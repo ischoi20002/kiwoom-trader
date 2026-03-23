@@ -1,0 +1,722 @@
+import FinanceDataReader as fdr
+import os
+import pandas as pd
+# [Fix] Silencing FutureWarnings regarding dtype downcasting (pandas 2.2+)
+pd.set_option('future.no_silent_downcasting', True)
+import json
+import time
+import requests
+import config
+from datetime import datetime, timedelta
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from concurrent.futures import ThreadPoolExecutor as TPE, as_completed
+import threading
+from data_manager_v2 import DataManagerV2
+import strategy_selector
+import itertools
+
+# [Modularization Phase 1]
+from utils.normalization import normalize_code
+from strategy.data_loader import BacktestDataLoader
+from reporting.signal_report import generate_signal_report
+from reporting.charts import generate_stock_market_chart
+import reporting.trade_report
+import importlib
+importlib.reload(reporting.trade_report)
+from reporting.trade_report import generate_trade_report
+from strategy import indicators, signals
+
+csv_lock = threading.Lock()
+# [v15.3.7] Script-relative absolute paths for robust log management
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SIGNAL_CSV = os.path.join(BASE_DIR, "backtest_signals.csv")
+TRADE_CSV = os.path.join(BASE_DIR, "backtest_trades.csv")
+print(f"DEBUG [backtest_engine]: BASE_DIR={BASE_DIR}")
+print(f"DEBUG [backtest_engine]: TRADE_CSV={TRADE_CSV}")
+
+class TradingStrategy:
+    """[v6.4] 실시간 감시와 백테스팅이 공유하는 매매 전략 엔진"""
+    _name_map = None
+    
+    @staticmethod
+    def get_stock_name_map():
+        """종목코드 -> 종목명 맵핑 로드 (v6.3)"""
+        if TradingStrategy._name_map is not None:
+            return TradingStrategy._name_map
+            
+        csv_path = "kospi_top_500.csv"
+        try:
+            if os.path.exists(csv_path):
+                # Unnamed: 0,Code,ISU_CD,Name ...
+                df_name = pd.read_csv(csv_path, dtype={'Code': str}, encoding='utf-8')
+                TradingStrategy._name_map = dict(zip(df_name['Code'], df_name['Name']))
+            else:
+                TradingStrategy._name_map = {}
+        except Exception as e:
+            print(f"  (!) Name Map Load Error: {e}")
+            TradingStrategy._name_map = {}
+        return TradingStrategy._name_map
+
+    @staticmethod
+    def calculate_buy_indicators(df, settings):
+        """[v15.2] 매수 신호용 경량 지표 계산 (RSI, MACD, MA 전용)"""
+        return indicators.calculate_buy_indicators_light(df, settings)
+
+    @staticmethod
+    def calculate_indicators(df, settings):
+        """지표 계산 (공통)"""
+        return indicators.calculate_all_indicators(df, settings)
+
+    @staticmethod
+    def get_market_status(market_df, vix_value=None):
+        """[v8.2] MSI, ADX, VIX를 조합한 시장 상태 판정"""
+        if market_df is None or len(market_df) < 120:
+            return 'SAFE'
+            
+        # 시장지수 지표 계산
+        m_df = TradingStrategy.calculate_indicators(market_df, {})
+        last = m_df.iloc[-1]
+        
+        msi = last.get('MSI', 0)
+        adx = last.get('ADX', 0)
+        vix = vix_value if vix_value is not None else 15.0 # 기본값
+        
+        # 판정 로직 (v8.2 명세)
+        if msi > 0 and adx >= 25 and vix <= 20:
+            return 'AGGRESSIVE'
+        elif msi > 0 and vix <= 20:
+            return 'SAFE'
+        elif msi < 0 and vix >= 30:
+            return 'RISK'
+        else:
+            return 'WATCH'
+
+    @staticmethod
+    def get_buy_signals_detailed(df, settings, market_trend='UP'):
+        """매수 신호 상세 분석 (v6.2: 상태값 포함)"""
+        return signals.get_buy_signals_detailed(df, settings, market_trend)
+
+    @staticmethod
+    def get_buy_signals(df, settings, market_trend='UP'):
+        """매수 신호 벡터 계산 (v6.1 통합: Trigger 기반)"""
+        return TradingStrategy.get_buy_signals_detailed(df, settings, market_trend)['Signal']
+
+
+
+class SimpleBacktester:
+    """고정밀 15분봉/일봉 백테스터 (v5.1)"""
+    def __init__(self, settings):
+        self.settings = settings
+        
+    def calculate_rsi(self, series, period=14):
+        delta = series.diff()
+        up = delta.clip(lower=0)
+        down = -1 * delta.clip(upper=0)
+        
+        avg_up = up.rolling(window=period).mean()
+        avg_down = down.rolling(window=period).mean()
+        
+        rs = avg_up / avg_down
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    def run(self, df, code="SAMPLE", market_df=None, vix_df=None, log_to_csv=False, skip_indicators=False, high_precision=False, m1_df_preloaded=None):
+        """[v15.0] Ultra-High Performance Backtest Engine"""
+        try:
+            # 1. Initialization
+            if not skip_indicators:
+                df = TradingStrategy.calculate_indicators(df, self.settings)
+            
+            print(f"  [Sim] Strategy Run: {code} | Data: {len(df)} rows | HighPrec: {high_precision}")
+            
+            params = self._init_simulation(df, code, market_df, vix_df, high_precision)
+            
+            # 2. Main Simulation Loop (v23.0 Optimized)
+            # [Perf] 미리 벡터화된 신호 및 가격 정보를 로컬 변수로 캐싱하여 루프 부하 최적화
+            close_vals = df['Close'].values
+            high_vals = df['High'].values
+            low_vals = df['Low'].values
+            time_indices = df.index
+            
+            m1_df = m1_df_preloaded.sort_index() if m1_df_preloaded is not None else None
+            
+            # 신호 및 필터 미리 정리
+            signal_shifted = df['Signal_Shifted'].values if 'Signal_Shifted' in df.columns else np.zeros(len(df), dtype=bool)
+            
+            total_bars = len(df)
+            for i in range(total_bars):
+                # i가 0이면 이전 바가 없으므로 건너뜀
+                if i == 0: 
+                    params['equity_curve'][0] = params['balance']
+                    continue
+                
+                # [v23.1] 불필요한 콘솔 출력 최소화 (진행률은 Optimizer에서 통합 관리)
+                params = self._sim_loop_step_v2(i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_df, high_precision, params, log_to_csv)
+                params['equity_curve'][i] = params['balance'] + (params['position']['qty'] * close_vals[i] if params['position'] else 0)
+
+            # 3. Finalize and Return Results
+            return self._finalize_simulation(df, code, params, log_to_csv)
+
+        except Exception as e:
+            print(f"  [Error] Simulation failed for {code}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _init_simulation(self, df, code, market_df, vix_df, high_precision):
+        """시뮬레이션 초기 설정 및 시장 상태 계산"""
+        max_slots = self.settings.get('max_slots', 10)
+        total_capital_val = self.settings.get('total_capital', 30000000)
+        slot_budget = total_capital_val / max_slots
+        
+        self.s1_amt = self.settings.get('stage1_amt', slot_budget * 0.3)
+        self.s2_amt = self.settings.get('stage2_amt', slot_budget * 0.7)
+        self.buy_f_rate = self.settings.get('buy_fee_rate', 0.015) / 100.0
+        self.sell_f_rate = self.settings.get('sell_fee_rate', 0.195) / 100.0
+        
+        stock_name_map = TradingStrategy.get_stock_name_map()
+        stock_name = stock_name_map.get(code, code)
+
+        # 시장 상태 계산
+        if market_df is not None and not market_df.empty:
+            m_df = TradingStrategy.calculate_indicators(market_df.copy(), {})
+            vix_s = vix_df['Close'] if vix_df is not None and 'Close' in vix_df.columns else pd.Series(15.0, index=m_df.index)
+            
+            m_df['Status'] = 'WATCH'
+            m_df.loc[(m_df['MSI'] > 0) & (m_df['ADX'] >= 25) & (vix_s <= 20), 'Status'] = 'AGGRESSIVE'
+            m_df.loc[(m_df['MSI'] > 0) & (vix_s <= 20) & (m_df['Status'] == 'WATCH'), 'Status'] = 'SAFE'
+            m_df.loc[(m_df['MSI'] < 0) & (vix_s >= 30), 'Status'] = 'RISK'
+            m_df['Trend'] = np.where(m_df['MSI'] > 0, 'UP', np.where(m_df['MSI'] < -0.1, 'DOWN', 'NEUTRAL'))
+            
+            df_daily_idx = df.index.normalize()
+            df['Market_Status'] = df_daily_idx.map(m_df['Status']).fillna('WATCH')
+            df['Market_Trend'] = df_daily_idx.map(m_df['Trend']).fillna('UP')
+            # [Fix] FutureWarning: infer_objects to ensure clean dtype
+            df['Market_Status'] = df['Market_Status'].infer_objects(copy=False)
+            df['Market_Trend'] = df['Market_Trend'].infer_objects(copy=False)
+        else:
+            df['Market_Status'] = 'SAFE'
+            df['Market_Trend'] = 'UP'
+
+        # 표준 모드 신호 미리 계산
+        if not high_precision and 'Signal_Shifted' not in df.columns:
+            sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend='UP')
+            for c in sigs.columns:
+                df[c] = sigs[c]
+            df.loc[df['Market_Trend'] == 'DOWN', 'Signal'] = False
+            # [Fix] Ensure bool dtype before shift to avoid warnings entirely
+            df['Signal_Shifted'] = df['Signal'].astype(bool).shift(1).fillna(False)
+
+        self.trades = []
+        return {
+            'code': code,
+            'balance': slot_budget,
+            'initial_balance': slot_budget,
+            'equity_curve': [slot_budget] * len(df),
+            'position': None,
+            'history': [],
+            'signal_logs': [],
+            'm1_checks': 0,
+            'stock_name': stock_name
+        }
+
+    def _sim_loop_step_v2(self, i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_df, high_precision, params, log_to_csv=False):
+        """[v23.1] 로직 무결성이 보장된 고속 시뮬레이션: 2차 매수 및 모든 익절/손절 조건 포함"""
+        curr_close = close_vals[i]
+        curr_date = time_indices[i]
+        curr_high = high_vals[i]
+        curr_low = low_vals[i]
+        
+        # Intra-bar Sim (High Precision)
+        if high_precision and m1_df is not None:
+             try:
+                m1_chunk = m1_df.loc[curr_date : curr_date + timedelta(minutes=14, seconds=59)]
+                if not m1_chunk.empty:
+                    params = self._process_intra_bar(i, df, code, m1_chunk, params, log_to_csv)
+                    return params
+             except: pass
+
+        # Standard Sim (v23.1 Full Logic)
+        if params['position'] is not None:
+            pos = params['position']
+            if curr_high > pos['max_price']: pos['max_price'] = curr_high
+            
+            # 1. Exit Check (TP/SL/Flash/Gap)
+            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos)
+            if exit_res:
+                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params)
+            
+            # 2. Stage 2 Buy Check (Secondary)
+            elif pos['stage'] == 1:
+                row = df.iloc[i]
+                if self._check_s2_approval(pos, row):
+                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason="CONF", indicator_row=row)
+        
+        # 3. Entry Check (Initial)
+        elif signal_shifted[i]:
+            row = df.iloc[i]
+            mkt_status = row.get('Market_Status', 'SAFE')
+            is_ok = (mkt_status != 'RISK')
+            # Type A 신호 필터링
+            if mkt_status == 'WATCH' and row.get('Sig_Type') != 'TYPE_A': is_ok = False
+            
+            if is_ok:
+                params = self._execute_buy(curr_date, close_vals[i], "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row)
+            
+        return params
+    def _process_intra_bar(self, i, df, code, m1_chunk, params, log_to_csv=False):
+        """1분봉 기반 고정밀 시뮬레이션"""
+        m1_vol_so_far = 0
+        m1_high_so_far = -1
+        m1_low_so_far = 999999999
+        prev_row_base = df.iloc[i-1] if i > 0 else df.iloc[i]
+        mkt_trend = df.iloc[i].get('Market_Trend', 'UP')
+        mkt_status = df.iloc[i].get('Market_Status', 'SAFE')
+        
+        m1_step = 0
+        for m1_dt, m1_r in m1_chunk.iterrows():
+            m1_step += 1
+            m1_o, m1_h, m1_l, m1_c = m1_r['Open'], m1_r['High'], m1_r['Low'], m1_r['Close']
+            m1_vol_so_far += m1_r['Volume']
+            m1_high_so_far = max(m1_high_so_far, m1_h)
+            m1_low_so_far = min(m1_low_so_far, m1_l)
+
+            if params['position'] is not None:
+                pos = params['position']
+                if m1_h > pos['max_price']: pos['max_price'] = m1_h
+                
+                # 익절/손절 체크
+                exit_res = self._check_exits(m1_dt, m1_c, m1_h, m1_l, pos)
+                if exit_res:
+                    params = self._execute_sell(m1_dt, exit_res['price'], f"1M_{exit_res['reason']}", params)
+                    break
+
+                # 2차 매수 체크
+                if pos['stage'] == 1:
+                    if self._check_s2_approval(pos, m1_r, indicator_row=prev_row_base): # v21.0: Using aligned logic
+                        # 1분봉 기반으로 OSC 상승 반전 체크 (고정밀)
+                        temp_df = df.iloc[max(0, i-65):i].copy()
+                        temp_df.loc[m1_dt] = [m1_o, m1_h, m1_l, m1_c, m1_vol_so_far] + [np.nan] * (len(temp_df.columns) - 5)
+                        temp_df = TradingStrategy.calculate_buy_indicators(temp_df, self.settings)
+                        
+                        # [v21.0] use_s2_osc 설정 준수
+                        osc_ok = True
+                        if self.settings.get('use_s2_osc', True):
+                            osc_ok = temp_df.iloc[-1]['OSC'] > prev_row_base.get('OSC', 0)
+                            
+                        if osc_ok:
+                            params = self._execute_buy(m1_dt, m1_c, "BUY_2ND", params, stage=2, reason="CONF_1M", indicator_row=temp_df.iloc[-1])
+            else:
+                # 매수 신호 탐색
+                if mkt_status != 'RISK':
+                    v_surge = float(self.settings.get('vol_surge', 1.5))
+                    if (m1_vol_so_far > prev_row_base.get('Vol_MA20', 0) * v_surge) or (m1_c > prev_row_base.get('MA20', m1_c)):
+                        if m1_step % 3 == 0:
+                            params['m1_checks'] += 1
+                            temp_df = df.iloc[max(0, i-65):i].copy()
+                            temp_df.loc[m1_dt] = [m1_o, m1_h, m1_l, m1_c, m1_vol_so_far] + [np.nan] * (len(temp_df.columns) - 5)
+                            temp_df = TradingStrategy.calculate_buy_indicators(temp_df, self.settings)
+                            sigs = TradingStrategy.get_buy_signals_detailed(temp_df, self.settings, mkt_trend)
+                            
+                            if log_to_csv and not sigs.empty:
+                                self._log_signal(m1_dt, code, params['stock_name'], m1_c, temp_df.iloc[-1], sigs.iloc[-1], mkt_trend, params)
+
+                            if not sigs.empty and sigs.iloc[-1]['Signal']:
+                                is_ok = (mkt_status != 'WATCH') or (sigs.iloc[-1]['Sig_Type'] == 'TYPE_A')
+                                if is_ok:
+                                    params = self._execute_buy(m1_dt, m1_c, "BUY_1ST", params, stage=1, entry_idx=i, max_p=m1_h, reason="1M_SIG", indicator_row=temp_df.iloc[-1])
+                                    break
+        return params
+
+    def _process_standard_bar(self, i, df, code, params, log_to_csv=False):
+        """15분봉 기반 표준 시나리오 시뮬레이션"""
+        row = df.iloc[i]
+        curr_date = df.index[i]
+        curr_open, curr_high, curr_low, curr_close = row['Open'], row['High'], row['Low'], row['Close']
+
+        if params['position'] is not None:
+            pos = params['position']
+            if curr_high > pos['max_price']: pos['max_price'] = curr_high
+            
+            # 익절/손절 체크 (봉 단위)
+            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos)
+            if exit_res:
+                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params)
+            elif pos['stage'] == 1:
+                if self._check_s2_approval(pos, row): # v21.0: Unified logic
+                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason="CONF", indicator_row=row)
+        elif row.get('Signal_Shifted', False):
+            mkt_status = row.get('Market_Status', 'SAFE')
+            is_ok = (mkt_status != 'RISK')
+            if mkt_status == 'WATCH' and row.get('Sig_Type') != 'TYPE_A': is_ok = False
+            
+            if is_ok:
+                params = self._execute_buy(curr_date, curr_open, "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row)
+        
+        # [v15.6] Log ALL candidate signals for Signal Report
+        if log_to_csv and not self.settings.get('skip_indicators', False):
+            if row.get('Signal', False) or (row.get('RSI', 0) > 30 and row.get('RSI', 0) < 80):
+                self._log_signal(curr_date, code, params['stock_name'], curr_close, row, row, row.get('Market_Trend', 'UP'), params)
+        
+        return params
+
+    def _log_signal(self, date, code, name, price, indicators, signal_row, mkt_trend, params):
+        """신호 로그 기록 (SIGNAL_CSV 용 데이터 수집)"""
+        params['signal_logs'].append({
+            'Date': date, 'Code': code, 'Name': name,
+            'Price': price, 'RSI': indicators.get('RSI'), 'MACD': indicators.get('MACD'),
+            'RSI_Range': (indicators.get('RSI', 0) >= self.settings.get('buy_rsi_min', 40) and indicators.get('RSI', 0) <= self.settings.get('buy_rsi_max_b', 70)),
+            'MACD_OK': (indicators.get('MACD', 0) >= indicators.get('MACD_Sig', 0)),
+            'MA_GC': (indicators.get('MA5', 0) > indicators.get('MA20', 0)),
+            'MA60_Range': (price / indicators.get('MA60', 1) >= 1.0 and price / indicators.get('MA60', 1) <= 1.12),
+            'Vol_Surge': (indicators.get('Volume', 0) > indicators.get('Vol_MA20', 1) * 1.5),
+            'Market_Trend': mkt_trend,
+            'Final_Signal': signal_row.get('Signal', False)
+        })
+    
+    def _check_s2_approval(self, pos, last_row, indicator_row=None):
+        """[v21.0] DynamicBacktester와 100% 일치하는 2차 매수 승인 로직 (v21.1: Day Delay 반영)"""
+        s = self.settings
+        
+        # 0. 최소 대기 기간 체크 (v21.1: 24시간 기준 강화)
+        min_days = int(s.get('s2_min_days', 1))
+        if min_days > 0:
+            entry_dt = pd.to_datetime(pos['entry_date'])
+            curr_dt = pd.to_datetime(last_row.name)
+            if (curr_dt - entry_dt) < timedelta(days=min_days):
+                return False
+
+        # 기술 지표는 indicator_row(이전 15분봉 등)를 우선 참조, 없으면 last_row 참조
+        ind = indicator_row if indicator_row is not None else last_row
+        
+        curr_price = last_row['Close']
+        
+        # 1. MA5 기준 (use_s2_ma5 설정 준수)
+        if s.get('use_s2_ma5', True):
+            ma5_val = ind.get('MA5', 0)
+            if curr_price < ma5_val * 0.995: # 0.5% 유격 허용 (기본값)
+                return False
+                
+        # 2. 수익률 기준 (use_s2_profit 설정 및 stage2_trigger 준수)
+        if s.get('use_s2_profit', True):
+            # Dynamic과 동일하게 'stage2_trigger'를 's2_profit_limit' 대신 사용하거나 둘 다 지원
+            trigger = float(s.get('stage2_trigger', s.get('s2_profit_limit', 1.0)))
+            if (curr_price / pos['avg_price'] - 1) * 100 < trigger:
+                return False
+                
+        # 3. OSC 기준 (use_s2_osc 설정 준수)
+        if s.get('use_s2_osc', True):
+            if ind.get('OSC', 0) <= ind.get('Prev_OSC', 0):
+                return False
+                
+        return True
+
+    def _check_exits(self, date, price, high, low, pos):
+        """Flash Exit, Gap Down, TP/SL 조건 체크"""
+        # 1. Flash Exit
+        f_pct = float(self.settings.get(f's{pos["stage"]}_flash_exit_pct', 3.0)) / 100.0
+        if price <= pos['max_price'] * (1.0 - f_pct):
+            drop_pct = (price / pos['max_price'] - 1) * 100
+            return {'price': price, 'reason': f"FLASH_EXIT|MaxP:{int(pos['max_price']):,}|Drop:{drop_pct:.1f}%"}
+            
+        # 2. Gap Down
+        g_lmt = float(self.settings.get('gap_down_limit', -5.0))
+        if (price / pos['avg_price'] - 1) * 100 <= g_lmt:
+            ret_pct = (price / pos['avg_price'] - 1) * 100
+            return {'price': price, 'reason': f"GAP_DOWN|Ret:{ret_pct:.1f}%"}
+
+        # 3. Take Profit
+        tp_pct = float(self.settings.get('take_profit', 5.0)) / 100.0
+        if (high / pos['avg_price'] - 1) >= tp_pct:
+            return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT|Target:{tp_pct*100:.1f}%"}
+            
+        return None
+
+    def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicator_row=None):
+        """매수 실행 및 params 업데이트"""
+        if indicator_row is not None:
+            try:
+                rsi_val = indicator_row.get('RSI', 0)
+                ma5_val = indicator_row.get('MA5', 0)
+                osc_val = indicator_row.get('OSC', 0)
+                reason += f"|RSI:{rsi_val:.1f}|MA5:{int(ma5_val):,}|OSC:{osc_val:.2f}"
+            except: pass
+
+        amt = self.s1_amt if stage == 1 else self.s2_amt
+        qty = int(amt // price)
+        if qty <= 0: return params
+        
+        fee = int(price * qty * self.buy_f_rate)
+        params['balance'] -= (qty * price + fee)
+        
+        if stage == 1:
+            params['position'] = {
+                'entry_date': date, 'entry_idx': entry_idx, 
+                'avg_price': price, 'qty': qty, 'stage': 1, 'max_price': max_p
+            }
+        else:
+            old_q = params['position']['qty']
+            pos = params['position']
+            pos['avg_price'] = (pos['avg_price'] * old_q + price * qty) / (old_q + qty)
+            pos['qty'] += qty
+            pos['stage'] = 2
+
+        self.collect_trade(date, action, price, qty, params['position']['qty'], params['position']['qty'] * price, reason_str=reason, fee=fee)
+        return params
+
+    def _execute_sell(self, date, price, reason, params):
+        """매도 실행 및 params 업데이트"""
+        pos = params['position']
+        ret_v = (price / pos['avg_price'] - 1) * 100
+        fee = int(price * pos['qty'] * self.sell_f_rate)
+        
+        self.collect_trade(date, "SELL", price, pos['qty'], 0, 0, ret_val=ret_v, reason_str=reason, fee=fee)
+        params['balance'] += (pos['qty'] * price - fee)
+        params['history'].append({'entry': pos['entry_date'], 'exit': date, 'ret': ret_v})
+        params['position'] = None
+        return params
+
+    def collect_trade(self, date, action, price, qty, total_qty, total_val, ret_val=0, reason_str="", fee=0):
+        self.trades.append({
+            'Date': date, 'Action': action, 'Price': price, 'Qty': qty,
+            'Total_Qty': total_qty, 'Total_Val': total_val, 'Return': ret_val, 
+            'Reason': reason_str, 'Fee': fee
+        })
+
+    def _finalize_simulation(self, df, code, params, log_to_csv=False):
+        """결과 정리 및 요약 생성"""
+        equity_curve = params['equity_curve']
+        position = params['position']
+        balance = params['balance']
+
+        if position is not None:
+            final_time = df.index[-1]
+            final_price = df['Close'].iloc[-1]
+            sell_fee = int(final_price * position['qty'] * self.sell_f_rate)
+            ret = (final_price / position['avg_price'] - 1) * 100
+            last_row = df.iloc[-1]
+            reason = f"Final|RSI:{last_row.get('RSI',0):.1f}|MA5:{int(last_row.get('MA5',0)):,}|OSC:{last_row.get('OSC',0):.2f}"
+            self.collect_trade(final_time, "HOLD", final_price, position['qty'], position['qty'], 
+                               position['qty'] * final_price, ret_val=ret, reason_str=reason, fee=sell_fee)
+            balance += (position['qty'] * final_price - sell_fee)
+            equity_curve[-1] = balance
+
+        df['Equity'] = equity_curve
+        final_ret = (equity_curve[-1] / params['initial_balance'] - 1) * 100 if len(equity_curve) > 0 else 0
+        
+        peak = -1e10
+        mdd = 0
+        for val in equity_curve:
+            if val > peak: peak = val
+            dd = (val / peak - 1) * 100
+            if dd < mdd: mdd = dd
+            
+        history = params['history']
+        win_rate = len([h for h in history if h['ret'] > 0]) / len(history) * 100 if history else 0
+        s2_count = len([t for t in self.trades if t['Action'] == 'BUY_2ND'])
+        
+        # [v15.6] Write batch logs to files
+        if log_to_csv:
+            with csv_lock:
+                if self.trades:
+                    trade_df = pd.DataFrame(self.trades)
+                    trade_df['Reason'] = trade_df['Reason'].astype(str).str.replace(',', ';')
+                    trade_df['Code'] = code
+                    trade_df['Name'] = params['stock_name']
+                    trade_header = not os.path.exists(TRADE_CSV)
+                    trade_df.to_csv(TRADE_CSV, mode='a', index=False, header=trade_header, encoding='utf-8-sig')
+                
+                if params['signal_logs']:
+                    sig_df = pd.DataFrame(params['signal_logs'])
+                    sig_header = not os.path.exists(SIGNAL_CSV)
+                    sig_df.to_csv(SIGNAL_CSV, mode='a', index=False, header=sig_header, encoding='utf-8-sig')
+
+        return {
+            'code': code,
+            'final_ret': final_ret,
+            'mdd': mdd,
+            'trades': len(params['history']),
+            'win_rate': win_rate,
+            's2_trades': s2_count,
+            'history': params['history'],
+            'final_equity': equity_curve[-1]
+        }
+
+    # _calculate_whipsaw_scale 메소드 제거 (pre-calculation으로 대체)
+
+class PortfolioBacktester:
+    """다중 종목 포트폴리오 백테스터 (v5.1)"""
+    def __init__(self, settings, codes):
+        self.settings = settings
+        self.codes = codes
+        self.loader = BacktestDataLoader()
+        self.tester = SimpleBacktester(settings)
+        
+    def run_all(self, start_date, end_date, interval='1d', force_refresh=False, high_precision=False):
+        """다중 종목 포트폴리오 백테스트 실행 (v16.0)"""
+        start_date = pd.to_datetime(start_date).strftime('%Y-%m-%d')
+        end_date = pd.to_datetime(end_date).strftime('%Y-%m-%d')
+        
+        # 1. 초기화
+        self._reset_csv_logs()
+        market_df, vix_df = self._prepare_market_data(start_date, end_date)
+        
+        # 2. 실행
+        print(f"Starting Backtest for {len(self.codes)} stocks ({start_date} ~ {end_date}, {interval})")
+        summaries, all_equity = self._run_parallel_backtests(start_date, end_date, market_df, vix_df, interval, force_refresh, high_precision)
+        
+        # 3. 결과 리포트 생성
+        if summaries:
+            self._generate_summary_reports(summaries, all_equity, market_df, vix_df, start_date, end_date, interval)
+            return pd.DataFrame(summaries)
+        return None
+
+    def _reset_csv_logs(self):
+        """기존 백테스트 로그 파일 초기화"""
+        for f in [SIGNAL_CSV, TRADE_CSV]:
+            if os.path.exists(f): 
+                try: os.remove(f)
+                except:
+                    try: open(f, 'w').close()
+                    except: pass
+
+    def _prepare_market_data(self, start_date, end_date):
+        """시장 지수 및 변동성 지수 데이터 준비"""
+        print(f"  [API] Fetching Market Index & Volatility data...")
+        w_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
+        
+        try:
+            import FinanceDataReader as fdr
+            market_df = fdr.DataReader('KS11', w_start_dt, end_date)
+            try:
+                vix_df = fdr.DataReader('VIX', w_start_dt, end_date)
+            except:
+                try: vix_df = fdr.DataReader('FRED:VIXCLS', w_start_dt, end_date)
+                except: 
+                    vix_df = pd.DataFrame(index=market_df.index)
+                    vix_df['Close'] = np.nan
+            
+            if market_df is not None:
+                market_df.columns = [c.capitalize() if c.lower() == 'close' else c for c in market_df.columns]
+                
+            if vix_df is not None:
+                if 'Close' not in vix_df.columns:
+                    if not vix_df.empty:
+                        vix_df.columns = ['Close'] + list(vix_df.columns[1:])
+                    else:
+                        vix_df['Close'] = np.nan
+                vix_df.columns = [c.capitalize() if c.lower() == 'close' else c for c in vix_df.columns]
+                vix_df = vix_df.reindex(market_df.index).ffill()
+            return market_df, vix_df
+        except Exception as e:
+            print(f"  (!) Market/VIX Data Error: {e}")
+            return None, None
+
+    def _run_parallel_backtests(self, start_date, end_date, market_df, vix_df, interval, force_refresh, high_precision):
+        """병렬로 개별 종목 백테스트 수행"""
+        w_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
+        self.tester.settings['_original_start_dt'] = start_date
+        
+        data_cache_m1 = {}
+        if high_precision:
+            print(f"  [Perf] Pre-loading 1m data...")
+            for code in self.codes:
+                m1_data = self.loader.get_data(code, w_start_dt, end_date, interval='1m')
+                if m1_data is not None: data_cache_m1[code] = m1_data
+
+        summaries = []
+        all_equity = pd.DataFrame()
+
+        def _run_single(code):
+            data = self.loader.get_data(code, w_start_dt, end_date, interval, force_refresh=force_refresh)
+            if data is not None:
+                # tester.run now modifies 'data' in place (adds 'Equity' column) and returns summary
+                summary = self.tester.run(data, code, market_df=market_df, vix_df=vix_df, log_to_csv=True, high_precision=high_precision, m1_df_preloaded=data_cache_m1.get(code))
+                return data, summary
+            return None, None
+
+        with TPE(max_workers=5) as executor:
+            future_to_code = {executor.submit(_run_single, code): code for code in self.codes}
+            for future in as_completed(future_to_code):
+                code = future_to_code[future]
+                try:
+                    res_df, summary = future.result()
+                    if summary:
+                        summaries.append(summary)
+                        if res_df is not None and 'Equity' in res_df.columns:
+                            all_equity[code] = res_df['Equity']
+                except Exception as e:
+                    print(f"  (!) Error backtesting {code}: {e}")
+        return summaries, all_equity
+
+    def _generate_summary_reports(self, summaries, all_equity, market_df, vix_df, start_date, end_date, interval):
+        """최종 통계 출력 및 리포트 생성"""
+        df_sum = pd.DataFrame(summaries)
+        
+        # Portfolio All Equity Curve (Total)
+        if not all_equity.empty:
+            all_equity['Total'] = all_equity.sum(axis=1) / len(self.codes)
+            all_equity[['Total']].to_csv("backtest_portfolio_curve.csv", encoding='utf-8-sig')
+
+        print("\n" + "="*40)
+        print(f"Portfolio Backtest Results ({len(summaries)} stocks)")
+        print(f" - Avg Return: {df_sum['final_ret'].mean():+.2f}%")
+        print(f" - Avg Win Rate: {df_sum['win_rate'].mean():.1f}%")
+        print("="*40)
+        
+        df_sum.to_csv("backtest_summary_multi.csv", index=False, encoding='utf-8-sig')
+        
+        # Reports
+        sig_path = os.path.join(BASE_DIR, "signal_report.html")
+        trd_path = os.path.join(BASE_DIR, "trade_report.html")
+        generate_signal_report(output_path=sig_path, target_codes=self.codes)
+        
+        trades_df = pd.DataFrame()
+        if os.path.exists(TRADE_CSV):
+            try:
+                trades_df = pd.read_csv(TRADE_CSV, dtype={'Code': str})
+                trades_df['Date'] = pd.to_datetime(trades_df['Date'])
+            except: pass
+            
+        daily_equity_list = [{'date': start_date + " 08:59:00", 'equity': 100.0, 'cash': 100.0}]
+        if not all_equity.empty and 'Total' in all_equity.columns:
+            for d, val in all_equity['Total'].items():
+                daily_equity_list.append({'date': d.strftime('%Y-%m-%d') + " 15:30:00", 'equity': val, 'cash': val}) 
+        
+        generate_trade_report(trades_df, interval, trd_path, len(summaries), 
+                              df_sum['win_rate'].mean(), df_sum['final_ret'].mean(), self.settings,
+                              market_df=market_df, vix_df=vix_df, target_codes=self.codes,
+                              start_date=start_date, end_date=end_date, daily_equity=daily_equity_list,
+                              high_precision=False)
+
+
+
+
+
+if __name__ == "__main__":
+    # 통합 테스트용 샘플 (v6.4: 산일전기 062040 추가)
+    sample_codes = ['005930', '000660', '005380', '055550', '051910', '012450', '035420', '015760', '028260', '009150']
+    
+    # 신호가 잘 발생하도록 완화된 설정 사용 (검증용)
+    lenient_settings = {
+        'buy_rsi_min': 30, 'buy_rsi_max_b': 65,
+        'ma60_min': 90, 'ma60_max': 120,
+        'vol_surge': 1.0,
+        'macd_fast': 12, 'macd_slow': 26, 'macd_sig': 9,
+        'stage1_amt': 900000, 'stage2_amt': 2100000,
+        'use_s2_ma5': True, 'use_s2_profit': True, 'use_s2_osc': True,
+        'use_s2_rsi_sig': True,
+        'take_profit': 5.0, 'stop_loss': 3.0, 'rsi_exit': 50.0
+    }
+    
+    start = "2024-01-01"
+    end = "2024-12-31"
+    
+    # 포트폴리오 백테스트 실행 예시
+    tester = PortfolioBacktester(lenient_settings, sample_codes)
+    tester.run_all(start, end)

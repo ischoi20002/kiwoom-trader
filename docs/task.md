@@ -1,0 +1,57 @@
+# Task Log: Recovery and Advanced Logic Restoration
+
+## Checklist
+- [x] Initial Recovery Logic [/]
+    - [x] Restore `Get_Price_GUI.py` from D: drive backup
+    - [x] Fix encoding and SyntaxErrors
+    - [x] Integrate RSI Type A/B split settings
+    - [x] Ensure `# -*- coding: utf-8 -*-` compliance
+- [x] Performance & UI Optimization [/]
+    - [x] Structure Strategy Settings UI into Groups (Type A, B, Common)
+    - [x] Remove reduntant Auto-Sync (Samsung/KODEX) on startup
+    - [x] Re-enable Incremental Sync in Harvester (`harvest_service.py`)
+- [x] UI Reorganization (Intuitive Layout) [/]
+    - [x] Group Optimization and Backtest into separate LabelFrames
+    - [x] Align descriptive labels for each action
+    - [x] Refactor Result viewing area (Reports + Chart Viewer)
+- [x] Bug Fix: Redundant Harvesting & Logic Simplification [/]
+    - [x] Mark all existing stocks as `COMPLETE` in DB
+    - [x] Remove deprecated March 4th date boundary logic
+    - [x] Simplify `is_data_complete` and boundary checks in `harvest_service.py`
+    - [x] Synchronize logic with `DataManagerV2`
+- [x] 고정밀 백테스트 데이터 정합성 버그 해결 (Datetime Index, Code Key)
+- [x] 현금 비중 과다 문제 해결 (Ghost Filters 제거 및 기본값 완화)
+- [x] 2단계(본대) 부분 익절 로직 버그 수정
+- [x] 부분 익절시 수익률 계산 및 리포트 유실 오류 수정
+- [x] 리포트 내 '누적수익금액' 표시 오류 수정 (현금흐름 -> 실현손익 기준)
+- [x] [Modularization Phase 1] 리포트 생성 로직(`generate_trade_report`) 분리 (`reporting/` 패키지) 완료
+- [x] 결과 리포트 내 '인터랙티브 분석 차트' 버튼을 '네이버 증권 차트'로 변경 및 링크 연결
+- [x] 리포트 내 '보유' 수량 표시 오류 수정 (Total_Qty 누락 해결)
+- [x] Type A 진입 조건 강화: 일봉 골든크로스(5/20) 상태 확인 로직 추가
+- [x] 전략 설정 UI 내 Type A 일봉 조건 설명 추가
+- [x] 1차 매수(S1) 실패율(94%) 개선 및 로직 최적화 
+- [x] Strategy UI Reorganization (Intuitive Phases) [/]
+    - [x] Group Type A, B, Common under "Stage 1: Primary Entry"
+    - [x] Align "Stage 2: Add-on Buy" with Stage 1 visual style
+    - [x] Group Exit & Money Management sections
+    - [x] Implement UI Dependencies (Toggle sub-settings)
+    - [x] Add missing Type B parameters (Vol_Surge_B, etc.)
+    - [x] Update Volume Surge Logic (Previous Day Same Time 1.5x)
+    - [x] Independent RSI Entry Windows (Removed Lower Bound for Entries)
+    - [x] Exempt Type B from RSI 50 Common Filter
+    - [x] Relocate RSI 50 Filter to Type A Section (GUI)
+    - [x] Correct Volume Spike UI Label (Average instead of Prev Day)
+    - [x] Consolidate MACD/OSC Filters to Common Mandatory Section
+    - [x] Add OSC Explanation to MACD Final Confirmation Label
+    - [x] Bug Fix: GUI Label Visibility in `add_signal_row`
+    - [x] Final Audit & Fix: Implement missing `rsi_window` and `ma_gap_limit` logic
+    - [x] Stage 2 Overhaul: Parameterize all 7 conditions and implement Active Monitoring
+    - [x] Set Stage 2 checkboxes to ON by default
+    - [x] Refine Stage 1 Exit: Split into Type A/B parameters with dual-column GUI
+    - [x] Implement dynamic parameter mapping (Suffix `_a`/`_b`) in engine
+    - [x] **Stage 2 Dynamic Scale-out**: Implement partial profit taking (RSI + Drop %)
+    - [x] **Full Parameterization**: Added `s2_rsi_tp_drop` to GUI and engine
+    - [x] **Refactor Engine**: Support `ratio` in `_execute_sell` for 50% liquidations
+- [x] Bug Fix: Settings Reset KeyError [/]
+    - [x] Add missing `use_vol_surge` to `DEFAULT_SETTINGS`
+    - [x] Hardened `reset_to_defaults` logic
