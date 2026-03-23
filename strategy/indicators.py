@@ -69,13 +69,14 @@ def calculate_all_indicators(df, settings):
     
     # 3. RSI
     df['RSI'] = calculate_rsi(df['Close'], 14)
-    df['RSI_Sig'] = calculate_ma(df['RSI'], settings.get('rsi_sig_period', 9))
+    rsi_sig_p = int(settings.get('rsi_sig_period', 9))
+    df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
     
-    # 4. MACD
-    fast = settings.get('macd_fast', 12)
-    slow = settings.get('macd_slow', 26)
-    sig = settings.get('macd_sig', 9)
-    df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], fast, slow, sig)
+    # 4. MACD (v6.2: 실시간/백테스트 신호용 파라미터 분리 적용)
+    fast = int(settings.get('sig_macd_fast', 12))
+    slow = int(settings.get('sig_macd_slow', 26))
+    sig = int(settings.get('sig_macd_sig', 9))
+    df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], max(1, fast), max(1, slow), max(1, sig))
     df['Prev_OSC'] = df['OSC'].shift(1)
     
     # 5. MSI (Market Strength Index)
@@ -86,9 +87,14 @@ def calculate_all_indicators(df, settings):
     if 'High' in df.columns and 'Low' in df.columns:
         _, _, df['ADX'] = calculate_adx(df, 14)
         
-    # 7. Prev Day Same Time Volume (전일 동시간 거래량)
+    # 7. Prev Day Same Time Volume (전일 동시간 거래량 평균)
     if len(df) > 0:
-        df['Prev_Day_Vol'] = df.groupby(df.index.time)['Volume'].shift(1)
+        v_lookback = int(settings.get('vol_lookback', 10))
+        vol_lookback = max(1, v_lookback)
+        # 각 시간별로 rolling mean 계산
+        df['Prev_Day_Vol'] = df.groupby(df.index.time)['Volume'].transform(
+            lambda x: x.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
+        )
         
     return df
 
@@ -101,15 +107,20 @@ def calculate_buy_indicators_light(df, settings):
     df['Vol_MA20'] = calculate_ma(df['Volume'], 20)
     
     df['RSI'] = calculate_rsi(df['Close'], 14)
-    df['RSI_Sig'] = calculate_ma(df['RSI'], settings.get('rsi_sig_period', 9))
+    rsi_sig_p = int(settings.get('rsi_sig_period', 9))
+    df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
     
-    fast = settings.get('macd_fast', 12)
-    slow = settings.get('macd_slow', 26)
-    sig = settings.get('macd_sig', 9)
-    df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], fast, slow, sig)
+    fast = int(settings.get('sig_macd_fast', 12))
+    slow = int(settings.get('sig_macd_slow', 26))
+    sig = int(settings.get('sig_macd_sig', 9))
+    df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], max(1, fast), max(1, slow), max(1, sig))
     df['Prev_OSC'] = df['OSC'].shift(1)
     
-    # Prev Day same time vol
-    df['Prev_Day_Vol'] = df.groupby(df.index.time)['Volume'].shift(1)
+    # Prev Day same time vol (전일 동시간 거래량 평균)
+    v_lookback = int(settings.get('vol_lookback', 10))
+    vol_lookback = max(1, v_lookback)
+    df['Prev_Day_Vol'] = df.groupby(df.index.time)['Volume'].transform(
+        lambda x: x.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
+    )
     
     return df

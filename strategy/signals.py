@@ -21,6 +21,10 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     cond_rsi_range = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_b)
     cond_rsi_type_a = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_a)
     
+    # [v6.4] RSI 시그널(R_SP) 돌파 조건 (RSI > RSI_Sig)
+    cond_rsi_sig = (df['RSI'] >= df['RSI_Sig']) 
+    use_rsi_sig_filter = settings.get('use_rsi_sig_filter', False)
+    
     # 3. MACD/이평선 조건
     cond_macd_basic = (df['MACD'] >= df['MACD_Sig']) 
     
@@ -30,7 +34,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     
     ma_gap_limit = settings.get('ma_gap_limit', 2.5)
     ma_gap = (df['MA5'] / df['MA20'] - 1) * 100
-    cond_ma_gc = (df['MA5'] > df['MA20']) & (df['MA5'].shift(1) <= df['MA20'].shift(1)) & (ma_gap <= ma_gap_limit)
+    
+    gc_bars = max(1, int(settings.get('gc_window', 15) / 15))
+    cond_ma_gc = (df['MA5'] > df['MA20']) & (df['MA5'].shift(gc_bars) <= df['MA20'].shift(gc_bars)) & (ma_gap <= ma_gap_limit)
     
     # 4. 거래량 조건 (Prev Day Same Time 대비)
     v_surge_a = settings.get('vol_surge', 1.2)
@@ -45,6 +51,7 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if settings.get('use_gc', True): signal_a &= cond_ma_gc
     if settings.get('use_vol_surge', True): signal_a &= cond_vol_a
     if settings.get('use_ma60_safe', True): signal_a &= cond_ma60
+    if use_rsi_sig_filter: signal_a &= cond_rsi_sig
     
     # Type A RSI 50 유지 조건
     if settings.get('use_rsi_signal', True):
@@ -61,6 +68,7 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if settings.get('use_macd_gc_b', True): signal_b &= cond_macd_gc
     if settings.get('use_trend_aligned_b', True): signal_b &= cond_trend_aligned
     if settings.get('use_type_b_vol', True): signal_b &= cond_vol_b
+    if use_rsi_sig_filter: signal_b &= cond_rsi_sig
     
     # 7. 최종 신호 및 공통 필터
     signal = signal_a | signal_b

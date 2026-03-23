@@ -49,16 +49,28 @@ class TradingStrategy:
         if TradingStrategy._name_map is not None:
             return TradingStrategy._name_map
             
-        csv_path = "kospi_top_500.csv"
+        csv_path = "kospi_200.csv"  # [v30.5 Fixed] kospi_top_500.csv -> kospi_200.csv
         try:
+            if not os.path.exists(csv_path):
+                # 다른 kospi_*.csv 파일이 있는지 확인
+                import glob
+                files = glob.glob("kospi_*.csv")
+                if files:
+                    csv_path = files[0]
+                else:
+                    TradingStrategy._name_map = {}
+                    return {}
+            
             if os.path.exists(csv_path):
                 # Unnamed: 0,Code,ISU_CD,Name ...
                 df_name = pd.read_csv(csv_path, dtype={'Code': str}, encoding='utf-8')
+                # 종목코드가 6자리가 되도록 패딩 (예: 660 -> 000660)
+                df_name['Code'] = df_name['Code'].apply(lambda x: str(x).zfill(6))
                 TradingStrategy._name_map = dict(zip(df_name['Code'], df_name['Name']))
             else:
                 TradingStrategy._name_map = {}
         except Exception as e:
-            print(f"  (!) Name Map Load Error: {e}")
+            print(f"  (!) Name Map Load Error (Path: {csv_path}): {e}")
             TradingStrategy._name_map = {}
         return TradingStrategy._name_map
 
@@ -266,7 +278,7 @@ class SimpleBacktester:
             if mkt_status == 'WATCH' and row.get('Sig_Type') != 'TYPE_A': is_ok = False
             
             if is_ok:
-                params = self._execute_buy(curr_date, close_vals[i], "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row)
+                params = self._execute_buy(curr_date, close_vals[i], "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row, sig_type=row.get('Sig_Type', 'TYPE_B'))
             
         return params
     def _process_intra_bar(self, i, df, code, m1_chunk, params, log_to_csv=False):
@@ -327,9 +339,10 @@ class SimpleBacktester:
                                 self._log_signal(m1_dt, code, params['stock_name'], m1_c, temp_df.iloc[-1], sigs.iloc[-1], mkt_trend, params)
 
                             if not sigs.empty and sigs.iloc[-1]['Signal']:
-                                is_ok = (mkt_status != 'WATCH') or (sigs.iloc[-1]['Sig_Type'] == 'TYPE_A')
+                                sig_type = sigs.iloc[-1]['Sig_Type']
+                                is_ok = (mkt_status != 'WATCH') or (sig_type == 'TYPE_A')
                                 if is_ok:
-                                    params = self._execute_buy(m1_dt, m1_c, "BUY_1ST", params, stage=1, entry_idx=i, max_p=m1_h, reason="1M_SIG", indicator_row=temp_df.iloc[-1])
+                                    params = self._execute_buy(m1_dt, m1_c, "BUY_1ST", params, stage=1, entry_idx=i, max_p=m1_h, reason="1M_SIG", indicator_row=temp_df.iloc[-1], sig_type=sig_type)
                                     break
         return params
 
@@ -352,11 +365,12 @@ class SimpleBacktester:
                     params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason="CONF", indicator_row=row)
         elif row.get('Signal_Shifted', False):
             mkt_status = row.get('Market_Status', 'SAFE')
+            sig_type = row.get('Sig_Type', 'TYPE_B')
             is_ok = (mkt_status != 'RISK')
-            if mkt_status == 'WATCH' and row.get('Sig_Type') != 'TYPE_A': is_ok = False
+            if mkt_status == 'WATCH' and sig_type != 'TYPE_A': is_ok = False
             
             if is_ok:
-                params = self._execute_buy(curr_date, curr_open, "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row)
+                params = self._execute_buy(curr_date, curr_open, "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row, sig_type=sig_type)
         
         # [v15.6] Log ALL candidate signals for Signal Report
         if log_to_csv and not self.settings.get('skip_indicators', False):
@@ -417,27 +431,56 @@ class SimpleBacktester:
         return True
 
     def _check_exits(self, date, price, high, low, pos):
-        """Flash Exit, Gap Down, TP/SL 조건 체크"""
+        """Flash Exit, Gap Down, TP/SL 조건 체크 (v26.0: Type A/B 분리 대응)"""
+        # 0. 공통 상수 및 설정 로드
+        s = self.settings
+        
+        # 진입 유형에 따른 접미사 결정 (Type A: _a, Type B: _b)
+        sig_type = pos.get('sig_type', 'TYPE_B')
+        suffix = "_a" if sig_type == "TYPE_A" else "_b"
+
         # 1. Flash Exit
-        f_pct = float(self.settings.get(f's{pos["stage"]}_flash_exit_pct', 3.0)) / 100.0
-        if price <= pos['max_price'] * (1.0 - f_pct):
-            drop_pct = (price / pos['max_price'] - 1) * 100
-            return {'price': price, 'reason': f"FLASH_EXIT|MaxP:{int(pos['max_price']):,}|Drop:{drop_pct:.1f}%"}
+        if pos['stage'] == 1:
+            f_pct = float(s.get(f's1{suffix}_flash_exit_pct', 3.0)) / 100.0
+            if price <= pos['max_price'] * (1.0 - f_pct):
+                drop_pct = (price / pos['max_price'] - 1) * 100
+                return {'price': price, 'reason': f"FLASH_EXIT(S1-{sig_type.split('_')[-1]})|Drop:{drop_pct:.1f}%"}
+        else:
+            f_pct = float(s.get('s2_flash_exit_pct', 3.0)) / 100.0
+            if price <= pos['max_price'] * (1.0 - f_pct):
+                drop_pct = (price / pos['max_price'] - 1) * 100
+                return {'price': price, 'reason': f"FLASH_EXIT(S2)|Drop:{drop_pct:.1f}%"}
             
-        # 2. Gap Down
-        g_lmt = float(self.settings.get('gap_down_limit', -5.0))
+        # 2. Gap Down Limit (S1/S2 공통)
+        g_lmt = float(s.get('gap_down_limit', -5.0))
         if (price / pos['avg_price'] - 1) * 100 <= g_lmt:
             ret_pct = (price / pos['avg_price'] - 1) * 100
             return {'price': price, 'reason': f"GAP_DOWN|Ret:{ret_pct:.1f}%"}
 
         # 3. Take Profit
-        tp_pct = float(self.settings.get('take_profit', 5.0)) / 100.0
+        if pos['stage'] == 1:
+            tp_pct = float(s.get(f's1{suffix}_take_profit', 5.0)) / 100.0
+        else:
+            tp_pct = float(s.get('s2_take_profit', 5.0)) / 100.0
+            
         if (high / pos['avg_price'] - 1) >= tp_pct:
-            return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT|Target:{tp_pct*100:.1f}%"}
+            return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S{pos['stage']})"}
+
+        # 4. Stop Loss
+        if pos['stage'] == 1:
+            if s.get('use_s1_stop_loss', True):
+                sl_pct = float(s.get(f's1{suffix}_stop_loss', 3.0)) / 100.0
+                if (price / pos['avg_price'] - 1) <= -sl_pct:
+                    return {'price': price, 'reason': f"STOP_LOSS(S1-{sig_type.split('_')[-1]})"}
+        else:
+            if s.get('use_s2_stop_loss', True):
+                sl_pct = float(s.get('s2_stop_loss', 2.0)) / 100.0
+                if (price / pos['avg_price'] - 1) <= -sl_pct:
+                    return {'price': price, 'reason': f"STOP_LOSS(S2)"}
             
         return None
 
-    def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicator_row=None):
+    def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicator_row=None, sig_type='TYPE_B'):
         """매수 실행 및 params 업데이트"""
         if indicator_row is not None:
             try:
@@ -457,7 +500,8 @@ class SimpleBacktester:
         if stage == 1:
             params['position'] = {
                 'entry_date': date, 'entry_idx': entry_idx, 
-                'avg_price': price, 'qty': qty, 'stage': 1, 'max_price': max_p
+                'avg_price': price, 'qty': qty, 'stage': 1, 'max_price': max_p,
+                'sig_type': sig_type
             }
         else:
             old_q = params['position']['qty']
@@ -707,7 +751,7 @@ if __name__ == "__main__":
         'buy_rsi_min': 30, 'buy_rsi_max_b': 65,
         'ma60_min': 90, 'ma60_max': 120,
         'vol_surge': 1.0,
-        'macd_fast': 12, 'macd_slow': 26, 'macd_sig': 9,
+        'sig_macd_fast': 12, 'sig_macd_slow': 26, 'sig_macd_sig': 9,
         'stage1_amt': 900000, 'stage2_amt': 2100000,
         'use_s2_ma5': True, 'use_s2_profit': True, 'use_s2_osc': True,
         'use_s2_rsi_sig': True,

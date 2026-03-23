@@ -190,10 +190,15 @@ class DynamicBacktester:
                                     drop_pct = (curr_price / h_info['max_p'] - 1) * 100
                                     exit_reason = f"Flash Exit (S1-{sig_type})|MaxP:{int(h_info['max_p']):,}|Drop:{drop_pct:.1f}%"
                             
+                            if not exit_reason and self.settings.get('use_s1_take_profit', True):
+                                s1_tp = float(self.settings.get(f's1{suffix}_take_profit', 5.0))
+                                if ret_pct >= s1_tp:
+                                    exit_reason = f"Take Profit (S1-{sig_type})|RSI:{curr_price_row['RSI']:.1f}|MA5:{int(curr_price_row['MA5']):,}|OSC:{curr_price_row['OSC']:.2f}"
+
                             if not exit_reason and self.settings.get('use_s1_stop_loss', True):
                                 s1_sl = float(self.settings.get(f's1{suffix}_stop_loss', 3.0))
                                 if ret_pct <= -s1_sl:
-                                    exit_reason = f"Stop Loss (S1)|RSI:{curr_price_row['RSI']:.1f}|MA5:{int(curr_price_row['MA5']):,}|OSC:{curr_price_row['OSC']:.2f}"
+                                    exit_reason = f"Stop Loss (S1-{sig_type})|RSI:{curr_price_row['RSI']:.1f}|MA5:{int(curr_price_row['MA5']):,}|OSC:{curr_price_row['OSC']:.2f}"
                         else:  # entry_n == 2
                             if self.settings.get('use_s2_flash_exit', True):
                                 f_pct = float(self.settings.get('s2_flash_exit_pct', 3.0))
@@ -201,6 +206,11 @@ class DynamicBacktester:
                                     drop_pct = (curr_price / h_info['max_p'] - 1) * 100
                                     exit_reason = f"Flash Exit (S2)|MaxP:{int(h_info['max_p']):,}|Drop:{drop_pct:.1f}%"
                             
+                            if not exit_reason and self.settings.get('use_s2_take_profit', True):
+                                s2_tp = float(self.settings.get('s2_take_profit', 5.0))
+                                if ret_pct >= s2_tp:
+                                    exit_reason = f"Take Profit (S2)|RSI:{curr_price_row['RSI']:.1f}|MA5:{int(curr_price_row['MA5']):,}|OSC:{curr_price_row['OSC']:.2f}"
+
                             if not exit_reason and self.settings.get('use_s2_stop_loss', True):
                                 s2_sl = float(self.settings.get('s2_stop_loss', 2.0))
                                 if ret_pct <= -s2_sl:
@@ -443,25 +453,31 @@ class DynamicBacktester:
             
             flash_exited = (f_pct > 0) & (m1_closes < running_max * (1 - f_pct/100))
             
-            # (B) Stop Loss 조건 계산
+            # (B) Stop Loss & Take Profit 조건 계산
             sl_pct = 0.0
+            tp_pct = 0.0
             if h_info['entry_n'] == 1:
                 sig_type = h_info.get('sig_type', 'Type A')
                 suffix = "_a" if sig_type == "Type A" else "_b"
                 if self.settings.get('use_s1_stop_loss', True):
                     sl_pct = float(self.settings.get(f's1{suffix}_stop_loss', 3.0))
+                if self.settings.get('use_s1_take_profit', True):
+                    tp_pct = float(self.settings.get(f's1{suffix}_take_profit', 5.0))
             else:
                 if self.settings.get('use_s2_stop_loss', True):
                     sl_pct = float(self.settings.get('s2_stop_loss', 2.0))
+                if self.settings.get('use_s2_take_profit', True):
+                    tp_pct = float(self.settings.get('s2_take_profit', 5.0))
             
             stop_lossed = (sl_pct > 0) & (m1_closes / h_info['avg_p'] - 1 <= -sl_pct/100)
+            take_profited = (tp_pct > 0) & (m1_highs / h_info['avg_p'] - 1 >= tp_pct/100)
             
             # (C) Gap Down 조건 (S1/S2 공통)
             g_lmt = float(self.settings.get('gap_down_limit', -5.0))
             gap_downed = (m1_closes / h_info['avg_p'] - 1 <= g_lmt / 100)
             
             # 최초 발생 지점 찾기
-            exit_mask = flash_exited | stop_lossed | gap_downed
+            exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
             exit_idxs = np.where(exit_mask)[0]
             
             if len(exit_idxs) > 0:
@@ -474,7 +490,10 @@ class DynamicBacktester:
                 elif flash_exited[idx]: 
                     drop = (exit_price / running_max[idx] - 1) * 100
                     reason = f"1M Flash Exit (S{h_info['entry_n']})|Drop:{drop:.1f}%"
-                else: reason = f"1M Stop Loss (S{h_info['entry_n']})"
+                elif take_profited[idx]:
+                    exit_price = h_info['avg_p'] * (1 + tp_pct/100) # 고전밀에서는 가능하면 TP 가격 체결 가정
+                    reason = f"1M Take Profit (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
+                else: reason = f"1M Stop Loss (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
                 
                 self._execute_sell(code, exit_price, exit_time, reason)
                 today_sells.add(code)

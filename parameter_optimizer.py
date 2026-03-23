@@ -203,11 +203,13 @@ class ParameterOptimizer:
         # [v23.1] 지표 재계산 필요 여부 판단 (보수적 화이트리스트 방식)
         # 아래 파라미터들은 지표(Indicators) 계산에는 영향을 주지 않고, 신호(Signals)나 매매 로직에만 관여함
         signal_only_params = {
-            'rsi_min', 'rsi_max', 'rsi_max_b', 'vol_surge', 
-            's1_stop_loss', 's2_stop_loss', 's1_flash_exit_pct', 's2_flash_exit_pct',
-            'take_profit', 'gap_down_limit', 's2_min_days', 'stage2_trigger',
+            'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
+            's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 
+            's1_a_take_profit', 's1_b_take_profit', 's2_take_profit',
+            'take_profit', 'stop_loss', 'gap_down_limit', 's2_min_days', 'stage2_trigger',
             'use_s1_flash_exit', 'use_s2_flash_exit', 'use_s1_stop_loss', 'use_s2_stop_loss',
-            'use_s2_ma5', 'use_s2_profit', 'use_s2_osc'
+            's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
+            'use_s2_ma5', 'use_s2_profit', 'use_s2_osc', 'gc_window', 'rsi_window'
         }
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False
@@ -276,7 +278,7 @@ class ParameterOptimizer:
                 best_settings = self.base_settings.copy()
                 for k in keys:
                     val = best[k]
-                    if k in ['rsi_sig_period', 'vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig']:
+                    if k in ['vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig']:
                         try: val = int(float(val))
                         except: pass
                     best_settings[k] = val

@@ -84,6 +84,7 @@ DEFAULT_SETTINGS = {
     "vol_lookback": 10,     
     "ma_convergence": 0.07,   
     "use_gc": True,           
+    "gc_window": 15,          
     "use_rsi_signal": True,   
     "rsi_window": 45,         
     "use_vol_power": True,    
@@ -96,6 +97,9 @@ DEFAULT_SETTINGS = {
     "macd_fast": 12,           
     "macd_slow": 26,           
     "macd_sig": 9,             
+    "sig_macd_fast": 12,       # [v6.2] 실시간/백테스트 신호용 MACD Fast
+    "sig_macd_slow": 26,       # [v6.2] 실시간/백테스트 신호용 MACD Slow
+    "sig_macd_sig": 9,         # [v6.2] 실시간/백테스트 신호용 MACD Signal
     "rsi_sig_period": 9,       
     "max_mon_targets": 20,     
     "use_auto_virtual": True,  # 매수 타점 포착 시 자동 가상 매수 여부

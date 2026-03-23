@@ -26,30 +26,26 @@ class BacktestTab:
             'vol_surge': tk.BooleanVar(value=True),
             'vol_surge_b': tk.BooleanVar(value=True),
             'rsi_window': tk.BooleanVar(value=True),
-            'rsi_sig_period': tk.BooleanVar(value=True),
-            'macd_fast': tk.BooleanVar(value=True),
-            'macd_slow': tk.BooleanVar(value=True),
-            'macd_sig': tk.BooleanVar(value=True),
-            'take_profit': tk.BooleanVar(value=True),
-            'stop_loss': tk.BooleanVar(value=True),
+            's1_a_take_profit': tk.BooleanVar(value=True),
+            's1_b_take_profit': tk.BooleanVar(value=True),
+            's1_a_stop_loss': tk.BooleanVar(value=True),
+            's1_b_stop_loss': tk.BooleanVar(value=True),
+            's2_take_profit': tk.BooleanVar(value=True),
+            's2_stop_loss': tk.BooleanVar(value=True),
             'rsi_exit_limit': tk.BooleanVar(value=True),
-            'stage2_trigger': tk.BooleanVar(value=True)
+            'stage2_trigger': tk.BooleanVar(value=True),
+            'vol_lookback': tk.BooleanVar(value=True),
+            'gc_window': tk.BooleanVar(value=True),
+            's2_min_days': tk.BooleanVar(value=True)
         }
         self.col_to_params = {
             "vol_a": ["vol_surge"], "vol_b": ["vol_surge_b"],
             "rsi_b": ["buy_rsi_max_b"], "rsi_a": ["buy_rsi_max_a"], "rsi_min": ["buy_rsi_min"],
-            "macd_f": ["macd_fast"], "macd_s": ["macd_slow"], "macd_sig": ["macd_sig"],
-            "rsi_sp": ["rsi_sig_period"], "rsi_w": ["rsi_window"],
-            "tp_sl": ["take_profit", "stop_loss"],
-            "rsi_ex": ["rsi_exit_limit"], "s2": ["stage2_trigger"]
-        }
-        # [v15.7] 헤더 텍스트 매핑 (아이콘 업데이트용)
-        self.param_to_col_id = {
-            "vol_surge": "#6", "vol_surge_b": "#7", "buy_rsi_max_b": "#8",
-            "buy_rsi_max_a": "#9", "buy_rsi_min": "#10", "macd_fast": "#11",
-            "macd_slow": "#12", "macd_sig": "#13", "rsi_sig_period": "#14",
-            "rsi_window": "#15", "take_profit": "#16", "stop_loss": "#16",
-            "rsi_exit_limit": "#17", "stage2_trigger": "#18"
+            "rsi_w": ["rsi_window"], "vol_l": ["vol_lookback"], "gc_w": ["gc_window"],
+            "a_tp": ["s1_a_take_profit"], "a_sl": ["s1_a_stop_loss"],
+            "b_tp": ["s1_b_take_profit"], "b_sl": ["s1_b_stop_loss"],
+            "s2_tp": ["s2_take_profit"], "s2_sl": ["s2_stop_loss"],
+            "rsi_ex": ["rsi_exit_limit"], "s2": ["stage2_trigger"], "s2_d": ["s2_min_days"]
         }
         # 초기 동기화 수행
         self._sync_opt_toggles_with_settings()
@@ -59,11 +55,11 @@ class BacktestTab:
         s = self.app.settings
         # 연동 맵 정의 (Settings Key -> Opt Params)
         sync_map = {
-            "use_type_a": ["vol_surge", "buy_rsi_max_a"],
-            "use_type_b": ["vol_surge_b", "buy_rsi_max_b"],
+            "use_type_a": ["vol_surge", "buy_rsi_max_a", "s1_a_take_profit", "s1_a_stop_loss"],
+            "use_type_b": ["vol_surge_b", "buy_rsi_max_b", "s1_b_take_profit", "s1_b_stop_loss"],
             "use_rsi_min": ["buy_rsi_min"],
-            "use_s1_tp": ["take_profit"],
-            "use_s1_stop_loss": ["stop_loss"],
+            "use_s2_tp": ["s2_take_profit"],
+            "use_s2_stop_loss": ["s2_stop_loss"],
             "use_s2_rsi_exit": ["rsi_exit_limit"]
         }
         
@@ -100,7 +96,7 @@ class BacktestTab:
         """백테스팅 탭 레이아웃 구성 (v16.8: 직관적인 그룹화 레이아웃 적용)"""
         # ---상단: 가로 배치 섹션 (설정 / 최적화 / 백테스트)---
         top_grid_frame = ttk.Frame(self.parent)
-        top_grid_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        top_grid_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(20, 10)) # [v18.0] 상단 여백 증설 (탭버튼 간격 확보)
         
         # 1. 기간 설정 (Date Settings)
         date_lf = ttk.LabelFrame(top_grid_frame, text=" 📅 1. 기본 기간 설정 ", padding="15")
@@ -188,9 +184,8 @@ class BacktestTab:
         # 카테고리 컬러 (Nord Palette 기반 저채도 구성)
         categories = [
             ("📊 성과", 275, "#434C5E"),
-            ("🚀 매수 진입", 325, "#4C566A"),
-            ("📈 지표", 325, "#3B4252"),
-            ("🎯 청산/추매", 295, "#2E3440")
+            ("🚀 매수 진입", 520, "#4C566A"),
+            ("🎯 청산/추매", 545, "#2E3440")
         ]
         
         for name, width, color in categories:
@@ -213,40 +208,36 @@ class BacktestTab:
             "rsi_b": "buy_rsi_max_b: 매수 조건 - RSI 상한선 (Type B)",
             "rsi_a": "buy_rsi_max_a: 매수 조건 - Type A 전용 RSI 상한선",
             "rsi_min": "buy_rsi_min: 매수 조건 - 전략 공통 RSI 하한선",
-            "macd_f": "macd_fast: MACD 단기 이동평균 기간",
-            "macd_s": "macd_slow: MACD 장기 이동평균 기간",
-            "macd_sig": "macd_sig: MACD 시그널 주기",
-            "rsi_sp": "rsi_sig_period: RSI 시그널 주기",
-            "tp_sl": "익절/손절: 목표 수익률 / 손절 가이드라인 (%)",
+            "a_tp": "s1_a_take_profit: Type A 익절선 (%)",
+            "a_sl": "s1_a_stop_loss: Type A 손절선 (%)",
+            "b_tp": "s1_b_take_profit: Type B 익절선 (%)",
+            "b_sl": "s1_b_stop_loss: Type B 손절선 (%)",
+            "s2_tp": "s2_take_profit: Stage 2 익절선 (%)",
+            "s2_sl": "s2_stop_loss: Stage 2 손절선 (%)",
             "rsi_ex": "rsi_exit_limit: 추세 약화 시 즉시 청산 기준",
             "s2": "stage2_trigger: 2차 매수(추매) 실행 수익률",
-            "rsi_w": "rsi_window: RSI 계산용 캔들 갯수"
+            "rsi_w": "rsi_window: RSI 50 상향 돌파 후 유지 시간 (분)",
+            "vol_l": "vol_lookback: 거래량 급증 비교 기준 기간 (일)",
+            "gc_w": "gc_window: 이평선 골든크로스 발동 유지 시간 (분)",
+            "s2_d": "s2_min_days: 1차 매수 후 2차 추매 최소 대기 기간 (일)"
         }
 
         # 카테고리별 컬럼 구성
         cols = ["rank", "avg_ret", "avg_mdd", "win_rate", "trades", 
-                "vol_a", "vol_b", "rsi_b", "rsi_a", "rsi_min",
-                "macd_f", "macd_s", "macd_sig", "rsi_sp", "rsi_w",
-                "tp_sl", "rsi_ex", "s2"]
+                "gc_w", "vol_l", "vol_a", "vol_b", "rsi_min", "rsi_a", "rsi_b", "rsi_w",
+                "a_tp", "a_sl", "b_tp", "b_sl", "s2_tp", "s2_sl", "rsi_ex", "s2", "s2_d"]
         self.app.tree_backtest = ttk.Treeview(self.table_assembly, columns=cols, show="headings", height=15)
         
         # 헤더 이름 설정 (카테고리 없이 깔끔하게)
         headers = {
             "rank": "순위", "avg_ret": "수익률", "avg_mdd": "MDD", "win_rate": "승률", "trades": "횟수",
-            "vol_a": "☑️ V_A", "vol_b": "☑️ V_B", "rsi_b": "☑️ R_B", "rsi_a": "☑️ R_A", "rsi_min": "☑️ R_Min",
-            "macd_f": "☑️ MF", "macd_s": "☑️ MS", "macd_sig": "☑️ MSg", "rsi_sp": "☑️ R_SP", "rsi_w": "☑️ R_W",
-            "tp_sl": "☑️ T/L", "rsi_ex": "☑️ R_Ex", "s2": "☑️ S2"
+            "gc_w": "☑️ GC_W", "vol_l": "☑️ V_L", "vol_a": "☑️ V_A", "vol_b": "☑️ V_B", 
+            "rsi_min": "☑️ R_Min", "rsi_a": "☑️ R_A", "rsi_b": "☑️ R_B", "rsi_w": "☑️ R_W", 
+            "a_tp": "☑️ A_TP", "a_sl": "☑️ A_SL", "b_tp": "☑️ B_TP", "b_sl": "☑️ B_SL",
+            "s2_tp": "☑️ S2_TP", "s2_sl": "☑️ S2_SL", "rsi_ex": "☑️ R_Ex", "s2": "☑️ S2", "s2_d": "☑️ S2_D"
         }
         
-        # [v25.0] 헤더 매핑 (클릭 시 토글 대상)
-        self.col_to_params = {
-            "vol_a": ["vol_surge"], "vol_b": ["vol_surge_b"],
-            "rsi_b": ["buy_rsi_max_b"], "rsi_a": ["buy_rsi_max_a"], "rsi_min": ["buy_rsi_min"],
-            "macd_f": ["macd_fast"], "macd_s": ["macd_slow"], "macd_sig": ["macd_sig"],
-            "rsi_sp": ["rsi_sig_period"], "rsi_w": ["rsi_window"],
-            "tp_sl": ["take_profit", "stop_loss"],
-            "rsi_ex": ["rsi_exit_limit"], "s2": ["stage2_trigger"]
-        }
+        # [v25.0] 헤더 매핑 (클릭 시 토글 대상) -> _init_vars에서 통합 관리
         
         for col in cols:
             self.app.tree_backtest.heading(col, text=headers.get(col, col))
@@ -254,9 +245,9 @@ class BacktestTab:
         # 정확한 픽셀 매칭 (위 카테고리 바와 일치시키기 위함, v3.7)
         col_widths = {
             "rank": 40, "avg_ret": 60, "avg_mdd": 60, "win_rate": 60, "trades": 55,
-            "vol_a": 65, "vol_b": 65, "rsi_b": 65, "rsi_a": 65, "rsi_min": 65,
-            "macd_f": 65, "macd_s": 65, "macd_sig": 65, "rsi_sp": 65, "rsi_w": 65,
-            "tp_sl": 100, "rsi_ex": 100, "s2": 95
+            "gc_w": 65, "vol_l": 65, "vol_a": 65, "vol_b": 65, "rsi_min": 65, "rsi_a": 65, "rsi_b": 65, "rsi_w": 65,
+            "a_tp": 60, "a_sl": 60, "b_tp": 60, "b_sl": 60, "s2_tp": 60, "s2_sl": 60,
+            "rsi_ex": 65, "s2": 60, "s2_d": 60
         }
         for col in cols:
             self.app.tree_backtest.column(col, width=col_widths.get(col, 60), anchor=tk.CENTER, stretch=False)
@@ -318,28 +309,35 @@ class BacktestTab:
     def _get_dynamic_search_space(self, settings):
         """[v15.7] 현재 설정값을 기준으로 주변 탐색 범위를 동적으로 생성"""
         s = settings
-        def range_for(val, step, count=3):
+        def range_for(val, step, count=3, min_val=None):
             # 정수형인 경우 정수 리스트, 소수인 경우 소수 리스트 반환
-            if isinstance(val, int):
-                return [int(val + (i - count//2) * step) for i in range(count)]
+            if isinstance(val, (int, np.integer)):
+                res = [int(val + (i - count//2) * step) for i in range(count)]
             else:
-                return [round(float(val) + (i - count//2) * step, 2) for i in range(count)]
+                res = [round(float(val) + (i - count//2) * step, 2) for i in range(count)]
+            
+            if min_val is not None:
+                res = [max(min_val, x) for x in res]
+            return sorted(list(set(res))) # 중중복 제거 및 정렬
 
         return {
-            'buy_rsi_min': range_for(s.get('buy_rsi_min', 40.0), 5.0),
+            'buy_rsi_min': range_for(s.get('buy_rsi_min', 40.0), 5.0, min_val=0),
             'buy_rsi_max_b': range_for(s.get('buy_rsi_max_b', 65.0), 5.0),
             'buy_rsi_max_a': range_for(s.get('buy_rsi_max_a', 58.0), 5.0),
-            'vol_surge': range_for(s.get('vol_surge', 1.5), 0.3),
-            'vol_surge_b': range_for(s.get('vol_surge_b', 1.5), 0.3),
-            'take_profit': range_for(s.get('take_profit', 5.0), 2.0),
-            'stop_loss': range_for(s.get('stop_loss', 3.0), 1.0),
+            'vol_surge': range_for(s.get('vol_surge', 1.5), 0.3, min_val=0.1),
+            'vol_surge_b': range_for(s.get('vol_surge_b', 1.5), 0.3, min_val=0.1),
+            's1_a_take_profit': range_for(s.get('s1_a_take_profit', 5.0), 2.0, min_val=0.5),
+            's1_b_take_profit': range_for(s.get('s1_b_take_profit', 5.0), 2.0, min_val=0.5),
+            's1_a_stop_loss': range_for(s.get('s1_a_stop_loss', 3.0), 1.0, min_val=0.5),
+            's1_b_stop_loss': range_for(s.get('s1_b_stop_loss', 3.0), 1.0, min_val=0.5),
+            's2_take_profit': range_for(s.get('s2_take_profit', 5.0), 2.0, min_val=0.5),
+            's2_stop_loss': range_for(s.get('s2_stop_loss', 2.0), 1.0, min_val=0.5),
             'rsi_exit_limit': range_for(s.get('rsi_exit_limit', 50.0), 5.0),
             'stage2_trigger': range_for(s.get('stage2_trigger', 1.0), 0.5),
-            'rsi_sig_period': range_for(s.get('rsi_sig_period', 9), 2),
-            'macd_fast': range_for(s.get('macd_fast', 12), 2),
-            'macd_slow': range_for(s.get('macd_slow', 26), 4),
-            'macd_sig': range_for(s.get('macd_sig', 9), 2),
-            'rsi_window': range_for(s.get('rsi_window', 14), 2)
+            'rsi_window': range_for(s.get('rsi_window', 45), 15, min_val=15),
+            'vol_lookback': range_for(s.get('vol_lookback', 10), 5, min_val=1),
+            'gc_window': range_for(s.get('gc_window', 15), 15, min_val=15),
+            's2_min_days': range_for(s.get('s2_min_days', 1), 1, min_val=0)
         }
 
     def _on_header_click(self, event):
@@ -356,10 +354,18 @@ class BacktestTab:
             
             if col_name in self.col_to_params:
                 params = self.col_to_params[col_name]
-                # 첫 번째 파라미터 기준으로 토글 (묶음 처리)
-                is_active = not self.opt_params_vars[params[0]].get()
+                if not params: return
+                
+                # [v25.8] 안전한 토글 로직 (키 존재 여부 확인 강화)
+                target_p = params[0]
+                if target_p not in self.opt_params_vars:
+                    print(f"  (!) Parameter {target_p} not found in opt_params_vars")
+                    return
+
+                is_active = not self.opt_params_vars[target_p].get()
                 for p in params:
-                    self.opt_params_vars[p].set(is_active)
+                    if p in self.opt_params_vars:
+                        self.opt_params_vars[p].set(is_active)
                 
                 # 헤더 텍스트 업데이트 (아이콘 교체)
                 icon = "☑️" if is_active else "⬜"
@@ -370,9 +376,11 @@ class BacktestTab:
                 
                 # 상태바 안내
                 status = "활성화" if is_active else "고정(Settings 기준)"
-                self.app.lbl_bt_status.config(text=f"파라미터 [{base_text}] 최적화 {status}", foreground="blue")
+                if hasattr(self.app, 'lbl_bt_status'):
+                    self.app.lbl_bt_status.config(text=f"파라미터 [{base_text}] 최적화 {status}", foreground="blue")
         except Exception as e:
             print(f"Header Toggle Error: {e}")
+            traceback.print_exc()
 
     def _on_btn_start_optimize(self):
         """최적화 버튼 클릭 핸들러"""
@@ -395,8 +403,8 @@ class BacktestTab:
             self.app.settings['bt_end_date'] = end_date
             self.app.save_settings()
             
-            # [v15.7] 최적화 시작 전 다시 한 번 설정 탭과 동기화
-            self._sync_opt_toggles_with_settings()
+            # [v15.7] 최적화 시작 전 다시 한 번 설정 탭과 동기화 (사용자 요청으로 제거)
+            # self._sync_opt_toggles_with_settings()
             
             # [v8.6] 전략 설정(self.settings) 탭의 값을 기준으로 백테스트 수행
             s = self.app.settings
@@ -450,8 +458,10 @@ class BacktestTab:
                     return f"{val:.{decimal}f}"
                 return str(val)
 
-            # 엔진의 변수명과 테이블 컬럼 매칭 (v30.0)
-            tp_sl = f"{res.get('take_profit', 0):.1f}/{res.get('stop_loss', 0):.1f}"
+            # 엔진의 변수명과 테이블 컬럼 매칭 (v31.0: 유형별 익절/손절 출력)
+            a_tp, a_sl = res.get('s1_a_take_profit', 0), res.get('s1_a_stop_loss', 0)
+            b_tp, b_sl = res.get('s1_b_take_profit', 0), res.get('s1_b_stop_loss', 0)
+            s2_tp, s2_sl = res.get('s2_take_profit', 0), res.get('s2_stop_loss', 0)
 
             vol_a = fmt('vol_surge', res.get('vol_surge', 0))
             vol_b = fmt('vol_surge_b', res.get('vol_surge_b', 0))
@@ -461,19 +471,19 @@ class BacktestTab:
             rsi_ex = fmt('rsi_exit_limit', res.get('rsi_exit_limit', 0))
             s2 = fmt('stage2_trigger', res.get('stage2_trigger', 0))
             
-            macd_f = fmt('macd_fast', res.get('macd_fast', 0), 0)
-            macd_s = fmt('macd_slow', res.get('macd_slow', 0), 0)
-            macd_sig = fmt('macd_sig', res.get('macd_sig', 0), 0)
-            rsi_sp = fmt('rsi_sig_period', res.get('rsi_sig_period', 0), 0)
             rsi_w = fmt('rsi_window', res.get('rsi_window', 0), 0)
+            vol_l = fmt('vol_lookback', res.get('vol_lookback', 0), 0)
+            gc_w = fmt('gc_window', res.get('gc_window', 0), 0)
+            s2_d = fmt('s2_min_days', res.get('s2_min_days', 0), 0)
             
             row_tag = 'even' if i % 2 == 0 else 'odd'
             perf_tag = 'plus' if row.avg_ret > 0 else 'minus'
             
             self.app.tree_backtest.insert("", tk.END, values=(
                 i, f"{row.avg_ret:+.2f}", f"{row.avg_mdd:.2f}", f"{row.avg_win:.2f}", 
-                int(row.total_trades), vol_a, vol_b, rsi_b, rsi_a, rsi_min,
-                macd_f, macd_s, macd_sig, rsi_sp, rsi_w, tp_sl, rsi_ex, s2
+                int(row.total_trades), gc_w, vol_l, vol_a, vol_b, rsi_min, rsi_a, rsi_b, rsi_w,
+                f"{a_tp:.1f}", f"{a_sl:.1f}", f"{b_tp:.1f}", f"{b_sl:.1f}", 
+                f"{s2_tp:.1f}", f"{s2_sl:.1f}", rsi_ex, s2, s2_d
             ), tags=(perf_tag, row_tag))
             
         # 태그 색상 설정 (노르딕 테마 고정밀 - 저채도)
@@ -614,7 +624,7 @@ class BacktestTab:
         popup.title("⚙️ 백테스트 반영 파라미터 확인")
         
         # [v25.6] 화면 중앙 배치 로직 (부모 창 기준)
-        w, h = 580, 520
+        w, h = 580, 620
         self.app.root.update_idletasks() # 부모 창 최신 정보 반영
         root_w = self.app.root.winfo_width()
         root_h = self.app.root.winfo_height()
@@ -650,15 +660,17 @@ class BacktestTab:
         categories = [
             (" 🏁 1. 매수 진입 조건 (Entry) ", {
                 'buy_rsi_min': 'RSI 하한', 'buy_rsi_max_a': 'RSI 상한(A)', 
-                'buy_rsi_max_b': 'RSI 상한(B)', 'vol_surge': '거래량(A)', 'vol_surge_b': '거래량(B)'
+                'buy_rsi_max_b': 'RSI 상한(B)', 'vol_surge': '거래량(A)', 'vol_surge_b': '거래량(B)',
+                'rsi_window': 'RSI 윈도우', 'vol_lookback': '거래량룩백(L)', 'gc_window': '골든크로스(W)'
             }),
-            (" 📈 2. 기술적 지표 (Indicators) ", {
-                'rsi_window': 'RSI 윈도우', 'rsi_sig_period': 'RSI 시그널',
-                'macd_fast': 'MACD Fast', 'macd_slow': 'MACD Slow', 'macd_sig': 'MACD Sig'
+            (" 🎯 2. Type A/B 청산 (Exit) ", {
+                's1_a_take_profit': 'A-익절 (%)', 's1_a_stop_loss': 'A-손절 (%)',
+                's1_b_take_profit': 'B-익절 (%)', 's1_b_stop_loss': 'B-손절 (%)',
+                'rsi_exit_limit': 'RSI 이탈기준'
             }),
-            (" 🎯 3. 청산 및 추매 (Exit/S2) ", {
-                'take_profit': '익절 (%)', 'stop_loss': '손절 (%)',
-                'rsi_exit_limit': 'RSI 이탈기준', 'stage2_trigger': 'S2 추매기준'
+            (" 💠 3. Stage 2 추매/청산 (S2) ", {
+                'stage2_trigger': 'S2 추매기준', 's2_take_profit': 'S2-익절 (%)', 
+                's2_stop_loss': 'S2-손절 (%)', 's2_min_days': 'S2-대기일(D)'
             })
         ]
 

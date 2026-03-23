@@ -73,10 +73,10 @@ class StreamProcessor:
             rsi_sig = rsi.rolling(rsi_sig_period).mean().iloc[-1]
             rsi_val = float(rsi.iloc[-1])
             
-            # 2. MACD
-            macd_fast = int(self.settings.get('macd_fast', 12))
-            macd_slow = int(self.settings.get('macd_slow', 26))
-            macd_sig = int(self.settings.get('macd_sig', 9))
+            # 2. MACD (실시간 신지용 파라미터 적용)
+            macd_fast = int(self.settings.get('sig_macd_fast', 12))
+            macd_slow = int(self.settings.get('sig_macd_slow', 26))
+            macd_sig = int(self.settings.get('sig_macd_sig', 9))
             
             ema_f = df['c'].ewm(span=macd_fast, adjust=False).mean()
             ema_s = df['c'].ewm(span=macd_slow, adjust=False).mean()

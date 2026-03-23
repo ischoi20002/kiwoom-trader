@@ -214,10 +214,10 @@ class SettingsTab:
         ttk.Label(group_a, text="※ 일봉 골든크로스(5/20) 조건 하에서만 발동됩니다.", font=("Malgun Gothic", 9), foreground=self.app.colors['primary']).pack(anchor=tk.W, padx=10, pady=2)
         add_signal_row(group_a, "use_type_a", "Type A 활성화", "buy_rsi_max_a", "", "RSI 눌림 상한:", 
                        widget_list=self.type_a_widgets, command=toggle_type_a, include_cb_in_list=False)
-        add_signal_row(group_a, "use_gc", "1. 골든크로스 15분", label_text="(이평선 간격 포함)", widget_list=self.type_a_widgets)
-        add_signal_row(group_a, "use_vol_surge", "2. 거래량 급증(A)", "vol_surge", "배", "전일 동시간 대비:", widget_list=self.type_a_widgets)
+        add_signal_row(group_a, "use_gc", "1. 이평선 골든크로스", "gc_window", "분", "유지 시간:", widget_list=self.type_a_widgets)
+        add_signal_row(group_a, "use_rsi_signal", "2. RSI 50 상향돌파", "rsi_window", "분", "유지 시간:", widget_list=self.type_a_widgets)
         add_signal_row(group_a, "use_ma60_safe", "3. MA60 안전구역", "ma60_min", "%", "위치:", "ma60_max", "%", widget_list=self.type_a_widgets)
-        add_signal_row(group_a, "use_rsi_signal", "4. RSI 50 상향돌파", "rsi_window", "분", "유지 시간:", widget_list=self.type_a_widgets)
+        add_signal_row(group_a, "use_vol_surge", "4. 거래량 급증(A)", "vol_surge", "배", "전일 동시간 대비:", widget_list=self.type_a_widgets)
 
         # Type B settings
         add_signal_row(group_b, "use_type_b", "Type B 활성화", "buy_rsi_max_b", "", "RSI 돌파 상한:", 
@@ -229,8 +229,55 @@ class SettingsTab:
         # Common Stage 1 settings
         add_signal_row(group_common, "use_market_filter", "1. 시장지수 필터", label_text="(하락장 매수 정지)")
         add_signal_row(group_common, "use_vol_power", "2. 체결강도 강화", "vol_power_lvl", "", "기준값:")
-        add_signal_row(group_common, "use_macd_signal", "3. MACD 최종 확인", label_text="(OSC > 0 강세 확인)")
-        add_signal_row(group_common, "use_rsi_min", "4. 매수 RSI 하한", "buy_rsi_min", "", "전략 공통:")
+        # 3. 매수 RSI 하한 (Moved up from 4)
+        add_signal_row(group_common, "use_rsi_min", "3. 매수 RSI 하한", "buy_rsi_min", "", "전략 공통:")
+
+        # [v6.4] 4. MACD-Signal 확인 (Read-only display, Moved down from 3)
+        macd_row = ttk.Frame(group_common, padding="6")
+        macd_row.pack(fill=tk.X)
+        self.conf_vars["use_macd_signal"] = tk.BooleanVar(value=self.app.settings.get("use_macd_signal", True))
+        ttk.Checkbutton(macd_row, text="4. MACD-Signal 확인", variable=self.conf_vars["use_macd_signal"], width=20).pack(side=tk.LEFT)
+        
+        ttk.Label(macd_row, text=" (F/S/Sig): ", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
+        for k in ["sig_macd_fast", "sig_macd_slow", "sig_macd_sig"]:
+            ent = ttk.Entry(macd_row, width=4, justify='center', state='readonly')
+            val = self.app.settings.get(k, self.default_settings.get(k, 0))
+            ent.config(state=tk.NORMAL)
+            ent.insert(0, str(val))
+            ent.config(state='readonly')
+            ent.pack(side=tk.LEFT, padx=2)
+            self.params_entries[k] = ent
+            
+        ttk.Label(macd_row, text=" (15분봉 고정값)", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(group_common, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
+
+        # [v6.4] 5. RSI-Signal 확인 (Read-only display, Formatted like MACD)
+        row_rsi_sig_f = ttk.Frame(group_common, padding="6")
+        row_rsi_sig_f.pack(fill=tk.X)
+        self.conf_vars["use_rsi_sig_filter"] = tk.BooleanVar(value=self.app.settings.get("use_rsi_sig_filter", False))
+        ttk.Checkbutton(row_rsi_sig_f, text="5. RSI-Signal 확인", variable=self.conf_vars["use_rsi_sig_filter"], width=20,
+                        style="TCheckbutton").pack(side=tk.LEFT)
+        
+        ttk.Label(row_rsi_sig_f, text=" (P/Sig): ", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
+        
+        # Read-only entry for RSI Period (fixed 14)
+        ent_rsi_p = ttk.Entry(row_rsi_sig_f, width=4, justify='center', state='readonly')
+        ent_rsi_p.config(state=tk.NORMAL)
+        ent_rsi_p.insert(0, "14")
+        ent_rsi_p.config(state='readonly')
+        ent_rsi_p.pack(side=tk.LEFT, padx=2)
+        
+        # Read-only entry for RSI Sig Period (from settings)
+        ent_rsi_sp = ttk.Entry(row_rsi_sig_f, width=4, justify='center', state='readonly')
+        val_rsi_sp = self.app.settings.get("rsi_sig_period", 9)
+        ent_rsi_sp.config(state=tk.NORMAL)
+        ent_rsi_sp.insert(0, str(val_rsi_sp))
+        ent_rsi_sp.config(state='readonly')
+        ent_rsi_sp.pack(side=tk.LEFT, padx=2)
+        self.params_entries["rsi_sig_period"] = ent_rsi_sp
+        
+        ttk.Label(row_rsi_sig_f, text=" (15분봉 고정값)", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(group_common, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
 
         self.app.root.after(100, toggle_type_a)
         self.app.root.after(100, toggle_type_b)
@@ -267,8 +314,8 @@ class SettingsTab:
         s1_exit_sub.pack(fill=tk.X, pady=5)
         add_split_exit_row(s1_exit_sub, "use_s1_flash_exit", "Flash Exit 적용", "s1_a_flash_exit_pct", "s1_b_flash_exit_pct", "%")
         add_split_exit_row(s1_exit_sub, "use_s1_ma_break", "이평선(20일) 이탈", "s1_a_ma_break_buffer", "s1_b_ma_break_buffer", "%")
-        add_split_exit_row(s1_exit_sub, "use_s1_stop_loss", "기본 손절 적용 (S1)", "s1_a_stop_loss", "s1_b_stop_loss", "%")
-        add_split_exit_row(s1_exit_sub, "use_s1_tp", "기본 익절 적용 (S1)", "s1_a_take_profit", "s1_b_take_profit", "%")
+        add_split_exit_row(s1_exit_sub, "use_s1_stop_loss", "1단계 손절 (S1)", "s1_a_stop_loss", "s1_b_stop_loss", "%")
+        add_split_exit_row(s1_exit_sub, "use_s1_tp", "1단계 익절 (S1)", "s1_a_take_profit", "s1_b_take_profit", "%")
 
         # (4.2) 2단계(본대) 매도 조건
         s2_exit_sub = ttk.LabelFrame(exit_container, text=" 2단계(본대) 매도 조건 ", padding="10")
@@ -277,8 +324,8 @@ class SettingsTab:
         add_signal_row(s2_exit_sub, "use_s2_rsi_tp", "다이나믹 50% 익절", "s2_rsi_tp_limit", "", "RSI 과열:", sub_param_key="s2_rsi_tp_drop", sub_unit="%", sub_label=" 고점대비 하락:")
         add_signal_row(s2_exit_sub, "use_s2_rsi_exit", "RSI 추세 이탈 매도", "rsi_exit_limit", "", "RSI 기준값:")
         add_signal_row(s2_exit_sub, "use_s2_ma_break", "이평선(20일) 이탈", "s2_ma_break_buffer", "%", "완충 지대:")
-        add_signal_row(s2_exit_sub, "use_s2_stop_loss", "기본 손절 적용 (S2)", "s2_stop_loss", "%", "손절 수익률:")
-        add_signal_row(s2_exit_sub, "use_s2_tp", "기본 익절 적용 (S2)", "s2_take_profit", "%", "목표 수익률:")
+        add_signal_row(s2_exit_sub, "use_s2_stop_loss", "2단계(추매) 손절 (S2)", "s2_stop_loss", "%", "손절 수익률:")
+        add_signal_row(s2_exit_sub, "use_s2_tp", "2단계(추매) 익절 (S2)", "s2_take_profit", "%", "목표 수익률:")
 
         # (4.3) 자금 운용 및 공통 설정
         money_sub = ttk.LabelFrame(exit_container, text=" 자금 운용 및 기타 설정 ", padding="10")
@@ -323,7 +370,7 @@ class SettingsTab:
         try:
             for key in self.params_entries:
                 val = self.params_entries[key].get()
-                if key in ["vol_lookback", "rsi_window", "stage1_amt", "stage2_amt", "stage3_amt", "s2_min_days", "max_slots"]:
+                if key in ["vol_lookback", "gc_window", "rsi_window", "stage1_amt", "stage2_amt", "stage3_amt", "s2_min_days", "max_slots"]:
                     self.app.settings[key] = int(val) if val.isdigit() else int(float(val))
                 elif key in ["rsi_tp_limit", "s2_rsi_tp_limit", "rsi_exit_limit", "stop_loss", "s2_stop_loss", "stage2_trigger", "take_profit"]:
                     self.app.settings[key] = float(val)
