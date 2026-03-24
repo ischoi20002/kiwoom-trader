@@ -57,16 +57,13 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             "use_type_b_vol", "use_macd_gc_b", "use_trend_aligned_b", "use_market_filter", "use_gap_down_filter", "gap_down_limit"
         ],
         "💰 [3] 추가 매수 (Stage 2 Add-on)": [
-            "stage2_amt", "stage2_trigger", "s2_min_days", "use_s2_ma5", "s2_ma5_gap", "use_s2_profit", 
-            "s2_profit_limit", "use_s2_osc", "s2_osc_gap", "use_s2_rsi_sig", "s2_rsi_gap", "use_s2_macd_gc", 
+            "stage2_amt", "stage2_trigger", "s2_delay_hours", "use_s2_ma5", "s2_ma5_gap", "use_s2_profit", 
+            "s2_profit_limit", "use_s2_rsi_sig", "s2_rsi_gap", "use_s2_macd_gc", 
             "s2_macd_gap", "use_s2_vol_surge", "s2_vol_ratio", "use_s2_ma20", "s2_ma20_gap"
         ],
         "🛡️ [4] 매도 및 손절 (Exit Strategy)": [
             "use_s1_flash_exit", "s1_a_flash_exit_pct", "s1_b_flash_exit_pct", "use_s1_stop_loss", 
             "s1_a_stop_loss", "s1_b_stop_loss", "use_s1_tp", "s1_a_take_profit", "s1_b_take_profit", 
-            "use_s1_ma_break", "s1_ma_break_buffer", "use_s2_flash_exit", "s2_flash_exit_pct", 
-            "use_s2_stop_loss", "s2_stop_loss", "s2_take_profit", "use_s2_rsi_tp", "s2_rsi_tp_limit", 
-            "s2_rsi_tp_drop", "use_s2_rsi_exit", "rsi_exit_limit", "use_s2_ma_break", "s2_ma_break_buffer"
         ]
     }
 
@@ -179,6 +176,20 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             .stat-card div:first-child {{ color: var(--dim); font-size: 0.8rem; font-weight: 600; margin-bottom: 8px; }}
             .stat-val {{ font-size: 1.5rem; font-weight: 800; font-variant-numeric: tabular-nums; }}
             
+            /* [v27.0] 전략별 진입 통계 스타일 */
+            .strategy-stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 25px; }}
+            .strategy-card {{ 
+                background: #1e293b; padding: 15px; border-radius: 12px; border: 1px solid #334155;
+                display: flex; justify-content: space-between; align-items: center;
+            }}
+            .str-label {{ font-size: 0.9rem; font-weight: 700; color: var(--dim); }}
+            .str-count {{ font-size: 1.2rem; font-weight: 800; color: var(--primary); }}
+            .str-count.type-a {{ color: #4ade80; }}
+            .str-count.type-b {{ color: #38bdf8; }}
+            .str-count.type-s2 {{ color: #fbbf24; }}
+            .str-count.s1-color {{ color: #94a3b8; }}
+            .str-count.s2-color {{ color: #fb7185; }}
+            
             .stock-group {{ background: #1e293b88; padding: 30px; border-radius: 24px; margin-bottom: 60px; border: 1px solid #334155; backdrop-filter: blur(10px); }}
             .stock-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; border-bottom: 2px solid #334155; padding-bottom: 15px; }}
             .stock-header-title {{ font-size: 1.5rem; font-weight: 800; color: #fff; display: flex; align-items: center; gap: 12px; }}
@@ -252,6 +263,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                         <div class="stat-val" style="color:{total_profit_color}; font-size:1.8rem; font-weight:800;">{total_profit:+,} <small style="font-size:0.8rem;">KRW</small></div>
                     </div>
                 </div>
+                {strategy_stats_html}
                 {equity_chart_html}
                 <div style="margin-top:20px; color:var(--dim); font-size:0.85rem; margin-bottom:5px;">Strategy Parameters</div>
                 {param_html}
@@ -341,6 +353,64 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     total_fees_val = total_fees
     gross_profit_val = total_profit_val + total_fees_val
     gross_profit_color = "var(--gain)" if gross_profit_val >= 0 else "var(--loss)"
+    
+    # [v27.0] Strategy Execution Breakdown - More robust counting (Prefix prioritized)
+    count_a = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('TYPE_A', case=False, na=False))])
+    count_b = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('TYPE_B', case=False, na=False))])
+    count_s2 = len(df[(df['Action'].str.contains('BUY2', na=False)) | (df['Action'] == 'ADDON') | (df['Reason'].str.contains('Stage 2|ADDON', case=False, na=False))])
+    
+    # [v27.3] Performance by Strategy Depth (S1 Only vs S2 Reached)
+    s1_rets, s2_rets = [], []
+    for c in df['Code'].unique():
+        s_df = df[df['Code'] == c]
+        has_s2 = False
+        for _, r in s_df.iterrows():
+            action = str(r['Action'])
+            if "BUY" in action:
+                if any(x in action for x in ["BUY2", "BUY_2ND", "ADDON", "S2"]):
+                    has_s2 = True
+            elif "SELL" in action:
+                ret = float(r.get('Return', 0))
+                if has_s2: s2_rets.append(ret)
+                else: s1_rets.append(ret)
+                has_s2 = False 
+
+    avg_s1 = sum(s1_rets)/len(s1_rets) if s1_rets else 0
+    avg_s2 = sum(s2_rets)/len(s2_rets) if s2_rets else 0
+
+    strategy_stats_html = f"""
+    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px;">Strategy Entry Breakdown (진입 횟수)</div>
+    <div class="strategy-stats">
+        <div class="strategy-card">
+            <span class="str-label">Type A (눌림목)</span>
+            <span class="str-count type-a">{count_a} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+        </div>
+        <div class="strategy-card">
+            <span class="str-label">Type B (추세돌파)</span>
+            <span class="str-count type-b">{count_b} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+        </div>
+        <div class="strategy-card">
+            <span class="str-label">Stage 2 (추가매수)</span>
+            <span class="str-count type-s2">{count_s2} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+        </div>
+    </div>
+    
+    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:20px;">Strategy Depth Performance (수익률 집계)</div>
+    <div class="strategy-stats">
+        <div class="strategy-card">
+            <span class="str-label">Stage 1 Only (정찰)</span>
+            <span class="str-count s1-color">{avg_s1:+.2f}% <small style="font-size:0.7rem; color:var(--dim)">({len(s1_rets)}건)</small></span>
+        </div>
+        <div class="strategy-card">
+            <span class="str-label">Stage 2 Reached (추매)</span>
+            <span class="str-count s2-color">{avg_s2:+.2f}% <small style="font-size:0.7rem; color:var(--dim)">({len(s2_rets)}건)</small></span>
+        </div>
+        <div class="strategy-card" style="border: 1px dashed #fb718555;">
+            <span class="str-label">Alpha (추매 가산점)</span>
+            <span class="str-count" style="color:#fff;">{avg_s2 - avg_s1:+.2f}%</span>
+        </div>
+    </div>
+    """
 
     # Portfolio Equity Chart
     equity_chart_html = ""
@@ -534,5 +604,5 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html_template.format(now=now_str, interval=display_interval, mode_label=mode_label, mode_color=mode_color, total=total_trades, win_rate=win_rate, avg_ret=avg_ret, ret_color=ret_color, total_profit=int(total_profit_val), total_profit_color=total_profit_color, gross_profit=int(gross_profit_val), gross_profit_color=gross_profit_color, total_fees=int(total_fees_val), param_html=param_html, sidebar_items="".join(sidebar_items), content="".join(content), start_date=start_date if start_date else "Simulation", end_date=end_date if end_date else "End", equity_chart_html=equity_chart_html))
+        f.write(html_template.format(now=now_str, interval=display_interval, mode_label=mode_label, mode_color=mode_color, total=total_trades, win_rate=win_rate, avg_ret=avg_ret, ret_color=ret_color, total_profit=int(total_profit_val), total_profit_color=total_profit_color, gross_profit=int(gross_profit_val), gross_profit_color=gross_profit_color, total_fees=int(total_fees_val), param_html=param_html, sidebar_items="".join(sidebar_items), content="".join(content), start_date=start_date if start_date else "Simulation", end_date=end_date if end_date else "End", equity_chart_html=equity_chart_html, strategy_stats_html=strategy_stats_html))
     print(f"  [Report] Execution log saved: {output_path}")

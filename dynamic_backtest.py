@@ -6,6 +6,7 @@ from data_manager_v2 import DataManagerV2
 import strategy_selector
 import backtest_engine as bt
 import importlib
+importlib.reload(bt) # [Force] 전 엔진 로직 업데이트 반영 (AttributeError 방지)
 import numpy as np
 from backtest_engine import TradingStrategy, csv_lock, SIGNAL_CSV, TRADE_CSV, BASE_DIR
 
@@ -182,8 +183,8 @@ class DynamicBacktester:
 
                     if not exit_reason:
                         if h_info['entry_n'] == 1:
-                            sig_type = h_info.get('sig_type', 'Type A')
-                            suffix = "_a" if sig_type == "Type A" else "_b"
+                            sig_type = h_info.get('sig_type', 'TYPE_A')
+                            suffix = "_a" if sig_type == "TYPE_A" else "_b"
                             if self.settings.get('use_s1_flash_exit', True):
                                 f_pct = float(self.settings.get(f's1{suffix}_flash_exit_pct', 3.0))
                                 if curr_price < h_info['max_p'] * (1 - f_pct/100):
@@ -230,9 +231,23 @@ class DynamicBacktester:
                         last_sig = day_signals[code].loc[curr_time]
                         h_info = self.holdings.get(code)
                         
-                        if (last_sig['Signal'] and last_sig['Ready']) or (h_info is not None and h_info['entry_n'] < 2):
-                            reason = f"{last_sig['Sig_Type']}" if last_sig['Signal'] else "ADDON(S2)"
-                            self._handle_buy_execution(code, {'reason': reason}, curr_time, d_df.loc[curr_time], indicator_row=d_df.loc[curr_time])
+                        # 2차 매수 대상인 경우 승인 조건 체크 (v22.1)
+                        is_buy_signal = (last_sig['Signal'] and last_sig['Ready'])
+                        is_addon_target = (h_info is not None and h_info['entry_n'] < 2)
+                        
+                        if is_buy_signal or is_addon_target:
+                            can_execute = True
+                            reason = f"{last_sig['Sig_Type']}"
+                            
+                            if is_addon_target:
+                                # 추매 승인 조건 체크 (TradingStrategy 통합 로직 사용)
+                                if self._check_s2_approval(code, h_info, last_sig):
+                                    reason = f"ADDON(S2)|R:{last_sig.get('RSI',0):.1f}|M:{last_sig.get('MACD',0):.1f}|O:{last_sig.get('OSC',0):.1f}|V:{int(last_sig.get('Volume',0))}"
+                                else:
+                                    can_execute = False
+                            
+                            if can_execute:
+                                self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': last_sig.get('Sig_Type', 'TYPE_A')}, curr_time, d_df.loc[curr_time], indicator_row=d_df.loc[curr_time])
 
             # 2-5. 일일 정산
             current_equity = self.cash + sum(h['qty'] * day_data[c]['Close'].iloc[-1] for c, h in self.holdings.items() if c in day_data)
@@ -268,13 +283,13 @@ class DynamicBacktester:
             if self.cash < s1_amt * 0.5: return 
             target_amt = s1_amt
             entry_n = 1
-            sig_type = sig_res.get('Sig_Type', 'Type A')
+            sig_type = sig_res.get('Sig_Type', 'TYPE_A')
         else:
             if h_info['entry_n'] >= 2: return
             if not self._check_s2_approval(code, h_info, last_row, indicator_row=indicator_row): return
             target_amt = s2_amt
             entry_n = 2
-            sig_type = h_info.get('sig_type', 'Type A')
+            sig_type = h_info.get('sig_type', 'TYPE_A')
             
         qty = int(target_amt // (price * (1 + self.buy_f_rate)))
         if qty <= 0: return
@@ -292,7 +307,9 @@ class DynamicBacktester:
             h_info['qty'] += qty
             h_info['entry_n'] = 2
             
-        reason_str = sig_res['reason']
+        # [v27.0] 전략 타입(A/B/S2)을 매수 사유(Reason) 접두어로 명시하여 리포트 집계 정확도 향상
+        prefix = f"[{sig_type}] " if entry_n == 1 else "[Stage 2] "
+        reason_str = prefix + sig_res['reason']
         if indicator_row is not None:
             try:
                 rsi_val = indicator_row.get('RSI', 0)
@@ -458,8 +475,8 @@ class DynamicBacktester:
             # (A) Flash Exit 조건 계산
             f_pct = 0.0
             if h_info['entry_n'] == 1:
-                sig_type = h_info.get('sig_type', 'Type A')
-                suffix = "_a" if sig_type == "Type A" else "_b"
+                sig_type = h_info.get('sig_type', 'TYPE_A')
+                suffix = "_a" if sig_type == "TYPE_A" else "_b"
                 if self.settings.get('use_s1_flash_exit', True):
                     f_pct = float(self.settings.get(f's1{suffix}_flash_exit_pct', 3.0))
             else:
@@ -472,8 +489,8 @@ class DynamicBacktester:
             sl_pct = 0.0
             tp_pct = 0.0
             if h_info['entry_n'] == 1:
-                sig_type = h_info.get('sig_type', 'Type A')
-                suffix = "_a" if sig_type == "Type A" else "_b"
+                sig_type = h_info.get('sig_type', 'TYPE_A')
+                suffix = "_a" if sig_type == "TYPE_A" else "_b"
                 if self.settings.get('use_s1_stop_loss', True):
                     sl_pct = float(self.settings.get(f's1{suffix}_stop_loss', 3.0))
                 if self.settings.get('use_s1_take_profit', True):
@@ -490,6 +507,13 @@ class DynamicBacktester:
             # (C) Gap Down 조건 (S1/S2 공통)
             g_lmt = float(self.settings.get('gap_down_limit', -5.0))
             gap_downed = (m1_closes / h_info['avg_p'] - 1 <= g_lmt / 100)
+            
+            # [v25.8/v25.9] 15-minute Gap-Down Grace Period: Allow recovery between SL/Flash and Gap Limit during first 15m
+            if self.settings.get('use_gap_grace', True):
+                if m1_times[0].hour == 9 and m1_times[0].minute == 0:
+                    grace_mask = (m1_times.hour == 9) & (m1_times.minute < 15)
+                    stop_lossed = stop_lossed & (~grace_mask)
+                    flash_exited = flash_exited & (~grace_mask)
             
             # 최초 발생 지점 찾기
             exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
@@ -523,26 +547,31 @@ class DynamicBacktester:
         
         if curr_15m is not None:
             h_info = self.holdings.get(code)
-            if (curr_15m['Signal'] and curr_15m['Ready']) or (h_info is not None and h_info['entry_n'] < 2):
-                reason = f"1M_{curr_15m['Sig_Type']}" if (curr_15m['Signal'] and curr_15m['Ready']) else "1M_ADDON(S2)"
-                self._handle_buy_execution(code, {'reason': reason}, m1_dt_first, m1_r_first, indicator_row=curr_15m)
+            
+            is_buy_signal = (curr_15m['Signal'] and curr_15m['Ready'])
+            is_addon_target = (h_info is not None and h_info['entry_n'] < 2)
+            
+            if is_buy_signal or is_addon_target:
+                can_execute = True
+                reason = f"1M_{curr_15m['Sig_Type']}"
+                
+                if is_addon_target:
+                    if self._check_s2_approval(code, h_info, curr_15m):
+                        reason = f"1M_ADDON(S2)|R:{curr_15m.get('RSI',0):.1f}|O:{curr_15m.get('OSC',0):.1f}"
+                    else:
+                        can_execute = False
+                
+                if can_execute:
+                    self._handle_buy_execution(code, {'reason': reason}, m1_dt_first, m1_r_first, indicator_row=curr_15m)
 
     def _check_s2_approval(self, code, h_info, last_row, indicator_row=None):
-        """[v16.0] 2차 매수 승인 로직 (v21.1: Day Delay 반영)"""
-        s = self.settings
-        
-        # 0. 최소 대기 기간 체크 (v21.1: 24시간 기준 강화)
-        min_days = int(s.get('s2_min_days', 1))
-        if min_days > 0:
-            entry_dt = pd.to_datetime(h_info['entry_date'])
-            curr_dt = pd.to_datetime(last_row.name)
-            if (curr_dt - entry_dt) < timedelta(days=min_days):
-                return False
-
-        # 기술 지표는 indicator_row(15분봉)를 우선 참조, 없으면 last_row 참조
-        ind = indicator_row if indicator_row is not None else last_row
-        
-        if s.get('use_s2_ma5', True) and last_row['Close'] < ind.get('MA5', 0): return False
-        if s.get('use_s2_profit', True) and (last_row['Close'] / h_info['avg_p'] - 1) * 100 < s.get('s2_profit_limit', 1.0): return False
-        if s.get('use_s2_osc', True) and ind.get('OSC', 0) < ind.get('Prev_OSC', 0): return False
-        return True
+        """[v22.1] 2차 매수 승인 로직 (backtest_engine.TradingStrategy._check_s2_approval 통합 연동)"""
+        # backtest_engine 형식을 맞추기 위해 가상의 pos 객체 생성
+        pos = {
+            'entry_date': h_info['entry_date'],
+            'avg_price': h_info['avg_p'],
+            'qty': h_info['qty'],
+            'invested': h_info['avg_p'] * h_info['qty']
+        }
+        # backtest_engine의 정적 메서드 호출
+        return TradingStrategy._check_s2_approval(pos, last_row, self.settings, indicator_row=indicator_row)

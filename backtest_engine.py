@@ -118,12 +118,83 @@ class TradingStrategy:
         """매수 신호 벡터 계산 (v6.1 통합: Trigger 기반)"""
         return TradingStrategy.get_buy_signals_detailed(df, settings, market_trend)['Signal']
 
+    @staticmethod
+    def _check_s2_approval(pos, last_row, settings, indicator_row=None):
+        """[v22.2] 설정창의 7가지 조건과 100% 동기화된 2차 매수 승인 로직 (Static)"""
+        s = settings
+        
+        # 0. 최소 대기 기간 (use_s2_delay)
+        if s.get('use_s2_delay', True):
+            min_hours = float(s.get('s2_delay_hours', 24))
+            entry_dt = pd.to_datetime(pos['entry_date'])
+            curr_dt = pd.to_datetime(last_row.name)
+            if (curr_dt - entry_dt).total_seconds() / 3600 < min_hours:
+                return False
+
+        # 기술 지표 참조 (indicator_row 우선)
+        ind = indicator_row if indicator_row is not None else last_row
+        curr_price = last_row['Close']
+        
+        # 1. 20일선 위 위치 (use_s2_ma20)
+        if s.get('use_s2_ma20', True):
+            ma20_val = ind.get('MA20', 0)
+            gap = float(s.get('s2_ma20_gap', 0.0))
+            if curr_price < ma20_val * (1 + gap/100.0):
+                return False
+
+        # 2. MA5 지지 확인 (use_s2_ma5)
+        if s.get('use_s2_ma5', True):
+            ma5_val = ind.get('MA5', 0)
+            gap = float(s.get('s2_ma5_gap', -0.5)) # 기본값 -0.5% (유격 허용)
+            if curr_price < ma5_val * (1 + gap/100.0):
+                return False
+                
+        # 3. 거래 수급 확인 (use_s2_vol_surge)
+        if s.get('use_s2_vol_surge', True):
+            vol_ma20 = ind.get('Vol_MA20', ind.get('Volume', 0))
+            ratio = float(s.get('s2_vol_ratio', 1.0))
+            if ind.get('Volume', 0) < vol_ma20 * ratio:
+                return False
+
+        # 4. RSI 강세 유지 및 모멘텀 상승 (use_s2_rsi_sig)
+        if s.get('use_s2_rsi_sig', True):
+            rsi_sig = ind.get('RSI_Sig', 50)
+            rsi_val = ind.get('RSI', 0)
+            rsi_prev = ind.get('Prev_RSI', rsi_val) # 이전값이 없으면 동일한 값 취급
+            gap = float(s.get('s2_rsi_gap', 0.0))
+            # [v27.1] RSI-Signal 상회(Level) + RSI 상승 중(Momentum) 동시 만족 조건 (S1과 동계열)
+            if rsi_val < rsi_sig * (1 + gap/100.0) or rsi_val <= rsi_prev:
+                return False
+
+        # 5. MACD 정배열 및 모멘텀 상승 (use_s2_macd_gc)
+        if s.get('use_s2_macd_gc', True):
+            macd_val = ind.get('MACD', 0)
+            macd_sig = ind.get('MACD_Sig', 0)
+            osc_val = ind.get('OSC', 1) 
+            osc_prev = ind.get('Prev_OSC', osc_val)
+            gap = float(s.get('s2_macd_gap', 0.0))
+            # [v27.2] MACD-Signal 상회 + OSC 양수 + OSC 증가 중 (S1과 동계열)
+            if macd_val < macd_sig + gap or osc_val <= 0 or osc_val <= osc_prev:
+                return False
+        # 6. 수익권 확인 (use_s2_profit)
+        if s.get('use_s2_profit', True):
+            trigger = float(s.get('stage2_trigger', s.get('s2_profit_limit', 1.0)))
+            if (curr_price / pos['avg_price'] - 1) * 100 < trigger:
+                return False
+                
+        return True
+
 
 
 class SimpleBacktester:
     """고정밀 15분봉/일봉 백테스터 (v5.1)"""
     def __init__(self, settings):
         self.settings = settings
+        self.trades = []
+        self.s1_amt = 0
+        self.s2_amt = 0
+        self.buy_f_rate = 0
+        self.sell_f_rate = 0
         
     def calculate_rsi(self, series, period=14):
         delta = series.diff()
@@ -140,9 +211,9 @@ class SimpleBacktester:
     def run(self, df, code="SAMPLE", market_df=None, vix_df=None, log_to_csv=False, skip_indicators=False, high_precision=False, m1_df_preloaded=None):
         """[v15.0] Ultra-High Performance Backtest Engine"""
         try:
-            # [v26.2] 최적 인스턴스 격리를 위해 데이터프레임 복사본 사용 (공유 메모리 오염 방지)
-            df = df.copy()
-            
+            # [v30.6] 최적화: 지표 계산이 필요 없는 경우(최적화 트라이얼 등) 데이터프레임 복사 생략
+            if not skip_indicators:
+                df = df.copy()
             # 1. Initialization
             if not skip_indicators:
                 df = TradingStrategy.calculate_indicators(df, self.settings)
@@ -158,21 +229,42 @@ class SimpleBacktester:
             low_vals = df['Low'].values
             time_indices = df.index
             
-            m1_df = m1_df_preloaded.sort_index() if m1_df_preloaded is not None else None
+            m1_np_high = None
+            m1_np_close = None
+            m1_np_time = None
+            m1_boundaries = None
+            if high_precision and m1_df_preloaded is not None:
+                # Find the starting index of 1M data for each 15M timestamp
+                times_15m = df.index
+                m1_times = m1_df_preloaded.index
+                start_idxs = np.searchsorted(m1_times, times_15m)
+                end_idxs = np.searchsorted(m1_times, times_15m + pd.Timedelta(minutes=14, seconds=59), side='right')
+                # Store as (start, end) tuples or arrays
+                m1_boundaries = list(zip(start_idxs, end_idxs))
+                # Convert 1M to numpy for zero-copy access
+                m1_np_high = m1_df_preloaded['High'].values
+                m1_np_close = m1_df_preloaded['Close'].values
+                m1_np_time = m1_df_preloaded.index.values # For exit time lookup
+            else:
+                m1_boundaries = None
             
             # 신호 및 필터 미리 정리
             signal_shifted = df['Signal_Shifted'].values if 'Signal_Shifted' in df.columns else np.zeros(len(df), dtype=bool)
             
             total_bars = len(df)
             for i in range(total_bars):
-                # i가 0이면 이전 바가 없으므로 건너뜀
+                # i가 0이면 이전 바가 없으므로 건너뛰
                 if i == 0: 
                     params['equity_curve'][0] = params['balance']
                     continue
                 
-                # [v23.1] 불필요한 콘솔 출력 최소화 (진행률은 Optimizer에서 통합 관리)
-                params = self._sim_loop_step_v2(i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_df, high_precision, params, log_to_csv)
+                # [v30.7] Pass pre-calculated m1_chunk info to avoid slicing overhead
+                m1_info = (m1_np_high, m1_np_close, m1_np_time, m1_boundaries[i]) if m1_boundaries else None
+                params = self._sim_loop_step_v2(i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_info, high_precision, params, log_to_csv)
                 params['equity_curve'][i] = params['balance'] + (params['position']['qty'] * close_vals[i] if params['position'] else 0)
+                if not params['position'] and i > 0 and params['balance'] != params['initial_balance']:
+                    # [v27.0] Slot Budget Protection: If all sold and net profit exists
+                    pass 
 
             # 3. Finalize and Return Results
             return self._finalize_simulation(df, code, params, log_to_csv)
@@ -232,14 +324,14 @@ class SimpleBacktester:
             df['Market_Status'] = 'SAFE'
             df['Market_Trend'] = 'UP'
 
-        # [v26.1] 표준 모드 신호 미리 계산 (최적화 시 신호 파라미터가 바뀔 수 있으므로 매번 수행)
-        if not high_precision:
-            sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend='UP')
-            for c in sigs.columns:
-                df[c] = sigs[c]
-            df.loc[df['Market_Trend'] == 'DOWN', 'Signal'] = False
-            # [Fix] Ensure bool dtype before shift to avoid warnings entirely
-            df['Signal_Shifted'] = df['Signal'].astype(bool).shift(1).fillna(False)
+        # [v26.1] 신호 미리 계산 (최적화 시 신호 파라미터가 바뀔 수 있으므로 매번 수행)
+        sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend='UP')
+        for c in sigs.columns:
+            df[c] = sigs[c]
+        df.loc[df['Market_Trend'] == 'DOWN', 'Signal'] = False
+        # [v30.0] 로직 변경: 신호 발생 즉시 매수 (지연 없음)
+        df['Signal_Shifted'] = df['Signal'].astype(bool)
+        df['Sig_Type_Shifted'] = df['Sig_Type']
 
         self.trades = []
         return {
@@ -254,21 +346,27 @@ class SimpleBacktester:
             'stock_name': stock_name
         }
 
-    def _sim_loop_step_v2(self, i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_df, high_precision, params, log_to_csv=False):
+    def _sim_loop_step_v2(self, i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_info, high_precision, params, log_to_csv=False):
         """[v23.1] 로직 무결성이 보장된 고속 시뮬레이션: 2차 매수 및 모든 익절/손절 조건 포함"""
         curr_close = close_vals[i]
         curr_date = time_indices[i]
         curr_high = high_vals[i]
         curr_low = low_vals[i]
         
-        # Intra-bar Sim (High Precision)
-        if high_precision and m1_df is not None:
+        # [v30.7] Optimized High Precision Exit Monitoring (Using pre-calculated NumPy slices)
+        if high_precision and m1_info is not None and params['position'] is not None:
              try:
-                m1_chunk = m1_df.loc[curr_date : curr_date + timedelta(minutes=14, seconds=59)]
-                if not m1_chunk.empty:
-                    params = self._process_intra_bar(i, df, code, m1_chunk, params, log_to_csv)
-                    return params
-             except: pass
+                m1_high_total, m1_close_total, m1_time_total, (s_idx, e_idx) = m1_info
+                if e_idx > s_idx:
+                    m1_highs = m1_high_total[s_idx:e_idx]
+                    m1_closes = m1_close_total[s_idx:e_idx]
+                    # Pass numpy arrays correctly to optimized function
+                    params = self._process_intra_bar_exit_only(i, df, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], params, log_to_csv)
+                    if params['position'] is None:
+                        return params
+             except Exception as e:
+                if i % 100 == 0:
+                    print(f"  [Error] Intra-bar error ({code} @ {curr_date}): {e}")
 
         # Standard Sim (v23.1 Full Logic)
         if params['position'] is not None:
@@ -283,84 +381,80 @@ class SimpleBacktester:
             # 2. Stage 2 Buy Check (Secondary)
             elif pos['stage'] == 1:
                 row = df.iloc[i]
-                if self._check_s2_approval(pos, row):
-                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason="CONF", indicator_row=row)
+                if TradingStrategy._check_s2_approval(pos, row, self.settings):
+                    # [v22.1] 2차 매입 사유 상세 기록 (지표 상태 포함)
+                    s2_reason = f"ADDON(S2)|R:{row.get('RSI',0):.1f}|M:{row.get('MACD',0):.1f}|O:{row.get('OSC',0):.1f}|V:{row.get('Volume',0)}"
+                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason=s2_reason, indicator_row=row)
         
         # 3. Entry Check (Initial)
         elif signal_shifted[i]:
             row = df.iloc[i]
             mkt_status = row.get('Market_Status', 'SAFE')
             is_ok = (mkt_status != 'RISK')
-            # Type A 신호 필터링
+            # Type A 신호 필터링 (신호 발생봉 무지연 체크)
             if mkt_status == 'WATCH' and row.get('Sig_Type') != 'TYPE_A': is_ok = False
             
             if is_ok:
                 params = self._execute_buy(curr_date, close_vals[i], "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row, sig_type=row.get('Sig_Type', 'TYPE_B'))
             
         return params
-    def _process_intra_bar(self, i, df, code, m1_chunk, params, log_to_csv=False):
-        """1분봉 기반 고정밀 시뮬레이션"""
-        m1_vol_so_far = 0
-        m1_high_so_far = -1
-        m1_low_so_far = 999999999
+
+    def _process_intra_bar_exit_only(self, i, df, code, m1_highs, m1_closes, m1_times, params, log_to_csv):
+        """[v30.7] Vectorized Intra-bar Exit check using pre-sliced NumPy arrays (Zero Pandas overhead)"""
         prev_row_base = df.iloc[i-1] if i > 0 else df.iloc[i]
-        mkt_trend = df.iloc[i].get('Market_Trend', 'UP')
-        mkt_status = df.iloc[i].get('Market_Status', 'SAFE')
         
-        m1_step = 0
-        for m1_dt, m1_r in m1_chunk.iterrows():
-            m1_step += 1
-            m1_o, m1_h, m1_l, m1_c = m1_r['Open'], m1_r['High'], m1_r['Low'], m1_r['Close']
-            m1_vol_so_far += m1_r['Volume']
-            m1_high_so_far = max(m1_high_so_far, m1_h)
-            m1_low_so_far = min(m1_low_so_far, m1_l)
-
-            if params['position'] is not None:
-                pos = params['position']
-                if m1_h > pos['max_price']: pos['max_price'] = m1_h
-                
-                # 익절/손절 체크
-                exit_res = self._check_exits(m1_dt, m1_c, m1_h, m1_l, pos)
-                if exit_res:
-                    params = self._execute_sell(m1_dt, exit_res['price'], f"1M_{exit_res['reason']}", params, indicator_row=prev_row_base)
-                    break
-
-                # 2차 매수 체크
-                if pos['stage'] == 1:
-                    if self._check_s2_approval(pos, m1_r, indicator_row=prev_row_base): # v21.0: Using aligned logic
-                        # 1분봉 기반으로 OSC 상승 반전 체크 (고정밀)
-                        temp_df = df.iloc[max(0, i-65):i].copy()
-                        temp_df.loc[m1_dt] = [m1_o, m1_h, m1_l, m1_c, m1_vol_so_far] + [np.nan] * (len(temp_df.columns) - 5)
-                        temp_df = TradingStrategy.calculate_buy_indicators(temp_df, self.settings)
-                        
-                        # [v21.0] use_s2_osc 설정 준수
-                        osc_ok = True
-                        if self.settings.get('use_s2_osc', True):
-                            osc_ok = temp_df.iloc[-1]['OSC'] > prev_row_base.get('OSC', 0)
-                            
-                        if osc_ok:
-                            params = self._execute_buy(m1_dt, m1_c, "BUY_2ND", params, stage=2, reason="CONF_1M", indicator_row=temp_df.iloc[-1])
-            else:
-                # 매수 신호 탐색
-                if mkt_status != 'RISK':
-                    v_surge = float(self.settings.get('vol_surge', 1.5))
-                    if (m1_vol_so_far > prev_row_base.get('Vol_MA20', 0) * v_surge) or (m1_c > prev_row_base.get('MA20', m1_c)):
-                        if m1_step % 3 == 0:
-                            params['m1_checks'] += 1
-                            temp_df = df.iloc[max(0, i-65):i].copy()
-                            temp_df.loc[m1_dt] = [m1_o, m1_h, m1_l, m1_c, m1_vol_so_far] + [np.nan] * (len(temp_df.columns) - 5)
-                            temp_df = TradingStrategy.calculate_buy_indicators(temp_df, self.settings)
-                            sigs = TradingStrategy.get_buy_signals_detailed(temp_df, self.settings, mkt_trend)
-                            
-                            if log_to_csv and not sigs.empty:
-                                self._log_signal(m1_dt, code, params['stock_name'], m1_c, temp_df.iloc[-1], sigs.iloc[-1], mkt_trend, params)
-
-                            if not sigs.empty and sigs.iloc[-1]['Signal']:
-                                sig_type = sigs.iloc[-1]['Sig_Type']
-                                is_ok = (mkt_status != 'WATCH') or (sig_type == 'TYPE_A')
-                                if is_ok:
-                                    params = self._execute_buy(m1_dt, m1_c, "BUY_1ST", params, stage=1, entry_idx=i, max_p=m1_h, reason="1M_SIG", indicator_row=temp_df.iloc[-1], sig_type=sig_type)
-                                    break
+        pos = params['position']
+        sig_type = pos.get('sig_type', 'TYPE_A')
+        
+        # Cache threshold parameters outside the loop
+        suffix = "_a" if sig_type == "TYPE_A" else "_b"
+        if pos['stage'] == 1:
+            f_pct = float(self.settings.get(f's1{suffix}_flash_exit_pct', 3.0)) if self.settings.get('use_s1_flash_exit', True) else 0.0
+            sl_pct = float(self.settings.get(f's1{suffix}_stop_loss', 3.0)) if self.settings.get('use_s1_stop_loss', True) else 0.0
+            tp_pct = float(self.settings.get(f's1{suffix}_take_profit', 5.0)) if self.settings.get('use_s1_take_profit', True) else 0.0
+        else:
+            f_pct = float(self.settings.get('s2_flash_exit_pct', 3.0)) if self.settings.get('use_s2_flash_exit', True) else 0.0
+            sl_pct = float(self.settings.get('s2_stop_loss', 2.0)) if self.settings.get('use_s2_stop_loss', True) else 0.0
+            tp_pct = float(self.settings.get('s2_take_profit', 5.0)) if self.settings.get('use_s2_take_profit', True) else 0.0
+        
+        g_lmt = float(self.settings.get('gap_down_limit', -5.0))
+        
+        prev_max = pos.get('max_price', pos['avg_price'])
+        # Vectorized monitoring
+        running_max = np.maximum.accumulate(m1_highs)
+        running_max = np.maximum(running_max, prev_max)
+        
+        avg_price = pos['avg_price']
+        
+        flash_exited = (f_pct > 0) & (m1_closes < running_max * (1 - f_pct/100))
+        stop_lossed = (sl_pct > 0) & (m1_closes / avg_price - 1 <= -sl_pct/100)
+        take_profited = (tp_pct > 0) & (m1_highs / avg_price - 1 >= tp_pct/100)
+        gap_downed = (m1_closes / avg_price - 1 <= g_lmt / 100)
+        
+        # [v25.8/v25.9] 15-minute Gap-Down Grace Period: Allow recovery between SL/Flash and Gap Limit during first 15m
+        if self.settings.get('use_gap_grace', True):
+            # Check if this is the opening 15m bar of the day (09:00)
+            if m1_times[0].hour == 9 and m1_times[0].minute == 0:
+                # In the morning (09:00-09:15), only GapDown can trigger if price is between boundaries
+                grace_mask = (m1_times.hour == 9) & (m1_times.minute < 15)
+                stop_lossed = stop_lossed & (~grace_mask)
+                flash_exited = flash_exited & (~grace_mask)
+        
+        exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
+        exit_idxs = np.where(exit_mask)[0]
+        
+        if len(exit_idxs) > 0:
+            idx = int(exit_idxs[0])
+            e_price, e_time = m1_closes[idx], m1_times[idx]
+            if bool(take_profited[idx]): e_price = avg_price * (1 + tp_pct/100)
+            
+            reason = "1M_SL"
+            if bool(gap_downed[idx]): reason = "1M_GapDown"
+            elif bool(flash_exited[idx]): reason = "1M_FlashExit"
+            elif bool(take_profited[idx]): reason = "1M_TP"
+            
+            params = self._execute_sell(e_time, e_price, reason, params, indicator_row=prev_row_base)
+            
         return params
 
     def _process_standard_bar(self, i, df, code, params, log_to_csv=False):
@@ -378,8 +472,10 @@ class SimpleBacktester:
             if exit_res:
                 params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicator_row=row)
             elif pos['stage'] == 1:
-                if self._check_s2_approval(pos, row): # v21.0: Unified logic
-                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason="CONF", indicator_row=row)
+                if TradingStrategy._check_s2_approval(pos, row, self.settings): 
+                    # [v22.1] 2차 매입 사유 상세 기록 (지표 상태 포함)
+                    s2_reason = f"ADDON(S2)|R:{row.get('RSI',0):.1f}|M:{row.get('MACD',0):.1f}|O:{row.get('OSC',0):.1f}|V:{row.get('Volume',0)}"
+                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason=s2_reason, indicator_row=row)
         elif row.get('Signal_Shifted', False):
             mkt_status = row.get('Market_Status', 'SAFE')
             sig_type = row.get('Sig_Type', 'TYPE_B')
@@ -410,42 +506,7 @@ class SimpleBacktester:
             'Final_Signal': signal_row.get('Signal', False)
         })
     
-    def _check_s2_approval(self, pos, last_row, indicator_row=None):
-        """[v21.0] DynamicBacktester와 100% 일치하는 2차 매수 승인 로직 (v21.1: Day Delay 반영)"""
-        s = self.settings
-        
-        # 0. 최소 대기 기간 체크 (v21.1: 24시간 기준 강화)
-        min_days = int(s.get('s2_min_days', 1))
-        if min_days > 0:
-            entry_dt = pd.to_datetime(pos['entry_date'])
-            curr_dt = pd.to_datetime(last_row.name)
-            if (curr_dt - entry_dt) < timedelta(days=min_days):
-                return False
-
-        # 기술 지표는 indicator_row(이전 15분봉 등)를 우선 참조, 없으면 last_row 참조
-        ind = indicator_row if indicator_row is not None else last_row
-        
-        curr_price = last_row['Close']
-        
-        # 1. MA5 기준 (use_s2_ma5 설정 준수)
-        if s.get('use_s2_ma5', True):
-            ma5_val = ind.get('MA5', 0)
-            if curr_price < ma5_val * 0.995: # 0.5% 유격 허용 (기본값)
-                return False
-                
-        # 2. 수익률 기준 (use_s2_profit 설정 및 stage2_trigger 준수)
-        if s.get('use_s2_profit', True):
-            # Dynamic과 동일하게 'stage2_trigger'를 's2_profit_limit' 대신 사용하거나 둘 다 지원
-            trigger = float(s.get('stage2_trigger', s.get('s2_profit_limit', 1.0)))
-            if (curr_price / pos['avg_price'] - 1) * 100 < trigger:
-                return False
-                
-        # 3. OSC 기준 (use_s2_osc 설정 준수)
-        if s.get('use_s2_osc', True):
-            if ind.get('OSC', 0) <= ind.get('Prev_OSC', 0):
-                return False
-                
-        return True
+        return params
 
     def _check_exits(self, date, price, high, low, pos):
         """Flash Exit, Gap Down, TP/SL 조건 체크 (v26.0: Type A/B 분리 대응)"""
@@ -504,9 +565,13 @@ class SimpleBacktester:
 
     def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicator_row=None, sig_type='TYPE_A'):
         """매수 실행 및 params 업데이트"""
-        # [v26.4] Type B 비활성화 시 강제로 TYPE_A로 전환하여 파라미터 오염 방지
-        if not self.settings.get('use_type_b', False) and sig_type == 'TYPE_B':
-            sig_type = 'TYPE_A'
+        # [v27.0] 전략 타입(A/B/S2)을 매수 사유(Reason) 접두어로 명시하여 리포트 집계 정확도 향상
+        if stage == 1:
+            if not self.settings.get('use_type_b', False) and sig_type == 'TYPE_B':
+                sig_type = 'TYPE_A'
+            reason = f"[{sig_type}] {reason}"
+        else:
+            reason = f"[Stage 2] {reason}"
         if indicator_row is not None:
             try:
                 rsi_val = indicator_row.get('RSI', 0)

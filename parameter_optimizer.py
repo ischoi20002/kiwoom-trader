@@ -18,18 +18,52 @@ import reporting.trade_report
 import importlib
 importlib.reload(reporting.trade_report)
 from reporting.trade_report import generate_trade_report
+import pickle
+
+# [v30.0] 멀티프로세싱 오버헤드 최적화를 위한 전역 변수 (Windows 피클링 방지)
+_G_DATA = {}
+_G_M1 = {}
+_G_MKT = None
+_G_VIX = None
+
+def init_worker(data_path):
+    """프로세스 생성 시 데이터를 한 번만 로드하여 메모리에 상주"""
+    global _G_DATA, _G_M1, _G_MKT, _G_VIX
+    try:
+        with open(data_path, 'rb') as f:
+            cache = pickle.load(f)
+            _G_DATA = cache.get('data', {})
+            _G_M1 = cache.get('m1', {})
+            _G_MKT = cache.get('market', None)
+            _G_VIX = cache.get('vix', None)
+        # print(f"  [Worker] Data loaded from {data_path}")
+    except Exception as e:
+        print(f"  (!) Worker Init Error: {e}")
 
 # [v23.0] 멀티프로세싱을 위해 최상위 레벨로 이동된 실행 함수
 def run_single_combination(args):
     """단일 파라미터 조합에 대해 모든 종목의 백테스트를 수행 (별도 프로세스에서 실행됨)"""
-    idx, settings, data_cache, data_cache_m1, market_df, vix_df, is_indicator_constant, high_precision = args
+    # [v30.0] args에서 거대한 데이터를 제거하고 전역 변수 사용
+    idx, settings, is_indicator_constant, high_precision = args
+    
+    # [v30.0] 워커 프로세스에서 데이터가 로드되지 않은 경우 지연 로딩 (Windows 최적화)
+    global _G_DATA, _G_M1, _G_MKT, _G_VIX
+    if not _G_DATA:
+        tmp_cache_path = os.path.join(BASE_DIR, "bt_opt_cache.tmp")
+        if os.path.exists(tmp_cache_path):
+            init_worker(tmp_cache_path)
     
     summaries = []
+    data_cache = _G_DATA
+    data_cache_m1 = _G_M1
+    market_df = _G_MKT
+    vix_df = _G_VIX
+
     for code, data in data_cache.items():
         if data is not None:
             # [v23.0] 가벼운 시뮬레이터를 사용하여 처리 (내부 쓰레드 제거로 오버헤드 최소화)
             local_tester = SimpleBacktester(settings)
-            m1_pre = data_cache_m1.get(code)
+            m1_pre = data_cache_m1.get(code) if data_cache_m1 else None
             try:
                 summary = local_tester.run(data, code, market_df=market_df, vix_df=vix_df, log_to_csv=False, 
                                       skip_indicators=is_indicator_constant, high_precision=high_precision, m1_df_preloaded=m1_pre)
@@ -196,9 +230,9 @@ class ParameterOptimizer:
 
             results = list(executor.map(load_with_m1, self.codes))
             for code, res_15m, res_1m in results:
-                data_cache[code] = res_15m
+                data_cache[code] = res_15m.sort_index() if res_15m is not None else None
                 if res_1m is not None:
-                    data_cache_m1[code] = res_1m
+                    data_cache_m1[code] = res_1m.sort_index()
 
         # [v23.1] 지표 재계산 필요 여부 판단 (보수적 화이트리스트 방식)
         # 아래 파라미터들은 지표(Indicators) 계산에는 영향을 주지 않고, 신호(Signals)나 매매 로직에만 관여함
@@ -206,10 +240,11 @@ class ParameterOptimizer:
             'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
             's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 
             's1_a_take_profit', 's1_b_take_profit', 's2_take_profit',
-            'take_profit', 'stop_loss', 'gap_down_limit', 's2_min_days', 'stage2_trigger',
+            'take_profit', 'stop_loss', 'gap_down_limit', 's2_delay_hours', 'stage2_trigger',
+            's2_ma20_gap', 's2_vol_ratio', 's2_rsi_gap', 's2_macd_gap',
             'use_s1_flash_exit', 'use_s2_flash_exit', 'use_s1_stop_loss', 'use_s2_stop_loss',
             's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
-            'use_s2_ma5', 'use_s2_profit', 'use_s2_osc', 'gc_window', 'rsi_window'
+            'use_s2_ma5', 'use_s2_profit', 'use_s2_delay', 'gc_window', 'rsi_window'
         }
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False
@@ -223,9 +258,19 @@ class ParameterOptimizer:
         else:
             print("  [Perf] Parameters affect indicators. Recalculating indicators for each trial.")
 
-        # [v23.0] 최적화: 모든 종목 데이터와 지수 데이터를 인자로 준비
-        # (주의: Windows에서는 피클링 오버헤드가 있으나, 시뮬레이션 연산이 이를 상쇄함)
-        common_args = (data_cache, data_cache_m1, market_df, vix_df, is_indicator_constant, high_precision)
+        # [v30.0] 거대한 데이터를 임시 파일로 저장하여 워커 프로세스에서 개별 로드 (Windows 피클링 오버헤드 방지)
+        cache_data = {'data': data_cache, 'm1': data_cache_m1, 'market': market_df, 'vix': vix_df}
+        tmp_cache_path = os.path.join(BASE_DIR, "bt_opt_cache.tmp")
+        try:
+            with open(tmp_cache_path, 'wb') as f:
+                pickle.dump(cache_data, f)
+            # 메인 프로세스에서도 전역 변수 설정 (일관성)
+            init_worker(tmp_cache_path)
+        except Exception as e:
+            print(f"  (!) Cache Write Error: {e}")
+
+        # [v23.0] 최적화: 공통 설정값만 인자로 준비
+        common_args = (is_indicator_constant, high_precision)
         
         def prepare_args(idx_settings):
             idx, settings = idx_settings
@@ -256,19 +301,36 @@ class ParameterOptimizer:
 
             sampler = optuna.samplers.TPESampler(seed=seed)
             study = optuna.create_study(direction='maximize', sampler=sampler)
-            study.optimize(objective, n_trials=n_trials)
+            
+            # [v27.5] 베이지안 최적화 멀티프로세싱 활성화 (n_jobs)
+            # [v30.0] 워커 초기화 함수 등록 (loky/joblib 호환성 확인)
+            num_workers = min(os.cpu_count() or 4, 8)
+            
+            # 주지사항: Optuna n_jobs는 내부적으로 loky를 쓰며, 전역 변수 상속이 안될 수 있음
+            # 따라서 run_single_combination 내부에서 데이터가 없으면 자동 로드하도록 보강
+            def robust_objective(trial):
+                if not _G_DATA: init_worker(tmp_cache_path)
+                return objective(trial)
+
+            study.optimize(robust_objective, n_trials=n_trials, n_jobs=num_workers)
         else:
             # [v23.0] 일반 Grid Search의 경우 모든 코어 동원
             num_workers = min(os.cpu_count() or 4, 12)
-            print(f"  [Perf] Starting Multiprocessing (PPE) with {num_workers} processes...")
+            print(f"  [Perf] Starting Multiprocessing (PPE) with {num_workers} processes (Gated/Vectorized)...")
             
             if callback: callback(f"멀티프로세싱 최적화 시작 (코어: {num_workers})...", 50)
             
-            with PPE(max_workers=num_workers) as p_executor:
+            # [v30.0] PPE 초기화 시 데이터 로드 (Windows 최적화)
+            with PPE(max_workers=num_workers, initializer=init_worker, initargs=(tmp_cache_path,)) as p_executor:
                 # [v23.0] 최상위 레벨 함수인 run_single_combination 사용
                 tasks = [prepare_args((i, comb)) for i, comb in enumerate(all_combinations)]
                 all_results = list(p_executor.map(run_single_combination, tasks))
                 all_results = [r for r in all_results if r is not None]
+
+        # [v30.0] 임시 캐시 파일 삭제
+        if os.path.exists(tmp_cache_path):
+            try: os.remove(tmp_cache_path)
+            except: pass
 
         if all_results:
             df_results = pd.DataFrame(all_results).sort_values(by='avg_ret', ascending=False)

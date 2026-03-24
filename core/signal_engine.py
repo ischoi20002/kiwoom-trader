@@ -80,9 +80,18 @@ class SignalEngine:
                     tag = "highlight_green"
 
             # 6. 볼륨 스파이크 탐지
-            is_vol_spike = self._check_volume_spike(code, volume - info.get('last_vol', volume))
+            last_vol = info.get('last_vol', volume)
+            is_vol_spike = self._check_volume_spike(code, volume - last_vol)
             info['last_vol'] = volume
-            
+
+            # 7. 실시간 가상 포지션 시나리오 처리 (익절/손절/추매)
+            vol_power = info.get('vol_power', 100.0)
+            self.app._process_virtual_scenarios(
+                code, now_price, rsi_val, macd_val, osc_val, 
+                vol_power, is_vol_spike, last_row if 'last_row' in locals() else None
+            )
+
+            # 8. 거래량 변동성 체크
             is_price_changed = False
             if now_price != info.get('last_price', 0):
                 is_price_changed = True

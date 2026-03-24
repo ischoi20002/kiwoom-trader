@@ -71,6 +71,7 @@ def calculate_all_indicators(df, settings):
     df['RSI'] = calculate_rsi(df['Close'], 14)
     rsi_sig_p = int(settings.get('rsi_sig_period', 9))
     df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
+    df['Prev_RSI'] = df['RSI'].shift(1)
     
     # 4. MACD (v6.2: 실시간/백테스트 신호용 파라미터 분리 적용)
     fast = int(settings.get('sig_macd_fast', 12))
@@ -109,6 +110,7 @@ def calculate_buy_indicators_light(df, settings):
     df['RSI'] = calculate_rsi(df['Close'], 14)
     rsi_sig_p = int(settings.get('rsi_sig_period', 9))
     df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
+    df['Prev_RSI'] = df['RSI'].shift(1)
     
     fast = int(settings.get('sig_macd_fast', 12))
     slow = int(settings.get('sig_macd_slow', 26))

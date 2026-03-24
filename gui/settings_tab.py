@@ -314,23 +314,14 @@ class SettingsTab:
         s2_container.pack(fill=tk.X, pady=10)
         
         # [v22.0] 1단계와 유사한 논리 흐름으로 순서 재정렬 (추세 -> 지지 -> 거래량 -> 지표 -> 제약)
-        add_signal_row(s2_container, "use_s2_ma20", "1. 20일선 위 위치", "s2_ma20_gap", "%", "이격도(>)")
-        add_signal_row(s2_container, "use_s2_ma5", "2. MA5 지지 확인", "s2_ma5_gap", "%", "이격도(>)")
-        add_signal_row(s2_container, "use_s2_vol_surge", "3. 거래 수급 확인", "s2_vol_ratio", "배", "평균 대비:")
-        add_signal_row(s2_container, "use_s2_rsi_sig", "4. RSI 강세 유지", "s2_rsi_gap", "%", "이격도(>)")
-        add_signal_row(s2_container, "use_s2_macd_gc", "5. MACD 정배열", "s2_macd_gap", "%", "이격도(>)")
-        add_signal_row(s2_container, "use_s2_osc", "6. OSC 확장 확인", "s2_osc_gap", "%", "이격도(>)")
-        add_signal_row(s2_container, "use_s2_profit", "7. 수익권 확인", "s2_profit_limit", "%", "최소 수익률:")
-        
-        # [v21.1] 2차 매수 최소 대기 기간 (Day Delay)
-        row_delay = ttk.Frame(s2_container, padding="6")
-        row_delay.pack(fill=tk.X)
-        ttk.Label(row_delay, text="최소 대기 기간 (1차 매수 후)", width=25).pack(side=tk.LEFT)
-        ent_delay = ttk.Entry(row_delay, width=6, justify='center')
-        ent_delay.insert(0, str(self.app.settings.get("s2_min_days", 1)))
-        ent_delay.pack(side=tk.LEFT, padx=5)
-        ttk.Label(row_delay, text="일", font=("Helvetica", 9)).pack(side=tk.LEFT)
-        self.params_entries["s2_min_days"] = ent_delay
+        # [v27.0] 더 직관적인 명칭으로 피드백 반영 (최소 조건 강조)
+        add_signal_row(s2_container, "use_s2_ma20", "1. MA20선 최소 상회", "s2_ma20_gap", "%", "최소 상회폭(>)")
+        add_signal_row(s2_container, "use_s2_ma5", "2. MA5선 최소 상회", "s2_ma5_gap", "%", "최소 상회폭(>)")
+        add_signal_row(s2_container, "use_s2_vol_surge", "3. 거래량 분출 확인", "s2_vol_ratio", "배", "최소 배율(>)")
+        add_signal_row(s2_container, "use_s2_rsi_sig", "4. RSI 모멘텀 상승 확인", "s2_rsi_gap", "%", "최소 상회폭(>)")
+        add_signal_row(s2_container, "use_s2_macd_gc", "5. MACD 모멘텀 상승 확인", "s2_macd_gap", "%", "최소 상회폭(>)")
+        add_signal_row(s2_container, "use_s2_profit", "6. 포지션 최소 수익률 유지", "s2_profit_limit", "%", "최소 수익률(>)")
+        add_signal_row(s2_container, "use_s2_delay", "7. 최소 대기 기간 (후행)", "s2_delay_hours", "시간", "최소 경과 시간(>)")
 
         # [4] 매도(탈출) 및 자금 운용 조건
         exit_container = ttk.LabelFrame(st_main_frame, text=" 💰 [4] 매도 및 자금 관리 (Exit & Money) ", padding="15")
@@ -339,19 +330,15 @@ class SettingsTab:
         # (4.1) 1단계(정찰) 매도 조건
         s1_exit_sub = ttk.LabelFrame(exit_container, text=" 1단계(정찰) 매도 조건 [ (A)눌림 | (B)돌파 ] ", padding="10")
         s1_exit_sub.pack(fill=tk.X, pady=5)
-        add_split_exit_row(s1_exit_sub, "use_s1_flash_exit", "Flash Exit 적용", "s1_a_flash_exit_pct", "s1_b_flash_exit_pct", "%")
-        add_split_exit_row(s1_exit_sub, "use_s1_ma_break", "이평선(20일) 이탈", "s1_a_ma_break_buffer", "s1_b_ma_break_buffer", "%")
-        add_split_exit_row(s1_exit_sub, "use_s1_stop_loss", "1단계 손절 (S1)", "s1_a_stop_loss", "s1_b_stop_loss", "%")
+        add_split_exit_row(s1_exit_sub, "use_s1_flash_exit", "Flash Exit(고점대비) 적용", "s1_a_flash_exit_pct", "s1_b_flash_exit_pct", "%")
+        add_split_exit_row(s1_exit_sub, "use_s1_stop_loss", "1단계 손절(평단대비) (S1)", "s1_a_stop_loss", "s1_b_stop_loss", "%")
         add_split_exit_row(s1_exit_sub, "use_s1_tp", "1단계 익절 (S1)", "s1_a_take_profit", "s1_b_take_profit", "%")
 
         # (4.2) 2단계(본대) 매도 조건
         s2_exit_sub = ttk.LabelFrame(exit_container, text=" 2단계(본대) 매도 조건 ", padding="10")
         s2_exit_sub.pack(fill=tk.X, pady=5)
-        add_signal_row(s2_exit_sub, "use_s2_flash_exit", "Flash Exit 적용", "s2_flash_exit_pct", "%", "고점 대비 하락폭:")
-        add_signal_row(s2_exit_sub, "use_s2_rsi_tp", "다이나믹 50% 익절", "s2_rsi_tp_limit", "", "RSI 과열:", sub_param_key="s2_rsi_tp_drop", sub_unit="%", sub_label=" 고점대비 하락:")
-        add_signal_row(s2_exit_sub, "use_s2_rsi_exit", "RSI 추세 이탈 매도", "rsi_exit_limit", "", "RSI 기준값:")
-        add_signal_row(s2_exit_sub, "use_s2_ma_break", "이평선(20일) 이탈", "s2_ma_break_buffer", "%", "완충 지대:")
-        add_signal_row(s2_exit_sub, "use_s2_stop_loss", "2단계(추매) 손절 (S2)", "s2_stop_loss", "%", "손절 수익률:")
+        add_signal_row(s2_exit_sub, "use_s2_flash_exit", "Flash Exit 적용", "s2_flash_exit_pct", "%", "고점(매수후최고) 대비 하락폭:")
+        add_signal_row(s2_exit_sub, "use_s2_stop_loss", "2단계(추매) 손절 (S2)", "s2_stop_loss", "%", "평단가 대비 손절 수익률:")
         add_signal_row(s2_exit_sub, "use_s2_tp", "2단계(추매) 익절 (S2)", "s2_take_profit", "%", "목표 수익률:")
 
         # (4.3) 자금 운용 및 공통 설정
@@ -372,9 +359,17 @@ class SettingsTab:
         add_risk_row(money_sub, "2. 최대 감시 종목 수 (슬롯):", "max_slots", "개")
         add_risk_row(money_sub, "3. 1단계(정찰) 비중 금액:", "stage1_amt", "원")
         add_risk_row(money_sub, "4. 2단계(본대) 추매 금액:", "stage2_amt", "원")
-        add_risk_row(money_sub, "5. 갭하락 마지노선:", "gap_down_limit", "%")
+        add_risk_row(money_sub, "5. 갭하락 킬스위치 (즉시매도):", "gap_down_limit", "%")
         
-        # [v6.0] 가상 매매 자동화 토글
+        # [v25.9] 15-minute Gap-Down Grace Period Toggle
+        row_grace = ttk.Frame(money_sub, padding="5")
+        row_grace.pack(fill=tk.X)
+        self.conf_vars["use_gap_grace"] = tk.BooleanVar(value=self.app.settings.get("use_gap_grace", True))
+        ttk.Checkbutton(row_grace, text="장 시작 15분 매도 유예 (손절/Flash Exit 털기 방지)", 
+                        variable=self.conf_vars["use_gap_grace"]).pack(side=tk.LEFT, padx=10)
+        ttk.Label(row_grace, text="* 갭하락이 킬스위치 이내일 때 09:15까지 대기", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
+
+        # (4.4) 가상 매매 자동화 토글
         row_auto = ttk.Frame(money_sub, padding="5")
         row_auto.pack(fill=tk.X)
         self.conf_vars["use_auto_virtual"] = tk.BooleanVar(value=self.app.settings.get("use_auto_virtual", True))
@@ -399,7 +394,6 @@ class SettingsTab:
                 val = self.params_entries[key].get()
                 if key in ["vol_lookback", "gc_window", "rsi_window", "stage1_amt", "stage2_amt", "stage3_amt", "s2_min_days", "max_slots"]:
                     self.app.settings[key] = int(val) if val.isdigit() else int(float(val))
-                elif key in ["rsi_tp_limit", "s2_rsi_tp_limit", "rsi_exit_limit", "stop_loss", "s2_stop_loss", "stage2_trigger", "take_profit"]:
                     self.app.settings[key] = float(val)
                 else:
                     self.app.settings[key] = float(val)

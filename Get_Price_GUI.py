@@ -65,35 +65,34 @@ except:
 
 # 기본 전략 설정
 DEFAULT_SETTINGS = {
-    "min_trde_val": 40.0,
+    "min_trde_val": 50.0,
     "sel_rsi_min": 30.0,
     "sel_rsi_max": 70.0,
-    "buy_rsi_min": 35.0,
+    "buy_rsi_min": 30.0,
     "buy_rsi_max_b": 70.0,
-    "buy_rsi_max_a": 55.0,
+    "buy_rsi_max_a": 65.0,
     "use_type_a": True,
-    "use_type_b": True,
-    "vol_surge": 2.0,
+    "use_type_b": False,
+    "vol_surge": 1.2,
     "use_vol_surge": True,
     "vol_surge_b": 2.0,
-    "use_type_b_vol": True,
-    "use_macd_gc_b": True,
-    "use_trend_aligned_b": True,
+    "use_type_b_vol": False,
+    "use_macd_gc_b": False,
+    "use_trend_aligned_b": False,
     "total_capital": 10000000.0,
-    "max_slots": 20,
-    "time_buffer_bars": 4,
+    "max_slots": 20.0,
     "vol_ratio": 1.5,
-    "vol_lookback": 10,
+    "vol_lookback": 10.0,
     "ma_convergence": 0.05,
     "use_gc": True,
-    "gc_window": 90,
+    "gc_window": 75.0,
     "use_rsi_signal": True,
-    "rsi_window": 45,
+    "rsi_window": 45.0,
     "use_vol_power": True,
     "vol_power_lvl": 120.0,
     "use_ma60_safe": True,
     "ma60_min": 100.0,
-    "ma60_max": 112.0,
+    "ma60_max": 110.0,
     "use_market_filter": True,
     "use_macd_signal": True,
     "macd_fast": 12.0,
@@ -103,62 +102,47 @@ DEFAULT_SETTINGS = {
     "sig_macd_slow": 26.0,
     "sig_macd_sig": 9.0,
     "rsi_sig_period": 9.0,
-    "max_mon_targets": 20,
     "use_auto_virtual": True,
     "flash_exit_pct": 3.0,
     "gap_down_limit": -5.0,
-    "stage1_amt": 1000000,
-    "stage2_amt": 2000000,
+    "stage1_amt": 1000000.0,
+    "stage2_amt": 2000000.0,
     "use_s2_ma5": True,
     "s2_ma5_gap": 0.0,
     "use_s2_profit": True,
     "s2_profit_limit": 1.0,
-    "use_s2_osc": True,
-    "s2_osc_gap": 0.0,
+    "use_s2_delay": True,
+    "s2_delay_hours": 24.0,
     "use_s2_rsi_sig": True,
     "s2_rsi_gap": 0.0,
     "use_s2_macd_gc": True,
     "s2_macd_gap": 0.0,
     "use_s2_vol_surge": True,
-    "s2_vol_ratio": 1.2,
+    "s2_vol_ratio": 1.5,
     "use_s2_ma20": True,
     "s2_ma20_gap": 0.0,
-    "s1_a_flash_exit_pct": 3.0,
+    "s1_a_flash_exit_pct": 1.5,
     "s1_b_flash_exit_pct": 1.5,
-    "s1_a_ma_break_buffer": 1.0,
-    "s1_b_ma_break_buffer": 0.5,
-    "s1_a_stop_loss": 2.0,
+    "s1_a_stop_loss": 3.0,
     "s1_b_stop_loss": 2.0,
     "s1_a_take_profit": 5.0,
     "s1_b_take_profit": 4.0,
     "use_s1_flash_exit": True,
     "use_s2_flash_exit": True,
     "s2_flash_exit_pct": 3.0,
-    "use_s2_rsi_tp": True,
-    "s2_rsi_tp_limit": 70.0,
-    "s2_rsi_tp_drop": 1.0,
-    "use_s2_rsi_exit": False,
-    "rsi_exit_limit": 50.0,
-    "use_s1_ma_break": True,
-    "s1_ma_break_buffer": 1.0,
-    "use_s2_ma_break": True,
-    "s2_ma_break_buffer": 1.0,
     "use_s1_stop_loss": True,
     "use_s2_stop_loss": True,
     "use_stop_loss": True,
     "stop_loss": 3.0,
     "s2_stop_loss": 2.0,
-    "s2_min_days": 1,
     "stage2_trigger": 1.0,
     "take_profit": 5.0,
-    "s2_take_profit": 5.0,
+    "s2_take_profit": 6.0,
     "use_s1_tp": True,
-    "use_trailing_stop": True,
-    "bt_start_date": "2025-04-01",
-    "bt_end_date": "2025-12-31",
     "use_rsi_min": True,
     "use_s2_tp": True,
-    "use_rsi_sig_filter": True
+    "use_rsi_sig_filter": True,
+    "use_gap_grace": True
 }
 
 class KiwoomApp:
@@ -574,7 +558,8 @@ class KiwoomApp:
             self.virtual_positions.clear()
             self._render_virtual_positions()
 
-    def _process_virtual_scenarios(self, code, now_price, rsi_val, macd_val, osc_val, vol_power, is_vol_spike):
+    def _process_virtual_scenarios(self, code, now_price, rsi_val, macd_val, osc_val, vol_power, is_vol_spike, ind=None):
+        """[v22.0] 설정창의 7가지 조건과 동기화된 가상 매매 시나리오 처리"""
         if code not in self.virtual_positions: return
         pos = self.virtual_positions[code]
         stage = pos['stage']
@@ -583,10 +568,15 @@ class KiwoomApp:
         pos['current_price'] = now_price
         if now_price > pos.get('max_now', 0): pos['max_now'] = now_price
 
+        # 지표 데이터 확보 (ind가 없으면 bars_data 활용)
+        if ind is None and code in self.bars_data and not self.bars_data[code].empty:
+            ind = self.bars_data[code].iloc[-1]
+
         is_exit = False
         exit_reason = ""
         max_now = pos.get('max_now', now_price)
         
+        # 1. 익절/손절/Flash Exit 체크
         flash_pct = float(self.settings.get(f's{stage}_flash_exit_pct', 3.0))
         if self.settings.get(f'use_s{stage}_flash_exit', True) and now_price <= max_now * (1.0 - flash_pct / 100.0):
             is_exit, exit_reason = True, "FLASH_EXIT"
@@ -604,22 +594,61 @@ class KiwoomApp:
             self._render_virtual_positions()
             return
 
+        # 2. 2단계 매수(추매) 승인 체크
         if stage == 1:
-            min_days = int(self.settings.get('s2_min_days', 1))
-            if pos.get('entry_time') and (datetime.now() - pos['entry_time']) < timedelta(days=min_days): return
+            s = self.settings
+            # 0. 최소 대기 기간 (Time Delay)
+            if s.get('use_s2_delay', True):
+                min_hours = float(s.get('s2_delay_hours', 24.0))
+                if pos.get('entry_time') and (datetime.now() - pos['entry_time']).total_seconds() / 3600 < min_hours:
+                    return
             
-            s2_trigger = float(self.settings.get('stage2_trigger', 1.0))
-            if profit_ratio >= s2_trigger:
-                add_amt = int(self.settings.get('stage2_amt', 2000000))
-                add_qty = add_amt // now_price
-                if add_qty > 0:
-                    new_inv = pos['invested'] + (add_qty * now_price)
-                    pos['qty'] += add_qty
-                    pos['avg_price'] = new_inv / pos['qty']
-                    pos['invested'] = new_inv
-                    pos['stage'] = 2
-                    self.log(f"🔥 [가상추매] {pos['name']}({code}) 2차 진입! (평단: {pos['avg_price']:.0f})")
-                    self._render_virtual_positions()
+            # 기술적 조건 체크 (ind 기반)
+            can_addon = True
+            if ind is not None:
+                rsi_val = ind.get('RSI', 0)
+                macd_val = ind.get('MACD', 0)
+                osc_val = ind.get('OSC', 0)
+                # 1. 20일선 위 (s2_ma20_gap)
+                if s.get('use_s2_ma20', True):
+                    gap = float(s.get('s2_ma20_gap', 0.0))
+                    if now_price < ind.get('MA20', 0) * (1 + gap/100.0): can_addon = False
+                
+                # 2. MA5 지지 (s2_ma5_gap)
+                if can_addon and s.get('use_s2_ma5', True):
+                    gap = float(s.get('s2_ma5_gap', -0.5))
+                    if now_price < ind.get('MA5', 0) * (1 + gap/100.0): can_addon = False
+                
+                # 3. 거래 수급 (s2_vol_ratio)
+                if can_addon and s.get('use_s2_vol_surge', True):
+                    v_ma20 = ind.get('Vol_MA20', ind.get('Volume', 0))
+                    if ind.get('Volume', 0) < v_ma20 * float(s.get('s2_vol_ratio', 1.0)): can_addon = False
+                
+                # 4. RSI 강세 (s2_rsi_gap)
+                if can_addon and s.get('use_s2_rsi_sig', True):
+                    r_sig = ind.get('RSI_Sig', 50)
+                    if rsi_val < r_sig * (1 + float(s.get('s2_rsi_gap', 0.0))/100.0): can_addon = False
+                
+                # 5. MACD 정배열 (s2_macd_gap)
+                if can_addon and s.get('use_s2_macd_gc', True):
+                    m_sig = ind.get('MACD_Sig', 0)
+                    if macd_val < m_sig + float(s.get('s2_macd_gap', 0.0)): can_addon = False
+                
+
+            # 7. 수익권 확인 (stage2_trigger)
+            if can_addon:
+                s2_trigger = float(s.get('stage2_trigger', 1.0))
+                if profit_ratio >= s2_trigger:
+                    add_amt = int(s.get('stage2_amt', 2000000))
+                    add_qty = add_amt // now_price
+                    if add_qty > 0:
+                        new_inv = pos['invested'] + (add_qty * now_price)
+                        pos['qty'] += add_qty
+                        pos['avg_price'] = new_inv / pos['qty']
+                        pos['invested'] = new_inv
+                        pos['stage'] = 2
+                        self.log(f"🔥 [가상추매] {pos['name']}({code}) 2차 진입! (평단: {pos['avg_price']:.0f})")
+                        self._render_virtual_positions()
 
 if __name__ == "__main__":
     root = tk.Tk()

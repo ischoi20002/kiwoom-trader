@@ -1,7 +1,8 @@
 import time
 import pandas as pd
 from datetime import datetime
-from backtest_engine import DynamicBacktester, DataManagerV2
+from dynamic_backtest import DynamicBacktester
+from data_manager_v2 import DataManagerV2
 
 def run_benchmark():
     import json
@@ -26,7 +27,7 @@ def run_benchmark():
         else:
             print(f"[  -  ] {msg}")
 
-    results = tester.run(start_date, end_date, interval='15m', callback=benchmark_callback)
+    results = tester.run(start_date, end_date, interval='15m', callback=benchmark_callback, high_precision=True)
     t1 = time.time()
     
     duration = t1 - t0

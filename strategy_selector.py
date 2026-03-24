@@ -290,7 +290,7 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
     if not df_result.empty:
         df_result = df_result.sort_values(by='Score', ascending=False)
         # [v18.9] 선정 결과 개수 제한 적용 (최대 N개)
-        max_mon = int(settings.get('max_mon_targets', 20))
+        max_mon = int(settings.get('max_slots', 20))
         df_result = df_result.head(max_mon)
         
         # 캐시 저장 (실시간일 때만)
