@@ -304,7 +304,8 @@ class ParameterOptimizer:
             
             # [v27.5] 베이지안 최적화 멀티프로세싱 활성화 (n_jobs)
             # [v30.0] 워커 초기화 함수 등록 (loky/joblib 호환성 확인)
-            num_workers = min(os.cpu_count() or 4, 8)
+            # [v31.0] 하드코딩된 CPU 코어 잠금(8 코어) 해제: 사용 가능한 모든 물리/논리 코어 활용
+            num_workers = -1 
             
             # 주지사항: Optuna n_jobs는 내부적으로 loky를 쓰며, 전역 변수 상속이 안될 수 있음
             # 따라서 run_single_combination 내부에서 데이터가 없으면 자동 로드하도록 보강
@@ -315,7 +316,8 @@ class ParameterOptimizer:
             study.optimize(robust_objective, n_trials=n_trials, n_jobs=num_workers)
         else:
             # [v23.0] 일반 Grid Search의 경우 모든 코어 동원
-            num_workers = min(os.cpu_count() or 4, 12)
+            # [v31.0] 마찬가지로 하드코딩 리미트(12) 해제
+            num_workers = os.cpu_count() or 4
             print(f"  [Perf] Starting Multiprocessing (PPE) with {num_workers} processes (Gated/Vectorized)...")
             
             if callback: callback(f"멀티프로세싱 최적화 시작 (코어: {num_workers})...", 50)
