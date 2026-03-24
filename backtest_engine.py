@@ -211,9 +211,11 @@ class SimpleBacktester:
     def run(self, df, code="SAMPLE", market_df=None, vix_df=None, log_to_csv=False, skip_indicators=False, high_precision=False, m1_df_preloaded=None):
         """[v15.0] Ultra-High Performance Backtest Engine"""
         try:
-            # [v30.6] 최적화: 지표 계산이 필요 없는 경우(최적화 트라이얼 등) 데이터프레임 복사 생략
+            # [v30.6/v30.8] 멀티스레드 환경에서 컬럼 추가/수정(In-place)으로 인한 pandas 내부 Index 충돌 버그 방지
             if not skip_indicators:
                 df = df.copy()
+            else:
+                df = df.copy(deep=False) # 얕은 복사로 메모리는 아끼고, Series 주소망 분리
             # 1. Initialization
             if not skip_indicators:
                 df = TradingStrategy.calculate_indicators(df, self.settings)
@@ -376,7 +378,7 @@ class SimpleBacktester:
             # 1. Exit Check (TP/SL/Flash/Gap)
             exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos)
             if exit_res:
-                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params)
+                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicator_row=df.iloc[i])
             
             # 2. Stage 2 Buy Check (Secondary)
             elif pos['stage'] == 1:
@@ -433,10 +435,11 @@ class SimpleBacktester:
         
         # [v25.8/v25.9] 15-minute Gap-Down Grace Period: Allow recovery between SL/Flash and Gap Limit during first 15m
         if self.settings.get('use_gap_grace', True):
+            m1_t = pd.DatetimeIndex(m1_times)
             # Check if this is the opening 15m bar of the day (09:00)
-            if m1_times[0].hour == 9 and m1_times[0].minute == 0:
+            if m1_t[0].hour == 9 and m1_t[0].minute == 0:
                 # In the morning (09:00-09:15), only GapDown can trigger if price is between boundaries
-                grace_mask = (m1_times.hour == 9) & (m1_times.minute < 15)
+                grace_mask = (m1_t.hour == 9).to_numpy() & (m1_t.minute < 15).to_numpy()
                 stop_lossed = stop_lossed & (~grace_mask)
                 flash_exited = flash_exited & (~grace_mask)
         

@@ -237,7 +237,7 @@ class DynamicBacktester:
                         
                         if is_buy_signal or is_addon_target:
                             can_execute = True
-                            reason = f"{last_sig['Sig_Type']}"
+                            reason = "SIG" # 일관성 있게 backtest_engine의 기본 SIG와 통일
                             
                             if is_addon_target:
                                 # 추매 승인 조건 체크 (TradingStrategy 통합 로직 사용)
@@ -247,7 +247,7 @@ class DynamicBacktester:
                                     can_execute = False
                             
                             if can_execute:
-                                self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': last_sig.get('Sig_Type', 'TYPE_A')}, curr_time, d_df.loc[curr_time], indicator_row=d_df.loc[curr_time])
+                                self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': last_sig.get('Sig_Type', 'TYPE_B')}, curr_time, d_df.loc[curr_time], indicator_row=d_df.loc[curr_time])
 
             # 2-5. 일일 정산
             current_equity = self.cash + sum(h['qty'] * day_data[c]['Close'].iloc[-1] for c, h in self.holdings.items() if c in day_data)
@@ -553,7 +553,7 @@ class DynamicBacktester:
             
             if is_buy_signal or is_addon_target:
                 can_execute = True
-                reason = f"1M_{curr_15m['Sig_Type']}"
+                reason = "1M_SIG" # 일관성 유지
                 
                 if is_addon_target:
                     if self._check_s2_approval(code, h_info, curr_15m):
@@ -562,7 +562,7 @@ class DynamicBacktester:
                         can_execute = False
                 
                 if can_execute:
-                    self._handle_buy_execution(code, {'reason': reason}, m1_dt_first, m1_r_first, indicator_row=curr_15m)
+                    self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': curr_15m.get('Sig_Type', 'TYPE_B')}, m1_dt_first, m1_r_first, indicator_row=curr_15m)
 
     def _check_s2_approval(self, code, h_info, last_row, indicator_row=None):
         """[v22.1] 2차 매수 승인 로직 (backtest_engine.TradingStrategy._check_s2_approval 통합 연동)"""

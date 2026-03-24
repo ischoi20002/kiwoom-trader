@@ -77,11 +77,9 @@ class BacktestTab:
         
         for settings_key, opt_keys in sync_map.items():
             is_enabled = s.get(settings_key, True)
-            if not is_enabled:
-                for k in opt_keys:
-                    if k in self.opt_params_vars:
-                        # 설정이 꺼져 있을 때만 최적화 체크박스도 강제로 끔
-                        self.opt_params_vars[k].set(False)
+            for k in opt_keys:
+                if k in self.opt_params_vars:
+                    self.opt_params_vars[k].set(is_enabled)
         
         # UI 업데이트 (헤더 아이콘 반영) - UI가 생성된 후라면 실행
         if hasattr(self.app, 'tree_backtest') and self.app.tree_backtest is not None:

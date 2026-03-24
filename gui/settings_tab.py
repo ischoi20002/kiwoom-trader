@@ -415,7 +415,8 @@ class SettingsTab:
             # Use KiwoomApp's save logic or handle here
             self.app._final_save_settings()
             
-            # [v15.8] 백테스팅 탭의 최적화 체크박스 상태 강제 동기화
+            # [v27.1] 실시간 Trace 대신, "설정 저장" 버튼을 누르는 시점에만 
+            # Settings 탭의 상태를 Optimization 헤더에 단방향으로 맞춰줍니다.
             if hasattr(self.app, 'backtest_tab'):
                 self.app.backtest_tab._sync_opt_toggles_with_settings()
             
