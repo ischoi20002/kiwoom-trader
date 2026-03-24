@@ -56,7 +56,7 @@ class ParameterOptimizer:
         self.param_ranges = param_ranges # {'rsi_min': [35, 40, 45], ...}
         self.base_settings = base_settings if base_settings else {}
         
-    def find_best_params(self, start_date, end_date, interval='1d', callback=None, force_refresh=False, high_precision=False, method='grid', n_trials=30):
+    def find_best_params(self, start_date, end_date, interval='1d', callback=None, force_refresh=False, high_precision=False, method='grid', n_trials=150, seed=42):
         # [v18.8] Date Normalization (YYYY-MM-DD)
         start_date = pd.to_datetime(start_date).strftime('%Y-%m-%d')
         end_date = pd.to_datetime(end_date).strftime('%Y-%m-%d')
@@ -254,7 +254,8 @@ class ParameterOptimizer:
                     return res['avg_ret']
                 return -999.0
 
-            study = optuna.create_study(direction='maximize')
+            sampler = optuna.samplers.TPESampler(seed=seed)
+            study = optuna.create_study(direction='maximize', sampler=sampler)
             study.optimize(objective, n_trials=n_trials)
         else:
             # [v23.0] 일반 Grid Search의 경우 모든 코어 동원

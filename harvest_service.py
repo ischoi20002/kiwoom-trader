@@ -3,7 +3,7 @@ import time
 import json
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import config
 from data_manager_v2 import DataManagerV2
 from kiwoom_rest_api.auth.token import TokenManager
@@ -125,20 +125,21 @@ class HarvestService:
             bars = self._parse_to_bars(raw_data)
             if not bars: break
             
-            # [Smart] 즉시 DB 저장
-            df_chunk = pd.DataFrame(bars)
-            self.db.save_bars(code, df_chunk)
-            
-            total_fetched += len(bars)
-            current_bottom_time = bars[-1]['time']
-            
-            # [Smart Check] 첫 번째 덩어리를 가져왔는데, 가장 최근 데이터가 이미 DB에 있다면?
-            if total_fetched == len(bars) and last_sync and bars[0]['time'] <= last_sync:
+            # [v16.9] 첫 번째 청산을 가져왔을 때, 가장 최근 데이터가 이미 DB에 있다면 즉시 조기 종료 처리
+            if total_fetched == 0 and last_sync and bars[0]['time'] <= last_sync:
                 self.log(f"   >> {code}: 이미 최신 상태입니다. (최신 데이터: {bars[0]['time']})")
                 total_fetched = 0
                 break
 
-            # [v16.9] Simplified: 기존 데이터와 조금이라도 겹치면 즉시 종료 (Incremental Sync)
+            # [v16.9] 즉시 DB 저장 후 마지막 동기화 시간 갱신 (Incremental Sync 정확도 향상)
+            df_chunk = pd.DataFrame(bars)
+            self.db.save_bars(code, df_chunk)
+            last_sync = self.db.get_last_sync_time(code) # DB에서 실시간으로 다시 읽어옴
+            
+            total_fetched += len(bars)
+            current_bottom_time = bars[-1]['time']
+            
+            # [v16.9] Simplified: 기존 데이터와 조금이라도 겹치면 종료 (Incremental Sync)
             if last_sync and current_bottom_time <= last_sync:
                 self.log(f"   - {code}: 기존 데이터와 연결됨. 조기 종료 (Overlapped).")
                 break
@@ -157,7 +158,11 @@ class HarvestService:
             self.db.refresh_resampled_data(code)
             self.log(f"[OK] {code} 처리 완료: 총 {total_fetched}개 신규 저장됨")
         else:
-            self.log(f"[OK] {code} 처리 완료: 추가된 데이터 없음")
+            # [v16.9] 원인별 로그 세분화
+            if last_sync and 'bars' in locals() and bars and bars[0]['time'] <= last_sync:
+                self.log(f"[OK] {code} 처리 완료: 이미 최신 상태입니다.")
+            else:
+                self.log(f"[OK] {code} 처리 완료: 서버에서 가져온 데이터가 없습니다.")
 
     def is_data_complete(self, code):
         """데이터의 충분성 및 구멍 유무를 판단 (v6.8: 종목별 한계 및 전역 경계 기준)"""
@@ -177,10 +182,18 @@ class HarvestService:
                 return False # 과거 데이터가 더 필요함 (바닥까지 가야함)
             
             # [Smart Check 2] 보충(Daily Sync) 확인: 오늘 날짜의 데이터가 있는지 확인
-            last_dt_str = last_sync[:10]
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            last_dt = datetime.strptime(last_sync, "%Y-%m-%d %H:%M:%S")
+            now = datetime.now()
             
-            if last_dt_str < today_str:
+            # [Fix] 오늘 장 개시 전(09:00 이전)이라면, 어제 장마감 데이터까지만 있어도 완료로 간주
+            if now.hour < 9:
+                # 어제(또는 가장 최근 평일) 데이터가 있다면 통과
+                # (now - timedelta).replace(...) 형식으로 datetime 객체의 replace를 호출해야 함
+                yesterday_limit = (now - timedelta(days=1)).replace(hour=15, minute=30, second=0, microsecond=0)
+                if last_dt >= yesterday_limit:
+                    return True
+            
+            if last_sync[:10] < now.strftime("%Y-%m-%d"):
                 return False 
                 
             return True 

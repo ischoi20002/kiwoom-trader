@@ -217,7 +217,7 @@ class DynamicBacktester:
                                     exit_reason = f"Stop Loss (S2)|RSI:{curr_price_row['RSI']:.1f}|MA5:{int(curr_price_row['MA5']):,}|OSC:{curr_price_row['OSC']:.2f}"
                     
                     if exit_reason:
-                        self._execute_sell(code, curr_price, curr_time, exit_reason)
+                        self._execute_sell(code, curr_price, curr_time, exit_reason, indicator_row=curr_price_row)
                         today_sells.add(code)
 
                 # 2-4-2. 매수 감시
@@ -308,7 +308,18 @@ class DynamicBacktester:
         })
         self._log_trade_to_csv(curr_time, code, f'BUY{entry_n}', price, qty, reason_str, fee=buy_fee)
 
-    def _execute_sell(self, code, price, curr_time, reason, ratio=1.0):
+    def _execute_sell(self, code, price, curr_time, reason, ratio=1.0, indicator_row=None):
+        """매도 실행 및 기록 (v8.1: 툴팁용 지표 데이터 포함)"""
+        if indicator_row is not None:
+            try:
+                rsi_val = indicator_row.get('RSI', 0)
+                ma5_val = indicator_row.get('MA5', 0)
+                osc_val = indicator_row.get('OSC', 0)
+                if "RSI:" not in str(reason):
+                    prefix = "|" if "|" not in str(reason) else ", "
+                    reason += f"{prefix}RSI:{rsi_val:.1f}|MA5:{int(ma5_val):,}|OSC:{osc_val:.2f}"
+            except: pass
+            
         h_info = self.holdings.get(code)
         if h_info is None: return
         sell_qty = int(h_info['qty'] * ratio)
@@ -427,6 +438,10 @@ class DynamicBacktester:
 
     def _process_intra_bar_dynamic(self, code, m1_chunk, day_df_15m, m_trend, today_sells):
         """[v23.0] 15분봉 내부의 1분봉 시뮬레이션: 넘파이 벡터연산으로 최적화"""
+        # [v26.1] Move curr_15m to top to avoid UnboundLocalError on exits
+        m1_dt_first = m1_chunk.index[0]
+        curr_15m = day_df_15m.loc[m1_dt_first] if day_df_15m is not None and m1_dt_first in day_df_15m.index else None
+        
         h_info = self.holdings.get(code)
         
         if h_info is not None:
@@ -495,7 +510,7 @@ class DynamicBacktester:
                     reason = f"1M Take Profit (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
                 else: reason = f"1M Stop Loss (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
                 
-                self._execute_sell(code, exit_price, exit_time, reason)
+                self._execute_sell(code, exit_price, exit_time, reason, indicator_row=curr_15m)
                 today_sells.add(code)
                 return
 
@@ -504,9 +519,7 @@ class DynamicBacktester:
             
         # 2. 미보유 또는 추가매수 가능 종목: 매수(Buy) 조건 검사
         # 매수 조건은 지표(15분봉) 기반이므로 첫 번째 분봉에서 처리
-        m1_dt_first = m1_chunk.index[0]
         m1_r_first = m1_chunk.iloc[0]
-        curr_15m = day_df_15m.loc[m1_dt_first] if day_df_15m is not None and m1_dt_first in day_df_15m.index else None
         
         if curr_15m is not None:
             h_info = self.holdings.get(code)

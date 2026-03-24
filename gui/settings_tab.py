@@ -76,14 +76,11 @@ class SettingsTab:
         
         param_configs = [
             ("min_trde_val", "1. 최소 거래대금", "억", "⬇️ 유동성 필터링 (대형주/중소형주 범위)"),
-            ("vol_ratio", "2. 거래량 분출 비율", "배", "⬆️ 강력한 수급 포착 (전일 동시간 대비)"),
+            ("vol_ratio", "2. 거래량 분출 비율", "배", "⬆️ 강한 수급 확인 (전일 거래량 대비)"),
             ("vol_lookback", "3. 분출 확인 기간", "일", "⬆️ 과거 이력 포함 범위"),
-            ("ma_convergence", "4. 이평선 수렴도 기준", "%", "⬇️ 밀집 구간 포착 정밀도 (수치가 작을수록 밀집)"),
+            ("ma_convergence", "4. 이평선 수렴도 기준", "%", "⬇️ MA5-MA20 밀집도 (작을수록 바닥권 수렴)"),
             ("sel_rsi_min", "5. 선정 RSI 하한", "", "⬆️ 과매도 반등 하한"),
-            ("sel_rsi_max", "6. 선정 RSI 상한", "", "⬇️ 과매수 진입 전 필터링"),
-            ("macd_fast", "7. MACD 단기 EMA", "", "포착 속도 조절"),
-            ("macd_slow", "8. MACD 장기 EMA", "", "추세 안정성 조절"),
-            ("macd_sig", "9. MACD Signal EMA", "", "신호 민감도 조절")
+            ("sel_rsi_max", "6. 선정 RSI 상한", "", "⬇️ 과매수 진입 전 필터링")
         ]
         
         for key, label, unit, impact in param_configs:
@@ -105,6 +102,23 @@ class SettingsTab:
             
             # 아래 행과의 구분선
             ttk.Separator(filter_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
+
+        # [v26.14] Mandatory MACD Momentum Filter (Stock Selection)
+        macd_filter_row = ttk.Frame(filter_frame, padding="6")
+        macd_filter_row.pack(fill=tk.X)
+        
+        ttk.Label(macd_filter_row, text="7. MACD 모멘텀 필터", width=25, font=("Malgun Gothic", 10)).pack(side=tk.LEFT)
+        ttk.Label(macd_filter_row, text=" (P/S/Sig): ", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
+        
+        for k in ["macd_fast", "macd_slow", "macd_sig"]:
+            ent = ttk.Entry(macd_filter_row, width=6, justify='center')
+            ent.insert(0, str(self.app.settings.get(k, self.default_settings[k])))
+            ent.pack(side=tk.LEFT, padx=5)
+            self.params_entries[k] = ent
+            
+        ttk.Label(macd_filter_row, text=" (필수) OSC > 0 시 선정 / (가산점) 우상향 시 +10점", 
+                  font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT, padx=10)
+        ttk.Separator(filter_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
 
         # [2] 1단계: 신규 매수 진입 조건 (Stage 1)
         s1_container = ttk.LabelFrame(st_main_frame, text=" 🚀 [2] 신규 매수 조건 (Stage 1 Entry) ", padding="15")
@@ -227,7 +241,18 @@ class SettingsTab:
         add_signal_row(group_b, "use_type_b_vol", "3. 거래량 급증(B)", "vol_surge_b", "배", "전일 동시간 대비:", widget_list=self.type_b_widgets)
 
         # Common Stage 1 settings
-        add_signal_row(group_common, "use_market_filter", "1. 시장지수 필터", label_text="(하락장 매수 정지)")
+        market_row = ttk.Frame(group_common, padding="6")
+        market_row.pack(fill=tk.X)
+        self.conf_vars["use_market_filter"] = tk.BooleanVar(value=self.app.settings.get("use_market_filter", True))
+        ttk.Checkbutton(market_row, text="1. 시장지수 필터", variable=self.conf_vars["use_market_filter"], width=23).pack(side=tk.LEFT)
+        
+        ttk.Label(market_row, text=" (MSI/VIX/ADX): ", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
+        for val in ["-0.05", "30", "15"]:
+            ent = ttk.Entry(market_row, width=5, justify='center', state='readonly')
+            ent.config(state=tk.NORMAL)
+            ent.insert(0, val)
+            ent.config(state='readonly')
+            ent.pack(side=tk.LEFT, padx=2)
         add_signal_row(group_common, "use_vol_power", "2. 체결강도 강화", "vol_power_lvl", "", "기준값:")
         # 3. 매수 RSI 하한 (Moved up from 4)
         add_signal_row(group_common, "use_rsi_min", "3. 매수 RSI 하한", "buy_rsi_min", "", "전략 공통:")
@@ -236,7 +261,8 @@ class SettingsTab:
         macd_row = ttk.Frame(group_common, padding="6")
         macd_row.pack(fill=tk.X)
         self.conf_vars["use_macd_signal"] = tk.BooleanVar(value=self.app.settings.get("use_macd_signal", True))
-        ttk.Checkbutton(macd_row, text="4. MACD-Signal 확인", variable=self.conf_vars["use_macd_signal"], width=20).pack(side=tk.LEFT)
+        ttk.Checkbutton(macd_row, text="4. MACD 모멘텀 상승 확인", variable=self.conf_vars["use_macd_signal"], width=23).pack(side=tk.LEFT)
+        ttk.Label(macd_row, text=" (OSC > 0 & 증가 중)", font=("Malgun Gothic", 8, "italic"), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
         
         ttk.Label(macd_row, text=" (F/S/Sig): ", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
         for k in ["sig_macd_fast", "sig_macd_slow", "sig_macd_sig"]:
@@ -255,8 +281,9 @@ class SettingsTab:
         row_rsi_sig_f = ttk.Frame(group_common, padding="6")
         row_rsi_sig_f.pack(fill=tk.X)
         self.conf_vars["use_rsi_sig_filter"] = tk.BooleanVar(value=self.app.settings.get("use_rsi_sig_filter", False))
-        ttk.Checkbutton(row_rsi_sig_f, text="5. RSI-Signal 확인", variable=self.conf_vars["use_rsi_sig_filter"], width=20,
+        ttk.Checkbutton(row_rsi_sig_f, text="5. RSI 모멘텀 상승 확인", variable=self.conf_vars["use_rsi_sig_filter"], width=23,
                         style="TCheckbutton").pack(side=tk.LEFT)
+        ttk.Label(row_rsi_sig_f, text=" (RSI > Sig & 증가 중)", font=("Malgun Gothic", 8, "italic"), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
         
         ttk.Label(row_rsi_sig_f, text=" (P/Sig): ", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']).pack(side=tk.LEFT)
         

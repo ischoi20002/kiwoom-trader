@@ -247,8 +247,8 @@ class DataManagerV2:
             cursor.execute("""
                 INSERT INTO sync_meta (code, last_sync_dt, earliest_sync_dt) VALUES (?, ?, ?)
                 ON CONFLICT(code) DO UPDATE SET 
-                    last_sync_dt = MAX(last_sync_dt, excluded.last_sync_dt),
-                    earliest_sync_dt = MIN(COALESCE(earliest_sync_dt, excluded.earliest_sync_dt), excluded.earliest_sync_dt)
+                    last_sync_dt = MAX(COALESCE(last_sync_dt, ''), excluded.last_sync_dt),
+                    earliest_sync_dt = MIN(COALESCE(earliest_sync_dt, '9999-12-31'), excluded.earliest_sync_dt)
             """, (code, last_dt, first_dt))
             conn.commit()
 
@@ -653,10 +653,10 @@ class DataManagerV2:
         with open(settings_file, "w", encoding="utf-8") as f:
             json.dump(settings, f, ensure_ascii=False, indent=2)
 
-    def get_kospi_200_list(self, force=False):
-        """KOSPI 200 종목 리스트 수집/확인"""
+    def get_kospi_list(self, count=200, force=False):
+        """KOSPI 종목 리스트 수집/확인 (count에 따라 200/500/전체 등 지원)"""
         import FinanceDataReader as fdr
-        cache_file = "kospi_200.csv"
+        cache_file = "kospi_200.csv" if count <= 200 else f"kospi_top_{count}.csv"
         try:
             is_expired = False
             if os.path.exists(cache_file):
@@ -668,11 +668,11 @@ class DataManagerV2:
             else:
                 df = fdr.StockListing('KOSPI')
                 df = df[df['Code'].str.endswith('0')]
-                df_sorted = df.sort_values(by='Marcap', ascending=False).head(200)
+                df_sorted = df.sort_values(by='Marcap', ascending=False).head(count)
                 df_sorted.to_csv(cache_file, index=False, encoding='utf-8-sig')
                 return df_sorted
         except Exception as e:
-            print(f"  [Error] KOSPI 200 list fetch error: {e}")
+            print(f"  [Error] KOSPI {count} list fetch error: {e}")
             return None
 
 # 싱글톤 인스턴스 (필요 시)

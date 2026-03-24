@@ -14,15 +14,15 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     ma60_ratio = (df['Close'] / df['MA60']) * 100
     
     # 2. RSI 조건
-    buy_rsi_min = settings.get('buy_rsi_min', 30.0)
+    buy_rsi_min = settings.get('buy_rsi_min', 35.0)
     buy_rsi_max_b = settings.get('buy_rsi_max_b', 70.0)
-    buy_rsi_max_a = settings.get('buy_rsi_max_a', 58.0) 
+    buy_rsi_max_a = settings.get('buy_rsi_max_a', 55.0) 
     
     cond_rsi_range = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_b)
     cond_rsi_type_a = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_a)
     
-    # [v6.4] RSI 시그널(R_SP) 돌파 조건 (RSI > RSI_Sig)
-    cond_rsi_sig = (df['RSI'] >= df['RSI_Sig']) 
+    # [v26.11] RSI Signal Filter: Ensure RSI is above signal AND increasing (momentum strengthening)
+    cond_rsi_sig = (df['RSI'] >= df['RSI_Sig']) & (df['RSI'] > df['RSI'].shift(1))
     use_rsi_sig_filter = settings.get('use_rsi_sig_filter', False)
     
     # 3. MACD/이평선 조건
@@ -35,32 +35,41 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     ma_gap_limit = settings.get('ma_gap_limit', 2.5)
     ma_gap = (df['MA5'] / df['MA20'] - 1) * 100
     
-    gc_bars = max(1, int(settings.get('gc_window', 15) / 15))
+    gc_bars = max(1, int(settings.get('gc_window', 90) / 15))
     cond_ma_gc = (df['MA5'] > df['MA20']) & (df['MA5'].shift(gc_bars) <= df['MA20'].shift(gc_bars)) & (ma_gap <= ma_gap_limit)
     
     # 4. 거래량 조건 (Prev Day Same Time 대비)
-    v_surge_a = settings.get('vol_surge', 1.2)
-    v_surge_b = settings.get('vol_surge_b', 1.5)
+    v_surge_a = settings.get('vol_surge', 2.0)
+    v_surge_b = settings.get('vol_surge_b', 2.0)
     
     cond_vol_a = (df['Volume'] > df['Prev_Day_Vol'] * v_surge_a)
     cond_vol_b = (df['Volume'] > df['Prev_Day_Vol'] * v_surge_b)
     
     # 5. Type A: 눌림목 (RSI 40-58 + MA_GC + MA60 근접)
-    use_a = settings.get('use_type_a', True)
+    # [v26.3] Default to False if missing for safety
+    use_a = settings.get('use_type_a', False)
     signal_a = use_a & cond_rsi_type_a
     if settings.get('use_gc', True): signal_a &= cond_ma_gc
     if settings.get('use_vol_surge', True): signal_a &= cond_vol_a
     if settings.get('use_ma60_safe', True): signal_a &= cond_ma60
     if use_rsi_sig_filter: signal_a &= cond_rsi_sig
     
-    # Type A RSI 50 유지 조건
+    # [v26.7] Type A RSI 50 Pulse Logic (Breakthrough + Duration + Invalidation)
     if settings.get('use_rsi_signal', True):
         r_window_bars = max(1, int(settings.get('rsi_window', 45) / 15))
-        cond_rsi_50_maint = (df['RSI'].rolling(window=r_window_bars).min() >= 50.0)
-        signal_a &= cond_rsi_50_maint
+        is_above_50 = (df['RSI'] >= 50.0)
+        # 50선 하향 이탈 시마다 그룹을 나누어 연속 돌파 유지 기간 계산
+        group_id = (df['RSI'] < 50.0).cumsum()
+        count_maint = is_above_50.groupby(group_id).cumsum()
+        
+        # 조건: 현재 50 이상 유지 중이면서, 돌파(카운트 시작) 후 설정된 바(N) 이내일 것
+        cond_rsi_50_pulse = (is_above_50) & (count_maint >= 1) & (count_maint <= r_window_bars)
+        signal_a &= cond_rsi_50_pulse
+
 
     # 6. Type B: 추세 돌파 (RSI 제약 + 정배열 + MACD GC)
-    use_b = settings.get('use_type_b', True)
+    # [v26.3] Default to False if missing for safety
+    use_b = settings.get('use_type_b', False)
     cond_trend_aligned = (df['MA20'] > df['MA60']) & (df['Close'] > df['MA20'])
     cond_macd_gc = (df['MACD'] > df['MACD_Sig']) & (df['MACD'].shift(1) <= df['MACD_Sig'].shift(1))
     
@@ -74,7 +83,8 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     signal = signal_a | signal_b
     
     if settings.get('use_macd_signal', True):
-        signal &= (df['OSC'] > 0)
+        # [v26.10] MACD Momentum Filter: Ensure OSC is positive AND increasing (energy strengthening)
+        signal &= (df['OSC'] > 0) & (df['OSC'] > df['OSC'].shift(1))
     
     return pd.DataFrame({
         'Signal': signal,

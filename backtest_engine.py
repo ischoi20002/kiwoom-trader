@@ -140,6 +140,9 @@ class SimpleBacktester:
     def run(self, df, code="SAMPLE", market_df=None, vix_df=None, log_to_csv=False, skip_indicators=False, high_precision=False, m1_df_preloaded=None):
         """[v15.0] Ultra-High Performance Backtest Engine"""
         try:
+            # [v26.2] 최적 인스턴스 격리를 위해 데이터프레임 복사본 사용 (공유 메모리 오염 방지)
+            df = df.copy()
+            
             # 1. Initialization
             if not skip_indicators:
                 df = TradingStrategy.calculate_indicators(df, self.settings)
@@ -197,13 +200,27 @@ class SimpleBacktester:
         # 시장 상태 계산
         if market_df is not None and not market_df.empty:
             m_df = TradingStrategy.calculate_indicators(market_df.copy(), {})
-            vix_s = vix_df['Close'] if vix_df is not None and 'Close' in vix_df.columns else pd.Series(15.0, index=m_df.index)
+            # [Fix] Align VIX with market index to prevent shape mismatch (broadcast error)
+            vix_s = vix_df['Close'].reindex(m_df.index).ffill().fillna(15.0) if vix_df is not None and 'Close' in vix_df.columns else pd.Series(15.0, index=m_df.index)
             
             m_df['Status'] = 'WATCH'
             m_df.loc[(m_df['MSI'] > 0) & (m_df['ADX'] >= 25) & (vix_s <= 20), 'Status'] = 'AGGRESSIVE'
             m_df.loc[(m_df['MSI'] > 0) & (vix_s <= 20) & (m_df['Status'] == 'WATCH'), 'Status'] = 'SAFE'
-            m_df.loc[(m_df['MSI'] < 0) & (vix_s >= 30), 'Status'] = 'RISK'
-            m_df['Trend'] = np.where(m_df['MSI'] > 0, 'UP', np.where(m_df['MSI'] < -0.1, 'DOWN', 'NEUTRAL'))
+            m_df.loc[(m_df['MSI'] < -0.05) | (vix_s >= 30), 'Status'] = 'RISK'
+            
+            # [v26.9] Triple-Lock Safety System (MSI -0.05, VIX 30, ADX 15)
+            # Market is 'DOWN' (Blocked) if ANY of these trigger:
+            lock_msi = m_df['MSI'] < -0.05
+            lock_vix = vix_s > 30
+            lock_adx = m_df['ADX'] < 15
+            triple_lock_down = lock_msi | lock_vix | lock_adx
+            
+            m_df['Trend'] = np.where(triple_lock_down, 'DOWN', 
+                                     np.where(m_df['MSI'] > 0, 'UP', 'NEUTRAL'))
+            
+            # [Realism] Today's market trend is determined by yesterday's close data to avoid look-ahead bias
+            m_df['Status'] = m_df['Status'].shift(1).fillna('WATCH')
+            m_df['Trend'] = m_df['Trend'].shift(1).fillna('UP')
             
             df_daily_idx = df.index.normalize()
             df['Market_Status'] = df_daily_idx.map(m_df['Status']).fillna('WATCH')
@@ -215,8 +232,8 @@ class SimpleBacktester:
             df['Market_Status'] = 'SAFE'
             df['Market_Trend'] = 'UP'
 
-        # 표준 모드 신호 미리 계산
-        if not high_precision and 'Signal_Shifted' not in df.columns:
+        # [v26.1] 표준 모드 신호 미리 계산 (최적화 시 신호 파라미터가 바뀔 수 있으므로 매번 수행)
+        if not high_precision:
             sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend='UP')
             for c in sigs.columns:
                 df[c] = sigs[c]
@@ -305,7 +322,7 @@ class SimpleBacktester:
                 # 익절/손절 체크
                 exit_res = self._check_exits(m1_dt, m1_c, m1_h, m1_l, pos)
                 if exit_res:
-                    params = self._execute_sell(m1_dt, exit_res['price'], f"1M_{exit_res['reason']}", params)
+                    params = self._execute_sell(m1_dt, exit_res['price'], f"1M_{exit_res['reason']}", params, indicator_row=prev_row_base)
                     break
 
                 # 2차 매수 체크
@@ -359,7 +376,7 @@ class SimpleBacktester:
             # 익절/손절 체크 (봉 단위)
             exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos)
             if exit_res:
-                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params)
+                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicator_row=row)
             elif pos['stage'] == 1:
                 if self._check_s2_approval(pos, row): # v21.0: Unified logic
                     params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason="CONF", indicator_row=row)
@@ -435,9 +452,14 @@ class SimpleBacktester:
         # 0. 공통 상수 및 설정 로드
         s = self.settings
         
-        # 진입 유형에 따른 접미사 결정 (Type A: _a, Type B: _b)
-        sig_type = pos.get('sig_type', 'TYPE_B')
-        suffix = "_a" if sig_type == "TYPE_A" else "_b"
+        # 진입 유형에 따른 접미사 결정 (v26.4: Type B 비활성화 시 강제로 _a 사용 연동)
+        use_b = s.get('use_type_b', False)
+        sig_type = pos.get('sig_type', 'TYPE_A')
+        
+        if not use_b:
+            suffix = "_a"
+        else:
+            suffix = "_b" if sig_type == "TYPE_B" else "_a"
 
         # 1. Flash Exit
         if pos['stage'] == 1:
@@ -480,8 +502,11 @@ class SimpleBacktester:
             
         return None
 
-    def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicator_row=None, sig_type='TYPE_B'):
+    def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicator_row=None, sig_type='TYPE_A'):
         """매수 실행 및 params 업데이트"""
+        # [v26.4] Type B 비활성화 시 강제로 TYPE_A로 전환하여 파라미터 오염 방지
+        if not self.settings.get('use_type_b', False) and sig_type == 'TYPE_B':
+            sig_type = 'TYPE_A'
         if indicator_row is not None:
             try:
                 rsi_val = indicator_row.get('RSI', 0)
@@ -513,8 +538,18 @@ class SimpleBacktester:
         self.collect_trade(date, action, price, qty, params['position']['qty'], params['position']['qty'] * price, reason_str=reason, fee=fee)
         return params
 
-    def _execute_sell(self, date, price, reason, params):
+    def _execute_sell(self, date, price, reason, params, indicator_row=None):
         """매도 실행 및 params 업데이트"""
+        if indicator_row is not None:
+            try:
+                rsi_val = indicator_row.get('RSI', 0)
+                ma5_val = indicator_row.get('MA5', 0)
+                osc_val = indicator_row.get('OSC', 0)
+                if "RSI:" not in str(reason): # RSI 정보가 없을 때만 추가
+                    prefix = "|" if "|" not in str(reason) else ", "
+                    reason += f"{prefix}RSI:{rsi_val:.1f}|MA5:{int(ma5_val):,}|OSC:{osc_val:.2f}"
+            except: pass
+            
         pos = params['position']
         ret_v = (price / pos['avg_price'] - 1) * 100
         fee = int(price * pos['qty'] * self.sell_f_rate)

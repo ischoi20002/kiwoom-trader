@@ -32,9 +32,6 @@ def calculate_technical_indicators(df, settings):
     df['MA20'] = df['close'].rolling(20).mean()
     df['MA60'] = df['close'].rolling(60).mean()
     
-    # 볼린저 밴드
-    std = df['close'].rolling(20).std()
-    df['BB_Upper'] = df['MA20'] + (std * 2)
     
     # 거래대금
     df['TrdeVal'] = df['close'] * df['volume']
@@ -60,8 +57,8 @@ def get_strategy_score(row, settings):
     """
     # 1. 환경 변수 로드
     min_억 = float(settings.get('min_trde_val', 40.0))
-    conv_limit = float(settings.get('ma_convergence', 0.03))
-    sel_rsi_min = float(settings.get('sel_rsi_min', 40.0))
+    conv_limit = float(settings.get('ma_convergence', 0.05))
+    sel_rsi_min = float(settings.get('sel_rsi_min', 30.0))
     sel_rsi_max = float(settings.get('sel_rsi_max', 70.0))
     
     # 2. 필터링 판정 (Status Tracking)
@@ -83,10 +80,17 @@ def get_strategy_score(row, settings):
     # 2-4. 거래량 분출 (VolBurst10 등 호출부 전달 필요)
     c4 = row.get('VolBurstActive', False)
     
-    if not (c1 and c2 and c3 and c4):
+    # 2-5. MACD/OSC 필터 (Hybrid v26.15: 양수 필터 + 우상향 가산점)
+    osc_prev = row.get('OSC_Prev', row.get('OSC', 0))
+    c5 = (row['OSC'] > 0) 
+    
+    if not (c1 and c2 and c3 and c4 and c5):
         return res
 
     # 3. 점수 산정
+    bonus = 0.0
+    if row['OSC'] > osc_prev: bonus += 10.0   # 우상향 시 가산점
+    
     avg_val_억 = avg_val / 100000000
     s1 = min(100, (row['RSI'] / 70) * 100) # 탄성 (RSI가 높을수록 가점)
     s2 = max(0, (1 - (diff_rate / conv_limit)) * 100) # 밀집도 (수렴할수록 가점)
@@ -94,11 +98,6 @@ def get_strategy_score(row, settings):
     
     pos_diff = abs(row['close'] - row['MA20']) / row['MA20'] if row['MA20'] > 0 else 1.0
     s4 = max(0, (1 - (pos_diff / 0.03)) * 100) # 20일선 근접도 (3%이내 가점)
-    
-    # 보너스 점수
-    bonus = 0.0
-    if row['MACD'] >= row['MACD_Sig']: bonus += 5.0
-    if row['OSC'] > 0: bonus += 5.0
     
     total_score = round((s2 * 0.4) + (s1 * 0.3) + (s3 * 0.2) + (s4 * 0.1) + bonus, 1)
     
@@ -236,7 +235,7 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
             df_valid['VolRatio'] = df_valid['volume'] / df_valid['volume'].shift(1)
             df_valid['VolBurst'] = (df_valid['VolRatio'] >= vol_thresh) & (df_valid['close'] > df_valid['close'].shift(1))
             df_valid['VolBurstActive'] = df_valid['VolBurst'].rolling(lookback).max().astype(bool)
-            
+            df_valid['OSC_Prev'] = df_valid['OSC'].shift(1)
             last_full = df_valid.iloc[-1]
             
             # 5. 전략 필터링 및 점수 산정 (공용 함수 사용)
@@ -262,9 +261,7 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
                 'Ratio': round((last_full['close'] / df_valid.iloc[-2]['close'] - 1) * 100, 2),
                 'RSI': round(last_full['RSI'], 1), 'MA20Dist': round(pos_diff * 100, 2),
                 'MA60Ratio': round((last_full['close'] / last_full['MA60']) * 100, 2),
-                'AvgTrdeVal': int(last_full['AvgVal5'] / 100000000), 
                 'MA20': float(last_full['MA20']), 'MA60': float(last_full['MA60']),
-                'BB_Upper': float(last_full['BB_Upper']),
                 'MACD': float(last_full['MACD']), 'MACD_Sig': float(last_full['MACD_Sig']), 'OSC': float(last_full['OSC']),
                 'Volume': int(last_full['volume']), 'PrevVol': int(df_valid.iloc[-2]['volume']),
                 'VolMax': int(df_valid['volume'].max()),
@@ -448,23 +445,24 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     df_all['VolRatio'] = df_all['volume'] / df_all.groupby('code')['volume'].shift(1)
     df_all['VolBurst'] = (df_all['VolRatio'] >= float(settings.get('vol_ratio', 1.5))) & (df_all['close'] > df_all.groupby('code')['close'].shift(1))
     df_all['VolBurstActive'] = df_all.groupby('code')['VolBurst'].transform(lambda x: x.rolling(vol_lookback).max())
+    df_all['OSC_Prev'] = df_all.groupby('code')['OSC'].shift(1)
     
-    # Filter Checks (공용 로직과 일치)
     c1 = df_all['AvgVal5'] >= (min_억 * 100000000)
     c2 = df_all['MA_Diff'] <= conv
     c3 = (df_all['RSI'] >= float(settings.get('sel_rsi_min', 40.0))) & (df_all['RSI'] <= float(settings.get('sel_rsi_max', 70.0)))
     c4 = df_all['VolBurstActive'] == 1
-    df_all['Valid'] = c1 & c2 & c3 & c4 & df_all['MA60'].notna()
+    c5 = (df_all['OSC'] > 0)
     
-    # Scoring (get_strategy_score와 100% 일치하도록 구성)
+    df_all['Valid'] = c1 & c2 & c3 & c4 & c5 & df_all['MA60'].notna()
+    
+    # Scoring (우상향 가산점 적용)
     df_all['s1'] = (df_all['RSI'] / 70 * 100).clip(upper=100)
     df_all['s2'] = ((1 - (df_all['MA_Diff'] / conv)) * 100).clip(lower=0)
     df_all['s3'] = (df_all['AvgVal5'] / 50000000000 * 100).clip(upper=100)
     df_all['s4'] = ((1 - (df_all['Pos_Diff'] / 0.03)) * 100).clip(lower=0)
     
     df_all['Score'] = (df_all['s2'] * 0.4) + (df_all['s1'] * 0.3) + (df_all['s3'] * 0.2) + (df_all['s4'] * 0.1)
-    df_all.loc[df_all['MACD'] >= df_all['MACD_S'], 'Score'] += 5.0
-    df_all.loc[df_all['OSC'] > 0, 'Score'] += 5.0
+    df_all.loc[df_all['OSC'] > df_all['OSC_Prev'], 'Score'] += 10.0
     
     # 6. 스케줄 생성
     logger_callback("  [Batch] 날짜별 상위 종목 추출 중...")

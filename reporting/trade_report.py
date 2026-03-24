@@ -197,11 +197,12 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             .reason-text {{ color: var(--dim); font-size: 0.75rem; cursor: help; border-bottom: 1px dotted #444; display: block; padding: 2px 0; }}
             .reason-cell {{ width: 100%; position: relative; }}
             .indicator-panel {{ 
-                font-size: 0.72rem; margin-top: 5px; background: #1e293b; 
-                padding: 10px; border-radius: 8px; display: none; 
-                position: absolute; left: 0; top: 100%; z-index: 50; 
-                border: 1px solid #334155; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5);
-                min-width: 160px; pointer-events: none;
+                font-size: 0.75rem; margin-top: 5px; background: #1e293b; 
+                padding: 12px; border-radius: 10px; display: none; 
+                position: absolute; left: 0; top: 100%; z-index: 100; 
+                border: 1px solid #3b82f6aa; box-shadow: 0 10px 25px -10px rgba(0,0,0,0.8);
+                min-width: 180px; pointer-events: none;
+                backdrop-filter: blur(8px);
             }}
             .reason-cell:hover .indicator-panel {{ display: block; }}
             .chart-cell {{ position: relative; cursor: crosshair; display: inline-block; vertical-align: middle; width: 100px; height: 40px; }}
@@ -258,7 +259,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             </div>
         </div>
         <script>
-            // [v16.6] Tooltip position correction for small charts
+            // [v16.7] Tooltip position correction for small charts and reason panels
             document.addEventListener('mouseover', (e) => {{
                 if (e.target.classList.contains('bar-trigger')) {{
                     const cell = e.target.closest('.chart-cell');
@@ -266,7 +267,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                     const panelIdx = e.target.className.split('bt-')[1];
                     const panel = cell.querySelector('.cp-' + panelIdx);
                     if (panel) {{
-                        // Prevent tooltips from going off-screen
                         const rect = panel.getBoundingClientRect();
                         if (rect.right > window.innerWidth) {{
                             panel.style.left = 'auto';
@@ -274,6 +274,44 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                             panel.style.marginLeft = '0';
                             panel.style.marginRight = '10px';
                         }}
+                    }}
+                }}
+                
+                // [v16.9] 상세 사유 툴팁 위치 자동 보정
+                const reasonCell = e.target.closest('.reason-cell');
+                if (reasonCell) {{
+                    const panel = reasonCell.querySelector('.indicator-panel');
+                    if (panel) {{
+                        // 임시로 보이게 해서 크기 측정 (CSS hover와 충돌 방지)
+                        panel.style.display = 'block';
+                        panel.style.visibility = 'hidden';
+                        
+                        const rect = panel.getBoundingClientRect();
+                        const winH = window.innerHeight;
+                        const winW = window.innerWidth;
+                        
+                        // 하단 잘림 방지
+                        if (rect.bottom > winH) {{
+                            panel.style.top = 'auto';
+                            panel.style.bottom = '100%';
+                            panel.style.marginBottom = '15px';
+                        }} else {{
+                            panel.style.top = '100%';
+                            panel.style.bottom = 'auto';
+                            panel.style.marginBottom = '0';
+                        }}
+                        
+                        // 우측 잘림 방지
+                        if (rect.right > winW) {{
+                            panel.style.left = 'auto';
+                            panel.style.right = '0';
+                        }} else {{
+                            panel.style.left = '0';
+                            panel.style.right = 'auto';
+                        }}
+                        
+                        panel.style.visibility = 'visible';
+                        panel.style.display = ''; // CSS 클래스 제어로 복구
                     }}
                 }}
             }});
@@ -469,15 +507,23 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 except: pass
 
             raw_reason = str(r['Reason'])
-            reason_main, indicators_html = (raw_reason.split("|")[0] if "|" in raw_reason else raw_reason), ""
-            if "|" in raw_reason:
-                ind_list = []
-                for pair in raw_reason.split("|")[1:]:
-                    if ":" in pair:
-                        k, v = pair.split(":")
-                        color = ("var(--buy)" if k == "RSI" and float(v) < 35 else "var(--loss)" if k == "RSI" and float(v) > 65 else "var(--dim)")
-                        ind_list.append(f'<div style="display:flex; justify-content:space-between; gap:10px; border-bottom:1px solid #444; padding:2px 0;"><span style="color:var(--dim)">{k}</span><span style="color:{color}; font-weight:bold;">{v}</span></div>')
-                if ind_list: indicators_html = f'<div class="indicator-panel"><div style="min-width:140px; padding:5px;">{"".join(ind_list)}</div></div>'
+            parts = raw_reason.split("|")
+            reason_main = parts[0]
+            
+            ind_list = []
+            # [v16.9] 모든 파이프(|) 구분 항목을 툴팁에 포함
+            for pair in parts[1:]:
+                if ":" in pair:
+                    k, v = pair.split(":", 1)
+                    color = ("var(--buy)" if k == "RSI" and float(v) < 35 else "var(--loss)" if k == "RSI" and float(v) > 65 else "var(--dim)")
+                    ind_list.append(f'<div style="display:flex; justify-content:space-between; gap:10px; border-bottom:1px solid #444; padding:2px 0;"><span style="color:var(--dim)">{k}</span><span style="color:{color}; font-weight:bold;">{v}</span></div>')
+                else:
+                    # 콜론이 없는 일반 텍스트도 추가
+                    ind_list.append(f'<div style="border-bottom:1px solid #444; padding:4px 0; color:var(--text); font-size:0.7rem;">• {pair}</div>')
+            
+            indicators_html = ""
+            if ind_list:
+                indicators_html = f'<div class="indicator-panel"><div style="min-width:160px; padding:5px;">{"".join(ind_list)}</div></div>'
 
             group_rows.append(f"""<tr><td>{r['Date'].strftime('%m-%d %H:%M')}</td><td><span class="{action_cls}">{r['Action']}</span></td><td>{candle_svg}</td><td class="num">{int(r['Price']):,}</td><td class="num">{int(r['Qty']):,}</td><td class="num">{int(amt):,}</td><td class="num">{int(fee):,}</td><td class="num">{int(r.get('Total_Qty', 0)):,}</td><td class="num">{ret_str}</td><td class="num">{cum_profit_str}</td><td class="num">{status_badge}</td><td class="num"><div class="reason-cell"><span class="reason-text">{reason_main} 🔍</span>{indicators_html}</div></td></tr>""")
         

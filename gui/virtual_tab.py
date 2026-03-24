@@ -45,6 +45,10 @@ class VirtualTab:
         self.app.tree_virtual.configure(yscroll=yscrollbar.set)
         yscrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         if self.app.tree_virtual: self.app.tree_virtual.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        
+        # [v16.9] 상세 사유 툴팁 바인딩
+        from gui.gui_utils import ToolTip
+        self.reason_tip = ToolTip(self.app.tree_virtual, self._get_cell_tooltip)
 
     def _render_virtual_positions(self):
         """가상 포지션 리스트를 트리뷰에 렌더링"""
@@ -86,3 +90,15 @@ class VirtualTab:
         self.app.tree_virtual.tag_configure("loss", foreground="#81A1C1")   # Soft Blue
         self.app.tree_virtual.tag_configure('odd', background='#242933')
         self.app.tree_virtual.tag_configure('even', background='#2E3440')
+
+    def _get_cell_tooltip(self, event):
+        """트리뷰의 특정 셀(상세사유)에 대한 툴팁 텍스트 반환"""
+        region = self.app.tree_virtual.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.app.tree_virtual.identify_column(event.x)
+            item_id = self.app.tree_virtual.identify_row(event.y)
+            if column == "#10": # Reason 컬럼
+                item = self.app.tree_virtual.item(item_id)
+                if item and 'values' in item and len(item['values']) >= 10:
+                    return str(item['values'][9])
+        return None
