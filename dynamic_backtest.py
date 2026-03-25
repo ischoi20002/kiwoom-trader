@@ -173,6 +173,7 @@ class DynamicBacktester:
                     curr_price_row = d_df.loc[curr_time]
                     curr_price = curr_price_row['Close']
                     h_info['max_p'] = max(h_info.get('max_p', 0), curr_price)
+                    h_info['last_p'] = curr_price # [v32.0] Store for dynamic sizing baseline
                     
                     ret_pct = (curr_price / h_info['avg_p'] - 1) * 100
                     exit_reason = ""
@@ -216,6 +217,18 @@ class DynamicBacktester:
                                 s2_sl = float(self.settings.get('s2_stop_loss', 2.0))
                                 if ret_pct <= -s2_sl:
                                     exit_reason = f"Stop Loss (S2)|RSI:{curr_price_row['RSI']:.1f}|MA5:{int(curr_price_row['MA5']):,}|OSC:{curr_price_row['OSC']:.2f}"
+                            
+                        # [v31.0] ATR Exit (Standard Mode)
+                        if not exit_reason and self.settings.get('use_atr_exit', False):
+                            curr_atr = curr_price_row.get('ATR', 0)
+                            entry_atr = h_info.get('atr_at_entry', curr_atr)
+                            if not np.isnan(curr_atr) and curr_atr > 0:
+                                sl_mult = float(self.settings.get('atr_multiplier_sl', 2.0))
+                                trail_mult = float(self.settings.get('atr_multiplier_trail', 3.0))
+                                if curr_price <= h_info['avg_p'] - (sl_mult * entry_atr):
+                                    exit_reason = f"ATR Stop Loss (S{h_info['entry_n']})|ATR:{curr_atr:.1f}"
+                                elif curr_price <= h_info['max_p'] - (trail_mult * curr_atr):
+                                    exit_reason = f"ATR Trail Stop (S{h_info['entry_n']})|ATR:{curr_atr:.1f}"
                     
                     if exit_reason:
                         self._execute_sell(code, curr_price, curr_time, exit_reason, indicator_row=curr_price_row)
@@ -278,6 +291,24 @@ class DynamicBacktester:
         h_info = self.holdings.get(code)
         s1_amt = float(self.settings.get('stage1_amt', 1_000_000))
         s2_amt = float(self.settings.get('stage2_amt', 2_000_000))
+        
+        # [v33.0] Unified Sizing (Unit-based: % or 원)
+        s1_unit = self.settings.get('s1_sizing_unit', "원")
+        s2_unit = self.settings.get('s2_sizing_unit', "원")
+        
+        if s1_unit == '%' or s2_unit == '%':
+            # Calculate current total equity (Cash + Current Holdings Value)
+            holdings_value = 0
+            for c, h in self.holdings.items():
+                holdings_value += h['qty'] * h.get('last_p', h['avg_p'])
+            total_equity = self.cash + holdings_value
+            
+            if s1_unit == '%':
+                s1_pct = float(self.settings.get('s1_equity_pct', 10.0))
+                s1_amt = total_equity * (s1_pct / 100.0)
+            if s2_unit == '%':
+                s2_pct = float(self.settings.get('s2_equity_pct', 20.0))
+                s2_amt = total_equity * (s2_pct / 100.0)
 
         if h_info is None:
             if self.cash < s1_amt * 0.5: return 
@@ -300,7 +331,11 @@ class DynamicBacktester:
 
         self.cash -= (real_amt + buy_fee)
         if h_info is None:
-            self.holdings[code] = {'qty': qty, 'avg_p': price, 'entry_n': 1, 'max_p': price, 'entry_date': curr_time, 'sig_type': sig_type}
+            self.holdings[code] = {
+                'qty': qty, 'avg_p': price, 'entry_n': 1, 'max_p': price, 
+                'entry_date': curr_time, 'sig_type': sig_type,
+                'atr_at_entry': last_row.get('ATR', 0) # Store ATR for SL
+            }
         else:
             old_qty = h_info['qty']
             h_info['avg_p'] = (h_info['avg_p'] * old_qty + real_amt) / (old_qty + qty)
@@ -493,12 +528,12 @@ class DynamicBacktester:
                 suffix = "_a" if sig_type == "TYPE_A" else "_b"
                 if self.settings.get('use_s1_stop_loss', True):
                     sl_pct = float(self.settings.get(f's1{suffix}_stop_loss', 3.0))
-                if self.settings.get('use_s1_take_profit', True):
+                if self.settings.get('use_s1_tp', True):
                     tp_pct = float(self.settings.get(f's1{suffix}_take_profit', 5.0))
             else:
                 if self.settings.get('use_s2_stop_loss', True):
                     sl_pct = float(self.settings.get('s2_stop_loss', 2.0))
-                if self.settings.get('use_s2_take_profit', True):
+                if self.settings.get('use_s2_tp', True):
                     tp_pct = float(self.settings.get('s2_take_profit', 5.0))
             
             stop_lossed = (sl_pct > 0) & (m1_closes / h_info['avg_p'] - 1 <= -sl_pct/100)
@@ -515,8 +550,22 @@ class DynamicBacktester:
                     stop_lossed = stop_lossed & (~grace_mask)
                     flash_exited = flash_exited & (~grace_mask)
             
+            # (D) ATR Exit (v31.0)
+            atr_trailed = np.zeros(len(m1_closes), dtype=bool)
+            atr_sl_triggered = np.zeros(len(m1_closes), dtype=bool)
+            if self.settings.get('use_atr_exit', False):
+                atr_val = curr_15m.get('ATR', 0) if curr_15m is not None else 0
+                entry_atr = h_info.get('atr_at_entry', atr_val)
+                if not np.isnan(atr_val) and atr_val > 0:
+                    sl_mult = float(self.settings.get('atr_multiplier_sl', 2.0))
+                    trail_mult = float(self.settings.get('atr_multiplier_trail', 3.0))
+                    if self.settings.get('use_atr_trailing_stop', True):
+                        atr_trailed = (m1_closes <= running_max - (trail_mult * atr_val))
+                    if self.settings.get('use_atr_stop_loss', True):
+                        atr_sl_triggered = (m1_closes <= h_info['avg_p'] - (sl_mult * entry_atr))
+
             # 최초 발생 지점 찾기
-            exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
+            exit_mask = flash_exited | stop_lossed | take_profited | gap_downed | atr_trailed | atr_sl_triggered
             exit_idxs = np.where(exit_mask)[0]
             
             if len(exit_idxs) > 0:
@@ -532,6 +581,10 @@ class DynamicBacktester:
                 elif take_profited[idx]:
                     exit_price = h_info['avg_p'] * (1 + tp_pct/100) # 고전밀에서는 가능하면 TP 가격 체결 가정
                     reason = f"1M Take Profit (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
+                elif atr_trailed[idx]:
+                    reason = f"1M ATR Trail Stop (S{h_info['entry_n']})"
+                elif atr_sl_triggered[idx]:
+                    reason = f"1M ATR Stop Loss (S{h_info['entry_n']})"
                 else: reason = f"1M Stop Loss (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
                 
                 self._execute_sell(code, exit_price, exit_time, reason, indicator_row=curr_15m)

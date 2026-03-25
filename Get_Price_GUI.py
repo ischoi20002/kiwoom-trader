@@ -63,7 +63,6 @@ try:
 except:
     pass
 
-# 기본 전략 설정
 DEFAULT_SETTINGS = {
     "min_trde_val": 50.0,
     "sel_rsi_min": 30.0,
@@ -72,22 +71,22 @@ DEFAULT_SETTINGS = {
     "buy_rsi_max_b": 70.0,
     "buy_rsi_max_a": 65.0,
     "use_type_a": True,
-    "use_type_b": False,
+    "use_type_b": True,
     "vol_surge": 1.2,
     "use_vol_surge": True,
     "vol_surge_b": 2.0,
-    "use_type_b_vol": False,
-    "use_macd_gc_b": False,
-    "use_trend_aligned_b": False,
-    "total_capital": 10000000.0,
-    "max_slots": 20.0,
+    "use_type_b_vol": True,
+    "use_macd_gc_b": True,
+    "use_trend_aligned_b": True,
+    "total_capital": 10000000,
+    "max_slots": 30,
     "vol_ratio": 1.5,
     "vol_lookback": 10.0,
     "ma_convergence": 0.05,
     "use_gc": True,
-    "gc_window": 75.0,
+    "gc_window": 75,
     "use_rsi_signal": True,
-    "rsi_window": 45.0,
+    "rsi_window": 45,
     "use_vol_power": True,
     "vol_power_lvl": 120.0,
     "use_ma60_safe": True,
@@ -98,15 +97,11 @@ DEFAULT_SETTINGS = {
     "macd_fast": 12.0,
     "macd_slow": 26.0,
     "macd_sig": 9.0,
-    "sig_macd_fast": 12.0,
-    "sig_macd_slow": 26.0,
-    "sig_macd_sig": 9.0,
-    "rsi_sig_period": 9.0,
+    "rsi_sig_period": 14.0,
     "use_auto_virtual": True,
-    "flash_exit_pct": 3.0,
     "gap_down_limit": -5.0,
-    "stage1_amt": 1000000.0,
-    "stage2_amt": 2000000.0,
+    "stage1_amt": 20.0,
+    "stage2_amt": 30.0,
     "use_s2_ma5": True,
     "s2_ma5_gap": 0.0,
     "use_s2_profit": True,
@@ -127,22 +122,28 @@ DEFAULT_SETTINGS = {
     "s1_b_stop_loss": 2.0,
     "s1_a_take_profit": 5.0,
     "s1_b_take_profit": 4.0,
-    "use_s1_flash_exit": True,
-    "use_s2_flash_exit": True,
+    "use_s1_flash_exit": False,
+    "use_s2_flash_exit": False,
     "s2_flash_exit_pct": 3.0,
-    "use_s1_stop_loss": True,
-    "use_s2_stop_loss": True,
-    "use_stop_loss": True,
-    "stop_loss": 3.0,
+    "use_s1_stop_loss": False,
+    "use_s2_stop_loss": False,
     "s2_stop_loss": 2.0,
-    "stage2_trigger": 1.0,
-    "take_profit": 5.0,
     "s2_take_profit": 6.0,
     "use_s1_tp": True,
     "use_rsi_min": True,
     "use_s2_tp": True,
     "use_rsi_sig_filter": True,
-    "use_gap_grace": True
+    "use_gap_grace": True,
+    "use_atr_exit": True,
+    "use_atr_stop_loss": True,
+    "use_atr_trailing_stop": True,
+    "atr_period": 100,
+    "atr_multiplier_sl": 3.0,
+    "atr_multiplier_trail": 5.0,
+    "s1_equity_pct": 20.0,
+    "s2_equity_pct": 30.0,
+    "s1_sizing_unit": "%",
+    "s2_sizing_unit": "%"
 }
 
 class KiwoomApp:
@@ -235,18 +236,42 @@ class KiwoomApp:
         self.params_entries = {}
         self.settings_status_label = None
         
+    def _final_save_settings(self):
+        """설정 데이터를 실제로 파일에 저장하고 엔진들에 통보"""
+        if self.config_handler.save_settings(self.settings):
+            self.stream_processor.settings = self.settings
+            self.log("💿 설정 파일(settings.json) 저장 완료")
+            return True
+        return False
+
+    def reset_ui_tabs(self):
+        """설정 초기화 시 UI 탭들을 다시 로드하여 반영"""
+        self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        # SettingsTab 등 각 탭이 재생성되거나 내부 변수를 갱신하게 함
+        if hasattr(self, 'notebook'):
+            # 현재 탭 인덱스 저장
+            curr_tab = self.notebook.index("current")
+            # 탭 초기화 및 재배치 (가장 확실한 방법)
+            for child in self.notebook.winfo_children():
+                child.destroy()
+            self._setup_ui()
+            self.notebook.select(curr_tab)
+            self.log("🔄 모든 UI 탭이 초기화된 설정으로 리로드되었습니다.")
+
     def _setup_ui(self):
         """전체 UI 초기화 및 메인 탭 구성"""
         self.colors = self.nordic_style.colors
 
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # [v33.3] Notebook 재사용 로직 (reset_ui_tabs 대응)
+        if not hasattr(self, 'notebook') or self.notebook is None or not self.notebook.winfo_exists():
+            self.notebook = ttk.Notebook(self.root)
+            self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         self.tab_dashboard = ttk.Frame(self.notebook)
-        self.tab_settings = ttk.Frame(self.notebook)
         self.tab_monitor = ttk.Frame(self.notebook)  
         self.tab_virtual = ttk.Frame(self.notebook) 
         self.tab_backtest = ttk.Frame(self.notebook)
+        self.tab_settings = ttk.Frame(self.notebook)
         
         self.notebook.add(self.tab_dashboard, text=" 📊 대시보드 ")
         self.notebook.add(self.tab_monitor, text=" 👁️ 실시간 감시 ")
@@ -276,10 +301,13 @@ class KiwoomApp:
         self.status_label.pack(side=tk.RIGHT, padx=5)
         
         self.gui_utils.log_area = self.log_area
-        self.log("🚀 프로그램이 시작되었습니다.")
+        self.log("🚀 화면 구성이 완료되었습니다.")
         
-        threading.Thread(target=self._fetch_indices_loop, daemon=True).start()
-        threading.Thread(target=self.get_auth_token, daemon=True).start()
+        # [v33.4] 초기화 시에만 실행되는 스레드들 (재입방지)
+        if not hasattr(self, '_initial_threads_started'):
+            self._initial_threads_started = True
+            threading.Thread(target=self._fetch_indices_loop, daemon=True).start()
+            threading.Thread(target=self.get_auth_token, daemon=True).start()
 
     def _on_tab_changed(self, event):
         """[v25.8] 탭 전환 시 호출되는 핸들러"""
@@ -505,9 +533,8 @@ class KiwoomApp:
         df = self.bars_data.get(code)
         if df is None or df.empty: return
         try:
-            rsi_series = strategy_selector.calculate_rsi(df['Close'], 14)
-            df['rsi_history'] = rsi_series
-            self.bars_data[code] = df
+            # [v31.0] 전체 지표 통합 계산 (ATR 포함)
+            self.bars_data[code] = TradingStrategy.calculate_indicators(df, self.settings)
         except Exception as e:
             print(f"[DEBUG] Indicator Recalc Error ({code}): {e}")
 
@@ -544,7 +571,8 @@ class KiwoomApp:
         self.virtual_positions[code] = {
             "name": name, "avg_price": price, "qty": qty, "stage": 1,
             "invested": qty * price, "entry_time": datetime.now(), "max_now": price,
-            "rsi_part_sold_s2": False, "ma_buffer_scale": self.monitor_info.get(code, {}).get('ma_buffer_scale', 1.0)
+            "rsi_part_sold_s2": False, "ma_buffer_scale": self.monitor_info.get(code, {}).get('ma_buffer_scale', 1.0),
+            "atr_at_entry": self.bars_data[code].iloc[-1].get('ATR', 0) if code in self.bars_data and not self.bars_data[code].empty else 0
         }
         self.log(f"💰 [가상매수] {name}({code}) 1차 진입 완료. ({price:,}원, {qty}주)")
         msg = f"<b>💰 [가상매수/1차]</b>\n종목: {name}({code})\n가: {price:,}원 / 수: {qty}주\n시간: {datetime.now().strftime('%H:%M:%S')}"
@@ -581,10 +609,39 @@ class KiwoomApp:
         if self.settings.get(f'use_s{stage}_flash_exit', True) and now_price <= max_now * (1.0 - flash_pct / 100.0):
             is_exit, exit_reason = True, "FLASH_EXIT"
 
-        if not is_exit and self.settings.get('use_stop_loss', True):
-            sl_pct = float(self.settings.get('stop_loss' if stage == 1 else 's2_stop_loss', 3.0))
+        if not is_exit and self.settings.get(f'use_s{stage}_tp', True):
+            tp_pct = float(self.settings.get('s1_a_take_profit' if stage == 1 else 's2_take_profit', 5.0))
+            # S1의 경우 A/B 구분 로직이 필요할 수 있으나 현재는 범용 Stage1 키 사용
+            if stage == 1:
+                # TYPE_B 여부에 따라 분기 (pos에 저장된 필드 활용)
+                is_b = "TYPE_B" in pos.get('reason', '')
+                tp_pct = float(self.settings.get('s1_b_take_profit' if is_b else 's1_a_take_profit', 5.0))
+            
+            if now_price >= avg_p * (1.0 + tp_pct / 100.0):
+                is_exit, exit_reason = True, "TAKE_PROFIT"
+
+        if not is_exit and self.settings.get(f'use_s{stage}_stop_loss', True):
+            sl_pct = float(self.settings.get('s1_a_stop_loss' if stage == 1 else 's2_stop_loss', 3.0))
+            if stage == 1:
+                is_b = "TYPE_B" in pos.get('reason', '')
+                sl_pct = float(self.settings.get('s1_b_stop_loss' if is_b else 's1_a_stop_loss', 3.0))
+            
             if now_price <= avg_p * (1.0 - sl_pct / 100.0):
                 is_exit, exit_reason = True, "STOP_LOSS"
+
+        # [v31.0] ATR-based Exit Check (Real-time)
+        if not is_exit and self.settings.get('use_atr_exit', False):
+            curr_atr = ind.get('ATR', 0) if ind is not None else 0
+            entry_atr = pos.get('atr_at_entry', curr_atr)
+            if curr_atr > 0:
+                sl_mult = float(self.settings.get('atr_multiplier_sl', 2.0))
+                trail_mult = float(self.settings.get('atr_multiplier_trail', 3.0))
+                # A. ATR Stop Loss
+                if self.settings.get('use_atr_stop_loss', True) and now_price <= avg_p - (sl_mult * entry_atr):
+                    is_exit, exit_reason = True, "ATR_SL"
+                # B. ATR Trailing Stop
+                elif self.settings.get('use_atr_trailing_stop', True) and now_price <= max_now - (trail_mult * curr_atr):
+                    is_exit, exit_reason = True, "ATR_TRAIL"
 
         if is_exit:
             self.log(f"🚨 [가상종료/{exit_reason}] {pos['name']}({code}) 탈출 ({profit_ratio:+.1f}%)")

@@ -524,14 +524,14 @@ class DataManagerV2:
                 f_op: 'first', f_hg: 'max', f_lw: 'min', f_cl: 'last', f_vl: 'sum'
             }).dropna()
             
-            resampled.columns = ['o', 'h', 'l', 'c', 'v']
+            resampled.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
             resampled['time'] = resampled.index.strftime('%H%M')
             
-            resampled['ma5'] = resampled['c'].rolling(window=5).mean()
-            resampled['ma20'] = resampled['c'].rolling(window=20).mean()
-            resampled['ma60'] = resampled['c'].rolling(window=60).mean()
+            resampled['ma5'] = resampled['Close'].rolling(window=5).mean()
+            resampled['ma20'] = resampled['Close'].rolling(window=20).mean()
+            resampled['ma60'] = resampled['Close'].rolling(window=60).mean()
             
-            return resampled[['time', 'o', 'h', 'l', 'c', 'v', 'ma5', 'ma20', 'ma60']].tail(100)
+            return resampled[['time', 'Open', 'High', 'Low', 'Close', 'Volume', 'ma5', 'ma20', 'ma60']].tail(100)
         except Exception as e:
             print(f"  [Error] Bar parsing error ({code}): {e}")
             return pd.DataFrame()

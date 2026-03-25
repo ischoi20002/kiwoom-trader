@@ -78,6 +78,23 @@ class NordicStyle:
         style.configure("TCheckbutton", background=self.colors['bg'], foreground=self.colors['fg'], font=("Malgun Gothic", 10))
         style.map("TCheckbutton", background=[("active", self.colors['bg'])], foreground=[("active", self.colors['primary'])])
 
+        # Combobox 스타일 [v33.1]
+        style.configure("TCombobox", fieldbackground="#242933", background="#434C5E", 
+                        foreground=self.colors['fg'], arrowcolor=self.colors['primary'], 
+                        borderwidth=1, relief=tk.FLAT)
+        style.map("TCombobox", 
+                  fieldbackground=[("readonly", "#242933")], 
+                  foreground=[("readonly", self.colors['fg'])],
+                  selectbackground=[("readonly", "#242933")],
+                  selectforeground=[("readonly", self.colors['primary'])])
+        
+        # [v33.1] Dropdown List (Listbox) 전역 스타일 (Combobox 팝업용)
+        self.root.option_add("*TCombobox*Listbox.background", "#242933")
+        self.root.option_add("*TCombobox*Listbox.foreground", self.colors['fg'])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", self.colors['primary'])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#2E3440")
+        self.root.option_add("*TCombobox*Listbox.font", ("Malgun Gothic", 9))
+
         # 스크롤바 스타일링
         style.layout("Vertical.TScrollbar", 
                      [('Vertical.Scrollbar.trough', {'children': [('Vertical.Scrollbar.thumb', {'expand': '1', 'sticky': 'nswe'})], 'sticky': 'ns'})])

@@ -33,30 +33,32 @@ class BacktestTab:
             's1_b_stop_loss': tk.BooleanVar(value=True),
             's2_take_profit': tk.BooleanVar(value=True),
             's2_stop_loss': tk.BooleanVar(value=True),
-            'stage2_trigger': tk.BooleanVar(value=True),
-            's2_rsi_gap': tk.BooleanVar(value=True),
             's2_vol_ratio': tk.BooleanVar(value=True),
-            's2_macd_gap': tk.BooleanVar(value=True)
+            'atr_period': tk.BooleanVar(value=True),
+            'atr_multiplier_sl': tk.BooleanVar(value=True),
+            'atr_multiplier_trail': tk.BooleanVar(value=True)
         }
         self.opt_high_precision_var = tk.BooleanVar(value=False)
         self.col_to_params = {
             "vol_a": ["vol_surge"], "vol_b": ["vol_surge_b"],
             "rsi_a": ["buy_rsi_max_a"], "rsi_b": ["buy_rsi_max_b"], "rsi_min": ["buy_rsi_min"],
             "gc_w": ["gc_window"], "rsi_w": ["rsi_window"],
-            "tp_sl_a": ["s1_a_take_profit", "s1_a_stop_loss"],
-            "tp_sl_b": ["s1_b_take_profit", "s1_b_stop_loss"],
-            "tp_sl_s2": ["s2_take_profit", "s2_stop_loss"], "s2_trg": ["stage2_trigger"],
-            "s2_rsi": ["s2_rsi_gap"], "s2_macd": ["s2_macd_gap"], "s2_vol": ["s2_vol_ratio"]
+            "tp_a": ["s1_a_take_profit"], "sl_a": ["s1_a_stop_loss"],
+            "tp_b": ["s1_b_take_profit"], "sl_b": ["s1_b_stop_loss"],
+            "tp_s2": ["s2_take_profit"], "sl_s2": ["s2_stop_loss"],
+            "s2_vol": ["s2_vol_ratio"],
+            "atr_p": ["atr_period"], "atr_sl": ["atr_multiplier_sl"], "atr_tr": ["atr_multiplier_trail"]
         }
         # [v15.7] 헤더 텍스트 매핑 (아이콘 업데이트용)
         self.param_to_col_id = {
             "vol_surge": "#6", "vol_surge_b": "#7", "buy_rsi_max_a": "#8",
             "buy_rsi_max_b": "#9", "buy_rsi_min": "#10", "gc_window": "#11",
             "rsi_window": "#12",
- "s1_a_take_profit": "#13", "s1_a_stop_loss": "#13",
-            "s1_b_take_profit": "#14", "s1_b_stop_loss": "#14",
-            "s2_take_profit": "#15", "s2_stop_loss": "#15",
-            "stage2_trigger": "#16", "s2_rsi_gap": "#17", "s2_macd_gap": "#18", "s2_vol_ratio": "#19"
+            "s1_a_take_profit": "#13", "s1_a_stop_loss": "#14",
+            "s1_b_take_profit": "#15", "s1_b_stop_loss": "#16",
+            "s2_take_profit": "#17", "s2_stop_loss": "#18",
+            "s2_vol_ratio": "#19",
+            "atr_period": "#20", "atr_multiplier_sl": "#21", "atr_multiplier_trail": "#22"
         }
         # 초기 동기화 수행
         self._sync_opt_toggles_with_settings()
@@ -72,7 +74,10 @@ class BacktestTab:
             "use_s1_tp": ["s1_a_take_profit", "s1_b_take_profit"],
             "use_s1_stop_loss": ["s1_a_stop_loss", "s1_b_stop_loss"],
             "use_s2_tp": ["s2_take_profit"],
-            "use_s2_stop_loss": ["s2_stop_loss"]
+            "use_s2_stop_loss": ["s2_stop_loss"],
+            "use_atr_exit": ["atr_period"],
+            "use_atr_stop_loss": ["atr_multiplier_sl"],
+            "use_atr_trailing_stop": ["atr_multiplier_trail"]
         }
         
         for settings_key, opt_keys in sync_map.items():
@@ -229,20 +234,23 @@ class BacktestTab:
             "macd_sig": "macd_sig: MACD 시그널 주기",
             "gc_w": "gc_window: 이평선 골든크로스 유지시간: 5/20 이평선 골든크로스가 유지된 캔들 갯수(분)",
             "rsi_w": "rsi_window: RSI 50 상향돌파 유지시간: RSI 50을 넘어선 상태로 유지된 캔들 갯수(분)",
-            "tp_sl_a": "1단계(A) 익절/손절: 목표 수익률 / 손절 기준 (%)",
-            "tp_sl_b": "1단계(B) 익절/손절: 목표 수익률 / 손절 기준 (%)",
-            "tp_sl_s2": "2단계(S2) 익절/손절: 목표 수익률 / 손절 기준 (%)",
-            "s2_trg": "stage2_trigger: 2차 매수(추매) 실행 수익률 (%)",
-            "s2_rsi": "s2_rsi_gap: RSI 모멘텀 슬로프 상승(Slope > 0) 확인 필터 (Min 상승폭 %)",
-            "s2_macd": "s2_macd_gap: MACD 시그널 모멘텀 상승 확인 필터 (Min 상승폭 %)",
-            "s2_vol": "s2_vol_ratio: 2차 매수 시 필요한 최소 거래량 배수 (배)"
+            "tp_a": "1단계(A) 익절: 목표 수익률 (%)",
+            "sl_a": "1단계(A) 손절: 손절 기준 (%)",
+            "tp_b": "1단계(B) 익절: 목표 수익률 (%)",
+            "sl_b": "1단계(B) 손절: 손절 기준 (%)",
+            "tp_s2": "2단계(S2) 익절: 목표 수익률 (%)",
+            "sl_s2": "2단계(S2) 손절: 손절 기준 (%)",
+            "s2_vol": "s2_vol_ratio: 2차 매수 시 필요한 최소 거래량 배수 (배)",
+            "atr_p": "atr_period: ATR 계산 기간 (Candles)",
+            "atr_sl": "atr_multiplier_sl: ATR 손절 배수 (Multiplier)",
+            "atr_tr": "atr_multiplier_trail: ATR 추격 매도시점 배수 (Multiplier)"
         }
 
         # 카테고리별 컬럼 구성 [v16.9]
         cols = ["rank", "avg_ret", "avg_mdd", "win_rate", "trades", 
                 "vol_a", "vol_b", "rsi_a", "rsi_b", "rsi_min", "gc_w", "rsi_w",
-                "tp_sl_a", "tp_sl_b", "tp_sl_s2", "s2_trg",
-                "s2_rsi", "s2_macd", "s2_vol"] # [v26.4]
+                "tp_a", "sl_a", "tp_b", "sl_b", "tp_s2", "sl_s2", "s2_vol",
+                "atr_p", "atr_sl", "atr_tr"] 
         self.app.tree_backtest = ttk.Treeview(self.table_assembly, columns=cols, show="headings", height=15)
         
         # 헤더 이름 설정 (카테고리 없이 깔끔하게)
@@ -250,8 +258,9 @@ class BacktestTab:
             "rank": "순위", "avg_ret": "수익률", "avg_mdd": "MDD", "win_rate": "승률", "trades": "횟수",
             "vol_a": "☑️ V_A", "vol_b": "☑️ V_B", "rsi_a": "☑️ R_A", "rsi_b": "☑️ R_B", "rsi_min": "☑️ R_Min",
             "gc_w": "☑️ G_Dur", "rsi_w": "☑️ R_Dur",
-            "tp_sl_a": "☑️ T/L(A)", "tp_sl_b": "☑️ T/L(B)", "tp_sl_s2": "☑️ T/L(S2)", "s2_trg": "☑️ S2",
-            "s2_rsi": "☑️ R_S2", "s2_macd": "☑️ M_S2", "s2_vol": "☑️ Vol" # [v26.4]
+            "tp_a": "☑️ T_A", "sl_a": "☑️ L_A", "tp_b": "☑️ T_B", "sl_b": "☑️ L_B",
+            "tp_s2": "☑️ T_S2", "sl_s2": "☑️ L_S2",
+            "s2_vol": "☑️ Vol", "atr_p": "☑️ ATR_P", "atr_sl": "☑️ ATR_SL", "atr_tr": "☑️ ATR_TR"
         }
         
         for col in cols:
@@ -263,8 +272,8 @@ class BacktestTab:
         col_widths = {
             "rank": 40, "avg_ret": 60, "avg_mdd": 60, "win_rate": 60, "trades": 55,
             "vol_a": 65, "vol_b": 65, "rsi_b": 65, "rsi_a": 65, "rsi_min": 65, "gc_w": 65, "rsi_w": 65, # [v25.3]
-            "tp_sl_a": 80, "tp_sl_b": 80, "tp_sl_s2": 80, "s2_trg": 80,
-            "s2_rsi": 80, "s2_macd": 80, "s2_vol": 100
+            "tp_a": 65, "sl_a": 65, "tp_b": 65, "sl_b": 65, "tp_s2": 65, "sl_s2": 65,
+            "s2_vol": 65, "atr_p": 65, "atr_sl": 65, "atr_tr": 65
         }
         for col in cols:
             self.app.tree_backtest.column(col, width=col_widths.get(col, 60), anchor=tk.CENTER, stretch=False)
@@ -345,12 +354,12 @@ class BacktestTab:
             's1_b_stop_loss': range_for(s.get('s1_b_stop_loss', 2.0), 1.0),
             's2_take_profit': range_for(s.get('s2_take_profit', 5.0), 2.0),
             's2_stop_loss': range_for(s.get('s2_stop_loss', 2.0), 0.5),
-            'stage2_trigger': range_for(s.get('stage2_trigger', 1.0), 0.5),
+            's2_vol_ratio': range_for(s.get('s2_vol_ratio', 1.0), 0.2),
             'gc_window': range_for(s.get('gc_window', 90), 10),
             'rsi_window': range_for(s.get('rsi_window', 45), 5),
-            's2_rsi_gap': range_for(s.get('s2_rsi_gap', 0.0), 0.1),
-            's2_vol_ratio': range_for(s.get('s2_vol_ratio', 1.0), 0.2),
-            's2_macd_gap': range_for(s.get('s2_macd_gap', 0.0), 0.1)
+            'atr_period': range_for(s.get('atr_period', 14), 5),
+            'atr_multiplier_sl': range_for(s.get('atr_multiplier_sl', 2.0), 0.5),
+            'atr_multiplier_trail': range_for(s.get('atr_multiplier_trail', 3.0), 1.0)
         }
 
     def _on_header_click(self, event):
@@ -469,24 +478,26 @@ class BacktestTab:
                     return f"{val:.{decimal}f}"
                 return str(val)
 
-            # 엔진의 변수명과 테이블 컬럼 매칭 (v16.9)
-            tp_sl_a = f"{res.get('s1_a_take_profit', 0):.1f}/{res.get('s1_a_stop_loss', 0):.1f}"
-            tp_sl_b = f"{res.get('s1_b_take_profit', 0):.1f}/{res.get('s1_b_stop_loss', 0):.1f}"
-            tp_sl_s2 = f"{res.get('s2_take_profit', 0):.1f}/{res.get('s2_stop_loss', 0):.1f}"
+            tp_a = fmt('s1_a_take_profit', res.get('s1_a_take_profit', 0))
+            sl_a = fmt('s1_a_stop_loss', res.get('s1_a_stop_loss', 0))
+            tp_b = fmt('s1_b_take_profit', res.get('s1_b_take_profit', 0))
+            sl_b = fmt('s1_b_stop_loss', res.get('s1_b_stop_loss', 0))
+            tp_s2 = fmt('s2_take_profit', res.get('s2_take_profit', 0))
+            sl_s2 = fmt('s2_stop_loss', res.get('s2_stop_loss', 0))
 
             vol_a = fmt('vol_surge', res.get('vol_surge', 0))
             vol_b = fmt('vol_surge_b', res.get('vol_surge_b', 0))
             rsi_b = fmt('buy_rsi_max_b', res.get('buy_rsi_max_b', 0))
             rsi_a = fmt('buy_rsi_max_a', res.get('buy_rsi_max_a', 0))
             rsi_min = fmt('buy_rsi_min', res.get('buy_rsi_min', 0))
-            s2_trg = fmt('stage2_trigger', res.get('stage2_trigger', 0))
-            
             rsi_w = fmt('rsi_window', res.get('rsi_window', 0), 0)
             gc_w = fmt('gc_window', res.get('gc_window', 0), 0)
-
-            s2_rsi = fmt('s2_rsi_gap', res.get('s2_rsi_gap', 0))
-            s2_macd = fmt('s2_macd_gap', res.get('s2_macd_gap', 0))
             s2_vol = fmt('s2_vol_ratio', res.get('s2_vol_ratio', 1.0))
+            
+            # [v31.0] ATR Parameters
+            atr_p = fmt('atr_period', res.get('atr_period', 14), 0)
+            atr_sl = fmt('atr_multiplier_sl', res.get('atr_multiplier_sl', 2.0))
+            atr_tr = fmt('atr_multiplier_trail', res.get('atr_multiplier_trail', 3.0))
             
             row_tag = 'even' if i % 2 == 0 else 'odd'
             perf_tag = 'plus' if row.avg_ret > 0 else 'minus'
@@ -494,7 +505,7 @@ class BacktestTab:
             self.app.tree_backtest.insert("", tk.END, values=(
                 i, f"{row.avg_ret:+.2f}", f"{row.avg_mdd:.2f}", f"{row.avg_win:.2f}", 
                 int(row.total_trades), vol_a, vol_b, rsi_a, rsi_b, rsi_min, gc_w, rsi_w, 
-                tp_sl_a, tp_sl_b, tp_sl_s2, s2_trg, s2_rsi, s2_macd, s2_vol
+                tp_a, sl_a, tp_b, sl_b, tp_s2, sl_s2, s2_vol, atr_p, atr_sl, atr_tr
             ), tags=(perf_tag, row_tag))
             
         # 태그 색상 설정 (노르딕 테마 고정밀 - 저채도)
@@ -682,13 +693,16 @@ class BacktestTab:
             ('buy_rsi_min', 'R_Min (RSI하한)'),
             ('gc_window', 'G_Dur (MA유지)'),
             ('rsi_window', 'R_Dur (RSI유지)'),
-            (['s1_a_take_profit', 's1_a_stop_loss'], 'T/L(A) (정찰 익/손절)'),
-            (['s1_b_take_profit', 's1_b_stop_loss'], 'T/L(B) (돌파 익/손절)'),
-            (['s2_take_profit', 's2_stop_loss'], 'T/L(S2) (추매 익/손절)'),
-            ('stage2_trigger', 'S2 (추매기준)'),
-            ('s2_rsi_gap', 'S2 RSI (모멘텀%)'),
-            ('s2_vol_ratio', 'S2 Vol (거래량비율)'),
-            ('s2_macd_gap', 'S2 MACD (모멘텀%)')
+            ('s1_a_take_profit', 'TP_A (정찰 익절)'),
+            ('s1_a_stop_loss', 'SL_A (정찰 손절)'),
+            ('s1_b_take_profit', 'TP_B (돌파 익절)'),
+            ('s1_b_stop_loss', 'SL_B (돌파 손절)'),
+            ('s2_take_profit', 'TP_S2 (추매 익절)'),
+            ('s2_stop_loss', 'SL_S2 (추매 손절)'),
+            ('s2_vol_ratio', 'Vol (추매 거래량)'),
+            ('atr_period', 'ATR_P (ATR기간)'),
+            ('atr_multiplier_sl', 'ATR_SL (손절배수)'),
+            ('atr_multiplier_trail', 'ATR_TR (추격배수)')
         ]
 
         entries = {}

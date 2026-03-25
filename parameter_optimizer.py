@@ -244,7 +244,8 @@ class ParameterOptimizer:
             's2_ma20_gap', 's2_vol_ratio', 's2_rsi_gap', 's2_macd_gap',
             'use_s1_flash_exit', 'use_s2_flash_exit', 'use_s1_stop_loss', 'use_s2_stop_loss',
             's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
-            'use_s2_ma5', 'use_s2_profit', 'use_s2_delay', 'gc_window', 'rsi_window'
+            'use_s2_ma5', 'use_s2_profit', 'use_s2_delay', 'gc_window', 'rsi_window',
+            'atr_multiplier_sl', 'atr_multiplier_trail'
         }
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False
@@ -343,7 +344,7 @@ class ParameterOptimizer:
                 best_settings = self.base_settings.copy()
                 for k in keys:
                     val = best[k]
-                    if k in ['vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig']:
+                    if k in ['vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig', 'gc_window', 'rsi_window', 'atr_period']:
                         try: val = int(float(val))
                         except: pass
                     best_settings[k] = val

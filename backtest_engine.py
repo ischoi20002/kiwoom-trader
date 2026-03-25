@@ -279,12 +279,11 @@ class SimpleBacktester:
 
     def _init_simulation(self, df, code, market_df, vix_df, high_precision):
         """시뮬레이션 초기 설정 및 시장 상태 계산"""
-        max_slots = self.settings.get('max_slots', 10)
         total_capital_val = self.settings.get('total_capital', 30000000)
-        slot_budget = total_capital_val / max_slots
         
-        self.s1_amt = self.settings.get('stage1_amt', slot_budget * 0.3)
-        self.s2_amt = self.settings.get('stage2_amt', slot_budget * 0.7)
+        # [v33.5] Decouple budget from max_slots (Now used as Monitoring limit)
+        self.s1_amt = self.settings.get('stage1_amt', 1000000.0)
+        self.s2_amt = self.settings.get('stage2_amt', 2000000.0)
         self.buy_f_rate = self.settings.get('buy_fee_rate', 0.015) / 100.0
         self.sell_f_rate = self.settings.get('sell_fee_rate', 0.195) / 100.0
         
@@ -375,8 +374,8 @@ class SimpleBacktester:
             pos = params['position']
             if curr_high > pos['max_price']: pos['max_price'] = curr_high
             
-            # 1. Exit Check (TP/SL/Flash/Gap)
-            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos)
+            # 1. Exit Check (TP/SL/Flash/Gap/ATR)
+            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos, indicator_row=df.iloc[i])
             if exit_res:
                 params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicator_row=df.iloc[i])
             
@@ -413,11 +412,11 @@ class SimpleBacktester:
         if pos['stage'] == 1:
             f_pct = float(self.settings.get(f's1{suffix}_flash_exit_pct', 3.0)) if self.settings.get('use_s1_flash_exit', True) else 0.0
             sl_pct = float(self.settings.get(f's1{suffix}_stop_loss', 3.0)) if self.settings.get('use_s1_stop_loss', True) else 0.0
-            tp_pct = float(self.settings.get(f's1{suffix}_take_profit', 5.0)) if self.settings.get('use_s1_take_profit', True) else 0.0
+            tp_pct = float(self.settings.get(f's1{suffix}_take_profit', 5.0)) if self.settings.get('use_s1_tp', True) else 0.0
         else:
             f_pct = float(self.settings.get('s2_flash_exit_pct', 3.0)) if self.settings.get('use_s2_flash_exit', True) else 0.0
             sl_pct = float(self.settings.get('s2_stop_loss', 2.0)) if self.settings.get('use_s2_stop_loss', True) else 0.0
-            tp_pct = float(self.settings.get('s2_take_profit', 5.0)) if self.settings.get('use_s2_take_profit', True) else 0.0
+            tp_pct = float(self.settings.get('s2_take_profit', 5.0)) if self.settings.get('use_s2_tp', True) else 0.0
         
         g_lmt = float(self.settings.get('gap_down_limit', -5.0))
         
@@ -433,17 +432,28 @@ class SimpleBacktester:
         take_profited = (tp_pct > 0) & (m1_highs / avg_price - 1 >= tp_pct/100)
         gap_downed = (m1_closes / avg_price - 1 <= g_lmt / 100)
         
-        # [v25.8/v25.9] 15-minute Gap-Down Grace Period: Allow recovery between SL/Flash and Gap Limit during first 15m
+        # [v25.8/v25.9] 15-minute Gap-Down Grace Period
         if self.settings.get('use_gap_grace', True):
             m1_t = pd.DatetimeIndex(m1_times)
-            # Check if this is the opening 15m bar of the day (09:00)
-            if m1_t[0].hour == 9 and m1_t[0].minute == 0:
-                # In the morning (09:00-09:15), only GapDown can trigger if price is between boundaries
+            if len(m1_t) > 0 and m1_t[0].hour == 9 and m1_t[0].minute == 0:
                 grace_mask = (m1_t.hour == 9).to_numpy() & (m1_t.minute < 15).to_numpy()
                 stop_lossed = stop_lossed & (~grace_mask)
-                flash_exited = flash_exited & (~grace_mask)
-        
         exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
+        
+        # [v31.0] ATR-based Stop Loss & Trailing Stop
+        atr_trailed = np.zeros(len(m1_closes), dtype=bool)
+        atr_sl_triggered = np.zeros(len(m1_closes), dtype=bool)
+        if self.settings.get('use_atr_exit', False):
+            atr_val = prev_row_base.get('ATR', 0)
+            if not np.isnan(atr_val) and atr_val > 0:
+                sl_mult = float(self.settings.get('atr_multiplier_sl', 2.0))
+                trail_mult = float(self.settings.get('atr_multiplier_trail', 3.0))
+                if self.settings.get('use_atr_trailing_stop', True):
+                    atr_trailed = (m1_closes <= running_max - (trail_mult * atr_val))
+                if self.settings.get('use_atr_stop_loss', True):
+                    atr_sl_triggered = (m1_closes <= avg_price - (sl_mult * atr_val))
+                exit_mask = exit_mask | atr_trailed | atr_sl_triggered
+
         exit_idxs = np.where(exit_mask)[0]
         
         if len(exit_idxs) > 0:
@@ -455,6 +465,8 @@ class SimpleBacktester:
             if bool(gap_downed[idx]): reason = "1M_GapDown"
             elif bool(flash_exited[idx]): reason = "1M_FlashExit"
             elif bool(take_profited[idx]): reason = "1M_TP"
+            elif bool(atr_trailed[idx]): reason = "1M_ATR_Trail"
+            elif bool(atr_sl_triggered[idx]): reason = "1M_ATR_SL"
             
             params = self._execute_sell(e_time, e_price, reason, params, indicator_row=prev_row_base)
             
@@ -471,7 +483,7 @@ class SimpleBacktester:
             if curr_high > pos['max_price']: pos['max_price'] = curr_high
             
             # 익절/손절 체크 (봉 단위)
-            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos)
+            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos, indicator_row=row)
             if exit_res:
                 params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicator_row=row)
             elif pos['stage'] == 1:
@@ -511,7 +523,8 @@ class SimpleBacktester:
     
         return params
 
-    def _check_exits(self, date, price, high, low, pos):
+    def _check_exits(self, date, price, high, low, pos, indicator_row=None):
+        """Flash Exit, Gap Down, TP/SL, ATR 조건 체크 (v31.0)"""
         """Flash Exit, Gap Down, TP/SL 조건 체크 (v26.0: Type A/B 분리 대응)"""
         # 0. 공통 상수 및 설정 로드
         s = self.settings
@@ -543,26 +556,35 @@ class SimpleBacktester:
             ret_pct = (price / pos['avg_price'] - 1) * 100
             return {'price': price, 'reason': f"GAP_DOWN|Ret:{ret_pct:.1f}%"}
 
-        # 3. Take Profit
-        if pos['stage'] == 1:
-            tp_pct = float(s.get(f's1{suffix}_take_profit', 5.0)) / 100.0
-        else:
-            tp_pct = float(s.get('s2_take_profit', 5.0)) / 100.0
+        # 3. ATR Exit (v31.0) - High Priority
+        if s.get('use_atr_exit', False) and indicator_row is not None:
+            curr_atr = indicator_row.get('ATR', 0)
+            entry_atr = pos.get('atr_at_entry', curr_atr)
             
-        if (high / pos['avg_price'] - 1) >= tp_pct:
-            return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S{pos['stage']})"}
+            if not np.isnan(curr_atr) and curr_atr > 0:
+                sl_mult = float(s.get('atr_multiplier_sl', 2.0))
+                trail_mult = float(s.get('atr_multiplier_trail', 3.0))
+                
+                # A. ATR Stop Loss (Based on Entry ATR)
+                if price <= pos['avg_price'] - (sl_mult * entry_atr):
+                    return {'price': price, 'reason': f"ATR_SL(S{pos['stage']})"}
+                    
+                # B. ATR Trailing Stop (Based on Current ATR from High)
+                if price <= pos['max_price'] - (trail_mult * curr_atr):
+                    return {'price': price, 'reason': f"ATR_TRAIL(S{pos['stage']})"}
 
-        # 4. Stop Loss
-        if pos['stage'] == 1:
-            if s.get('use_s1_stop_loss', True):
-                sl_pct = float(s.get(f's1{suffix}_stop_loss', 3.0)) / 100.0
-                if (price / pos['avg_price'] - 1) <= -sl_pct:
-                    return {'price': price, 'reason': f"STOP_LOSS(S1-{sig_type.split('_')[-1]})"}
-        else:
-            if s.get('use_s2_stop_loss', True):
-                sl_pct = float(s.get('s2_stop_loss', 2.0)) / 100.0
-                if (price / pos['avg_price'] - 1) <= -sl_pct:
-                    return {'price': price, 'reason': f"STOP_LOSS(S2)"}
+        # 4. Take Profit
+        tp_ok = s.get('use_s1_tp', True) if pos['stage'] == 1 else s.get('use_s2_tp', True)
+        if tp_ok:
+            if pos['stage'] == 1:
+                tp_pct = float(s.get(f's1{suffix}_take_profit', 5.0)) / 100.0
+            else:
+                tp_pct = float(s.get('s2_take_profit', 5.0)) / 100.0
+                
+            if (high / pos['avg_price'] - 1) >= tp_pct:
+                return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S{pos['stage']})"}
+
+        # 5. Stop Loss (Fixed %)
             
         return None
 
@@ -584,6 +606,20 @@ class SimpleBacktester:
             except: pass
 
         amt = self.s1_amt if stage == 1 else self.s2_amt
+        
+        # [v33.0] Unified Sizing (Unit-based: % or 원)
+        unit = self.settings.get('s1_sizing_unit' if stage == 1 else 's2_sizing_unit', "원")
+        if unit == '%':
+            total_equity = params['balance']
+            if params['position'] is not None:
+                total_equity += params['position']['qty'] * price
+            
+            s_pct = float(self.settings.get('s1_equity_pct' if stage == 1 else 's2_equity_pct', 10.0))
+            amt = total_equity * (s_pct / 100.0)
+        else:
+            # 원화 고정 금액 (이미 상단에서 amt에 할당됨. 명시적으로 재할당 가능)
+            amt = float(self.settings.get('stage1_amt' if stage == 1 else 'stage2_amt', 1_000_000))
+
         qty = int(amt // price)
         if qty <= 0: return params
         
@@ -594,7 +630,8 @@ class SimpleBacktester:
             params['position'] = {
                 'entry_date': date, 'entry_idx': entry_idx, 
                 'avg_price': price, 'qty': qty, 'stage': 1, 'max_price': max_p,
-                'sig_type': sig_type
+                'sig_type': sig_type,
+                'atr_at_entry': indicator_row.get('ATR', 0) if indicator_row is not None else 0
             }
         else:
             old_q = params['position']['qty']

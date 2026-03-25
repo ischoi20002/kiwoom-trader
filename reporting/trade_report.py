@@ -45,6 +45,8 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             except: pass
             return
     
+    avg_cash_ratio = 0 # [v32.1] Initialize for template
+    
     # [v16.0] UI-Consistent Hierarchical Parameter Mapping
     PARAM_STRUCTURE = [
         {
@@ -91,7 +93,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             ]
         },
         {
-            "name": "🛡️ [4] 매도 및 자금 관리 (Exit & Risk)",
+            "name": "🛡️ [4] 매도 및 자산 관리 (Exit & Risk)",
             "items": [
                 {"label": "S1 Flash Exit (A/B)", "toggle": "use_s1_flash_exit", "keys": ["s1_a_flash_exit_pct", "s1_b_flash_exit_pct"], "unit": "%", "sep": "/"},
                 {"label": "S1 손절 수익률 (A/B)", "toggle": "use_s1_stop_loss", "keys": ["s1_a_stop_loss", "s1_b_stop_loss"], "unit": "%", "sep": "/"},
@@ -99,13 +101,16 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "S2 Flash Exit 적용", "toggle": "use_s2_flash_exit", "key": "s2_flash_exit_pct", "unit": "%"},
                 {"label": "S2 손절 수익률", "toggle": "use_s2_stop_loss", "key": "s2_stop_loss", "unit": "%"},
                 {"label": "S2 익절 수익률", "toggle": "use_s2_tp", "key": "s2_take_profit", "unit": "%"},
-                {"label": "총 운용 자산", "key": "total_capital", "unit": "원", "is_amt": True},
-                {"label": "최대 감시 종목(슬롯)", "key": "max_slots", "unit": "개"},
-                {"label": "1단계(정찰) 비중", "key": "stage1_amt", "unit": "원", "is_amt": True},
-                {"label": "2단계(본대) 비중", "key": "stage2_amt", "unit": "원", "is_amt": True},
                 {"label": "갭하락 킬스위치", "key": "gap_down_limit", "unit": "%"},
                 {"label": "장 시작 15분 유예", "toggle": "use_gap_grace"},
-                {"label": "가상 매수 자동화", "toggle": "use_auto_virtual"}
+                {"label": "가상 매수 자동화", "toggle": "use_auto_virtual"},
+                {"label": "ATR 기반 탈출", "toggle": "use_atr_exit", "key": "atr_period", "unit": "일"},
+                {"label": "ㄴ ATR 손절배수(SL)", "key": "atr_multiplier_sl", "unit": "배"},
+                {"label": "ㄴ ATR 추격배수(Trail)", "key": "atr_multiplier_trail", "unit": "배"},
+                {"label": "총 운용 자산", "key": "total_capital", "unit": "원", "is_amt": True},
+                {"label": "최대 감시 종목 수", "key": "max_slots", "unit": "개"},
+                {"label": "1단계(정찰) 비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"},
+                {"label": "2단계(본대) 비중", "keys": ["stage2_amt", "s2_equity_pct"], "unit_key": "s2_sizing_unit"}
             ]
         }
     ]
@@ -151,7 +156,18 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 value_html = ""
                 if is_on:
                     v_list = []
-                    if val_key:
+                    # [v33.0] unit_key가 있으면 해당 단위에 맞는 키만 선택
+                    unit_key = item.get("unit_key")
+                    if unit_key and unit_key in best_settings:
+                        current_unit = best_settings[unit_key]
+                        mapped_unit = current_unit # "원", "%" 등
+                        # keys[0]은 "원", keys[1]은 "%"로 가정 (통일된 규칙)
+                        if val_keys and len(val_keys) >= 2:
+                            target_key = val_keys[0] if current_unit == "원" else val_keys[1]
+                            assigned_keys.add(target_key)
+                            v_list.append(format_val(best_settings.get(target_key, 0)))
+                            unit = mapped_unit
+                    elif val_key:
                         assigned_keys.add(val_key)
                         if val_key in best_settings:
                             v_list.append(format_val(best_settings[val_key] * mult))
@@ -253,11 +269,11 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             h1 {{ margin: 0; font-size: 2.2rem; font-weight: 900; letter-spacing: -1px; }}
             .mode-badge-top {{ font-size: 0.8rem; background: {mode_color}; color: #0f172a; padding: 4px 12px; border-radius: 8px; font-weight: 800; }}
             
-            .stats {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 15px; margin-bottom: 40px; }}
-            .stat-card {{ background: linear-gradient(135deg, #1e293b, #0f172a); padding: 20px 15px; border-radius: 16px; border: 1px solid #334155; position: relative; overflow: hidden; }}
+            .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 15px; margin-bottom: 40px; }}
+            .stat-card {{ background: linear-gradient(135deg, #1e293b, #0f172a); padding: 15px 10px; border-radius: 16px; border: 1px solid #334155; position: relative; overflow: hidden; min-width: 0; }}
             .stat-card::after {{ content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 4px; background: var(--primary); opacity: 0.5; }}
-            .stat-card div:first-child {{ color: var(--dim); font-size: 0.8rem; font-weight: 600; margin-bottom: 8px; }}
-            .stat-val {{ font-size: 1.5rem; font-weight: 800; font-variant-numeric: tabular-nums; }}
+            .stat-card div:first-child {{ color: var(--dim); font-size: 0.75rem; font-weight: 600; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+            .stat-val {{ font-size: 1.25rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
             
             /* [v27.0] 전략별 진입 통계 스타일 */
             .strategy-stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 25px; }}
@@ -339,11 +355,13 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                     <div class="stat-card"><div>Total Trades</div><div class="stat-val">{total}</div></div>
                     <div class="stat-card"><div>Win Rate</div><div class="stat-val" style="color:var(--gain)">{win_rate:.1f}%</div></div>
                     <div class="stat-card"><div>Avg Return</div><div class="stat-val" style="color:{ret_color}">{avg_ret:+.2f}%</div></div>
+                    <div class="stat-card"><div>Avg Cash Ratio</div><div class="stat-val" style="color:#38bdf8">{avg_cash_ratio:.1f}%</div></div>
+                    
                     <div class="stat-card"><div>Total Profit (Gross)</div><div class="stat-val" style="color:{gross_profit_color}">{gross_profit:+,}</div></div>
                     <div class="stat-card"><div>Total Fees</div><div class="stat-val" style="color:var(--loss)">-{total_fees:,}</div></div>
                     <div class="stat-card" style="border: 2px solid {total_profit_color}; background: rgba(0,255,127,0.05);">
                         <div style="font-weight:bold;">Net Profit</div>
-                        <div class="stat-val" style="color:{total_profit_color}; font-size:1.8rem; font-weight:800;">{total_profit:+,} <small style="font-size:0.8rem;">KRW</small></div>
+                        <div class="stat-val" style="color:{total_profit_color}; font-size:1.6rem; font-weight:800;">{total_profit:+,} <small style="font-size:0.8rem;">KRW</small></div>
                     </div>
                 </div>
                 {strategy_stats_html}
@@ -505,6 +523,10 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             equities = [d['equity'] for d in daily_equity]
             cashes = [d['cash'] for d in daily_equity]
             holdings = [max(0, d['equity'] - d['cash']) for d in daily_equity]
+            
+            # [v32.1] Calculate Cash Metrics
+            ratios = [(d['cash'] / d['equity'] * 100) for d in daily_equity if d['equity'] > 0]
+            avg_cash_ratio = sum(ratios) / len(ratios) if ratios else 0
             
             # [v15.5.1] Synchronize Y-axes to ensure the red line tracks the top of the stacked area
             max_val = max(equities) * 1.05
@@ -687,5 +709,5 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html_template.format(now=now_str, interval=display_interval, mode_label=mode_label, mode_color=mode_color, total=total_trades, win_rate=win_rate, avg_ret=avg_ret, ret_color=ret_color, total_profit=int(total_profit_val), total_profit_color=total_profit_color, gross_profit=int(gross_profit_val), gross_profit_color=gross_profit_color, total_fees=int(total_fees_val), param_html=param_html, sidebar_items="".join(sidebar_items), content="".join(content), start_date=start_date if start_date else "Simulation", end_date=end_date if end_date else "End", equity_chart_html=equity_chart_html, strategy_stats_html=strategy_stats_html))
+        f.write(html_template.format(now=now_str, interval=display_interval, mode_label=mode_label, mode_color=mode_color, total=total_trades, win_rate=win_rate, avg_ret=avg_ret, ret_color=ret_color, total_profit=int(total_profit_val), total_profit_color=total_profit_color, gross_profit=int(gross_profit_val), gross_profit_color=gross_profit_color, total_fees=int(total_fees_val), param_html=param_html, sidebar_items="".join(sidebar_items), content="".join(content), start_date=start_date if start_date else "Simulation", end_date=end_date if end_date else "End", equity_chart_html=equity_chart_html, strategy_stats_html=strategy_stats_html, avg_cash_ratio=avg_cash_ratio))
     print(f"  [Report] Execution log saved: {output_path}")

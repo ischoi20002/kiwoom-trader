@@ -1,6 +1,21 @@
 import pandas as pd
 import numpy as np
 
+def calculate_atr(df, period=14):
+    """ATR (Average True Range) 계산 (Wilder's Smoothing)"""
+    if df.empty or len(df) < period:
+        return pd.Series(np.nan, index=df.index)
+        
+    df = df.copy()
+    high_low = df['High'] - df['Low']
+    high_pc = abs(df['High'] - df['Close'].shift(1))
+    low_pc = abs(df['Low'] - df['Close'].shift(1))
+    
+    tr = pd.concat([high_low, high_pc, low_pc], axis=1).max(axis=1)
+    # Wilder's Smoothing: ewm with alpha=1/period is equivalent to Wilder's
+    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    return atr
+
 def calculate_ma(series, window):
     """이동평균선 계산"""
     return series.rolling(window=window).mean()
@@ -84,9 +99,11 @@ def calculate_all_indicators(df, settings):
     if 'MA120' in df.columns:
         df['MSI'] = (df['MA20'] / (df['MA60'] + 1e-10) - 1) + (df['MA60'] / (df['MA120'] + 1e-10) - 1)
     
-    # 6. ADX
+    # 6. ADX & ATR
     if 'High' in df.columns and 'Low' in df.columns:
         _, _, df['ADX'] = calculate_adx(df, 14)
+        atr_p = int(settings.get('atr_period', 14))
+        df['ATR'] = calculate_atr(df, max(1, atr_p))
         
     # 7. Prev Day Same Time Volume (전일 동시간 거래량 평균)
     if len(df) > 0:
@@ -124,5 +141,11 @@ def calculate_buy_indicators_light(df, settings):
     df['Prev_Day_Vol'] = df.groupby(df.index.time)['Volume'].transform(
         lambda x: x.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
     )
+    
+    # ATR (v31.0: Added for exit monitoring)
+    # If High/Low exist, calculate ATR (required for SL/Trail)
+    if 'High' in df.columns and 'Low' in df.columns:
+        atr_p = int(settings.get('atr_period', 14))
+        df['ATR'] = calculate_atr(df, max(1, atr_p))
     
     return df
