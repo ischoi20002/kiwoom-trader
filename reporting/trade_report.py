@@ -45,31 +45,76 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             except: pass
             return
     
-    # [v15.5] 파라미터 그룹화 정의
-    PARAM_GROUPS = {
-        "🔍 [1] 종목 선정 (Stock Selection)": [
-            "min_trde_val", "vol_ratio", "vol_lookback", "ma_convergence", "sel_rsi_min", "sel_rsi_max", 
-            "macd_fast", "macd_slow", "macd_sig", "rsi_window", "rsi_sig_period", "vol_power_lvl"
-        ],
-        "🚀 [2] 신규 매수 (Stage 1 Entry)": [
-            "stage1_amt", "use_type_a", "buy_rsi_max_a", "use_gc", "use_vol_surge", "vol_surge", 
-            "use_ma60_safe", "ma60_min", "ma60_max", "use_type_b", "buy_rsi_max_b", "vol_surge_b", 
-            "use_type_b_vol", "use_macd_gc_b", "use_trend_aligned_b", "use_market_filter", "use_gap_down_filter", "gap_down_limit"
-        ],
-        "💰 [3] 추가 매수 (Stage 2 Add-on)": [
-            "stage2_amt", "stage2_trigger", "s2_delay_hours", "use_s2_ma5", "s2_ma5_gap", "use_s2_profit", 
-            "s2_profit_limit", "use_s2_rsi_sig", "s2_rsi_gap", "use_s2_macd_gc", 
-            "s2_macd_gap", "use_s2_vol_surge", "s2_vol_ratio", "use_s2_ma20", "s2_ma20_gap"
-        ],
-        "🛡️ [4] 매도 및 손절 (Exit Strategy)": [
-            "use_s1_flash_exit", "s1_a_flash_exit_pct", "s1_b_flash_exit_pct", "use_s1_stop_loss", 
-            "s1_a_stop_loss", "s1_b_stop_loss", "use_s1_tp", "s1_a_take_profit", "s1_b_take_profit", 
-        ]
-    }
+    # [v16.0] UI-Consistent Hierarchical Parameter Mapping
+    PARAM_STRUCTURE = [
+        {
+            "name": "🔍 [1] 종목 선정 (Stock Selection Filter)",
+            "items": [
+                {"label": "1. 최소 거래대금", "key": "min_trde_val", "unit": "억"},
+                {"label": "2. 거래량 분출 비율", "key": "vol_ratio", "unit": "배"},
+                {"label": "3. 분출 확인 기간", "key": "vol_lookback", "unit": "일"},
+                {"label": "4. 이평선 수렴도 기준", "key": "ma_convergence", "unit": "%", "multiply": 100},
+                {"label": "5. 선정 RSI 필터", "keys": ["sel_rsi_min", "sel_rsi_max"], "sep": "~"},
+                {"label": "6. MACD 모멘텀 필터", "keys": ["macd_fast", "macd_slow", "macd_sig"], "sep": "/"}
+            ]
+        },
+        {
+            "name": "🚀 [2] 신규 매수 (Stage 1 Entry)",
+            "items": [
+                {"label": "Type A 활성화 (RSI 상한)", "toggle": "use_type_a", "key": "buy_rsi_max_a"},
+                {"label": "ㄴ 1. 이평 골든크로스", "toggle": "use_gc", "key": "gc_window", "unit": "분"},
+                {"label": "ㄴ 2. RSI 50 상향돌파", "toggle": "use_rsi_signal", "key": "rsi_window", "unit": "분"},
+                {"label": "ㄴ 3. MA60 안전구역", "toggle": "use_ma60_safe", "keys": ["ma60_min", "ma60_max"], "unit": "%", "sep": "~"},
+                {"label": "ㄴ 4. 거래량 급증(A)", "toggle": "use_vol_surge", "key": "vol_surge", "unit": "배"},
+                {"label": "Type B 활성화 (RSI 상한)", "toggle": "use_type_b", "key": "buy_rsi_max_b"},
+                {"label": "ㄴ 1. MACD 골든크로스(B)", "toggle": "use_macd_gc_b"},
+                {"label": "ㄴ 2. 정배열 추세 확인(B)", "toggle": "use_trend_aligned_b"},
+                {"label": "ㄴ 3. 거래량 급증(B)", "toggle": "use_type_b_vol", "key": "vol_surge_b", "unit": "배"},
+                {"label": "공통-1. 시장지수 필터", "toggle": "use_market_filter"},
+                {"label": "공통-2. 체결강도 강화", "toggle": "use_vol_power", "key": "vol_power_lvl"},
+                {"label": "공통-3. 매수 RSI 하한", "toggle": "use_rsi_min", "key": "buy_rsi_min"},
+                {"label": "공통-4. MACD 모멘텀 상승", "toggle": "use_macd_signal", "keys": ["sig_macd_fast", "sig_macd_slow", "sig_macd_sig"], "sep": "/"},
+                {"label": "공통-5. RSI 모멘텀 상승", "toggle": "use_rsi_sig_filter", "key": "rsi_sig_period"}
+            ]
+        },
+        {
+            "name": "📈 [3] 추매 승인 (Stage 2 Buy Add-on)",
+            "items": [
+                {"label": "1. MA20선 최소 상회", "toggle": "use_s2_ma20", "key": "s2_ma20_gap", "unit": "%"},
+                {"label": "2. MA5선 최소 상회", "toggle": "use_s2_ma5", "key": "s2_ma5_gap", "unit": "%"},
+                {"label": "3. 거래량 분출 확인", "toggle": "use_s2_vol_surge", "key": "s2_vol_ratio", "unit": "배"},
+                {"label": "4. RSI 모멘텀 상승", "toggle": "use_s2_rsi_sig", "key": "s2_rsi_gap", "unit": "%"},
+                {"label": "5. MACD 모멘텀 상승", "toggle": "use_s2_macd_gc", "key": "s2_macd_gap", "unit": "%"},
+                {"label": "6. 포지션 최소 수익률", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"},
+                {"label": "7. 최소 대기 기간", "toggle": "use_s2_delay", "key": "s2_delay_hours", "unit": "시간"},
+                {"label": "추매 트리거 수익률", "key": "stage2_trigger", "unit": "%"}
+            ]
+        },
+        {
+            "name": "🛡️ [4] 매도 및 자금 관리 (Exit & Risk)",
+            "items": [
+                {"label": "S1 Flash Exit (A/B)", "toggle": "use_s1_flash_exit", "keys": ["s1_a_flash_exit_pct", "s1_b_flash_exit_pct"], "unit": "%", "sep": "/"},
+                {"label": "S1 손절 수익률 (A/B)", "toggle": "use_s1_stop_loss", "keys": ["s1_a_stop_loss", "s1_b_stop_loss"], "unit": "%", "sep": "/"},
+                {"label": "S1 익절 수익률 (A/B)", "toggle": "use_s1_tp", "keys": ["s1_a_take_profit", "s1_b_take_profit"], "unit": "%", "sep": "/"},
+                {"label": "S2 Flash Exit 적용", "toggle": "use_s2_flash_exit", "key": "s2_flash_exit_pct", "unit": "%"},
+                {"label": "S2 손절 수익률", "toggle": "use_s2_stop_loss", "key": "s2_stop_loss", "unit": "%"},
+                {"label": "S2 익절 수익률", "toggle": "use_s2_tp", "key": "s2_take_profit", "unit": "%"},
+                {"label": "총 운용 자산", "key": "total_capital", "unit": "원", "is_amt": True},
+                {"label": "최대 감시 종목(슬롯)", "key": "max_slots", "unit": "개"},
+                {"label": "1단계(정찰) 비중", "key": "stage1_amt", "unit": "원", "is_amt": True},
+                {"label": "2단계(본대) 비중", "key": "stage2_amt", "unit": "원", "is_amt": True},
+                {"label": "갭하락 킬스위치", "key": "gap_down_limit", "unit": "%"},
+                {"label": "장 시작 15분 유예", "toggle": "use_gap_grace"},
+                {"label": "가상 매수 자동화", "toggle": "use_auto_virtual"}
+            ]
+        }
+    ]
 
-    # [v15.6] 파라미터 값 포맷팅 함수
+    # [v16.1] Efficient Formatter
     def format_val(v):
         if isinstance(v, (int, float, np.integer, np.floating)):
+            if float(v) > 1000000: # 금액 표시 (KRW)
+                return f"{int(v):,}"
             if float(v).is_integer(): return str(int(v))
             return f"{float(v):.1f}"
         return str(v)
@@ -80,32 +125,68 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         group_htmls = []
         assigned_keys = set()
         
-        for group_name, keys in PARAM_GROUPS.items():
-            items = []
-            for k in keys:
-                if k in best_settings:
-                    v = best_settings[k]
-                    assigned_keys.add(k)
-                    if isinstance(v, bool):
-                        val_class = "val-on" if v else "val-off"
-                        val_text = "ON" if v else "OFF"
-                        items.append(f'<div class="p-item"><span class="p-key">{k}</span><span class="p-val {val_class}">{val_text}</span></div>')
-                    else:
-                        items.append(f'<div class="p-item"><span class="p-key">{k}</span><span class="p-val">{format_val(v)}</span></div>')
+        for group in PARAM_STRUCTURE:
+            items_html = []
+            for item in group["items"]:
+                label = item["label"]
+                toggle_key = item.get("toggle")
+                val_key = item.get("key")
+                val_keys = item.get("keys")
+                unit = item.get("unit", "")
+                sep = item.get("sep", ", ")
+                mult = item.get("multiply", 1)
+                
+                # 1. 상태 정보 (ON/OFF)
+                status_html = ""
+                is_on = True
+                if toggle_key:
+                    assigned_keys.add(toggle_key)
+                    val = best_settings.get(toggle_key, False)
+                    is_on = val
+                    status_class = "val-on" if val else "val-off"
+                    status_text = "ON" if val else "OFF"
+                    status_html = f'<span class="p-val {status_class}">{status_text}</span>'
+                
+                # 2. 값 정보 (ON일 때만 또는 키가 지정된 경우 표시)
+                value_html = ""
+                if is_on:
+                    v_list = []
+                    if val_key:
+                        assigned_keys.add(val_key)
+                        if val_key in best_settings:
+                            v_list.append(format_val(best_settings[val_key] * mult))
+                    elif val_keys:
+                        for k in val_keys:
+                            assigned_keys.add(k)
+                            if k in best_settings:
+                                v_list.append(format_val(best_settings[k] * mult))
+                    
+                    if v_list:
+                        val_str = sep.join(v_list)
+                        value_html = f'<span class="p-val-sub">({val_str}{unit})</span>'
+                
+                items_html.append(f"""
+                <div class="p-item">
+                    <span class="p-key">{label}</span>
+                    <div class="p-val-group">
+                        {status_html}
+                        {value_html}
+                    </div>
+                </div>
+                """)
             
-            if items:
-                # [v15.6] Details/Summary를 이용한 접기/펼치기 구현 (기본: 닫힘)
+            if items_html:
                 group_htmls.append(f"""
                 <details class="p-group">
-                    <summary class="p-group-title">{group_name}</summary>
-                    <div class="p-grid">{"".join(items)}</div>
+                    <summary class="p-group-title">{group['name']}</summary>
+                    <div class="p-grid">{"".join(items_html)}</div>
                 </details>
                 """)
         
-        # 정의되지 않은 나머지 파라미터들
+        # [v16.1] 정의되지 않은 나머지 파라미터들 (기타 설정)
         others = []
         for k, v in best_settings.items():
-            if k not in assigned_keys:
+            if k not in assigned_keys and k not in ['bt_start_date', 'bt_end_date']:
                 if isinstance(v, bool):
                     val_class = "val-on" if v else "val-off"
                     val_text = "ON" if v else "OFF"
@@ -159,10 +240,12 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             .p-group[open] .p-group-title::after {{ content: '📖'; opacity: 1; transform: rotate(180deg); }}
             .p-group-title:hover {{ opacity: 0.8; }}
             
-            .p-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; padding-top: 15px; border-top: 1px solid #334155; margin-top: 10px; }}
+            .p-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 10px; padding-top: 15px; border-top: 1px solid #334155; margin-top: 10px; }}
             .p-item {{ display: flex; justify-content: space-between; align-items: center; background: rgba(15, 23, 42, 0.4); padding: 8px 12px; border-radius: 8px; border: 1px solid #33415566; }}
-            .p-key {{ font-size: 0.8rem; color: var(--dim); font-family: 'JetBrains Mono', monospace; }}
-            .p-val {{ font-size: 0.9rem; font-weight: 600; color: var(--text); }}
+            .p-key {{ font-size: 0.85rem; color: var(--dim); font-family: 'Pretendard', sans-serif; }}
+            .p-val-group {{ display: flex; align-items: center; gap: 8px; }}
+            .p-val {{ font-size: 0.9rem; font-weight: 700; color: var(--text); min-width: 35px; text-align: center; }}
+            .p-val-sub {{ font-size: 0.8rem; color: var(--primary); font-weight: 600; font-family: 'JetBrains Mono', monospace; }}
             .val-on {{ color: #4ade80; background: rgba(74, 222, 128, 0.1); padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }}
             .val-off {{ color: #94a3b8; background: rgba(148, 163, 184, 0.1); padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }}
             
