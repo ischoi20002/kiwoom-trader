@@ -13,7 +13,7 @@ class BacktestDataLoader:
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super(BacktestDataLoader, cls).__new__(cls)
-                # DB 경로는 Get_Price_GUI.py와 동일하게 설정
+                # DB 경로는 k_trader_gui.py와 동일하게 설정
                 cls._instance.db_path = os.path.join(os.getcwd(), "trading_data.db")
                 cls._instance.cache_dir = os.path.join(os.getcwd(), "backtest_data")
                 cls._instance.cache = {}

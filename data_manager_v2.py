@@ -138,6 +138,24 @@ class DataManagerV2:
                 )
             """)
 
+            # 8. 원격 명령 테이블 [v3.8]
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS remote_commands (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    command TEXT,
+                    timestamp TEXT,
+                    status TEXT DEFAULT 'PENDING'
+                )
+            """)
+
+            # 9. 시스템 설정/상태 테이블 [v3.8] 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS system_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1m_code_dt ON bars_1m (code, datetime)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_15m_code_dt ON bars_15m (code, datetime)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1d_code_dt ON bars_1d (code, datetime)")
@@ -147,7 +165,16 @@ class DataManagerV2:
             try:
                 conn.execute("ALTER TABLE sync_meta ADD COLUMN last_daily_sync TEXT")
             except sqlite3.OperationalError:
-                pass # 이미 존재함
+                pass
+            
+            # [Migration] order_history 테이블에 체결 정보 및 신호 메타데이터 컬럼 추가 [v3.8]
+            try:
+                conn.execute("ALTER TABLE order_history ADD COLUMN filled_price INTEGER DEFAULT 0")
+                conn.execute("ALTER TABLE order_history ADD COLUMN filled_qty INTEGER DEFAULT 0")
+                conn.execute("ALTER TABLE order_history ADD COLUMN name TEXT DEFAULT ''")
+                conn.execute("ALTER TABLE order_history ADD COLUMN reason TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
             
             conn.commit()
 
@@ -343,14 +370,49 @@ class DataManagerV2:
             conn.execute("DELETE FROM active_positions WHERE code = ?", (code,))
             conn.commit()
 
-    def log_order(self, code, side, qty, price, order_type, order_no, result):
-        """[v3.7.8] 주문 이력 기록"""
+    def log_order(self, code, side, qty, price, order_type, order_no, result, name="", reason=""):
+        """[v3.7.8] 주문 이력 기록 (신호 메타데이터 포함 [v3.8])"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
             conn.execute("""
-                INSERT INTO order_history (code, side, qty, price, order_type, order_no, timestamp, result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (code, side, qty, price, order_type, order_no, now, result))
+                INSERT INTO order_history (code, side, qty, price, order_type, order_no, timestamp, result, name, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, side, qty, price, order_type, order_no, now, result, name, reason))
+            conn.commit()
+
+    def get_today_orders(self):
+        """[v3.8] 당일 주문 내역 조회 (00:00:00 이후)"""
+        today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT timestamp, code, side, qty, price, filled_price, filled_qty, result, name, reason
+                FROM order_history 
+                WHERE timestamp >= ? 
+                ORDER BY timestamp DESC
+            """, (today_start,))
+            return cursor.fetchall()
+
+    def get_latest_order_meta(self, code):
+        """[v3.8] 특정 종목의 가장 최근 미체결 주문 메타데이터(이름, 사유) 조회"""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT name, reason 
+                FROM order_history 
+                WHERE code = ? AND (result = 'SUCCESS' OR result = 'MOCK')
+                ORDER BY timestamp DESC LIMIT 1
+            """, (code,))
+            res = cursor.fetchone()
+            return res if res else (None, None)
+
+    def update_order_status(self, code, order_no, new_status, filled_price=0, filled_qty=0):
+        """[v3.8] 주문 상태 업데이트 (체결 내용 포함)"""
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE order_history 
+                SET result = ?, filled_price = ?, filled_qty = ?
+                WHERE code = ? AND (order_no = ? OR order_no = 'MOCK_ID')
+                AND timestamp >= ?
+            """, (new_status, filled_price, filled_qty, code, order_no, datetime.now().strftime("%Y-%m-%d 00:00:00")))
             conn.commit()
 
     def sync_historical_vol_power(self, code, token):
@@ -613,7 +675,7 @@ class DataManagerV2:
                     return raw_list
                 elif res.status_code == 429:
                     if attempt < max_retries:
-                        wait = (attempt + 1) * 2
+                        wait = (attempt + 1) * 3
                         time.sleep(wait)
                         continue
                 
@@ -642,9 +704,9 @@ class DataManagerV2:
         # 2. API에서 최신 데이터 보충 (오늘 데이터 확보)
         df_api = pd.DataFrame()
         if token:
-            # [v3.5.2] Throttling 강화: 0.1~0.3 -> 0.5~1.0
+            # [v3.5.2] Throttling 강화 (429 방지): 0.5~1.5 -> 0.8~1.5
             import random
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(random.uniform(0.8, 1.5))
             raw_api = self.fetch_kiwoom_minute_data(code, token)
             if raw_api:
                 df_api = pd.DataFrame(raw_api)
@@ -786,9 +848,9 @@ class DataManagerV2:
         if not token: return
         
         def process(code):
-            # [v3.5.2] Throttling 강화: 0.1~0.5 -> 0.5~1.5
+            # [v3.5.2] Throttling 강화 (429 방지): 0.5~1.5 -> 1.0~2.0
             import random
-            time.sleep(random.uniform(0.5, 1.5))
+            time.sleep(random.uniform(1.0, 2.0))
             fresh_data = self.fetch_kiwoom_minute_data(code, token)
             if not fresh_data: return
             
@@ -945,6 +1007,76 @@ class DataManagerV2:
         except Exception as e:
             print(f"  [Error] KOSPI {count} list fetch error: {e}")
             return None
+
+    # --- [v3.8] Active Position Management ---
+    def get_active_positions(self):
+        """활성 포지션 목록을 가져옵니다."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT code, name, avg_price, qty, stage, invested, entry_time, reason FROM active_positions WHERE status='OPEN'")
+            return cursor.fetchall()
+
+    def save_active_position(self, code, name, avg_p, qty, stage, invested, time, reason):
+        """포지션 정보를 저장하거나 업데이트합니다."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO active_positions (code, name, avg_price, qty, stage, invested, entry_time, reason, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+            """, (code, name, avg_p, qty, stage, invested, time, reason))
+            conn.commit()
+
+    def delete_active_position(self, code):
+        """포지션을 삭제(상태 변경)하거나 실제로 제거합니다."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM active_positions WHERE code = ?", (code,))
+            conn.commit()
+
+    # --- [v3.8] Order History & Meta ---
+    def save_order_history(self, code, side, qty, price, o_type, o_no, result, name="", reason=""):
+        """주문 이력을 기록합니다."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO order_history (code, side, qty, price, order_type, order_no, timestamp, result, name, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, side, qty, price, o_type, o_no, datetime.now().isoformat(), result, name, reason))
+            conn.commit()
+
+    def get_latest_order_meta(self, code):
+        """특정 종목의 가장 최근 주문 메타데이터(이름, 사유)를 가져옵니다."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT name, reason FROM order_history WHERE code = ? ORDER BY id DESC LIMIT 1", (code,))
+            return cursor.fetchone()
+
+    # --- [v3.8] Remote Commands & System Config ---
+    def get_remote_command(self):
+        """대기 중인 최신 원격 명령을 가져옵니다."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT command FROM remote_commands WHERE status='PENDING' ORDER BY id DESC LIMIT 1")
+            row = cursor.fetchone()
+            if row:
+                cmd = row[0]
+                conn.execute("UPDATE remote_commands SET status='DONE' WHERE command=? AND status='PENDING'", (cmd,))
+                conn.commit()
+                return cmd
+        return None
+
+    def set_remote_command(self, command):
+        """원격 명령을 등록합니다."""
+        with self._get_connection() as conn:
+            conn.execute("INSERT INTO remote_commands (command, timestamp) VALUES (?, ?)", (command, datetime.now().isoformat()))
+            conn.commit()
+
+    def get_market_trend_label(self):
+        """저장된 시장 트렌드 라벨을 가져옵니다."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT value FROM system_config WHERE key='market_trend'")
+            row = cursor.fetchone()
+            return row[0] if row else "NEUTRAL"
+
+    def set_market_trend_label(self, label):
+        """시장 트렌드 라벨을 저장합니다."""
+        with self._get_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('market_trend', ?)", (label,))
+            conn.commit()
 
 # 싱글톤 인스턴스 (필요 시)
 # data_manager = DataManagerV2()

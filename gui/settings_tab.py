@@ -7,7 +7,7 @@ import pandas as pd
 # Assume DEFAULT_SETTINGS is accessible or passed. 
 # For now, I'll import it from a common place if possible, 
 # or just expect the app to provide it.
-# Looking at Get_Price_GUI.py, it's defined globally.
+# Looking at k_trader_gui.py, it's defined globally.
 
 class SettingsTab:
     def __init__(self, parent, app, default_settings):

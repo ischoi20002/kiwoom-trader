@@ -37,7 +37,6 @@ class DashboardTab:
         # [타일 3] 인증 및 연결 (Auth) - 가장 오른쪽, 작은 비중
         auth_tile = ttk.LabelFrame(tiles_frame, text=" 🔑 계정 연결 ", padding="15")
         auth_tile.grid(row=0, column=2, sticky="nsew", padx=(12, 0))
-        ttk.Label(auth_tile, text="키움증권 API와의\n연결 상태를 관리합니다.", foreground="#81A1C1").pack(expand=True)
         self.app.btn_auth = ttk.Button(auth_tile, text="인증 재시도", style="Subtle.TButton", command=self.app.get_auth_token)
         self.app.btn_auth.pack(side=tk.BOTTOM, fill=tk.X, pady=(15,0))
 

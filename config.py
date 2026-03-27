@@ -8,7 +8,7 @@ APP_SECRET = "-TZiGwo1WpQSTPDnoDJAAblpcbkuCqpPpCC9mPlFA80"
 # 2. 거래 서버 설정 (실전/모의)
 REAL_URL = "https://api.kiwoom.com"
 MOCK_URL = "https://mockapi.kiwoom.com"
-USE_MOCK = True # 환경 전환 버튼에 의해 자동 수정됨
+USE_MOCK = True # 서버 전환 버튼에 의해 자동 수정됨
 
 # [Fix] USE_MOCK 값에 따라 최종 접속 URL을 결정합니다.
 URL = MOCK_URL if USE_MOCK else REAL_URL

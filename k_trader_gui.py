@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import tkinter as tk
+import typing as tp
 from tkinter import ttk, scrolledtext, messagebox, simpledialog
 import requests
 import pandas as pd
@@ -51,6 +52,11 @@ from core.stream_processor import StreamProcessor
 from core.signal_engine import SignalEngine
 from gui.gui_utils import GuiUtils
 from gui.styles import NordicStyle
+
+# [v3.8] Core Modules extraction
+from core.portfolio_manager import PortfolioManager
+from core.market_service import MarketDataService
+from core.remote_commander import RemoteCommander
 
 from kiwoom_rest_api.auth.token import TokenManager
 
@@ -195,7 +201,7 @@ class KiwoomApp:
     def __init__(self, root, auto_start=False):
         self.root = root
         self.auto_start = auto_start
-        self.root.title("Kiwoom Rest API Trader v3.7.8 [Remote Monitoring]")
+        self.root.title("K-Trader v4.0.0 [Remote Monitoring]")
         self.root.geometry("1400x900")
         
         # [v1.3] 로깅 및 기본 매니저들을 최우선으로 초기화 (다른 초기화 중 log 호출 대응)
@@ -241,9 +247,12 @@ class KiwoomApp:
         self.update_theme_var = None
         self.btn_auth = None
         
-        self.virtual_db_file = "virtual_db.json"
+        
+        # 기존 가상 포지션 호환성 (Tab 참조용 - 초기화 필요)
         self.virtual_positions = {}
         self.virtual_history = []
+        self.virtual_db_file = "virtual_db.json"
+        
         
         self.backtest_entries = {}
         self.backtest_force_refresh_var = tk.BooleanVar(value=False)
@@ -271,6 +280,12 @@ class KiwoomApp:
         self.tree_active_monitor = None
         self.lbl_heartbeat = None
         self.lbl_headwind_caution = None
+        self.virtual_tab = None
+        self.header_frame: tp.Any = None
+        self.tab_virtual: tp.Any = None
+        self.monitor_tab: tp.Any = None
+        self.lbl_market_status: tp.Any = None
+        self.lbl_market_indices: tp.Any = None
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         self.bars_data = self.config_handler.load_bars_cache() 
@@ -279,16 +294,41 @@ class KiwoomApp:
         self.order_manager = OrderManager(self) 
         self.signal_engine = SignalEngine(self)
 
-        self._load_virtual_db()
+        # [v3.8] Core 매니저 통합 (종속성 확보 후 초기화)
+        # 1. 포트폴리오 매니저 (가상 포지션/동기화 전담)
+        self.portfolio = PortfolioManager(
+            self.data_manager, 
+            self.order_manager, 
+            settings=self.settings,
+            log_func=self.log,
+            gui_callback=self._render_virtual_positions,
+            telegram_callback=self.send_telegram_message
+        )
+        # 2. 시장 데이터 서비스 (지수/트렌드 루프 전담)
+        self.market_service = MarketDataService(
+            self.data_manager,
+            log_func=self.log,
+            gui_callback=self._on_market_data_update
+        )
+        # 3. 원격 명령 서비스 (텔레그램 업데이트/재시작 전담)
+        self.remote_commander = RemoteCommander(
+            self.data_manager,
+            log_func=self.log
+        )
+
+        # 가상 포지션 데이터 바인딩
+        self.virtual_positions = self.portfolio.virtual_positions
+        self.virtual_history = self.portfolio.virtual_history
+        self.virtual_db_file = self.portfolio.virtual_db_file
+
+        self.portfolio.load_all()
         self._setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # [v1.0] 원격 업데이트 리스너 시작 (5초 주기)
         self.last_update_id = 0
         self.is_updating = False
-        self.root.after(5000, self._check_remote_commands) # 로그 출력 제거 (gui_utils 준비성 보장)
-        
-        self._load_active_positions_from_db() # [v3.7.8] DB에서 활성 포지션 복구
+        self.root.after(5000, self.remote_commander.start) # 로그 출력 제거 (gui_utils 준비성 보장)
         
         # [v3.8] 자동 시작 옵션이 있는 경우 8초 후 실시간 감시 시작
         if self.auto_start:
@@ -427,9 +467,13 @@ class KiwoomApp:
         if token:
             if self.status_label:
                 self.root.after(0, lambda: self.status_label.config(text="상태: 로그인 완료", foreground="green"))
-            # [v3.7.8] 로그인 성공 시 즉시 계좌 동기화 및 주기적 동기화 시작
-            self.root.after(2000, lambda: self.sync_with_actual_account(silent=True))
-            self.root.after(10 * 60 * 1000, self._periodic_account_sync)
+            # [v3.8] 모듈화된 서비스 시작
+            self.portfolio.load_all()      # 기존 데이터 복구
+            self.market_service.start()    # 시장 지수 모니터링 시작
+            self.remote_commander.start()  # 원격 명령 폴링 시작
+            
+            # 초기 동기화 (2초 후)
+            self.root.after(2000, lambda: self.portfolio.sync_with_actual_account(silent=True))
             
             threading.Thread(target=lambda: self.get_kospi_200(force=True), daemon=True).start()
 
@@ -546,14 +590,23 @@ class KiwoomApp:
             self.root.after(0, lambda: self.lbl_market_indices.config(text=full_text))
 
     def _on_realtime_data_received(self, code, now_price, volume, trde_val, **kwargs):
-        """[v25.7] SignalEngine을 통해 실시간 데이터 처리 및 DB 로깅 (가상 시뮬레이션 기반 백테스트용)"""
-        # 1. 시그널 엔진 처리
+        """[v25.7] SignalEngine을 통해 실시간 데이터 처리 및 DB 로깅"""
         self.signal_engine.on_tick_received(code, now_price, volume, trde_val, **kwargs)
+
+    def _on_execution_received(self, code, order_no, qty, price, side):
+        """[v3.8] 실시간 체결(Execution/CHE) 이벤트 처리 - 모듈 위임"""
+        side_kr = "매수" if side == "buy" else "매도"
         
-        # 2. 실시간 데이터 스냅샷 로깅 (체결강도, 호가잔량)
-        # [v35.7] 자가 학습형 합성 모델 채택으로 인해 매 틱 무차별 로깅 중단
-        # (성능 향상 및 DB 비대화 방지. 대신 SignalEngine에서 중요 시점에만 스냅샷 저장 가능)
-        pass
+        # 1. DB 상태 업데이트
+        self.data_manager.update_order_status(code, order_no, "FILLED", filled_price=price, filled_qty=qty)
+        
+        # 2. 포트폴리오 매니저 위임 (가상 포지션 관리 및 텔레그램 알림)
+        self.portfolio.on_fill(code, side, price, qty)
+        
+        # 3. UI 업데이트 (3판넬 통합 갱신)
+        self._log_order_ui(code, side, qty, price, "SYSTEM", "SUCCESS")
+        
+        self.log(f"✅ [체결] {code} {side_kr} {qty}주 완료 ({price:,}원)")
 
     def _update_market_visuals(self, trend):
         """[v27.3] 시장 지수 추세에 따른 실시간 감시창 '온몸' 테마 변경"""
@@ -594,6 +647,15 @@ class KiwoomApp:
         if now < start: return 0.001
         if now > end: return 1.0
         return min(1.0, (now - start).total_seconds() / 23400.0)
+
+    def _on_market_data_update(self, indices=None, trend=None):
+        """[v3.8] MarketDataService로부터 데이터를 전달받아 UI 갱신"""
+        if indices:
+            self.market_status = indices
+            self._refresh_market_ticker_ui()
+        if trend:
+            self.market_trend = trend
+            self._update_market_visuals(trend)
 
     def _render_tree_updates(self):
         if not self.tree_monitor or not self.is_monitoring: 
@@ -935,6 +997,14 @@ class KiwoomApp:
     def on_close(self):
         """창 닫기 시 안전하게 종료 처리"""
         self.log("⏹️ [System] 프로그램을 종료합니다. 리소스를 정리 중...")
+        
+        # [v35.7] 종료 시 학습된 파라미터 강제 저장
+        try:
+            from strategy.simulation_models import SimulatedRealtimeMetrics
+            SimulatedRealtimeMetrics.save_params()
+            self.log("✅ [Learning] 자가 학습 파라미터가 안전하게 저장되었습니다.")
+        except: pass
+        
         self.is_monitoring = False
         if self.executor:
             try:
@@ -983,7 +1053,22 @@ class KiwoomApp:
         threading.Thread(target=self.send_telegram_message, args=(msg,), daemon=True).start()
 
     def _render_virtual_positions(self):
-        self.virtual_tab._render_virtual_positions()
+        if hasattr(self, 'virtual_tab'):
+            self.virtual_tab._render_virtual_positions()
+
+    def sync_with_actual_account(self, silent=False):
+        """UI에서 호출하는 계좌 동기화 프록시"""
+        self.portfolio.sync_with_actual_account(silent=silent)
+
+    def _clear_virtual_positions(self):
+        """UI에서 호출하는 포지션 초기화 프록시"""
+        if messagebox.askyesno("초기화", "모든 가상 포지션과 히스토리를 초기화하시겠습니까?"):
+            self.portfolio.clear_all()
+
+    def _sell_all_virtual(self):
+        """UI에서 호출하는 비상 매도 프록시"""
+        if messagebox.askyesno("🚨 비상 청산", "모든 보유 종목을 지금 즉시 시장가로 매도하시겠습니까?"):
+            self.portfolio.sell_all()
 
     def _calculate_buy_amt(self, stage=1):
         """[v2.2] 설정창의 비중 설정(원/%)에 따른 실제 투자금액 산출"""
@@ -1000,30 +1085,19 @@ class KiwoomApp:
         if code in self.virtual_positions: return
         # [v2.2] 동적 비중 계산 적용
         invest_amt = self._calculate_buy_amt(stage=1)
-        qty = max(1, invest_amt // price)
-        actual_invested = qty * price
         
-        # [v3.7.8] 실전/모의투자 연동 (Stage 1)
+        # [v3.8] 공격적 체결을 위한 +1틱 보정가 산출
+        adj_price = self.order_manager.get_adjusted_price(price, "buy")
+        qty = max(1, invest_amt // adj_price)
+        actual_invested = qty * adj_price
+        
+        # [v3.8] 실전/모의투자 연동 (Stage 1) - 이제 주문만 발송하고 체결(CHE) 시점에 가상포지션 등록
         use_mock = getattr(config, 'USE_MOCK', False)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
         if allow_order:
-            self.order_manager.place_order(code, qty, price, order_type="03", side="buy")
+            self.order_manager.place_order(code, qty, price, order_type="03", side="buy", name=name, reason=reason)
         
-        # [v2.2] 상세 기록 및 스냅샷 포함
-        snapshot = self._get_system_snapshot(code, price, reason=reason)
-        self.virtual_positions[code] = {
-            "name": name, "avg_price": price, "qty": qty, "stage": 1,
-            "invested": actual_invested, "entry_time": datetime.now().isoformat(),
-            "max_now": price, "realized_pnl": 0.0,
-            "reason": reason, # 사유 저장
-            "events": [{
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "action": "BUY", "price": price, "qty": qty, "pnl": "-",
-                "reason": reason,
-                "snapshot": snapshot
-            }]
-        }
-        self.log(f"💰 [가상매수] {name}({code}) 1차 진입 완료. ({price:,}원, {qty}주)")
+        self.log(f"🚀 [주문발송] {name}({code}) 1차 진입 주문! ({price:,}원, {qty}주). 체결 대기 중...")
         msg = f"<b>💰 [가상매수/1차]</b>\n종목: {name}({code})\n가: {price:,}원 / 수: {qty}주\n시간: {datetime.now().strftime('%H:%M:%S')}"
         threading.Thread(target=self.send_telegram_message, args=(msg,), daemon=True).start()
         
@@ -1032,36 +1106,15 @@ class KiwoomApp:
         self._log_order_ui(code, "buy", qty, price, "03", "SUCCESS")
 
         self.notebook.select(self.tab_virtual)
-        self._save_virtual_db()
+        self.portfolio.save_db()
         self._render_virtual_positions()
-
-    def _clear_virtual_positions(self):
-        """[v3.7.8] 가상 포트폴리오 및 DB 데이터 전체 초기화"""
-        if not self.virtual_positions and not self.virtual_history: 
-            messagebox.showinfo("알림", "삭제할 데이터가 없습니다.")
-            return
-            
-        if messagebox.askyesno("전체 데이터 초기화", "모든 가상/실제 포지션 및 매매 히스토리를 삭제하시겠습니까?\n\n* DB 데이터와 로그 파일이 모두 초기화됩니다."):
-            self.virtual_positions.clear()
-            self.virtual_history.clear()
-            
-            # [v3.7.8] DB 테이블 초기화
-            try:
-                with self.data_manager._get_connection() as conn:
-                    conn.execute("DELETE FROM active_positions")
-                    conn.execute("DELETE FROM order_history")
-                self.log("🧹 [System] DB 및 가상 포트폴리오 초기화 완료.")
-            except Exception as e:
-                self.log(f"⚠️ [System] DB 초기화 오류: {e}")
-
-            self._save_virtual_db()
-            self._render_virtual_positions()
 
     def _process_virtual_scenarios(self, code, now_price, rsi_val, macd_val, osc_val, vol_power, is_vol_spike, ind=None, **kwargs):
         """[v22.0] 설정창의 7가지 조건과 동기화된 가상 매매 시나리오 처리"""
         if now_price <= 0: return # [v2.2] 유효하지 않은 가격 데이터 진입 차단
         if code not in self.virtual_positions: return
         pos = self.virtual_positions[code]
+        if pos.get('exit_pending', False): return # [v3.8] 이미 매도 주문 발송됨
         stage = pos['stage']
         avg_p = pos['avg_price']
         profit_ratio = (now_price / avg_p - 1) * 100
@@ -1128,36 +1181,32 @@ class KiwoomApp:
                         is_exit, exit_reason = True, "SMART_EXIT"
 
         if is_exit:
-            pnl_amt = (now_price - avg_p) * pos['qty']
+            # [v3.8] 공격적 체결(매도)을 위한 -1틱 보정가 산출
+            adj_price = self.order_manager.get_adjusted_price(now_price, "sell")
+            pnl_amt = (adj_price - avg_p) * pos['qty']
             
             # [v3.7.8] 실전/모의투자 연동 (Exit)
             use_mock = getattr(config, 'USE_MOCK', False)
             allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
             if allow_order:
-                self.order_manager.place_order(code, pos['qty'], now_price, order_type="03", side="sell")
+                # [v3.8] name, reason 파라미터 추가
+                self.order_manager.place_order(code, pos['qty'], now_price, order_type="03", side="sell", name=pos['name'], reason=f"EXIT_{exit_reason}")
 
-            self.log(f"🚨 [가상종료/{exit_reason}] {pos['name']}({code}) 탈탈 ({profit_ratio:+.2f}%)")
-            snapshot = self._get_system_snapshot(code, now_price, reason=exit_reason)
-            pos['events'].append({
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "action": exit_reason, "price": now_price, "qty": pos['qty'],
-                "pnl": f"{profit_ratio:+.2f}%", "reason": exit_reason,
-                "snapshot": snapshot
-            })
-            pos['final_pnl_pct'] = profit_ratio # [v2.2]
-            pos['realized_pnl_amt'] = pnl_amt # [v2.2] 실현 손익 금액 저장
-            pos['code'] = code
-            self.virtual_history.append(pos)
-            msg = f"<b>🚨 [가상종료/{exit_reason}]</b>\n종목: {pos['name']}({code})\n수익률: {profit_ratio:+.1f}%\n수익금: {int(pnl_amt):,}원\n시간: {datetime.now().strftime('%H:%M:%S')}"
-            threading.Thread(target=self.send_telegram_message, args=(msg,), daemon=True).start()
-            del self.virtual_positions[code]
+            self.log(f"🚨 [매도발송/{exit_reason}] {pos['name']}({code}) 탈출 주문! ({profit_ratio:+.2f}%)")
+            # [v3.8] 즉시 삭제 대신 '매도 대기' 상태로 전환
+            pos['exit_pending'] = True
+            pos['exit_reason'] = exit_reason
+            pos['exit_adj_price'] = adj_price # 체결 시점 pnl 계산용 임시 저장
             
-            # [v3.7.8] DB 포지션 삭제 및 주문 기록
-            self.data_manager.delete_active_position(code)
-            self._log_order_ui(code, "sell", pos.get('qty', 0), now_price, "03", "SUCCESS") # UI 로그 기록
-
-            self._save_virtual_db()
+            # UI 로그에는 주문 단계 노출
+            self._log_order_ui(code, "sell", pos.get('qty', 0), now_price, "03", "SELL_PENDING")
+            
+            msg = f"<b>🚀 [매도발송/{exit_reason}]</b>\n종목: {pos['name']}({code})\n예상수익: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
+            threading.Thread(target=self.send_telegram_message, args=(msg,), daemon=True).start()
+            
+            self.portfolio.save_db()
             self._render_virtual_positions()
+
             return
 
         # 2. 2단계 매수(추매) 승인 체크
@@ -1201,36 +1250,19 @@ class KiwoomApp:
                 if profit_ratio >= s2_trigger:
                     # [v2.2] 동적 비중 계산 적용
                     add_amt = self._calculate_buy_amt(stage=2)
-                    add_qty = add_amt // now_price
+                    # [v3.8] 공격적 체결을 위한 +1틱 보정가 산출
+                    adj_price = self.order_manager.get_adjusted_price(now_price, "buy")
+                    add_qty = add_amt // adj_price
                     if add_qty > 0:
                         # [v3.7.8] 실전/모의투자 연동 (Stage 2)
                         use_mock = getattr(config, 'USE_MOCK', False)
                         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
                         if allow_order:
-                            self.order_manager.place_order(code, add_qty, now_price, order_type="03", side="buy")
-                            
-                        snapshot = self._get_system_snapshot(code, now_price, reason="Stage 2 Scaling")
-                        new_inv = pos['invested'] + (add_qty * now_price)
-                        pos['events'].append({
-                            "time": datetime.now().strftime("%H:%M:%S"),
-                            "action": "ADD", "price": now_price, "qty": add_qty,
-                            "pnl": f"{profit_ratio:+.2f}%", "reason": "Stage 2 Scaling",
-                            "snapshot": snapshot
-                        })
-                        pos['qty'] += add_qty
-                        pos['avg_price'] = new_inv / pos['qty']
-                        pos['invested'] = new_inv
-                        pos['stage'] = 2
-                        self.log(f"🔥 [가상추매] {pos['name']}({code}) 2차 진입! (평단: {pos['avg_price']:.0f})")
-                        msg = f"<b>🔥 [가상추매/2차]</b>\n종목: {pos['name']}({code})\n평단: {pos['avg_price']:,.0f}원\n시간: {datetime.now().strftime('%H:%M:%S')}"
-                        threading.Thread(target=self.send_telegram_message, args=(msg,), daemon=True).start()
+                            self.order_manager.place_order(code, add_qty, now_price, order_type="03", side="buy", name=pos['name'], reason="Stage 2 Scaling")
                         
-                        # [v3.7.8] DB 정보 갱신 및 UI 로그 기록
-                        self.data_manager.save_active_position(code, pos['name'], pos['avg_price'], pos['qty'], 2, pos['invested'], pos['entry_time'], pos['reason'])
-                        self._log_order_ui(code, "buy", add_qty, now_price, "03", "SUCCESS")
-
-                        self._save_virtual_db()
-                        self._render_virtual_positions()
+                        self.log(f"🔥 [추매발송] {pos['name']}({code}) 2차 진입 주문! ({adj_price:,}원, {add_qty}주). 체결 대기 중...")
+                        # DB에 임시 기록 (체결 시 정식 반영)
+                        self._log_order_ui(code, "buy", add_qty, adj_price, "03", "ADD_PENDING")
 
     def _get_system_snapshot(self, code, price, reason="N/A"):
         """현재 시점의 시장지수 및 보조지표 상황 캡처"""
@@ -1268,12 +1300,11 @@ class KiwoomApp:
                 print(f"Virtual DB Load Error: {e}")
 
     def _log_order_ui(self, code, side, qty, price, order_type, result):
-        """[v3.7.8] DB 기록과 동시에 GUI 주문 로그 트리에 한 줄 추가"""
+        """[v3.9] DB 기록 및 신규 3판넬 UI 갱신"""
         self.data_manager.log_order(code, side, qty, price, order_type, "MOCK_ID", result)
-        if hasattr(self, 'virtual_tab') and self.virtual_tab.tree_orders:
-            now = datetime.now().strftime("%H:%M:%S")
-            side_kr = "매수" if side == "buy" else "매도"
-            self.virtual_tab.tree_orders.insert("", 0, values=(now, code, side_kr, f"{qty:,}", f"{price:,}", result))
+        if hasattr(self, 'virtual_tab'):
+            self.virtual_tab._render_orders()
+            self.virtual_tab._render_virtual_positions()
 
     def _sell_all_virtual(self):
         """[v3.7.8] 비상 상황: 모든 가상/실제 포지션 즉시 시장가 매도 청산"""
@@ -1290,208 +1321,30 @@ class KiwoomApp:
             info = self.monitor_info.get(code, {})
             curr_p = info.get('price', pos['avg_price'])
             
+            # [v3.8] 공격적 체결(매도)을 위한 -1틱 보정가 산출
+            adj_p = self.order_manager.get_adjusted_price(curr_p, "sell")
+            
             # 실제 주문 발송 (허용된 경우)
             use_mock = getattr(config, 'USE_MOCK', False)
             allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
             if allow_order:
                 self.order_manager.place_order(code, pos['qty'], curr_p, order_type="03", side="sell")
             
-            # DB 및 UI 로그 기록
-            self._log_order_ui(code, "sell", pos['qty'], curr_p, "03", "EMERGENCY")
+            # [v3.8] 즉시 삭제 대신 '매도 대기' 상태로 전환
+            pos['exit_pending'] = True
+            pos['exit_reason'] = "EMERGENCY"
+            # self.data_manager.delete_active_position(code) # CHE에서 삭제하도록 유도
             
-            # 가상 포지션 삭제
-            del self.virtual_positions[code]
-            self.data_manager.delete_active_position(code)
-
-        self._save_virtual_db()
+            # DB 및 UI 로그 기록 (보정가 반영 [v3.8])
+            self._log_order_ui(code, "sell", pos['qty'], adj_p, "03", "SELL_PENDING")
+            
+        self.portfolio.save_db()
         self._render_virtual_positions()
         messagebox.showinfo("완료", f"{len(codes)}개 종목의 청산 주문이 발송되었습니다.")
-
-    def sync_with_actual_account(self, silent=False):
-        """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 가상 포지션을 동기화 (Reconciliation)"""
-        holdings = self.order_manager.get_holdings()
-        if holdings is None: 
-            if not silent: messagebox.showwarning("오류", "계좌 정보를 가져올 수 없습니다. API 연결을 확인하세요.")
-            return
-        
-        server_codes = set()
-        updated_count = 0
-        new_count = 0
-        
-        # 1. 서버 데이터 기준으로 로컬 데이터 업데이트 및 추가
-        for item in holdings:
-            code = item.get('pdno') or item.get('code') # 필드명은 API 사양에 따라 다를 수 있음
-            if not code: continue
-            
-            name = item.get('prdt_name') or item.get('name', 'Unknown')
-            qty = int(item.get('hldg_qty') or item.get('qty', 0))
-            avg_price = float(item.get('pchs_avg_pric') or item.get('avg_price', 0))
-            server_codes.add(code)
-            
-            if code in self.virtual_positions:
-                # 기존 포지션 정보 실시간 서버 데이터로 보정
-                self.virtual_positions[code]['qty'] = qty
-                self.virtual_positions[code]['avg_price'] = avg_price
-                self.virtual_positions[code]['invested'] = qty * avg_price
-                updated_count += 1
-            else:
-                # 서버에는 있으나 로컬에 없는 종목 복구
-                self.virtual_positions[code] = {
-                    "name": name, "avg_price": avg_price, "qty": qty,
-                    "stage": 1, "invested": qty * avg_price,
-                    "entry_time": datetime.now().isoformat(),
-                    "reason": "SYNCED", "events": [], "max_now": avg_price
-                }
-                # DB 영구 저장소에도 기록
-                self.data_manager.save_active_position(code, name, avg_price, qty, 1, qty * avg_price, datetime.now().isoformat(), "SYNCED")
-                new_count += 1
-                
-        # 2. 로컬에는 있으나 서버에는 없는 종목 제거 (매도 완료)
-        local_codes = list(self.virtual_positions.keys())
-        removed_count = 0
-        for code in local_codes:
-            if code not in server_codes:
-                del self.virtual_positions[code]
-                self.data_manager.delete_active_position(code)
-                removed_count += 1
-                
-        self._save_virtual_db()
-        self._render_virtual_positions()
-        
-        result_msg = f"🔄 동기화 완료: 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
-        self.log(f"✅ [System] {result_msg}")
-        if not silent:
-            messagebox.showinfo("계좌 동기화", result_msg)
-
-    def _periodic_account_sync(self):
-        """[v3.7.8] 10분마다 주기적으로 계좌 동기화 실행 (백그라운드)"""
-        # 로그인 상태이고 유효한 토큰이 있을 때만 수행
-        try:
-            if self.auth_manager and self.auth_manager.get_access_token():
-                self.sync_with_actual_account(silent=True)
-        except: pass
-        
-        # 10분 (10 * 60 * 1000 ms) 후 재실행 예약
-        self.root.after(10 * 60 * 1000, self._periodic_account_sync)
-
-    def _load_active_positions_from_db(self):
-        """[v3.7.8] DB(active_positions)에서 실제/모의 포지션 복구"""
-        try:
-            with self.data_manager._get_connection() as conn:
-                cursor = conn.execute("SELECT * FROM active_positions WHERE status = 'OPEN'")
-                rows = cursor.fetchall()
-                for row in rows:
-                    code = row[0]
-                    if code not in self.virtual_positions:
-                        self.virtual_positions[code] = {
-                            "name": row[1], "avg_price": row[2], "qty": row[3],
-                            "stage": row[4], "invested": row[5], "entry_time": row[6],
-                            "reason": row[7], "events": [], 
-                            "max_now": row[2]
-                        }
-                if rows:
-                    self.log(f"📥 [System] DB에서 {len(rows)}개의 활성 포지션을 복구했습니다.")
-        except Exception as e:
-            self.log(f"⚠️ [System] 포지션 복구 중 오류: {e}")
-
-    def _save_virtual_db(self):
-        try:
-            with open(self.virtual_db_file, 'w', encoding='utf-8') as f:
-                json.dump({'active': self.virtual_positions, 'history': self.virtual_history}, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"Virtual DB Save Error: {e}")
 
     # ==========================================
     # 원격 배포 및 자동 업데이트 (Handover 방식)
     # ==========================================
-    def _check_remote_commands(self):
-        """[v1.5] 텔레그램봇 명령 리스너 - 단일 루프 스레드 방식(Long Polling)"""
-        if getattr(self, "_remote_thread_started", False): return
-        self._remote_thread_started = True
-
-        token = getattr(config, "TELEGRAM_BOT_TOKEN", "")
-        chat_id = str(getattr(config, "TELEGRAM_CHAT_ID", ""))
-        
-        if not token or not chat_id or "발급" in token:
-            if self.lbl_remote_status:
-                self.root.after(0, lambda: self.lbl_remote_status.config(text="📡 원격: 설정필요", foreground="orange"))
-            self.log("⚠️ [Remote] 텔레그램 설정이 비어있어 리스너를 중단합니다. (config.py 확인 필요)")
-            return
-
-        def polling_loop():
-            # [v1.0] 원격 업데이트 리스너 시작
-            last_id = 0
-            self.log("📡 [Remote] 원격 명령 리스너가 시작되었습니다.")
-            
-            while not self.is_updating:
-                try:
-                    url = f"https://api.telegram.org/bot{token}/getUpdates"
-                    if last_id == 0:
-                        params = {"offset": -1, "timeout": 5, "limit": 100}
-                    else:
-                        params = {"offset": last_id + 1, "timeout": 20, "limit": 100}
-                    
-                    res = requests.get(url, params=params, timeout=30)
-                    if res.status_code == 200:
-                        data = res.json()
-                        results = data.get("result", [])
-                        
-                        # [DEBUG] 하트비트
-                        print(f"📡 [Remote Polling] OK - 수신된 패킷: {len(results)}개 (Last ID: {last_id})")
-                        
-                        if last_id == 0:
-                            # 첫 바퀴: 과거 내역 소거
-                            if self.lbl_remote_status:
-                                self.root.after(0, lambda: self.lbl_remote_status.config(
-                                    text=f"📡 원격: 정상 ({datetime.now().strftime('%H:%M:%S')})", foreground="#4C566A"))
-                            if results:
-                                last_id = results[-1]["update_id"]
-                                print(f"[Remote Debug] First poll skipped {len(results)} packets (Last ID: {last_id})")
-                            else:
-                                last_id = 1
-                            time.sleep(1)
-                            continue
-
-                        for update in results:
-                            last_id = update["update_id"]
-                            msg = update.get("message") or update.get("channel_post", {})
-                            text = (msg.get("text") or "").strip().lower()
-                            from_id = str(msg.get("from", {}).get("id") or msg.get("chat", {}).get("id") or "")
-                            
-                            # [DEBUG] 수신된 내용 전체 로깅
-                            print(f"[Remote Debug] Packet received - Text: '{text}', FromID: {from_id}, ExpectedChatID: {chat_id}")
-                            
-                            if text.startswith("/"):
-                                self.root.after(0, lambda m=text, f=from_id, c=chat_id: self.log(f"📩 [Remote] 명령 포착: {m} (From: {f}, Expected: {c})"))
-                                
-                            if from_id == chat_id:
-                                if text == "/update" or text.startswith("/update@"):
-                                    self.root.after(0, self._handle_remote_update)
-                                    return # 스레드 종료
-                                elif text == "/restart" or text.startswith("/restart@"):
-                                    self.root.after(0, self._handle_remote_restart)
-                                    return
-                                elif text == "/select" or text.startswith("/select@"):
-                                    self.root.after(0, self.start_selection_thread)
-                                    self.send_telegram_message("🔍 <b>[원격 종목 선정]</b>\n전략 종목 스캔을 시작합니다. 잠시만 기다려주세요...")
-                            else:
-                                if text.startswith("/"):
-                                    print(f"⚠️ [Remote Debug] Chat ID Mismatch! Message from {from_id}, but we only accept from {chat_id}")
-                    else:
-                        if self.lbl_remote_status:
-                            self.root.after(0, lambda s=res.status_code: self.lbl_remote_status.config(
-                                text=f"📡 원격: 오류({s})", foreground="red"))
-                        print(f"[Telegram] API Error: {res.status_code}")
-                except Exception as e:
-                    if self.lbl_remote_status:
-                        self.root.after(0, lambda: self.lbl_remote_status.config(text="📡 원격: 연결끊김", foreground="red"))
-                    print(f"[Telegram Polling Exception] {e}")
-                
-                # 쿨타임 (다음 폴링 전 대기)
-                time.sleep(3)
-
-        threading.Thread(target=polling_loop, daemon=True).start()
-
     def _handle_remote_update(self):
         """[Handover] 대리인 스크립트 실행 후 즉시 자기 자신을 종료합니다."""
         self.is_updating = True
@@ -1533,6 +1386,7 @@ class KiwoomApp:
         restart_script = os.path.join(script_dir, "run_app.bat")
         subprocess.Popen(["cmd.exe", "/c", restart_script], cwd=script_dir, creationflags=0x10)
         self.root.after(500, self.on_close)
+
 
 if __name__ == "__main__":
     root = tk.Tk()

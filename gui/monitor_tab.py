@@ -30,8 +30,9 @@ class MonitorTab:
         
         self.app.btn_monitor_toggle = ttk.Button(self.ctrl_frame, text="▶️ 실시간 감시 시작", command=self.app.toggle_monitoring, style="Accent.TButton")
         self.app.btn_monitor_toggle.pack(side=tk.RIGHT, padx=5)
+        # 📄 주문 로그 버튼 제거 (가상 포지션 탭으로 통합됨)
         
-        self.app.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground="#81A1C1")
+        self.app.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground="#81A1C3")
         self.app.lbl_monitor_status.pack(side=tk.RIGHT, padx=10)
 
         # [v3.5] 시스템 심박수 (Heartbeat)
@@ -163,7 +164,7 @@ class MonitorTab:
                                         break # Try reconnecting from scratch
                                 elif trnm == 'PING':
                                     await ws.send(json.dumps(packet))
-                                elif trnm == 'REAL' or ('values' in packet and ('item' in packet or 'stk_cd' in packet)):
+                                elif trnm in ['REAL', 'CHE'] or ('values' in packet and ('item' in packet or 'stk_cd' in packet)):
                                     self._process_realtime_packet(packet)
                         except asyncio.TimeoutError:
                             continue
@@ -201,6 +202,17 @@ class MonitorTab:
             full_code = str(raw_code).strip()
             code = full_code.split('_')[0].zfill(6)
             
+            if trnm == 'CHE':
+                order_no = item_data.get('ord_no')
+                cntg_qty = int(item_data.get('cntg_qty', 0))
+                cntg_unpr = int(item_data.get('cntg_unpr', 0))
+                buy_sell_tp = item_data.get('buy_sell_tp', '1') # 1:매도, 2:매수
+                side = "buy" if buy_sell_tp == '2' else "sell"
+                
+                # KiwoomApp의 체결 핸들러 호출
+                self.app._on_execution_received(code, order_no, cntg_qty, cntg_unpr, side)
+                continue
+
             if code in self.app.monitor_info:
                 info = self.app.monitor_info[code]
                 vals = item_data.get('values', {})

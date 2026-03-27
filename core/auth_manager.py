@@ -4,7 +4,7 @@ import threading
 import config
 import os
 
-# [v3.7] 환경변수는 메인 GUI(Get_Price_GUI.py)에서 USE_MOCK 설정에 따라 동적으로 설정됩니다.
+# [v3.7] 환경변수는 메인 GUI(k_trader_gui.py)에서 USE_MOCK 설정에 따라 동적으로 설정됩니다.
 
 class AuthManager:
     """키움 REST API 인증 및 토큰 관리 (v3.2: 백업 로직 절대 복구)"""
@@ -15,6 +15,10 @@ class AuthManager:
     def get_access_token(self):
         """[v3.7.8] 현재 저장된 액세스 토큰 반환"""
         return self.access_token
+
+    def get_token(self):
+        """[COMPAT] kiwoom_rest_api 패키지 호환용"""
+        return self.get_auth_token()
 
     def log(self, message):
         if self.logger:

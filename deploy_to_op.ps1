@@ -6,7 +6,7 @@ $Source = Get-Location
 $TargetName = "vibe_op"
 $Target = Join-Path (Split-Path $Source) $TargetName
 
-$ExcludeList = @("trading_data.db", "virtual_db.json", "deploy_to_op.ps1")
+$ExcludeList = @("trading_data.db", "virtual_db.json", "sim_model_params.json", "deploy_to_op.ps1")
 
 Write-Host "--------------------------------------------------" -ForegroundColor Cyan
 Write-Host "🚀 [Operation Deployment] : $Source -> $Target" -ForegroundColor Cyan
@@ -45,5 +45,5 @@ if (Test-Path "$Source\$vdb") {
 }
 
 Write-Host "`n✅ Deployment Complete!" -ForegroundColor Green
-Write-Host "💡 Run Get_Price_GUI.py in $Target" -ForegroundColor Green
+Write-Host "💡 Run k_trader_gui.py in $Target" -ForegroundColor Green
 Write-Host "--------------------------------------------------" -ForegroundColor Cyan

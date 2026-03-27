@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import config
 from data_manager_v2 import DataManagerV2
 from kiwoom_rest_api.auth.token import TokenManager
+from core.auth_manager import AuthManager
 import sys
 import io
 
@@ -17,21 +18,47 @@ if sys.stdout.encoding != 'utf-8':
 
 class HarvestService:
     def __init__(self, target_list_path="kospi_top_500.csv"):
-        self.db = DataManagerV2("trading_data.db")
-        self.token_manager = TokenManager()
+        # -----------------------------------------------------------------------
+        # [v16.9.3] 하베스팅 실전 서버 강제 설정
+        # -----------------------------------------------------------------------
+        # 모의투자(config.USE_MOCK=True) 상태에서도 하베스팅은 항상 실전 서버를 사용해야
+        # 합니다. 모의투자 서버는 체결강도(VolPower) 등 일부 시장 데이터를 제공하지 않아
+        # DB에 0건이 저장되는 문제가 있기 때문입니다.
+        # 반드시 AuthManager()/DataManagerV2() 생성 전에 config를 변경해야 합니다.
+        config.USE_MOCK = False
+        config.URL = config.REAL_URL
+
+        # [v3.8] DB 경로를 절대 경로로 고정 (GUI와 동일한 파일 사용 보장)
+        db_path = os.path.join(os.getcwd(), "trading_data.db")
+        self.db = DataManagerV2(db_path)
+
+        # -----------------------------------------------------------------------
+        # [v16.9.4] 토큰 관리자: kiwoom_rest_api.TokenManager → AuthManager 교체
+        # -----------------------------------------------------------------------
+        # 【문제】 kiwoom_rest_api 패키지의 TokenManager는 내부적으로
+        #   kiwoom_rest_api/config.py 의 모듈 수준 변수를 사용합니다:
+        #     API_KEY = os.environ.get("KIWOOM_API_KEY", "")  ← import 시점에 1회 고정
+        #   따라서 이후에 os.environ 을 수정하거나 kiwoom_config.API_KEY 를 재할당해도
+        #   이미 ""(빈 문자열)로 굳어진 상태라 토큰 발급이 항상 실패합니다.
+        # 【해결】 프로젝트 자체의 AuthManager(core/auth_manager.py)를 사용합니다.
+        #   AuthManager.get_auth_token()은 매 호출 시점에 config.APP_KEY /
+        #   config.APP_SECRET 을 직접 읽으므로, 위에서 config.USE_MOCK=False 로
+        #   설정한 실전 키가 정확히 반영됩니다.
+        self.token_manager = AuthManager()
+
         self.target_list_path = target_list_path
         self.running = True
-        
-        # [v16.9] 수집 완료 여부를 COMPLETE 마크와 당일 동기화여부로만 판단 (특정 날짜 수동 지정 제거)
-        
-        # Kiwoom API 환경 및 라이브러리 설정 추가
+
+        self.log(f"🔍 [Info] 하베스팅 모드: 실전투자 서버 (데이터 무결성 우선)")
+
         os.environ['KIWOOM_API_KEY'] = config.APP_KEY
         os.environ['KIWOOM_API_SECRET'] = config.APP_SECRET
-        
+
         try:
             from kiwoom_rest_api import config as kiwoom_config
             kiwoom_config.API_KEY = config.APP_KEY
             kiwoom_config.API_SECRET = config.APP_SECRET
+            kiwoom_config.BASE_URL = config.REAL_URL
         except:
             pass
 
@@ -224,7 +251,7 @@ class HarvestService:
                 
         self.log(f"[START] 총 {len(codes)}개 종목 수집을 시작합니다. (지수 포함)")
         
-        token = self.token_manager.get_token()
+        token = self.token_manager.get_auth_token()
         if not token:
             self.log("[ERROR] 토큰을 가져올 수 없습니다. 종료합니다.")
             return

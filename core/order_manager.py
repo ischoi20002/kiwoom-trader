@@ -1,118 +1,140 @@
 import requests
 import json
 import logging
+from datetime import datetime
 import config
+from utils.normalization import get_tick_size
+
+# [v4.0] Kiwoom REST API 공식 패키지 모듈 도입
+try:
+    from kiwoom_rest_api.koreanstock.order import Order
+    from kiwoom_rest_api.koreanstock.account import Account
+except ImportError:
+    Order = None
+    Account = None
 
 class OrderManager:
-    """[v3.7.8] 키움증권 REST API 주문 집행 매니저"""
+    """[v4.0.0] K-Trader 주문 집행 매니저 (Kiwoom REST API 공식 규격 준수)"""
     def __init__(self, app):
         self.app = app
         self.logger = logging.getLogger("OrderManager")
+        
+        # [v4.0] API 객체 초기화
+        # AuthManager는 KiwoomBaseAPI가 요구하는 get_token() 인터페이스를 구현함
+        base_url = config.MOCK_URL if getattr(config, 'USE_MOCK', False) else config.URL
+        
+        if Order:
+            self.order_api = Order(base_url=base_url, token_manager=self.app.auth_manager)
+            self.account_api = Account(base_url=base_url, token_manager=self.app.auth_manager)
+        else:
+            self.order_api = None
+            self.account_api = None
+            self.logger.error("❌ kiwoom_rest_api 패키지를 로드할 수 없습니다.")
 
     def _get_base_url(self):
-        """config 설정에 따라 실전/모의 API 주소 반환"""
         return config.MOCK_URL if getattr(config, 'USE_MOCK', False) else config.URL
 
-    def place_order(self, code, qty, price, order_type="00", side="buy"):
+    def get_adjusted_price(self, price, side):
+        """[v3.8] 공격적인 체결을 위해 ±1틱 보정 가격 산출"""
+        tick = get_tick_size(price)
+        if side == "buy":
+            return int(price + tick)
+        else:
+            return int(price - tick)
+
+    def place_order(self, code, qty, price, order_type="00", side="buy", name="", reason=""):
         """
-        주문 발송 (REST API 호출)
-        - code: 종목코드
-        - qty: 수량
-        - price: 가격 (시장가 주문 시 0 가능)
-        - order_type: "00"(지정가), "03"(시장가) 등
-        - side: "buy" 또는 "sell"
+        주문 발송 (REST API 호출 - v4.0.0 Refactored)
         """
         use_mock = getattr(config, 'USE_MOCK', False)
         mode_str = "모의투자" if use_mock else "실전투자"
         
-        # 실제 주문 실행 전 최종 확인 (config의 안전장치 확인)
+        # [v16.9] 실제 주문 실행 전 최종 확인 (Safety Switch)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
         
         if not allow_order:
             self.app.log(f"⚠️ [{mode_str}] 주문 차단됨 (Safety Switch: OFF)")
             return None
 
-        base_url = self._get_base_url()
-        # [주의] 실제 API 엔드포인트는 개발 문서를 재확인해야 함 (임시 예시 경로)
-        endpoint = f"{base_url}/v1/orders" 
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.app.auth_manager.get_access_token()}"
-        }
-        
-        payload = {
-            "account_no": self.app.settings.get("account_id", ""),
-            "order_type": "1" if side == "buy" else "2", # 1:신규매수, 2:신규매도
-            "code": code,
-            "qty": int(qty),
-            "price": int(price),
-            "ord_kind": order_type # "00":지정가
-        }
+        if not self.order_api:
+            self.app.log(f"❌ [{mode_str}] 주문 엔진 로드 실패")
+            return None
 
         try:
-            self.app.log(f"🚀 [{mode_str}] 주문 발송: {code} | {qty}주 | {price:,}원")
-            # response = requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=10)
-            # result = response.json()
+            # [v4.0] 가격 보정 적용 및 API 규격 매핑
+            adj_price = self.get_adjusted_price(price, side) if order_type == "00" else price
             
-            # TODO: 실제 API 연동 시 주석 해제 및 결과 처리
-            # if result.get('return_code') == '0':
-            #     self.app.log(f"✅ 주문 성공: {result.get('order_no')}")
-            #     return result.get('order_no')
-            # else:
-            #     self.app.log(f"❌ 주문 실패: {result.get('return_msg')}")
+            # trde_tp: "0"(Limit), "3"(Market)
+            # order_type "00" -> "0", "03" -> "3" 등 변환
+            api_trde_tp = str(int(order_type)) 
             
-            return "MOCK_ORDER_ID" # 테스트를 위해 임시 아이디 반환
+            self.app.log(f"🚀 [{mode_str}] 주문 발송 시도: {code}({name}) | {qty}주 | {adj_price:,}원")
+
+            if side == "buy":
+                # stock_buy_order_request_kt10000
+                res = self.order_api.stock_buy_order_request_kt10000(
+                    dmst_stex_tp="KRX", # 기본 거래소
+                    stk_cd=code,
+                    ord_qty=str(int(qty)),
+                    trde_tp=api_trde_tp,
+                    ord_uv=str(int(adj_price)) if order_type == "00" else "0"
+                )
+            else:
+                # stock_sell_order_request_kt10001
+                res = self.order_api.stock_sell_order_request_kt10001(
+                    dmst_stex_tp="KRX",
+                    stk_cd=code,
+                    ord_qty=str(int(qty)),
+                    trde_tp=api_trde_tp,
+                    ord_uv=str(int(adj_price)) if order_type == "00" else "0"
+                )
+            
+            # API 응답 처리
+            ret_code = res.get("return_code", -1)
+            ret_msg = res.get("return_msg", "No Message")
+            ord_no = res.get("ord_no", "")
+
+            if ret_code == 0 or ord_no:
+                self.app.log(f"✅ [{mode_str}] 주문 성공! 번호: {ord_no}")
+                # [v3.8] DB 로그 기록
+                self.app.data_manager.log_order(code, side, qty, adj_price, order_type, ord_no, "SUCCESS", name=name, reason=reason)
+                
+                # 텔레그램 알림
+                side_kr = "매수" if side == "buy" else "매도"
+                msg = f"<b>🚀 [주문 성공]</b>\n종목: {code}({name})\n구분: {side_kr}\n가격: {adj_price:,}원 / 수량: {qty}주\n번호: {ord_no}"
+                import threading
+                threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
+                return ord_no
+            else:
+                self.app.log(f"❌ [{mode_str}] 주문 거부: {ret_msg} (ErrorCode: {ret_code})")
+                return None
 
         except Exception as e:
             self.app.log(f"💥 주문 프로세스 오류: {str(e)}")
             return None
 
     def get_holdings(self):
-        """[v3.7.8] 계좌 잔고 및 보유 종목 리스트 조회 (Kiwoom API 연동)"""
-        use_mock = getattr(config, 'USE_MOCK', False)
-        mode_str = "모의투자" if use_mock else "실전투자"
-        acc_no = self.app.settings.get("mock_account_id" if use_mock else "account_id", "")
-        
-        if not acc_no:
-            self.app.log(f"⚠️ [{mode_str}] 계좌 번호가 설정되지 않았습니다.")
+        """[v4.0.0] 실시간 계좌 잔고 동기화 (ka10085 규격)"""
+        if not self.account_api:
             return None
 
-        base_url = self._get_base_url()
-        # [v3.7.8] Kiwoom REST API 규격에 맞게 엔드포인트 및 헤더 수정
-        endpoint = f"{base_url}/api/dostk/accbal" 
+        use_mock = getattr(config, 'USE_MOCK', False)
+        mode_str = "모의투자" if use_mock else "실전투자"
         
-        headers = {
-            "Content-Type": "application/json;charset=UTF-8",
-            "authorization": f"Bearer {self.app.auth_manager.get_access_token()}",
-            "api-id": "ka10018"
-        }
-        
-        # 계좌 비밀번호는 보통 모의투자에서 무시되거나 공백/0000 처리됨
-        # [주의] 실제 사용 환경에 따라 payload 구조가 다를 수 있음
-        body = {
-            "acc_no": acc_no,
-            "acc_pwd": "0000", # 기본값
-            "acc_tp": "0",
-            "next_key": ""
-        }
-
         try:
-            self.app.log(f"🔍 [{mode_str}] 계좌[{acc_no}] 서버 데이터 동기화 시도...")
-            response = requests.post(endpoint, headers=headers, json=body, timeout=10)
+            self.app.log(f"🔍 [{mode_str}] 실시간 계좌 데이터 동기화 시도...")
+            # ka10085: 계좌 수익률/잔고 요청
+            # stex_tp "0": 통합거래소
+            res = self.account_api.account_return_rate_request_ka10085(stex_tp="0")
             
-            if response.status_code == 200:
-                data = response.json()
-                # Kiwoom REST API 응답 구조: 보통 stk_cntg_hour_trnd_qry 또는 output1
-                # 잔고조회(ka10018)의 경우 acc_bal_qry 또는 output1 등 개발 문서를 재확인해야 함
-                # 일반적인 패턴은 output1: 보유종목 리스트, output2: 요약
-                holdings = data.get('output1', data.get('acc_bal_qry', []))
-                if not isinstance(holdings, list): holdings = []
-                
+            ret_code = res.get("return_code", -1)
+            if ret_code == 0:
+                holdings = res.get("acnt_prft_rt", [])
                 self.app.log(f"✅ 계좌 동기화 성공 (보유 종목: {len(holdings)}개)")
                 return holdings
             else:
-                self.app.log(f"⚠️ 계좌 조회 실패: {response.status_code} ({response.text})")
+                msg = res.get("return_msg", "Unknown error")
+                self.app.log(f"⚠️ 계좌 조회 실패: {msg} (ErrorCode: {ret_code})")
                 return None
 
         except Exception as e:

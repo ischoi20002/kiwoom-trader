@@ -402,8 +402,8 @@ class SimpleBacktester:
         # [v33.5] Decouple budget from max_slots (Now used as Monitoring limit)
         self.s1_amt = self.settings.get('stage1_amt', 1000000.0)
         self.s2_amt = self.settings.get('stage2_amt', 2000000.0)
-        self.buy_f_rate = self.settings.get('buy_fee_rate', 0.015) / 100.0
-        self.sell_f_rate = self.settings.get('sell_fee_rate', 0.195) / 100.0
+        self.buy_f_rate = self.settings.get('buy_fee_bt', self.settings.get('buy_fee_rate', 0.015)) / 100.0
+        self.sell_f_rate = self.settings.get('sell_fee_bt', self.settings.get('sell_fee_rate', 0.215)) / 100.0
         
         stock_name_map = TradingStrategy.get_stock_name_map()
         stock_name = stock_name_map.get(code, code)
