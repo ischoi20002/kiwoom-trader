@@ -6,7 +6,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     # 1. 하락장 필터링
     if settings.get('use_market_filter', True) and market_trend == 'DOWN':
         return pd.DataFrame({
-            'Signal': False, 'Sig_Type': 'NONE', 'RSI_Range': False, 'RSI_Cross': False,
+            'Signal': False, 'Sig_Type': 'NONE', 
+            'Met_Count': 0, 'Total_Count': 1, 'Met_Ratio': 0.0,
+            'RSI_Range': False, 'RSI_Cross': False,
             'MACD_OK': False, 'MA60_Range': False, 'MA_GC': False, 'Vol_Surge': False
         }, index=df.index)
         
@@ -36,7 +38,13 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     ma_gap = (df['MA5'] / df['MA20'] - 1) * 100
     
     gc_bars = max(1, int(settings.get('gc_window', 90) / 15))
-    cond_ma_gc = (df['MA5'] > df['MA20']) & (df['MA5'].shift(gc_bars) <= df['MA20'].shift(gc_bars)) & (ma_gap <= ma_gap_limit)
+    is_ma_aligned = (df['MA5'] > df['MA20'])
+    # [v3.5] MA Pulse: MA5 < MA20 이탈 시마다 그룹을 나누어 연속 정배열 유지 기간 계산
+    ma_group_id = (~is_ma_aligned).cumsum()
+    ma_count_maint = is_ma_aligned.groupby(ma_group_id).cumsum()
+    
+    # 조건: 현재 정배열 상태이면서, 골든크로스 직후 설정된 바(N) 이내일 것
+    cond_ma_gc = (is_ma_aligned) & (ma_count_maint >= 1) & (ma_count_maint <= gc_bars) & (ma_gap <= ma_gap_limit)
     
     # 4. 거래량 조건 (Prev Day Same Time 대비)
     v_surge_a = settings.get('vol_surge', 2.0)
@@ -70,6 +78,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     # 6. Type B: 추세 돌파 (RSI 제약 + 정배열 + MACD GC)
     # [v26.3] Default to False if missing for safety
     use_b = settings.get('use_type_b', False)
+    # [v27.3] 중립(NEUTRAL) 상태에서는 백테스팅 엔진과 동일하게 Type B 진입을 차단함
+    if market_trend == 'NEUTRAL': use_b = False
+    
     cond_trend_aligned = (df['MA20'] > df['MA60']) & (df['Close'] > df['MA20'])
     cond_macd_gc = (df['MACD'] > df['MACD_Sig']) & (df['MACD'].shift(1) <= df['MACD_Sig'].shift(1))
     
@@ -86,9 +97,47 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         # [v26.10] MACD Momentum Filter: Ensure OSC is positive AND increasing (energy strengthening)
         signal &= (df['OSC'] > 0) & (df['OSC'] > df['OSC'].shift(1))
     
+    # 8. 수급 합치도 (Confluence Score) 계산 - [v3.5]
+    def calc_met_count(sig_type):
+        if sig_type == 'TYPE_A':
+            conds = [cond_rsi_type_a]
+            if settings.get('use_gc', True): conds.append(cond_ma_gc)
+            if settings.get('use_vol_surge', True): conds.append(cond_vol_a)
+            if settings.get('use_ma60_safe', True): conds.append(cond_ma60)
+            if use_rsi_sig_filter: conds.append(cond_rsi_sig)
+            if settings.get('use_rsi_signal', True): conds.append(cond_rsi_50_pulse)
+        elif sig_type == 'TYPE_B':
+            conds = [cond_rsi_range]
+            if settings.get('use_macd_gc_b', True): conds.append(cond_macd_gc)
+            if settings.get('use_trend_aligned_b', True): conds.append(cond_trend_aligned)
+            if settings.get('use_type_b_vol', True): conds.append(cond_vol_b)
+            if use_rsi_sig_filter: conds.append(cond_rsi_sig)
+        else:
+            return 0, 1
+        
+        # 공통 필터 추가
+        if settings.get('use_macd_signal', True):
+            conds.append((df['OSC'] > 0) & (df['OSC'] > df['OSC'].shift(1)))
+        
+        met = sum([c.astype(int) for c in conds])
+        return met, len(conds)
+
+    met_a, total_a = calc_met_count('TYPE_A')
+    met_b, total_b = calc_met_count('TYPE_B')
+    
+    # 더 높은 합치도를 가진 타입을 기준으로 점수 산출
+    ratio_a = met_a / total_a
+    ratio_b = met_b / total_b
+    
+    final_met = np.where(ratio_b >= ratio_a, met_b, met_a)
+    final_total = np.where(ratio_b >= ratio_a, total_b, total_a)
+
     return pd.DataFrame({
         'Signal': signal,
         'Sig_Type': np.where(signal_b, 'TYPE_B', np.where(signal_a, 'TYPE_A', 'NONE')),
+        'Met_Count': final_met,
+        'Total_Count': final_total,
+        'Met_Ratio': np.where(final_total > 0, final_met / final_total, 0),
         'RSI_Range': cond_rsi_range,
         'MACD_OK': cond_macd_basic,
         'MA60_Range': cond_ma60,

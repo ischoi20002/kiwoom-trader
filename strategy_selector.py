@@ -265,7 +265,8 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
                 'MACD': float(last_full['MACD']), 'MACD_Sig': float(last_full['MACD_Sig']), 'OSC': float(last_full['OSC']),
                 'Volume': int(last_full['volume']), 'PrevVol': int(df_valid.iloc[-2]['volume']),
                 'VolMax': int(df_valid['volume'].max()),
-                'MABufScale': 1.0  # 기본값
+                'MABufScale': 1.0,  # 기본값
+                'AvgTrdeVal': int(last_full['AvgVal5'] / 100000000) # [Fix] 억 단위 추가
             }
             return res, status
         except Exception:

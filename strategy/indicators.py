@@ -105,14 +105,50 @@ def calculate_all_indicators(df, settings):
         atr_p = int(settings.get('atr_period', 14))
         df['ATR'] = calculate_atr(df, max(1, atr_p))
         
-    # 7. Prev Day Same Time Volume (전일 동시간 거래량 평균)
-    if len(df) > 0:
-        v_lookback = int(settings.get('vol_lookback', 10))
-        vol_lookback = max(1, v_lookback)
-        # 각 시간별로 rolling mean 계산
-        df['Prev_Day_Vol'] = df.groupby(df.index.time)['Volume'].transform(
-            lambda x: x.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
-        )
+        # [Perf] Vectorized Prev Day Same Time Volume calculation (Replaces slow groupby.transform)
+        if len(df) > 0:
+            v_lookback = int(settings.get('vol_lookback', 10))
+            vol_lookback = max(1, v_lookback)
+            
+            # Create a pivot table of volumes by date and time
+            # Index is date, columns are time, values are volume
+            pivot_vol = df.copy()
+            # [v35.7] Safety: Ensure DatetimeIndex for normalize()
+            if not isinstance(pivot_vol.index, pd.DatetimeIndex):
+                if 'datetime' in pivot_vol.columns:
+                    pivot_vol.index = pd.to_datetime(pivot_vol['datetime'], errors='coerce')
+                elif 'time' in pivot_vol.columns:
+                    # [v35.7] HHMM 문자열(예: '1215')을 오늘 날짜와 결합하여 정상 타임스탬프로 변환
+                    from datetime import datetime
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    # '1215' -> '2026-03-27 1215' -> Datetime
+                    t_series = pivot_vol['time'].astype(str).str.zfill(4)
+                    pivot_vol.index = pd.to_datetime(today_str + ' ' + t_series, format='%Y-%m-%d %H%M', errors='coerce')
+            
+            if not isinstance(pivot_vol.index, pd.DatetimeIndex):
+                # Fallback: create dummy date if index is not datetime-like
+                pivot_vol['date_only'] = pd.Timestamp.now().normalize()
+            else:
+                pivot_vol['date_only'] = pivot_vol.index.normalize()
+            
+            pivot_vol['time_only'] = pivot_vol.index.time
+            
+            # Use pivot_table to handle cases with missing bars
+            pivoted = pivot_vol.pivot_table(index='date_only', columns='time_only', values='Volume')
+            # Shift by 1 day and take rolling mean of previous days for each time slot
+            pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
+            # Unpivot and merge back
+            rolled_long = pivoted_rolled.melt(ignore_index=False, value_name='Prev_Day_Vol').dropna(subset=['Prev_Day_Vol'])
+            # Reset index to get date_only back as a column
+            rolled_long = rolled_long.reset_index()
+            
+            # Map back to original df using (date_only, time_only)
+            df['date_only'] = df.index.normalize()
+            df['time_only'] = df.index.time
+            df = df.merge(rolled_long, on=['date_only', 'time_only'], how='left')
+            df.index = pivot_vol.index # Restore DatetimeIndex
+            df = df.drop(columns=['date_only', 'time_only'])
+            df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
         
     return df
 
@@ -138,7 +174,9 @@ def calculate_buy_indicators_light(df, settings):
     # Prev Day same time vol (전일 동시간 거래량 평균)
     v_lookback = int(settings.get('vol_lookback', 10))
     vol_lookback = max(1, v_lookback)
-    df['Prev_Day_Vol'] = df.groupby(df.index.time)['Volume'].transform(
+    # 각 시간별로 rolling mean 계산
+    time_groups = df.index.time if isinstance(df.index, pd.DatetimeIndex) else (df['time'] if 'time' in df.columns else df.index)
+    df['Prev_Day_Vol'] = df.groupby(time_groups)['Volume'].transform(
         lambda x: x.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
     )
     

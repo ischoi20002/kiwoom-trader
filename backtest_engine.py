@@ -30,14 +30,16 @@ import importlib
 importlib.reload(reporting.trade_report)
 from reporting.trade_report import generate_trade_report
 from strategy import indicators, signals
+from strategy.indicators import calculate_all_indicators
+from strategy.simulation_models import SimulatedRealtimeMetrics
 
 csv_lock = threading.Lock()
 # [v15.3.7] Script-relative absolute paths for robust log management
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIGNAL_CSV = os.path.join(BASE_DIR, "backtest_signals.csv")
 TRADE_CSV = os.path.join(BASE_DIR, "backtest_trades.csv")
-print(f"DEBUG [backtest_engine]: BASE_DIR={BASE_DIR}")
-print(f"DEBUG [backtest_engine]: TRADE_CSV={TRADE_CSV}")
+# print(f"DEBUG [backtest_engine]: BASE_DIR={BASE_DIR}")
+# print(f"DEBUG [backtest_engine]: TRADE_CSV={TRADE_CSV}")
 
 class TradingStrategy:
     """[v6.4] 실시간 감시와 백테스팅이 공유하는 매매 전략 엔진"""
@@ -82,7 +84,7 @@ class TradingStrategy:
     @staticmethod
     def calculate_indicators(df, settings):
         """지표 계산 (공통)"""
-        return indicators.calculate_all_indicators(df, settings)
+        return calculate_all_indicators(df, settings)
 
     @staticmethod
     def get_market_status(market_df, vix_value=None):
@@ -195,6 +197,25 @@ class SimpleBacktester:
         self.s2_amt = 0
         self.buy_f_rate = 0
         self.sell_f_rate = 0
+        self.trades_history = []
+        
+        # [Perf] Pre-init cached settings placeholders (v33.8)
+        self.use_sb = False
+        self.use_sb_a = False
+        self.use_sb_b = False
+        self.use_sb_s2 = False
+        self.sb_ba = 1.2
+        self.sb_vp = 110.0
+        self.use_sx = False
+        self.sx_ba = 0.8
+        self.sx_vp = 90.0
+        self.sx_p_thr = 0.0
+        self.use_atr = False
+        self.atr_sl_mult = 2.0
+        self.atr_trail_mult = 3.0
+        self.gap_down_limit = -5.0
+        self.use_s2_tp_active = True
+        self.use_type_b = False
         
     def calculate_rsi(self, series, period=14):
         delta = series.diff()
@@ -220,16 +241,86 @@ class SimpleBacktester:
             if not skip_indicators:
                 df = TradingStrategy.calculate_indicators(df, self.settings)
             
-            print(f"  [Sim] Strategy Run: {code} | Data: {len(df)} rows | HighPrec: {high_precision}")
+            if log_to_csv:
+                print(f"  [Sim] Strategy Run: {code} | Data: {len(df)} rows | HighPrec: {high_precision}")
             
             params = self._init_simulation(df, code, market_df, vix_df, high_precision)
             
             # 2. Main Simulation Loop (v23.0 Optimized)
             # [Perf] 미리 벡터화된 신호 및 가격 정보를 로컬 변수로 캐싱하여 루프 부하 최적화
+            # [v31.4] Real-time only columns preparation
+            if self.settings.get('use_synthetic_realtime', True):
+                if 'vol_power' not in df.columns: df['vol_power'] = np.nan
+                if 'total_ask' not in df.columns: df['total_ask'] = np.nan
+                if 'total_bid' not in df.columns: df['total_bid'] = np.nan
+                if 'bid_ask_ratio' not in df.columns: df['bid_ask_ratio'] = np.nan
+                
+                # Fill NaNs with heuristic model
+                p_changes = df['Close'].pct_change().fillna(0).values
+                vol_mas = df['Vol_MA20'].values if 'Vol_MA20' in df.columns else df['Volume'].rolling(20).mean().bfill().values
+                vol_ratios = (df['Volume'] / (vol_mas + 1e-10)).values
+                
+                vps = df['vol_power'].values
+                tasks = df['total_ask'].values
+                tbids = df['total_bid'].values
+                ratios = df['bid_ask_ratio'].values
+                
+                for i in range(len(df)):
+                    if np.isnan(vps[i]):
+                        vps[i] = SimulatedRealtimeMetrics.simulate_vol_power(p_changes[i], vol_ratios[i])
+                    if np.isnan(tasks[i]) or np.isnan(tbids[i]):
+                        r = SimulatedRealtimeMetrics.simulate_bid_ask_ratio(p_changes[i], vol_ratios[i], vps[i])
+                        tasks[i] = 100000
+                        tbids[i] = int(100000 * r)
+                        ratios[i] = r
+                
+                df['vol_power'] = vps
+                df['total_ask'] = tasks
+                df['total_bid'] = tbids
+                df['bid_ask_ratio'] = ratios
+
             close_vals = df['Close'].values
             high_vals = df['High'].values
             low_vals = df['Low'].values
+            vol_vals = df['Volume'].values
+            vol_ma_vals = df['Vol_MA20'].values if 'Vol_MA20' in df.columns else (df['Volume'].rolling(20).mean().values)
+            
+            # [v31.4] Real-time only columns (VolPower, Bid/Ask)
+            vp_vals = df['vol_power'].values if 'vol_power' in df.columns else np.full(len(df), np.nan)
+            task_vals = df['total_ask'].values if 'total_ask' in df.columns else np.full(len(df), np.nan)
+            tbid_vals = df['total_bid'].values if 'total_bid' in df.columns else np.full(len(df), np.nan)
+            
+            # [Perf] Extract all potentially needed indicators to NumPy for zero-copy access in loops
+            # This avoids expensive df.iloc[i] and df.get(col) calls
+            np_indicators = {
+                'Close': close_vals,
+                'High': high_vals,
+                'Low': low_vals,
+                'Volume': vol_vals,
+                'RSI': df['RSI'].values if 'RSI' in df.columns else np.zeros(len(df)),
+                'MACD': df['MACD'].values if 'MACD' in df.columns else np.zeros(len(df)),
+                'MACD_Sig': df['MACD_Sig'].values if 'MACD_Sig' in df.columns else np.zeros(len(df)),
+                'OSC': df['OSC'].values if 'OSC' in df.columns else np.zeros(len(df)),
+                'Prev_OSC': df['Prev_OSC'].values if 'Prev_OSC' in df.columns else np.zeros(len(df)),
+                'MA5': df['MA5'].values if 'MA5' in df.columns else np.zeros(len(df)),
+                'MA20': df['MA20'].values if 'MA20' in df.columns else np.zeros(len(df)),
+                'Vol_MA20': vol_ma_vals,
+                'ATR': df['ATR'].values if 'ATR' in df.columns else np.zeros(len(df)),
+                'RSI_Sig': df['RSI_Sig'].values if 'RSI_Sig' in df.columns else np.zeros(len(df)),
+                'Prev_RSI': df['Prev_RSI'].values if 'Prev_RSI' in df.columns else np.zeros(len(df)),
+                'Market_Status': df['Market_Status'].values if 'Market_Status' in df.columns else np.full(len(df), 'SAFE', dtype=object),
+                'Market_Trend': df['Market_Trend'].values if 'Market_Trend' in df.columns else np.full(len(df), 'UP', dtype=object),
+                'Sig_Type': df['Sig_Type'].values if 'Sig_Type' in df.columns else np.full(len(df), 'TYPE_A', dtype=object),
+                'bid_ask_ratio': df['bid_ask_ratio'].values if 'bid_ask_ratio' in df.columns else np.full(len(df), 1.0),
+                'vol_power': df['vol_power'].values if 'vol_power' in df.columns else np.full(len(df), 100.0),
+                'Signal': df['Signal'].values if 'Signal' in df.columns else np.zeros(len(df), dtype=bool),
+                'MA60': df['MA60'].values if 'MA60' in df.columns else np.zeros(len(df))
+            }
+            
             time_indices = df.index
+            # [Perf] Pre-cache hour/minute for gap grace check
+            time_hours = time_indices.hour.values
+            time_minutes = time_indices.minute.values
             
             m1_np_high = None
             m1_np_close = None
@@ -254,16 +345,41 @@ class SimpleBacktester:
             signal_shifted = df['Signal_Shifted'].values if 'Signal_Shifted' in df.columns else np.zeros(len(df), dtype=bool)
             
             total_bars = len(df)
-            for i in range(total_bars):
-                # i가 0이면 이전 바가 없으므로 건너뛰
-                if i == 0: 
-                    params['equity_curve'][0] = params['balance']
-                    continue
-                
-                # [v30.7] Pass pre-calculated m1_chunk info to avoid slicing overhead
+            # [v35.5] High-Performance Simulation Step (Zero Dict Creation)
+            # Initialize equity_curve[0] outside the loop
+            params['equity_curve'][0] = params['balance']
+            equity_curve = params['equity_curve'] # Reference to modify directly
+            
+            # [v35.6] Ultra-Performance Unpacked Loop
+            # Dictionary lookups are slow in million-bar loops. Unpack arrays to local variables once.
+            ind_signal = np_indicators['Signal']
+            ind_sig_type = np_indicators['Sig_Type']
+            ind_mkt_status = np_indicators['Market_Status']
+            ind_mkt_trend = np_indicators['Market_Trend']
+            ind_ba_ratio = np_indicators['bid_ask_ratio']
+            ind_vp = np_indicators['vol_power']
+            ind_rsi = np_indicators['RSI']
+            
+            # Unpack hot parameters for simulation step to avoid repeated dict/attr access
+            pos = params['position']
+            balance = params['balance']
+            
+            for i in range(1, total_bars):
                 m1_info = (m1_np_high, m1_np_close, m1_np_time, m1_boundaries[i]) if m1_boundaries else None
-                params = self._sim_loop_step_v2(i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_info, high_precision, params, log_to_csv)
-                params['equity_curve'][i] = params['balance'] + (params['position']['qty'] * close_vals[i] if params['position'] else 0)
+                
+                # Update loop locals
+                params['position'] = pos
+                params['balance'] = balance
+                
+                # [v35.6] Optimized Step
+                params = self._sim_loop_step_v3(
+                    i, close_vals, high_vals, low_vals, time_indices, time_hours, time_minutes, 
+                    signal_shifted, np_indicators, code, m1_info, high_precision, params, log_to_csv
+                )
+                
+                pos = params['position']
+                balance = params['balance']
+                equity_curve[i] = balance + (pos['qty'] * close_vals[i] if pos else 0)
                 if not params['position'] and i > 0 and params['balance'] != params['initial_balance']:
                     # [v27.0] Slot Budget Protection: If all sold and net profit exists
                     pass 
@@ -280,6 +396,8 @@ class SimpleBacktester:
     def _init_simulation(self, df, code, market_df, vix_df, high_precision):
         """시뮬레이션 초기 설정 및 시장 상태 계산"""
         total_capital_val = self.settings.get('total_capital', 30000000)
+        max_slots = self.settings.get('max_slots', 10)
+        slot_budget = total_capital_val / max_slots
         
         # [v33.5] Decouple budget from max_slots (Now used as Monitoring limit)
         self.s1_amt = self.settings.get('stage1_amt', 1000000.0)
@@ -290,9 +408,73 @@ class SimpleBacktester:
         stock_name_map = TradingStrategy.get_stock_name_map()
         stock_name = stock_name_map.get(code, code)
 
+        # [Perf] Cache Smart Filter & Exit settings to avoid repeated dictionary lookups in hot loops
+        s = self.settings
+        self.use_sb_a = s.get('use_smart_buy_a', True)
+        self.use_sb_b = s.get('use_smart_buy_b', True)
+        self.use_sb_s2 = s.get('use_smart_buy_s2', True)
+        self.sb_ba = float(s.get('smart_buy_ba_ratio', 1.2))
+        self.sb_vp = float(s.get('smart_buy_vp', 110.0))
+        
+        self.use_sx = s.get('use_smart_exit', False)
+        self.sx_ba = float(s.get('smart_exit_ba_ratio', 0.8))
+        self.sx_vp = float(s.get('smart_exit_vp', 90.0))
+        self.sx_p_thr = float(s.get('smart_exit_price_threshold', 0.0))
+        
+        # [Perf] Cache TP/SL parameters (v33.6)
+        self.use_s1_tp = s.get('use_s1_tp', True)
+        self.s1a_tp = float(s.get('s1_a_take_profit', 5.0)) / 100.0
+        self.s1b_tp = float(s.get('s1_b_take_profit', 5.0)) / 100.0
+        self.s2_tp = float(s.get('s2_take_profit', 5.0)) / 100.0
+        
+        self.use_s1_sl = s.get('use_s1_stop_loss', True)
+        self.use_s2_sl = s.get('use_s2_stop_loss', True) # [v35.3] Added missing S2 SL flag
+        self.s1a_sl = float(s.get('s1_a_stop_loss', 3.0)) / 100.0
+        self.s1b_sl = float(s.get('s1_b_stop_loss', 3.0)) / 100.0
+        self.s2_sl = float(s.get('s2_stop_loss', 2.0)) / 100.0
+        
+        self.use_type_b = s.get('use_type_b', False)
+        
+        # [Perf] Cache ATR & Gap Down settings (v33.7)
+        self.use_atr = s.get('use_atr_exit', False)
+        self.use_atr_trail = s.get('use_atr_trailing_stop', True)
+        self.use_atr_sl = s.get('use_atr_stop_loss', True)
+        self.atr_sl_mult = float(s.get('atr_multiplier_sl', 2.0))
+        self.atr_trail_mult = float(s.get('atr_multiplier_trail', 3.0))
+        self.gap_down_limit = float(s.get('gap_down_limit', -5.0))
+        self.use_s2_tp_active = s.get('use_s2_tp', True)
+        self.use_gap_grace = s.get('use_gap_grace', True)
+        
+        # [Perf] Cache Flash Exit settings
+        self.use_s1_flash = s.get('use_s1_flash_exit', True)
+        self.use_s2_flash = s.get('use_s2_flash_exit', True)
+        self.s1a_flash = float(s.get('s1_a_flash_exit_pct', 3.0))
+        self.s1b_flash = float(s.get('s1_b_flash_exit_pct', 3.0))
+        self.s2_flash = float(s.get('s2_flash_exit_pct', 3.0))
+        
+        # [Perf] Cache S2 Approval settings
+        self.use_s2_delay = s.get('use_s2_delay', True)
+        self.s2_delay_h = float(s.get('s2_delay_hours', 24))
+        self.use_s2_ma20 = s.get('use_s2_ma20', True)
+        self.s2_ma20_g = float(s.get('s2_ma20_gap', 0.0))
+        self.use_s2_ma5 = s.get('use_s2_ma5', True)
+        self.s2_ma5_g = float(s.get('s2_ma5_gap', -0.5))
+        self.use_s2_vol = s.get('use_s2_vol_surge', True)
+        self.s2_vol_r = float(s.get('s2_vol_ratio', 1.0))
+        self.use_s2_rsi = s.get('use_s2_rsi_sig', True)
+        self.s2_rsi_g = float(s.get('s2_rsi_gap', 0.0))
+        self.use_s2_macd = s.get('use_s2_macd_gc', True)
+        self.s2_macd_g = float(s.get('s2_macd_gap', 0.0))
+        self.use_s2_profit = s.get('use_s2_profit', True)
+        self.s2_trigger = float(s.get('stage2_trigger', s.get('s2_profit_limit', 1.0)))
+        
         # 시장 상태 계산
         if market_df is not None and not market_df.empty:
-            m_df = TradingStrategy.calculate_indicators(market_df.copy(), {})
+            # [Perf] Pre-calculated market indicators check
+            if 'MSI' in market_df.columns and 'ADX' in market_df.columns:
+                m_df = market_df
+            else:
+                m_df = TradingStrategy.calculate_indicators(market_df.copy(), {})
             # [Fix] Align VIX with market index to prevent shape mismatch (broadcast error)
             vix_s = vix_df['Close'].reindex(m_df.index).ffill().fillna(15.0) if vix_df is not None and 'Close' in vix_df.columns else pd.Series(15.0, index=m_df.index)
             
@@ -315,9 +497,23 @@ class SimpleBacktester:
             m_df['Status'] = m_df['Status'].shift(1).fillna('WATCH')
             m_df['Trend'] = m_df['Trend'].shift(1).fillna('UP')
             
-            df_daily_idx = df.index.normalize()
-            df['Market_Status'] = df_daily_idx.map(m_df['Status']).fillna('WATCH')
-            df['Market_Trend'] = df_daily_idx.map(m_df['Trend']).fillna('UP')
+            # [v35.7] Safety: ensure DatetimeIndex for normalize()
+            if not isinstance(df.index, pd.DatetimeIndex):
+                if 'datetime' in df.columns:
+                    df.index = pd.to_datetime(df['datetime'])
+                elif 'time' in df.columns:
+                    df.index = pd.to_datetime(df['time'])
+                else:
+                    # If index is still RangeIndex, normalize() will fail
+                    pass
+            
+            if isinstance(df.index, pd.DatetimeIndex):
+                df_daily_idx = df.index.normalize()
+                df['Market_Status'] = df_daily_idx.map(m_df['Status']).fillna('WATCH')
+                df['Market_Trend'] = df_daily_idx.map(m_df['Trend']).fillna('UP')
+            else:
+                df['Market_Status'] = 'WATCH'
+                df['Market_Trend'] = 'UP'
             # [Fix] FutureWarning: infer_objects to ensure clean dtype
             df['Market_Status'] = df['Market_Status'].infer_objects(copy=False)
             df['Market_Trend'] = df['Market_Trend'].infer_objects(copy=False)
@@ -347,248 +543,203 @@ class SimpleBacktester:
             'stock_name': stock_name
         }
 
-    def _sim_loop_step_v2(self, i, close_vals, high_vals, low_vals, time_indices, signal_shifted, df, code, m1_info, high_precision, params, log_to_csv=False):
-        """[v23.1] 로직 무결성이 보장된 고속 시뮬레이션: 2차 매수 및 모든 익절/손절 조건 포함"""
+    def _check_s2_approval_v2(self, pos, indicators, i):
+        """[v35.5] Ultra-Fast 2nd Buy approval (Direct Indexing, No Dict Creation)"""
+        if self.use_s2_ma20:
+            ma20 = indicators['MA20'][i]
+            if ma20 == 0 or indicators['Close'][i] < ma20 * (1 + self.s2_ma20_g/100.0): return False
+        if self.use_s2_ma5:
+            ma5 = indicators['MA5'][i]
+            if ma5 > 0 and indicators['Close'][i] < ma5 * (1 + self.s2_ma5_g/100.0): return False
+        if self.use_s2_vol:
+            if indicators['Volume'][i] < indicators['Vol_MA20'][i] * self.s2_vol_r: return False
+        if self.use_s2_rsi:
+            rsi = indicators['RSI'][i]
+            if rsi < indicators['RSI_Sig'][i] * (1 + self.s2_rsi_g/100.0) or rsi <= indicators['Prev_RSI'][i]: return False
+        if self.use_s2_macd:
+            macd = indicators['MACD'][i]
+            osc = indicators['OSC'][i]
+            if macd < indicators['MACD_Sig'][i] + self.s2_macd_g or osc <= 0 or osc <= indicators['Prev_OSC'][i]: return False
+        if self.use_s2_profit:
+            if (indicators['Close'][i] / pos['avg_price'] - 1) * 100 < self.s2_trigger: return False
+        return True
+
+            
+    def _process_intra_bar_exit_only_v2(self, i, code, m1_highs, m1_closes, m1_times, params, time_h, time_m):
+        """[v35.0] Ultra-Fast Intra-bar Exit check (Zero Pandas)"""
+        pos = params['position']
+        sig_type = pos.get('sig_type', 'TYPE_A')
+        is_type_b = (sig_type == "TYPE_B" and self.use_type_b)
+        
+        if pos['stage'] == 1:
+            f_pct = self.s1b_flash if is_type_b else self.s1a_flash if self.use_s1_flash else 0.0
+            sl_pct = (self.s1b_sl if is_type_b else self.s1a_sl) * 100 if self.use_s1_sl else 0.0
+            tp_pct = (self.s1b_tp if is_type_b else self.s1a_tp) * 100 if self.use_s1_tp else 0.0
+        else:
+            f_pct = self.s2_flash if self.use_s2_flash else 0.0
+            sl_pct = self.s2_sl * 100 if self.use_s2_sl else 0.0
+            tp_pct = self.s2_tp * 100 if self.use_s2_tp_active else 0.0
+        
+        avg_price = pos['avg_price']
+        prev_max = pos.get('max_price', avg_price)
+        running_max = np.maximum.accumulate(m1_highs)
+        running_max = np.maximum(running_max, prev_max)
+        
+        flash_exited = (f_pct > 0) & (m1_closes < running_max * (1 - f_pct/100))
+        stop_lossed = (sl_pct > 0) & (m1_closes / avg_price - 1 <= -sl_pct/100)
+        take_profited = (tp_pct > 0) & (m1_highs / avg_price - 1 >= tp_pct/100)
+        gap_downed = (m1_closes / avg_price - 1 <= self.gap_down_limit / 100)
+        
+        if self.use_gap_grace and time_h == 9 and time_m == 0:
+            grace_idx_limit = 15 
+            if len(stop_lossed) > 0: stop_lossed[:grace_idx_limit] = False
+                
+        exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
+        exit_idxs = np.where(exit_mask)[0]
+        if len(exit_idxs) > 0:
+            idx = int(exit_idxs[0])
+            e_price, e_time = m1_closes[idx], m1_times[idx]
+            if bool(take_profited[idx]): e_price = avg_price * (1 + tp_pct/100)
+            reason = "1M_SL"
+            if bool(gap_downed[idx]): reason = "1M_GapDown"
+            elif bool(flash_exited[idx]): reason = "1M_FlashExit"
+            elif bool(take_profited[idx]): reason = "1M_TP"
+            params = self._execute_sell(e_time, e_price, reason, params)
+        return params
+
+    def _sim_loop_step_v3(self, i, close_vals, high_vals, low_vals, time_indices, time_hours, time_minutes, signal_shifted, indicators, code, m1_info, high_precision, params, log_to_csv=False):
+        """[v35.5] Ultra-Fast Simulation Step (Direct Indexing, No Dict Creation)"""
         curr_close = close_vals[i]
         curr_date = time_indices[i]
         curr_high = high_vals[i]
         curr_low = low_vals[i]
         
-        # [v30.7] Optimized High Precision Exit Monitoring (Using pre-calculated NumPy slices)
+        # 1. High Precision Exit Monitoring
         if high_precision and m1_info is not None and params['position'] is not None:
-             try:
-                m1_high_total, m1_close_total, m1_time_total, (s_idx, e_idx) = m1_info
-                if e_idx > s_idx:
-                    m1_highs = m1_high_total[s_idx:e_idx]
-                    m1_closes = m1_close_total[s_idx:e_idx]
-                    # Pass numpy arrays correctly to optimized function
-                    params = self._process_intra_bar_exit_only(i, df, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], params, log_to_csv)
-                    if params['position'] is None:
-                        return params
-             except Exception as e:
-                if i % 100 == 0:
-                    print(f"  [Error] Intra-bar error ({code} @ {curr_date}): {e}")
+            m1_high_total, m1_close_total, m1_time_total, (s_idx, e_idx) = m1_info
+            if e_idx > s_idx:
+                m1_highs = m1_high_total[s_idx:e_idx]
+                m1_closes = m1_close_total[s_idx:e_idx]
+                params = self._process_intra_bar_exit_only_v2(i, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], params, time_hours[i], time_minutes[i])
+                if params['position'] is None:
+                    return params
 
-        # Standard Sim (v23.1 Full Logic)
+        # 2. Standard Sim Logic
         if params['position'] is not None:
             pos = params['position']
             if curr_high > pos['max_price']: pos['max_price'] = curr_high
             
-            # 1. Exit Check (TP/SL/Flash/Gap/ATR)
-            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos, indicator_row=df.iloc[i])
+            # Exit Check
+            exit_res = self._check_exits_optimized(curr_date, curr_close, curr_high, curr_low, pos, indicators=indicators, i=i)
             if exit_res:
-                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicator_row=df.iloc[i])
+                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicators=indicators, i=i)
             
-            # 2. Stage 2 Buy Check (Secondary)
+            # Stage 2 Buy Check
             elif pos['stage'] == 1:
-                row = df.iloc[i]
-                if TradingStrategy._check_s2_approval(pos, row, self.settings):
-                    # [v22.1] 2차 매입 사유 상세 기록 (지표 상태 포함)
-                    s2_reason = f"ADDON(S2)|R:{row.get('RSI',0):.1f}|M:{row.get('MACD',0):.1f}|O:{row.get('OSC',0):.1f}|V:{row.get('Volume',0)}"
-                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason=s2_reason, indicator_row=row)
+                if self._check_s2_approval_v2(pos, indicators, i):
+                    can_buy_s2 = True
+                    if self.use_sb_s2:
+                        ba_ratio = indicators['bid_ask_ratio'][i]
+                        v_power = indicators['vol_power'][i]
+                        if ba_ratio < self.sb_ba or v_power < self.sb_vp:
+                            can_buy_s2 = False
+                    
+                    if can_buy_s2:
+                        s2_reason = f"ADDON(S2)|R:{indicators['RSI'][i]:.1f}|M:{indicators['MACD'][i]:.1f}|O:{indicators['OSC'][i]:.1f}|V:{indicators['Volume'][i]}"
+                        if self.use_sb_s2: s2_reason = "SmartBuy|" + s2_reason
+                        params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason=s2_reason, indicators=indicators, i=i)
         
-        # 3. Entry Check (Initial)
+        # 3. Entry Check
         elif signal_shifted[i]:
-            row = df.iloc[i]
-            mkt_status = row.get('Market_Status', 'SAFE')
-            is_ok = (mkt_status != 'RISK')
-            # Type A 신호 필터링 (신호 발생봉 무지연 체크)
-            if mkt_status == 'WATCH' and row.get('Sig_Type') != 'TYPE_A': is_ok = False
-            
-            if is_ok:
-                params = self._execute_buy(curr_date, close_vals[i], "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row, sig_type=row.get('Sig_Type', 'TYPE_B'))
-            
-        return params
-
-    def _process_intra_bar_exit_only(self, i, df, code, m1_highs, m1_closes, m1_times, params, log_to_csv):
-        """[v30.7] Vectorized Intra-bar Exit check using pre-sliced NumPy arrays (Zero Pandas overhead)"""
-        prev_row_base = df.iloc[i-1] if i > 0 else df.iloc[i]
-        
-        pos = params['position']
-        sig_type = pos.get('sig_type', 'TYPE_A')
-        
-        # Cache threshold parameters outside the loop
-        suffix = "_a" if sig_type == "TYPE_A" else "_b"
-        if pos['stage'] == 1:
-            f_pct = float(self.settings.get(f's1{suffix}_flash_exit_pct', 3.0)) if self.settings.get('use_s1_flash_exit', True) else 0.0
-            sl_pct = float(self.settings.get(f's1{suffix}_stop_loss', 3.0)) if self.settings.get('use_s1_stop_loss', True) else 0.0
-            tp_pct = float(self.settings.get(f's1{suffix}_take_profit', 5.0)) if self.settings.get('use_s1_tp', True) else 0.0
-        else:
-            f_pct = float(self.settings.get('s2_flash_exit_pct', 3.0)) if self.settings.get('use_s2_flash_exit', True) else 0.0
-            sl_pct = float(self.settings.get('s2_stop_loss', 2.0)) if self.settings.get('use_s2_stop_loss', True) else 0.0
-            tp_pct = float(self.settings.get('s2_take_profit', 5.0)) if self.settings.get('use_s2_tp', True) else 0.0
-        
-        g_lmt = float(self.settings.get('gap_down_limit', -5.0))
-        
-        prev_max = pos.get('max_price', pos['avg_price'])
-        # Vectorized monitoring
-        running_max = np.maximum.accumulate(m1_highs)
-        running_max = np.maximum(running_max, prev_max)
-        
-        avg_price = pos['avg_price']
-        
-        flash_exited = (f_pct > 0) & (m1_closes < running_max * (1 - f_pct/100))
-        stop_lossed = (sl_pct > 0) & (m1_closes / avg_price - 1 <= -sl_pct/100)
-        take_profited = (tp_pct > 0) & (m1_highs / avg_price - 1 >= tp_pct/100)
-        gap_downed = (m1_closes / avg_price - 1 <= g_lmt / 100)
-        
-        # [v25.8/v25.9] 15-minute Gap-Down Grace Period
-        if self.settings.get('use_gap_grace', True):
-            m1_t = pd.DatetimeIndex(m1_times)
-            if len(m1_t) > 0 and m1_t[0].hour == 9 and m1_t[0].minute == 0:
-                grace_mask = (m1_t.hour == 9).to_numpy() & (m1_t.minute < 15).to_numpy()
-                stop_lossed = stop_lossed & (~grace_mask)
-        exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
-        
-        # [v31.0] ATR-based Stop Loss & Trailing Stop
-        atr_trailed = np.zeros(len(m1_closes), dtype=bool)
-        atr_sl_triggered = np.zeros(len(m1_closes), dtype=bool)
-        if self.settings.get('use_atr_exit', False):
-            atr_val = prev_row_base.get('ATR', 0)
-            if not np.isnan(atr_val) and atr_val > 0:
-                sl_mult = float(self.settings.get('atr_multiplier_sl', 2.0))
-                trail_mult = float(self.settings.get('atr_multiplier_trail', 3.0))
-                if self.settings.get('use_atr_trailing_stop', True):
-                    atr_trailed = (m1_closes <= running_max - (trail_mult * atr_val))
-                if self.settings.get('use_atr_stop_loss', True):
-                    atr_sl_triggered = (m1_closes <= avg_price - (sl_mult * atr_val))
-                exit_mask = exit_mask | atr_trailed | atr_sl_triggered
-
-        exit_idxs = np.where(exit_mask)[0]
-        
-        if len(exit_idxs) > 0:
-            idx = int(exit_idxs[0])
-            e_price, e_time = m1_closes[idx], m1_times[idx]
-            if bool(take_profited[idx]): e_price = avg_price * (1 + tp_pct/100)
-            
-            reason = "1M_SL"
-            if bool(gap_downed[idx]): reason = "1M_GapDown"
-            elif bool(flash_exited[idx]): reason = "1M_FlashExit"
-            elif bool(take_profited[idx]): reason = "1M_TP"
-            elif bool(atr_trailed[idx]): reason = "1M_ATR_Trail"
-            elif bool(atr_sl_triggered[idx]): reason = "1M_ATR_SL"
-            
-            params = self._execute_sell(e_time, e_price, reason, params, indicator_row=prev_row_base)
-            
-        return params
-
-    def _process_standard_bar(self, i, df, code, params, log_to_csv=False):
-        """15분봉 기반 표준 시나리오 시뮬레이션"""
-        row = df.iloc[i]
-        curr_date = df.index[i]
-        curr_open, curr_high, curr_low, curr_close = row['Open'], row['High'], row['Low'], row['Close']
-
-        if params['position'] is not None:
-            pos = params['position']
-            if curr_high > pos['max_price']: pos['max_price'] = curr_high
-            
-            # 익절/손절 체크 (봉 단위)
-            exit_res = self._check_exits(curr_date, curr_close, curr_high, curr_low, pos, indicator_row=row)
-            if exit_res:
-                params = self._execute_sell(curr_date, exit_res['price'], exit_res['reason'], params, indicator_row=row)
-            elif pos['stage'] == 1:
-                if TradingStrategy._check_s2_approval(pos, row, self.settings): 
-                    # [v22.1] 2차 매입 사유 상세 기록 (지표 상태 포함)
-                    s2_reason = f"ADDON(S2)|R:{row.get('RSI',0):.1f}|M:{row.get('MACD',0):.1f}|O:{row.get('OSC',0):.1f}|V:{row.get('Volume',0)}"
-                    params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason=s2_reason, indicator_row=row)
-        elif row.get('Signal_Shifted', False):
-            mkt_status = row.get('Market_Status', 'SAFE')
-            sig_type = row.get('Sig_Type', 'TYPE_B')
+            mkt_status = indicators['Market_Status'][i]
+            sig_type = indicators['Sig_Type'][i]
             is_ok = (mkt_status != 'RISK')
             if mkt_status == 'WATCH' and sig_type != 'TYPE_A': is_ok = False
             
             if is_ok:
-                params = self._execute_buy(curr_date, curr_open, "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason="SIG", indicator_row=row, sig_type=sig_type)
+                use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
+                if use_sb_for_type:
+                    ba_ratio = indicators['bid_ask_ratio'][i]
+                    v_power = indicators['vol_power'][i]
+                    if ba_ratio < self.sb_ba or v_power < self.sb_vp:
+                        is_ok = False
+                
+                if is_ok:
+                    reason = "SmartBuy|SIG" if use_sb_for_type else "SIG"
+                    params = self._execute_buy(curr_date, curr_close, "BUY_1ST", params, stage=1, entry_idx=i, max_p=curr_high, reason=reason, indicators=indicators, i=i, sig_type=sig_type)
         
-        # [v15.6] Log ALL candidate signals for Signal Report
         if log_to_csv and not self.settings.get('skip_indicators', False):
-            if row.get('Signal', False) or (row.get('RSI', 0) > 30 and row.get('RSI', 0) < 80):
-                self._log_signal(curr_date, code, params['stock_name'], curr_close, row, row, row.get('Market_Trend', 'UP'), params)
-        
+            if indicators['Signal'][i] or (indicators['RSI'][i] > 30 and indicators['RSI'][i] < 80):
+                self._log_signal(curr_date, code, params['stock_name'], curr_close, indicators, i, indicators['Market_Trend'][i], params)
         return params
 
-    def _log_signal(self, date, code, name, price, indicators, signal_row, mkt_trend, params):
+    def _check_exits_optimized(self, date, price, high, low, pos, indicators=None, i=None):
+        """[v35.5] Ultra-Fast Exit check (Direct Indexing, No Dict Creation)"""
+        sig_type = pos.get('sig_type', 'TYPE_A')
+        is_type_b = (sig_type == "TYPE_B" and self.use_type_b)
+
+        if pos['stage'] == 1:
+            f_pct = (self.s1b_flash if is_type_b else self.s1a_flash if self.use_s1_flash else 0.0) / 100.0
+            if f_pct > 0 and price <= pos['max_price'] * (1.0 - f_pct):
+                return {'price': price, 'reason': f"FLASH_EXIT(S1)"}
+        else:
+            f_pct = (self.s2_flash if self.use_s2_flash else 0.0) / 100.0
+            if f_pct > 0 and price <= pos['max_price'] * (1.0 - f_pct):
+                return {'price': price, 'reason': f"FLASH_EXIT(S2)"}
+            
+        if (price / pos['avg_price'] - 1) * 100 <= self.gap_down_limit:
+            return {'price': price, 'reason': f"GAP_DOWN"}
+
+        if self.use_atr and indicators is not None and i is not None:
+            curr_atr = indicators['ATR'][i]
+            entry_atr = pos.get('atr_at_entry', curr_atr)
+            if curr_atr > 0:
+                if self.use_atr_sl and price <= pos['avg_price'] - (self.atr_sl_mult * entry_atr):
+                    return {'price': price, 'reason': f"ATR_SL"}
+                if self.use_atr_trail and price <= pos['max_price'] - (self.atr_trail_mult * curr_atr):
+                    return {'price': price, 'reason': f"ATR_TRAIL"}
+
+        if pos['stage'] == 1:
+            if self.use_s1_tp:
+                tp_pct = self.s1b_tp if is_type_b else self.s1a_tp
+                if (high / pos['avg_price'] - 1) >= tp_pct:
+                    return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S1)"}
+        else:
+            if self.use_s2_tp_active:
+                tp_pct = self.s2_tp
+                if (high / pos['avg_price'] - 1) >= tp_pct:
+                    return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S2)"}
+
+        if self.use_sx and indicators is not None and i is not None:
+            ba_ratio = indicators['bid_ask_ratio'][i]
+            v_power = indicators['vol_power'][i]
+            if ba_ratio < self.sx_ba and v_power < self.sx_vp:
+                if self.sx_p_thr == 0 or price <= pos['max_price'] * (1 + self.sx_p_thr / 100.0):
+                    return {'price': price, 'reason': f"SMART_EXIT"}
+        return None
+
+    def _check_exits(self, date, price, high, low, pos, indicators=None, i=None):
+        return self._check_exits_optimized(date, price, high, low, pos, indicators=indicators, i=i)
+
+
+    def _log_signal(self, date, code, name, price, indicators, i, mkt_trend, params):
         """신호 로그 기록 (SIGNAL_CSV 용 데이터 수집)"""
         params['signal_logs'].append({
             'Date': date, 'Code': code, 'Name': name,
-            'Price': price, 'RSI': indicators.get('RSI'), 'MACD': indicators.get('MACD'),
-            'RSI_Range': (indicators.get('RSI', 0) >= self.settings.get('buy_rsi_min', 40) and indicators.get('RSI', 0) <= self.settings.get('buy_rsi_max_b', 70)),
-            'MACD_OK': (indicators.get('MACD', 0) >= indicators.get('MACD_Sig', 0)),
-            'MA_GC': (indicators.get('MA5', 0) > indicators.get('MA20', 0)),
-            'MA60_Range': (price / indicators.get('MA60', 1) >= 1.0 and price / indicators.get('MA60', 1) <= 1.12),
-            'Vol_Surge': (indicators.get('Volume', 0) > indicators.get('Vol_MA20', 1) * 1.5),
+            'Price': price, 'RSI': indicators['RSI'][i], 'MACD': indicators['MACD'][i],
+            'RSI_Range': (indicators['RSI'][i] >= self.settings.get('buy_rsi_min', 40) and indicators['RSI'][i] <= self.settings.get('buy_rsi_max_b', 70)),
+            'MACD_OK': (indicators['MACD'][i] >= indicators['MACD_Sig'][i]),
+            'MA_GC': (indicators['MA5'][i] > indicators['MA20'][i]),
+            'MA60_Range': (price / indicators['MA60'][i] >= 1.0 and price / indicators['MA60'][i] <= 1.12),
+            'Vol_Surge': (indicators['Volume'][i] > indicators['Vol_MA20'][i] * 1.5),
             'Market_Trend': mkt_trend,
-            'Final_Signal': signal_row.get('Signal', False)
+            'Final_Signal': indicators['Signal'][i]
         })
     
         return params
 
-    def _check_exits(self, date, price, high, low, pos, indicator_row=None):
-        """Flash Exit, Gap Down, TP/SL, ATR 조건 체크 (v31.0)"""
-        """Flash Exit, Gap Down, TP/SL 조건 체크 (v26.0: Type A/B 분리 대응)"""
-        # 0. 공통 상수 및 설정 로드
-        s = self.settings
-        
-        # 진입 유형에 따른 접미사 결정 (v26.4: Type B 비활성화 시 강제로 _a 사용 연동)
-        use_b = s.get('use_type_b', False)
-        sig_type = pos.get('sig_type', 'TYPE_A')
-        
-        if not use_b:
-            suffix = "_a"
-        else:
-            suffix = "_b" if sig_type == "TYPE_B" else "_a"
 
-        # 1. Flash Exit
-        if pos['stage'] == 1:
-            f_pct = float(s.get(f's1{suffix}_flash_exit_pct', 3.0)) / 100.0
-            if price <= pos['max_price'] * (1.0 - f_pct):
-                drop_pct = (price / pos['max_price'] - 1) * 100
-                return {'price': price, 'reason': f"FLASH_EXIT(S1-{sig_type.split('_')[-1]})|Drop:{drop_pct:.1f}%"}
-        else:
-            f_pct = float(s.get('s2_flash_exit_pct', 3.0)) / 100.0
-            if price <= pos['max_price'] * (1.0 - f_pct):
-                drop_pct = (price / pos['max_price'] - 1) * 100
-                return {'price': price, 'reason': f"FLASH_EXIT(S2)|Drop:{drop_pct:.1f}%"}
-            
-        # 2. Gap Down Limit (S1/S2 공통)
-        g_lmt = float(s.get('gap_down_limit', -5.0))
-        if (price / pos['avg_price'] - 1) * 100 <= g_lmt:
-            ret_pct = (price / pos['avg_price'] - 1) * 100
-            return {'price': price, 'reason': f"GAP_DOWN|Ret:{ret_pct:.1f}%"}
-
-        # 3. ATR Exit (v31.0) - High Priority
-        if s.get('use_atr_exit', False) and indicator_row is not None:
-            curr_atr = indicator_row.get('ATR', 0)
-            entry_atr = pos.get('atr_at_entry', curr_atr)
-            
-            if not np.isnan(curr_atr) and curr_atr > 0:
-                sl_mult = float(s.get('atr_multiplier_sl', 2.0))
-                trail_mult = float(s.get('atr_multiplier_trail', 3.0))
-                
-                # A. ATR Stop Loss (Based on Entry ATR)
-                if price <= pos['avg_price'] - (sl_mult * entry_atr):
-                    return {'price': price, 'reason': f"ATR_SL(S{pos['stage']})"}
-                    
-                # B. ATR Trailing Stop (Based on Current ATR from High)
-                if price <= pos['max_price'] - (trail_mult * curr_atr):
-                    return {'price': price, 'reason': f"ATR_TRAIL(S{pos['stage']})"}
-
-        # 4. Take Profit
-        tp_ok = s.get('use_s1_tp', True) if pos['stage'] == 1 else s.get('use_s2_tp', True)
-        if tp_ok:
-            if pos['stage'] == 1:
-                tp_pct = float(s.get(f's1{suffix}_take_profit', 5.0)) / 100.0
-            else:
-                tp_pct = float(s.get('s2_take_profit', 5.0)) / 100.0
-                
-            if (high / pos['avg_price'] - 1) >= tp_pct:
-                return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S{pos['stage']})"}
-
-        # 5. Stop Loss (Fixed %)
-            
-        return None
-
-    def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicator_row=None, sig_type='TYPE_A'):
+    def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicators=None, i=None, sig_type='TYPE_A'):
         """매수 실행 및 params 업데이트"""
         # [v27.0] 전략 타입(A/B/S2)을 매수 사유(Reason) 접두어로 명시하여 리포트 집계 정확도 향상
         if stage == 1:
@@ -597,11 +748,11 @@ class SimpleBacktester:
             reason = f"[{sig_type}] {reason}"
         else:
             reason = f"[Stage 2] {reason}"
-        if indicator_row is not None:
+        if indicators is not None and i is not None:
             try:
-                rsi_val = indicator_row.get('RSI', 0)
-                ma5_val = indicator_row.get('MA5', 0)
-                osc_val = indicator_row.get('OSC', 0)
+                rsi_val = indicators['RSI'][i]
+                ma5_val = indicators['MA5'][i]
+                osc_val = indicators['OSC'][i]
                 reason += f"|RSI:{rsi_val:.1f}|MA5:{int(ma5_val):,}|OSC:{osc_val:.2f}"
             except: pass
 
@@ -631,7 +782,7 @@ class SimpleBacktester:
                 'entry_date': date, 'entry_idx': entry_idx, 
                 'avg_price': price, 'qty': qty, 'stage': 1, 'max_price': max_p,
                 'sig_type': sig_type,
-                'atr_at_entry': indicator_row.get('ATR', 0) if indicator_row is not None else 0
+                'atr_at_entry': indicators['ATR'][i] if indicators is not None and i is not None else 0
             }
         else:
             old_q = params['position']['qty']
@@ -643,13 +794,13 @@ class SimpleBacktester:
         self.collect_trade(date, action, price, qty, params['position']['qty'], params['position']['qty'] * price, reason_str=reason, fee=fee)
         return params
 
-    def _execute_sell(self, date, price, reason, params, indicator_row=None):
+    def _execute_sell(self, date, price, reason, params, indicators=None, i=None):
         """매도 실행 및 params 업데이트"""
-        if indicator_row is not None:
+        if indicators is not None and i is not None:
             try:
-                rsi_val = indicator_row.get('RSI', 0)
-                ma5_val = indicator_row.get('MA5', 0)
-                osc_val = indicator_row.get('OSC', 0)
+                rsi_val = indicators['RSI'][i]
+                ma5_val = indicators['MA5'][i]
+                osc_val = indicators['OSC'][i]
                 if "RSI:" not in str(reason): # RSI 정보가 없을 때만 추가
                     prefix = "|" if "|" not in str(reason) else ", "
                     reason += f"{prefix}RSI:{rsi_val:.1f}|MA5:{int(ma5_val):,}|OSC:{osc_val:.2f}"

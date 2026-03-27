@@ -95,9 +95,53 @@ class DataManagerV2:
                 )
             """)
 
+            # 5. 실시간 데이터 스냅샷 테이블 (체결강도, 호가잔량 로깅용)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS realtime_snapshots (
+                    code TEXT,
+                    datetime TEXT,
+                    price INTEGER,
+                    vol_power REAL,
+                    total_ask INTEGER,
+                    total_bid INTEGER,
+                    PRIMARY KEY (code, datetime)
+                )
+            """)
+
+            # 6. 활성 포지션 테이블 (실전/모의 매매 상태 유지용) [v3.7.8]
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS active_positions (
+                    code TEXT PRIMARY KEY,
+                    name TEXT,
+                    avg_price REAL,
+                    qty INTEGER,
+                    stage INTEGER,
+                    invested INTEGER,
+                    entry_time TEXT,
+                    reason TEXT,
+                    status TEXT DEFAULT 'OPEN'
+                )
+            """)
+
+            # 7. 주문 이력 테이블 [v3.7.8]
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS order_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT,
+                    side TEXT,
+                    qty INTEGER,
+                    price INTEGER,
+                    order_type TEXT,
+                    order_no TEXT,
+                    timestamp TEXT,
+                    result TEXT
+                )
+            """)
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1m_code_dt ON bars_1m (code, datetime)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_15m_code_dt ON bars_15m (code, datetime)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1d_code_dt ON bars_1d (code, datetime)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_realtime_snap_code_dt ON realtime_snapshots (code, datetime)")
 
             # [Migration] sync_meta 테이블에 last_daily_sync 컬럼이 없는 경우 추가
             try:
@@ -273,6 +317,114 @@ class DataManagerV2:
             conn.execute("DELETE FROM bars_15m WHERE code = ?", (code,))
             df_15m.to_sql('bars_15m', conn, if_exists='append', index=False)
             conn.commit()
+
+    def save_realtime_snapshot(self, code, dt, price, vol_power, total_ask, total_bid):
+        """[v35.7] 실시간 데이터 스케줄 스냅샷 저장 (모델 학습용)"""
+        code = normalize_code(code)
+        with self._lock, self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO realtime_snapshots (code, datetime, price, vol_power, total_ask, total_bid)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (code, dt, price, vol_power, total_ask, total_bid))
+            conn.commit()
+
+    def save_active_position(self, code, name, avg_price, qty, stage, invested, entry_time, reason):
+        """[v3.7.8] 활성 포지션 정보 저장"""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO active_positions (code, name, avg_price, qty, stage, invested, entry_time, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, name, avg_price, qty, stage, invested, entry_time, reason))
+            conn.commit()
+
+    def delete_active_position(self, code):
+        """[v3.7.8] 포지션 종료 시 삭제"""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM active_positions WHERE code = ?", (code,))
+            conn.commit()
+
+    def log_order(self, code, side, qty, price, order_type, order_no, result):
+        """[v3.7.8] 주문 이력 기록"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO order_history (code, side, qty, price, order_type, order_no, timestamp, result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, side, qty, price, order_type, order_no, now, result))
+            conn.commit()
+
+    def sync_historical_vol_power(self, code, token):
+        """[v31.2] ka10046 API를 사용하여 과거 체결강도 데이터를 수집 및 저장"""
+        code = normalize_code(code)
+        url = f"{config.URL}/api/dostk/mrkcond"
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "authorization": f"Bearer {token}",
+            "api-id": "ka10046"
+        }
+        
+        # 현재 날짜로부터 역순으로 날짜 추정 (ka10046은 날짜를 명시적으로 주지 않으므로)
+        current_date = datetime.now()
+        
+        next_key = ""
+        total_saved = 0
+        last_tm = "999999"
+        
+        # [v31.2] 최신 데이터부터 과거로 수집
+        while True:
+            body = {
+                "stk_cd": code,
+                "tic_scope": "1",
+                "vol_pow_tp": "1"
+            }
+            if next_key:
+                headers["cont-yn"] = "Y"
+                headers["next-key"] = next_key
+
+            try:
+                res = requests.post(url, headers=headers, json=body, timeout=10)
+                if res.status_code != 200: break
+                
+                data = res.json()
+                raw_list = data.get('stk_cntg_hour_trnd_qry', data.get('output', []))
+                next_key = res.headers.get('next-key', "")
+                
+                if not raw_list: break
+                
+                snapshots = []
+                for item in raw_list:
+                    tm = str(item.get('cntg_tm', '000000')).strip()
+                    if len(tm) < 6: tm = tm.zfill(6)
+                    
+                    # 날짜 경계 감지 (시간이 갑자기 커지면 전일로 이동)
+                    if tm > last_tm:
+                        # 주말/공휴일 제외 로직은 생략(단순화), 실제 거래일 기반으로 날짜 차감
+                        current_date -= timedelta(days=1)
+                        # 금요일에서 목요일이 아니라 금요일에서 월요일 등으로 건너뛰는 것은 실제 데이터 흐름에 맡김
+                    
+                    last_tm = tm
+                    dt_str = f"{current_date.strftime('%Y-%m-%d')} {tm[:2]}:{tm[2:4]}:{tm[4:6]}"
+                    price = int(str(item.get('cur_prc', '0')).replace('+', '').replace('-', '').strip())
+                    vol_pow = float(item.get('cntr_str', '0'))
+                    
+                    snapshots.append((code, dt_str, price, vol_pow))
+                
+                with self._lock, self._get_connection() as conn:
+                    conn.executemany("""
+                        INSERT OR REPLACE INTO realtime_snapshots (code, datetime, price, vol_power)
+                        VALUES (?, ?, ?, ?)
+                    """, snapshots)
+                    conn.commit()
+                
+                total_saved += len(snapshots)
+                if not next_key: break
+                time.sleep(0.2)
+                
+            except Exception as e:
+                print(f"  (!) VolPower Sync Error ({code}): {e}")
+                break
+                
+        return total_saved
 
     def get_bars(self, code, start_dt=None, end_dt=None, interval='1m', limit=None):
         """특정 구간의 데이터를 DataFrame으로 반환 (v9.5: C-level date parsing)"""
@@ -461,6 +613,61 @@ class DataManagerV2:
             print(f"  [Error] API Fetch Exception ({code}): {e}")
             return None
 
+    def fetch_and_parse_15m_bars(self, code, token):
+        """[v3.5] DB와 API 데이터를 무조건 병합하여 15분봉 워밍업 수행 (29/60 부족 현상 방지)"""
+        # 1. DB에서 가장 최신의 1분봉 5000개 조회 (약 10거래일분)
+        n_code = normalize_code(code)
+        query = "SELECT datetime, open, high, low, close, volume FROM bars_1m WHERE code = ? ORDER BY datetime DESC LIMIT 5000"
+        with self._get_connection() as conn:
+            df_db = pd.read_sql_query(query, conn, params=[n_code])
+        
+        
+        # 2. API에서 최신 데이터 보충 (오늘 데이터 확보)
+        df_api = pd.DataFrame()
+        if token:
+            raw_api = self.fetch_kiwoom_minute_data(code, token)
+            if raw_api:
+                df_api = pd.DataFrame(raw_api)
+                # 컬럼 파싱 및 정규화
+                f_cl = 'cur_prc'; f_op = 'open_pric'; f_hg = 'high_pric'; f_lw = 'low_pric'; f_tm = 'cntr_tm'; f_vl = 'trde_qty'
+                for c in [f_cl, f_op, f_hg, f_lw, f_vl]:
+                    if c in df_api.columns:
+                        df_api[c] = pd.to_numeric(df_api[c].astype(str).str.replace('+', '').str.replace('-', ''), errors='coerce').fillna(0)
+                
+                df_api['datetime'] = pd.to_datetime(df_api[f_tm], format='%Y%m%d%H%M%S', errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+                df_api.rename(columns={f_op: 'open', f_hg: 'high', f_lw: 'low', f_cl: 'close', f_vl: 'volume'}, inplace=True)
+                df_api = df_api[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+
+        # 3. 데이터 결합 (DB + API) 및 최신 5000개 유지
+        df_combined = pd.concat([df_db, df_api]).drop_duplicates('datetime').sort_values('datetime')
+        if df_combined.empty: return pd.DataFrame()
+        
+        df_final = df_combined.tail(5000).copy() # [Fix] SettingWithCopyWarning 방지
+        
+
+        try:
+            # 4. 1분봉 -> 15분봉 리샘플링 (DatetimeIndex 보존)
+            df_final['datetime'] = pd.to_datetime(df_final['datetime'])
+            df_final.set_index('datetime', inplace=True)
+            
+            resampled = df_final.resample('15min', closed='right', label='right').agg({
+                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+            }).dropna()
+            
+            # [v3.5] 전략 엔진 규격 (CamelCase & DatetimeIndex)
+            resampled['time'] = resampled.index.strftime('%H%M')
+            resampled.rename(columns={
+                'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
+            }, inplace=True)
+            
+            # [Merge Debug]
+            # print(f"  [Merge] {code}: Final Bars {len(resampled)}/60")
+            
+            return resampled.tail(300) # 충분한 버퍼 (300개) 유지
+        except Exception as e:
+            print(f"  [Error] 15m DB Warmup Parse Error ({code}): {e}")
+            return pd.DataFrame()
+
     def build_volume_profile(self, minute_data):
         """분봉 데이터를 기반으로 시간대별 '누적 거래량 평균' 프로필 생성"""
         if not minute_data: return {}, {}
@@ -566,13 +773,10 @@ class DataManagerV2:
             volume_profiles[code] = prof
             min_volume_profiles[code] = min_prof
             
-            new_df = self.parse_to_bars(fresh_data, code)
-            if code in bars_data and not bars_data[code].empty:
-                old_df = bars_data[code]
-                combined = pd.concat([old_df, new_df]).drop_duplicates(subset=['time'], keep='last')
-                bars_data[code] = combined.sort_values('time').tail(100)
-            else:
-                bars_data[code] = new_df
+            # [v3.5 Fix] 이미 워밍업된 bars_data를 여기서 다시 업데이트하면
+            # time('0915' 등) 기준 중복 제거로 인해 과거 데이터가 파괴됨.
+            # 따라서 프로필만 계산하고 데이터 업데이트는 생략함.
+            pass
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             list(executor.map(process, monitor_codes))
@@ -621,31 +825,74 @@ class DataManagerV2:
             print(f"  [Telegram Skip] Token or Chat ID not properly set in config.py")
 
     def get_market_indices(self):
-        """ FinanceDataReader를 사용하여 시장 지수(KOSPI, KOSDAQ)를 조회 """
+        """[v27.0] 백테스팅 엔진과 동일한 Triple-Lock (MSI, ADX, VIX) 기반 시장 지수 조회 (헤비/2분 주기)"""
         import FinanceDataReader as fdr
+        from strategy import indicators
         indices = {"KS11": "KOSPI", "KQ11": "KOSDAQ"}
         results = {}
         
+        # 1. VIX(변동성 지수) 수집
+        vix_val = 15.0
+        try:
+            vix_df = fdr.DataReader('VIX', (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'))
+            if not vix_df.empty: vix_val = float(vix_df.iloc[-1]['Close'])
+        except:
+            try:
+                vix_df = fdr.DataReader('FRED:VIXCLS', (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'))
+                if not vix_df.empty: vix_val = float(vix_df.iloc[-1].iloc[0])
+            except: pass
+
+        # 2. 각 지수별 추세 판단 (Triple-Lock)
         for ticker, name in indices.items():
             try:
-                df = fdr.DataReader(ticker, (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'))
-                if df is not None and not df.empty:
+                # [v27.0] MSI/ADX 산출을 위해 200일치 데이터 수집
+                df = fdr.DataReader(ticker, (datetime.now() - timedelta(days=300)).strftime('%Y-%m-%d'))
+                if df is not None and len(df) >= 120:
+                    df.columns = [c.capitalize() if c.lower() == 'close' else c for c in df.columns]
+                    df = indicators.calculate_all_indicators(df, {})
                     last = df.iloc[-1]
-                    prev = df.iloc[-2]
+                    
                     price = float(last['Close'])
-                    ratio = float((price / prev['Close'] - 1) * 100)
+                    ratio = float((price / df.iloc[-2]['Close'] - 1) * 100)
+                    msi = float(last.get('MSI', 0))
+                    adx = float(last.get('ADX', 0))
                     
-                    ma5_series = df['Close'].rolling(5).mean()
-                    ma5 = ma5_series.iloc[-1]
-                    ma5_prev = ma5_series.iloc[-2]
-                    slope = ma5 - ma5_prev
+                    # Triple-Lock 판단 로직
+                    lock_msi = msi < -0.05
+                    lock_vix = vix_val > 30
+                    lock_adx = adx < 15
+                    triple_lock_down = lock_msi | lock_vix | lock_adx
                     
-                    if price >= ma5 and slope > 0: trend = "UP"
-                    elif abs(price - ma5) / ma5 < 0.005: trend = "NEUTRAL"
-                    else: trend = "DOWN"
+                    if triple_lock_down: trend = "DOWN"
+                    elif msi > 0: trend = "UP"
+                    else: trend = "NEUTRAL"
                     
-                    results[name] = {"val": price, "ratio": ratio, "trend": trend}
-            except: continue
+                    results[name] = {
+                        "val": price, "ratio": ratio, "trend": trend,
+                        "msi": msi, "adx": adx, "vix": vix_val
+                    }
+            except Exception as e:
+                print(f"  [Error] Market Index ({name}) calculation error: {e}")
+                continue
+        return results
+
+    def get_realtime_indices(self):
+        """[v27.4] 네이버 금융 Polling API를 이용한 초실시간 지수 가격 수집 (라이트/10초 주기)"""
+        url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        results = {}
+        try:
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get('datas', []):
+                    code = item['itemCode'] 
+                    results[code] = {
+                        'val': float(item['closePriceRaw']),
+                        'ratio': float(item['fluctuationsRatioRaw'])
+                    }
+        except Exception as e:
+            print(f"[DataManager] Realtime Index Fetch Error: {e}")
         return results
 
     def _final_save_settings(self, settings_file, settings):

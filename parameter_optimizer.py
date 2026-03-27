@@ -9,6 +9,7 @@ import random
 try:
     import optuna
     HAS_OPTUNA = True
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
 except ImportError:
     HAS_OPTUNA = False
 from backtest_engine import SimpleBacktester, TradingStrategy, SIGNAL_CSV, TRADE_CSV, BASE_DIR
@@ -114,9 +115,9 @@ class ParameterOptimizer:
                 comb.update(dict(zip(keys, v)))
                 all_combinations.append(comb)
             total_comb = len(all_combinations)
-            print(f"\nOptimization Started (Grid): {total_comb} combinations to test ({interval}).")
+            print(f"\n[Opt] Grid Search: {total_comb} combinations ({interval})")
         elif method == 'random':
-            print(f"\nOptimization Started (Random): {n_trials} trials to test ({interval}).")
+            print(f"\n[Opt] Random Search: {n_trials} trials ({interval})")
             for _ in range(n_trials):
                 comb = self.base_settings.copy()
                 for k, v_list in self.param_ranges.items():
@@ -124,7 +125,7 @@ class ParameterOptimizer:
                 all_combinations.append(comb)
             total_comb = n_trials
         elif method == 'bayesian' and HAS_OPTUNA:
-            print(f"\nOptimization Started (Bayesian/Optuna): {n_trials} trials to test ({interval}).")
+            print(f"\n[Opt] Bayesian Search: {n_trials} trials ({interval})")
             # Bayesian은 별도 루프(study.optimize)에서 처리하므로 여기서 combinations를 채우지 않음
             total_comb = n_trials
         else:
@@ -159,7 +160,7 @@ class ParameterOptimizer:
                     if not df_m.empty:
                         c_start, c_end = df_m.index.min(), df_m.index.max()
                         if c_start.strftime("%Y-%m-%d") <= start and c_end.strftime("%Y-%m-%d") >= end:
-                            print(f"  [Cache] {symbol} index hit! ({c_start.date()} ~ {c_end.date()})")
+                            print(f"  [Cache] {symbol} index hit!")
                             return df_m
                 except: pass
             
@@ -186,7 +187,7 @@ class ParameterOptimizer:
                     vix_df = pd.read_csv(vix_cache_path, index_col=0, parse_dates=True)
                     v_start, v_end = vix_df.index.min(), vix_df.index.max()
                     if v_start.strftime("%Y-%m-%d") <= w_start_dt and v_end.strftime("%Y-%m-%d") >= end_date:
-                        print(f"  [Cache] VIX hit! ({v_start.date()} ~ {v_end.date()})")
+                        print(f"  [Cache] VIX hit!")
                     else:
                         vix_df = None
                 except: vix_df = None
@@ -208,8 +209,13 @@ class ParameterOptimizer:
         except Exception as e:
             print(f"  (!) Market Data Caching Error: {e}")
 
-        self.market_df = market_df
         self.vix_df = vix_df
+        
+        # [Perf] Pre-calculate market indicators once to avoid redundant calcs in trials
+        if market_df is not None and not market_df.empty:
+            print("  [Perf] Pre-calculating market indicators...")
+            market_df = TradingStrategy.calculate_indicators(market_df, {})
+        self.market_df = market_df
 
         data_cache_m1 = {}
         
@@ -245,7 +251,11 @@ class ParameterOptimizer:
             'use_s1_flash_exit', 'use_s2_flash_exit', 'use_s1_stop_loss', 'use_s2_stop_loss',
             's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
             'use_s2_ma5', 'use_s2_profit', 'use_s2_delay', 'gc_window', 'rsi_window',
-            'atr_multiplier_sl', 'atr_multiplier_trail'
+            'atr_multiplier_sl', 'atr_multiplier_trail',
+            's1_equity_pct', 's2_equity_pct', 's1_sizing_unit', 's2_sizing_unit',
+            'use_smart_exit', 'smart_exit_ba_ratio', 'smart_exit_vp', 'smart_exit_price_threshold',
+            'use_smart_buy_a', 'use_smart_buy_b', 'use_smart_buy_s2',
+            'smart_buy_ba_ratio', 'smart_buy_vp', 'use_synthetic_realtime'
         }
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False
@@ -295,31 +305,40 @@ class ParameterOptimizer:
                 
                 res = run_single_combination(prepare_args((trial.number, settings)))
                 if res:
-                    all_results.append(res)
-                    if callback: callback(f"베이지안 최적화 중 ({trial.number+1}/{n_trials})", 50 + (trial.number/n_trials)*50)
+                    # [v35.4] Performance: Strip large lists (history, signal_logs) before storing in user_attrs
+                    # This dramatically reduces Optuna's internal serialization overhead per trial
+                    summary_res = {k: v for k, v in res.items() if k not in ['history', 'signal_logs', 'equity_curve']}
+                    for k, v in summary_res.items():
+                        trial.set_user_attr(k, v)
                     return res['avg_ret']
                 return -999.0
+
+            def study_callback(study, trial):
+                """[v35.1] Callback running in MAIN THREAD to safely update GUI"""
+                if trial.state == optuna.trial.TrialState.COMPLETE:
+                    # Get the full result stored in user_attrs
+                    res = trial.user_attrs
+                    if res:
+                        all_results.append(res)
+                        if callback:
+                            callback(f"베이지안 최적화 중 ({len(all_results)}/{n_trials})", 50 + (len(all_results)/n_trials)*50)
 
             sampler = optuna.samplers.TPESampler(seed=seed)
             study = optuna.create_study(direction='maximize', sampler=sampler)
             
-            # [v27.5] 베이지안 최적화 멀티프로세싱 활성화 (n_jobs)
-            # [v30.0] 워커 초기화 함수 등록 (loky/joblib 호환성 확인)
-            # [v31.0] 하드코딩된 CPU 코어 잠금(8 코어) 해제: 사용 가능한 모든 물리/논리 코어 활용
-            num_workers = -1 
+            # [v35.6] Stable Worker Count (Avoid Overload)
+            num_workers = min(os.cpu_count() or 4, 12) 
             
-            # 주지사항: Optuna n_jobs는 내부적으로 loky를 쓰며, 전역 변수 상속이 안될 수 있음
-            # 따라서 run_single_combination 내부에서 데이터가 없으면 자동 로드하도록 보강
             def robust_objective(trial):
                 if not _G_DATA: init_worker(tmp_cache_path)
                 return objective(trial)
 
-            study.optimize(robust_objective, n_trials=n_trials, n_jobs=num_workers)
+            study.optimize(robust_objective, n_trials=n_trials, n_jobs=num_workers, callbacks=[study_callback])
         else:
             # [v23.0] 일반 Grid Search의 경우 모든 코어 동원
             # [v31.0] 마찬가지로 하드코딩 리미트(12) 해제
             num_workers = os.cpu_count() or 4
-            print(f"  [Perf] Starting Multiprocessing (PPE) with {num_workers} processes (Gated/Vectorized)...")
+            print(f"  [Perf] Parallel PPE: {num_workers} workers")
             
             if callback: callback(f"멀티프로세싱 최적화 시작 (코어: {num_workers})...", 50)
             

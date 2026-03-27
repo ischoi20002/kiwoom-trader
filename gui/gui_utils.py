@@ -25,17 +25,28 @@ class GuiUtils:
             try:
                 print(message)
             except UnicodeEncodeError:
-                # [v3.3] CP949 등 터미널 인코딩 에러 발생 시 이모지 제거 후 출력
                 safe_msg = message.replace("🔍", "[DEBUG]").replace("❌", "[ERROR]").replace("⚠️", "[WARN]").replace("📊", "[STATS]").replace("✅", "[OK]")
-                try:
-                    print(safe_msg.encode(sys.stdout.encoding, errors='ignore').decode(sys.stdout.encoding))
-                except:
-                    print(message.encode('ascii', errors='ignore').decode('ascii'))
+                try: print(safe_msg.encode(sys.stdout.encoding, errors='ignore').decode(sys.stdout.encoding))
+                except: print(message.encode('ascii', errors='ignore').decode('ascii'))
             return
         
         try:
-            # 텍스트 끝에 추가
-            self.log_area.insert(tk.END, f"{message}\n")
+            # [v3.6] 타임스탬프 및 메시지 정돈 (이모지 제거 포함)
+            now = datetime.now().strftime("%H:%M:%S")
+            prefix = ""
+            msg_str = str(message)
+            if msg_str.startswith("\n"):
+                prefix = "\n"
+                msg_str = msg_str.lstrip("\n")
+            
+            # 이모지 및 특수 기호 제거 (텍스트형으로 변환)
+            icons = ["🚀", "🔍", "✅", "❌", "⚠️", "📊", "ℹ️", "🎯", "🔎", "⏹️", "⚙️"]
+            for icon in icons:
+                msg_str = msg_str.replace(icon, "").strip()
+            
+            clean_msg = f"{prefix}[{now}] {msg_str}"
+            
+            self.log_area.insert(tk.END, f"{clean_msg}\n")
             
             # 중요 디버그 메시지는 터미널에도 출력
             icon_triggers = ["🔍", "❌", "⚠️", "📊", "✅", "🚀", "ℹ️", "🎯"]

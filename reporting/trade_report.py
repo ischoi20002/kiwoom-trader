@@ -107,6 +107,10 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "ATR 기반 탈출", "toggle": "use_atr_exit", "key": "atr_period", "unit": "일"},
                 {"label": "ㄴ ATR 손절배수(SL)", "key": "atr_multiplier_sl", "unit": "배"},
                 {"label": "ㄴ ATR 추격배수(Trail)", "key": "atr_multiplier_trail", "unit": "배"},
+                {"label": "Smart Exit (조기탈출)", "toggle": "use_smart_exit", "keys": ["smart_exit_ba_ratio", "smart_exit_vp", "smart_exit_price_threshold"], "sep": " / "},
+                {"label": "Smart Buy (Type A)", "toggle": "use_smart_buy_a", "keys": ["smart_buy_ba_ratio", "smart_buy_vp"], "sep": " / "},
+                {"label": "Smart Buy (Type B)", "toggle": "use_smart_buy_b", "keys": ["smart_buy_ba_ratio", "smart_buy_vp"], "sep": " / "},
+                {"label": "Smart Buy (Stage 2)", "toggle": "use_smart_buy_s2", "keys": ["smart_buy_ba_ratio", "smart_buy_vp"], "sep": " / "},
                 {"label": "총 운용 자산", "key": "total_capital", "unit": "원", "is_amt": True},
                 {"label": "최대 감시 종목 수", "key": "max_slots", "unit": "개"},
                 {"label": "1단계(정찰) 비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"},
@@ -447,11 +451,17 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 else: s_profit += (amt - fee)
             total_profit_val += s_profit
     
-    total_fees = df['Fee'].fillna(0).sum() if 'Fee' in df.columns else 0
-    total_fees = int(total_fees) if not pd.isna(total_fees) else 0
-    total_profit_val = int(total_profit_val) if not pd.isna(total_profit_val) else 0
+    def _s_int(v, default=0):
+        try:
+            if v is None or pd.isna(v): return default
+            return int(float(v))
+        except: return default
+
+    # [v27.0] Summary Section NaN Safety
+    total_fees_val = _s_int(df['Fee'].sum() if 'Fee' in df.columns else 0)
+    total_profit_val = _s_int(total_profit_val)
     total_profit_color = "var(--gain)" if total_profit_val >= 0 else "var(--loss)"
-    total_fees_val = total_fees
+    
     gross_profit_val = total_profit_val + total_fees_val
     gross_profit_color = "var(--gain)" if gross_profit_val >= 0 else "var(--loss)"
     
@@ -459,6 +469,13 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     count_a = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('TYPE_A', case=False, na=False))])
     count_b = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('TYPE_B', case=False, na=False))])
     count_s2 = len(df[(df['Action'].str.contains('BUY2', na=False)) | (df['Action'] == 'ADDON') | (df['Reason'].str.contains('Stage 2|ADDON', case=False, na=False))])
+    
+    # [v27.5] Smart Buy/Exit Tracking
+    count_smart_buy = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('SmartBuy', case=False, na=False))])
+    count_smart_exit = len(df[(df['Action'].str.startswith('SELL', na=False)) & (df['Reason'].str.contains('Smart Exit', case=False, na=False))])
+    count_rejected = len(df[df['Action'] == 'REJECTED_SIG'])
+    total_signals = count_smart_buy + count_rejected
+    pass_rate = (count_smart_buy / max(1, total_signals)) * 100
     
     # [v27.3] Performance by Strategy Depth (S1 Only vs S2 Reached)
     s1_rets, s2_rets = [], []
@@ -493,6 +510,22 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         <div class="strategy-card">
             <span class="str-label">Stage 2 (추가매수)</span>
             <span class="str-count type-s2">{count_s2} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+        </div>
+    </div>
+    
+    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:15px;">Smart Metrics (수급 및 실시간 필터링)</div>
+    <div class="strategy-stats">
+        <div class="strategy-card">
+            <span class="str-label">Smart Buy (통과율: {pass_rate:.1f}%)</span>
+            <span class="str-count" style="color:#22c55e">{count_smart_buy} <small style="font-size:0.7rem; color:var(--dim)">/ {total_signals} 건</small></span>
+        </div>
+        <div class="strategy-card">
+            <span class="str-label">Smart Exit (실시간 매도)</span>
+            <span class="str-count" style="color:#ef4444">{count_smart_exit} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+        </div>
+        <div class="strategy-card" style="opacity:0.5;">
+            <span class="str-label">-</span>
+            <span class="str-count">-</span>
         </div>
     </div>
     
@@ -638,10 +671,18 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             fee = r.get('Fee', 0) if not pd.isna(r.get('Fee', 0)) else 0
             ret_str, action_cls, cum_profit_str = "", "action-buy", "-"
             
-            if "BUY" not in str(r['Action']):
-                ret_val = float(r.get('Return', 0))
+            if "BUY" in str(r['Action']):
+                pass # Default values OK
+            elif r['Action'] == 'REJECTED_SIG':
+                action_cls = "action-rejected"
+                ret_str = '<span style="color:var(--dim)">Filtered</span>'
+            else:
+                ret_val = float(r.get('Return', 0)) if not pd.isna(r.get('Return', 0)) else 0
                 avg_p_rev = r['Price'] / (1 + ret_val/100) if (1 + ret_val/100) != 0 else r['Price']
-                stock_realized_profit += (r['Price'] - avg_p_rev) * r['Qty'] - fee
+                p_inc = (r['Price'] - avg_p_rev) * r['Qty'] - fee
+                if not pd.isna(p_inc):
+                    stock_realized_profit += p_inc
+                
                 action_cls = "action-sell"
                 if r['Action'] in ["SELL", "HOLD", "PARTIAL_SELL"]:
                     r_cls = "profit" if ret_val > 0 else "loss"
@@ -649,8 +690,10 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                     if r['Action'] == "HOLD":
                         action_cls = "action-hold"
                         ret_str = f'<span class="{r_cls}">{ret_val:+.2f}% (Held)</span>'
+                
                 p_row_cls = "profit" if stock_realized_profit >= 0 else "loss"
-                cum_profit_str = f'<span class="{p_row_cls}">{int(stock_realized_profit):+,}</span>'
+                p_val_display = int(stock_realized_profit) if not pd.isna(stock_realized_profit) else 0
+                cum_profit_str = f'<span class="{p_row_cls}">{p_val_display:+,}</span>'
             
             candle_svg = "-"
             if price_df is not None and not price_df.empty:
@@ -700,14 +743,14 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             if ind_list:
                 indicators_html = f'<div class="indicator-panel"><div style="min-width:160px; padding:5px;">{"".join(ind_list)}</div></div>'
 
-            group_rows.append(f"""<tr><td>{r['Date'].strftime('%m-%d %H:%M')}</td><td><span class="{action_cls}">{r['Action']}</span></td><td>{candle_svg}</td><td class="num">{int(r['Price']):,}</td><td class="num">{int(r['Qty']):,}</td><td class="num">{int(amt):,}</td><td class="num">{int(fee):,}</td><td class="num">{int(r.get('Total_Qty', 0)):,}</td><td class="num">{ret_str}</td><td class="num">{cum_profit_str}</td><td class="num">{status_badge}</td><td class="num"><div class="reason-cell"><span class="reason-text">{reason_main} 🔍</span>{indicators_html}</div></td></tr>""")
+            group_rows.append(f"""<tr><td>{r['Date'].strftime('%m-%d %H:%M')}</td><td><span class="{action_cls}">{r['Action']}</span></td><td>{candle_svg}</td><td class="num">{_s_int(r['Price']):,}</td><td class="num">{_s_int(r['Qty']):,}</td><td class="num">{_s_int(amt):,}</td><td class="num">{_s_int(fee):,}</td><td class="num">{_s_int(r.get('Total_Qty', 0)):,}</td><td class="num">{ret_str}</td><td class="num">{cum_profit_str}</td><td class="num">{status_badge}</td><td class="num"><div class="reason-cell"><span class="reason-text">{reason_main} 🔍</span>{indicators_html}</div></td></tr>""")
         
         profit_color = "var(--gain)" if stock_realized_profit >= 0 else "var(--loss)"
-        content.append(f"""<div class="stock-group" id="stock-{code_str}"><div class="stock-header"><div style="display:flex; align-items:center;">{name} <span style="color:var(--dim); font-size:0.9rem; margin-left:8px;">({code_str})</span>{chart_link_html}</div><div style="font-size:1rem; color:white">누적 수익금: <span style="color:{profit_color}">{int(stock_realized_profit):+,}원</span></div></div><table><thead><tr><th>시간</th><th>구분</th><th>차트</th><th>가격</th><th>수량</th><th>거래액</th><th>비용</th><th>보유</th><th>수익률</th><th>누적 수익금액</th><th>시장</th><th>상세 사유</th></tr></thead><tbody>{"".join(group_rows)}</tbody></table></div>""")
+        content.append(f"""<div class="stock-group" id="stock-{code_str}"><div class="stock-header"><div style="display:flex; align-items:center;">{name} <span style="color:var(--dim); font-size:0.9rem; margin-left:8px;">({code_str})</span>{chart_link_html}</div><div style="font-size:1rem; color:white">누적 수익금: <span style="color:{profit_color}">{_s_int(stock_realized_profit):+,}원</span></div></div><table><thead><tr><th>시간</th><th>구분</th><th>차트</th><th>가격</th><th>수량</th><th>거래액</th><th>비용</th><th>보유</th><th>수익률</th><th>누적 수익금액</th><th>시장</th><th>상세 사유</th></tr></thead><tbody>{"".join(group_rows)}</tbody></table></div>""")
 
     ret_color = "var(--gain)" if avg_ret > 0 else "var(--loss)"
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html_template.format(now=now_str, interval=display_interval, mode_label=mode_label, mode_color=mode_color, total=total_trades, win_rate=win_rate, avg_ret=avg_ret, ret_color=ret_color, total_profit=int(total_profit_val), total_profit_color=total_profit_color, gross_profit=int(gross_profit_val), gross_profit_color=gross_profit_color, total_fees=int(total_fees_val), param_html=param_html, sidebar_items="".join(sidebar_items), content="".join(content), start_date=start_date if start_date else "Simulation", end_date=end_date if end_date else "End", equity_chart_html=equity_chart_html, strategy_stats_html=strategy_stats_html, avg_cash_ratio=avg_cash_ratio))
+        f.write(html_template.format(now=now_str, interval=display_interval, mode_label=mode_label, mode_color=mode_color, total=total_trades, win_rate=win_rate, avg_ret=avg_ret, ret_color=ret_color, total_profit=total_profit_val, total_profit_color=total_profit_color, gross_profit=gross_profit_val, gross_profit_color=gross_profit_color, total_fees=total_fees_val, param_html=param_html, sidebar_items="".join(sidebar_items), content="".join(content), start_date=start_date if start_date else "Simulation", end_date=end_date if end_date else "End", equity_chart_html=equity_chart_html, strategy_stats_html=strategy_stats_html, avg_cash_ratio=avg_cash_ratio))
     print(f"  [Report] Execution log saved: {output_path}")

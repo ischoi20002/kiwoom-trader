@@ -9,6 +9,7 @@ import importlib
 importlib.reload(bt) # [Force] 전 엔진 로직 업데이트 반영 (AttributeError 방지)
 import numpy as np
 from backtest_engine import TradingStrategy, csv_lock, SIGNAL_CSV, TRADE_CSV, BASE_DIR
+from strategy.simulation_models import SimulatedRealtimeMetrics
 
 class DynamicBacktester:
     """[v16.0] 동적 포트폴리오 백테스터: 매일 종목을 새로 선정하고 1,000만원 예산을 공유하여 운용"""
@@ -32,6 +33,28 @@ class DynamicBacktester:
         self.high_precision = False  # [v20.0] 고정밀 모드 플래그
         self.cached_1m_data = {}     # [v20.0] 1분봉 데이터 캐시
         
+        # [Perf] Pre-init cached settings placeholders (v33.8)
+        self.use_sb = False
+        self.use_sb_a = False
+        self.use_sb_b = False
+        self.use_sb_s2 = False
+        self.sb_ba = 1.2
+        self.sb_vp = 110.0
+        self.use_sx = False
+        self.sx_ba = 0.8
+        self.sx_vp = 90.0
+        self.sx_p_thr = 0.0
+        self.use_s1_tp = True
+        self.use_s1_sl = True
+        self.use_s2_tp = True
+        self.use_s2_sl = True
+        self.use_s1_flash = True
+        self.use_s2_flash = True
+        self.use_atr = False
+        self.use_type_b = False
+        self.gap_down_lmt = -5.0
+        self.stock_name_map = {}
+        
     def run(self, start_date, end_date, interval='15m', callback=None, high_precision=False):
         """메인 시뮬레이션 루프 (일단위 유니버스 갱신 + 분단위/15분단위 체결)"""
         self.high_precision = high_precision
@@ -41,6 +64,31 @@ class DynamicBacktester:
         
         self.start_date = start_date
         self.end_date = end_date
+        
+        # [Perf] Cache settings and maps once to avoid lookups in hot loops (v33.8)
+        s = self.settings
+        self.use_sb_a = self.settings.get('use_smart_buy_a', False)
+        self.use_sb_b = self.settings.get('use_smart_buy_b', False)
+        self.use_sb_s2 = self.settings.get('use_smart_buy_s2', False)
+        self.sb_ba = float(s.get('smart_buy_ba_ratio', 1.2))
+        self.sb_vp = float(s.get('smart_buy_vp', 110.0))
+        self.use_sx = s.get('use_smart_exit', False)
+        self.sx_ba = float(s.get('smart_exit_ba_ratio', 0.8))
+        self.sx_vp = float(s.get('smart_exit_vp', 90.0))
+        self.sx_p_thr = float(s.get('smart_exit_price_threshold', 0.0))
+        
+        self.use_s1_tp = s.get('use_s1_tp', True)
+        self.use_s1_sl = s.get('use_s1_stop_loss', True)
+        self.use_s2_tp = s.get('use_s2_take_profit', True)
+        self.use_s2_sl = s.get('use_s2_stop_loss', True)
+        self.use_s1_flash = s.get('use_s1_flash_exit', True)
+        self.use_s2_flash = s.get('use_s2_flash_exit', True)
+        self.use_atr = s.get('use_atr_exit', False)
+        self.use_type_b = s.get('use_type_b', False)
+        self.gap_down_lmt = float(s.get('gap_down_limit', -5.0))
+        
+        self.stock_name_map = TradingStrategy.get_stock_name_map()
+        
         if callback: callback("백테스트 준비 중...", 0)
         
         # 1. 기초 데이터 (지수 및 VIX) 로드
@@ -230,6 +278,19 @@ class DynamicBacktester:
                                 elif curr_price <= h_info['max_p'] - (trail_mult * curr_atr):
                                     exit_reason = f"ATR Trail Stop (S{h_info['entry_n']})|ATR:{curr_atr:.1f}"
                     
+                    # [v31.5] Smart Exit (VolPower, Bid/Ask Ratio)
+                    if not exit_reason and self.settings.get('use_smart_exit', False):
+                        ba_ratio = curr_price_row.get('bid_ask_ratio', 1.0)
+                        v_power = curr_price_row.get('vol_power', 100.0)
+                        ba_threshold = float(self.settings.get('smart_exit_ba_ratio', 0.8))
+                        vp_threshold = float(self.settings.get('smart_exit_vp', 90.0))
+                        
+                        if ba_ratio < ba_threshold and v_power < vp_threshold:
+                            # [v31.6] Smart Exit Price Threshold
+                            p_thr = float(self.settings.get('smart_exit_price_threshold', 0.0))
+                            if p_thr == 0 or curr_price <= h_info['max_p'] * (1 + p_thr / 100.0):
+                                exit_reason = f"Smart Exit|BA:{ba_ratio:.2f}|VP:{v_power:.0f}"
+                    
                     if exit_reason:
                         self._execute_sell(code, curr_price, curr_time, exit_reason, indicator_row=curr_price_row)
                         today_sells.add(code)
@@ -255,12 +316,63 @@ class DynamicBacktester:
                             if is_addon_target:
                                 # 추매 승인 조건 체크 (TradingStrategy 통합 로직 사용)
                                 if self._check_s2_approval(code, h_info, last_sig):
-                                    reason = f"ADDON(S2)|R:{last_sig.get('RSI',0):.1f}|M:{last_sig.get('MACD',0):.1f}|O:{last_sig.get('OSC',0):.1f}|V:{int(last_sig.get('Volume',0))}"
+                                    # [v33.9] Stage 2 Smart Buy Filter
+                                    can_execute_s2 = True
+                                    if self.use_sb_s2:
+                                        ba_ratio = last_sig.get('bid_ask_ratio', 1.0)
+                                        v_power = last_sig.get('vol_power', 100.0)
+                                        if ba_ratio < self.sb_ba or v_power < self.sb_vp:
+                                            can_execute_s2 = False
+                                    
+                                    if can_execute_s2:
+                                        reason = f"ADDON(S2)|R:{last_sig.get('RSI',0):.1f}|M:{last_sig.get('MACD',0):.1f}|O:{last_sig.get('OSC',0):.1f}|V:{int(last_sig.get('Volume',0))}"
+                                    else:
+                                        can_execute = False
                                 else:
                                     can_execute = False
                             
+                            if can_execute and not is_addon_target:
+                                # [v31.5] Smart Buy (Supply/Demand Confirmation)
+                                sig_type = last_sig.get('Sig_Type', 'TYPE_B')
+                                use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
+                                
+                                if use_sb_for_type:
+                                    ba_ratio = last_sig.get('bid_ask_ratio', 1.0)
+                                    v_power = last_sig.get('vol_power', 100.0)
+                                    ba_min = float(self.settings.get('smart_buy_ba_ratio', 1.2))
+                                    vp_min = float(self.settings.get('smart_buy_vp', 110.0))
+                                    
+                                    if ba_ratio < ba_min or v_power < vp_min:
+                                        can_execute = False
+                                        # [v27.5] Shadow Return (1h Lookahead)
+                                        p_inc_str = ""
+                                        try:
+                                            curr_idx = timeline.index(curr_time)
+                                            future_idx = min(curr_idx + 4, len(timeline) - 1)
+                                            future_time = timeline[future_idx]
+                                            if future_time in d_df.index:
+                                                p_inc = (d_df.loc[future_time, 'Close'] / last_sig['Close'] - 1) * 100
+                                                p_inc_str = f"|1h:{p_inc:+.2f}%"
+                                        except: pass
+
+                                        # [v27.5] Log Rejection
+                                        self.trades_history.append({
+                                            'Date': curr_time, 'Code': code, 'Name': self.stock_name_map.get(code, code),
+                                            'Action': 'REJECTED_SIG', 'Price': last_sig['Close'], 'Qty': 0, 'Amount': 0, 
+                                            'Reason': f"SmartBuy Rejected|BA:{ba_ratio:.2f}|VP:{v_power:.0f}{p_inc_str}", 'Cash': self.cash
+                                        })
+                            
                             if can_execute:
-                                self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': last_sig.get('Sig_Type', 'TYPE_B')}, curr_time, d_df.loc[curr_time], indicator_row=d_df.loc[curr_time])
+                                sig_type = last_sig.get('Sig_Type', 'TYPE_B')
+                                use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \
+                                                   self.use_sb_b if (sig_type == "TYPE_B" and not is_addon_target) else \
+                                                   self.use_sb_s2
+                                
+                                # [v33.9] Prefix "SmartBuy|" if it was enabled and passed
+                                if use_sb_for_type:
+                                    reason = "SmartBuy|" + reason
+                                    
+                                self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': sig_type}, curr_time, d_df.loc[curr_time], indicator_row=d_df.loc[curr_time])
 
             # 2-5. 일일 정산
             current_equity = self.cash + sum(h['qty'] * day_data[c]['Close'].iloc[-1] for c, h in self.holdings.items() if c in day_data)
@@ -354,7 +466,7 @@ class DynamicBacktester:
             except: pass
 
         self.trades_history.append({
-            'Date': curr_time, 'Code': code, 'Name': TradingStrategy.get_stock_name_map().get(code, code),
+            'Date': curr_time, 'Code': code, 'Name': self.stock_name_map.get(code, code),
             'Action': f'BUY{entry_n}', 'Price': price, 'Qty': qty, 'Amount': real_amt, 'Fee': buy_fee,
             'Reason': reason_str, 'Cash': self.cash
         })
@@ -392,14 +504,14 @@ class DynamicBacktester:
         self.cash += (gross - fee)
         
         self.trades_history.append({
-            'Date': curr_time, 'Code': code, 'Name': TradingStrategy.get_stock_name_map().get(code, code),
+            'Date': curr_time, 'Code': code, 'Name': self.stock_name_map.get(code, code),
             'Action': action, 'Price': price, 'Qty': sell_qty, 'Amount': gross, 'Fee': fee,
             'Reason': reason, 'Return': ret, 'Cash': self.cash
         })
         self._log_trade_to_csv(curr_time, code, action, price, sell_qty, reason, ret=ret, fee=fee)
 
     def _log_trade_to_csv(self, dt, code, action, price, qty, reason, ret=0, fee=0):
-        name = TradingStrategy.get_stock_name_map().get(code, code)
+        name = self.stock_name_map.get(code, code)
         safe_reason = str(reason).replace(',', ';')
         row = [pd.to_datetime(dt).strftime('%Y-%m-%d %H:%M'), code, name, action, price, qty, f"{ret:.2f}", safe_reason, fee]
         with csv_lock:
@@ -447,7 +559,15 @@ class DynamicBacktester:
         all_codes = list(u_codes)
         pad_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=21)).strftime("%Y-%m-%d")
         placeholders = ",".join(["?"] * len(all_codes))
-        query = f"SELECT code, datetime as time, open, high, low, close, volume FROM bars_15m WHERE code IN ({placeholders}) AND datetime BETWEEN ? AND ? ORDER BY code, datetime"
+        # [v31.5] Updated query to join with realtime_snapshots
+        query = f"""
+            SELECT b.code, b.datetime as time, b.open, b.high, b.low, b.close, b.volume,
+                   r.vol_power, r.total_ask, r.total_bid
+            FROM bars_15m b
+            LEFT JOIN realtime_snapshots r ON b.code = r.code AND b.datetime = r.datetime
+            WHERE b.code IN ({placeholders}) AND b.datetime BETWEEN ? AND ?
+            ORDER BY b.code, b.datetime
+        """
         with self.db._get_connection() as conn:
             df_all = pd.read_sql_query(query, conn, params=all_codes + [pad_start, end_date + " 23:59:59"])
         if df_all.empty: return {}
@@ -456,6 +576,35 @@ class DynamicBacktester:
         df_all.set_index('time', inplace=True)
         cached = {}
         for code, group in df_all.groupby('Code'):
+            # [v31.5] Synthetic Metrics Pre-calculation for Dynamic Backtester
+            if self.settings.get('use_synthetic_realtime', True):
+                # [v31.5] Ensure numeric types for join columns
+                for col in ['Vol_power', 'Total_ask', 'Total_bid']:
+                    if col in group.columns:
+                        group[col] = pd.to_numeric(group[col], errors='coerce')
+                
+                p_changes = group['Close'].pct_change().fillna(0).values
+                vol_mas = group['Volume'].rolling(20).mean().bfill().values
+                vol_ratios = (group['Volume'] / (vol_mas + 1e-10)).values
+                vps = group['Vol_power'].values
+                tasks = group['Total_ask'].values
+                tbids = group['Total_bid'].values
+                
+                for i in range(len(group)):
+                    if pd.isna(vps[i]):
+                        vps[i] = SimulatedRealtimeMetrics.simulate_vol_power(p_changes[i], vol_ratios[i])
+                    if pd.isna(tasks[i]) or pd.isna(tbids[i]):
+                        r = SimulatedRealtimeMetrics.simulate_bid_ask_ratio(p_changes[i], vol_ratios[i], vps[i])
+                        tasks[i] = 100000
+                        tbids[i] = int(100000 * r)
+                
+                group = group.copy() # In-place modification warning prevention
+                group['Vol_power'] = vps
+                group['Total_ask'] = tasks
+                group['Total_bid'] = tbids
+                group['bid_ask_ratio'] = group['Total_bid'] / (group['Total_ask'] + 1e-10)
+                group['vol_power'] = vps # [v31.5] Maintain lowercase for backward compatibility if needed
+
             df_ind = TradingStrategy.calculate_indicators(group, self.settings)
             df_ind['Ready'] = (df_ind.reset_index().index >= 19)
             cached[code] = df_ind
@@ -465,7 +614,15 @@ class DynamicBacktester:
         """[v23.0] 필요한 시점에만 1분봉 데이터를 DB에서 가져와 캐싱 (성능 핵심)"""
         cache_key = (code, date_str)
         if cache_key not in self.cached_1m_data:
-            query = "SELECT datetime as time, open, high, low, close, volume FROM bars_1m WHERE code = ? AND datetime BETWEEN ? AND ? ORDER BY datetime"
+            # [v31.5] Join with realtime_snapshots for high-precision smart metrics
+            query = """
+                SELECT b.datetime as time, b.open, b.high, b.low, b.close, b.volume,
+                       r.vol_power, r.total_ask, r.total_bid
+                FROM bars_1m b
+                LEFT JOIN realtime_snapshots r ON b.code = r.code AND b.datetime = r.datetime
+                WHERE b.code = ? AND b.datetime BETWEEN ? AND ?
+                ORDER BY b.datetime
+            """
             with self.db._get_connection() as conn:
                 df = pd.read_sql_query(query, conn, params=[code, date_str + " 09:00:00", date_str + " 15:30:00"])
             if df.empty:
@@ -474,6 +631,31 @@ class DynamicBacktester:
                 df.columns = [c.capitalize() if c.lower() != 'time' else 'time' for c in df.columns]
                 df['time'] = pd.to_datetime(df['time'])
                 df.set_index('time', inplace=True)
+                
+                # [v31.5] Pre-calculate synthetic metrics for 1m data
+                if self.settings.get('use_synthetic_realtime', True):
+                    # [v31.5] Ensure numeric types
+                    for col in ['Vol_power', 'Total_ask', 'Total_bid']:
+                        if col in df.columns:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                    p_changes = df['Close'].pct_change().fillna(0).values
+                    # 1m MA20
+                    vol_mas = df['Volume'].rolling(20).mean().bfill().values
+                    vol_ratios = (df['Volume'] / (vol_mas + 1e-10)).values
+                    vps = df['Vol_power'].values
+                    ratios = np.full(len(df), np.nan)
+                    
+                    for i in range(len(df)):
+                        if pd.isna(vps[i]):
+                            vps[i] = SimulatedRealtimeMetrics.simulate_vol_power(p_changes[i], vol_ratios[i])
+                        ratios[i] = SimulatedRealtimeMetrics.simulate_bid_ask_ratio(p_changes[i], vol_ratios[i], vps[i])
+                    
+                    df = df.copy()
+                    df['Vol_power'] = vps
+                    df['vol_power'] = vps # Compatibility
+                    df['bid_ask_ratio'] = ratios
+
                 self.cached_1m_data[cache_key] = df
         
         m1_full = self.cached_1m_data[cache_key]
@@ -510,12 +692,12 @@ class DynamicBacktester:
             # (A) Flash Exit 조건 계산
             f_pct = 0.0
             if h_info['entry_n'] == 1:
-                sig_type = h_info.get('sig_type', 'TYPE_A')
-                suffix = "_a" if sig_type == "TYPE_A" else "_b"
-                if self.settings.get('use_s1_flash_exit', True):
+                is_type_b = (h_info.get('sig_type') == "TYPE_B" and self.use_type_b)
+                suffix = "_b" if is_type_b else "_a"
+                if self.use_s1_flash:
                     f_pct = float(self.settings.get(f's1{suffix}_flash_exit_pct', 3.0))
             else:
-                if self.settings.get('use_s2_flash_exit', True):
+                if self.use_s2_flash:
                     f_pct = float(self.settings.get('s2_flash_exit_pct', 3.0))
             
             flash_exited = (f_pct > 0) & (m1_closes < running_max * (1 - f_pct/100))
@@ -524,24 +706,23 @@ class DynamicBacktester:
             sl_pct = 0.0
             tp_pct = 0.0
             if h_info['entry_n'] == 1:
-                sig_type = h_info.get('sig_type', 'TYPE_A')
-                suffix = "_a" if sig_type == "TYPE_A" else "_b"
-                if self.settings.get('use_s1_stop_loss', True):
+                is_type_b = (h_info.get('sig_type') == "TYPE_B" and self.use_type_b)
+                suffix = "_b" if is_type_b else "_a"
+                if self.use_s1_sl:
                     sl_pct = float(self.settings.get(f's1{suffix}_stop_loss', 3.0))
-                if self.settings.get('use_s1_tp', True):
+                if self.use_s1_tp:
                     tp_pct = float(self.settings.get(f's1{suffix}_take_profit', 5.0))
             else:
-                if self.settings.get('use_s2_stop_loss', True):
+                if self.use_s2_sl:
                     sl_pct = float(self.settings.get('s2_stop_loss', 2.0))
-                if self.settings.get('use_s2_tp', True):
+                if self.use_s2_tp:
                     tp_pct = float(self.settings.get('s2_take_profit', 5.0))
             
             stop_lossed = (sl_pct > 0) & (m1_closes / h_info['avg_p'] - 1 <= -sl_pct/100)
             take_profited = (tp_pct > 0) & (m1_highs / h_info['avg_p'] - 1 >= tp_pct/100)
             
             # (C) Gap Down 조건 (S1/S2 공통)
-            g_lmt = float(self.settings.get('gap_down_limit', -5.0))
-            gap_downed = (m1_closes / h_info['avg_p'] - 1 <= g_lmt / 100)
+            gap_downed = (m1_closes / h_info['avg_p'] - 1 <= self.gap_down_lmt / 100)
             
             # [v25.8/v25.9] 15-minute Gap-Down Grace Period: Allow recovery between SL/Flash and Gap Limit during first 15m
             if self.settings.get('use_gap_grace', True):
@@ -553,7 +734,7 @@ class DynamicBacktester:
             # (D) ATR Exit (v31.0)
             atr_trailed = np.zeros(len(m1_closes), dtype=bool)
             atr_sl_triggered = np.zeros(len(m1_closes), dtype=bool)
-            if self.settings.get('use_atr_exit', False):
+            if self.use_atr:
                 atr_val = curr_15m.get('ATR', 0) if curr_15m is not None else 0
                 entry_atr = h_info.get('atr_at_entry', atr_val)
                 if not np.isnan(atr_val) and atr_val > 0:
@@ -585,6 +766,15 @@ class DynamicBacktester:
                     reason = f"1M ATR Trail Stop (S{h_info['entry_n']})"
                 elif atr_sl_triggered[idx]:
                     reason = f"1M ATR Stop Loss (S{h_info['entry_n']})"
+                # [v31.5] Smart Exit in High-Precision Mode
+                elif self.use_sx:
+                    ba_ratio = m1_chunk.iloc[idx].get('bid_ask_ratio', 1.0)
+                    v_power = m1_chunk.iloc[idx].get('vol_power', 100.0)
+                    if ba_ratio < self.sx_ba and v_power < self.sx_vp:
+                        # [v31.6] Smart Exit Price Threshold (High-Precision)
+                        if self.sx_p_thr == 0 or exit_price <= running_max[idx] * (1 + self.sx_p_thr / 100.0):
+                            reason = f"1M Smart Exit|BA:{ba_ratio:.2f}|VP:{v_power:.0f}"
+                        else: reason = f"1M Stop Loss (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
                 else: reason = f"1M Stop Loss (S{h_info['entry_n']}-{h_info.get('sig_type','').split(' ')[-1]})"
                 
                 self._execute_sell(code, exit_price, exit_time, reason, indicator_row=curr_15m)
@@ -614,8 +804,42 @@ class DynamicBacktester:
                     else:
                         can_execute = False
                 
+                # [v31.5] Granular Smart Buy Selection
+                sig_type = curr_15m.get('Sig_Type', 'TYPE_B')
+                use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \
+                                   self.use_sb_b if (sig_type == "TYPE_B" and not is_addon_target) else \
+                                   self.use_sb_s2
+
+                if can_execute and use_sb_for_type:
+                    ba_ratio = curr_15m.get('bid_ask_ratio', 1.0)
+                    v_power = curr_15m.get('vol_power', 100.0)
+                    
+                    if ba_ratio < self.sb_ba or v_power < self.sb_vp:
+                        can_execute = False
+                        
+                        # [v27.5] Shadow Return (1h Lookahead)
+                        p_inc_str = ""
+                        try:
+                            if day_df_full is not None:
+                                idx_list = day_df_full.index.tolist()
+                                curr_idx = idx_list.index(curr_15m.name)
+                                future_idx = min(curr_idx + 4, len(idx_list) - 1)
+                                future_p = day_df_full.iloc[future_idx]['Close']
+                                p_inc = (future_p / m1_r_first['Close'] - 1) * 100
+                                p_inc_str = f"|1h:{p_inc:+.2f}%"
+                        except: pass
+
+                        # [v27.5] Log Rejection (1M)
+                        self.trades_history.append({
+                            'Date': m1_r_first.name, 'Code': code, 'Name': TradingStrategy.get_stock_name_map().get(code, code),
+                            'Action': 'REJECTED_SIG', 'Price': m1_r_first['Close'], 'Qty': 0, 'Amount': 0, 
+                            'Reason': f"1M SmartBuy Filter Rejected|BA:{ba_ratio:.2f}|VP:{v_power:.0f}{p_inc_str}", 'Cash': self.cash
+                        })
+                
                 if can_execute:
-                    self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': curr_15m.get('Sig_Type', 'TYPE_B')}, m1_dt_first, m1_r_first, indicator_row=curr_15m)
+                    if use_sb_for_type:
+                        reason = "1M_SmartBuy|" + reason
+                    self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': sig_type}, m1_r_first.name, m1_r_first, indicator_row=curr_15m)
 
     def _check_s2_approval(self, code, h_info, last_row, indicator_row=None):
         """[v22.1] 2차 매수 승인 로직 (backtest_engine.TradingStrategy._check_s2_approval 통합 연동)"""

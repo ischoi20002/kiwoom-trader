@@ -16,17 +16,25 @@ class StreamProcessor:
     def update_realtime_bar(self, code, price, volume, bars_data):
         """틱 정보를 DataFrame 기반 봉에 반영"""
         now = datetime.now()
-        # 15분 단위 슬롯 계산
+        # [v3.5] 15분 단위 슬롯으로 원복 (지표 안정성 확보)
         target_minute = ((now.minute // 15) + 1) * 15
         target_hour = now.hour
         if target_minute == 60:
             target_minute, target_hour = 0, target_hour + 1
         slot_time = f"{target_hour:02d}{target_minute:02d}"
 
+        # [v35.7] 슬롯 시간을 현재 날짜와 결합하여 전체 타임스탬프 생성
+        now_dt = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        dt_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
         df = bars_data.get(code)
         if df is None or df.empty:
             # 첫 진입 시 Volume은 0으로 시작 (기준점)
-            bars_data[code] = pd.DataFrame([{'time': slot_time, 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 0, 'cum_v_start': volume}])
+            new_row = {'datetime': dt_str, 'time': slot_time, 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 0, 'cum_v_start': volume}
+            new_df = pd.DataFrame([new_row])
+            new_df['datetime'] = pd.to_datetime(new_df['datetime'])
+            new_df.set_index('datetime', inplace=True)
+            bars_data[code] = new_df
             return bars_data
         
         last_idx = df.index[-1]
@@ -39,9 +47,13 @@ class StreamProcessor:
             start_v = df.at[last_idx, 'cum_v_start'] if 'cum_v_start' in df.columns else volume
             df.at[last_idx, 'Volume'] = max(0, volume - start_v)
         else:
-            # 새 봉 추가 및 100개 유지
-            new_row = pd.DataFrame([{'time': slot_time, 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 0, 'cum_v_start': volume}])
-            df = pd.concat([df, new_row], ignore_index=True).tail(100)
+            # 새 봉 추가 및 300개 유지 (충분한 지표 계산용)
+            new_row_data = {'datetime': dt_str, 'time': slot_time, 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 0, 'cum_v_start': volume}
+            new_row_df = pd.DataFrame([new_row_data])
+            new_row_df['datetime'] = pd.to_datetime(new_row_df['datetime'])
+            new_row_df.set_index('datetime', inplace=True)
+            
+            df = pd.concat([df, new_row_df]).tail(300)
             
             # MA 계산 (15분봉 기준)
             df['ma5'] = df['Close'].rolling(window=5).mean()

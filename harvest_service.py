@@ -42,8 +42,9 @@ class HarvestService:
     def _fetch_minute_data(self, code, token, next_key=""):
         """키움 REST API 분봉차트조회 호출 (v9.0: 인덱스 수집 보류 - 주식 전용 최적화)"""
         code = str(code).strip()
-        if len(code) <= 3:
-            return None, "" # 지수는 REST API 불안정으로 수집 생략 (fdr로 대체)
+        # [v16.9.1] 지수 및 시장 지표는 전용 동기화(Daily/FDR)를 위해 REST 수집 생략 
+        if len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11']:
+            return None, "" 
 
         url = f"{config.URL}/api/dostk/chart"
         headers = {
@@ -156,11 +157,17 @@ class HarvestService:
         if total_fetched > 0:
             self.log(f"   - {code}: 15분봉 데이터 갱신 중...")
             self.db.refresh_resampled_data(code)
-            self.log(f"[OK] {code} 처리 완료: 총 {total_fetched}개 신규 저장됨")
+            self.log(f"   - {code}: 과거 체결강도(VolPower) 동기화 중...")
+            vp_count = self.db.sync_historical_vol_power(code, token)
+            self.log(f"[OK] {code} 처리 완료: 신규 봉 {total_fetched}개, 체결강도 {vp_count}개 저장됨")
         else:
-            # [v16.9] 원인별 로그 세분화
+            # [v16.9.1] 개선된 원인별 로그 세분화 (지수/최신/미수집)
+            is_idx = (len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11'])
+            
             if last_sync and 'bars' in locals() and bars and bars[0]['time'] <= last_sync:
                 self.log(f"[OK] {code} 처리 완료: 이미 최신 상태입니다.")
+            elif is_idx:
+                self.log(f"[OK] {code} 처리 완료: 지수 데이터(Daily Sync) 유효성 확인됨")
             else:
                 self.log(f"[OK] {code} 처리 완료: 서버에서 가져온 데이터가 없습니다.")
 
