@@ -72,15 +72,9 @@ def plot_kospi_with_strength():
     plt.xticks(rotation=45)
     plt.tight_layout()
     
-    output_path = r'C:\Users\ischo\OneDrive\바이브\kospi_2025_strength_analysis.png'
-    # Copy to artifacts directory later or use absolute path
+    output_path = os.path.join(os.path.dirname(__file__), 'kospi_2025_strength_analysis.png')
     plt.savefig(output_path, dpi=150)
-    
-    # Also save to artifacts for embedding
-    artifact_path = r'C:\Users\ischo\.gemini\antigravity\brain\2b2248cb-83c8-4c02-a0b4-a63ed817d3b2\kospi_2025_strength.png'
-    plt.savefig(artifact_path, dpi=150)
-    
-    print(f"Analysis chart saved to: {artifact_path}")
+    print(f"Analysis chart saved to: {output_path}")
 
 if __name__ == "__main__":
     plot_kospi_with_strength()

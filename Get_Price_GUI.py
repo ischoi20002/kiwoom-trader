@@ -78,12 +78,15 @@ try:
     
     # 2. 샌드박스(모의투자) 모드 적용
     api_config.USE_SANDBOX = USE_MOCK
+    os.environ['KIWOOM_USE_SANDBOX'] = 'true' if USE_MOCK else 'false'
     
-    # 3. 토큰 주소 강제 고정 (중요: 임소팅된 변수도 덮어쓰기)
+    # 3. 토큰 주소 및 베이스 URL 강제 고정 (중요)
     if USE_MOCK:
         fixed_token_url = "https://mockapi.kiwoom.com/oauth2/token"
+        api_config.DEFAULT_BASE_URL = "https://mockapi.kiwoom.com"
     else:
         fixed_token_url = "https://api.kiwoom.com/oauth2/token"
+        api_config.DEFAULT_BASE_URL = "https://api.kiwoom.com"
         
     api_config.TOKEN_URL = fixed_token_url
     api_token.TOKEN_URL = fixed_token_url 
@@ -189,37 +192,30 @@ class KiwoomApp:
     def access_token(self, value):
         self.auth_manager.access_token = value
         
-    def __init__(self, root):
+    def __init__(self, root, auto_start=False):
         self.root = root
-        # [v3.7.4] 환경에 따른 제목 표시
-        mode_str = "[실전투자]" if not config.USE_MOCK else "[모의투자]"
-        self.root.title(f"KOSPI TRADER V0R16 {mode_str}")
+        self.auto_start = auto_start
+        self.root.title("Kiwoom Rest API Trader v3.7.8 [Remote Monitoring]")
         self.root.geometry("1400x900")
         
+        # [v1.3] 로깅 및 기본 매니저들을 최우선으로 초기화 (다른 초기화 중 log 호출 대응)
+        self.gui_utils = GuiUtils(root=self.root)
         self.auth_manager = AuthManager(logger_callback=self.log)
         self.config_handler = ConfigHandler(logger_callback=self.log)
         self.data_manager = DataManager()
         self.config = config
-        
-        self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
-        
-        self.stream_processor = StreamProcessor(self.settings, logger_callback=self.log)
-        self.gui_utils = GuiUtils(root=self.root)
-        self.order_manager = OrderManager(self) # [v3.7.8] 주문 관리자 초기화
-        self.signal_engine = SignalEngine(self)
         self.nordic_style = NordicStyle(self.root)
-        
-        # [v1.0] attributes initialization (moved from _init_attributes for lint resolution)
+
+        # 나머지 속성 초기화
         self.settings_file = "settings.json"
         self.realtime_data = {} 
         self.monitor_thread = None
         self.is_monitoring = False
-        self.executor = None # [v3.5] For clean shutdown
+        self.executor = None 
         self.monitor_codes = []
         self.monitor_info = {}
         self.volume_profiles = {} 
         self.min_volume_profiles = {} 
-        self.bars_data = self.config_handler.load_bars_cache() 
         self.cache_file = "bars_cache.json"
         self.debug_packet_logged = False
         self._last_parse_error_log = 0.0
@@ -248,25 +244,10 @@ class KiwoomApp:
         self.virtual_db_file = "virtual_db.json"
         self.virtual_positions = {}
         self.virtual_history = []
-        self._load_virtual_db()
         
-        self._setup_ui()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        
-        # [v1.0] 원격 업데이트 리스너 시작 (30초 주기)
-        self.last_update_id = 0
-        self.is_updating = False
-        self.root.after(30000, self._check_remote_commands)
-        
-        
-        self._load_active_positions_from_db() # [v3.7.8] DB에서 활성 포지션 복구
-        self.tree_virtual = None     
-        self.tab_backtest = None
-        self.tree_backtest = None
         self.backtest_entries = {}
         self.backtest_force_refresh_var = tk.BooleanVar(value=False)
         self.base_backtest_settings = DEFAULT_SETTINGS.copy()
-        
         self.last_backtest_trades = None
         self.last_backtest_market = None
         self.last_backtest_vix = None
@@ -274,7 +255,10 @@ class KiwoomApp:
         self.last_backtest_interval = "15m"
         self.last_backtest_start = None  
         self.last_backtest_end = None    
-        
+
+        self.tree_virtual = None     
+        self.tab_backtest = None
+        self.tree_backtest = None
         self.btn_basics_update = None
         self.btn_select = None
         self.log_area = None
@@ -282,8 +266,34 @@ class KiwoomApp:
         self.lbl_criteria = None
         self.tree_monitor = None
         self.btn_monitor_toggle = None
-        self.params_entries = {}
         self.settings_status_label = None
+        self.lbl_remote_status = None 
+        self.tree_active_monitor = None
+        self.lbl_heartbeat = None
+        self.lbl_headwind_caution = None
+
+        self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        self.bars_data = self.config_handler.load_bars_cache() 
+        
+        self.stream_processor = StreamProcessor(self.settings, logger_callback=self.log)
+        self.order_manager = OrderManager(self) 
+        self.signal_engine = SignalEngine(self)
+
+        self._load_virtual_db()
+        self._setup_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        # [v1.0] 원격 업데이트 리스너 시작 (5초 주기)
+        self.last_update_id = 0
+        self.is_updating = False
+        self.root.after(5000, self._check_remote_commands) # 로그 출력 제거 (gui_utils 준비성 보장)
+        
+        self._load_active_positions_from_db() # [v3.7.8] DB에서 활성 포지션 복구
+        
+        # [v3.8] 자동 시작 옵션이 있는 경우 8초 후 실시간 감시 시작
+        if self.auto_start:
+            self.log("🚀 [Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
+            self.root.after(8000, self.toggle_monitoring)
         
     def _final_save_settings(self):
         """[v3.5] 설정 데이터를 실제로 파일에 저장하고 엔진들에 통보 (Zombie 파라미터 필터링)"""
@@ -362,6 +372,9 @@ class KiwoomApp:
         
         self.status_label = ttk.Label(status_frame, text="상태: 대기 중", foreground="blue")
         self.status_label.pack(side=tk.RIGHT, padx=5)
+        
+        self.lbl_remote_status = ttk.Label(status_frame, text="📡 원격: 비활성", foreground="gray")
+        self.lbl_remote_status.pack(side=tk.LEFT, padx=10)
         
         self.gui_utils.log_area = self.log_area
         self.log("[System] 화면 구성 및 GUI 모듈 초기화 완료")
@@ -899,8 +912,8 @@ class KiwoomApp:
                     if self.status_label:
                         self.root.after(0, lambda c=cur: self.status_label.config(text=f"상태: 분석 중 ({c}/{total})"))
 
-        # DB 읽기 병목을 줄이기 위해 스레드 수를 5개로 조정
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        # [v3.5.2] API 호출 제한(429) 방지를 위해 병렬 허용치를 5 -> 2로 축소
+        self.executor = ThreadPoolExecutor(max_workers=2)
         try:
             list(self.executor.map(process, self.monitor_codes))
         finally:
@@ -910,7 +923,14 @@ class KiwoomApp:
         
         if self.status_label:
             self.root.after(0, lambda: self.status_label.config(text="상태: 분석 완료", foreground="green"))
-        self.log(f"✅ [System] 워밍업 완료 ({success_count[0]}/{total} 성공). 지표가 즉시 활성화됩니다.")
+        
+        msg = f"✅ [System] 워밍업 완료 ({success_count[0]}/{total} 성공). 지표가 즉시 활성화됩니다."
+        if success_count[0] < total:
+            msg = f"⚠️ [System] 워밍업 일부 실패 ({success_count[0]}/{total} 성공). API 제한이나 DB 부재로 지표가 지연될 수 있습니다."
+            if success_count[0] == 0:
+                msg = f"❌ [System] 워밍업 전원 실패 (0/{total}). API 호출 제한(429) 또는 DB 파일 유실을 확인하세요."
+        
+        self.log(msg)
 
     def on_close(self):
         """창 닫기 시 안전하게 종료 처리"""
@@ -1385,72 +1405,133 @@ class KiwoomApp:
     # 원격 배포 및 자동 업데이트 (Handover 방식)
     # ==========================================
     def _check_remote_commands(self):
-        """[v1.0] 텔레그램봇으로부터 원격 명령(/update, /restart)을 확인합니다."""
-        if self.is_updating: return
-        
+        """[v1.5] 텔레그램봇 명령 리스너 - 단일 루프 스레드 방식(Long Polling)"""
+        if getattr(self, "_remote_thread_started", False): return
+        self._remote_thread_started = True
+
         token = getattr(config, "TELEGRAM_BOT_TOKEN", "")
-        chat_id = getattr(config, "TELEGRAM_CHAT_ID", "")
+        chat_id = str(getattr(config, "TELEGRAM_CHAT_ID", ""))
+        
         if not token or not chat_id or "발급" in token:
-            self.root.after(60000, self._check_remote_commands)
+            if self.lbl_remote_status:
+                self.root.after(0, lambda: self.lbl_remote_status.config(text="📡 원격: 설정필요", foreground="orange"))
+            self.log("⚠️ [Remote] 텔레그램 설정이 비어있어 리스너를 중단합니다. (config.py 확인 필요)")
             return
 
-        def task():
-            try:
-                url = f"https://api.telegram.org/bot{token}/getUpdates"
-                params = {"offset": self.last_update_id + 1, "timeout": 20}
-                res = requests.get(url, params=params, timeout=25)
-                if res.status_code == 200:
-                    data = res.json()
-                    for update in data.get("result", []):
-                        self.last_update_id = update["update_id"]
-                        msg = update.get("message", {})
-                        text = msg.get("text", "")
-                        from_id = str(msg.get("from", {}).get("id", ""))
-                        
-                        if from_id == str(chat_id):
-                            if text == "/update":
-                                self.log("🚀 [Remote] 원격 업데이트 명령 수신! 배포를 시작합니다...")
-                                self.root.after(0, self._handle_remote_update)
-                                break
-                            elif text == "/restart":
-                                self.log("🔄 [Remote] 원격 재시작 명령 수신!")
-                                self.root.after(0, self._handle_remote_restart)
-                                break
-            except Exception as e:
-                print(f"[Telegram Polling Error] {e}")
+        def polling_loop():
+            # [v1.0] 원격 업데이트 리스너 시작
+            last_id = 0
+            self.log("📡 [Remote] 원격 명령 리스너가 시작되었습니다.")
             
-            # 다음 확인 예약
-            if not self.is_updating:
-                self.root.after(30000, self._check_remote_commands)
+            while not self.is_updating:
+                try:
+                    url = f"https://api.telegram.org/bot{token}/getUpdates"
+                    if last_id == 0:
+                        params = {"offset": -1, "timeout": 5, "limit": 100}
+                    else:
+                        params = {"offset": last_id + 1, "timeout": 20, "limit": 100}
+                    
+                    res = requests.get(url, params=params, timeout=30)
+                    if res.status_code == 200:
+                        data = res.json()
+                        results = data.get("result", [])
+                        
+                        # [DEBUG] 하트비트
+                        print(f"📡 [Remote Polling] OK - 수신된 패킷: {len(results)}개 (Last ID: {last_id})")
+                        
+                        if last_id == 0:
+                            # 첫 바퀴: 과거 내역 소거
+                            if self.lbl_remote_status:
+                                self.root.after(0, lambda: self.lbl_remote_status.config(
+                                    text=f"📡 원격: 정상 ({datetime.now().strftime('%H:%M:%S')})", foreground="#4C566A"))
+                            if results:
+                                last_id = results[-1]["update_id"]
+                                print(f"[Remote Debug] First poll skipped {len(results)} packets (Last ID: {last_id})")
+                            else:
+                                last_id = 1
+                            time.sleep(1)
+                            continue
 
-        threading.Thread(target=task, daemon=True).start()
+                        for update in results:
+                            last_id = update["update_id"]
+                            msg = update.get("message") or update.get("channel_post", {})
+                            text = (msg.get("text") or "").strip().lower()
+                            from_id = str(msg.get("from", {}).get("id") or msg.get("chat", {}).get("id") or "")
+                            
+                            # [DEBUG] 수신된 내용 전체 로깅
+                            print(f"[Remote Debug] Packet received - Text: '{text}', FromID: {from_id}, ExpectedChatID: {chat_id}")
+                            
+                            if text.startswith("/"):
+                                self.root.after(0, lambda m=text, f=from_id, c=chat_id: self.log(f"📩 [Remote] 명령 포착: {m} (From: {f}, Expected: {c})"))
+                                
+                            if from_id == chat_id:
+                                if text == "/update" or text.startswith("/update@"):
+                                    self.root.after(0, self._handle_remote_update)
+                                    return # 스레드 종료
+                                elif text == "/restart" or text.startswith("/restart@"):
+                                    self.root.after(0, self._handle_remote_restart)
+                                    return
+                                elif text == "/select" or text.startswith("/select@"):
+                                    self.root.after(0, self.start_selection_thread)
+                                    self.send_telegram_message("🔍 <b>[원격 종목 선정]</b>\n전략 종목 스캔을 시작합니다. 잠시만 기다려주세요...")
+                            else:
+                                if text.startswith("/"):
+                                    print(f"⚠️ [Remote Debug] Chat ID Mismatch! Message from {from_id}, but we only accept from {chat_id}")
+                    else:
+                        if self.lbl_remote_status:
+                            self.root.after(0, lambda s=res.status_code: self.lbl_remote_status.config(
+                                text=f"📡 원격: 오류({s})", foreground="red"))
+                        print(f"[Telegram] API Error: {res.status_code}")
+                except Exception as e:
+                    if self.lbl_remote_status:
+                        self.root.after(0, lambda: self.lbl_remote_status.config(text="📡 원격: 연결끊김", foreground="red"))
+                    print(f"[Telegram Polling Exception] {e}")
+                
+                # 쿨타임 (다음 폴링 전 대기)
+                time.sleep(3)
+
+        threading.Thread(target=polling_loop, daemon=True).start()
 
     def _handle_remote_update(self):
         """[Handover] 대리인 스크립트 실행 후 즉시 자기 자신을 종료합니다."""
         self.is_updating = True
-        self.send_telegram_message("📦 <b>[원격 배포 시작]</b>\nGIT Pull 및 재배포를 시작합니다.\n5~10초 후 프로그램이 자동 재시작됩니다.")
+        self.send_telegram_message("📦 <b>[원격 배포 시작]</b>\nGIT Pull 및 재배포를 시작합니다.\n10~20초 후 프로그램이 자동 재시작됩니다.")
         
         try:
-            # remote_update.bat 실행 (새로운 콘솔창에서 독립적으로 실행)
-            update_script = os.path.join(os.getcwd(), "remote_update.bat")
+            # [v1.7] CWD 의존성을 없애기 위해 실행 파일 경로 기준으로 탐색
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            update_script = os.path.normpath(os.path.join(script_dir, "remote_update.ps1"))
+            
+            msg_start = f"📡 [Remote] 업데이트 스크립트 실행 시도: {update_script}"
+            self.log(msg_start)
+            print(msg_start)
+            
             if os.path.exists(update_script):
-                subprocess.Popen(["cmd.exe", "/c", update_script], 
-                                 cwd=os.getcwd(), 
-                                 creationflags=0x10) # subprocess.CREATE_NEW_CONSOLE
-                # 즉시 GUI 종료 및 프로세스 반환 (파일 잠금 해제)
-                self.root.after(1000, self.on_close)
+                # [v2.2] 영문 경로 대응 및 자동 재시작 최적화
+                ps_exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+                subprocess.Popen([ps_exe, "-ExecutionPolicy", "Bypass", "-File", update_script], 
+                                 cwd=script_dir, 
+                                 creationflags=0x10) # CREATE_NEW_CONSOLE
+                
+                self.log("✅ [Remote] 업데이트 배포 시작. 2초 후 자동 재시작됩니다.")
+                self.root.after(2000, self.on_close)
             else:
-                self.log("⚠️ [Error] remote_update.bat 파일을 찾을 수 없습니다.")
+                msg = f"❌ [Remote] 업데이트 스크립트 미탐지: {update_script}"
+                self.log(msg)
+                print(msg)
                 self.is_updating = False
         except Exception as e:
-            self.log(f"⚠️ [Error] 업데이트 프로세스 시작 실패: {e}")
+            msg_err = f"⚠️ [Error] 업데이트 프로세스 시작 실패: {e}"
+            self.log(msg_err)
+            print(msg_err)
             self.is_updating = False
 
     def _handle_remote_restart(self):
         """단순 재시작 처리"""
         self.send_telegram_message("🔄 <b>[원격 재시작]</b>\n프로그램을 다시 시작합니다.")
-        restart_script = os.path.join(os.getcwd(), "run_app.bat")
-        subprocess.Popen(["cmd.exe", "/c", restart_script], cwd=os.getcwd(), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        restart_script = os.path.join(script_dir, "run_app.bat")
+        subprocess.Popen(["cmd.exe", "/c", restart_script], cwd=script_dir, creationflags=0x10)
         self.root.after(500, self.on_close)
 
 if __name__ == "__main__":
@@ -1459,5 +1540,21 @@ if __name__ == "__main__":
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
     except: pass
-    KiwoomApp(root)
-    root.mainloop()
+    
+    import sys
+    auto_start = "--auto-start" in sys.argv
+    
+    try:
+        app = KiwoomApp(root, auto_start=auto_start)
+        root.mainloop()
+    except Exception as e:
+        import traceback
+        err_details = traceback.format_exc()
+        try:
+            print(err_details)
+        except:
+            # CP949 인코딩 에러 방지 (특수문자 제거)
+            safe_details = err_details.encode('ascii', errors='replace').decode('ascii')
+            print(safe_details)
+        # 팝업으로 에러 상세 표시 (깜빡임 종료 방지)
+        messagebox.showerror("Fatal Error", f"프로그램 시작 중 오류가 발생했습니다:\n\n{e}\n\n상세 정보:\n{err_details[:500]}...")

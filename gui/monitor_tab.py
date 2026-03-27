@@ -173,8 +173,16 @@ class MonitorTab:
                             
             except Exception as e:
                 if self.app.is_monitoring:
-                    self.app.log(f"❌ [시스템] 연결 에러: {e}. 5초 후 재연결 시도...")
-                    await asyncio.sleep(5)
+                    # [v3.5.1] API Error (HTTP 429) 감지 시 대기 시간 대폭 연장
+                    error_msg = str(e)
+                    wait_sec = 5
+                    if "429" in error_msg:
+                        wait_sec = 60 # 429 발생 시 1분 대기
+                        self.app.log(f"🛑 [시스템] API 호출 제한(429) 감지. {wait_sec}초 후 다시 시도합니다.")
+                    else:
+                        self.app.log(f"❌ [시스템] 연결 에러: {e}. {wait_sec}초 후 재연결 시도...")
+                    
+                    await asyncio.sleep(wait_sec)
             finally:
                 if not self.app.is_monitoring:
                     self.app.root.after(0, self.app.stop_monitoring)
@@ -281,8 +289,9 @@ class MonitorTab:
         
         # 3. 트리뷰 필드 및 줄무늬 색상 변경
         style.configure("Treeview", fieldbackground=t['field'], background=t['field'])
-        self.app.tree_monitor.tag_configure("oddrow", background=t['odd'])
-        self.app.tree_monitor.tag_configure("evenrow", background=t['even'])
+        if self.app.tree_monitor:
+            self.app.tree_monitor.tag_configure("oddrow", background=t['odd'])
+            self.app.tree_monitor.tag_configure("evenrow", background=t['even'])
         
         # 4. 상태 안내 문구 및 가시성 제어
         if hasattr(self.app, 'lbl_headwind_caution'):
@@ -293,4 +302,5 @@ class MonitorTab:
                 self.app.lbl_headwind_caution.pack(side=tk.LEFT, padx=10)
                 
         # 5. 하단 상태바 동기화 전파 (선택사항)
-        self.app.status_label.config(text=f"장세: {trend}", foreground=t['fg'], background=t['bg'])
+        if self.app.status_label:
+            self.app.status_label.config(text=f"장세: {trend}", foreground=t['fg'], background=t['bg'])

@@ -1,7 +1,9 @@
 import pandas as pd
 import os
 
-trade_csv = 'c:/바이브/backtest_trades.csv'
+# [v3.5.1] Use dynamic path detection
+import os
+trade_csv = os.path.join(os.path.dirname(__file__), 'backtest_trades.csv')
 if not os.path.exists(trade_csv):
     print("No backtest_trades.csv found.")
 else:

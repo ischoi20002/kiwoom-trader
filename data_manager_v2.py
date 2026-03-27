@@ -586,32 +586,49 @@ class DataManagerV2:
             """, (code, status))
             conn.commit()
 
-    def fetch_kiwoom_minute_data(self, code, token):
-        """키움 주식분봉차트조회(ka10080) 호출"""
-        try:
-            url = f"{config.URL}/api/dostk/chart"
-            headers = {
-                "Content-Type": "application/json;charset=UTF-8",
-                "authorization": f"Bearer {token}",
-                "cont-yn": "N",
-                "next-key": "",
-                "api-id": "ka10080"
-            }
-            body = {
-                "stk_cd": code,
-                "tic_scope": "1", 
-                "upd_stkpc_tp": "1"
-            }
-            res = requests.post(url, headers=headers, json=body, timeout=10)
-            
-            if res.status_code == 200:
-                data = res.json()
-                raw_list = data.get('stk_min_pole_chart_qry', data.get('output', data.get('data', [])))
-                return raw_list
-            return None
-        except Exception as e:
-            print(f"  [Error] API Fetch Exception ({code}): {e}")
-            return None
+    def fetch_kiwoom_minute_data(self, code, token, logger=None):
+        """키움 주식분봉차트조회(ka10080) 호출 - [v3.5.2] Retry 로직 추가"""
+        url = f"{config.URL}/api/dostk/chart"
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "authorization": f"Bearer {token}",
+            "cont-yn": "N",
+            "next-key": "",
+            "api-id": "ka10080"
+        }
+        body = {
+            "stk_cd": code,
+            "tic_scope": "1", 
+            "upd_stkpc_tp": "1"
+        }
+        
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                res = requests.post(url, headers=headers, json=body, timeout=10)
+                
+                if res.status_code == 200:
+                    data = res.json()
+                    raw_list = data.get('stk_min_pole_chart_qry', data.get('output', data.get('data', [])))
+                    return raw_list
+                elif res.status_code == 429:
+                    if attempt < max_retries:
+                        wait = (attempt + 1) * 2
+                        time.sleep(wait)
+                        continue
+                
+                if res.status_code != 200:
+                    # [v3.5.2] 에러 발생 시 로그 출력 (429 차단 등 대응)
+                    if logger: logger(f"  [Error] API Status {res.status_code} ({code})")
+                    else: print(f"  [Error] API Status {res.status_code} ({code})")
+                return None
+            except Exception as e:
+                if attempt < max_retries:
+                    time.sleep(1)
+                    continue
+                print(f"  [Error] API Fetch Exception ({code}): {e}")
+                return None
+        return None
 
     def fetch_and_parse_15m_bars(self, code, token):
         """[v3.5] DB와 API 데이터를 무조건 병합하여 15분봉 워밍업 수행 (29/60 부족 현상 방지)"""
@@ -625,6 +642,9 @@ class DataManagerV2:
         # 2. API에서 최신 데이터 보충 (오늘 데이터 확보)
         df_api = pd.DataFrame()
         if token:
+            # [v3.5.2] Throttling 강화: 0.1~0.3 -> 0.5~1.0
+            import random
+            time.sleep(random.uniform(0.5, 1.0))
             raw_api = self.fetch_kiwoom_minute_data(code, token)
             if raw_api:
                 df_api = pd.DataFrame(raw_api)
@@ -766,6 +786,9 @@ class DataManagerV2:
         if not token: return
         
         def process(code):
+            # [v3.5.2] Throttling 강화: 0.1~0.5 -> 0.5~1.5
+            import random
+            time.sleep(random.uniform(0.5, 1.5))
             fresh_data = self.fetch_kiwoom_minute_data(code, token)
             if not fresh_data: return
             
@@ -778,7 +801,8 @@ class DataManagerV2:
             # 따라서 프로필만 계산하고 데이터 업데이트는 생략함.
             pass
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        # [v3.5.2] API 호출 제한 방지를 위해 병렬 허용치 축소 (10 -> 2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
             list(executor.map(process, monitor_codes))
 
     def save_bars_cache(self, bars_data, cache_file):

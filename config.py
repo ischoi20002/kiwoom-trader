@@ -6,11 +6,15 @@ APP_KEY = "3qV0WGDfHHTDrievzvsl0Yvt-7u6VLSOwS469J_AYP0"
 APP_SECRET = "-TZiGwo1WpQSTPDnoDJAAblpcbkuCqpPpCC9mPlFA80"
 
 # 2. 거래 서버 설정 (실전/모의)
-MOCK_APP_KEY = "5-_eJyH9IVD8SFmAqXMHas0jaTCS0O9nJ-_ivKx4KLI"                     # 모의투자용 App Key (8030 에러 시 별도 발급 필요)
-MOCK_APP_SECRET = "NFlzCETCLsvRQ_BwghdIlLW_h0p39YlZZANiimKeF-E"                  # 모의투자용 Secret Key
-URL = "https://api.kiwoom.com"        # 실전투자 메인 주소
-MOCK_URL = "https://mockapi.kiwoom.com" # 모의투자 메인 주소
+REAL_URL = "https://api.kiwoom.com"
+MOCK_URL = "https://mockapi.kiwoom.com"
 USE_MOCK = True # 환경 전환 버튼에 의해 자동 수정됨
+
+# [Fix] USE_MOCK 값에 따라 최종 접속 URL을 결정합니다.
+URL = MOCK_URL if USE_MOCK else REAL_URL
+
+MOCK_APP_KEY = "5-_eJyH9IVD8SFmAqXMHas0jaTCS0O9nJ-_ivKx4KLI"                     # 모의투자용 App Key
+MOCK_APP_SECRET = "NFlzCETCLsvRQ_BwghdIlLW_h0p39YlZZANiimKeF-E"                  # 모의투자용 Secret Key
 ALLOW_MOCK_ORDER = True # 모의투자 주문 허용 여부
 ALLOW_REAL_ORDER = False # 실전투자 주문 허용 여부 (매우 주의!)
 

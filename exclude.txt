@@ -1,0 +1,11 @@
+config.py
+trading_data.db
+virtual_db.json
+bars_cache.json
+trading.log
+__pycache__
+.git
+.agents
+.gemini
+tmp
+exclude.txt

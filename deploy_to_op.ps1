@@ -3,7 +3,7 @@
 
 $Source = Get-Location
 # 운영 폴더 이름을 직접 쓰는 대신, 상위 폴더 기준의 상대 경로를 사용하거나 English Alias를 사용합니다.
-$TargetName = "바이브_운영"
+$TargetName = "vibe_op"
 $Target = Join-Path (Split-Path $Source) $TargetName
 
 $ExcludeList = @("trading_data.db", "virtual_db.json", "deploy_to_op.ps1")

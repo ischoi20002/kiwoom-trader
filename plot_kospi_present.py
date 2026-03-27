@@ -78,14 +78,10 @@ def plot_kospi_to_present():
     plt.xticks(rotation=45)
     plt.tight_layout()
     
-    artifact_path = r'C:\Users\ischo\OneDrive\바이브\kospi_present_strength.png'
-    plt.savefig(artifact_path, dpi=150)
-    
-    # Copy to brain artifacts
-    brain_path = r'C:\Users\ischo\.gemini\antigravity\brain\2b2248cb-83c8-4c02-a0b4-a63ed817d3b2\kospi_present_strength.png'
-    plt.savefig(brain_path, dpi=150)
-    
-    print(f"Extended analysis chart saved to: {brain_path}")
+    # [v3.5.1] Use relative path
+    output_path = os.path.join(os.path.dirname(__file__), 'kospi_present_strength.png')
+    plt.savefig(output_path, dpi=150)
+    print(f"Extended analysis chart saved to: {output_path}")
 
 if __name__ == "__main__":
     plot_kospi_to_present()

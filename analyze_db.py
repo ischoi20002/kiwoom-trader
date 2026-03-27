@@ -2,7 +2,8 @@ import sqlite3
 import pandas as pd
 import os
 
-db_path = r"C:\바이브\trading_data.db"
+# [v3.5.1] Use dynamic path detection instead of hardcoded C:\바이브
+db_path = os.path.join(os.path.dirname(__file__), "trading_data.db")
 
 def analyze():
     if not os.path.exists(db_path):
