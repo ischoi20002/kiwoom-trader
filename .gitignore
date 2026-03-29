@@ -8,7 +8,6 @@ __pycache__/
 *.cache
 *.bak
 *.ruined
-settings.json
 backtest_data/
 *.csv
 !kospi_200.csv
