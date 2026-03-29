@@ -35,7 +35,7 @@ class PortfolioManager:
                         data = json.load(f)
                         self.virtual_history = data.get('history', [])
                 except Exception as e:
-                    self.log(f"⚠️ [Portfolio] 히스토리 로드 실패: {e}")
+                    self.log(f"[Error] [Portfolio] 히스토리 로드 실패: {e}")
 
             # 2. DB에서 활성 포지션 로드 (DataManagerV2 기준)
             try:
@@ -55,9 +55,9 @@ class PortfolioManager:
                             }
                     else:
                         self.virtual_positions = active
-                    self.log(f"📥 [Portfolio] DB에서 {len(self.virtual_positions)}개의 활성 포지션 복구")
+                    self.log(f"[Portfolio] DB에서 {len(self.virtual_positions)}개의 활성 포지션 복구")
             except Exception as e:
-                self.log(f"⚠️ [Portfolio] DB 포지션 복구 실패: {e}")
+                self.log(f"[Error] [Portfolio] DB 포지션 복구 실패: {e}")
 
     def save_db(self):
         """현재 상태를 파일에 저장합니다 (히스토리 위주)."""
@@ -65,13 +65,13 @@ class PortfolioManager:
             with open(self.virtual_db_file, 'w', encoding='utf-8') as f:
                 json.dump({'history': self.virtual_history}, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            self.log(f"⚠️ [Portfolio] DB 저장 실패: {e}")
+            self.log(f"[Error] [Portfolio] DB 저장 실패: {e}")
 
     def sync_with_actual_account(self, silent=False):
         """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 가상 포지션을 동기화 (Reconciliation)"""
         holdings = self.order_manager.get_holdings()
         if holdings is None: 
-            self.log("⚠️ [Sync] 계좌 정보를 실시간으로 가져올 수 없습니다.")
+            self.log("[Error] [Sync] 계좌 정보를 실시간으로 가져올 수 없습니다.")
             return
         
         server_codes = set()
@@ -131,13 +131,13 @@ class PortfolioManager:
                     self.virtual_positions.pop(code, None)
                     self.data_manager.delete_active_position(code)
                     removed_count += 1
-                    self.log(f"⚠️ [Sync] {pos['name']}({code}) 종목이 서버에서 사라져 이력으로 이동 (Reconciled)")
+                    self.log(f"[Sync] {pos['name']}({code}) 종목이 서버에서 사라져 이력으로 이동 (Reconciled)")
 
         self.save_db()
         if self.gui_callback: self.gui_callback()
         
-        result_msg = f"🔄 동기화: 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
-        self.log(f"✅ [Portfolio] {result_msg}")
+        result_msg = f"동기화: 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
+        self.log(f"[Portfolio] {result_msg}")
 
     def _to_f(self, v):
         try: return float(v) if not isinstance(v, list) else 0.0
@@ -147,8 +147,8 @@ class PortfolioManager:
         try: return int(v) if not isinstance(v, list) else 0
         except: return 0
 
-    def on_fill(self, code, side, price, qty, name=None, reason=None):
-        """체결(CHE) 데이터를 처리하여 포지션을 업데이트합니다."""
+    def on_fill(self, code, side, price, qty, name=None, reason=None, snapshot=None):
+        """[v18.0] 체결(CHE) 데이터를 처리하여 포지션을 업데이트하며, 시점 스냅샷을 함께 기록합니다."""
         now_str = datetime.now().strftime('%H:%M:%S')
         with self.lock:
             if side == "buy":
@@ -171,10 +171,14 @@ class PortfolioManager:
                         "entry_time": datetime.now().isoformat(),
                         "reason": reg_reason, "events": [], "max_now": fp
                     }
+                    if snapshot:
+                        self.virtual_positions[code]['events'].append({
+                            "time": now_str, "action": "BUY_S1", "price": fp, "qty": iq, "snapshot": snapshot
+                        })
                     self.data_manager.save_active_position(code, reg_name, fp, iq, 1, total_invested, datetime.now().isoformat(), reg_reason)
-                    self.log(f"✅ [Portfolio] {reg_name}({code}) 신규 진입 등록 ({price:,}원)")
+                    self.log(f"[Portfolio] {reg_name}({code}) 신규 진입 등록 ({price:,}원)")
                     if self.telegram_callback:
-                        msg = f"<b>💰 [가상진입]</b>\n종목: {reg_name}({code})\n가: {price:,}원 / 수: {qty}주\n시간: {now_str}"
+                        msg = f"<b>✅ [가상체결/1차]</b>\n종목: {reg_name}({code})\n가: {price:,}원 / 수: {qty}주\n등급: {reg_reason}\n시간: {now_str}"
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
                 else:
                     # 추가 매수 (Stage 2)
@@ -188,12 +192,16 @@ class PortfolioManager:
                     pos['avg_price'] = new_avg_price
                     pos['invested'] = float(new_avg_price) * float(new_total_qty)
                     pos['stage'] = 2
+                    if snapshot:
+                        pos['events'].append({
+                            "time": now_str, "action": "BUY_S2", "price": self._to_f(price), "qty": self._to_i(qty), "snapshot": snapshot
+                        })
                     
                     # DB 동기화
                     self.data_manager.save_active_position(code, pos['name'], new_avg_price, new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
-                    self.log(f"🔥 [Portfolio] {pos['name']}({code}) 2차 수량 업데이트 (평단: {int(new_avg_price):,}원)")
+                    self.log(f"[Portfolio] {pos['name']}({code}) 2차 수량 업데이트 (평단: {int(new_avg_price):,}원)")
                     if self.telegram_callback:
-                        msg = f"<b>🔥 [추매완료]</b>\n종목: {pos['name']}({code})\n추가: {price:,}원 / {qty}주\n평단: {int(new_avg_price):,}원\n시간: {now_str}"
+                        msg = f"<b>🔥 [추매체결/2차]</b>\n종목: {pos['name']}({code})\n추가: {price:,}원 / {qty}주\n평단: {int(new_avg_price):,}원\n시간: {now_str}"
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
             
             elif side == "sell":
@@ -219,11 +227,15 @@ class PortfolioManager:
                     pos['exit_price'] = p_val
                     pos['exit_time'] = now_str
                     pos['code'] = code
+                    if snapshot:
+                        pos['events'].append({
+                            "time": now_str, "action": "SELL", "price": p_val, "qty": qty_val, "snapshot": snapshot
+                        })
                     self.virtual_history.append(pos)
                     
                     self.virtual_positions.pop(code, None)
                     self.data_manager.delete_active_position(code)
-                    self.log(f"🚨 [Portfolio] {pos['name']}({code}) 최종 청산 완료 ({pnl_pct:+.2f}%)")
+                    self.log(f"[Portfolio] {pos['name']}({code}) 최종 청산 완료 ({pnl_pct:+.2f}%)")
                     if self.telegram_callback:
                         msg = f"<b>🚨 [매도완료/{exit_reason}]</b>\n종목: {pos['name']}({code})\n최종수익: {pnl_pct:+.1f}%\n수익금: {int(pnl_amt):,}원\n시간: {now_str}"
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()

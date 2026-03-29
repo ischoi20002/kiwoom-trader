@@ -876,6 +876,7 @@ class DataManagerV2:
                     cache_data[code] = df.to_dict(orient='records')
             
             with open(cache_file, "w", encoding="utf-8") as f:
+                import json
                 json.dump(cache_data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"  [Error] Cache save error: {e}")
@@ -885,6 +886,7 @@ class DataManagerV2:
         if not os.path.exists(cache_file): return {}
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
+                import json
                 cache_data = json.load(f)
             
             bars_data = {}
@@ -896,19 +898,49 @@ class DataManagerV2:
             return {}
 
     def send_telegram_message(self, message):
+        """[v2.1] 공용 텔레그램 메시지 전송 모듈"""
         import importlib
         importlib.reload(config)
-        token, cid = getattr(config, "TELEGRAM_BOT_TOKEN", ""), getattr(config, "TELEGRAM_CHAT_ID", "")
+        token = getattr(config, "TELEGRAM_BOT_TOKEN", "")
+        cid = getattr(config, "TELEGRAM_CHAT_ID", "")
         if token and cid and "발급" not in token:
             try:
-                res = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                                   json={"chat_id": cid, "text": message, "parse_mode": "HTML"}, timeout=5)
-                if res.status_code != 200:
-                    print(f"  [Telegram Error] Status: {res.status_code}, Body: {res.text}")
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                payload = {"chat_id": cid, "text": message, "parse_mode": "HTML"}
+                requests.post(url, json=payload, timeout=5)
             except Exception as e:
-                print(f"  [Telegram Exception] {e}")
+                print(f"  [Telegram Error] {e}")
         else:
-            print(f"  [Telegram Skip] Token or Chat ID not properly set in config.py")
+            print(f"  [Telegram Skip] Token or Chat ID not set")
+
+    @staticmethod
+    def judge_market_trend(msi, vix_val, adx, name="KOSPI"):
+        """[v4.5] Triple-Lock 기반 시장 트렌드 통합 판별 (Single Source of Truth)"""
+        reason = ""
+        if name == "KOSPI":
+            # 1. 역풍(DOWN) 조건: 절대적 모멘텀 붕괴 또는 복합적 위험
+            if msi < -0.15: 
+                trend = "DOWN"; reason = f"급격한 모멘텀 붕괴(MSI:{msi:.2f})"
+            elif (msi < -0.05 and vix_val > 30):
+                trend = "DOWN"; reason = f"모멘텀 하락 및 변동성 과열(VIX:{vix_val:.1f})"
+            elif vix_val > 40:
+                trend = "DOWN"; reason = f"극심한 시장 공포(VIX:{vix_val:.1f})"
+            # 2. 순풍(UP) 조건: 안정적인 반등 및 하락장 탈출 (MSI 0.05 기준)
+            elif msi > 0.05 and vix_val < 30: 
+                trend = "UP"; reason = f"안정적 반등(MSI:{msi:.2f}, VIX:{vix_val:.1f})"
+            # 3. 중립(NEUTRAL) 조건: 그 외 모호한 횡보 또는 회복 중인 상태
+            else: 
+                trend = "NEUTRAL"
+                if msi > 0: reason = f"회복 중이나 변동성 잔존(MSI:{msi:.2f}, VIX:{vix_val:.1f})"
+                elif adx < 15: reason = f"방향성 모호(ADX:{adx:.1f})"
+                else: reason = "시장 관망세 유지"
+        else:
+            # KOSDAQ 등은 간소화된 추세 적용
+            if msi > 0.05: trend = "UP"; reason = "모멘텀 회복"
+            elif msi < -0.15: trend = "DOWN"; reason = "낙폭 과대"
+            else: trend = "NEUTRAL"; reason = "관망"
+            
+        return trend, reason
 
     def get_market_indices(self):
         """[v27.0] 백테스팅 엔진과 동일한 Triple-Lock (MSI, ADX, VIX) 기반 시장 지수 조회 (헤비/2분 주기)"""
@@ -943,18 +975,11 @@ class DataManagerV2:
                     msi = float(last.get('MSI', 0))
                     adx = float(last.get('ADX', 0))
                     
-                    # Triple-Lock 판단 로직
-                    lock_msi = msi < -0.05
-                    lock_vix = vix_val > 30
-                    lock_adx = adx < 15
-                    triple_lock_down = lock_msi | lock_vix | lock_adx
-                    
-                    if triple_lock_down: trend = "DOWN"
-                    elif msi > 0: trend = "UP"
-                    else: trend = "NEUTRAL"
+                    # [v4.5] 공용 판별 메서드 호출 (Single Source of Truth)
+                    trend, reason = self.judge_market_trend(msi, vix_val, adx, name)
                     
                     results[name] = {
-                        "val": price, "ratio": ratio, "trend": trend,
+                        "val": price, "ratio": ratio, "trend": trend, "reason": reason,
                         "msi": msi, "adx": adx, "vix": vix_val
                     }
             except Exception as e:

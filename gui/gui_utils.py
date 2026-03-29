@@ -39,8 +39,9 @@ class GuiUtils:
                 prefix = "\n"
                 msg_str = msg_str.lstrip("\n")
             
-            # 이모지 및 특수 기호 제거 (텍스트형으로 변환)
-            icons = ["🚀", "🔍", "✅", "❌", "⚠️", "📊", "ℹ️", "🎯", "🔎", "⏹️", "⚙️"]
+            # 이모지 및 특수 기호 제거 (텍스트형으로 변환 / 사용자 요청으로 대폭 확장)
+            icons = ["🚀", "🔍", "✅", "❌", "⚠️", "📊", "ℹ️", "🎯", "🔎", "⏹️", "⚙️", 
+                     "📡", "🔄", "🛡️", "📦", "📥", "🔥", "🚨", "🔔", "💿", "💰", "📈", "👁️", "📅", "🟢", "⚪"]
             for icon in icons:
                 msg_str = msg_str.replace(icon, "").strip()
             
@@ -74,7 +75,7 @@ class GuiUtils:
         b = "▶ " if format_type == "ui" else "■ "
         line_break = "\n" if format_type == "ui" else "\n"
         return (
-            f"{b}KOSPI 200  |  {b}{s.get('min_trde_val', 40)}억+  |  {b}수렴 {int(s.get('ma_convergence', 0.03)*100)}%  |  {b}선정RSI {s.get('sel_rsi_min', 40)}~{s.get('sel_rsi_max', 70)}{line_break}"
+            f"{b}KOSPI 200  |  {b}{s.get('min_trde_val', 40)}억+  |  {b}수렴 {int(s.get('ma_convergence', 3.0))}%  |  {b}선정RSI {s.get('sel_rsi_min', 40)}~{s.get('sel_rsi_max', 70)}{line_break}"
             f"{b}분출 {int(s.get('vol_lookback', 10))}일내 {int(s.get('vol_ratio', 1.5)*100)}%+  |  {b}매수RSI {s.get('buy_rsi_min', 40)} ~ [A:{s.get('buy_rsi_max_a', 58.0)} / B:{s.get('buy_rsi_max_b', 65.0)}]"              
         )
 

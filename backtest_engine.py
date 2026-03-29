@@ -23,7 +23,7 @@ import itertools
 # [Modularization Phase 1]
 from utils.normalization import normalize_code
 from strategy.data_loader import BacktestDataLoader
-from reporting.signal_report import generate_signal_report
+# from reporting.signal_report import generate_signal_report (DELETED)
 from reporting.charts import generate_stock_market_chart
 import reporting.trade_report
 import importlib
@@ -121,9 +121,13 @@ class TradingStrategy:
         return TradingStrategy.get_buy_signals_detailed(df, settings, market_trend)['Signal']
 
     @staticmethod
-    def _check_s2_approval(pos, last_row, settings, indicator_row=None):
+    def _check_s2_approval(pos, last_row, settings, indicator_row=None, market_trend='UP'):
         """[v22.2] 설정창의 7가지 조건과 100% 동기화된 2차 매수 승인 로직 (Static)"""
         s = settings
+        
+        # [v4.5 Rule] 시장지수 필터 (Stage 2 공통)
+        if s.get('use_market_filter', True) and market_trend != 'UP':
+            return False
         
         # 0. 최소 대기 기간 (use_s2_delay)
         if s.get('use_s2_delay', True):
@@ -153,9 +157,10 @@ class TradingStrategy:
                 
         # 3. 거래 수급 확인 (use_s2_vol_surge)
         if s.get('use_s2_vol_surge', True):
-            vol_ma20 = ind.get('Vol_MA20', ind.get('Volume', 0))
-            ratio = float(s.get('s2_vol_ratio', 1.0))
-            if ind.get('Volume', 0) < vol_ma20 * ratio:
+            # [v4.5 Sync] Use Prev_Day_Vol for better intraday surge detection
+            vol_target = ind.get('Prev_Day_Vol', ind.get('Vol_MA20', ind.get('Volume', 0)))
+            ratio = float(s.get('s2_vol_ratio', 1.5))
+            if ind.get('Volume', 0) < vol_target * ratio:
                 return False
 
         # 4. RSI 강세 유지 및 모멘텀 상승 (use_s2_rsi_sig)
@@ -180,7 +185,7 @@ class TradingStrategy:
                 return False
         # 6. 수익권 확인 (use_s2_profit)
         if s.get('use_s2_profit', True):
-            trigger = float(s.get('stage2_trigger', s.get('s2_profit_limit', 1.0)))
+            trigger = float(s.get('s2_profit_limit', 1.0))
             if (curr_price / pos['avg_price'] - 1) * 100 < trigger:
                 return False
                 
@@ -255,7 +260,7 @@ class SimpleBacktester:
                 if 'total_bid' not in df.columns: df['total_bid'] = np.nan
                 if 'bid_ask_ratio' not in df.columns: df['bid_ask_ratio'] = np.nan
                 
-                # Fill NaNs with heuristic model
+                # Fill NaNs with vectorized heuristic model (v35.8 Optimized)
                 p_changes = df['Close'].pct_change().fillna(0).values
                 vol_mas = df['Vol_MA20'].values if 'Vol_MA20' in df.columns else df['Volume'].rolling(20).mean().bfill().values
                 vol_ratios = (df['Volume'] / (vol_mas + 1e-10)).values
@@ -265,19 +270,23 @@ class SimpleBacktester:
                 tbids = df['total_bid'].values
                 ratios = df['bid_ask_ratio'].values
                 
-                for i in range(len(df)):
-                    if np.isnan(vps[i]):
-                        vps[i] = SimulatedRealtimeMetrics.simulate_vol_power(p_changes[i], vol_ratios[i])
-                    if np.isnan(tasks[i]) or np.isnan(tbids[i]):
-                        r = SimulatedRealtimeMetrics.simulate_bid_ask_ratio(p_changes[i], vol_ratios[i], vps[i])
-                        tasks[i] = 100000
-                        tbids[i] = int(100000 * r)
-                        ratios[i] = r
+                # Vectorized Fill
+                nan_vp = np.isnan(vps)
+                if np.any(nan_vp):
+                    vps[nan_vp] = SimulatedRealtimeMetrics.simulate_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
+                
+                nan_ba = np.isnan(ratios)
+                if np.any(nan_ba):
+                    r_new = SimulatedRealtimeMetrics.simulate_bid_ask_ratio_vectorized(p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba])
+                    ratios[nan_ba] = r_new
+                    tasks[nan_ba] = 100000
+                    tbids[nan_ba] = (100000 * r_new).astype(int)
                 
                 df['vol_power'] = vps
                 df['total_ask'] = tasks
                 df['total_bid'] = tbids
                 df['bid_ask_ratio'] = ratios
+                df['ask_bid_ratio'] = 1.0 / (ratios + 1e-10)
 
             close_vals = df['Close'].values
             high_vals = df['High'].values
@@ -312,9 +321,11 @@ class SimpleBacktester:
                 'Market_Trend': df['Market_Trend'].values if 'Market_Trend' in df.columns else np.full(len(df), 'UP', dtype=object),
                 'Sig_Type': df['Sig_Type'].values if 'Sig_Type' in df.columns else np.full(len(df), 'TYPE_A', dtype=object),
                 'bid_ask_ratio': df['bid_ask_ratio'].values if 'bid_ask_ratio' in df.columns else np.full(len(df), 1.0),
+                'ask_bid_ratio': df['ask_bid_ratio'].values if 'ask_bid_ratio' in df.columns else np.full(len(df), 1.0),
                 'vol_power': df['vol_power'].values if 'vol_power' in df.columns else np.full(len(df), 100.0),
                 'Signal': df['Signal'].values if 'Signal' in df.columns else np.zeros(len(df), dtype=bool),
-                'MA60': df['MA60'].values if 'MA60' in df.columns else np.zeros(len(df))
+                'MA60': df['MA60'].values if 'MA60' in df.columns else np.zeros(len(df)),
+                'Prev_Day_Vol': df['Prev_Day_Vol'].values if 'Prev_Day_Vol' in df.columns else np.zeros(len(df))
             }
             
             time_indices = df.index
@@ -395,13 +406,25 @@ class SimpleBacktester:
 
     def _init_simulation(self, df, code, market_df, vix_df, high_precision):
         """시뮬레이션 초기 설정 및 시장 상태 계산"""
-        total_capital_val = self.settings.get('total_capital', 30000000)
-        max_slots = self.settings.get('max_slots', 10)
+        total_capital_val = float(self.settings.get('backtest_initial_capital', 30000000))
+        max_slots = int(self.settings.get('max_slots', 10))
         slot_budget = total_capital_val / max_slots
         
-        # [v33.5] Decouple budget from max_slots (Now used as Monitoring limit)
-        self.s1_amt = self.settings.get('stage1_amt', 1000000.0)
-        self.s2_amt = self.settings.get('stage2_amt', 2000000.0)
+        # [v4.5 Sync] Handle Sizing Units (Won / %)
+        s1_unit = self.settings.get('s1_sizing_unit', '%')
+        if s1_unit == '원':
+            self.s1_amt = float(self.settings.get('stage1_amt', 1000000.0))
+        else:
+            s1_pct = float(self.settings.get('s1_equity_pct', 20.0))
+            self.s1_amt = total_capital_val * (s1_pct / 100.0)
+
+        s2_unit = self.settings.get('s2_sizing_unit', '%')
+        if s2_unit == '원':
+            self.s2_amt = float(self.settings.get('stage2_amt', 2000000.0))
+        else:
+            s2_pct = float(self.settings.get('s2_equity_pct', 30.0))
+            self.s2_amt = total_capital_val * (s2_pct / 100.0)
+
         self.buy_f_rate = self.settings.get('buy_fee_bt', self.settings.get('buy_fee_rate', 0.015)) / 100.0
         self.sell_f_rate = self.settings.get('sell_fee_bt', self.settings.get('sell_fee_rate', 0.215)) / 100.0
         
@@ -416,18 +439,20 @@ class SimpleBacktester:
         self.sb_ba = float(s.get('smart_buy_ba_ratio', 1.2))
         self.sb_vp = float(s.get('smart_buy_vp', 110.0))
         
-        self.use_sx = s.get('use_smart_exit', False)
-        self.sx_ba = float(s.get('smart_exit_ba_ratio', 0.8))
+        self.use_sx = s.get('use_smart_exit', True) # [v4.5 Sync] Default True
+        self.sx_ba = float(s.get('smart_exit_ba_ratio', 1.3)) # [v4.5 Sync] UI/SignalEngine Default 1.3
         self.sx_vp = float(s.get('smart_exit_vp', 90.0))
-        self.sx_p_thr = float(s.get('smart_exit_price_threshold', 0.0))
+        self.sx_p_thr = float(s.get('smart_exit_price_threshold', -0.5)) # [v4.5 Sync] Default -0.5
         
         # [Perf] Cache TP/SL parameters (v33.6)
-        self.use_s1_tp = s.get('use_s1_tp', True)
+        self.use_s1a_tp_active = s.get('use_s1_a_tp', True)
+        self.use_s1b_tp_active = s.get('use_s1_b_tp', True)
         self.s1a_tp = float(s.get('s1_a_take_profit', 5.0)) / 100.0
         self.s1b_tp = float(s.get('s1_b_take_profit', 5.0)) / 100.0
         self.s2_tp = float(s.get('s2_take_profit', 5.0)) / 100.0
         
-        self.use_s1_sl = s.get('use_s1_stop_loss', True)
+        self.use_s1a_sl_active = s.get('use_s1_a_stop_loss', True)
+        self.use_s1b_sl_active = s.get('use_s1_b_stop_loss', True)
         self.use_s2_sl = s.get('use_s2_stop_loss', True) # [v35.3] Added missing S2 SL flag
         self.s1a_sl = float(s.get('s1_a_stop_loss', 3.0)) / 100.0
         self.s1b_sl = float(s.get('s1_b_stop_loss', 3.0)) / 100.0
@@ -435,18 +460,33 @@ class SimpleBacktester:
         
         self.use_type_b = s.get('use_type_b', False)
         
-        # [Perf] Cache ATR & Gap Down settings (v33.7)
+        # [Perf] Cache ATR & Gap Down settings (v33.7) - Granular S1A/S1B/S2 (v4.5 Sync)
         self.use_atr = s.get('use_atr_exit', False)
-        self.use_atr_trail = s.get('use_atr_trailing_stop', True)
-        self.use_atr_sl = s.get('use_atr_stop_loss', True)
-        self.atr_sl_mult = float(s.get('atr_multiplier_sl', 2.0))
-        self.atr_trail_mult = float(s.get('atr_multiplier_trail', 3.0))
+        
+        self.use_atr_sl_a = s.get('use_atr_stop_loss_a', True)
+        self.use_atr_sl_b = s.get('use_atr_stop_loss_b', True)
+        self.use_atr_sl_s2 = s.get('use_atr_stop_loss_s2', True)
+        
+        self.use_atr_trail_a = s.get('use_atr_trailing_stop_a', True)
+        self.use_atr_trail_b = s.get('use_atr_trailing_stop_b', True)
+        self.use_atr_trail_s2 = s.get('use_atr_trailing_stop_s2', True)
+        
+        self.atr_sl_mult_a = float(s.get('atr_multiplier_sl_a', 2.5))
+        self.atr_sl_mult_b = float(s.get('atr_multiplier_sl_b', 2.5))
+        self.atr_sl_mult_s2 = float(s.get('atr_multiplier_sl_s2', 2.5))
+        
+        self.atr_trail_mult_a = float(s.get('atr_multiplier_trail_a', 4.0))
+        self.atr_trail_mult_b = float(s.get('atr_multiplier_trail_b', 4.0))
+        self.atr_trail_mult_s2 = float(s.get('atr_multiplier_trail_s2', 4.0))
+        
         self.gap_down_limit = float(s.get('gap_down_limit', -5.0))
+        self.use_gap_down_exit = s.get('use_gap_down_exit', True) # [v4.5 Sync] New toggle
         self.use_s2_tp_active = s.get('use_s2_tp', True)
         self.use_gap_grace = s.get('use_gap_grace', True)
         
         # [Perf] Cache Flash Exit settings
-        self.use_s1_flash = s.get('use_s1_flash_exit', True)
+        self.use_s1a_flash_active = s.get('use_s1_a_flash_exit', True)
+        self.use_s1b_flash_active = s.get('use_s1_b_flash_exit', True)
         self.use_s2_flash = s.get('use_s2_flash_exit', True)
         self.s1a_flash = float(s.get('s1_a_flash_exit_pct', 3.0))
         self.s1b_flash = float(s.get('s1_b_flash_exit_pct', 3.0))
@@ -460,13 +500,13 @@ class SimpleBacktester:
         self.use_s2_ma5 = s.get('use_s2_ma5', True)
         self.s2_ma5_g = float(s.get('s2_ma5_gap', -0.5))
         self.use_s2_vol = s.get('use_s2_vol_surge', True)
-        self.s2_vol_r = float(s.get('s2_vol_ratio', 1.0))
+        self.s2_vol_r = float(s.get('s2_vol_ratio', 1.5)) # Default sync
         self.use_s2_rsi = s.get('use_s2_rsi_sig', True)
         self.s2_rsi_g = float(s.get('s2_rsi_gap', 0.0))
         self.use_s2_macd = s.get('use_s2_macd_gc', True)
         self.s2_macd_g = float(s.get('s2_macd_gap', 0.0))
         self.use_s2_profit = s.get('use_s2_profit', True)
-        self.s2_trigger = float(s.get('stage2_trigger', s.get('s2_profit_limit', 1.0)))
+        self.s2_trigger = float(s.get('s2_profit_limit', 1.0))
         
         # 시장 상태 계산
         if market_df is not None and not market_df.empty:
@@ -525,7 +565,13 @@ class SimpleBacktester:
         sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend='UP')
         for c in sigs.columns:
             df[c] = sigs[c]
-        df.loc[df['Market_Trend'] == 'DOWN', 'Signal'] = False
+        # [v4.5 Rule] 시장지수 필터링 (UP/NEUTRAL/DOWN 3단계)
+        if self.settings.get('use_market_filter', True):
+            # 1. DOWN (역풍): 모든 신호 차단
+            df.loc[df['Market_Trend'] == 'DOWN', 'Signal'] = False
+            # 2. NEUTRAL (중립): Type B 신호 차단
+            df.loc[(df['Market_Trend'] == 'NEUTRAL') & (df['Sig_Type'] == 'TYPE_B'), 'Signal'] = False
+
         # [v30.0] 로직 변경: 신호 발생 즉시 매수 (지연 없음)
         df['Signal_Shifted'] = df['Signal'].astype(bool)
         df['Sig_Type_Shifted'] = df['Sig_Type']
@@ -544,6 +590,18 @@ class SimpleBacktester:
         }
 
     def _check_s2_approval_v2(self, pos, indicators, i):
+        # [v4.5 Rule] 시장지수 필터 (Stage 2 공통)
+        m_trend = indicators['Market_Trend'][i] if 'Market_Trend' in indicators else 'UP'
+        if self.settings.get('use_market_filter', True) and m_trend != 'UP':
+            return False
+            
+        return TradingStrategy._check_s2_approval(
+            pos, None, self.settings, 
+            indicator_row={k: v[i] for k, v in indicators.items()},
+            market_trend=m_trend
+        )
+
+    def _check_s2_approval_legacy(self, pos, indicators, i):
         """[v35.5] Ultra-Fast 2nd Buy approval (Direct Indexing, No Dict Creation)"""
         if self.use_s2_ma20:
             ma20 = indicators['MA20'][i]
@@ -552,7 +610,8 @@ class SimpleBacktester:
             ma5 = indicators['MA5'][i]
             if ma5 > 0 and indicators['Close'][i] < ma5 * (1 + self.s2_ma5_g/100.0): return False
         if self.use_s2_vol:
-            if indicators['Volume'][i] < indicators['Vol_MA20'][i] * self.s2_vol_r: return False
+            # [v35.8] Unified Volume Strategy: Use Same-Time Average (Prev_Day_Vol) instead of MA20
+            if indicators['Volume'][i] < indicators['Prev_Day_Vol'][i] * self.s2_vol_r: return False
         if self.use_s2_rsi:
             rsi = indicators['RSI'][i]
             if rsi < indicators['RSI_Sig'][i] * (1 + self.s2_rsi_g/100.0) or rsi <= indicators['Prev_RSI'][i]: return False
@@ -572,9 +631,14 @@ class SimpleBacktester:
         is_type_b = (sig_type == "TYPE_B" and self.use_type_b)
         
         if pos['stage'] == 1:
-            f_pct = self.s1b_flash if is_type_b else self.s1a_flash if self.use_s1_flash else 0.0
-            sl_pct = (self.s1b_sl if is_type_b else self.s1a_sl) * 100 if self.use_s1_sl else 0.0
-            tp_pct = (self.s1b_tp if is_type_b else self.s1a_tp) * 100 if self.use_s1_tp else 0.0
+            use_flash = self.use_s1b_flash_active if is_type_b else self.use_s1a_flash_active
+            f_pct = (self.s1b_flash if is_type_b else self.s1a_flash) if use_flash else 0.0
+            
+            use_sl = self.use_s1b_sl_active if is_type_b else self.use_s1a_sl_active
+            sl_pct = (self.s1b_sl if is_type_b else self.s1a_sl) * 100 if use_sl else 0.0
+            
+            use_tp = self.use_s1b_tp_active if is_type_b else self.use_s1a_tp_active
+            tp_pct = (self.s1b_tp if is_type_b else self.s1a_tp) * 100 if use_tp else 0.0
         else:
             f_pct = self.s2_flash if self.use_s2_flash else 0.0
             sl_pct = self.s2_sl * 100 if self.use_s2_sl else 0.0
@@ -588,7 +652,7 @@ class SimpleBacktester:
         flash_exited = (f_pct > 0) & (m1_closes < running_max * (1 - f_pct/100))
         stop_lossed = (sl_pct > 0) & (m1_closes / avg_price - 1 <= -sl_pct/100)
         take_profited = (tp_pct > 0) & (m1_highs / avg_price - 1 >= tp_pct/100)
-        gap_downed = (m1_closes / avg_price - 1 <= self.gap_down_limit / 100)
+        gap_downed = (self.use_gap_down_exit) & (m1_closes / avg_price - 1 <= self.gap_down_limit / 100)
         
         if self.use_gap_grace and time_h == 9 and time_m == 0:
             grace_idx_limit = 15 
@@ -639,13 +703,14 @@ class SimpleBacktester:
                 if self._check_s2_approval_v2(pos, indicators, i):
                     can_buy_s2 = True
                     if self.use_sb_s2:
-                        ba_ratio = indicators['bid_ask_ratio'][i]
+                        ab_ratio = indicators['ask_bid_ratio'][i]
                         v_power = indicators['vol_power'][i]
-                        if ba_ratio < self.sb_ba or v_power < self.sb_vp:
+                        # [v4.4] S2 추매 정석: 매도벽(Ask) 두터울 때
+                        if ab_ratio < self.sb_ba or v_power < self.sb_vp:
                             can_buy_s2 = False
                     
                     if can_buy_s2:
-                        s2_reason = f"ADDON(S2)|R:{indicators['RSI'][i]:.1f}|M:{indicators['MACD'][i]:.1f}|O:{indicators['OSC'][i]:.1f}|V:{indicators['Volume'][i]}"
+                        s2_reason = f"ADDON(S2)|R:{indicators['RSI'][i]:.1f}|M:{indicators['MACD'][i]:.1f}|O:{indicators['OSC'][i]:.2f}|V:{indicators['Volume'][i]}"
                         if self.use_sb_s2: s2_reason = "SmartBuy|" + s2_reason
                         params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason=s2_reason, indicators=indicators, i=i)
         
@@ -659,9 +724,10 @@ class SimpleBacktester:
             if is_ok:
                 use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
                 if use_sb_for_type:
-                    ba_ratio = indicators['bid_ask_ratio'][i]
+                    ab_ratio = indicators['ask_bid_ratio'][i]
                     v_power = indicators['vol_power'][i]
-                    if ba_ratio < self.sb_ba or v_power < self.sb_vp:
+                    # [v4.4] S1 진입 정석: 매도벽(Ask) 두터울 때
+                    if ab_ratio < self.sb_ba or v_power < self.sb_vp:
                         is_ok = False
                 
                 if is_ok:
@@ -674,48 +740,76 @@ class SimpleBacktester:
         return params
 
     def _check_exits_optimized(self, date, price, high, low, pos, indicators=None, i=None):
-        """[v35.5] Ultra-Fast Exit check (Direct Indexing, No Dict Creation)"""
+        """[v35.5] Ultra-Fast Exit check (v4.5 Granular ATR Sync)"""
         sig_type = pos.get('sig_type', 'TYPE_A')
         is_type_b = (sig_type == "TYPE_B" and self.use_type_b)
+        stage = pos.get('stage', 1)
 
-        if pos['stage'] == 1:
-            f_pct = (self.s1b_flash if is_type_b else self.s1a_flash if self.use_s1_flash else 0.0) / 100.0
-            if f_pct > 0 and price <= pos['max_price'] * (1.0 - f_pct):
-                return {'price': price, 'reason': f"FLASH_EXIT(S1)"}
+        # 1. Flash Exit
+        if stage == 1:
+            f_pct = (self.s1b_flash if is_type_b else self.s1a_flash) / 100.0
+            use_f = (self.use_s1b_flash_active if is_type_b else self.use_s1a_flash_active)
         else:
-            f_pct = (self.s2_flash if self.use_s2_flash else 0.0) / 100.0
-            if f_pct > 0 and price <= pos['max_price'] * (1.0 - f_pct):
-                return {'price': price, 'reason': f"FLASH_EXIT(S2)"}
+            f_pct = self.s2_flash / 100.0
+            use_f = self.use_s2_flash
             
-        if (price / pos['avg_price'] - 1) * 100 <= self.gap_down_limit:
+        if use_f and f_pct > 0 and price <= pos['max_price'] * (1.0 - f_pct):
+            return {'price': price, 'reason': f"FLASH_EXIT(S{stage})"}
+            
+        # 2. Gap Down (Global) - [v4.5 Sync] Toggle Enforcement
+        if self.use_gap_down_exit and (price / pos['avg_price'] - 1) * 100 <= self.gap_down_limit:
             return {'price': price, 'reason': f"GAP_DOWN"}
 
+        # 3. Smart Exit (Tactical)
+        if self.use_sx and indicators is not None and i is not None:
+            bid_ratio = indicators['bid_ask_ratio'][i]
+            v_power = indicators['vol_power'][i]
+            # [v4.5 Audit] Smart Exit triggers on Bid Trap (High Bid/Ask) + Low Power
+            if bid_ratio >= self.sx_ba and v_power < self.sx_vp:
+                if self.sx_p_thr == 0 or price <= pos['max_price'] * (1 + self.sx_p_thr / 100.0):
+                    return {'price': price, 'reason': f"SMART_EXIT"}
+
+        # 4. ATR Exit (Granular)
         if self.use_atr and indicators is not None and i is not None:
             curr_atr = indicators['ATR'][i]
             entry_atr = pos.get('atr_at_entry', curr_atr)
             if curr_atr > 0:
-                if self.use_atr_sl and price <= pos['avg_price'] - (self.atr_sl_mult * entry_atr):
-                    return {'price': price, 'reason': f"ATR_SL"}
-                if self.use_atr_trail and price <= pos['max_price'] - (self.atr_trail_mult * curr_atr):
-                    return {'price': price, 'reason': f"ATR_TRAIL"}
+                if stage == 2:
+                    sl_mult = self.atr_sl_mult_s2
+                    trail_mult = self.atr_trail_mult_s2
+                    use_sl = self.use_atr_sl_s2
+                    use_trail = self.use_atr_trail_s2
+                else:
+                    sl_mult = self.atr_sl_mult_b if is_type_b else self.atr_sl_mult_a
+                    trail_mult = self.atr_trail_mult_b if is_type_b else self.atr_trail_mult_a
+                    use_sl = self.use_atr_sl_b if is_type_b else self.use_atr_sl_a
+                    use_trail = self.use_atr_trail_b if is_type_b else self.use_atr_trail_a
 
-        if pos['stage'] == 1:
-            if self.use_s1_tp:
-                tp_pct = self.s1b_tp if is_type_b else self.s1a_tp
-                if (high / pos['avg_price'] - 1) >= tp_pct:
-                    return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S1)"}
+                if use_sl and price <= pos['avg_price'] - (sl_mult * entry_atr):
+                    return {'price': price, 'reason': f"ATR_SL(S{stage})"}
+                if use_trail and price <= pos['max_price'] - (trail_mult * curr_atr):
+                    return {'price': price, 'reason': f"ATR_TRAIL(S{stage})"}
+
+        # 5. Fixed TP/SL
+        if stage == 1:
+            # TP
+            use_tp = self.use_s1b_tp_active if is_type_b else self.use_s1a_tp_active
+            tp_pct = self.s1b_tp if is_type_b else self.s1a_tp
+            if use_tp and (high / pos['avg_price'] - 1) >= tp_pct:
+                return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S1)"}
+            # SL
+            use_sl = self.use_s1b_sl_active if is_type_b else self.use_s1a_sl_active
+            sl_pct = self.s1b_sl if is_type_b else self.s1a_sl
+            if use_sl and (low / pos['avg_price'] - 1) <= -sl_pct:
+                return {'price': pos['avg_price'] * (1.0 - sl_pct), 'reason': f"SL_LIMIT(S1)"}
         else:
-            if self.use_s2_tp_active:
-                tp_pct = self.s2_tp
-                if (high / pos['avg_price'] - 1) >= tp_pct:
-                    return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S2)"}
-
-        if self.use_sx and indicators is not None and i is not None:
-            ba_ratio = indicators['bid_ask_ratio'][i]
-            v_power = indicators['vol_power'][i]
-            if ba_ratio < self.sx_ba and v_power < self.sx_vp:
-                if self.sx_p_thr == 0 or price <= pos['max_price'] * (1 + self.sx_p_thr / 100.0):
-                    return {'price': price, 'reason': f"SMART_EXIT"}
+            # TP
+            if self.use_s2_tp_active and (high / pos['avg_price'] - 1) >= self.s2_tp:
+                return {'price': pos['avg_price'] * (1.0 + self.s2_tp), 'reason': f"TP_LIMIT(S2)"}
+            # SL
+            if self.use_s2_sl and (low / pos['avg_price'] - 1) <= -self.s2_sl:
+                return {'price': pos['avg_price'] * (1.0 - self.s2_sl), 'reason': f"SL_LIMIT(S2)"}
+        
         return None
 
     def _check_exits(self, date, price, high, low, pos, indicators=None, i=None):
@@ -791,7 +885,8 @@ class SimpleBacktester:
             pos['qty'] += qty
             pos['stage'] = 2
 
-        self.collect_trade(date, action, price, qty, params['position']['qty'], params['position']['qty'] * price, reason_str=reason, fee=fee)
+        curr_sig_type = params['position']['sig_type']
+        self.collect_trade(date, action, price, qty, params['position']['qty'], params['position']['qty'] * price, reason_str=reason, fee=fee, sig_type=curr_sig_type)
         return params
 
     def _execute_sell(self, date, price, reason, params, indicators=None, i=None):
@@ -810,17 +905,27 @@ class SimpleBacktester:
         ret_v = (price / pos['avg_price'] - 1) * 100
         fee = int(price * pos['qty'] * self.sell_f_rate)
         
-        self.collect_trade(date, "SELL", price, pos['qty'], 0, 0, ret_val=ret_v, reason_str=reason, fee=fee)
+        entry_date = pos['entry_date']
+        entry_sig = pos['sig_type']
+        
+        self.collect_trade(date, "SELL", price, pos['qty'], 0, 0, ret_val=ret_v, reason_str=reason, fee=fee, sig_type=entry_sig)
+        if reason is None:
+            reason = "SELL" # Default
+        
+        # [v4.0] Include stage for precise S1/S2 filtering
+        params['history'].append({
+            'date': date, 'type': 'SELL', 'price': price, 'ret': ret_v, 
+            'reason': reason, 'sig_type': entry_sig, 'stage': pos.get('stage', 1)
+        })
         params['balance'] += (pos['qty'] * price - fee)
-        params['history'].append({'entry': pos['entry_date'], 'exit': date, 'ret': ret_v})
         params['position'] = None
         return params
 
-    def collect_trade(self, date, action, price, qty, total_qty, total_val, ret_val=0, reason_str="", fee=0):
+    def collect_trade(self, date, action, price, qty, total_qty, total_val, ret_val=0, reason_str="", fee=0, sig_type=None):
         self.trades.append({
             'Date': date, 'Action': action, 'Price': price, 'Qty': qty,
             'Total_Qty': total_qty, 'Total_Val': total_val, 'Return': ret_val, 
-            'Reason': reason_str, 'Fee': fee
+            'Reason': reason_str, 'Fee': fee, 'Sig_Type': sig_type
         })
 
     def _finalize_simulation(self, df, code, params, log_to_csv=False):
@@ -837,7 +942,7 @@ class SimpleBacktester:
             last_row = df.iloc[-1]
             reason = f"Final|RSI:{last_row.get('RSI',0):.1f}|MA5:{int(last_row.get('MA5',0)):,}|OSC:{last_row.get('OSC',0):.2f}"
             self.collect_trade(final_time, "HOLD", final_price, position['qty'], position['qty'], 
-                               position['qty'] * final_price, ret_val=ret, reason_str=reason, fee=sell_fee)
+                               position['qty'] * final_price, ret_val=ret, reason_str=reason, fee=sell_fee, sig_type=position['sig_type'])
             balance += (position['qty'] * final_price - sell_fee)
             equity_curve[-1] = balance
 
@@ -854,6 +959,14 @@ class SimpleBacktester:
         history = params['history']
         win_rate = len([h for h in history if h['ret'] > 0]) / len(history) * 100 if history else 0
         s2_count = len([t for t in self.trades if t['Action'] == 'BUY_2ND'])
+        
+        # [v35.8] Granular Averages for Type A/B
+        # [v4.0] Granular Stage 1 A/B filtering (Excluding S2 via stage field and Reason string)
+        s1_a_rets = [h['ret'] for h in history if "TYPE_A" in str(h.get('sig_type', '')) and h.get('stage', 1) == 1 and "[Stage 2]" not in str(h.get('reason', ''))]
+        s1_b_rets = [h['ret'] for h in history if "TYPE_B" in str(h.get('sig_type', '')) and h.get('stage', 1) == 1 and "[Stage 2]" not in str(h.get('reason', ''))]
+        
+        avg_s1_a = sum(s1_a_rets) / len(s1_a_rets) if s1_a_rets else 0
+        avg_s1_b = sum(s1_b_rets) / len(s1_b_rets) if s1_b_rets else 0
         
         # [v15.6] Write batch logs to files
         if log_to_csv:
@@ -878,6 +991,10 @@ class SimpleBacktester:
             'trades': len(params['history']),
             'win_rate': win_rate,
             's2_trades': s2_count,
+            'avg_s1_a': avg_s1_a,
+            'avg_s1_b': avg_s1_b,
+            's1_a_rets': s1_a_rets,
+            's1_b_rets': s1_b_rets,
             'history': params['history'],
             'final_equity': equity_curve[-1]
         }
@@ -1002,14 +1119,28 @@ class PortfolioBacktester:
         print(f"Portfolio Backtest Results ({len(summaries)} stocks)")
         print(f" - Avg Return: {df_sum['final_ret'].mean():+.2f}%")
         print(f" - Avg Win Rate: {df_sum['win_rate'].mean():.1f}%")
+        
+        # [v4.0] True Global Stage 1 Averages (Aggregated across ALL stocks)
+        all_s1_a = [r for s in summaries for r in s.get('s1_a_rets', [])]
+        all_s1_b = [r for s in summaries for r in s.get('s1_b_rets', [])]
+        
+        grand_avg_s1_a = sum(all_s1_a) / len(all_s1_a) if all_s1_a else 0
+        grand_avg_s1_b = sum(all_s1_b) / len(all_s1_b) if all_s1_b else 0
+        
+        print(f" - S1 Type A Avg: {grand_avg_s1_a:+.2f}% ({len(all_s1_a)} trades)")
+        print(f" - S1 Type B Avg: {grand_avg_s1_b:+.2f}% ({len(all_s1_b)} trades)")
         print("="*40)
+        
+        # [v4.0] Overwrite per-stock averages with global grand averages for Optimizer compatibility
+        if summaries:
+            for s in summaries:
+                s['avg_s1_a'] = grand_avg_s1_a
+                s['avg_s1_b'] = grand_avg_s1_b
         
         df_sum.to_csv("backtest_summary_multi.csv", index=False, encoding='utf-8-sig')
         
-        # Reports
-        sig_path = os.path.join(BASE_DIR, "signal_report.html")
+        # Reports (signal_report DELETED)
         trd_path = os.path.join(BASE_DIR, "trade_report.html")
-        generate_signal_report(output_path=sig_path, target_codes=self.codes)
         
         trades_df = pd.DataFrame()
         if os.path.exists(TRADE_CSV):
@@ -1042,7 +1173,7 @@ if __name__ == "__main__":
         'buy_rsi_min': 30, 'buy_rsi_max_b': 65,
         'ma60_min': 90, 'ma60_max': 120,
         'vol_surge': 1.0,
-        'sig_macd_fast': 12, 'sig_macd_slow': 26, 'sig_macd_sig': 9,
+        'macd_fast_entry': 12, 'macd_slow_entry': 26, 'macd_sig_entry': 9,
         'stage1_amt': 900000, 'stage2_amt': 2100000,
         'use_s2_ma5': True, 'use_s2_profit': True, 'use_s2_osc': True,
         'use_s2_rsi_sig': True,

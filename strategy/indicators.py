@@ -89,9 +89,9 @@ def calculate_all_indicators(df, settings):
     df['Prev_RSI'] = df['RSI'].shift(1)
     
     # 4. MACD (v6.2: 실시간/백테스트 신호용 파라미터 분리 적용)
-    fast = int(settings.get('sig_macd_fast', 12))
-    slow = int(settings.get('sig_macd_slow', 26))
-    sig = int(settings.get('sig_macd_sig', 9))
+    fast = int(settings.get('macd_fast_entry', 12))
+    slow = int(settings.get('macd_slow_entry', 26))
+    sig = int(settings.get('macd_sig_entry', 9))
     df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], max(1, fast), max(1, slow), max(1, sig))
     df['Prev_OSC'] = df['OSC'].shift(1)
     
@@ -137,17 +137,15 @@ def calculate_all_indicators(df, settings):
             pivoted = pivot_vol.pivot_table(index='date_only', columns='time_only', values='Volume')
             # Shift by 1 day and take rolling mean of previous days for each time slot
             pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
-            # Unpivot and merge back
-            rolled_long = pivoted_rolled.melt(ignore_index=False, value_name='Prev_Day_Vol').dropna(subset=['Prev_Day_Vol'])
-            # Reset index to get date_only back as a column
-            rolled_long = rolled_long.reset_index()
             
-            # Map back to original df using (date_only, time_only)
-            df['date_only'] = df.index.normalize()
-            df['time_only'] = df.index.time
-            df = df.merge(rolled_long, on=['date_only', 'time_only'], how='left')
-            df.index = pivot_vol.index # Restore DatetimeIndex
-            df = df.drop(columns=['date_only', 'time_only'])
+            # Map back efficiently (v35.8: Avoid merge/KeyError issues)
+            # stack() converts pivoted_rolled to a Series with MultiIndex (date_only, time_only)
+            stacked = pivoted_rolled.stack(future_stack=True)
+            
+            # Reindex to match the original df's (date_only, time_only)
+            # This is much safer and faster than merge + restore index
+            lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
+            df['Prev_Day_Vol'] = stacked.reindex(lookup_keys).values
             df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
         
     return df
@@ -165,20 +163,32 @@ def calculate_buy_indicators_light(df, settings):
     df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
     df['Prev_RSI'] = df['RSI'].shift(1)
     
-    fast = int(settings.get('sig_macd_fast', 12))
-    slow = int(settings.get('sig_macd_slow', 26))
-    sig = int(settings.get('sig_macd_sig', 9))
+    fast = int(settings.get('macd_fast_entry', 12))
+    slow = int(settings.get('macd_slow_entry', 26))
+    sig = int(settings.get('macd_sig_entry', 9))
     df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], max(1, fast), max(1, slow), max(1, sig))
     df['Prev_OSC'] = df['OSC'].shift(1)
     
-    # Prev Day same time vol (전일 동시간 거래량 평균)
+    # Prev Day same time vol (전일 동시간 거래량 평균) - Optimized for v35.8
     v_lookback = int(settings.get('vol_lookback', 10))
     vol_lookback = max(1, v_lookback)
-    # 각 시간별로 rolling mean 계산
-    time_groups = df.index.time if isinstance(df.index, pd.DatetimeIndex) else (df['time'] if 'time' in df.columns else df.index)
-    df['Prev_Day_Vol'] = df.groupby(time_groups)['Volume'].transform(
-        lambda x: x.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
-    )
+    
+    if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
+        # Vectorized pivot-based approach (v35.8: Optimized with reindex)
+        df_tmp = df[['Volume']].copy()
+        df_tmp['date_only'] = df_tmp.index.normalize()
+        df_tmp['time_only'] = df_tmp.index.time
+        
+        pivoted = df_tmp.pivot_table(index='date_only', columns='time_only', values='Volume')
+        pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
+        
+        # Map back efficiently (Avoid merge/KeyError issues)
+        stacked = pivoted_rolled.stack(future_stack=True)
+        lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
+        df['Prev_Day_Vol'] = stacked.reindex(lookup_keys).values
+        df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
+    else:
+        df['Prev_Day_Vol'] = 0
     
     # ATR (v31.0: Added for exit monitoring)
     # If High/Low exist, calculate ATR (required for SL/Trail)

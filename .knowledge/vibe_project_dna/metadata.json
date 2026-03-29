@@ -1,0 +1,7 @@
+{
+  "title": "Vibe 프로젝트 DNA 및 전략 백서",
+  "summary": "Vibe 자동매매 시스템의 아키텍처, 핵심 전략(A/B/S2)의 수립 근거 및 기술적 사유, 리포트 디자인 표준 가이드.",
+  "created_at": "2026-03-30T01:08:24+09:00",
+  "reference_conversations": ["a8ddc8a3-cfc5-42db-b28a-24d1d232590c"],
+  "tags": ["vibe", "trading", "strategy", "architecture", "ui_standard"]
+}

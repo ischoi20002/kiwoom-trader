@@ -27,7 +27,7 @@ class MarketDataService:
         # 2. 무거운 트렌드 분석 루프 (60초)
         threading.Thread(target=self._heavy_index_trend_loop, daemon=True).start()
         
-        self.log("📡 [Market] 지수 모니터링 및 트렌드 분석 엔진 가동 시작")
+        self.log("[Market] 지수 모니터링 및 트렌드 분석 엔진 가동 시작")
 
     def stop(self):
         self.is_running = False
@@ -42,7 +42,7 @@ class MarketDataService:
                         self.market_indices = indices
                     if self.gui_callback: self.gui_callback(indices=indices)
             except Exception as e:
-                self.log(f"⚠️ [Market] 지수 업데이트 오류: {e}")
+                self.log(f"[Error] [Market] 지수 업데이트 오류: {e}")
             time.sleep(10)
 
     def _heavy_index_trend_loop(self):
@@ -56,7 +56,7 @@ class MarketDataService:
                     self.market_trend = trend
                 if self.gui_callback: self.gui_callback(trend=trend)
             except Exception as e:
-                self.log(f"⚠️ [Market] 트렌드 분석 오류: {e}")
+                self.log(f"[Error] [Market] 트렌드 분석 오류: {e}")
             time.sleep(60)
 
     def get_status(self):

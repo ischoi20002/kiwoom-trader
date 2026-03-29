@@ -45,9 +45,9 @@ class AuthManager:
                 "appkey": app_key, 
                 "secretkey": app_sec
             }
-            # [DEBUG] 자격 증명 로드 확인 (터미널 출력을 위해 🔍 아이콘 추가)
-            self.log(f"[Debug] AppKey Loaded: {config.APP_KEY[:5]}***, Secret Loaded: {config.APP_SECRET[:5]}***")
-            self.log(f"[Debug] Auth URL: {auth_url}")
+            # [DEBUG] 자격 증명 로드 확인 (DEACTIVATE FOR USER PRIVACY)
+            # self.log(f"[Debug] AppKey Loaded: {config.APP_KEY[:5]}***, Secret Loaded: {config.APP_SECRET[:5]}***")
+            # self.log(f"[Debug] Auth URL: {auth_url}")
             
             # [v3.2] 헤더를 완전히 제거하여 백업 코드 'requests.post(auth_url, json=auth_data)'와 100% 일치시킴
             res = requests.post(auth_url, json=auth_data, timeout=15)
@@ -61,11 +61,11 @@ class AuthManager:
             if "text/html" in content_type or "<html" in res.text[:100].lower():
                 # HTML 응답인 경우 점검 페이지인지 확인
                 maintenance_keywords = ["시스템", "점검", "작업", "알림", "서비스", "maintenance", "notice"]
-                if any(kw in res.text for kw in maintenance_keywords):
-                    self.log("[System] 키움 API 서버가 현재 점검 중입니다. (보통 토요일 오후 2~5시 사이)")
-                    self.log(f"[Info] 점검 정보 응답 일부: {res.text[:150].strip()}...")
+                if any(kw in res.text for kw in maintenance_keywords) or res.status_code == 302:
+                    self.log("[System] 키움 API 서버가 현재 점검 중이거나 접근이 제한되었습니다 (302/HTML).")
+                    self.log("[Tip] 매주 토요일은 정기 점검 시간(보통 14~17시)이므로 API 기능이 제한됩니다. 로컬 데이터로 계속 진행합니다.")
                 else:
-                    self.log(f"[Error] 예상치 못한 HTML 응답 수신 (Status {res.status_code})")
+                    self.log(f"[Error] 예상치 못한 응답 수신 (Status {res.status_code})")
                 return None
 
             try:

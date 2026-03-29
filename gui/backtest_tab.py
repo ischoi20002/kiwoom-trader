@@ -50,13 +50,26 @@ class BacktestTab:
             'use_smart_buy_s2': tk.BooleanVar(value=False),
             'smart_buy_ba_ratio': tk.BooleanVar(value=False),
             'smart_buy_vp': tk.BooleanVar(value=False),
-            'smart_exit_price_threshold': tk.BooleanVar(value=False)
+            'smart_exit_price_threshold': tk.BooleanVar(value=False),
+            'macd_fast_daily': tk.BooleanVar(value=False),
+            'macd_slow_daily': tk.BooleanVar(value=False),
+            'macd_sig_daily': tk.BooleanVar(value=False),
+            'macd_fast_entry': tk.BooleanVar(value=False),
+            'macd_slow_entry': tk.BooleanVar(value=False),
+            'macd_sig_entry': tk.BooleanVar(value=False),
+            'backtest_initial_capital': tk.BooleanVar(value=False),
+            'sel_rsi_min': tk.BooleanVar(value=False),
+            'sel_rsi_max': tk.BooleanVar(value=False)
         }
         self.col_to_params = {
             "vol_a": ["vol_surge"], "vol_b": ["vol_surge_b"],
             "rsi_a": ["buy_rsi_max_a"], "rsi_b": ["buy_rsi_max_b"], "rsi_min": ["buy_rsi_min"],
             "gc_w": ["gc_window"], "rsi_w": ["rsi_window"],
             "tp_a": ["s1_a_take_profit"], "sl_a": ["s1_a_stop_loss"],
+            "macd_d": ["macd_fast_daily", "macd_slow_daily", "macd_sig_daily"],
+            "macd_e": ["macd_fast_entry", "macd_slow_entry", "macd_sig_entry"],
+            "cap": ["backtest_initial_capital"],
+            "sel_rsi": ["sel_rsi_min", "sel_rsi_max"],
             "tp_b": ["s1_b_take_profit"], "sl_b": ["s1_b_stop_loss"],
             "tp_s2": ["s2_take_profit"], "sl_s2": ["s2_stop_loss"],
             "s2_vol": ["s2_vol_ratio"],
@@ -88,8 +101,10 @@ class BacktestTab:
             "use_type_a": ["vol_surge", "buy_rsi_max_a", "s1_a_take_profit", "s1_a_stop_loss"],
             "use_type_b": ["vol_surge_b", "buy_rsi_max_b", "s1_b_take_profit", "s1_b_stop_loss"],
             "use_rsi_min": ["buy_rsi_min"],
-            "use_s1_tp": ["s1_a_take_profit", "s1_b_take_profit"],
-            "use_s1_stop_loss": ["s1_a_stop_loss", "s1_b_stop_loss"],
+            "use_s1_a_tp": ["s1_a_take_profit"],
+            "use_s1_b_tp": ["s1_b_take_profit"],
+            "use_s1_a_stop_loss": ["s1_a_stop_loss"],
+            "use_s1_b_stop_loss": ["s1_b_stop_loss"],
             "use_s2_tp": ["s2_take_profit"],
             "use_s2_stop_loss": ["s2_stop_loss"],
             "use_atr_exit": ["atr_period"],
@@ -267,6 +282,10 @@ class BacktestTab:
             "trades": "매매수: 백테스트 기간 중 발생한 총 매매 횟수",
             "vol_a": "vol_surge: Type A 거래량 급증 기준 (배)",
             "vol_b": "vol_surge_b: Type B 거래량 급증 기준 (배)",
+            "macd_d": "Screening MACD: 일봉 기준 유니버스 필터 (Fast/Slow/Sig)",
+            "macd_e": "Entry MACD: 15분봉 기준 진입 신호 필터 (Fast/Slow/Sig)",
+            "cap": "초기자금: 백테스팅 시작 자산 (원)",
+            "sel_rsi": "Selection RSI: 종목 선정 시 RSI 범위 (Min~Max)",
             "rsi_b": "buy_rsi_max_b: 매수 조건 - RSI 상한선 (Type B)",
             "rsi_a": "buy_rsi_max_a: 매수 조건 - Type A 전용 RSI 상한선",
             "rsi_min": "buy_rsi_min: 매수 조건 - 전략 공통 RSI 하한선",
@@ -296,7 +315,8 @@ class BacktestTab:
 
         # 카테고리별 컬럼 구성 [v16.9]
         cols = ["rank", "avg_ret", "avg_mdd", "win_rate", "trades", 
-                "vol_a", "vol_b", "rsi_a", "rsi_b", "rsi_min", "gc_w", "rsi_w", "sb_vp", "sb_ba",
+                "vol_a", "vol_b", "macd_d", "macd_e", "cap", "sel_rsi",
+                "rsi_a", "rsi_b", "rsi_min", "gc_w", "rsi_w", "sb_vp", "sb_ba",
                 "s1_%", "s2_%",
                 "tp_a", "sl_a", "tp_b", "sl_b", "tp_s2", "sl_s2", "s2_vol",
                 "atr_p", "atr_sl", "atr_tr", "sx_vp", "sx_ba", "sx_thr"] 
@@ -305,7 +325,9 @@ class BacktestTab:
         # 헤더 이름 설정 (카테고리 없이 깔끔하게)
         headers = {
             "rank": "순위", "avg_ret": "수익률", "avg_mdd": "MDD", "win_rate": "승률", "trades": "횟수",
-            "vol_a": "☑️ V_A", "vol_b": "☑️ V_B", "rsi_a": "☑️ R_A", "rsi_b": "☑️ R_B", "rsi_min": "☑️ R_Min",
+            "vol_a": "☑️ V_A", "vol_b": "☑️ V_B", "macd_d": "☑️ M_D", "macd_e": "☑️ M_E", "cap": "☑️ Cap",
+            "sel_rsi": "☑️ R_Sel",
+            "rsi_a": "☑️ R_A", "rsi_b": "☑️ R_B", "rsi_min": "☑️ R_Min",
             "gc_w": "☑️ G_Dur", "rsi_w": "☑️ R_Dur",
             "tp_a": "☑️ T_A", "sl_a": "☑️ L_A", "tp_b": "☑️ T_B", "sl_b": "☑️ L_B",
             "tp_s2": "☑️ T_S2", "sl_s2": "☑️ L_S2",
@@ -427,11 +449,29 @@ class BacktestTab:
             'atr_multiplier_trail': range_for(s.get('atr_multiplier_trail', 3.0), 1.0),
             's1_equity_pct': range_for(s.get('s1_equity_pct', 10.0), 5.0),
             's2_equity_pct': range_for(s.get('s2_equity_pct', 20.0), 10.0),
+            'macd_fast_daily': range_for(s.get('macd_fast_daily', 12), 2),
+            'macd_slow_daily': range_for(s.get('macd_slow_daily', 26), 4),
+            'macd_sig_daily': range_for(s.get('macd_sig_daily', 9), 2),
+            'macd_fast_entry': range_for(s.get('macd_fast_entry', 12), 2),
+            'macd_slow_entry': range_for(s.get('macd_slow_entry', 26), 4),
+            'macd_sig_entry': range_for(s.get('macd_sig_entry', 9), 2),
+            'sel_rsi_min': range_for(s.get('sel_rsi_min', 30.0), 5.0),
+            'sel_rsi_max': range_for(s.get('sel_rsi_max', 70.0), 5.0),
+            'backtest_initial_capital': [10000000, 30000000, 50000000],
             'smart_buy_vp': range_for(s.get('smart_buy_vp', 120.0), 10.0),
             'smart_buy_ba_ratio': range_for(s.get('smart_buy_ba_ratio', 1.5), 0.3),
             'smart_exit_vp': range_for(s.get('smart_exit_vp', 100.0), 10.0),
             'smart_exit_ba_ratio': range_for(s.get('smart_exit_ba_ratio', 1.5), 0.3),
             'smart_exit_price_threshold': range_for(s.get('smart_exit_price_threshold', -2.0), -1.0),
+            'use_s1_a_tp': [s.get('use_s1_a_tp', True)],
+            'use_s1_b_tp': [s.get('use_s1_b_tp', True)],
+            'use_s1_a_stop_loss': [s.get('use_s1_a_stop_loss', True)],
+            'use_s1_b_stop_loss': [s.get('use_s1_b_stop_loss', True)],
+            'use_s1_a_flash_exit': [s.get('use_s1_a_flash_exit', True)],
+            'use_s1_b_flash_exit': [s.get('use_s1_b_flash_exit', True)],
+            'use_s2_tp': [s.get('use_s2_tp', True)],
+            'use_s2_stop_loss': [s.get('use_s2_stop_loss', True)],
+            'use_s2_flash_exit': [s.get('use_s2_flash_exit', True)],
             'use_smart_buy_a': [s.get('use_smart_buy_a', True)],
             'use_smart_buy_b': [s.get('use_smart_buy_b', True)],
             'use_smart_buy_s2': [s.get('use_smart_buy_s2', True)],
@@ -570,6 +610,12 @@ class BacktestTab:
 
             vol_a = fmt('vol_surge', res.get('vol_surge', 0))
             vol_b = fmt('vol_surge_b', res.get('vol_surge_b', 0))
+            
+            macd_d = f"{int(res.get('macd_fast_daily', 12))}/{int(res.get('macd_slow_daily', 26))}/{int(res.get('macd_sig_daily', 9))}"
+            macd_e = f"{int(res.get('macd_fast_entry', 12))}/{int(res.get('macd_slow_entry', 26))}/{int(res.get('macd_sig_entry', 9))}"
+            cap_val = f"{int(res.get('backtest_initial_capital', 0)) // 10000}만"
+            sel_rsi_val = f"{int(res.get('sel_rsi_min', 30))}-{int(res.get('sel_rsi_max', 70))}"
+            
             rsi_b = fmt('buy_rsi_max_b', res.get('buy_rsi_max_b', 0))
             rsi_a = fmt('buy_rsi_max_a', res.get('buy_rsi_max_a', 0))
             rsi_min = fmt('buy_rsi_min', res.get('buy_rsi_min', 0))
@@ -596,7 +642,8 @@ class BacktestTab:
             
             self.app.tree_backtest.insert("", tk.END, values=(
                 i, f"{row.avg_ret:+.2f}", f"{row.avg_mdd:.2f}", f"{row.avg_win:.2f}", 
-                int(row.total_trades), vol_a, vol_b, rsi_a, rsi_b, rsi_min, gc_w, rsi_w, 
+                int(row.total_trades), vol_a, vol_b, macd_d, macd_e, cap_val, sel_rsi_val,
+                rsi_a, rsi_b, rsi_min, gc_w, rsi_w, 
                 sb_vp, sb_ba,
                 s1_pct, s2_pct,
                 tp_a, sl_a, tp_b, sl_b, tp_s2, sl_s2, s2_vol, atr_p, atr_sl, atr_tr,
@@ -849,6 +896,15 @@ class BacktestTab:
         param_rows = [
             ('vol_surge', 'V_A (거래량급증A)'),
             ('vol_surge_b', 'V_B (거래량급증B)'),
+            ('macd_fast_daily', 'M_D_F (Screening Fast)'),
+            ('macd_slow_daily', 'M_D_S (Screening Slow)'),
+            ('macd_sig_daily', 'M_D_Sig (Screening Sig)'),
+            ('macd_fast_entry', 'M_E_F (Entry Fast)'),
+            ('macd_slow_entry', 'M_E_S (Entry Slow)'),
+            ('macd_sig_entry', 'M_E_Sig (Entry Sig)'),
+            ('backtest_initial_capital', 'Cap (초기자금)'),
+            ('sel_rsi_min', 'R_Sel_Min (선정 RSI하한)'),
+            ('sel_rsi_max', 'R_Sel_Max (선정 RSI상한)'),
             ('buy_rsi_max_a', 'R_A (RSI상한A)'),
             ('buy_rsi_max_b', 'R_B (RSI상한B)'),
             ('buy_rsi_min', 'R_Min (RSI하한)'),

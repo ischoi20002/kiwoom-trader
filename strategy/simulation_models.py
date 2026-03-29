@@ -91,6 +91,29 @@ class SimulatedRealtimeMetrics:
         return max(0.3, min(3.0, base_ratio + noise))
 
     @classmethod
+    def simulate_bid_ask_ratio_vectorized(cls, price_changes, vol_ratios, vol_powers=None, add_noise=True):
+        """[v35.8] Vectorized version of simulate_bid_ask_ratio for high-performance backtesting"""
+        if not cls._initialized: cls.load_params()
+        p = cls.params
+        
+        # 1. Base + Price Change
+        base_ratios = p["ba_bias"] + price_changes * p["ba_multiplier"]
+        
+        # 2. Volume Surge Bonus
+        base_ratios += np.where((vol_ratios > 2.0) & (price_changes > 0), 0.3, 
+                               np.where((vol_ratios > 2.0) & (price_changes <= 0), -0.3, 0.0))
+        
+        # 3. VolPower Alignment
+        if vol_powers is not None:
+            base_ratios += np.where(vol_powers > 150, 0.2, 
+                                   np.where(vol_powers < 70, -0.2, 0.0))
+            
+        if add_noise:
+            base_ratios += np.random.normal(0, 0.05, size=len(price_changes))
+            
+        return np.clip(base_ratios, 0.3, 3.0)
+
+    @classmethod
     def simulate_vol_power(cls, price_change, vol_ratio, add_noise=True):
         if not cls._initialized: cls.load_params()
         
@@ -106,3 +129,20 @@ class SimulatedRealtimeMetrics:
             
         noise = np.random.normal(0, 5.0) if add_noise else 0
         return max(30.0, min(500.0, base_vp + noise))
+
+    @classmethod
+    def simulate_vol_power_vectorized(cls, price_changes, vol_ratios, add_noise=True):
+        """[v35.8] Vectorized version of simulate_vol_power for high-performance backtesting"""
+        if not cls._initialized: cls.load_params()
+        p = cls.params
+        
+        # 1. Base + Price Change
+        base_vps = p["vp_bias"] + price_changes * p["vp_multiplier"]
+        
+        # 2. Volume Bonus
+        base_vps += np.where((vol_ratios > 1.5) & (price_changes > 0), 20.0, 0.0)
+        
+        if add_noise:
+            base_vps += np.random.normal(0, 5.0, size=len(price_changes))
+            
+        return np.clip(base_vps, 30.0, 500.0)

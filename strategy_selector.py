@@ -40,9 +40,9 @@ def calculate_technical_indicators(df, settings):
     df['RSI'] = calculate_rsi(df['close'], 14)
     
     # MACD
-    m_f = int(settings.get('macd_fast', 12))
-    m_s = int(settings.get('macd_slow', 26))
-    m_sg = int(settings.get('macd_sig', 9))
+    m_f = int(settings.get('macd_fast_daily', 12))
+    m_s = int(settings.get('macd_slow_daily', 26))
+    m_sg = int(settings.get('macd_sig_daily', 9))
     df['EMA_Fast'] = df['close'].ewm(span=m_f, adjust=False).mean()
     df['EMA_Slow'] = df['close'].ewm(span=m_s, adjust=False).mean()
     df['MACD'] = df['EMA_Fast'] - df['EMA_Slow']
@@ -57,7 +57,7 @@ def get_strategy_score(row, settings):
     """
     # 1. 환경 변수 로드
     min_억 = float(settings.get('min_trde_val', 40.0))
-    conv_limit = float(settings.get('ma_convergence', 0.05))
+    conv_limit = float(settings.get('ma_convergence', 5.0)) / 100.0
     sel_rsi_min = float(settings.get('sel_rsi_min', 30.0))
     sel_rsi_max = float(settings.get('sel_rsi_max', 70.0))
     
@@ -82,6 +82,7 @@ def get_strategy_score(row, settings):
     
     # 2-5. MACD/OSC 필터 (Hybrid v26.15: 양수 필터 + 우상향 가산점)
     osc_prev = row.get('OSC_Prev', row.get('OSC', 0))
+    # 2-5. 일봉 MACD 필터 (OSC 양수 고정)
     c5 = (row['OSC'] > 0) 
     
     if not (c1 and c2 and c3 and c4 and c5):
@@ -243,7 +244,7 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
             
             # 상세 상태 업데이트 (하위 호환성용)
             if last_full['AvgVal5'] >= min_val_krw: status["value"] = 1
-            if abs(last_full['MA5'] - last_full['MA20']) / last_full['MA20'] <= float(settings.get('ma_convergence', 0.03)): status["trend"] = 1
+            if abs(last_full['MA5'] - last_full['MA20']) / last_full['MA20'] <= float(settings.get('ma_convergence', 3.0)) / 100.0: status["trend"] = 1
             if float(settings.get('sel_rsi_min', 40.0)) <= last_full['RSI'] <= float(settings.get('sel_rsi_max', 70.0)): status["rsi"] = 1
             if last_full['VolBurstActive']: status["vol"] = 1
             
@@ -428,7 +429,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     ema_down = loss.groupby(df_all['code']).transform(lambda x: x.ewm(com=13, adjust=False).mean())
     df_all['RSI'] = 100 - (100 / (1 + ema_up / (ema_down + 1e-10)))
     
-    m_f, m_sl, m_sg = int(settings.get('macd_fast', 12)), int(settings.get('macd_slow', 26)), int(settings.get('macd_sig', 9))
+    m_f, m_sl, m_sg = int(settings.get('macd_fast_daily', 12)), int(settings.get('macd_slow_daily', 26)), int(settings.get('macd_sig_daily', 9))
     df_all['EMA_F'] = df_all.groupby('code')['close'].transform(lambda x: x.ewm(span=m_f, adjust=False).mean())
     df_all['EMA_S'] = df_all.groupby('code')['close'].transform(lambda x: x.ewm(span=m_sl, adjust=False).mean())
     df_all['MACD'] = df_all['EMA_F'] - df_all['EMA_S']
@@ -437,7 +438,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
     # 5. 필터링 및 점수화
     min_억 = float(settings.get('min_trde_val', 40.0))
-    conv = float(settings.get('ma_convergence', 0.03))
+    conv = float(settings.get('ma_convergence', 3.0)) / 100.0
     vol_lookback = int(settings.get('vol_lookback', 10))
     
     df_all['AvgVal5'] = df_all.groupby('code')['trde_val'].transform(lambda x: x.rolling(5).mean())

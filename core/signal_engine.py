@@ -136,7 +136,8 @@ class SignalEngine:
 
                     if use_sb_for_type:
                         min_p = self.app.settings.get('smart_buy_vp', 120.0)
-                        min_r = self.app.settings.get('smart_buy_ba_ratio', 1.5)
+                        min_r = self.app.settings.get('smart_buy_ba_ratio', 1.2)
+                        # [v4.4] 정석 로직: 매도벽(Ask)이 두터워야 진입 승인
                         if vol_power < min_p or ask_bid_ratio < min_r:
                             is_buy = False
                     
@@ -208,9 +209,6 @@ class SignalEngine:
                 f"{int(volume):,}", f"{trde_val:,}"
             )
             
-            # [v3.5] 심박수(Heartbeat) 업데이트
-            if hasattr(self.app, 'lbl_heartbeat'):
-                self.app.lbl_heartbeat.config(text=f"💓 심박수: {datetime.now().strftime('%H:%M:%S')}")
 
             # [v27.9] 블링크(Blink) 포기 및 단순화: 시세 방향만 표시
             p_tag = "price_up" if diff_val > 0 else ("price_down" if diff_val < 0 else "price_stable")

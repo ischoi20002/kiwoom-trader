@@ -30,36 +30,25 @@ class MonitorTab:
         
         self.app.btn_monitor_toggle = ttk.Button(self.ctrl_frame, text="▶️ 실시간 감시 시작", command=self.app.toggle_monitoring, style="Accent.TButton")
         self.app.btn_monitor_toggle.pack(side=tk.RIGHT, padx=5)
-        # 📄 주문 로그 버튼 제거 (가상 포지션 탭으로 통합됨)
         
         self.app.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground="#81A1C3")
         self.app.lbl_monitor_status.pack(side=tk.RIGHT, padx=10)
 
-        # [v3.5] 시스템 심박수 (Heartbeat)
-        self.app.lbl_heartbeat = ttk.Label(self.ctrl_frame, text="💓 심박수: 대기", font=("Malgun Gothic", 9), foreground="#A9A9A9")
-        self.app.lbl_heartbeat.pack(side=tk.LEFT, padx=10)
-
         # [v27.3] 시장 역풍 알림 라벨 (기본 숨김)
         self.app.lbl_headwind_caution = ttk.Label(self.ctrl_frame, text="⚠️ 시장 역풍 - 매수 신호가 일시 정지되었습니다", 
                                                 font=("Malgun Gothic", 10, "bold"), foreground="#BF616A")
-        # 초기에는 pack하지 않고 대기
-
-        # 전략 요약 정보 라벨
-        self.app.lbl_criteria = ttk.Label(self.mo_main_frame, text="", font=("Malgun Gothic", 9), foreground="#ECEFF4", justify=tk.LEFT)
-        self.app.lbl_criteria.pack(fill=tk.X)
-        self.app._update_criteria_label() 
         
         # 트리뷰 영역 (Split-View 도입) [v2.2]
         paned = ttk.PanedWindow(self.mo_main_frame, orient=tk.VERTICAL)
         paned.pack(fill=tk.BOTH, expand=True)
         
-        # [상단] 보유 종목 창
+        # [상단] 보유 종목 창 (세로폭 축소)
         active_frame = ttk.LabelFrame(paned, text=" 🔥 보유 및 대응 종목 (Active Positions) ", padding="5")
-        paned.add(active_frame, weight=1)
+        paned.add(active_frame, weight=0) # 고정 비중(최소화)
         
-        # [하단] 일반 감시 창
+        # [하단] 일반 감시 창 (확대)
         watchlist_frame = ttk.LabelFrame(paned, text=" 👁️ 실시간 감시 목록 (Watchlist) ", padding="5")
-        paned.add(watchlist_frame, weight=2)
+        paned.add(watchlist_frame, weight=1)
         
         columns = ("Score", "Code", "Name", "Price", "Ratio", "VolPower", "Status", "TotalAsk", "TotalBid", "Volume", "TrdeVal")
         headings = {
@@ -75,8 +64,8 @@ class MonitorTab:
             "Volume": 110, "TrdeVal": 75
         }
 
-        # 1. 상단 트리뷰 (Active)
-        self.app.tree_active_monitor = ttk.Treeview(active_frame, columns=columns, show="headings", selectmode="browse", height=5)
+        # 1. 상단 트리뷰 (Active) - 높이 축소
+        self.app.tree_active_monitor = ttk.Treeview(active_frame, columns=columns, show="headings", selectmode="browse", height=3)
         for col in columns:
             self.app.tree_active_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
             anchor = tk.W if col == "Name" else tk.CENTER
@@ -115,10 +104,9 @@ class MonitorTab:
             try:
                 self.app.root.after(0, self.app.log, "📡 [시스템] 실시간 서버 접속 시도...")
                 
-                token_manager = TokenManager()
-                access_token = token_manager.get_token()
+                access_token = self.app.auth_manager.get_auth_token()
                 if not access_token:
-                    self.app.root.after(0, self.app.log, "❌ [시스템] 액세스 토큰이 없습니다. 10초 후 재시도...")
+                    self.app.root.after(0, self.app.log, "⏳ [시스템] 거래 서버 점검 또는 인증 대기 중... (10초 후 재시도)")
                     await asyncio.sleep(10)
                     continue
                 

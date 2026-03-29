@@ -20,11 +20,13 @@ import itertools
 import importlib.util
 import webbrowser
 import subprocess
+from datetime import datetime, timedelta
 
 from backtest_engine import TradingStrategy
 from data_manager_v2 import DataManagerV2 as DataManager
 import strategy_selector
-import reporting
+from reporting.trade_report import generate_trade_report
+from reporting.virtual_report import generate_virtual_narrative_report
 from strategy.data_loader import BacktestDataLoader
 
 # Modularized GUI Tabs [v3.0]
@@ -102,42 +104,51 @@ except:
 DEFAULT_SETTINGS = {
     "min_trde_val": 50.0,
     "sel_rsi_min": 30.0,
-    "sel_rsi_max": 70.0,
+    "sel_rsi_max": 70.0, # [v4.5 Sync] Added missing UI key
+    "use_rsi_min": True,
     "buy_rsi_min": 30.0,
-    "buy_rsi_max_b": 70.0,
-    "buy_rsi_max_a": 65.0,
-    "use_type_a": True,
-    "use_type_b": True,
-    "vol_surge": 1.2,
-    "use_vol_surge": True,
+    "buy_rsi_max_a": 65.0, # [v4.5 Sync] Default 65.0
+    "buy_rsi_max_b": 70.0, # [v4.5 Sync] Default 70.0
+    "use_gc": True,
+    "gc_window": 90,
+    "ma_convergence": 5.0, 
+    "ma60_safe_ratio": 15.0,
+    "vol_surge": 1.5, # [v4.5 Sync] Unified key for Type A
+    "use_vol_surge": True, # [v4.5 Sync] Unified key for Type A
     "vol_surge_b": 2.0,
     "use_type_b_vol": True,
     "use_macd_gc_b": True,
     "use_trend_aligned_b": True,
-    "total_capital": 10000000,
+    "backtest_initial_capital": 30000000, # [v4.5 Sync] 30M standard
     "max_slots": 30,
     "vol_ratio": 1.5,
     "vol_lookback": 10.0,
-    "ma_convergence": 0.05,
-    "use_gc": True,
-    "gc_window": 75,
-    "use_rsi_signal": True,
-    "rsi_window": 45,
     "use_ma60_safe": True,
     "ma60_min": 100.0,
     "ma60_max": 110.0,
     "use_market_filter": True,
     "use_macd_signal": True,
-    "macd_fast": 12.0,
-    "macd_slow": 26.0,
-    "macd_sig": 9.0,
-    "rsi_sig_period": 14.0,
+    "macd_fast_daily": 12,
+    "macd_slow_daily": 26,
+    "macd_sig_daily": 9,
+    "macd_fast_entry": 12,
+    "macd_slow_entry": 26,
+    "macd_sig_entry": 9,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_sig": 9,
+    "rsi_sig_period": 9.0,
     "use_auto_virtual": True,
     "gap_down_limit": -5.0,
+    "use_gap_down_exit": True, # [v4.5 Sync] Default ON
+    "use_gap_grace": True,
     "stage1_amt": 20.0,
+    "s1_equity_pct": 20.0,
+    "s1_sizing_unit": "%",
     "stage2_amt": 30.0,
+    "s2_equity_pct": 30.0,
+    "s2_sizing_unit": "%",
     "use_s2_ma5": True,
-    "s2_ma5_gap": 0.0,
     "use_s2_profit": True,
     "s2_profit_limit": 1.0,
     "use_s2_delay": True,
@@ -146,47 +157,57 @@ DEFAULT_SETTINGS = {
     "s2_rsi_gap": 0.0,
     "use_s2_macd_gc": True,
     "s2_macd_gap": 0.0,
+    "s2_ma5_gap": -0.5, 
     "use_s2_vol_surge": True,
     "s2_vol_ratio": 1.5,
     "use_s2_ma20": True,
     "s2_ma20_gap": 0.0,
-    "s1_a_flash_exit_pct": 1.5,
-    "s1_b_flash_exit_pct": 1.5,
+    "s1_a_flash_exit_pct": 3.0,
+    "s1_b_flash_exit_pct": 3.0,
     "s1_a_stop_loss": 3.0,
-    "s1_b_stop_loss": 2.0,
+    "s1_b_stop_loss": 3.0,
     "s1_a_take_profit": 5.0,
     "s1_b_take_profit": 4.0,
-    "use_s1_flash_exit": False,
-    "use_s2_flash_exit": False,
+    "use_s1_a_flash_exit": True,
+    "use_s1_b_flash_exit": True,
+    "use_s2_flash_exit": True,
     "s2_flash_exit_pct": 3.0,
-    "use_s1_stop_loss": False,
-    "use_s2_stop_loss": False,
-    "s2_stop_loss": 2.0,
+    "use_s1_a_stop_loss": True,
+    "use_s1_b_stop_loss": True,
+    "use_s2_stop_loss": True,
+    "s2_stop_loss": 3.0,
     "s2_take_profit": 6.0,
-    "use_s1_tp": True,
-    "use_rsi_min": True,
+    "use_s1_a_tp": True,
+    "use_s1_b_tp": True,
     "use_s2_tp": True,
     "use_rsi_sig_filter": True,
-    "use_gap_grace": True,
     "use_atr_exit": True,
-    "use_atr_stop_loss": True,
-    "use_atr_trailing_stop": True,
+    "use_atr_stop_loss_a": False,
+    "use_atr_stop_loss_b": True,
+    "use_atr_trailing_stop_a": False,
+    "use_atr_trailing_stop_b": True,
+    "atr_multiplier_sl_a": 2.5,
+    "atr_multiplier_sl_b": 2.5,
+    "atr_multiplier_trail_a": 5.0,
+    "atr_multiplier_trail_b": 4.0,
+    "use_atr_stop_loss_s2": True,
+    "atr_multiplier_sl_s2": 2.5,
+    "use_atr_trailing_stop_s2": True,
+    "atr_multiplier_trail_s2": 4.0,
     "atr_period": 100,
-    "atr_multiplier_sl": 3.0,
-    "atr_multiplier_trail": 5.0,
-    "s1_equity_pct": 20.0,
-    "s2_equity_pct": 30.0,
-    "s1_sizing_unit": "%",
-    "s2_sizing_unit": "%",
-    "use_smart_buy_a": True,
+    "use_smart_buy_a": False,
     "use_smart_buy_b": True,
     "use_smart_buy_s2": True,
-    "smart_buy_vp": 120.0,
-    "smart_buy_ba_ratio": 1.5,
+    "smart_buy_vp": 125.0,
+    "smart_buy_ba_ratio": 1.25, # [v4.5 Sync] UI Default
     "use_smart_exit": True,
-    "smart_exit_vp": 100.0,
-    "smart_exit_ba_ratio": 1.5,
-    "smart_exit_price_threshold": -2.0
+    "smart_exit_vp": 90.0,
+    "smart_exit_ba_ratio": 1.3, # [v4.5 Sync] Consistent with SignalEngine
+    "smart_exit_price_threshold": -0.5, # [v4.5 Sync] Default -0.5
+    "min_vol_power_entry": 120.0,
+    "min_ask_bid_ratio_entry": 1.5,
+    "power_sustained_min": 2,
+    "smart_exit_bid_ratio": 1.5
 }
 
 class KiwoomApp:
@@ -220,6 +241,7 @@ class KiwoomApp:
         self.executor = None 
         self.monitor_codes = []
         self.monitor_info = {}
+        self.actual_deposit = 0 # [v18.0] 실전/모의 실제 예수금 저장용
         self.volume_profiles = {} 
         self.min_volume_profiles = {} 
         self.cache_file = "bars_cache.json"
@@ -332,14 +354,14 @@ class KiwoomApp:
         
         # [v3.8] 자동 시작 옵션이 있는 경우 8초 후 실시간 감시 시작
         if self.auto_start:
-            self.log("🚀 [Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
+            self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
             self.root.after(8000, self.toggle_monitoring)
         
     def _final_save_settings(self):
         """[v3.5] 설정 데이터를 실제로 파일에 저장하고 엔진들에 통보 (Zombie 파라미터 필터링)"""
         # 1. 유효한 키 리스트 구성 (DEFAULT_SETTINGS 기준 + 동적 보존 키)
         valid_keys = set(DEFAULT_SETTINGS.keys())
-        extra_keys = {'bt_start_date', 'bt_end_date', 's1_sizing_unit', 's2_sizing_unit', 'mock_account_id'}
+        extra_keys = {'bt_start_date', 'bt_end_date', 's1_sizing_unit', 's2_sizing_unit', 'mock_account_id', 'backtest_initial_capital'}
         allowed = valid_keys.union(extra_keys)
         
         # 2. 필터링 수행 (더 이상 사용하지 않는 키는 제외)
@@ -364,7 +386,7 @@ class KiwoomApp:
                 child.destroy()
             self._setup_ui()
             self.notebook.select(curr_tab)
-            self.log("🔄 모든 UI 탭이 초기화된 설정으로 리로드되었습니다.")
+            self.log("모든 UI 탭이 초기화된 설정으로 리로드되었습니다.")
 
     def _setup_ui(self):
         """전체 UI 초기화 및 메인 탭 구성"""
@@ -372,13 +394,36 @@ class KiwoomApp:
 
         # [v33.3] Notebook 재사용 로직 (reset_ui_tabs 대응)
         if not hasattr(self, 'notebook') or self.notebook is None or not self.notebook.winfo_exists():
-            # [v27.1] 상단 전광판 (Market Ticker Header) 추가
+            # [v27.1] 상단 전광판 (Market Ticker Header)
             self.header_frame = ttk.Frame(self.root, padding=(15, 8))
             self.header_frame.pack(side=tk.TOP, fill=tk.X)
             
-            self.lbl_market_indices = ttk.Label(self.header_frame, text="📊 시장 지수: 데이터 로딩 중...", 
+            self.lbl_market_indices = ttk.Label(self.header_frame, text="시장 지수: 데이터 로딩 중...", 
                                               font=("Helvetica", 10, "bold"), foreground=self.colors['primary'])
             self.lbl_market_indices.pack(side=tk.LEFT)
+
+            # [v35.8-Fix] 하단 상태바를 노트북보다 먼저 배치하여 공간 확보 (side=tk.BOTTOM)
+            status_frame = ttk.Frame(self.root)
+            status_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
+            
+            # [v35.8] Global Intelligence Board (AI Calibration Status)
+            self.learn_status_frame = ttk.Frame(status_frame)
+            self.learn_status_frame.pack(side=tk.LEFT, padx=30)
+            
+            self.lbl_iq_status = ttk.Label(self.learn_status_frame, text="🧠 IQ: 0 steps", font=("Malgun Gothic", 8), foreground="#8FBCBB")
+            self.lbl_iq_status.pack(side=tk.LEFT, padx=10)
+            
+            self.lbl_vp_calib = ttk.Label(self.learn_status_frame, text="⚡ VP: -", font=("Malgun Gothic", 8), foreground="#88C0D0")
+            self.lbl_vp_calib.pack(side=tk.LEFT, padx=10)
+            
+            self.lbl_ba_calib = ttk.Label(self.learn_status_frame, text="⚖️ BA: -", font=("Malgun Gothic", 8), foreground="#EBCB8B")
+            self.lbl_ba_calib.pack(side=tk.LEFT, padx=10)
+            
+            self.status_label = ttk.Label(status_frame, text="상태: 대기 중", foreground="blue")
+            self.status_label.pack(side=tk.RIGHT, padx=5)
+            
+            self.lbl_remote_status = ttk.Label(status_frame, text="원격: 비활성", foreground="gray")
+            self.lbl_remote_status.pack(side=tk.LEFT, padx=10)
             
             self.notebook = ttk.Notebook(self.root)
             self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=0)
@@ -389,11 +434,11 @@ class KiwoomApp:
         self.tab_backtest = ttk.Frame(self.notebook)
         self.tab_settings = ttk.Frame(self.notebook)
         
-        self.notebook.add(self.tab_dashboard, text=" 📊 대시보드 ")
-        self.notebook.add(self.tab_monitor, text=" 👁️ 실시간 감시 ")
-        self.notebook.add(self.tab_virtual, text=" 💰 가상 포지션 ") 
-        self.notebook.add(self.tab_backtest, text=" 📈 백테스팅 ")
-        self.notebook.add(self.tab_settings, text=" ⚙️ 전략 설정 ")
+        self.notebook.add(self.tab_dashboard, text=" 대시보드 ")
+        self.notebook.add(self.tab_monitor, text=" 실시간 감시 ")
+        self.notebook.add(self.tab_virtual, text=" 가상 포지션 ") 
+        self.notebook.add(self.tab_backtest, text=" 백테스팅 ")
+        self.notebook.add(self.tab_settings, text=" 전략 설정 ")
 
         # [v25.8] 탭 전환 시 동기화 연동 바인딩
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -407,15 +452,6 @@ class KiwoomApp:
         self.virtual_tab = VirtualTab(self.tab_virtual, self)
         self.backtest_tab = BacktestTab(self.tab_backtest, self)
         
-        status_frame = ttk.Frame(self.root)
-        status_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
-        
-        self.status_label = ttk.Label(status_frame, text="상태: 대기 중", foreground="blue")
-        self.status_label.pack(side=tk.RIGHT, padx=5)
-        
-        self.lbl_remote_status = ttk.Label(status_frame, text="📡 원격: 비활성", foreground="gray")
-        self.lbl_remote_status.pack(side=tk.LEFT, padx=10)
-        
         self.gui_utils.log_area = self.log_area
         self.log("[System] 화면 구성 및 GUI 모듈 초기화 완료")
         
@@ -424,8 +460,31 @@ class KiwoomApp:
             self._initial_threads_started = True
             # [v27.4] 듀얼 트랙 지수 업데이트 시작
             threading.Thread(target=self._fast_index_price_loop, daemon=True).start()
-            threading.Thread(target=self._heavy_index_trend_loop, daemon=True).start()
+            self.heavy_thread_p = threading.Thread(target=self._heavy_index_trend_loop, daemon=True)
+            self.heavy_thread_p.start()
             threading.Thread(target=self.get_auth_token, daemon=True).start()
+
+        # [v35.8] 초기 오프라인 상태에서도 지능 정보 로드
+        self._update_learning_status()
+
+    def _update_learning_status(self):
+        """[v35.8] SimulatedRealtimeMetrics의 자가 학습 파라미터를 하단 글로벌 상태바에 반영"""
+        try:
+            from strategy.simulation_models import SimulatedRealtimeMetrics
+            
+            # 모델 파라미터 로딩 (초기 1회)
+            if not getattr(SimulatedRealtimeMetrics, '_initialized', False):
+                SimulatedRealtimeMetrics.load_params()
+                
+            p = SimulatedRealtimeMetrics.params
+            
+            # 글로벌 상태바 업데이트 (아이콘 및 정돈된 레이아웃)
+            self.lbl_iq_status.config(text=f"🧠 IQ: {p['total_calibrations']:,} steps")
+            self.lbl_vp_calib.config(text=f"⚡ VP: x{p['vp_multiplier']:.1f} (avg E:{p['avg_error_vp']:.2f})")
+            self.lbl_ba_calib.config(text=f"⚖️ BA: x{p['ba_multiplier']:.1f} (avg E:{p['avg_error_ba']:.2f})")
+            
+        except Exception as e:
+            print(f"[DEBUG] Global Learning Status Sync Error: {e}")
 
     def _on_tab_changed(self, event):
         """[v25.8] 탭 전환 시 호출되는 핸들러"""
@@ -453,8 +512,8 @@ class KiwoomApp:
         return self.config_handler.save_bars_cache(self.bars_data or {})
 
     def _update_criteria_label(self):
-        if self.lbl_criteria:
-            self.lbl_criteria.config(text=self._get_criteria_text(format_type="ui"))
+        # [v4.2] UI에서 라벨이 제거되어 더 이상 사용하지 않음 (Stub)
+        pass
 
     def _get_criteria_text(self, format_type="ui"):
         return self.gui_utils.get_criteria_text(self.settings, format_type)
@@ -547,16 +606,9 @@ class KiwoomApp:
         for name, data in res_dict.items():
             self.market_status[name] = data
         
-        # [v27.3] Triple-Lock 기반 통합 추세 판단 (3단계)
-        trends = [v.get('trend', 'NEUTRAL') for v in self.market_status.values()]
-        if not trends:
-            self.market_trend = "NEUTRAL"
-        elif "DOWN" in trends:
-            self.market_trend = "DOWN"
-        elif all(t == "UP" for t in trends):
-            self.market_trend = "UP"
-        else:
-            self.market_trend = "NEUTRAL"
+        # [v4.2] Triple-Lock 기반 통합 추세 판단 (KOSPI 중심으로 고정)
+        kospi_data = self.market_status.get("KOSPI", {})
+        self.market_trend = kospi_data.get("trend", "NEUTRAL")
         
         m_display = {"UP": "🟢순풍", "NEUTRAL": "⚪중립", "DOWN": "⚠️역풍"}[self.market_trend]
         
@@ -577,16 +629,17 @@ class KiwoomApp:
             price = data.get('val', 0)
             ratio = data.get('ratio', 0)
             msi = data.get('msi', 0)
+            adx = data.get('adx', 0)
             vix = data.get('vix', vix)
             
             sign = "▲" if ratio > 0 else "▼"
-            # 가독성을 위해 M(MSI) 정보도 유지
-            results.append(f"{name}: {price:,.2f}({sign}{abs(ratio):.2f}%, M:{msi:+.2f})")
+            # [v4.0] MSI와 ADX 정보를 명확하게 표시
+            results.append(f"{name}: {price:,.2f}({sign}{abs(ratio):.2f}%, MSI:{msi:+.2f}, ADX:{adx:.1f})")
         
         if results:
             m_tag = {"UP": "[순풍]", "NEUTRAL": "[중립]", "DOWN": "[역풍]"}.get(self.market_trend, "[확인중]")
             status_text = " | ".join(results)
-            full_text = f"📊 {m_tag} 시장 지수: {status_text} | VIX: {vix:.1f}"
+            full_text = f"시장 지수: {m_tag} {status_text} | VIX: {vix:.1f}"
             self.root.after(0, lambda: self.lbl_market_indices.config(text=full_text))
 
     def _on_realtime_data_received(self, code, now_price, volume, trde_val, **kwargs):
@@ -601,7 +654,9 @@ class KiwoomApp:
         self.data_manager.update_order_status(code, order_no, "FILLED", filled_price=price, filled_qty=qty)
         
         # 2. 포트폴리오 매니저 위임 (가상 포지션 관리 및 텔레그램 알림)
-        self.portfolio.on_fill(code, side, price, qty)
+        # [v18.0] 체결 시점의 스냅샷 캡처 및 기록
+        snapshot = self._get_system_snapshot(code, price, reason=f"EXEC_{side.upper()}")
+        self.portfolio.on_fill(code, side, price, qty, snapshot=snapshot)
         
         # 3. UI 업데이트 (3판넬 통합 갱신)
         self._log_order_ui(code, side, qty, price, "SYSTEM", "SUCCESS")
@@ -700,6 +755,8 @@ class KiwoomApp:
             if self._virtual_refresh_cnt % 5 == 0:
                 if hasattr(self, 'virtual_tab'):
                     self.virtual_tab._render_real_data()
+                # [v35.8] 자가 학습 필터 글로벌 업데이트
+                self._update_learning_status()
 
         except Exception as e:
             print(f"[DEBUG] Render error: {e}")
@@ -715,6 +772,12 @@ class KiwoomApp:
         s = self.settings
         met, total = 0, 0
         
+        # [v4.5 Rule] 0. 시장 지수 필터 (Stage 2 공용)
+        if s.get('use_market_filter', True):
+            total += 1
+            if getattr(self, 'market_trend', 'UP') == 'UP':
+                met += 1
+        
         # 1. 시간 지연
         if s.get('use_s2_delay', True):
             total += 1
@@ -723,9 +786,10 @@ class KiwoomApp:
                 met += 1
         
         # 2. 수익률 트리거
-        total += 1
-        profit = (now_price / pos['avg_price'] - 1) * 100
-        if profit >= float(s.get('stage2_trigger', 1.0)): met += 1
+        if s.get('use_s2_profit', True):
+            total += 1
+            profit = (now_price / pos['avg_price'] - 1) * 100
+            if profit >= float(s.get('s2_profit_limit', 1.0)): met += 1
         
         # 3. 기술적 지표 (MA20, MA5, RSI, MACD)
         if ind is not None:
@@ -738,6 +802,23 @@ class KiwoomApp:
             if s.get('use_s2_vol_surge', True):
                 total += 1
                 if ind.get('Volume', 0) >= ind.get('Vol_MA20', 0) * float(s.get('s2_vol_ratio', 1.0)): met += 1
+            if s.get('use_s2_rsi_sig', True):
+                total += 1
+                rsi_val = ind.get('RSI', 0)
+                rsi_sig = ind.get('RSI_Sig', 50)
+                rsi_prev = ind.get('Prev_RSI', rsi_val)
+                # [v4.5/v27.1 Sync] Level + Momentum (Rising)
+                if rsi_val >= rsi_sig * (1 + float(s.get('s2_rsi_gap', 0.0))/100.0) and rsi_val > rsi_prev: 
+                    met += 1
+            if s.get('use_s2_macd_gc', True):
+                total += 1
+                macd_val = ind.get('MACD', 0)
+                macd_sig = ind.get('MACD_Sig', 0)
+                osc_val = ind.get('OSC', 0)
+                osc_prev = ind.get('Prev_OSC', osc_val)
+                # [v4.5/v27.2 Sync] Level + OSC Positive + OSC Rising
+                if macd_val >= macd_sig + float(s.get('s2_macd_gap', 0.0)) and osc_val > 0 and osc_val > osc_prev: 
+                    met += 1
                 
         # 4. 수급 (Smart Buy)
         if s.get('use_smart_buy_s2', True):
@@ -748,114 +829,67 @@ class KiwoomApp:
             
         return f"추매 ({met}/{total})", (met/total if total > 0 else 0)
 
-    def _sync_mock_account_balance(self):
-        """[v2.2] 모의투자 계좌의 실시간 예수금 조회 (kt00001 API 활용)"""
+    def _sync_account_deposit(self):
+        """[v18.0] 실전/모의 계좌의 실시간 예수금 조회 및 동기화 (ka10001/kt00001 대응)"""
         try:
-            # 1. 계좌번호 확인
+            # 1. 계좌번호 확인 (설정창에 저장된 계좌번호 사용)
             acc_id = self.settings.get('mock_account_id', "")
             if not acc_id:
-                acc_id = simpledialog.askstring("입력", "모의투자 계좌번호를 입력하세요:", parent=self.root)
+                acc_id = simpledialog.askstring("입력", "조회할 계좌번호를 입력하세요:", parent=self.root)
                 if not acc_id: return
                 self.settings['mock_account_id'] = acc_id
                 self._final_save_settings()
 
-            # 2. 모의투자 전용 토큰 직접 발급 시도 (V3.6)
-            mock_token = None
-            try:
-                mock_token_url = "https://mockapi.kiwoom.com/oauth2/token"
-                self.log(f"[Auth] 모의투자 전용 토큰 발급 시도: {mock_token_url}")
-                
-                # 모의투자 전용 키가 설정되어 있는지 확인
-                mock_app_key = getattr(config, 'MOCK_APP_KEY', "")
-                mock_app_secret = getattr(config, 'MOCK_APP_SECRET', "")
-                
-                # 공백이거나 설정되지 않은 경우 실전 키 사용 (단, 8030 에러 가능성 높음)
-                use_key = mock_app_key if mock_app_key else config.APP_KEY
-                use_secret = mock_app_secret if mock_app_secret else config.APP_SECRET
-                
-                if not mock_app_key:
-                    self.log("⚠️ [Auth] 모의투자 전용 AppKey가 config.py에 설정되지 않았습니다. 실전 키로 시도합니다.")
-
-                res = requests.post(mock_token_url, json={
-                    "grant_type": "client_credentials",
-                    "appkey": use_key,
-                    "secretkey": use_secret
-                }, timeout=10)
-                
-                if res.status_code == 200:
-                    data = res.json()
-                    mock_token = data.get('access_token') or data.get('token')
-                    if mock_token:
-                        self.log("✅ [Auth] 모의투자 토큰 발급 성공!")
-                    else:
-                        msg = data.get('return_msg', '응답 메시지 없음')
-                        self.log(f"⚠️ [Auth] 모의투자 토큰 발급 거절 ({data.get('return_code')}): {msg}")
-                else:
-                    self.log(f"❌ [Auth] 모의투자 토큰 발급 실패 ({res.status_code}): {res.text}")
-                    # 만약 실패하면 기존 방식(실전 토큰)으로 일단 진행해봄 (백업)
-                    tm = TokenManager()
-                    mock_token = tm.get_token()
-            except Exception as te:
-                self.log(f"❌ [Auth] 모의투자 토큰 요청 중 예외: {te}")
-                tm = TokenManager()
-                mock_token = tm.get_token()
-
-            token = mock_token
+            # 2. 토큰 확보 (AuthManager 활용)
+            token = self.auth_manager.get_auth_token()
             if not token:
                 self.virtual_tab.lbl_mock_result.config(text="토큰 발급 실패", foreground="#BF616A")
                 return
 
-            # 3. API 요청 (kt00001 - 모의투자 예수금상세현황)
-            host = getattr(config, 'MOCK_URL', 'https://mockapi.kiwoom.com')
+            # 3. 환경별 API 설정 [v18.0]
+            use_mock = getattr(config, 'USE_MOCK', False)
+            host = getattr(config, 'MOCK_URL', 'https://mockapi.kiwoom.com') if use_mock else config.URL
+            api_id = 'kt00001' if use_mock else 'ka10001'
+            
             url = f"{host}/api/dostk/acnt"
             headers = {
                 'Content-Type': 'application/json;charset=UTF-8',
                 'authorization': f'Bearer {token}',
-                'api-id': 'kt00001',
+                'api-id': api_id,
             }
-            params = {
-                'qry_tp': '3', # 추정조회
-                'acc_no': acc_id
-            }
-
+            
             self.virtual_tab.lbl_mock_result.config(text="조회 중...", foreground="#EBCB8B")
             
             def run_inquiry():
                 try:
-                    # 1차 시도: qry_tp='3' (추정조회)
-                    payload = {'qry_tp': '3'}
+                    # qry_tp: '2' (일반조회) [v18.0]
+                    payload = {'qry_tp': '2'}
                     res = requests.post(url, headers=headers, json=payload, timeout=10)
                     data = res.json()
                     
-                    # 만약 잔고가 0이거나 조회가 안 되면 qry_tp='2' (일반조회) 시도
-                    deposit_str = data.get('entr', '0')
-                    if not deposit_str or float(str(deposit_str).replace(',', '')) == 0:
-                        payload = {'qry_tp': '2'}
-                        res = requests.post(url, headers=headers, json=payload, timeout=10)
-                        data = res.json()
-                        deposit_str = data.get('entr', '0')
-
-                    dps_val = int(float(str(deposit_str).replace(',', '')))
-
+                    # 실전/모의 공통 키 대응
+                    out_body = data.get('output', data.get('data', data))
+                    # ka10001(실전): nstd_re_ib_amt(주문가능현금), kt00001(모의): entr(예수금)
+                    deposit_str = out_body.get('entr', out_body.get('nstd_re_ib_amt', '0'))
+                    
+                    self.actual_deposit = int(float(str(deposit_str).replace(',', '')))
+                    dps_val = self.actual_deposit
+                    
                     # 결과 반영
                     def update_ui():
-                        self.virtual_tab.lbl_mock_result.config(text=f"연결됨: {dps_val:,}원", foreground="#A3BE8C")
-                        if dps_val <= 0:
-                            self.log(f"⚠️ [모의계좌] 잔고가 0원입니다. (응답: {data})")
-                        else:
-                            self.log(f"✅ [모의계좌] 잔고 조회 성공: {dps_val:,}원")
+                        mode_label = "모의" if use_mock else "실전"
+                        self.virtual_tab.lbl_mock_result.config(text=f"{mode_label} 잔고: {dps_val:,}원", foreground="#A3BE8C")
+                        self.log(f"✅ [{mode_label}계좌] 예수금 조회 성공: {dps_val:,}원 (비중 계산에 반영됨)")
                     
                     self.root.after(0, update_ui)
                 except Exception as e:
-                    self.root.after(0, lambda: self.virtual_tab.lbl_mock_result.config(
-                        text="오류 발생", foreground="#BF616A"
-                    ))
-                    print(f"[DEBUG] Mock Inquiry Error: {e}")
-
+                    self.root.after(0, lambda: self.virtual_tab.lbl_mock_result.config(text="조회 실패", foreground="#BF616A"))
+                    self.log(f"❌ 예수금 조회 중 오류: {e}")
+            
             threading.Thread(target=run_inquiry, daemon=True).start()
 
-        except Exception as e:
-            messagebox.showerror("에러", f"모의 잔고 조회 중 오류 발생: {e}")
+        except Exception as ex:
+            self.log(f"❌ [_sync_account_deposit] 치명적 오류: {ex}")
 
     def toggle_monitoring(self):
         if not getattr(self, 'is_monitoring', False):
@@ -915,19 +949,23 @@ class KiwoomApp:
             self.root.after(0, lambda: self.lbl_monitor_status.config(text=f"상태: 분석 중 ({len(self.monitor_codes)}종목)", foreground="blue"))
         
         def start_sequence():
-            self.log("[Analysis] 4단계: 분봉 데이터 분석 및 프로필 최적화 시작...")
-            # [v3.5] 1분봉 워밍업 (Cold Start 제거)
-            self._warmup_historical_data()
-            self._prepare_volume_profiles()
-            self.is_monitoring = True
-            if self.btn_monitor_toggle: self.root.after(0, self.btn_monitor_toggle.config, {"text": "⏹️ 감시 중단", "style": "Toggle.TButton"})
-            if self.lbl_monitor_status: self.root.after(0, self.lbl_monitor_status.config, {"text": f"상태: 연결 중 ({len(self.monitor_codes)}종목)", "foreground": "blue"})
-            self.monitor_thread = threading.Thread(target=self._ws_worker, daemon=True)
-            self.monitor_thread.start()
-            
-            # [v35.7] 자가 학습형 모델 주기적 실력 보고 및 저장 스케줄링
-            self.root.after(300000, self._auto_save_sim_params) # 5분마다 저장
-            self.root.after(1800000, self._report_sim_calibration) # 30분마다 보고
+            try:
+                self.log("[Analysis] 4단계: 분봉 데이터 분석 및 프로필 최적화 시작...")
+                # [v3.5] 1분봉 워밍업 (Cold Start 제거)
+                self._warmup_historical_data()
+                self._prepare_volume_profiles()
+                self.is_monitoring = True
+                if self.btn_monitor_toggle: self.root.after(0, self.btn_monitor_toggle.config, {"text": "⏹️ 감시 중단", "style": "Toggle.TButton"})
+                if self.lbl_monitor_status: self.root.after(0, self.lbl_monitor_status.config, {"text": f"상태: 연결 중 ({len(self.monitor_codes)}종목)", "foreground": "blue"})
+                self.monitor_thread = threading.Thread(target=self._ws_worker, daemon=True)
+                self.monitor_thread.start()
+                
+                # [v35.7] 자가 학습형 모델 주기적 실력 보고 및 저장 스케줄링
+                self.root.after(300000, self._auto_save_sim_params) # 5분마다 저장
+                self.root.after(1800000, self._report_sim_calibration) # 30분마다 보고
+            except Exception as e:
+                self.log(f"❌ [Error] 감시 시작 시퀀스 중 오류 발생: {e}")
+                self.stop_monitoring()
         threading.Thread(target=start_sequence, daemon=True).start()
 
     def _auto_save_sim_params(self):
@@ -1013,8 +1051,8 @@ class KiwoomApp:
         self.root.destroy()
 
     def _prepare_volume_profiles(self):
-        token_manager = TokenManager()
-        token = token_manager.get_token()
+        # [v4.1] TokenManager 대신 자체 AuthManager 사용 (302/Saturday Maintenance Crash 방지)
+        token = self.auth_manager.get_auth_token()
         if not token: return
         self.data_manager.prepare_volume_profiles(self.monitor_codes, token, self.bars_data, self.volume_profiles, self.min_volume_profiles)
         self.log(f"✅ {len(self.volume_profiles)}/{len(self.monitor_codes)}개 종목 분석 완료")
@@ -1070,32 +1108,50 @@ class KiwoomApp:
         if messagebox.askyesno("🚨 비상 청산", "모든 보유 종목을 지금 즉시 시장가로 매도하시겠습니까?"):
             self.portfolio.sell_all()
 
-    def _calculate_buy_amt(self, stage=1):
-        """[v2.2] 설정창의 비중 설정(원/%)에 따른 실제 투자금액 산출"""
+    def _calculate_buy_amt(self, stage=1, is_simulation=False):
+        """[v2.2] 설정창의 비중 설정(원/%)에 따른 실제 투자금액 산출 (실전/시뮬レーション 로직 분리)"""
         unit = self.settings.get(f's{stage}_sizing_unit', '원')
         if unit == '원':
-            # 콤마가 포함된 문자열일 가능성을 배제하기 위해 float 변환 후 int
             return int(float(str(self.settings.get(f'stage{stage}_amt', 1000000)).replace(',', '')))
         else:
             pct = float(self.settings.get(f's{stage}_equity_pct', 10.0))
-            total_cap = float(str(self.settings.get('total_capital', 10000000)).replace(',', ''))
+            
+            # [v18.0] Separation of Logic: Real-time order vs Simulation
+            if is_simulation:
+                # 백테스팅/가상매매는 설정창의 기반 자산을 사용
+                total_cap = float(str(self.settings.get('backtest_initial_capital', 10000000)).replace(',', ''))
+            else:
+                # 실전/모의투자는 실제 계좌의 예수금을 사용 (API 조회값 우선)
+                # 만약 조회가 안 되었다면 설정창 값을 폴백으로 사용하되 로그에 경고
+                actual_dep = getattr(self, 'actual_deposit', 0)
+                if actual_dep > 0:
+                    total_cap = actual_dep
+                else:
+                    total_cap = float(str(self.settings.get('backtest_initial_capital', 10000000)).replace(',', ''))
+                    self.log("⚠️ [Risk] 실제 예수금을 가져오지 못해 설정창 '백테스팅용 초기자금'을 기준으로 비중을 계산했습니다.")
+            
             return int(total_cap * pct / 100.0)
 
     def _virtual_buy_stage_1(self, code, name, price, reason="TYPE_A"):
         if code in self.virtual_positions: return
-        # [v2.2] 동적 비중 계산 적용
-        invest_amt = self._calculate_buy_amt(stage=1)
+        # [v18.0] 실전/모의 주문 허용 여부에 따라 자산 참조 로직 결정
+        use_mock = getattr(config, 'USE_MOCK', False)
+        allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
+        
+        # 실제 주문이 나가는 상황이면 실전 로직(is_simulation=False), 아니면 가상 로직 사용
+        invest_amt = self._calculate_buy_amt(stage=1, is_simulation=not allow_order)
         
         # [v3.8] 공격적 체결을 위한 +1틱 보정가 산출
         adj_price = self.order_manager.get_adjusted_price(price, "buy")
         qty = max(1, invest_amt // adj_price)
         actual_invested = qty * adj_price
         
-        # [v3.8] 실전/모의투자 연동 (Stage 1) - 이제 주문만 발송하고 체결(CHE) 시점에 가상포지션 등록
-        use_mock = getattr(config, 'USE_MOCK', False)
-        allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
         if allow_order:
             self.order_manager.place_order(code, qty, price, order_type="03", side="buy", name=name, reason=reason)
+        else:
+            # [v18.0] 순수 가상 매매인 경우 즉시 포트폴리오에 반영 (스냅샷 포함)
+            snapshot = self._get_system_snapshot(code, price, reason=reason)
+            self.portfolio.on_fill(code, "buy", price, qty, name=name, reason=reason, snapshot=snapshot)
         
         self.log(f"🚀 [주문발송] {name}({code}) 1차 진입 주문! ({price:,}원, {qty}주). 체결 대기 중...")
         msg = f"<b>💰 [가상매수/1차]</b>\n종목: {name}({code})\n가: {price:,}원 / 수: {qty}주\n시간: {datetime.now().strftime('%H:%M:%S')}"
@@ -1135,21 +1191,57 @@ class KiwoomApp:
         exit_reason = ""
         max_now = pos.get('max_now', now_price)
         
-        # 1. 익절/손절/Flash Exit 체크
-        flash_pct = float(self.settings.get(f's{stage}_flash_exit_pct', 3.0))
-        if self.settings.get(f'use_s{stage}_flash_exit', True) and now_price <= max_now * (1.0 - flash_pct / 100.0):
-            is_exit, exit_reason = True, "FLASH_EXIT"
+        # 1. 익절 / 손절 / Flash Exit 체크
+        is_type_b = "TYPE_B" in pos.get('reason', '')
+        
+        # Flash Exit (조기 탈출)
+        use_flash = self.settings.get('use_s2_flash_exit' if stage == 2 else ('use_s1_b_flash_exit' if is_type_b else 'use_s1_a_flash_exit'), True)
+        if use_flash:
+            flash_pct = float(self.settings.get(f's{stage}_flash_exit_pct' if stage == 2 else ('s1_b_flash_exit_pct' if is_type_b else 's1_a_flash_exit_pct'), 3.0))
+            if now_price <= max_now * (1.0 - flash_pct / 100.0):
+                is_exit, exit_reason = True, "FLASH_EXIT"
 
-        if not is_exit and self.settings.get(f'use_s{stage}_tp', True):
-            tp_pct = float(self.settings.get('s1_a_take_profit' if stage == 1 else 's2_take_profit', 5.0))
+        # 0. Gap Down (Global) - [v4.5 Sync] Enforcement of Toggle
+        if not is_exit and self.settings.get('use_gap_down_exit', True):
+            gap_limit = float(self.settings.get('gap_down_limit', -5.0))
+            if (now_price / avg_p - 1) * 100 <= gap_limit:
+                is_exit, exit_reason = True, "GAP_DOWN"
+
+        # 익절(Take Profit) 체크
+        use_tp = self.settings.get('use_s2_tp' if stage == 2 else ('use_s1_b_tp' if is_type_b else 'use_s1_a_tp'), True)
+        if not is_exit and use_tp:
             if stage == 1:
-                is_b = "TYPE_B" in pos.get('reason', '')
-                tp_pct = float(self.settings.get('s1_b_take_profit' if is_b else 's1_a_take_profit', 5.0))
+                tp_pct = float(self.settings.get('s1_b_take_profit' if is_type_b else 's1_a_take_profit', 5.0))
+            else:
+                tp_pct = float(self.settings.get('s2_take_profit', 6.0))
             
             if now_price >= avg_p * (1.0 + tp_pct / 100.0):
                 is_exit, exit_reason = True, "TAKE_PROFIT"
+        
+        # 손절(Stop Loss) 체크 (v4.5.2 추가)
+        use_sl = self.settings.get('use_s2_stop_loss' if stage == 2 else ('use_s1_b_stop_loss' if is_type_b else 'use_s1_a_stop_loss'), True)
+        if not is_exit and use_sl:
+            if stage == 1:
+                sl_pct = float(self.settings.get('s1_b_stop_loss' if is_type_b else 's1_a_stop_loss', 3.0))
+            else:
+                sl_pct = float(self.settings.get('s2_stop_loss', 3.0))
+            
+            if now_price <= avg_p * (1.0 - sl_pct / 100.0):
+                is_exit, exit_reason = True, "STOP_LOSS"
+
+        # [Phase 5] Smart Exit (Supply/Demand Trap)
+        if not is_exit and self.settings.get('use_smart_exit', True):
+            # [v31.4] Simplified threshold check (High - Drop)
+            threshold = float(self.settings.get('smart_exit_price_threshold', -0.5))
+            if now_price <= max_now * (1.0 + threshold / 100.0):
+                if is_power_exhausted:
+                    min_trap = float(self.settings.get('smart_exit_ba_ratio', 1.3))
+        # [v4.4] 사용자 정석 로직: 매수 함정(Bid Trap) 발생 시 탈출 도모
+                    if bid_ask_ratio >= min_trap:
+                        is_exit, exit_reason = True, "SMART_EXIT"
 
         if not is_exit and self.settings.get(f'use_s{stage}_stop_loss', True):
+            # 일반 모드: 설정된 손절 % 기준 작동
             sl_pct = float(self.settings.get('s1_a_stop_loss' if stage == 1 else 's2_stop_loss', 3.0))
             if stage == 1:
                 is_b = "TYPE_B" in pos.get('reason', '')
@@ -1158,27 +1250,28 @@ class KiwoomApp:
             if now_price <= avg_p * (1.0 - sl_pct / 100.0):
                 is_exit, exit_reason = True, "STOP_LOSS"
 
-        # [v31.0] ATR-based Exit Check (Real-time)
+        # [v4.5/v31.0] ATR-based Exit Check (Real-time) - Granular S1A/S1B/S2 Multipliers
         if not is_exit and self.settings.get('use_atr_exit', False):
             curr_atr = ind.get('ATR', 0) if ind is not None else 0
             entry_atr = pos.get('atr_at_entry', curr_atr)
             if curr_atr > 0:
-                sl_mult = float(self.settings.get('atr_multiplier_sl', 2.0))
-                trail_mult = float(self.settings.get('atr_multiplier_trail', 3.0))
-                if self.settings.get('use_atr_stop_loss', True) and now_price <= avg_p - (sl_mult * entry_atr):
-                    is_exit, exit_reason = True, "ATR_SL"
-                elif self.settings.get('use_atr_trailing_stop', True) and now_price <= max_now - (trail_mult * curr_atr):
-                    is_exit, exit_reason = True, "ATR_TRAIL"
+                # [Audit] Select correct multiplier based on current position state
+                if stage == 2:
+                    sl_mult = float(self.settings.get('atr_multiplier_sl_s2', 2.5))
+                    trail_mult = float(self.settings.get('atr_multiplier_trail_s2', 4.0))
+                    use_sl = self.settings.get('use_atr_stop_loss_s2', True)
+                    use_trail = self.settings.get('use_atr_trailing_stop_s2', True)
+                else:
+                    suff = "_b" if is_type_b else "_a"
+                    sl_mult = float(self.settings.get(f'atr_multiplier_sl{suff}', 2.5))
+                    trail_mult = float(self.settings.get(f'atr_multiplier_trail{suff}', 4.0))
+                    use_sl = self.settings.get(f'use_atr_stop_loss{suff}', True)
+                    use_trail = self.settings.get(f'use_atr_trailing_stop{suff}', True)
 
-        # [Phase 5] Smart Exit (Supply/Demand Trap)
-        if not is_exit and self.settings.get('use_smart_exit', True):
-            # [v31.4] Simplified threshold check (High - Drop)
-            threshold = float(self.settings.get('smart_exit_price_threshold', -2.0))
-            if now_price <= max_now * (1.0 + threshold / 100.0):
-                if is_power_exhausted:
-                    min_ba = float(self.settings.get('smart_exit_ba_ratio', 1.5))
-                    if bid_ask_ratio >= min_ba:
-                        is_exit, exit_reason = True, "SMART_EXIT"
+                if use_sl and now_price <= avg_p - (sl_mult * entry_atr):
+                    is_exit, exit_reason = True, "ATR_SL"
+                elif use_trail and now_price <= max_now - (trail_mult * curr_atr):
+                    is_exit, exit_reason = True, "ATR_TRAIL"
 
         if is_exit:
             # [v3.8] 공격적 체결(매도)을 위한 -1틱 보정가 산출
@@ -1191,6 +1284,10 @@ class KiwoomApp:
             if allow_order:
                 # [v3.8] name, reason 파라미터 추가
                 self.order_manager.place_order(code, pos['qty'], now_price, order_type="03", side="sell", name=pos['name'], reason=f"EXIT_{exit_reason}")
+            else:
+                # [v18.0] 순수 가상 매매인 경우 즉시 청산 반영 (스냅샷 포함)
+                snapshot = self._get_system_snapshot(code, now_price, reason=f"EXIT_{exit_reason}")
+                self.portfolio.on_fill(code, "sell", now_price, pos['qty'], snapshot=snapshot)
 
             self.log(f"🚨 [매도발송/{exit_reason}] {pos['name']}({code}) 탈출 주문! ({profit_ratio:+.2f}%)")
             # [v3.8] 즉시 삭제 대신 '매도 대기' 상태로 전환
@@ -1212,6 +1309,12 @@ class KiwoomApp:
         # 2. 2단계 매수(추매) 승인 체크
         if stage == 1:
             s = self.settings
+            # [v4.5 Rule] 0. 시장지수 필터 (Stage 2 공통)
+            if s.get('use_market_filter', True):
+                if self.market_status in ['NEUTRAL', 'DOWN']:
+                    # 중립/하락장에서 추매 금지
+                    return
+
             if s.get('use_s2_delay', True):
                 min_hours = float(s.get('s2_delay_hours', 24.0))
                 if pos.get('entry_time') and (datetime.now() - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 3600 < min_hours:
@@ -1233,10 +1336,15 @@ class KiwoomApp:
                     if ind.get('Volume', 0) < v_ma20 * float(s.get('s2_vol_ratio', 1.0)): can_addon = False
                 if can_addon and s.get('use_s2_rsi_sig', True):
                     r_sig = ind.get('RSI_Sig', 50)
-                    if rsi_val < r_sig * (1 + float(s.get('s2_rsi_gap', 0.0))/100.0): can_addon = False
+                    r_prev = ind.get('Prev_RSI', rsi_val)
+                    if rsi_val < r_sig * (1 + float(s.get('s2_rsi_gap', 0.0))/100.0) or rsi_val <= r_prev: 
+                        can_addon = False
                 if can_addon and s.get('use_s2_macd_gc', True):
                     m_sig = ind.get('MACD_Sig', 0)
-                    if macd_val < m_sig + float(s.get('s2_macd_gap', 0.0)): can_addon = False
+                    o_val = ind.get('OSC', 0)
+                    o_prev = ind.get('Prev_OSC', o_val)
+                    if macd_val < m_sig + float(s.get('s2_macd_gap', 0.0)) or o_val <= 0 or o_val <= o_prev: 
+                        can_addon = False
 
             if can_addon:
                 if self.settings.get('use_smart_buy_s2', True):
@@ -1246,47 +1354,73 @@ class KiwoomApp:
                         can_addon = False
                 
             if can_addon:
-                s2_trigger = float(s.get('stage2_trigger', 1.0))
+                s2_trigger = float(s.get('s2_profit_limit', 1.0))
                 if profit_ratio >= s2_trigger:
-                    # [v2.2] 동적 비중 계산 적용
-                    add_amt = self._calculate_buy_amt(stage=2)
+                    # [v18.0] 실전/모의 매매 여부에 따라 추매 비중 계산 로직 분리
+                    use_mock = getattr(config, 'USE_MOCK', False)
+                    allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
+                    
+                    add_amt = self._calculate_buy_amt(stage=2, is_simulation=not allow_order)
                     # [v3.8] 공격적 체결을 위한 +1틱 보정가 산출
                     adj_price = self.order_manager.get_adjusted_price(now_price, "buy")
                     add_qty = add_amt // adj_price
                     if add_qty > 0:
-                        # [v3.7.8] 실전/모의투자 연동 (Stage 2)
-                        use_mock = getattr(config, 'USE_MOCK', False)
-                        allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
                         if allow_order:
                             self.order_manager.place_order(code, add_qty, now_price, order_type="03", side="buy", name=pos['name'], reason="Stage 2 Scaling")
+                        else:
+                            # [v18.0] 순수 가상 매매인 경우 즉시 2차 진입 반영 (스냅샷 포함)
+                            snapshot = self._get_system_snapshot(code, now_price, reason="Stage 2 Scaling")
+                            self.portfolio.on_fill(code, "buy", now_price, add_qty, snapshot=snapshot)
                         
                         self.log(f"🔥 [추매발송] {pos['name']}({code}) 2차 진입 주문! ({adj_price:,}원, {add_qty}주). 체결 대기 중...")
+                        # [v4.2] 2차 추매 발송 텔레그램 알림 추가
+                        msg = f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n가: {adj_price:,}원 / 수: {add_qty}주\n수익률: {profit_ratio:+.2f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
+                        threading.Thread(target=self.send_telegram_message, args=(msg,), daemon=True).start()
+                        
                         # DB에 임시 기록 (체결 시 정식 반영)
                         self._log_order_ui(code, "buy", add_qty, adj_price, "03", "ADD_PENDING")
 
     def _get_system_snapshot(self, code, price, reason="N/A"):
-        """현재 시점의 시장지수 및 보조지표 상황 캡처"""
+        """[v18.0] 현재 시점의 시장지수 및 보조지표 상황 정밀 캡처"""
         info = self.monitor_info.get(code, {})
-        # [v2.2] market_trend 가시성 개선
         m_trend = getattr(self, 'market_trend', 'NEUTRAL')
-        m_tag = {"UP": "🟢순풍", "NEUTRAL": "⚪중립", "DOWN": "⚠️역풍"}.get(m_trend, m_trend)
         
+        # [v4.2] 더 풍부한 데이터 스냅샷 구성
         snapshot = {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "price": f"{price:,}",
-            "market": m_tag,
-            "rsi": "-", "ma": "확인중",
-            "power": f"{info.get('vol_power', 100.0):.1f}%",
-            "reason": reason
+            "price": price,
+            "market_trend": m_trend,
+            "vol_power": info.get('vol_power', 100.0),
+            "reason": reason,
+            "rsi": 0.0,
+            "macd": 0.0,
+            "osc": 0.0,
+            "ma_alignment": "N/A",
+            "bid_ask_ratio": 0.0,
+            "adx": 0.0
         }
+        
+        # 호가 잔량 정보 산출
+        total_ask = info.get('total_ask', 0)
+        total_bid = info.get('total_bid', 1)
+        if total_ask > 0:
+            snapshot["bid_ask_ratio"] = round(total_bid / total_ask, 2)
+
+        # 지표 데이터 확보
         if code in self.bars_data and not self.bars_data[code].empty:
             ind = self.bars_data[code].iloc[-1]
-            snapshot["rsi"] = f"{ind.get('RSI', 0):.1f}"
-            snapshot["ma"] = "정배열" if ind.get('MA5', 0) > ind.get('MA20', 0) else "데드크로스"
-            # 호가 잔량 정보 추가
-            total_ask = info.get('total_ask', 0)
-            total_bid = info.get('total_bid', 1)
-            snapshot["ba_ratio"] = f"{(total_bid / total_ask):.2f}" if total_ask > 0 else "-"
+            snapshot["rsi"] = round(float(ind.get('RSI', 0)), 1)
+            snapshot["macd"] = round(float(ind.get('MACD', 0)), 2)
+            snapshot["osc"] = round(float(ind.get('OSC', 0)), 2)
+            snapshot["adx"] = round(float(ind.get('ADX', 0)), 1)
+            
+            ma5 = ind.get('MA5', 0)
+            ma20 = ind.get('MA20', 0)
+            ma60 = ind.get('MA60', 0)
+            if ma5 > ma20 > ma60: snapshot["ma_alignment"] = "정배열(Bull)"
+            elif ma5 < ma20 < ma60: snapshot["ma_alignment"] = "역배열(Bear)"
+            else: snapshot["ma_alignment"] = "혼조(Neutral)"
+            
         return snapshot
 
     def _load_virtual_db(self):
@@ -1387,6 +1521,29 @@ class KiwoomApp:
         subprocess.Popen(["cmd.exe", "/c", restart_script], cwd=script_dir, creationflags=0x10)
         self.root.after(500, self.on_close)
 
+
+    def _generate_virtual_report(self):
+        """[v18.0] 가상 매매 나러티브 리포트 생성 및 브라우저 열기"""
+        try:
+            output_file = "virtual_trade_report.html"
+            generate_virtual_narrative_report(self.portfolio.virtual_history, output_file, self.settings)
+            
+            # 절대 경로 획득 및 브라우저 오픈
+            abs_path = os.path.abspath(output_file)
+            if os.path.exists(abs_path):
+                webbrowser.open(f"file://{abs_path}")
+                self.log(f"[Sync] 가상 매매 나러티브 리포트가 생성되었습니다: {output_file}")
+            else:
+                self.log("[Error] 리포트 파일 생성에 실패했습니다.")
+        except Exception as e:
+            self.log(f"[Error] 리포트 생성 중 오류: {e}")
+
+    def _open_report_folder(self):
+        """리포트가 저장된 폴더를 탐색기로 엽니다."""
+        try:
+            os.startfile(os.getcwd())
+        except Exception as e:
+            self.log(f"[Error] 폴더 열기 실패: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()

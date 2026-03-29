@@ -3,22 +3,26 @@ import numpy as np
 
 def get_buy_signals_detailed(df, settings, market_trend='UP'):
     """매수 신호 상세 분석 (Type A/B 통합)"""
-    # 1. 하락장 필터링
+    # [v4.4 Rule] 1. 시장지수 필터링 (3단계 차등 적용)
     if settings.get('use_market_filter', True) and market_trend == 'DOWN':
+        # DOWN (역풍): 모든 신호 차단
         return pd.DataFrame({
             'Signal': False, 'Sig_Type': 'NONE', 
             'Met_Count': 0, 'Total_Count': 1, 'Met_Ratio': 0.0,
             'RSI_Range': False, 'RSI_Cross': False,
             'MACD_OK': False, 'MA60_Range': False, 'MA_GC': False, 'Vol_Surge': False
         }, index=df.index)
+    
+    # NEUTRAL (중립): Type B는 나중에 차단 (signal_b에서 처리)
         
     settings = settings or {}
     ma60_ratio = (df['Close'] / df['MA60']) * 100
     
     # 2. RSI 조건
-    buy_rsi_min = settings.get('buy_rsi_min', 35.0)
+    # [v4.5 Sync] Respect use_rsi_min toggle
+    buy_rsi_min = settings.get('buy_rsi_min', 30.0) if settings.get('use_rsi_min', True) else 0.0
     buy_rsi_max_b = settings.get('buy_rsi_max_b', 70.0)
-    buy_rsi_max_a = settings.get('buy_rsi_max_a', 55.0) 
+    buy_rsi_max_a = settings.get('buy_rsi_max_a', 65.0) # [v4.5 Sync] Default 55.0 -> 65.0
     
     cond_rsi_range = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_b)
     cond_rsi_type_a = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_a)
@@ -34,7 +38,8 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     ma60_high = settings.get('ma60_max', 112)
     cond_ma60 = (ma60_ratio >= ma60_low) & (ma60_ratio <= ma60_high)
     
-    ma_gap_limit = settings.get('ma_gap_limit', 2.5)
+    # [v4.5 Sync] ma_gap_limit -> ma_convergence
+    ma_conv_limit = settings.get('ma_convergence', 5.0) 
     ma_gap = (df['MA5'] / df['MA20'] - 1) * 100
     
     gc_bars = max(1, int(settings.get('gc_window', 90) / 15))
@@ -44,7 +49,7 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     ma_count_maint = is_ma_aligned.groupby(ma_group_id).cumsum()
     
     # 조건: 현재 정배열 상태이면서, 골든크로스 직후 설정된 바(N) 이내일 것
-    cond_ma_gc = (is_ma_aligned) & (ma_count_maint >= 1) & (ma_count_maint <= gc_bars) & (ma_gap <= ma_gap_limit)
+    cond_ma_gc = (is_ma_aligned) & (ma_count_maint >= 1) & (ma_count_maint <= gc_bars) & (ma_gap <= ma_conv_limit)
     
     # 4. 거래량 조건 (Prev Day Same Time 대비)
     v_surge_a = settings.get('vol_surge', 2.0)
@@ -53,14 +58,20 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     cond_vol_a = (df['Volume'] > df['Prev_Day_Vol'] * v_surge_a)
     cond_vol_b = (df['Volume'] > df['Prev_Day_Vol'] * v_surge_b)
     
-    # 5. Type A: 눌림목 (RSI 40-58 + MA_GC + MA60 근접)
-    # [v26.3] Default to False if missing for safety
+    # 5. Type A: 눌림목 (RSI 40-65 + MA_GC + MA60 근접)
+    # 이미 구현되어 있는 RSI/MA 필터를 활용하여 중복 제거
     use_a = settings.get('use_type_a', False)
-    signal_a = use_a & cond_rsi_type_a
+    signal_a = use_a & cond_rsi_type_a 
+    
     if settings.get('use_gc', True): signal_a &= cond_ma_gc
     if settings.get('use_vol_surge', True): signal_a &= cond_vol_a
     if settings.get('use_ma60_safe', True): signal_a &= cond_ma60
-    if use_rsi_sig_filter: signal_a &= cond_rsi_sig
+    
+    # MA5 Recovery: 가격이 단기 이평선(5일선) 위로 올라타는 확정 시점에만 진입
+    signal_a &= (df['Close'] >= df['MA5']) 
+    
+    # [Point] RSI 반등은 이미 구현된 cond_rsi_sig 필터(L27)를 활성화하여 처리
+    if settings.get('use_rsi_sig_filter', True): signal_a &= cond_rsi_sig
     
     # [v26.7] Type A RSI 50 Pulse Logic (Breakthrough + Duration + Invalidation)
     if settings.get('use_rsi_signal', True):
@@ -87,8 +98,11 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     signal_b = use_b & cond_rsi_range 
     if settings.get('use_macd_gc_b', True): signal_b &= cond_macd_gc
     if settings.get('use_trend_aligned_b', True): signal_b &= cond_trend_aligned
-    if settings.get('use_type_b_vol', True): signal_b &= cond_vol_b
     if use_rsi_sig_filter: signal_b &= cond_rsi_sig
+    
+    # [v4.5 Rule] 시장지수 'NEUTRAL' 상태일 경우 Type B 진입 차단
+    if settings.get('use_market_filter', True) and market_trend == 'NEUTRAL':
+        signal_b[:] = False
     
     # 7. 최종 신호 및 공통 필터
     signal = signal_a | signal_b
@@ -104,7 +118,7 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
             if settings.get('use_gc', True): conds.append(cond_ma_gc)
             if settings.get('use_vol_surge', True): conds.append(cond_vol_a)
             if settings.get('use_ma60_safe', True): conds.append(cond_ma60)
-            if use_rsi_sig_filter: conds.append(cond_rsi_sig)
+            if settings.get('use_rsi_sig_filter', True): conds.append(cond_rsi_sig)
             if settings.get('use_rsi_signal', True): conds.append(cond_rsi_50_pulse)
         elif sig_type == 'TYPE_B':
             conds = [cond_rsi_range]

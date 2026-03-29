@@ -14,7 +14,6 @@ except ImportError:
     HAS_OPTUNA = False
 from backtest_engine import SimpleBacktester, TradingStrategy, SIGNAL_CSV, TRADE_CSV, BASE_DIR
 from strategy.data_loader import BacktestDataLoader
-from reporting.signal_report import generate_signal_report
 import reporting.trade_report
 import importlib
 importlib.reload(reporting.trade_report)
@@ -63,10 +62,10 @@ def run_single_combination(args):
     for code, data in data_cache.items():
         if data is not None:
             # [v23.0] 가벼운 시뮬레이터를 사용하여 처리 (내부 쓰레드 제거로 오버헤드 최소화)
-            local_tester = SimpleBacktester(settings)
+            tester = SimpleBacktester(settings) # Renamed local_tester to tester as per user's edit
             m1_pre = data_cache_m1.get(code) if data_cache_m1 else None
             try:
-                summary = local_tester.run(data, code, market_df=market_df, vix_df=vix_df, log_to_csv=False, 
+                summary = tester.run(data, code, market_df=market_df, vix_df=vix_df, log_to_csv=False, 
                                       skip_indicators=is_indicator_constant, high_precision=high_precision, m1_df_preloaded=m1_pre)
                 if summary:
                     summaries.append(summary)
@@ -76,10 +75,20 @@ def run_single_combination(args):
     if summaries:
         df_sum = pd.DataFrame(summaries)
         result = settings.copy()
+        
+        # [v4.0] Accurate Global Aggregation for Stage 1 Metrics
+        all_s1_a = [r for s in summaries for r in s.get('s1_a_rets', [])]
+        all_s1_b = [r for s in summaries for r in s.get('s1_b_rets', [])]
+        
+        avg_s1_a = sum(all_s1_a) / len(all_s1_a) if all_s1_a else 0
+        avg_s1_b = sum(all_s1_b) / len(all_s1_b) if all_s1_b else 0
+        
         result.update({
             'avg_ret': df_sum['final_ret'].mean(), 'avg_mdd': df_sum['mdd'].mean(), 
             'avg_win': df_sum['win_rate'].mean(), 'total_trades': df_sum['trades'].sum(),
-            'avg_s2': df_sum['s2_trades'].mean()
+            'avg_s2': df_sum['s2_trades'].mean(),
+            'avg_s1_a': avg_s1_a,
+            'avg_s1_b': avg_s1_b
         })
         return result
     return None
@@ -246,16 +255,23 @@ class ParameterOptimizer:
             'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
             's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 
             's1_a_take_profit', 's1_b_take_profit', 's2_take_profit',
-            'take_profit', 'stop_loss', 'gap_down_limit', 's2_delay_hours', 'stage2_trigger',
+            'take_profit', 'stop_loss', 'gap_down_limit', 's2_delay_hours', 's2_profit_limit',
             's2_ma20_gap', 's2_vol_ratio', 's2_rsi_gap', 's2_macd_gap',
-            'use_s1_flash_exit', 'use_s2_flash_exit', 'use_s1_stop_loss', 'use_s2_stop_loss',
+            'use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 
+            'use_s1_a_stop_loss', 'use_s1_b_stop_loss', 'use_s2_stop_loss',
+            'use_s1_a_tp', 'use_s1_b_tp', 'use_s2_tp',
             's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
             'use_s2_ma5', 'use_s2_profit', 'use_s2_delay', 'gc_window', 'rsi_window',
-            'atr_multiplier_sl', 'atr_multiplier_trail',
+            'atr_multiplier_sl_a', 'atr_multiplier_sl_b', 'atr_multiplier_sl_s2',
+            'atr_multiplier_trail_a', 'atr_multiplier_trail_b', 'atr_multiplier_trail_s2',
+            'ma_convergence', 'use_rsi_min',
             's1_equity_pct', 's2_equity_pct', 's1_sizing_unit', 's2_sizing_unit',
             'use_smart_exit', 'smart_exit_ba_ratio', 'smart_exit_vp', 'smart_exit_price_threshold',
             'use_smart_buy_a', 'use_smart_buy_b', 'use_smart_buy_s2',
-            'smart_buy_ba_ratio', 'smart_buy_vp', 'use_synthetic_realtime'
+            'smart_buy_ba_ratio', 'smart_buy_vp', 'use_synthetic_realtime',
+            'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
+            'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry',
+            'backtest_initial_capital', 'sel_rsi_min', 'sel_rsi_max'
         }
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False
@@ -363,7 +379,11 @@ class ParameterOptimizer:
                 best_settings = self.base_settings.copy()
                 for k in keys:
                     val = best[k]
-                    if k in ['vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig', 'gc_window', 'rsi_window', 'atr_period']:
+                    if k in ['vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig', 
+                            'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
+                            'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry',
+                            'gc_window', 'rsi_window', 'atr_period', 'ma_convergence', 
+                            'ma60_safe_ratio', 'backtest_initial_capital']:
                         try: val = int(float(val))
                         except: pass
                     best_settings[k] = val
@@ -393,13 +413,7 @@ class ParameterOptimizer:
                         finished_pass += 1
                         msg = f"최종 백테스트 수행 중 ({finished_pass}/{total_pass})..."
                         if callback: callback(msg, 50 + (finished_pass/total_pass)*10)
-                        try: future.result()
-                        except: pass
-            
-            sig_path = os.path.join(BASE_DIR, "signal_report.html")
             trd_path = os.path.join(BASE_DIR, "trade_report.html")
-            
-            generate_signal_report(output_path=sig_path, target_codes=self.codes)
             trades_df = pd.DataFrame()
             total_trades_count, win_rate_calc, avg_ret_calc = 0, 0, 0
             
@@ -411,7 +425,7 @@ class ParameterOptimizer:
                         trades_df['Date'] = pd.to_datetime(trades_df['Date'], errors='coerce')
                         trades_df = trades_df.dropna(subset=['Date'])
                         
-                        sells = trades_df[trades_df['Action'].isin(['SELL', 'HOLD', 'PARTIAL_SELL'])]
+                        sells = trades_df[trades_df['Action'].isin(['SELL', 'HOLD'])]
                         total_trades_count = len(sells)
                         win_rate_calc = (len(sells[sells['Return'] > 0]) / total_trades_count * 100) if total_trades_count > 0 else 0
                         

@@ -73,8 +73,7 @@ class VirtualTab:
         btn_group.pack(side=tk.RIGHT)
         
         ttk.Button(btn_group, text="🔄 동기화", width=8, command=lambda: self.app.portfolio.sync_with_actual_account()).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_group, text="🧹 초기화", width=8, command=self.app._clear_virtual_positions).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_group, text="🚨 비상매도", style="Accent.TButton", width=10, command=self.app._sell_all_virtual).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_group, text="📊 리포트", width=8, command=self.app._generate_virtual_report).pack(side=tk.LEFT, padx=2)
         
         # [v3.9.5] 버튼명 '서버 전환'으로 변경
         self.btn_env = ttk.Button(btn_group, text="서버 전환", width=10, command=self._toggle_environment)
@@ -225,19 +224,27 @@ class VirtualTab:
         self._render_orders()
 
         # 4. 요약 정보
-        start_cap = float(str(self.app.settings.get('total_capital', 10000000)).replace(',', ''))
+        # [v18.0] Decoupled Asset Management: Use actual deposit for metrics if available
+        actual_dep = getattr(self.app, 'actual_deposit', 0)
+        if actual_dep > 0:
+            start_cap = actual_dep
+        else:
+            start_cap = float(str(self.app.settings.get('backtest_initial_capital', 10000000)).replace(',', ''))
+            
         current_cash = start_cap - total_invested + total_realized_pnl
         total_assets = current_cash + total_eval
         
         day_pnl_total = total_day_realized_pnl + total_unrealized_pnl
-        day_pnl_pct = (day_pnl_total / start_cap) * 100
+        # [v18.1] Safety check for zero start_cap to avoid div-by-zero
+        safe_cap = max(1, start_cap)
+        day_pnl_pct = (day_pnl_total / safe_cap) * 100
         
         self.vars["total"].set(f"{total_assets:,.0f}")
         self.vars["cash"].set(f"{current_cash:,.0f}")
         self.vars["stock"].set(f"{total_eval:,.0f}")
         self.vars["day"].set(f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
         
-        total_profit_pct = (total_assets / start_cap - 1) * 100
+        total_profit_pct = (total_assets / safe_cap - 1) * 100
         self.vars["cum"].set(f"{total_profit_pct:+.2f}%")
 
     def _render_orders(self):

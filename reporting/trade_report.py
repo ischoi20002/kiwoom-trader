@@ -47,74 +47,94 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     
     avg_cash_ratio = 0 # [v32.1] Initialize for template
     
-    # [v16.0] UI-Consistent Hierarchical Parameter Mapping
+    # [v4.5] UI-Consistent Hierarchical Parameter Mapping (6-Section Sync)
     PARAM_STRUCTURE = [
         {
-            "name": "🔍 [1] 종목 선정 (Stock Selection Filter)",
+            "name": "💰 [1] 자금 및 계좌 관리 (Account & Fund)",
             "items": [
-                {"label": "1. 최소 거래대금", "key": "min_trde_val", "unit": "억"},
-                {"label": "2. 거래량 분출 비율", "key": "vol_ratio", "unit": "배"},
-                {"label": "3. 분출 확인 기간", "key": "vol_lookback", "unit": "일"},
-                {"label": "4. 이평선 수렴도 기준", "key": "ma_convergence", "unit": "%", "multiply": 100},
-                {"label": "5. 선정 RSI 필터", "keys": ["sel_rsi_min", "sel_rsi_max"], "sep": "~"},
-                {"label": "6. MACD 모멘텀 필터", "keys": ["macd_fast", "macd_slow", "macd_sig"], "sep": "/"}
-            ]
-        },
-        {
-            "name": "🚀 [2] 신규 매수 (Stage 1 Entry)",
-            "items": [
-                {"label": "Type A 활성화 (RSI 상한)", "toggle": "use_type_a", "key": "buy_rsi_max_a"},
-                {"label": "ㄴ 1. 이평 골든크로스", "toggle": "use_gc", "key": "gc_window", "unit": "분"},
-                {"label": "ㄴ 2. RSI 50 상향돌파", "toggle": "use_rsi_signal", "key": "rsi_window", "unit": "분"},
-                {"label": "ㄴ 3. MA60 안전구역", "toggle": "use_ma60_safe", "keys": ["ma60_min", "ma60_max"], "unit": "%", "sep": "~"},
-                {"label": "ㄴ 4. 거래량 급증(A)", "toggle": "use_vol_surge", "key": "vol_surge", "unit": "배"},
-                {"label": "Type B 활성화 (RSI 상한)", "toggle": "use_type_b", "key": "buy_rsi_max_b"},
-                {"label": "ㄴ 1. MACD 골든크로스(B)", "toggle": "use_macd_gc_b"},
-                {"label": "ㄴ 2. 정배열 추세 확인(B)", "toggle": "use_trend_aligned_b"},
-                {"label": "ㄴ 3. 거래량 급증(B)", "toggle": "use_type_b_vol", "key": "vol_surge_b", "unit": "배"},
-                {"label": "공통-1. 시장지수 필터", "toggle": "use_market_filter"},
-                {"label": "공통-2. 체결강도 강화", "toggle": "use_vol_power", "key": "vol_power_lvl"},
-                {"label": "공통-3. 매수 RSI 하한", "toggle": "use_rsi_min", "key": "buy_rsi_min"},
-                {"label": "공통-4. MACD 모멘텀 상승", "toggle": "use_macd_signal", "keys": ["sig_macd_fast", "sig_macd_slow", "sig_macd_sig"], "sep": "/"},
-                {"label": "공통-5. RSI 모멘텀 상승", "toggle": "use_rsi_sig_filter", "key": "rsi_sig_period"}
-            ]
-        },
-        {
-            "name": "📈 [3] 추매 승인 (Stage 2 Buy Add-on)",
-            "items": [
-                {"label": "1. MA20선 최소 상회", "toggle": "use_s2_ma20", "key": "s2_ma20_gap", "unit": "%"},
-                {"label": "2. MA5선 최소 상회", "toggle": "use_s2_ma5", "key": "s2_ma5_gap", "unit": "%"},
-                {"label": "3. 거래량 분출 확인", "toggle": "use_s2_vol_surge", "key": "s2_vol_ratio", "unit": "배"},
-                {"label": "4. RSI 모멘텀 상승", "toggle": "use_s2_rsi_sig", "key": "s2_rsi_gap", "unit": "%"},
-                {"label": "5. MACD 모멘텀 상승", "toggle": "use_s2_macd_gc", "key": "s2_macd_gap", "unit": "%"},
-                {"label": "6. 포지션 최소 수익률", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"},
-                {"label": "7. 최소 대기 기간", "toggle": "use_s2_delay", "key": "s2_delay_hours", "unit": "시간"},
-                {"label": "추매 트리거 수익률", "key": "stage2_trigger", "unit": "%"}
-            ]
-        },
-        {
-            "name": "🛡️ [4] 매도 및 자산 관리 (Exit & Risk)",
-            "items": [
-                {"label": "S1 Flash Exit (A/B)", "toggle": "use_s1_flash_exit", "keys": ["s1_a_flash_exit_pct", "s1_b_flash_exit_pct"], "unit": "%", "sep": "/"},
-                {"label": "S1 손절 수익률 (A/B)", "toggle": "use_s1_stop_loss", "keys": ["s1_a_stop_loss", "s1_b_stop_loss"], "unit": "%", "sep": "/"},
-                {"label": "S1 익절 수익률 (A/B)", "toggle": "use_s1_tp", "keys": ["s1_a_take_profit", "s1_b_take_profit"], "unit": "%", "sep": "/"},
-                {"label": "S2 Flash Exit 적용", "toggle": "use_s2_flash_exit", "key": "s2_flash_exit_pct", "unit": "%"},
-                {"label": "S2 손절 수익률", "toggle": "use_s2_stop_loss", "key": "s2_stop_loss", "unit": "%"},
-                {"label": "S2 익절 수익률", "toggle": "use_s2_tp", "key": "s2_take_profit", "unit": "%"},
-                {"label": "갭하락 킬스위치", "key": "gap_down_limit", "unit": "%"},
-                {"label": "장 시작 15분 유예", "toggle": "use_gap_grace"},
-                {"label": "가상 매수 자동화", "toggle": "use_auto_virtual"},
-                {"label": "ATR 기반 탈출", "toggle": "use_atr_exit", "key": "atr_period", "unit": "일"},
-                {"label": "ㄴ ATR 손절배수(SL)", "key": "atr_multiplier_sl", "unit": "배"},
-                {"label": "ㄴ ATR 추격배수(Trail)", "key": "atr_multiplier_trail", "unit": "배"},
-                {"label": "Smart Exit (조기탈출)", "toggle": "use_smart_exit", "keys": ["smart_exit_ba_ratio", "smart_exit_vp", "smart_exit_price_threshold"], "sep": " / "},
-                {"label": "Smart Buy (Type A)", "toggle": "use_smart_buy_a", "keys": ["smart_buy_ba_ratio", "smart_buy_vp"], "sep": " / "},
-                {"label": "Smart Buy (Type B)", "toggle": "use_smart_buy_b", "keys": ["smart_buy_ba_ratio", "smart_buy_vp"], "sep": " / "},
-                {"label": "Smart Buy (Stage 2)", "toggle": "use_smart_buy_s2", "keys": ["smart_buy_ba_ratio", "smart_buy_vp"], "sep": " / "},
-                {"label": "총 운용 자산", "key": "total_capital", "unit": "원", "is_amt": True},
+                {"label": "백테스팅용 초기자금", "key": "backtest_initial_capital", "unit": "원", "is_amt": True},
                 {"label": "최대 감시 종목 수", "key": "max_slots", "unit": "개"},
                 {"label": "1단계(정찰) 비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"},
-                {"label": "2단계(본대) 비중", "keys": ["stage2_amt", "s2_equity_pct"], "unit_key": "s2_sizing_unit"}
+                {"label": "2단계(본대) 비중", "keys": ["stage2_amt", "s2_equity_pct"], "unit_key": "s2_sizing_unit"},
+                {"label": "가상 매매 자동화", "toggle": "use_auto_virtual"}
+            ]
+        },
+        {
+            "name": "🔍 [2] 종목 선정 필수 필터 (Stock Selection)",
+            "items": [
+                {"label": "최소 거래대금", "key": "min_trde_val", "unit": "억"},
+                {"label": "거래량 분출 비율", "key": "vol_ratio", "unit": "배"},
+                {"label": "분출 확인 기간", "key": "vol_lookback", "unit": "일"},
+                {"label": "종목 선정 RSI 범위", "keys": ["sel_rsi_min", "sel_rsi_max"], "sep": "~"},
+                {"label": "일봉 MACD 필터", "keys": ["macd_fast_daily", "macd_slow_daily", "macd_sig_daily"], "sep": "/"},
+                {"label": "이평선 수렴도 기준", "key": "ma_convergence", "unit": "%"},
+                {"label": "시장 지수 필터", "toggle": "use_market_filter"},
+            ]
+        },
+        {
+            "name": "🎯 [3] 진입 시그널 필터 (Signal Logic - 15m)",
+            "items": [
+                {"label": "매수 진입 RSI 하한", "toggle": "use_rsi_min", "key": "buy_rsi_min"},
+                {"label": "15분봉 MACD 필터", "toggle": "use_macd_signal"},
+                {"label": "  ㄴ MACD E-Periods", "keys": ["macd_fast_entry", "macd_slow_entry", "macd_sig_entry"], "sep": "/"},
+                {"label": "RSI 시그널 필터", "toggle": "use_rsi_sig_filter", "key": "rsi_sig_period", "unit": "일"}
+            ]
+        },
+        {
+            "name": "🚀 [4] 1단계 진입 전략 (Stage 1 Master)",
+            "items": [
+                {"label": "Type A (눌림목) 활성화", "toggle": "use_type_a", "key": "buy_rsi_max_a", "unit": " RSI"},
+                {"label": "ㄴ Smart Buy (Type A)", "toggle": "use_smart_buy_a"},
+                {"label": "ㄴ 거래량 급증 확인(A)", "toggle": "use_vol_surge", "key": "vol_surge", "unit": "배"},
+                {"label": "ㄴ MA60 지지(상/하)", "keys": ["ma60_min", "ma60_max"], "unit": "%", "sep": "~"},
+                {"label": "ㄴ 이평 골든크로스(분)", "toggle": "use_gc", "key": "gc_window", "unit": "분"},
+                {"label": "ㄴ RSI 50 돌파 컨펌(분)", "toggle": "use_rsi_signal", "key": "rsi_window", "unit": "분"},
+                {"label": "ㄴ A 전용 ATR 손절(SL)", "toggle": "use_atr_stop_loss_a", "key": "atr_multiplier_sl_a", "unit": "배"},
+                {"label": "ㄴ A 전용 추격 익절(Trl)", "toggle": "use_atr_trailing_stop_a", "key": "atr_multiplier_trail_a", "unit": "배"},
+                {"label": "Type B (돌파 타점) 활성화", "toggle": "use_type_b", "key": "buy_rsi_max_b", "unit": " RSI"},
+                {"label": "ㄴ Smart Buy (Type B)", "toggle": "use_smart_buy_b"},
+                {"label": "ㄴ MACD 골든크로스(B)", "toggle": "use_macd_gc_b"},
+                {"label": "ㄴ 정배열 추세 확인(B)", "toggle": "use_trend_aligned_b"},
+                {"label": "ㄴ 돌파 시 거래량 분출", "toggle": "use_type_b_vol", "key": "vol_surge_b", "unit": "배"},
+                {"label": "ㄴ B 전용 ATR 손절(SL)", "toggle": "use_atr_stop_loss_b", "key": "atr_multiplier_sl_b", "unit": "배"},
+                {"label": "ㄴ B 전용 추격 익절(Trl)", "toggle": "use_atr_trailing_stop_b", "key": "atr_multiplier_trail_b", "unit": "배"}
+            ]
+        },
+        {
+            "name": "📈 [5] 2단계 추매 전략 (Scaling Up)",
+            "items": [
+                {"label": "1. 20일선 지지 확인", "toggle": "use_s2_ma20", "key": "s2_ma20_gap", "unit": "%"},
+                {"label": "2. 5일선 회복/지지", "toggle": "use_s2_ma5", "key": "s2_ma5_gap", "unit": "%"},
+                {"label": "3. 추매용 Smart Buy", "toggle": "use_smart_buy_s2"},
+                {"label": "4. 추매 시 거래량 급증", "toggle": "use_s2_vol_surge", "key": "s2_vol_ratio", "unit": "배"},
+                {"label": "5. RSI 모멘텀 상승", "toggle": "use_s2_rsi_sig", "key": "s2_rsi_gap", "unit": "%"},
+                {"label": "6. MACD 모멘텀 상승", "toggle": "use_s2_macd_gc", "key": "s2_macd_gap", "unit": "%"},
+                {"label": "7. 수익권 진입 필터", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"},
+                {"label": "8. 진입 후 대기 시간", "toggle": "use_s2_delay", "key": "s2_delay_hours", "unit": "시간"},
+                {"label": "ㄴ S2 전용 ATR 손절(SL)", "toggle": "use_atr_stop_loss_s2", "key": "atr_multiplier_sl_s2", "unit": "배"},
+                {"label": "ㄴ S2 전용 추격 익절(Trl)", "toggle": "use_atr_trailing_stop_s2", "key": "atr_multiplier_trail_s2", "unit": "배"}
+            ]
+        },
+        {
+            "name": "💰 [6] 진입 수능 임계값 (Smart Buy Wall)",
+            "items": [
+                {"label": "최소 체결강도 (VP)", "key": "smart_buy_vp", "unit": "%"},
+                {"label": "진입용 최소 매도벽", "key": "smart_buy_ba_ratio", "unit": "배"}
+            ]
+        },
+        {
+            "name": "🛡️ [7] 공통 매도 및 리스크 관리 (Exit & Trap)",
+            "items": [
+                {"label": "Smart Exit (조기탈출)", "toggle": "use_smart_exit", "keys": ["smart_exit_vp", "smart_exit_ba_ratio"], "sep": "VP / Ratio: "},
+                {"label": "ㄴ 가격 하락 임계", "key": "smart_exit_price_threshold", "unit": "%"},
+                {"label": "갭하락 즉시 손절(Cut)", "key": "gap_down_limit", "unit": "%"},
+                {"label": "개장 초기 매도 유예", "toggle": "use_gap_grace"},
+                {"label": "ATR 공통 제어", "toggle": "use_atr_exit", "key": "atr_period", "unit": "일"},
+                {"label": "S1 눌림 익절/손절", "toggle": "use_s1_a_tp", "keys": ["s1_a_take_profit", "s1_a_stop_loss"], "unit": "%", "sep": "TP / SL: "},
+                {"label": "S1 돌파 익절/손절", "toggle": "use_s1_b_tp", "keys": ["s1_b_take_profit", "s1_b_stop_loss"], "unit": "%", "sep": "TP / SL: "},
+                {"label": "S1 눌림 Flash Exit", "toggle": "use_s1_a_flash_exit", "key": "s1_a_flash_exit_pct", "unit": "%"},
+                {"label": "S1 돌파 Flash Exit", "toggle": "use_s1_b_flash_exit", "key": "s1_b_flash_exit_pct", "unit": "%"},
+                {"label": "S2 익절/손절/Flash", "toggle": "use_s2_tp", "keys": ["s2_take_profit", "s2_stop_loss", "s2_flash_exit_pct"], "unit": "%", "sep": " / "}
             ]
         }
     ]
@@ -154,46 +174,50 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                     is_on = val
                     status_class = "val-on" if val else "val-off"
                     status_text = "ON" if val else "OFF"
+                    # [v17.0] ON/OFF 배지만 있으면 충분, 값은 괄호로 묶어 통합 표시
                     status_html = f'<span class="p-val {status_class}">{status_text}</span>'
                 
                 # 2. 값 정보 (ON일 때만 또는 키가 지정된 경우 표시)
                 value_html = ""
-                if is_on:
-                    v_list = []
-                    # [v33.0] unit_key가 있으면 해당 단위에 맞는 키만 선택
-                    unit_key = item.get("unit_key")
-                    if unit_key and unit_key in best_settings:
-                        current_unit = best_settings[unit_key]
-                        mapped_unit = current_unit # "원", "%" 등
-                        # keys[0]은 "원", keys[1]은 "%"로 가정 (통일된 규칙)
-                        if val_keys and len(val_keys) >= 2:
-                            target_key = val_keys[0] if current_unit == "원" else val_keys[1]
-                            assigned_keys.add(target_key)
-                            v_list.append(format_val(best_settings.get(target_key, 0)))
-                            unit = mapped_unit
-                    elif val_key:
-                        assigned_keys.add(val_key)
-                        if val_key in best_settings:
-                            v_list.append(format_val(best_settings[val_key] * mult))
-                    elif val_keys:
-                        for k in val_keys:
-                            assigned_keys.add(k)
-                            if k in best_settings:
-                                v_list.append(format_val(best_settings[k] * mult))
-                    
-                    if v_list:
-                        val_str = sep.join(v_list)
-                        value_html = f'<span class="p-val-sub">({val_str}{unit})</span>'
+                v_list = []
+                # [v33.0] unit_key가 있으면 해당 단위에 맞는 키만 선택
+                unit_key = item.get("unit_key")
+                if unit_key and unit_key in best_settings:
+                    current_unit = best_settings[unit_key]
+                    mapped_unit = current_unit # "원", "%" 등
+                    if val_keys and len(val_keys) >= 2:
+                        target_key = val_keys[0] if current_unit == "원" else val_keys[1]
+                        assigned_keys.add(target_key)
+                        v_list.append(format_val(best_settings.get(target_key, 0)))
+                        unit = mapped_unit
+                elif val_key:
+                    assigned_keys.add(val_key)
+                    if val_key in best_settings:
+                        v_list.append(format_val(best_settings[val_key] * mult))
+                elif val_keys:
+                    for k in val_keys:
+                        assigned_keys.add(k)
+                        if k in best_settings:
+                            v_list.append(format_val(best_settings[k] * mult))
                 
-                items_html.append(f"""
-                <div class="p-item">
-                    <span class="p-key">{label}</span>
-                    <div class="p-val-group">
-                        {status_html}
-                        {value_html}
+                if v_list:
+                    val_str = sep.join(v_list)
+                    # OFF인 경우에는 괄호 내용을 숨기거나 희미하게 처리 (선택사항: 여기서는 ON일 때만 표시)
+                    if is_on:
+                        value_html = f'<span class="p-val-sub">({val_str}{unit})</span>'
+                    else:
+                        value_html = "" # OFF이면 값 숨김 (요청사항 반영)
+                
+                if toggle_key or v_list: # 키가 정의된 항목만 표시
+                    items_html.append(f"""
+                    <div class="p-item">
+                        <span class="p-key">{label}</span>
+                        <div class="p-val-group">
+                            {status_html}
+                            {value_html}
+                        </div>
                     </div>
-                </div>
-                """)
+                    """)
             
             if items_html:
                 group_htmls.append(f"""
@@ -237,8 +261,8 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 --buy: #38bdf8; --sell: #fbbf24; --gain: #4ade80; --loss: #f87171; 
                 --primary: #3b82f6; --sidebar-w: 280px;
             }}
-            body {{ font-family: 'Pretendard', sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; overflow: hidden; }}
-            .sidebar {{ width: var(--sidebar-w); background: #0a0f1d; border-right: 1px solid #1e293b; display: flex; flex-direction: column; flex-shrink: 0; }}
+            body {{ font-family: 'Pretendard', sans-serif; background: var(--bg); color: var(--text); margin: 0; min-height: 100vh; overflow-x: hidden; }}
+            .sidebar {{ width: var(--sidebar-w); background: #0a0f1d; border-right: 1px solid #1e293b; display: flex; flex-direction: column; position: fixed; left: 0; top: 0; bottom: 0; z-index: 1000; overflow-y: auto; }}
             .sidebar-header {{ padding: 25px 20px; border-bottom: 2px solid #1e293b; background: rgba(59,130,246,0.05); }}
             .sidebar-title {{ font-size: 1.2rem; font-weight: 800; color: var(--primary); display: flex; align-items: center; gap: 10px; text-transform: uppercase; letter-spacing: 1px; }}
             .nav-list {{ list-style: none; padding: 15px; margin: 0; overflow-y: auto; flex: 1; }}
@@ -247,13 +271,14 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             .nav-item a:hover {{ background: #1e293b; color: white; border-color: #334155; transform: translateX(5px); }}
             .nav-item .code-badge {{ background: #334155; color: #cbd5e1; font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; }}
             
-            .main-content {{ flex: 1; overflow-y: auto; padding: 40px; scroll-behavior: smooth; background: radial-gradient(circle at top right, #1e293b11, transparent); }}
-            .container {{ max-width: 1300px; margin: 0 auto; }}
+            .main-content {{ margin-left: calc(var(--sidebar-w) + 30px); padding: 40px; background: radial-gradient(circle at top right, #1e293b11, transparent); min-height: 100vh; display: block; overflow-x: visible; }}
+            .container {{ width: 100%; max-width: 1400px; margin: 0; display: block; }}
+            .header-flex {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 35px; border-bottom: 1px solid #1e293b; padding-bottom: 20px; width: 100%; }}
             
             /* 파라미터 그룹 스타일 [v15.6] */
-            .p-container {{ margin-bottom: 40px; display: flex; flex-direction: column; gap: 15px; }}
-            .p-group {{ background: #1e293bCC; border: 1px solid #334155; border-radius: 16px; padding: 15px 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); cursor: default; }}
-            .p-group[open] {{ background: #1e293b; border-color: var(--primary); }}
+            .p-container {{ margin-top: 40px; margin-bottom: 50px; display: flex; flex-direction: column; gap: 20px; clear: both; width: 100%; }}
+            .p-group {{ background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 15px 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); cursor: default; display: block; }}
+            .p-group[open] {{ background: #1e293b; border-color: var(--primary); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.4); }}
             .p-group-title {{ font-size: 0.95rem; font-weight: 700; color: var(--buy); list-style: none; outline: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }}
             .p-group-title::-webkit-details-marker {{ display: none; }}
             .p-group-title::after {{ content: '📂'; font-size: 0.8rem; opacity: 0.5; transition: 0.2s; }}
@@ -273,19 +298,18 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             h1 {{ margin: 0; font-size: 2.2rem; font-weight: 900; letter-spacing: -1px; }}
             .mode-badge-top {{ font-size: 0.8rem; background: {mode_color}; color: #0f172a; padding: 4px 12px; border-radius: 8px; font-weight: 800; }}
             
-            .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 15px; margin-bottom: 40px; }}
-            .stat-card {{ background: linear-gradient(135deg, #1e293b, #0f172a); padding: 15px 10px; border-radius: 16px; border: 1px solid #334155; position: relative; overflow: hidden; min-width: 0; }}
-            .stat-card::after {{ content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 4px; background: var(--primary); opacity: 0.5; }}
-            .stat-card div:first-child {{ color: var(--dim); font-size: 0.75rem; font-weight: 600; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-            .stat-val {{ font-size: 1.25rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+            .stats {{ display: grid !important; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin-bottom: 40px; clear: both; width: 100%; }}
+            .stat-card {{ background: linear-gradient(135deg, #1e293b, #0f172a); padding: 15px 12px; border-radius: 16px; border: 1px solid #334155; position: relative; box-sizing: border-box; min-width: 180px; }}
+            .stat-val {{ font-size: 1.25rem; font-weight: 800; font-variant-numeric: tabular-nums; }}
             
-            /* [v27.0] 전략별 진입 통계 스타일 */
-            .strategy-stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 25px; }}
+            /* [v27.0] 전략별 진입 통계 스타일 - 수직 스택 구조 고정 */
+            .strategy-stats {{ display: block; width: 100%; margin-bottom: 30px; }}
             .strategy-card {{ 
-                background: #1e293b; padding: 15px; border-radius: 12px; border: 1px solid #334155;
-                display: flex; justify-content: space-between; align-items: center;
+                background: #1e293b; padding: 20px; border-radius: 16px; border: 1px solid #334155;
+                margin-bottom: 15px; width: 100%; box-sizing: border-box;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
             }}
-            .str-label {{ font-size: 0.9rem; font-weight: 700; color: var(--dim); }}
+            .str-label {{ font-size: 1rem; font-weight: 700; color: #fff; }}
             .str-count {{ font-size: 1.2rem; font-weight: 800; color: var(--primary); }}
             .str-count.type-a {{ color: #4ade80; }}
             .str-count.type-b {{ color: #38bdf8; }}
@@ -293,14 +317,20 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             .str-count.s1-color {{ color: #94a3b8; }}
             .str-count.s2-color {{ color: #fb7185; }}
             
+            /* 카드 내부 테이블 최적화 */
+            .strategy-card table {{ width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: auto; }}
+            .strategy-card th {{ padding: 8px 0; border-bottom: 1px solid #334155; color: var(--dim); font-size: 0.75rem; text-align: left; }}
+            .strategy-card td {{ padding: 10px 0; border-bottom: 1px solid #1e293b88; font-size: 0.9rem; }}
+            .strategy-card tr:last-child td {{ border-bottom: none; }}
+            
             .stock-group {{ background: #1e293b88; padding: 30px; border-radius: 24px; margin-bottom: 60px; border: 1px solid #334155; backdrop-filter: blur(10px); }}
             .stock-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; border-bottom: 2px solid #334155; padding-bottom: 15px; }}
             .stock-header-title {{ font-size: 1.5rem; font-weight: 800; color: #fff; display: flex; align-items: center; gap: 12px; }}
             .stock-header-code {{ color: var(--buy); font-family: monospace; font-size: 1.1rem; }}
             
-            table {{ width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 15px; }}
-            th {{ color: var(--dim); padding: 15px 12px; text-align: left; font-size: 0.75rem; border-bottom: 2px solid #334155; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }}
-            td {{ padding: 16px 12px; border-bottom: 1px solid #1e293b; font-size: 0.9rem; font-variant-numeric: tabular-nums; }}
+            table {{ width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 15px; table-layout: fixed; }}
+            th {{ color: var(--dim); padding: 15px 12px; text-align: left; font-size: 0.75rem; border-bottom: 2px solid #334155; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; word-break: break-all; }}
+            td {{ padding: 16px 12px; border-bottom: 1px solid #1e293b; font-size: 0.96rem; font-variant-numeric: tabular-nums; word-break: break-all; }}
             tr:last-child td {{ border-bottom: none; }}
             tr:hover td {{ background: rgba(59, 130, 246, 0.03); }}
             .action-buy {{ color: var(--buy); font-weight: 700; background: rgba(56,189,248,0.1); padding: 2px 6px; border-radius: 4px; }}
@@ -445,11 +475,14 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             stock_trades = df[df['Code'] == c]
             s_profit = 0
             for _, tr in stock_trades.iterrows():
+                action = str(tr['Action'])
                 amt = float(tr['Price']) * float(tr['Qty'])
                 fee = float(tr.get('Fee', 0)) if not pd.isna(tr.get('Fee', 0)) else 0
-                if "BUY" in str(tr['Action']): s_profit -= (amt + fee)
-                else: s_profit += (amt - fee)
-            total_profit_val += s_profit
+                if "BUY" in action: 
+                    total_profit_val = float(total_profit_val) - (amt + fee)
+                elif action in ['SELL', 'HOLD']:
+                    total_profit_val = float(total_profit_val) + (amt - fee)
+            # total_profit_val += s_profit (기존 로직 대체)
     
     def _s_int(v, default=0):
         try:
@@ -470,6 +503,17 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     count_b = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('TYPE_B', case=False, na=False))])
     count_s2 = len(df[(df['Action'].str.contains('BUY2', na=False)) | (df['Action'] == 'ADDON') | (df['Reason'].str.contains('Stage 2|ADDON', case=False, na=False))])
     
+    # [v4.0] Precise Stage 1 Type A/B Filtering (Excluding S2/ADDON)
+    s1_a_mask = (df['Action'].isin(['SELL', 'HOLD'])) & \
+                (df['Sig_Type'] == 'TYPE_A') & \
+                (~df['Reason'].str.contains('S2|Stage 2|추매|ADDON', case=False, na=False))
+    s1_a_rets = df[s1_a_mask]['Return'].tolist()
+    
+    s1_b_mask = (df['Action'].isin(['SELL', 'HOLD'])) & \
+                (df['Sig_Type'] == 'TYPE_B') & \
+                (~df['Reason'].str.contains('S2|Stage 2|추매|ADDON', case=False, na=False))
+    s1_b_rets = df[s1_b_mask]['Return'].tolist()
+    
     # [v27.5] Smart Buy/Exit Tracking
     count_smart_buy = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('SmartBuy', case=False, na=False))])
     count_smart_exit = len(df[(df['Action'].str.startswith('SELL', na=False)) & (df['Reason'].str.contains('Smart Exit', case=False, na=False))])
@@ -477,43 +521,178 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     total_signals = count_smart_buy + count_rejected
     pass_rate = (count_smart_buy / max(1, total_signals)) * 100
     
-    # [v27.3] Performance by Strategy Depth (S1 Only vs S2 Reached)
-    s1_rets, s2_rets = [], []
+    # [v5.0] Granular Profit & Yield Breakdown (S1-Only vs S1+S2)
+    a_s1_p, a_s1_i = [], []     # Type A, Stage 1 Only
+    a_s2_p, a_s2_i = [], []     # Type A, with Stage 2
+    b_s1_p, b_s1_i = [], []     # Type B, Stage 1 Only
+    b_s2_p, b_s2_i = [], []     # Type B, with Stage 2
+    
+    total_s1_p, total_s1_i = [], []  # All S1-only exits
+    total_s2_p, total_s2_i = [], []  # All S1+S2 exits
+
     for c in df['Code'].unique():
         s_df = df[df['Code'] == c]
+        entry_sig = "NONE"
+        investment_sum = 0
         has_s2 = False
+        
+        # Action-based sequence parsing
+        temp_inv = 0
+        temp_has_s2 = False
+        temp_sig = "NONE"
+        
         for _, r in s_df.iterrows():
             action = str(r['Action'])
+            price = float(r['Price'])
+            qty = float(r['Qty'])
+            fee = float(r.get('Fee', 0)) if not pd.isna(r.get('Fee', 0)) else 0
+            
             if "BUY" in action:
                 if any(x in action for x in ["BUY2", "BUY_2ND", "ADDON", "S2"]):
-                    has_s2 = True
-            elif "SELL" in action:
-                ret = float(r.get('Return', 0))
-                if has_s2: s2_rets.append(ret)
-                else: s1_rets.append(ret)
-                has_s2 = False 
+                    temp_has_s2 = True
+                else:
+                    temp_sig = str(r.get('Sig_Type', 'NONE'))
+                temp_inv += (price * qty) + fee
+            
+            elif action in ["SELL", "HOLD"]:
+                profit = (price * qty) - fee - temp_inv
+                
+                if temp_has_s2:
+                    if "TYPE_A" in temp_sig:
+                        a_s2_p.append(profit); a_s2_i.append(temp_inv)
+                    elif "TYPE_B" in temp_sig:
+                        b_s2_p.append(profit); b_s2_i.append(temp_inv)
+                    total_s2_p.append(profit); total_s2_i.append(temp_inv)
+                else:
+                    if "TYPE_A" in temp_sig:
+                        a_s1_p.append(profit); a_s1_i.append(temp_inv)
+                    elif "TYPE_B" in temp_sig:
+                        b_s1_p.append(profit); b_s1_i.append(temp_inv)
+                    total_s1_p.append(profit); total_s1_i.append(temp_inv)
+                
+                # Reset for next trade in SAME ticker
+                temp_inv = 0
+                temp_has_s2 = False
+                temp_sig = "NONE"
 
-    avg_s1 = sum(s1_rets)/len(s1_rets) if s1_rets else 0
-    avg_s2 = sum(s2_rets)/len(s2_rets) if s2_rets else 0
+    def calc_yield(profits, invested):
+        if not invested or sum(invested) == 0: return 0
+        return (sum(profits) / sum(invested)) * 100
+
+    y_a1, s_a1 = calc_yield(a_s1_p, a_s1_i), sum(a_s1_p)
+    y_a2, s_a2 = calc_yield(a_s2_p, a_s2_i), sum(a_s2_p)
+    y_b1, s_b1 = calc_yield(b_s1_p, b_s1_i), sum(b_s1_p)
+    y_b2, s_b2 = calc_yield(b_s2_p, b_s2_i), sum(b_s2_p)
+    y_s1, s_s1 = calc_yield(total_s1_p, total_s1_i), sum(total_s1_p)
+    y_s2, s_s2 = calc_yield(total_s2_p, total_s2_i), sum(total_s2_p)
+
+    # [v4.7] Refined Statistics (Signals vs Fills)
+    count_fills = len(df[df['Action'].isin(['SELL', 'HOLD'])])
+    total_signals = count_smart_buy + count_rejected
+    pass_rate = (count_smart_buy / max(1, total_signals)) * 100
 
     strategy_stats_html = f"""
-    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px;">Strategy Entry Breakdown (진입 횟수)</div>
-    <div class="strategy-stats">
-        <div class="strategy-card">
-            <span class="str-label">Type A (눌림목)</span>
-            <span class="str-count type-a">{count_a} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:12px;">Strategy Execution Map (전략별 실행 성과 지도)</div>
+    <div class="strategy-stats" style="display: flex; flex-direction: column; gap: 15px;">
+        
+        <!-- Type A Section (눌림목) -->
+        <div class="strategy-card" style="display: block; border-left: 5px solid var(--type-a); padding: 15px; background: var(--card-bg); border-radius: 8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #334155; padding-bottom:10px; margin-bottom:12px;">
+                <span style="color:var(--type-a); font-weight:800; font-size:1.1rem;">Type A (눌림목)</span>
+                <span style="font-size:0.9rem; color:var(--dim);">총 진입 횟수: <b style="color:#fff; font-size:1.1rem;">{len(a_s1_p)+len(a_s2_p)}</b> 건</span>
+            </div>
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="color:var(--dim); text-align:left;">
+                        <th style="width: 30%;">진입 구분</th>
+                        <th style="text-align:center; width: 20%;">건수</th>
+                        <th style="text-align:center; width: 20%;">가중 수익률</th>
+                        <th style="text-align:right; width: 30%;">총 수익금 (Net KRW)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="padding: 8px 0;">Stage 1 Only (1차만 진행)</td>
+                        <td style="text-align:center; font-weight:600;">{len(a_s1_p)}건</td>
+                        <td style="text-align:center;" class="{'gain' if s_a1 >= 0 else 'loss'}">{y_a1:+.2f}%</td>
+                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_a1 >= 0 else 'loss'}">{int(s_a1):,}원</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0;">with Stage 2 (추매 포함)</td>
+                        <td style="text-align:center; font-weight:600;">{len(a_s2_p)}건</td>
+                        <td style="text-align:center;" class="{'gain' if s_a2 >= 0 else 'loss'}">{y_a2:+.2f}%</td>
+                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_a2 >= 0 else 'loss'}">{int(s_a2):,}원</td>
+                    </tr>
+                </tbody>
+            </table>
+            <div style="margin-top:15px; padding-top:12px; border-top:2px solid #334155; text-align:right;">
+                <span style="color:var(--dim); font-size:0.85rem; margin-right:10px;">Type A 합계 수익:</span> 
+                <span class="{'gain' if (s_a1+s_a2) >= 0 else 'loss'}" style="font-size:1.3rem; font-weight:900;">{int(s_a1+s_a2):,}원</span>
+            </div>
         </div>
-        <div class="strategy-card">
-            <span class="str-label">Type B (추세돌파)</span>
-            <span class="str-count type-b">{count_b} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+
+        <!-- Type B Section (추세돌파) -->
+        <div class="strategy-card" style="display: block; border-left: 5px solid var(--type-b); padding: 15px; background: var(--card-bg); border-radius: 8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #334155; padding-bottom:10px; margin-bottom:12px;">
+                <span style="color:var(--type-b); font-weight:800; font-size:1.1rem;">Type B (추세돌파)</span>
+                <span style="font-size:0.9rem; color:var(--dim);">총 진입 횟수: <b style="color:#fff; font-size:1.1rem;">{len(b_s1_p)+len(b_s2_p)}</b> 건</span>
+            </div>
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="color:var(--dim); text-align:left;">
+                        <th style="width: 30%;">진입 구분</th>
+                        <th style="text-align:center; width: 20%;">건수</th>
+                        <th style="text-align:center; width: 20%;">가중 수익률</th>
+                        <th style="text-align:right; width: 30%;">총 수익금 (Net KRW)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="padding: 8px 0;">Stage 1 Only (1차만 진행)</td>
+                        <td style="text-align:center; font-weight:600;">{len(b_s1_p)}건</td>
+                        <td style="text-align:center;" class="{'gain' if s_b1 >= 0 else 'loss'}">{y_b1:+.2f}%</td>
+                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_b1 >= 0 else 'loss'}">{int(s_b1):,}원</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0;">with Stage 2 (추매 포함)</td>
+                        <td style="text-align:center; font-weight:600;">{len(b_s2_p)}건</td>
+                        <td style="text-align:center;" class="{'gain' if s_b2 >= 0 else 'loss'}">{y_b2:+.2f}%</td>
+                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_b2 >= 0 else 'loss'}">{int(s_b2):,}원</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
-        <div class="strategy-card">
-            <span class="str-label">Stage 2 (추가매수)</span>
-            <span class="str-count type-s2">{count_s2} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+
+        <div style="display:flex; flex-wrap: wrap; gap:15px; width:100%;">
+            <!-- Overall Summary Section -->
+            <div class="strategy-card" style="flex:2; min-width:300px;">
+                <span class="str-label" style="border-bottom:1px solid #444; padding-bottom:5px; display:block; margin-bottom:10px;">Overall Execution (전체 실행 정산)</span>
+                <div style="display:flex; justify-content:space-between; font-size:0.9rem; margin-bottom:8px;">
+                    <span style="color:var(--dim)">S1 Only (1단계 전용):</span>
+                    <span class="{'gain' if s_s1 >= 0 else 'loss'}" style="font-weight:700;">{y_s1:.2f}% ({int(s_s1):,}원 / {len(total_s1_p)}건)</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:0.9rem;">
+                    <span style="color:var(--dim)">with S2 (추매 포함):</span>
+                    <span class="{'gain' if s_s2 >= 0 else 'loss'}" style="font-weight:700;">{y_s2:.2f}% ({int(s_s2):,}원 / {len(total_s2_p)}건)</span>
+                </div>
+            </div>
+
+            <!-- Signal Stats Section -->
+            <div class="strategy-card" style="flex:1; min-width:200px;">
+                <span class="str-label" style="border-bottom:1px solid #444; padding-bottom:5px; display:block; margin-bottom:10px;">Signal Stats (신호 통계)</span>
+                <div style="display:flex; justify-content:space-between; font-size:0.85rem; margin-bottom:6px;">
+                    <span style="color:var(--dim)">실제 진입:</span>
+                    <span>{len(total_s1_p)+len(total_s2_p)} 건 / {total_signals} 건</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:0.85rem;">
+                    <span style="color:var(--dim)">SmartBuy 통과:</span>
+                    <span style="color:#22c55e; font-weight:bold;">{pass_rate:.1f}%</span>
+                </div>
+            </div>
         </div>
     </div>
     
-    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:15px;">Smart Metrics (수급 및 실시간 필터링)</div>
+    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:20px;">Smart Metrics (수급 및 실시간 필터링)</div>
     <div class="strategy-stats">
         <div class="strategy-card">
             <span class="str-label">Smart Buy (통과율: {pass_rate:.1f}%)</span>
@@ -523,27 +702,12 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             <span class="str-label">Smart Exit (실시간 매도)</span>
             <span class="str-count" style="color:#ef4444">{count_smart_exit} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
         </div>
-        <div class="strategy-card" style="opacity:0.5;">
-            <span class="str-label">-</span>
-            <span class="str-count">-</span>
+        <div class="strategy-card">
+            <span class="str-label">Signals Rejected (신호 거절됨)</span>
+            <span class="str-count" style="color:var(--dim)">{count_rejected} <small style="font-size:0.7rem;">건</small></span>
         </div>
     </div>
     
-    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:20px;">Strategy Depth Performance (수익률 집계)</div>
-    <div class="strategy-stats">
-        <div class="strategy-card">
-            <span class="str-label">Stage 1 Only (정찰)</span>
-            <span class="str-count s1-color">{avg_s1:+.2f}% <small style="font-size:0.7rem; color:var(--dim)">({len(s1_rets)}건)</small></span>
-        </div>
-        <div class="strategy-card">
-            <span class="str-label">Stage 2 Reached (추매)</span>
-            <span class="str-count s2-color">{avg_s2:+.2f}% <small style="font-size:0.7rem; color:var(--dim)">({len(s2_rets)}건)</small></span>
-        </div>
-        <div class="strategy-card" style="border: 1px dashed #fb718555;">
-            <span class="str-label">Alpha (추매 가산점)</span>
-            <span class="str-count" style="color:#fff;">{avg_s2 - avg_s1:+.2f}%</span>
-        </div>
-    </div>
     """
 
     # Portfolio Equity Chart
@@ -565,9 +729,9 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             max_val = max(equities) * 1.05
             
             equity_chart_html = f"""
-            <div style="background:var(--card-bg); border-radius:12px; padding:20px; margin-top:20px; border:1px solid #333;">
-                <h3 style="margin-top:0; margin-bottom:15px; font-size:1.1rem; color:var(--dim);">📈 포트폴리오 자산 추이 및 비중 분석</h3>
-                <div id="equity-chart" style="height:400px; width:100%;"></div>
+            <div style="background:var(--card-bg); border-radius:12px; padding:20px; margin-top:30px; border:1px solid #334155; display: block; clear: both; width: 100%; box-sizing: border-box; overflow: hidden;">
+                <h3 style="margin-top:0; margin-bottom:15px; font-size:1.15rem; color:var(--primary); border-bottom: 1px solid #334155; padding-bottom: 10px;">📈 포트폴리오 자산 추이 및 비중 분석</h3>
+                <div id="equity-chart" style="height:450px; width:100%; min-height:450px;"></div>
                 <script>
                     const traceEquity = {{
                         x: {json.dumps(dates)}, y: {json.dumps(equities)},
@@ -654,34 +818,49 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             status_badge = "-"
             try:
                 if msi is not None and adx is not None and vix_series is not None:
-                    m_idx = msi.index.get_indexer([r['Date']], method='pad')[0]
+                    # [v18.0] Intraday Timestamp Handling: Match by nearest prior daily index
+                    target_date = r['Date'].replace(hour=0, minute=0, second=0, microsecond=0)
+                    m_idx = msi.index.get_indexer([target_date], method='pad')[0]
+                    if m_idx == -1: # Try without time reset if pad failed
+                        m_idx = msi.index.get_indexer([r['Date']], method='pad')[0]
+                        
                     if m_idx != -1:
                         m_val, a_val, v_val = msi.iloc[m_idx], adx.iloc[m_idx], vix_series.iloc[m_idx]
                         if m_val > 0 and a_val > 25 and v_val < 20:
-                            status_badge = '<span style="background:#22c55e; color:white; padding:2px 6px; border-radius:4px; font-weight:bold; font-size:0.75rem;">AGGRESSIVE</span>'
-                        elif m_val > 0 and v_val < 20:
-                            status_badge = '<span style="background:#fbbf24; color:black; padding:2px 6px; border-radius:4px; font-weight:bold; font-size:0.75rem;">SAFE</span>'
-                        elif m_val < 0 and v_val > 30:
-                            status_badge = '<span style="background:#ef4444; color:white; padding:2px 6px; border-radius:4px; font-weight:bold; font-size:0.75rem;">RISK</span>'
+                            status_badge = '<span style="background:#22c55e; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">UP (Aggressive)</span>'
+                        elif m_val > 0 and v_val < 25:
+                            status_badge = '<span style="background:#84cc16; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">UP (Safe)</span>'
+                        elif m_val < -1 or v_val > 30:
+                            status_badge = '<span style="background:#ef4444; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">DOWN (Risk)</span>'
                         else:
-                            status_badge = '<span style="background:#f97316; color:white; padding:2px 6px; border-radius:4px; font-weight:bold; font-size:0.75rem;">WATCH</span>'
+                            status_badge = '<span style="background:#f97316; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">NEUTRAL</span>'
+                    else:
+                        # Fallback: Just show Neutral if data exists but index is slightly off
+                        status_badge = '<span style="background:#64748b; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">NEUTRAL</span>'
             except: pass
 
             amt = r['Price'] * r['Qty']
             fee = r.get('Fee', 0) if not pd.isna(r.get('Fee', 0)) else 0
             ret_str, action_cls, cum_profit_str = "", "action-buy", "-"
             
-            if "BUY" in str(r['Action']):
+            action_raw = str(r['Action'])
+            if "BUY" in action_raw:
                 pass # Default values OK
-            elif r['Action'] == 'REJECTED_SIG':
+            elif action_raw == 'REJECTED_SIG':
                 action_cls = "action-rejected"
                 ret_str = '<span style="color:var(--dim)">Filtered</span>'
+            elif "PROTECT" in action_raw:
+                action_cls = "action-hold" # [v8.0] 파란색 계열로 표시
+                ret_str = "-"
+                cum_profit_str = "-"
             else:
                 ret_val = float(r.get('Return', 0)) if not pd.isna(r.get('Return', 0)) else 0
-                avg_p_rev = r['Price'] / (1 + ret_val/100) if (1 + ret_val/100) != 0 else r['Price']
-                p_inc = (r['Price'] - avg_p_rev) * r['Qty'] - fee
-                if not pd.isna(p_inc):
-                    stock_realized_profit += p_inc
+                # [v8.0] 실제 매매인 경우에만 누적 수익금 계산
+                if action_raw in ['SELL', 'HOLD', 'PARTIAL_SELL']:
+                    avg_p_rev = r['Price'] / (1 + ret_val/100) if (1 + ret_val/100) != 0 else r['Price']
+                    p_inc = (r['Price'] - avg_p_rev) * r['Qty'] - fee
+                    if not pd.isna(p_inc):
+                        stock_realized_profit += p_inc
                 
                 action_cls = "action-sell"
                 if r['Action'] in ["SELL", "HOLD", "PARTIAL_SELL"]:
