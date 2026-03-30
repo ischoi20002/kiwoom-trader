@@ -29,17 +29,17 @@ class ConfigHandler:
         return default_settings.copy()
 
     def save_settings(self, settings):
-        """설정 파일 저장"""
+        """[v3.5.5] 설정 파일 저장 (유효 키 필터링 포함)"""
         try:
+            # [v4.5.3 Modularization] core.defaults에서 허용된 키 가져오기
+            from core.defaults import get_allowed_keys
+            allowed = get_allowed_keys()
+            
+            # 필터링 수행 (DEFAULT_SETTINGS에 없는 좀비 파라미터 제거)
+            filtered_settings = {k: v for k, v in settings.items() if k in allowed}
+            
             with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=4, ensure_safe_chars=True) # ensure_safe_chars might not be a standard json.dump arg, using default
-                # Standard json.dump doesn't have ensure_safe_chars. Using ensure_ascii=False for Korean support.
-                # Re-writing to be safe.
-        except: pass
-        
-        try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=4, ensure_ascii=False)
+                json.dump(filtered_settings, f, indent=4, ensure_ascii=False)
             return True
         except Exception as e:
             self.log(f"❌ 설정 저장 실패: {e}")

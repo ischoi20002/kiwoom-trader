@@ -139,12 +139,14 @@ def calculate_all_indicators(df, settings):
             pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
             
             # Map back efficiently (v35.8: Avoid merge/KeyError issues)
-            # stack() converts pivoted_rolled to a Series with MultiIndex (date_only, time_only)
             stacked = pivoted_rolled.stack(future_stack=True)
-            
-            # Reindex to match the original df's (date_only, time_only)
-            # This is much safer and faster than merge + restore index
-            lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
+            if isinstance(df.index, pd.DatetimeIndex):
+                lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
+            else:
+                # Fallback: Use current date for all rows if index is not datetime
+                now_norm = pd.Timestamp.now().normalize()
+                lookup_keys = pd.MultiIndex.from_arrays([[now_norm]*len(df), [None]*len(df)])
+                
             df['Prev_Day_Vol'] = stacked.reindex(lookup_keys).values
             df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
         
@@ -184,7 +186,12 @@ def calculate_buy_indicators_light(df, settings):
         
         # Map back efficiently (Avoid merge/KeyError issues)
         stacked = pivoted_rolled.stack(future_stack=True)
-        lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
+        if isinstance(df.index, pd.DatetimeIndex):
+            lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
+        else:
+            now_norm = pd.Timestamp.now().normalize()
+            lookup_keys = pd.MultiIndex.from_arrays([[now_norm]*len(df), [None]*len(df)])
+            
         df['Prev_Day_Vol'] = stacked.reindex(lookup_keys).values
         df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
     else:

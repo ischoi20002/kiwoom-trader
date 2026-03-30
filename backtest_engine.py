@@ -345,12 +345,17 @@ class SimpleBacktester:
                 end_idxs = np.searchsorted(m1_times, times_15m + pd.Timedelta(minutes=14, seconds=59), side='right')
                 # Store as (start, end) tuples or arrays
                 m1_boundaries = list(zip(start_idxs, end_idxs))
-                # Convert 1M to numpy for zero-copy access
+                # [v4.5.10] Extract VP/BA for 1M Smart Exit simulation
                 m1_np_high = m1_df_preloaded['High'].values
                 m1_np_close = m1_df_preloaded['Close'].values
-                m1_np_time = m1_df_preloaded.index.values # For exit time lookup
+                m1_np_time = m1_df_preloaded.index.values
+                # Bid/Ask Ratio mapping (v4.5: Ensure column names match data_loader)
+                m1_np_ba = m1_df_preloaded['total_bid'].values / m1_df_preloaded['total_ask'].values if 'total_bid' in m1_df_preloaded.columns else np.full(len(m1_df_preloaded), 1.0)
+                m1_np_vp = m1_df_preloaded['vol_power'].values if 'vol_power' in m1_df_preloaded.columns else np.full(len(m1_df_preloaded), 100.0)
             else:
                 m1_boundaries = None
+                m1_np_ba = None
+                m1_np_vp = None
             
             # 신호 및 필터 미리 정리
             signal_shifted = df['Signal_Shifted'].values if 'Signal_Shifted' in df.columns else np.zeros(len(df), dtype=bool)
@@ -376,7 +381,7 @@ class SimpleBacktester:
             balance = params['balance']
             
             for i in range(1, total_bars):
-                m1_info = (m1_np_high, m1_np_close, m1_np_time, m1_boundaries[i]) if m1_boundaries else None
+                m1_info = (m1_np_high, m1_np_close, m1_np_time, m1_boundaries[i], m1_np_ba, m1_np_vp) if m1_boundaries else None
                 
                 # Update loop locals
                 params['position'] = pos
@@ -407,8 +412,8 @@ class SimpleBacktester:
     def _init_simulation(self, df, code, market_df, vix_df, high_precision):
         """시뮬레이션 초기 설정 및 시장 상태 계산"""
         total_capital_val = float(self.settings.get('backtest_initial_capital', 30000000))
-        max_slots = int(self.settings.get('max_slots', 10))
-        slot_budget = total_capital_val / max_slots
+        # [v4.5 Design Update] 슬롯별 예산 제한 폐지. 각 종목은 전체 가용 자산을 기준으로 시뮬레이션됨.
+        slot_budget = total_capital_val
         
         # [v4.5 Sync] Handle Sizing Units (Won / %)
         s1_unit = self.settings.get('s1_sizing_unit', '%')
@@ -518,24 +523,23 @@ class SimpleBacktester:
             # [Fix] Align VIX with market index to prevent shape mismatch (broadcast error)
             vix_s = vix_df['Close'].reindex(m_df.index).ffill().fillna(15.0) if vix_df is not None and 'Close' in vix_df.columns else pd.Series(15.0, index=m_df.index)
             
+            # [v4.5.10] Unified Triple-Lock Safety System (DNA Sync)
+            # Thresholds: DOWN (Stop All), NEUTRAL (Stop Type B), UP (Go All)
+            lock_down = (m_df['MSI'] < -0.10) | (vix_s > 30)
+            lock_neutral = (m_df['ADX'] < 15) | ((m_df['MSI'] >= -0.10) & (m_df['MSI'] <= 0.05))
+            
+            m_df['Trend'] = np.where(lock_down, 'DOWN', 
+                                     np.where(lock_neutral, 'NEUTRAL', 'UP'))
+            
+            # Status Mapping (v4.5.10 Hardened)
             m_df['Status'] = 'WATCH'
-            m_df.loc[(m_df['MSI'] > 0) & (m_df['ADX'] >= 25) & (vix_s <= 20), 'Status'] = 'AGGRESSIVE'
-            m_df.loc[(m_df['MSI'] > 0) & (vix_s <= 20) & (m_df['Status'] == 'WATCH'), 'Status'] = 'SAFE'
-            m_df.loc[(m_df['MSI'] < -0.05) | (vix_s >= 30), 'Status'] = 'RISK'
-            
-            # [v26.9] Triple-Lock Safety System (MSI -0.05, VIX 30, ADX 15)
-            # Market is 'DOWN' (Blocked) if ANY of these trigger:
-            lock_msi = m_df['MSI'] < -0.05
-            lock_vix = vix_s > 30
-            lock_adx = m_df['ADX'] < 15
-            triple_lock_down = lock_msi | lock_vix | lock_adx
-            
-            m_df['Trend'] = np.where(triple_lock_down, 'DOWN', 
-                                     np.where(m_df['MSI'] > 0, 'UP', 'NEUTRAL'))
-            
+            m_df.loc[(m_df['Trend'] == 'UP') & (m_df['ADX'] >= 25) & (vix_s <= 20), 'Status'] = 'AGGRESSIVE'
+            m_df.loc[(m_df['Trend'] == 'UP') & (m_df['Status'] == 'WATCH'), 'Status'] = 'SAFE'
+            m_df.loc[m_df['Trend'] == 'DOWN', 'Status'] = 'RISK'
+
             # [Realism] Today's market trend is determined by yesterday's close data to avoid look-ahead bias
-            m_df['Status'] = m_df['Status'].shift(1).fillna('WATCH')
             m_df['Trend'] = m_df['Trend'].shift(1).fillna('UP')
+            m_df['Status'] = m_df['Status'].shift(1).fillna('WATCH')
             
             # [v35.7] Safety: ensure DatetimeIndex for normalize()
             if not isinstance(df.index, pd.DatetimeIndex):
@@ -624,21 +628,18 @@ class SimpleBacktester:
         return True
 
             
-    def _process_intra_bar_exit_only_v2(self, i, code, m1_highs, m1_closes, m1_times, params, time_h, time_m):
-        """[v35.0] Ultra-Fast Intra-bar Exit check (Zero Pandas)"""
+    def _process_intra_bar_exit_only_v2(self, i, code, m1_highs, m1_closes, m1_times, params, time_h, time_m, m1_ba=None, m1_vp=None, indicators=None):
+        """[v35.0] Ultra-Fast Intra-bar Exit check (v4.5.10 ATR/Smart Sync)"""
         pos = params['position']
         sig_type = pos.get('sig_type', 'TYPE_A')
         is_type_b = (sig_type == "TYPE_B" and self.use_type_b)
+        stage = pos['stage']
         
-        if pos['stage'] == 1:
+        if stage == 1:
             use_flash = self.use_s1b_flash_active if is_type_b else self.use_s1a_flash_active
             f_pct = (self.s1b_flash if is_type_b else self.s1a_flash) if use_flash else 0.0
-            
-            use_sl = self.use_s1b_sl_active if is_type_b else self.use_s1a_sl_active
-            sl_pct = (self.s1b_sl if is_type_b else self.s1a_sl) * 100 if use_sl else 0.0
-            
-            use_tp = self.use_s1b_tp_active if is_type_b else self.use_s1a_tp_active
-            tp_pct = (self.s1b_tp if is_type_b else self.s1a_tp) * 100 if use_tp else 0.0
+            sl_pct = (self.s1b_sl if is_type_b else self.s1a_sl) * 100 if (self.use_s1b_sl_active if is_type_b else self.use_s1a_sl_active) else 0.0
+            tp_pct = (self.s1b_tp if is_type_b else self.s1a_tp) * 100 if (self.use_s1b_tp_active if is_type_b else self.use_s1a_tp_active) else 0.0
         else:
             f_pct = self.s2_flash if self.use_s2_flash else 0.0
             sl_pct = self.s2_sl * 100 if self.use_s2_sl else 0.0
@@ -653,21 +654,50 @@ class SimpleBacktester:
         stop_lossed = (sl_pct > 0) & (m1_closes / avg_price - 1 <= -sl_pct/100)
         take_profited = (tp_pct > 0) & (m1_highs / avg_price - 1 >= tp_pct/100)
         gap_downed = (self.use_gap_down_exit) & (m1_closes / avg_price - 1 <= self.gap_down_limit / 100)
-        
+
+        # [v4.5.10] ATR Exit Logic (Sync with StrategyEngine)
+        atr_exit = np.zeros(len(m1_closes), dtype=bool)
+        atr_trail = np.zeros(len(m1_closes), dtype=bool)
+        if self.use_atr and indicators is not None:
+            atr_val = indicators['ATR'][i]
+            entry_atr = pos.get('atr_at_entry', atr_val)
+            if not np.isnan(atr_val) and atr_val > 0:
+                suff = "_s2" if stage == 2 else ("_b" if is_type_b else "_a")
+                if getattr(self, f'use_atr_sl{suff}'):
+                    atr_exit = (m1_closes <= avg_price - (getattr(self, f'atr_sl_mult{suff}') * entry_atr))
+                if getattr(self, f'use_atr_trail{suff}'):
+                    atr_trail = (m1_closes <= running_max - (getattr(self, f'atr_trail_mult{suff}') * atr_val))
+
+        # [v4.5.10] Smart Exit Logic (Sync with DNA / StrategyEngine)
+        smart_exited = np.zeros(len(m1_closes), dtype=bool)
+        if self.use_sx and m1_ba is not None and m1_vp is not None:
+            # DNA/StrategyEngine rule: Bid Trap (High Bid wall + Weak VolPower + Price Stall)
+            # Bid/Ask >= 1.3 AND VolPower < 90 AND (optional) Price logic
+            smart_exited = (m1_ba >= self.sx_ba) & (m1_vp < self.sx_vp)
+            if self.sx_p_thr != 0:
+                smart_exited &= (m1_closes <= running_max * (1 + self.sx_p_thr / 100.0))
+
         if self.use_gap_grace and time_h == 9 and time_m == 0:
             grace_idx_limit = 15 
             if len(stop_lossed) > 0: stop_lossed[:grace_idx_limit] = False
+            if len(gap_downed) > 0: gap_downed[:grace_idx_limit] = False
+            if len(flash_exited) > 0: flash_exited[:grace_idx_limit] = False
                 
-        exit_mask = flash_exited | stop_lossed | take_profited | gap_downed
+        exit_mask = flash_exited | stop_lossed | take_profited | gap_downed | atr_exit | atr_trail | smart_exited
         exit_idxs = np.where(exit_mask)[0]
         if len(exit_idxs) > 0:
             idx = int(exit_idxs[0])
             e_price, e_time = m1_closes[idx], m1_times[idx]
             if bool(take_profited[idx]): e_price = avg_price * (1 + tp_pct/100)
+            
             reason = "1M_SL"
             if bool(gap_downed[idx]): reason = "1M_GapDown"
             elif bool(flash_exited[idx]): reason = "1M_FlashExit"
             elif bool(take_profited[idx]): reason = "1M_TP"
+            elif bool(atr_exit[idx]): reason = "1M_ATR_SL"
+            elif bool(atr_trail[idx]): reason = "1M_ATR_Trail"
+            elif bool(smart_exited[idx]): reason = f"1M_SmartExit(BA:{m1_ba[idx]:.2f}/VP:{m1_vp[idx]:.0f})"
+            
             params = self._execute_sell(e_time, e_price, reason, params)
         return params
 
@@ -680,11 +710,17 @@ class SimpleBacktester:
         
         # 1. High Precision Exit Monitoring
         if high_precision and m1_info is not None and params['position'] is not None:
-            m1_high_total, m1_close_total, m1_time_total, (s_idx, e_idx) = m1_info
+            m1_high_total, m1_close_total, m1_time_total, (s_idx, e_idx), m1_ba_total, m1_vp_total = m1_info
             if e_idx > s_idx:
                 m1_highs = m1_high_total[s_idx:e_idx]
                 m1_closes = m1_close_total[s_idx:e_idx]
-                params = self._process_intra_bar_exit_only_v2(i, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], params, time_hours[i], time_minutes[i])
+                m1_ba = m1_ba_total[s_idx:e_idx] if m1_ba_total is not None else None
+                m1_vp = m1_vp_total[s_idx:e_idx] if m1_vp_total is not None else None
+                params = self._process_intra_bar_exit_only_v2(
+                    i, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], 
+                    params, time_hours[i], time_minutes[i], 
+                    m1_ba=m1_ba, m1_vp=m1_vp, indicators=indicators
+                )
                 if params['position'] is None:
                     return params
 

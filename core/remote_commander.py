@@ -8,7 +8,8 @@ class RemoteCommander:
     """
     [v3.8] 텔레그램을 통한 원격 업데이트 및 재시작 명령을 전담하는 모듈.
     """
-    def __init__(self, data_manager, log_func=None):
+    def __init__(self, app, data_manager, log_func=None):
+        self.app = app
         self.data_manager = data_manager
         self.log = log_func or print
         self.is_running = False
@@ -35,7 +36,11 @@ class RemoteCommander:
                         self._handle_remote_update()
                     elif command == "/restart":
                         self._handle_remote_restart()
-                    # 처리된 명령은 DB에서 삭제 (DataManagerV2에서 담당한다고 가정)
+                    elif command == "/select":
+                        self._handle_remote_select()
+                    elif command == "/start":
+                        self.app.root.after(0, self.app.trading_controller.start)
+                    # 처리된 명령은 DB에서 삭제됨
             except Exception as e:
                 self.log(f"[Error] [Remote] 명령 폴링 오류: {e}")
             time.sleep(5)
@@ -68,3 +73,12 @@ class RemoteCommander:
                 self.log("[Error] [Remote] 실행 스크립트(run_app.bat)를 찾을 수 없습니다.")
         except Exception as e:
             self.log(f"[Error] [Remote] 재시작 중 오류: {e}")
+
+    def _handle_remote_select(self):
+        """원격 종목 선정 트리거 (Auto-Confirm 모드)"""
+        self.log("[Remote] 원격 종목 선정 시작...")
+        if hasattr(self.app, 'dashboard_tab'):
+            # GUI 스레드 세이프하게 호출
+            self.app.root.after(0, lambda: self.app.dashboard_tab.start_selection_thread(auto_confirm=True))
+        else:
+            self.log("[Error] [Remote] DashboardTab이 로드되지 않아 명령을 수행할 수 없습니다.")

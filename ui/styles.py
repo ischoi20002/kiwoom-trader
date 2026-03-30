@@ -20,7 +20,7 @@ class NordicStyle:
 
     def apply(self):
         style = ttk.Style()
-        style.theme_use('clam')
+        style.theme_use('alt')
         
         # 메인 배경 및 전연 폰트
         self.root.configure(bg=self.colors['bg'])
@@ -63,12 +63,22 @@ class NordicStyle:
         style.configure("Subtle.TButton", foreground=self.colors['secondary'], background=self.colors['card'], borderwidth=1)
         style.map("Subtle.TButton", background=[("active", self.colors['bg'])], foreground=[("active", self.colors['primary'])])
 
-        # 트리뷰 스타일
+        # 트리뷰 스타일 (v4.5.31 tags support fix)
         style.configure("Treeview", background="#242933", foreground=self.colors['fg'], 
                         fieldbackground="#242933", rowheight=32, borderwidth=0)
         style.configure("Treeview.Heading", background="#434C5E", foreground=self.colors['primary'], 
-                        font=("Malgun Gothic", 9, "bold"), borderwidth=1, relief=tk.FLAT)
-        style.map("Treeview", background=[("selected", "#88C0D0")], foreground=[("selected", "#2E3440")])
+                        font=("Segoe UI", 9, "bold"), borderwidth=1, relief=tk.FLAT)
+        
+        # [v4.5.9] ttk 태그 색상 무시 방지: 모든 상태 초기화 (Nuclear Reset)
+        style.map("Treeview", foreground=[], background=[])
+        
+        # 선택된 행의 색상만 명시적으로 재설정
+        style.map("Treeview", 
+                  background=[("selected", "#88C0D0")], 
+                  foreground=[("selected", "#2E3440")])
+        
+        # [Critical Fix] Treeview 기본 설정에서 foreground/background 매핑을 완전히 제거하여 태그 우선순위 보장
+        style.configure("Treeview", foreground="", background="")
 
         # 입력 위젯 스타일
         style.configure("TEntry", fieldbackground="#242933", foreground=self.colors['fg'], 

@@ -391,10 +391,10 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                     <div class="stat-card"><div>Avg Return</div><div class="stat-val" style="color:{ret_color}">{avg_ret:+.2f}%</div></div>
                     <div class="stat-card"><div>Avg Cash Ratio</div><div class="stat-val" style="color:#38bdf8">{avg_cash_ratio:.1f}%</div></div>
                     
-                    <div class="stat-card"><div>Total Profit (Gross)</div><div class="stat-val" style="color:{gross_profit_color}">{gross_profit:+,}</div></div>
-                    <div class="stat-card"><div>Total Fees</div><div class="stat-val" style="color:var(--loss)">-{total_fees:,}</div></div>
+                    <div class="stat-card"><div>Total Profit (Gross)</div><div class="stat-val" style="color:{gross_profit_color}">{gross_profit:+,} <small style="font-size:0.7rem;">원</small></div></div>
+                    <div class="stat-card"><div>Total Fees</div><div class="stat-val" style="color:var(--loss)">-{total_fees:,} <small style="font-size:0.7rem;">원</small></div></div>
                     <div class="stat-card" style="border: 2px solid {total_profit_color}; background: rgba(0,255,127,0.05);">
-                        <div style="font-weight:bold;">Net Profit</div>
+                        <div style="font-weight:bold;">Net Profit / Loss</div>
                         <div class="stat-val" style="color:{total_profit_color}; font-size:1.6rem; font-weight:800;">{total_profit:+,} <small style="font-size:0.8rem;">KRW</small></div>
                     </div>
                 </div>
@@ -514,12 +514,15 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 (~df['Reason'].str.contains('S2|Stage 2|추매|ADDON', case=False, na=False))
     s1_b_rets = df[s1_b_mask]['Return'].tolist()
     
-    # [v27.5] Smart Buy/Exit Tracking
+    # [v27.5] Smart Buy/Exit Tracking & End-of-Test Holdings (HOLD)
     count_smart_buy = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('SmartBuy', case=False, na=False))])
     count_smart_exit = len(df[(df['Action'].str.startswith('SELL', na=False)) & (df['Reason'].str.contains('Smart Exit', case=False, na=False))])
     count_rejected = len(df[df['Action'] == 'REJECTED_SIG'])
     total_signals = count_smart_buy + count_rejected
     pass_rate = (count_smart_buy / max(1, total_signals)) * 100
+    
+    # [v4.10.6] Explicit Hold Count for Summary Dashboard
+    hold_count = len(df[df['Action'] == 'HOLD']['Code'].unique())
     
     # [v5.0] Granular Profit & Yield Breakdown (S1-Only vs S1+S2)
     a_s1_p, a_s1_i = [], []     # Type A, Stage 1 Only
@@ -692,15 +695,23 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         </div>
     </div>
     
-    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:20px;">Smart Metrics (수급 및 실시간 필터링)</div>
+    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:20px;">Performance Metrics (실행 및 결과 상세 통계)</div>
     <div class="strategy-stats">
         <div class="strategy-card">
-            <span class="str-label">Smart Buy (통과율: {pass_rate:.1f}%)</span>
-            <span class="str-count" style="color:#22c55e">{count_smart_buy} <small style="font-size:0.7rem; color:var(--dim)">/ {total_signals} 건</small></span>
+            <span class="str-label">Total Sells (전체 매도)</span>
+            <span class="str-count" style="color:#fff">{count_fills} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+        </div>
+        <div class="strategy-card" style="border-left:3px solid #a855f7;">
+            <span class="str-label">Stocks Held (테스트 종료 시 보유)</span>
+            <span class="str-count" style="color:#a855f7">{hold_count} <small style="font-size:0.7rem; color:var(--dim)">종목</small></span>
         </div>
         <div class="strategy-card">
             <span class="str-label">Smart Exit (실시간 매도)</span>
             <span class="str-count" style="color:#ef4444">{count_smart_exit} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
+        </div>
+        <div class="strategy-card">
+            <span class="str-label">Smart Buy (통과율: {pass_rate:.1f}%)</span>
+            <span class="str-count" style="color:#22c55e">{count_smart_buy} <small style="font-size:0.7rem; color:var(--dim)">/ {total_signals} 건</small></span>
         </div>
         <div class="strategy-card">
             <span class="str-label">Signals Rejected (신호 거절됨)</span>
@@ -931,5 +942,29 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html_template.format(now=now_str, interval=display_interval, mode_label=mode_label, mode_color=mode_color, total=total_trades, win_rate=win_rate, avg_ret=avg_ret, ret_color=ret_color, total_profit=total_profit_val, total_profit_color=total_profit_color, gross_profit=gross_profit_val, gross_profit_color=gross_profit_color, total_fees=total_fees_val, param_html=param_html, sidebar_items="".join(sidebar_items), content="".join(content), start_date=start_date if start_date else "Simulation", end_date=end_date if end_date else "End", equity_chart_html=equity_chart_html, strategy_stats_html=strategy_stats_html, avg_cash_ratio=avg_cash_ratio))
+        f.write(html_template.format(
+            now=now_str, 
+            interval=display_interval, 
+            mode_label=mode_label, 
+            mode_color=mode_color, 
+            total=total_trades, 
+            win_rate=win_rate, 
+            avg_ret=avg_ret, 
+            ret_color=ret_color, 
+            total_profit=total_profit_val, 
+            total_profit_color=total_profit_color, 
+            gross_profit=gross_profit_val, 
+            gross_profit_color=gross_profit_color, 
+            total_fees=total_fees_val, 
+            param_html=param_html, 
+            sidebar_items="".join(sidebar_items), 
+            content="".join(content), 
+            start_date=start_date if start_date else "Simulation", 
+            end_date=end_date if end_date else "End", 
+            equity_chart_html=equity_chart_html, 
+            strategy_stats_html=strategy_stats_html, 
+            avg_cash_ratio=avg_cash_ratio,
+            count_smart_exit=count_smart_exit,
+            hold_count=hold_count
+        ))
     print(f"  [Report] Execution log saved: {output_path}")

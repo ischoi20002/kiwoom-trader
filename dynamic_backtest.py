@@ -812,9 +812,9 @@ class DynamicBacktester:
                 elif self.use_sx:
                     ba_ratio = m1_chunk.iloc[idx].get('bid_ask_ratio', 1.0)
                     v_power = m1_chunk.iloc[idx].get('vol_power', 100.0)
-                    if ba_ratio < self.sx_ba and v_power < self.sx_vp:
+                    if ba_ratio >= self.sx_ba and v_power < self.sx_vp:
                         if self.sx_p_thr == 0 or exit_price <= running_max[idx] * (1 + self.sx_p_thr / 100.0):
-                            reason = f"1M Smart Exit|BA:{ba_ratio:.2f}|VP:{v_power:.0f}"
+                            reason = f"1M Smart Exit(Trap)|BA:{ba_ratio:.2f}|VP:{v_power:.0f}"
                         else: reason = "1M Unknown Exit"
                     else: reason = "1M Unknown Exit"
                 else:

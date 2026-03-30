@@ -130,8 +130,30 @@ class OrderManager:
             ret_code = res.get("return_code", -1)
             if ret_code == 0:
                 holdings = res.get("acnt_prft_rt", [])
-                self.app.log(f"✅ 계좌 동기화 성공 (보유 종목: {len(holdings)}개)")
-                return holdings
+                # [v4.5 Asset Harden] 총 평가금액(Total Equity) 추출 (예수금 + 주식 평가액)
+                total_equity = float(res.get("tot_evlu_amt", 0))
+                d1_deposit = float(res.get("d1_samt", 0))
+                d2_deposit = float(res.get("d2_samt", 0))
+                
+                # [v4.8.5 Asset Fallback] 보유 종목이 없으면 총자산이 0으로 잡히는 API 특성 보정
+                if total_equity == 0:
+                    deposit = self.get_deposit()
+                    if deposit:
+                        total_equity = float(deposit)
+                        d1_deposit = total_equity
+                        d2_deposit = total_equity
+                
+                self.app.log(f"✅ 계좌 동기화 성공 (보유: {len(holdings)}개 | 총자산: {total_equity:,.0f}원)")
+                return {
+                    "holdings": holdings,
+                    "total_equity": total_equity,
+                    "d1_deposit": d1_deposit,
+                    "d2_deposit": d2_deposit
+                }
+            elif ret_code == 429 or "429" in str(res):
+                # [v4.5.1 API Throttle] 전용 서버 조회 건수 초과 대응
+                self.app.log("⚠️ [Throttle] 키움 서버 조회 제한(429)에 도달했습니다. 1~2분 후 자동으로 동기화됩니다.")
+                return None
             else:
                 msg = res.get("return_msg", "Unknown error")
                 self.app.log(f"⚠️ 계좌 조회 실패: {msg} (ErrorCode: {ret_code})")
@@ -139,6 +161,35 @@ class OrderManager:
 
         except Exception as e:
             self.app.log(f"💥 계좌 조회 중 네트워크/파싱 오류: {str(e)}")
+            return None
+
+    def get_deposit(self):
+        """[v4.5.3] 전용 예수금 상세 조회 (ka10001/kt00001)"""
+        use_mock = getattr(config, 'USE_MOCK', False)
+        api_id = 'kt00001' if use_mock else 'ka10001'
+        host = config.MOCK_URL if use_mock else config.URL
+        
+        token = self.app.auth_manager.get_auth_token()
+        if not token: return None
+        
+        url = f"{host}/api/dostk/acnt"
+        headers = {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'authorization': f'Bearer {token}',
+            'api-id': api_id,
+        }
+        
+        try:
+            payload = {'qry_tp': '2'}
+            res = requests.post(url, headers=headers, json=payload, timeout=10)
+            data = res.json()
+            out_body = data.get('output', data.get('data', data))
+            
+            # ka10001(실전): nstd_re_ib_amt(주문가능현금), kt00001(모의): entr(예수금)
+            deposit_str = out_body.get('entr', out_body.get('nstd_re_ib_amt', '0'))
+            return int(float(str(deposit_str).replace(',', '')))
+        except Exception as e:
+            self.app.log(f"❌ 예수금 상세 조회 실패: {e}")
             return None
 
     def cancel_order(self, order_no):

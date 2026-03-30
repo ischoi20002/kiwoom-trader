@@ -9,6 +9,7 @@ class VirtualTab:
         self.parent = parent
         self.app = app
         self.vars = {}
+        # [v4.5.3] 위젯 소유권 이전 (캡슐화)
         self.tree_active = None
         self.tree_history = None
         self.tree_orders = None
@@ -36,6 +37,8 @@ class VirtualTab:
             "total": tk.StringVar(value="0"),
             "cash": tk.StringVar(value="0"),
             "stock": tk.StringVar(value="0"),
+            "d1_cash": tk.StringVar(value="0"),
+            "d2_cash": tk.StringVar(value="0"),
             "day": tk.StringVar(value="0 (0.00%)"),
             "cum": tk.StringVar(value="0.00%")
         })
@@ -43,18 +46,20 @@ class VirtualTab:
         for label, var, color in [
             ("총 자산", "total", self.app.colors['primary']),
             ("예수금", "cash", None),
+            ("D+1 예상", "d1_cash", "#EBCB8B"),
+            ("D+2 예상", "d2_cash", "#EBCB8B"),
             ("주식 평가금", "stock", None),
             ("금일 손익", "day", "#BF616A"),
             ("누적 수익률", "cum", "#A3BE8C")
         ]:
             f = ttk.Frame(summary_f)
             f.pack(side=tk.LEFT, padx=(0, 15))
-            ttk.Label(f, text=label, font=("Malgun Gothic", 8), foreground=self.app.colors['secondary']).pack(anchor=tk.W)
-            ttk.Label(f, textvariable=self.vars[var], font=("Malgun Gothic", 10, "bold"), 
+            ttk.Label(f, text=label, font=("Segoe UI", 8), foreground="#EBCB8B").pack(anchor=tk.W)
+            ttk.Label(f, textvariable=self.vars[var], font=("Segoe UI", 10, "bold"), 
                       foreground=color if color else self.app.colors['fg']).pack(anchor=tk.W)
 
         # [v3.9.1] 모의투자 잔고 조회 결과 라벨
-        self.lbl_mock_result = ttk.Label(summary_f, text="", font=("Malgun Gothic", 9), foreground="#A3BE8C")
+        self.lbl_mock_result = ttk.Label(summary_f, text="", font=("Segoe UI", 9), foreground="#A3BE8C")
         self.lbl_mock_result.pack(side=tk.LEFT, padx=10, pady=(15, 0))
 
         # 제어 버튼 (우측)
@@ -65,15 +70,15 @@ class VirtualTab:
         use_mock = getattr(config, 'USE_MOCK', False)
         mode_text = " 모의투자모드 " if use_mock else " 실전모드 "
         mode_bg = "#5E81AC" if use_mock else "#BF616A" 
-        self.lbl_mode_badge = tk.Label(control_f, text=mode_text, font=("Malgun Gothic", 9, "bold"), 
+        self.lbl_mode_badge = tk.Label(control_f, text=mode_text, font=("Segoe UI", 9, "bold"), 
                                       foreground="white", background=mode_bg, padx=10, pady=2)
         self.lbl_mode_badge.pack(side=tk.RIGHT, padx=(10, 0))
 
         btn_group = ttk.Frame(control_f)
         btn_group.pack(side=tk.RIGHT)
         
-        ttk.Button(btn_group, text="🔄 동기화", width=8, command=lambda: self.app.portfolio.sync_with_actual_account()).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_group, text="📊 리포트", width=8, command=self.app._generate_virtual_report).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_group, text="🔄 동기화", width=8, command=self.app._sync_account_deposit).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_group, text="📊 리포트", width=8, command=self.generate_report).pack(side=tk.LEFT, padx=2)
         
         # [v3.9.5] 버튼명 '서버 전환'으로 변경
         self.btn_env = ttk.Button(btn_group, text="서버 전환", width=10, command=self._toggle_environment)
@@ -164,7 +169,7 @@ class VirtualTab:
         total_unrealized_pnl = 0
         
         existing_active = set(self.tree_active.get_children())
-        active_list = list(self.app.virtual_positions.items())
+        active_list = list(self.app.portfolio.virtual_positions.items())
         
         for idx, (code, pos) in enumerate(active_list):
             info = self.app.monitor_info.get(code, {})
@@ -202,7 +207,7 @@ class VirtualTab:
         today_str = datetime.now().strftime("%Y-%m-%d")
         
         self.tree_history.delete(*self.tree_history.get_children())
-        for idx, pos in enumerate(self.app.virtual_history):
+        for idx, pos in enumerate(self.app.portfolio.virtual_history):
             last_event = pos['events'][-1] if pos.get('events') else {}
             pnl_amt = pos.get('realized_pnl_amt', 0)
             total_realized_pnl += pnl_amt
@@ -223,29 +228,67 @@ class VirtualTab:
         # 3. 주문 내역
         self._render_orders()
 
-        # 4. 요약 정보
-        # [v18.0] Decoupled Asset Management: Use actual deposit for metrics if available
-        actual_dep = getattr(self.app, 'actual_deposit', 0)
-        if actual_dep > 0:
-            start_cap = actual_dep
-        else:
-            start_cap = float(str(self.app.settings.get('backtest_initial_capital', 10000000)).replace(',', ''))
-            
-        current_cash = start_cap - total_invested + total_realized_pnl
-        total_assets = current_cash + total_eval
+        # 4. 요약 정보 (Account Summary - REST API Synced)
+        # [v4.8.6 Asset Sync] 추정치가 아닌 실제 계좌 동기화 데이터를 우선 사용
+        portfolio = self.app.portfolio
+        total_assets = getattr(portfolio, 'total_equity', 0)
+        current_cash = getattr(portfolio, 'actual_deposit', 0)
+        stock_eval = total_eval # 현재 트리뷰의 평가금액 합계
         
+        # [v4.8.6] API에서 총자산이 0으로 잡히는 경우(종목미보유 등)를 대비한 최종 보정
+        if total_assets == 0:
+            total_assets = current_cash + stock_eval
+            
         day_pnl_total = total_day_realized_pnl + total_unrealized_pnl
-        # [v18.1] Safety check for zero start_cap to avoid div-by-zero
-        safe_cap = max(1, start_cap)
+        # 수익률 계산을 위한 기준 자산 (설정값 or 실제자산)
+        start_cap = float(str(self.app.settings.get('backtest_initial_capital', 10000000)).replace(',', ''))
+        safe_cap = max(1, start_cap if total_assets == 0 else (total_assets - day_pnl_total))
+        
         day_pnl_pct = (day_pnl_total / safe_cap) * 100
         
         self.vars["total"].set(f"{total_assets:,.0f}")
         self.vars["cash"].set(f"{current_cash:,.0f}")
-        self.vars["stock"].set(f"{total_eval:,.0f}")
+        self.vars["stock"].set(f"{stock_eval:,.0f}")
+        
+        # [v4.5.3] D+1, D+2 예상 예수금 업데이트
+        self.vars["d1_cash"].set(f"{getattr(portfolio, 'd1_deposit', 0):,.0f}")
+        self.vars["d2_cash"].set(f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
+            
         self.vars["day"].set(f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
         
         total_profit_pct = (total_assets / safe_cap - 1) * 100
         self.vars["cum"].set(f"{total_profit_pct:+.2f}%")
+
+    def _render_real_data(self):
+        """[v4.5.3] 실시간 틱 수신 시 보유 종목 수익률만 부분 렌더링 (최적화)"""
+        if not self.tree_active: return
+        
+        for code in self.app.portfolio.virtual_positions:
+            if self.tree_active.exists(code):
+                pos = self.app.portfolio.virtual_positions[code]
+                info = self.app.monitor_info.get(code, {})
+                curr_p = info.get('price', pos['avg_price'])
+                profit_pct = (curr_p / pos['avg_price'] - 1) * 100
+                eval_amt = curr_p * pos['qty']
+                unrealized = (curr_p - pos['avg_price']) * pos['qty']
+                
+                p_str = f"{profit_pct:+.2f}%"
+                p_tag = "price_up" if profit_pct > 0 else "price_down" if profit_pct < 0 else ""
+                
+                # 기존 값 가져와서 수익률/평가금만 교체
+                curr_vals = list(self.tree_active.item(code, 'values'))
+                curr_vals[4] = f"{curr_p:,.0f}"      # 현재가
+                curr_vals[5] = f"{int(eval_amt):+,}" # 평가금
+                curr_vals[6] = f"{int(unrealized):+,}" # 손익금
+                curr_vals[7] = p_str                # 수익률
+                
+                # 태그 유지하며 색상만 변경
+                tags = list(self.tree_active.item(code, 'tags'))
+                if "price_up" in tags: tags.remove("price_up")
+                if "price_down" in tags: tags.remove("price_down")
+                if p_tag: tags.append(p_tag)
+                
+                self.tree_active.item(code, values=tuple(curr_vals), tags=tuple(tags))
 
     def _render_orders(self):
         """DB 기반 실시간 주문 내역 동기화"""
@@ -323,16 +366,51 @@ class VirtualTab:
         except Exception as e:
             messagebox.showerror("오류", f"설정 변경 중 오류가 발생했습니다: {e}")
 
+    def log_order(self, code, side, qty, price, order_type, result, reason=""):
+        """[v4.5.3] DB 기록 및 신규 3판넬 UI 갱신 (캡슐화)"""
+        self.app.data_manager.log_order(code, side, qty, price, order_type, "MOCK_ID", result, reason)
+        self._render_orders()
+        self._render_virtual_positions()
+
+    def generate_report(self):
+        """[v4.5.3] 가상 매매 나러티브 리포트 생성 (UI 위임)"""
+        try:
+            from reporting.virtual_report import generate_virtual_narrative_report
+            import webbrowser
+            
+            output_file = "virtual_trade_report.html"
+            generate_virtual_narrative_report(self.app.portfolio.virtual_history, output_file, self.app.settings)
+            
+            abs_path = os.path.abspath(output_file)
+            if os.path.exists(abs_path):
+                webbrowser.open(f"file://{abs_path}")
+                self.app.log(f"[Sync] 가상 매매 나러티브 리포트 생성 완료: {output_file}")
+            else:
+                self.app.log("[Error] 리포트 파일 생성 실패")
+        except Exception as e:
+            self.app.log(f"[Error] 리포트 생성 중 오류: {e}")
+
+    def open_report_folder(self):
+        """리포트 저장 폴더 열기"""
+        try:
+            os.startfile(os.getcwd())
+        except Exception as e:
+            self.app.log(f"[Error] 폴더 열기 실패: {e}")
+
     def _setup_styles(self):
+        import tkinter as tk
+        from tkinter import ttk
+        style = ttk.Style()
         bg_even = "#242933" 
         bg_odd = "#3B4252"
+        up_col = "#E35F5F" # Nord Red variant
+        dn_col = "#81A1C3" # Nord Blue variant
+        
         for t in [self.tree_active, self.tree_history, self.tree_orders]:
+            # [v4.8.4] TCheckbutton 스타일은 메인에서 관리하므로 태그에 집중
             t.tag_configure("even", background=bg_even)
             t.tag_configure("odd", background=bg_odd)
             
-        self.tree_active.tag_configure("price_up", foreground="#BF616A")
-        self.tree_active.tag_configure("price_down", foreground="#81A1C1")
-        self.tree_history.tag_configure("price_up", foreground="#BF616A")
-        self.tree_history.tag_configure("price_down", foreground="#81A1C1")
-        self.tree_orders.tag_configure("price_up", foreground="#BF616A")
-        self.tree_orders.tag_configure("price_down", foreground="#81A1C1")
+            # [v4.7.5] 글로벌 일관성을 위해 고밀도 시인성 컬러 적용
+            t.tag_configure("price_up", foreground=up_col)
+            t.tag_configure("price_down", foreground=dn_col)

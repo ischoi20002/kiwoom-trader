@@ -28,14 +28,16 @@ class MonitorTab:
         self.ctrl_frame = ttk.Frame(self.mo_main_frame)
         self.ctrl_frame.pack(fill=tk.X, pady=(0, 15))
         
-        self.app.btn_monitor_toggle = ttk.Button(self.ctrl_frame, text="▶️ 실시간 감시 시작", command=self.app.toggle_monitoring, style="Accent.TButton")
-        self.app.btn_monitor_toggle.pack(side=tk.RIGHT, padx=5)
+        self.btn_monitor_toggle = ttk.Button(self.ctrl_frame, text="▶️ 실시간 감시 시작", command=self.app.toggle_monitoring, style="Accent.TButton")
+        self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=5)
         
-        self.app.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground="#81A1C3")
-        self.app.lbl_monitor_status.pack(side=tk.RIGHT, padx=10)
+        self.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground="#EBCB8B")
+        self.lbl_monitor_status.pack(side=tk.RIGHT, padx=10)
 
-        # [v27.3] 시장 역풍 알림 라벨 (기본 숨김)
-        self.app.lbl_headwind_caution = ttk.Label(self.ctrl_frame, text="⚠️ 시장 역풍 - 매수 신호가 일시 정지되었습니다", 
+        self.pb_warmup = ttk.Progressbar(self.ctrl_frame, orient=tk.HORIZONTAL, length=180, mode='determinate')
+        self.lbl_warmup_detail = ttk.Label(self.ctrl_frame, text="", font=("Malgun Gothic", 9), foreground="#EBCB8B") # Warm yellow for sync
+        
+        self.lbl_headwind_caution = ttk.Label(self.ctrl_frame, text="⚠️ 시장 역풍 - 매수 신호가 일시 정지되었습니다", 
                                                 font=("Malgun Gothic", 10, "bold"), foreground="#BF616A")
         
         # 트리뷰 영역 (Split-View 도입) [v2.2]
@@ -65,38 +67,51 @@ class MonitorTab:
         }
 
         # 1. 상단 트리뷰 (Active) - 높이 축소
-        self.app.tree_active_monitor = ttk.Treeview(active_frame, columns=columns, show="headings", selectmode="browse", height=3)
+        self.tree_active_monitor = ttk.Treeview(active_frame, columns=columns, show="headings", selectmode="browse", height=3)
         for col in columns:
-            self.app.tree_active_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
+            self.tree_active_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
             anchor = tk.W if col == "Name" else tk.CENTER
-            self.app.tree_active_monitor.column(col, width=col_widths[col], anchor=anchor)
-        self.app.tree_active_monitor.pack(fill=tk.BOTH, expand=True)
+            self.tree_active_monitor.column(col, width=col_widths[col], anchor=anchor)
+        self.tree_active_monitor.pack(fill=tk.BOTH, expand=True)
 
         # 2. 하단 트리뷰 (Watchlist)
-        self.app.tree_monitor = ttk.Treeview(watchlist_frame, columns=columns, show="headings", selectmode="browse")
+        self.tree_monitor = ttk.Treeview(watchlist_frame, columns=columns, show="headings", selectmode="browse")
         for col in columns:
-            self.app.tree_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
+            self.tree_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
             anchor = tk.W if col == "Name" else tk.CENTER
-            self.app.tree_monitor.column(col, width=col_widths[col], anchor=anchor)
+            self.tree_monitor.column(col, width=col_widths[col], anchor=anchor)
         
-        yscrollbar = ttk.Scrollbar(watchlist_frame, orient=tk.VERTICAL, command=self.app.tree_monitor.yview)
-        self.app.tree_monitor.configure(yscroll=yscrollbar.set)
+        yscrollbar = ttk.Scrollbar(watchlist_frame, orient=tk.VERTICAL, command=self.tree_monitor.yview)
+        self.tree_monitor.configure(yscroll=yscrollbar.set)
         yscrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.app.tree_monitor.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        self.tree_monitor.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         
-        # [v3.0] 우클릭 컨텍스트 메뉴 바인딩
-        # self.app.tree_monitor.bind("<Button-3>", self.app._on_tree_monitor_right_click)
+        # [v4.7.5] 'HD Crisp UI' 도입: 굵지 않고 날렵한 Segoe UI 및 차분한 프로 컬러 사용
+        row_font = ("Segoe UI", 9, "normal")
+        up_col = "#E35F5F" # 채도가 너무 높아 번져 보이는 #FF0000 대신 차분한 레드
+        dn_col = "#81A1C3" # 너무 쨍한 파란색 대신 가시성 좋은 노르딕 블루
         
-        # 태그 색상 설정 (노르딕 테마 고정밀 - 저채도)
-        for t in [self.app.tree_monitor, self.app.tree_active_monitor]:
-            t.tag_configure("oddrow", background="#242933") # Polar Night
-            t.tag_configure("evenrow", background="#3B4252") # Lighter Slate (More contrast)
-            t.tag_configure("price_up", foreground="#FF4C4C") # 선명한 빨강 (상승)
-            t.tag_configure("price_down", foreground="#4C9EFF") # 선명한 파랑 (하락)
-            t.tag_configure("price_stable", foreground="#A9A9A9") # 보합 (Silver Grey)
-            t.tag_configure("status_high", foreground="#EBCB8B") # 높은 합치도 (Yellow/Orange)
-            t.tag_configure("status_low", foreground="#4C566A") # 낮은 합치도 (Grey Blue)
-            t.tag_configure("active_pos", background="#434C5E") # 보유 중 강조 배경
+        for t in [self.tree_monitor, self.tree_active_monitor]:
+            # 1. 상승 (레드)
+            t.tag_configure("up_even", foreground=up_col, background="#3B4252", font=row_font)
+            t.tag_configure("up_odd", foreground=up_col, background="#242933", font=row_font)
+            
+            # 2. 하락 (블루)
+            t.tag_configure("down_even", foreground=dn_col, background="#3B4252", font=row_font)
+            t.tag_configure("down_odd", foreground=dn_col, background="#242933", font=row_font)
+            
+            # 3. 보합 (기본)
+            t.tag_configure("stable_even", foreground="#D8DEE9", background="#3B4252", font=row_font)
+            t.tag_configure("stable_odd", foreground="#D8DEE9", background="#242933", font=row_font)
+            
+            # 4. 보유 종목 특수 (Active)
+            t.tag_configure("active_up", foreground=up_col, background="#434C5E", font=row_font)
+            t.tag_configure("active_down", foreground=dn_col, background="#434C5E", font=row_font)
+            t.tag_configure("active_stable", foreground="#D8DEE9", background="#434C5E", font=row_font)
+            
+            # 5. 보조 상태 (합치도)
+            t.tag_configure("status_high", foreground="#EBCB8B", font=row_font)
+            t.tag_configure("status_low", foreground="#616E88", font=row_font)
 
     async def _ws_client_loop(self):
         """키움 REST API 방식 웹소켓 루프 (자동 재연결 및 안정성 강화)"""
@@ -115,13 +130,11 @@ class MonitorTab:
                     self.app.is_monitoring = False
                     return
 
-                # [v3.7.3] 모의투자 환경에 따른 웹소켓 주소 동적 결정
                 if getattr(config, 'USE_MOCK', False):
                     ws_url = 'wss://mockapi.kiwoom.com:10000/api/dostk/websocket'
                 else:
                     ws_url = 'wss://api.kiwoom.com:10000/api/dostk/websocket'
                 
-                # [v3.5] ping_timeout 추가 및 안정성 강화
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
                     self.app.root.after(0, self.app.log, "✅ [시스템] 서버 연결 성공. 로그인 시도...")
                     
@@ -149,7 +162,7 @@ class MonitorTab:
                                     else:
                                         self.app.log(f"❌ [시스템] 로그인 실패: {packet.get('return_msg')}. 15초 후 재시도...")
                                         await asyncio.sleep(15)
-                                        break # Try reconnecting from scratch
+                                        break
                                 elif trnm == 'PING':
                                     await ws.send(json.dumps(packet))
                                 elif trnm in ['REAL', 'CHE'] or ('values' in packet and ('item' in packet or 'stk_cd' in packet)):
@@ -158,15 +171,14 @@ class MonitorTab:
                             continue
                         except Exception as e:
                             self.app.log(f"⚠️ [시스템] 수신 에러: {e}")
-                            break # Inner loop break -> triggers reconnect
+                            break
                             
             except Exception as e:
                 if self.app.is_monitoring:
-                    # [v3.5.1] API Error (HTTP 429) 감지 시 대기 시간 대폭 연장
                     error_msg = str(e)
                     wait_sec = 5
                     if "429" in error_msg:
-                        wait_sec = 60 # 429 발생 시 1분 대기
+                        wait_sec = 60
                         self.app.log(f"🛑 [시스템] API 호출 제한(429) 감지. {wait_sec}초 후 다시 시도합니다.")
                     else:
                         self.app.log(f"❌ [시스템] 연결 에러: {e}. {wait_sec}초 후 재연결 시도...")
@@ -196,15 +208,13 @@ class MonitorTab:
                 cntg_unpr = int(item_data.get('cntg_unpr', 0))
                 buy_sell_tp = item_data.get('buy_sell_tp', '1') # 1:매도, 2:매수
                 side = "buy" if buy_sell_tp == '2' else "sell"
-                
-                # KiwoomApp의 체결 핸들러 호출
                 self.app._on_execution_received(code, order_no, cntg_qty, cntg_unpr, side)
                 continue
 
             if code in self.app.monitor_info:
                 info = self.app.monitor_info[code]
                 vals = item_data.get('values', {})
-                p_type = item_data.get('type', '0B') # 기본값 0B
+                p_type = item_data.get('type', '0B')
                 
                 def get_val(fid, default=0):
                     v = vals.get(str(fid))
@@ -215,43 +225,31 @@ class MonitorTab:
                 if p_type == '0B':
                     now_price = int(get_val(10)) 
                     if now_price == 0: return
-                    
                     volume = int(get_val(13))
                     trde_val = int(get_val(26) // 1000)
                     ratio_val = vals.get('12', '0')
                     diff_val = vals.get('11', '0')
-                    vol_power = get_val(228) # 체결강도
-                    
-                    # Update Info
+                    vol_power = get_val(228)
                     info['price'] = now_price
                     info['ratio'] = ratio_val
                     info['diff'] = diff_val
                     info['volume'] = volume
                     info['trde_val'] = trde_val
                     info['vol_power'] = vol_power
-                    
-                    # Signal processing
                     self.app._on_realtime_data_received(code, now_price, volume, trde_val, vol_power=vol_power)
-
                 elif p_type == '0D':
-                    total_ask = int(get_val(121)) # 매도호가총잔량
-                    total_bid = int(get_val(125)) # 매수호가총잔량
-                    
+                    total_ask = int(get_val(121))
+                    total_bid = int(get_val(125))
                     info['total_ask'] = total_ask
                     info['total_bid'] = total_bid
-                    
-                    # 호가 잔량 업데이트를 위해 signal_engine 호출 (가격 정보는 이전 값 유지)
                     self.app._on_realtime_data_received(code, info.get('price', 0), info.get('volume', 0), info.get('trde_val', 0), 
                                                         total_ask=total_ask, total_bid=total_bid)
-
-                # NXT Detection
                 mkt = item_data.get('market', item_data.get('mkt', ''))
                 if mkt == 'NXT' or '_nx' in full_code.lower():
                     info['is_nxt'] = True
 
     def _update_visual_theme(self, trend):
         """[v27.3] 시장 지질(Background) 테마를 '온몸'으로 변경"""
-        # 1. 색상 정의
         themes = {
             "UP": {
                 "bg": "#2E3440", "field": "#242933", 
@@ -270,37 +268,117 @@ class MonitorTab:
             }
         }
         t = themes.get(trend, themes["UP"])
-        
-        # 2. 메인 프레임 및 컨트롤 영역 배경 변경
         style = ttk.Style()
         style.configure("Monitor.TFrame", background=t['bg'])
         style.configure("Monitor.TLabel", background=t['bg'], foreground=t['fg'])
-        
         self.mo_main_frame.config(style="Monitor.TFrame")
         self.ctrl_frame.config(style="Monitor.TFrame")
-        
-        # 2.1 하위 라벨들 스타일 일괄 적용
         for widget in self.mo_main_frame.winfo_children():
-            if isinstance(widget, ttk.Label):
-                widget.config(style="Monitor.TLabel")
+            if isinstance(widget, ttk.Label): widget.config(style="Monitor.TLabel")
         for widget in self.ctrl_frame.winfo_children():
-            if isinstance(widget, ttk.Label):
-                widget.config(style="Monitor.TLabel")
-        
-        # 3. 트리뷰 필드 및 줄무늬 색상 변경
+            if isinstance(widget, ttk.Label): widget.config(style="Monitor.TLabel")
         style.configure("Treeview", fieldbackground=t['field'], background=t['field'])
-        if self.app.tree_monitor:
-            self.app.tree_monitor.tag_configure("oddrow", background=t['odd'])
-            self.app.tree_monitor.tag_configure("evenrow", background=t['even'])
-        
-        # 4. 상태 안내 문구 및 가시성 제어
-        if hasattr(self.app, 'lbl_headwind_caution'):
-            self.app.lbl_headwind_caution.config(text=t['desc'], background=t['bg'])
-            if trend == "UP":
-                self.app.lbl_headwind_caution.pack_forget()
-            else:
-                self.app.lbl_headwind_caution.pack(side=tk.LEFT, padx=10)
-                
-        # 5. 하단 상태바 동기화 전파 (선택사항)
+        if self.tree_monitor:
+            self.tree_monitor.tag_configure("oddrow", background=t['odd'])
+            self.tree_monitor.tag_configure("evenrow", background=t['even'])
+        if hasattr(self, 'lbl_headwind_caution'):
+            self.lbl_headwind_caution.config(text=t['desc'], background=t['bg'])
+            if trend == "UP": self.lbl_headwind_caution.pack_forget()
+            else: self.lbl_headwind_caution.pack(side=tk.LEFT, padx=10)
         if self.app.status_label:
             self.app.status_label.config(text=f"장세: {trend}", foreground=t['fg'], background=t['bg'])
+
+    def update_view(self, updates, virtual_positions):
+        """[v4.5.3] App으로부터 전달받은 실시간 틱 데이터를 화면에 렌더링 (캡슐화)"""
+        if not self.tree_monitor: return
+        
+        try:
+            if updates:
+                items = list(updates.items())
+                updates.clear()
+                
+                for iid, (values, tag, _) in items:
+                    # 보유 여부에 따라 타겟 트리 결정
+                    is_active = iid in virtual_positions
+                    target_tree = self.tree_active_monitor if is_active else self.tree_monitor
+                    other_tree = self.tree_monitor if is_active else self.tree_active_monitor
+                    
+                    # 반대편 트리에 있으면 삭제 (이동 효과)
+                    if other_tree.exists(iid):
+                        other_tree.delete(iid)
+                        
+                    # [v4.5.42] 행의 인덱스와 기본 태그 정의 (안전한 index 추출)
+                    if not target_tree.exists(iid):
+                        target_tree.insert("", tk.END, iid=iid, values=values)
+                    
+                    # [Composite Tag Selection] v4.6.5
+                    idx = target_tree.index(iid)
+                    is_even = (idx % 2 == 0)
+                    row_type = "even" if is_even else "odd"
+                    
+                    # 방향 결정
+                    if "price_up" in str(tag): direction = "up"
+                    elif "price_down" in str(tag): direction = "down"
+                    else: direction = "stable"
+                    
+                    # 최종 태그 조합
+                    if is_active:
+                        final_tag = f"active_{direction}"
+                    else:
+                        final_tag = f"{direction}_{row_type}"
+                    
+                    # 데이터와 태그가 변경된 경우에만 업데이트
+                    curr = target_tree.item(iid)
+                    if curr['values'] != values or final_tag not in curr['tags']:
+                        target_tree.item(iid, values=values, tags=(final_tag,))
+        except Exception as e:
+            print(f"[UI Error] MonitorTab Render Error: {e}")
+
+    def update_watchlist(self, monitor_info):
+        """[v4.5.3] 감시 종목 리스트 초기화 렌더링"""
+        self.tree_monitor.delete(*self.tree_monitor.get_children())
+        self.tree_active_monitor.delete(*self.tree_active_monitor.get_children())
+        
+        # [v4.5.7] 가점(Score) 기준 내림차순 정렬하여 초기 삽입
+        sorted_items = sorted(monitor_info.items(), key=lambda x: x[1].get('score', 0), reverse=True)
+        
+        for code, info in sorted_items:
+            now_p = info.get('price', 0)
+            values = (
+                f"{info.get('score', 0):.1f}", code, info['name'],
+                f"{now_p:,.0f}", info.get('ratio', '0'), 
+                f"{info.get('vol_power', 0):.1f}%", info.get('status_text', '대기'),
+                f"{info.get('total_ask', 0):,}", f"{info.get('total_bid', 0):,}",
+                f"{info.get('volume', 0):,}", f"{info.get('trde_val', 0):,.1f}"
+            )
+            self.tree_monitor.insert("", tk.END, iid=code, values=values)
+
+    def load_targets(self, codes_or_info):
+        """KiwoomApp과의 호환성을 위한 래퍼"""
+        if isinstance(codes_or_info, dict):
+            self.update_watchlist(codes_or_info)
+        else:
+            # codes 리스트인 경우 (TradingController로부터 받은 경우 등)
+            pass
+
+    def update_warmup(self, cur, total, name, code):
+        """[v4.6.0] 비동기 배경 동기화(Sync) 진행률 UI 업데이트"""
+        if not hasattr(self, 'pb_warmup'): return
+        
+        # [v4.6.0] 동기화 중임을 적극적으로 알림
+        if not self.pb_warmup.winfo_ismapped():
+            self.pb_warmup.pack(side=tk.LEFT, padx=(20, 10))
+            self.lbl_warmup_detail.pack(side=tk.LEFT, padx=5)
+            
+        pct = (cur / total) * 100
+        self.pb_warmup['value'] = pct
+        self.lbl_warmup_detail.config(text=f"🔄 동기화 중: {name} ({cur}/{total})")
+        
+        if cur >= total:
+            self.lbl_warmup_detail.config(text="✅ 동기화 완료", foreground="#A3BE8C") # Success Green
+            self.app.root.after(5000, self._hide_warmup)
+
+    def _hide_warmup(self):
+        if hasattr(self, 'pb_warmup'):
+            self.pb_warmup.pack_forget()
+            self.lbl_warmup_detail.pack_forget()

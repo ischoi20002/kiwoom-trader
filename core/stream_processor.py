@@ -38,14 +38,21 @@ class StreamProcessor:
             return bars_data
         
         last_idx = df.index[-1]
-        if df.at[last_idx, 'time'] == slot_time:
+        # [v4.5.9] Series Ambiguity 방어: 중복 인덱스 발생 시에도 첫 번째 값만 참조
+        last_time_v = df.at[last_idx, 'time']
+        last_time = last_time_v.iloc[0] if hasattr(last_time_v, 'iloc') else last_time_v
+
+        if last_time == slot_time:
             # 현재 봉 업데이트
             df.at[last_idx, 'Close'] = price
-            if price > df.at[last_idx, 'High']: df.at[last_idx, 'High'] = price
-            if price < df.at[last_idx, 'Low']: df.at[last_idx, 'Low'] = price
+            if price > float(df.at[last_idx, 'High'].iloc[0] if hasattr(df.at[last_idx, 'High'], 'iloc') else df.at[last_idx, 'High']): 
+                df.at[last_idx, 'High'] = price
+            if price < float(df.at[last_idx, 'Low'].iloc[0] if hasattr(df.at[last_idx, 'Low'], 'iloc') else df.at[last_idx, 'Low']): 
+                df.at[last_idx, 'Low'] = price
             # 봉 내 거래량 = 현재 누계 - 봉 시작 누계
-            start_v = df.at[last_idx, 'cum_v_start'] if 'cum_v_start' in df.columns else volume
-            df.at[last_idx, 'Volume'] = max(0, volume - start_v)
+            start_v_v = df.at[last_idx, 'cum_v_start'] if 'cum_v_start' in df.columns else volume
+            start_v = start_v_v.iloc[0] if hasattr(start_v_v, 'iloc') else start_v_v
+            df.at[last_idx, 'Volume'] = max(0, volume - float(start_v))
         else:
             # 새 봉 추가 및 300개 유지 (충분한 지표 계산용)
             new_row_data = {'datetime': dt_str, 'time': slot_time, 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 0, 'cum_v_start': volume}

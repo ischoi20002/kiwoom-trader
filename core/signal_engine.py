@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from datetime import datetime
 import traceback
 from backtest_engine import TradingStrategy
@@ -10,6 +11,21 @@ class SignalEngine:
         self.app = app
         self._last_realtime_err = None
         self.last_buy_sig_time = {} # [v1.0] 중복 시그널 방지용 쿨타임 관리
+
+    def _to_scalar(self, val, default=0):
+        """[v4.5.9] 헬퍼: Series/DF/Numpy 등 어떤 형태에서든 안전하게 단일 스칼라 값 추출"""
+        if val is None: return default
+        # 1. Pandas 객체 처리 (Series, DataFrame)
+        if hasattr(val, 'iloc'):
+            if hasattr(val, 'size') and val.size == 0: return default
+            return self._to_scalar(val.iloc[0], default)
+        # 2. Numpy 스칼라 처리
+        if hasattr(val, 'item') and not hasattr(val, 'shape'): # 진짜 스칼라인 경우만
+            return val.item()
+        # 3. 리스트/어레이 처리
+        if isinstance(val, (list, np.ndarray)) and len(val) > 0:
+            return self._to_scalar(val[0], default)
+        return val
 
     def on_tick_received(self, code, now_price, volume, trde_val, **kwargs):
         """실시간 체결 데이터(Tick) 처리 본체"""
@@ -81,144 +97,102 @@ class SignalEngine:
                 info['power_below_start'] = None
 
             # [v35.7] 자가 학습형 합성 모델 보정 (Adaptive Calibration)
-            # 매 20틱마다 실제 데이터와 합성 모델의 오차를 계산하여 파라미터 자동 튜닝
-            info['calib_ticks'] = info.get('calib_ticks', 0) + 1
-            if info['calib_ticks'] % 20 == 0:
-                prev_p = info.get('last_price_calib', now_price)
-                avg_v = info.get('prev_vol', 1.0)
-                if prev_p > 0 and avg_v > 0:
-                    SimulatedRealtimeMetrics.calibrate(
-                        vol_power, bid_ask_ratio, 
-                        (now_price / prev_p - 1.0), 
-                        (volume / avg_v)
-                    )
-                info['last_price_calib'] = now_price
-
-            # [Performance Fix] 지표 계산 주기 최적화 (매 틱 계산 -> 신규 봉 또는 100틱 주기)
-            # 매 틱마다 전체 지표를 계산하면 CPU 부하로 인해 웹소켓 Ping Timeout이 발생할 수 있음.
+            
+            # 5. 지표 및 시그널 계산 주기 관리 (100틱마다 또는 분봉 변경 시)
             info['tick_count'] = info.get('tick_count', 0) + 1
             last_bar_count = info.get('last_bar_count', 0)
-            current_bar_count = len(self.app.bars_data[code]) if code in self.app.bars_data else 0
+            current_bar_count = len(self.app.bars_data[code])
             
             should_recalc = (current_bar_count > last_bar_count) or (info['tick_count'] % 100 == 1)
             
             is_buy = False
-            rsi_sig, macd_val, osc_val = 0.0, 0.0, 0.0
             last_row = None
-
             if code in self.app.bars_data and len(self.app.bars_data[code]) >= 60:
-                # 계산이 필요할 때만 수행하고, 아니면 이전 캐시된 결과 사용
                 if should_recalc or 'last_detailed_sig' not in info:
                     df_with_ind = TradingStrategy.calculate_indicators(self.app.bars_data[code], self.app.settings)
                     info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(df_with_ind, self.app.settings, getattr(self.app, 'market_trend', 'UP'))
-                    info['last_row_cache'] = df_with_ind.iloc[-1]
                     info['last_bar_count'] = current_bar_count
-
+                    info['last_row_cache'] = df_with_ind.iloc[-1].to_dict()
+                
                 detailed_signals = info['last_detailed_sig']
                 last_sig = detailed_signals.iloc[-1]
-                is_buy = last_sig['Signal']
-                met_c = int(last_sig['Met_Count'])
-                total_c = int(last_sig['Total_Count'])
+                
+                # [v4.5.9] 전방위적 스칼라 쉴드 적용
+                is_buy = bool(self._to_scalar(last_sig['Signal'], False))
+                met_c = int(self._to_scalar(last_sig['Met_Count'], 0))
+                total_c = int(self._to_scalar(last_sig['Total_Count'], 1))
                 info['confluence'] = f"대기 ({met_c}/{total_c})"
-                info['met_ratio'] = last_sig['Met_Ratio']
+                info['met_ratio'] = float(self._to_scalar(last_sig['Met_Ratio'], 0.0))
                 
                 last_row = info['last_row_cache']
-                rsi_sig = last_row.get('RSI_Sig', 0)
-                macd_val = last_row.get('MACD', 0)
-                osc_val = last_row.get('OSC', 0)
-                ma60_ratio = (now_price / last_row['MA60']) * 100 if 'MA60' in last_row and last_row['MA60'] > 0 else 0.0
+                rsi_sig = float(self._to_scalar(last_row.get('RSI_Sig', 0), 0.0))
+                macd_val = float(self._to_scalar(last_row.get('MACD', 0), 0.0))
+                osc_val = float(self._to_scalar(last_row.get('OSC', 0), 0.0))
+                
+                ma60_scalar = float(self._to_scalar(last_row['MA60'], 0.0))
+                ma60_ratio = (now_price / ma60_scalar) * 100 if ma60_scalar > 0 else 0.0
                 
                 if is_buy:
-                    # [Phase 5] 1단계 진입 시 'Smart Buy' 전술적 수급 컨펌
-                    sig_type = last_sig.get('Sig_Type', 'TYPE_B')
-                    use_sb_for_type = self.app.settings.get('use_smart_buy_a', True) if sig_type == "TYPE_A" else \
-                                       self.app.settings.get('use_smart_buy_b', True)
-
+                    sig_type = str(self._to_scalar(last_sig.get('Sig_Type', 'TYPE_B'), 'TYPE_B'))
+                    use_sb_for_type = self.app.settings.get('use_smart_buy_a', True) if sig_type == "TYPE_A" else self.app.settings.get('use_smart_buy_b', True)
+                    
                     if use_sb_for_type:
-                        min_p = self.app.settings.get('smart_buy_vp', 120.0)
-                        min_r = self.app.settings.get('smart_buy_ba_ratio', 1.2)
-                        # [v4.4] 정석 로직: 매도벽(Ask)이 두터워야 진입 승인
+                        vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
+                        ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
+                        min_p = float(self.app.settings.get('smart_buy_vp', 100.0))
+                        min_r = float(self.app.settings.get('smart_buy_ratio', 1.0))
+                        
                         if vol_power < min_p or ask_bid_ratio < min_r:
                             is_buy = False
-                    
-                    if is_buy:
-                        # [v3.7.8] 중복 방지: 이미 보유 중이거나, 최근 2분 이내에 신호가 발생한 경우 생략
-                        last_sig_dt = self.last_buy_sig_time.get(code)
-                        now_dt = datetime.now()
-                        is_cool = True
-                        if last_sig_dt and (now_dt - last_sig_dt).total_seconds() < 120:
-                            is_cool = False
-                        
-                        if code not in self.app.virtual_positions and is_cool:
-                            self.last_buy_sig_time[code] = now_dt
-                            self.app.log(f"[Signal] {info['name']}({code}) 통합 전략 타점 포착!")
-                            # [v35.7] 신호 발생 시 정밀 스냅샷 저장 (모델 검증용)
-                            self.app.data_manager.save_realtime_snapshot(
-                                code, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                                now_price, vol_power, total_ask, total_bid
-                            )
-                            if self.app.settings.get('use_auto_virtual', True):
-                                self.app._virtual_buy_stage_1(code, info['name'], now_price, reason=sig_type)
+                            info['confluence'] = "수급 대기"
+                
+                # 쿨타임 및 중복 진입 방지
+                is_cool = True
+                if code in self.last_buy_sig_time:
+                    if (datetime.now() - self.last_buy_sig_time[code]).total_seconds() < 180:
+                        is_cool = False
+                
+                if is_buy and is_cool and code not in self.app.virtual_positions:
+                    self.last_buy_sig_time[code] = datetime.now()
+                    self.app._on_buy_signal_received(code, now_price, rsi_sig, macd_val, osc_val, ma60_ratio)
 
-            # [v2.2] 보유 중인 종목의 신호 상태 동적 전환 (1차: 추매 신호, 2차: 수익률)
-            if code in self.app.virtual_positions:
-                pos = self.app.virtual_positions[code]
-                if pos.get('stage', 1) == 1:
-                    # 2단계 추매 조건 합치도 계산
-                    status_text, m_ratio = self.app._calculate_stage2_confluence(code, now_price, last_row if 'last_row' in locals() else None, vol_power, ask_bid_ratio)
-                    info['confluence'] = status_text
-                    info['met_ratio'] = m_ratio
-                else:
-                    # 2단계 완료 시 실시간 수익률 표시
-                    profit = (now_price / pos['avg_price'] - 1) * 100
-                    info['confluence'] = f"보유 ({profit:+.1f}%)"
-                    info['met_ratio'] = 1.0 # 고정 강조
-
-            # 6. 볼륨 스파이크 탐지
-            last_vol = info.get('last_vol', volume)
-            is_vol_spike = self._check_volume_spike(code, volume - last_vol)
-            info['last_vol'] = volume
-
-            # 7. 실시간 가상 포지션 시나리오 처리 (익절/손절/추매)
-            self.app._process_virtual_scenarios(
-                code, now_price, rsi_val, macd_val, osc_val, 
-                vol_power, is_vol_spike, 
-                ind=last_row if 'last_row' in locals() else None,
+            # 7. 실시간 가상 포지션 시나리오 처리
+            # is_power_exhausted는 이미 Line 88~95에서 계산됨
+            bid_ask_ratio = float(self._to_scalar(info.get('bid_ask_ratio', 1.0), 1.0))
+            ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
+            vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
+            
+            res = self.app.strategy_engine.evaluate_position(
+                code, now_price, 
+                ind=last_row,
                 is_power_exhausted=is_power_exhausted,
                 bid_ask_ratio=bid_ask_ratio,
-                ask_bid_ratio=ask_bid_ratio
+                ask_bid_ratio=ask_bid_ratio,
+                vol_power=vol_power
             )
+            
+            if res['action'] != 'HOLD':
+                self.app._on_strategy_action_needed(code, res['action'], res['reason'], now_price=now_price, profit_ratio=res.get('profit_ratio', 0))
 
-            # 8. 거래량 변동성 체크
-            is_price_changed = False
-            if now_price != info.get('last_price', 0):
-                is_price_changed = True
-                info['last_price'] = now_price
-
-            # 7. 트리뷰 업데이트 큐잉 (UI 업데이트는 App을 통해 수행)
-            sign = "▲" if diff_val > 0 else "▼" if diff_val < 0 else ""
-            abs_ratio = abs(diff_val / open_price * 100) if open_price else 0
+            # 8. 트리뷰 업데이트 큐잉
+            p_tag = "price_up" if diff_val > 0 else ("price_down" if diff_val < 0 else "price_stable")
+            sign = "▲" if diff_val > 0 else ("▼" if diff_val < 0 else "")
+            abs_ratio = abs(diff_val / open_price * 100) if open_price != 0 else 0
             
             full_values = (
-                f"{info.get('score', 0.0):.1f}", code, info['name'],
+                f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}", code, info['name'],
                 f"{int(now_price):,}", f"{sign} {abs_ratio:.2f}%" if sign else "0.00%",
-                f"{info.get('vol_power', 0.0):.1f}%", 
-                info.get('confluence', '-'),
-                f"{int(info.get('total_ask', 0)):,}",
-                f"{int(info.get('total_bid', 0)):,}",
+                f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%", 
+                str(info.get('confluence', '-')),
+                f"{int(float(self._to_scalar(info.get('total_ask', 0), 0))):,}",
+                f"{int(float(self._to_scalar(info.get('total_bid', 0), 0))):,}",
                 f"{int(volume):,}", f"{trde_val:,}"
             )
             
-
-            # [v27.9] 블링크(Blink) 포기 및 단순화: 시세 방향만 표시
-            p_tag = "price_up" if diff_val > 0 else ("price_down" if diff_val < 0 else "price_stable")
+            final_tags = []
             
-            final_tags = [p_tag]
-            if tag: 
-                final_tags.insert(0, tag)
-            
-            # [v3.5] 합치도 기반 색상 태그 추가
-            m_ratio = info.get('met_ratio', 0)
+            # 합치도 기반 색상 태그
+            m_ratio = float(self._to_scalar(info.get('met_ratio', 0.0), 0.0))
             if is_buy:
                 info['confluence'] = "🔥 타점 포착"
                 final_tags.append("status_high")
@@ -226,6 +200,9 @@ class SignalEngine:
                 final_tags.append("status_high")
             else:
                 final_tags.append("status_low")
+
+            # 가격 태그를 가장 뒤에 추가하여 최우선 적용
+            final_tags.append(p_tag)
                 
             # [v27.9] is_blink 플래그를 항상 False로 전달
             self.app.pending_tree_updates[code] = (full_values, tuple(final_tags), False)
@@ -261,5 +238,9 @@ class SignalEngine:
         if not hasattr(self.app, 'min_volume_profiles') or code not in self.app.min_volume_profiles:
             return False
         now_hm = datetime.now().strftime('%H%M')
-        avg_min_vol = self.app.min_volume_profiles[code].get(now_hm, 0)
-        return current_vol > (avg_min_vol * 3.0) and current_vol > 5000
+        # [v4.5.9] Series Ambiguity 방어: 볼륨 프로필에서 스칼라값 안전 추출
+        avg_min_vol_v = self.app.min_volume_profiles[code].get(now_hm, 0)
+        avg_min_vol = float(self._to_scalar(avg_min_vol_v, 0.0))
+        
+        c_vol = float(self._to_scalar(current_vol, 0.0))
+        return bool(c_vol > (avg_min_vol * 3.0) and c_vol > 5000)

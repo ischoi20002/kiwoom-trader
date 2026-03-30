@@ -4,6 +4,7 @@ import json
 import os
 import pandas as pd
 import typing as tp
+from core.defaults import DEFAULT_SETTINGS
 
 class SettingsTab:
     def __init__(self, parent, app, default_settings):
@@ -15,13 +16,14 @@ class SettingsTab:
         self.type_a_widgets = []
         self.type_b_widgets = []
         self.grid_rows = {} 
+        self.sizing_rows = []
         self.window_id: tp.Any = None 
         self._setup_ui()
 
     def _setup_ui(self):
         # --- Theme Styling ---
         bg_col = self.app.colors.get('bg', '#2E3440')
-        txt_col = self.app.colors.get('text', '#D8DEE9')
+        txt_col = self.app.colors.get('text', '#EBCB8B') # Global warm gold for visibility
         primary_col = self.app.colors.get('primary', '#88C0D0')
         active_col = '#5E81AC' 
 
@@ -50,9 +52,9 @@ class SettingsTab:
         # 헤더
         header_sticky = ttk.Frame(self.parent, padding=(25, 15, 25, 0))
         header_sticky.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(header_sticky, text='⚙️ 전략 파라미터 최적화', font=('Malgun Gothic', 18, 'bold'), foreground=primary_col).pack(side=tk.LEFT)
-        self.app.settings_status_label = ttk.Label(header_sticky, text='', font=('Malgun Gothic', 10), foreground=self.app.colors.get('secondary', '#81A1C1'))
-        self.app.settings_status_label.pack(side=tk.RIGHT)
+        ttk.Label(header_sticky, text='⚙️ 전략 파라미터 최적화', font=('Segoe UI', 18, 'bold'), foreground=primary_col).pack(side=tk.LEFT)
+        self.status_label = ttk.Label(header_sticky, text='', font=('Segoe UI', 10), foreground=self.app.colors.get('secondary', '#81A1C1'))
+        self.status_label.pack(side=tk.RIGHT)
 
         scrollbar.pack(side='right', fill='y')
         canvas.pack(side='left', fill='both', expand=True)
@@ -77,7 +79,7 @@ class SettingsTab:
 
         def add_header(parent, text):
             r = get_next_row(parent)
-            ttk.Label(parent, text=text, font=('Malgun Gothic', 10, 'bold'), foreground=primary_col).grid(row=r, column=0, columnspan=5, sticky='w', pady=(15, 5))
+            ttk.Label(parent, text=text, font=('Segoe UI', 10, 'bold'), foreground=primary_col).grid(row=r, column=0, columnspan=5, sticky='w', pady=(15, 5))
 
         def add_param_row(parent, label, key=None, unit='', hint='', toggle_key=None, widget_list=None):
             r = get_next_row(parent)
@@ -87,7 +89,7 @@ class SettingsTab:
                     self.conf_vars[toggle_key] = tk.BooleanVar(value=self.app.settings.get(toggle_key, def_val))
                 cb = tk.Checkbutton(parent, variable=self.conf_vars[toggle_key], bg=bg_col, fg=txt_col, activebackground=bg_col, selectcolor=active_col) 
                 cb.grid(row=r, column=0, sticky='w', padx=(5, 0))
-            lbl = ttk.Label(parent, text=label, font=('Malgun Gothic', 10))
+            lbl = ttk.Label(parent, text=label, font=('Segoe UI', 10), foreground='#EBCB8B')
             lbl.grid(row=r, column=1, sticky='w', pady=4)
             if key:
                 val = self.app.settings.get(key, self.default_settings.get(key, ''))
@@ -97,7 +99,7 @@ class SettingsTab:
                 self.params_entries[key] = ent
                 if widget_list is not None: widget_list.append(ent)
             if unit:
-                un = ttk.Label(parent, text=unit, font=('Malgun Gothic', 9))
+                un = ttk.Label(parent, text=unit, font=('Segoe UI', 9), foreground='#EBCB8B')
                 un.grid(row=r, column=3, sticky='w')
                 if widget_list is not None: widget_list.append(un)
             if hint:
@@ -108,17 +110,16 @@ class SettingsTab:
 
         def add_sizing_row(parent, label, amt_key, pct_key, unit_key):
             r = get_next_row(parent)
-            ttk.Label(parent, text=label, font=('Malgun Gothic', 10)).grid(row=r, column=1, sticky='w', pady=4)
+            ttk.Label(parent, text=label, font=('Segoe UI', 10), foreground='#EBCB8B').grid(row=r, column=1, sticky='w', pady=4)
             frame = ttk.Frame(parent)
             frame.grid(row=r, column=2, columnspan=2, sticky='w')
             ent = ttk.Entry(frame, width=10, justify='center')
-            self.params_entries[amt_key] = ent
-            self.params_entries[pct_key] = ent 
             ent.pack(side=tk.LEFT, padx=(5, 2))
             if unit_key not in self.conf_vars:
                 self.conf_vars[unit_key] = tk.StringVar(value=self.app.settings.get(unit_key, '원'))
             cb = ttk.Combobox(frame, textvariable=self.conf_vars[unit_key], values=['원', '%'], width=3, state='readonly')
             cb.pack(side=tk.LEFT)
+            self.sizing_rows.append({'ent': ent, 'unit_var': self.conf_vars[unit_key], 'amt_key': amt_key, 'pct_key': pct_key})
             def on_unit_change(*args):
                 u = self.conf_vars[unit_key].get()
                 val = self.app.settings.get(amt_key if u == '원' else pct_key, '')
@@ -264,8 +265,39 @@ class SettingsTab:
                     self.app.settings[k] = float(v)
             for k, var in self.conf_vars.items():
                 if hasattr(var, 'get'): self.app.settings[k] = var.get()
-            if hasattr(self.app, '_final_save_settings'): self.app._final_save_settings()
-            if hasattr(self.app, 'backtest_tab'): self.app.backtest_tab._sync_opt_toggles_with_settings()
-            self.app.log('✅ 설정이 저장되었습니다.')
+
+            # [Audit Fix] Isolate sizing variables (Won vs %)
+            for row in self.sizing_rows:
+                ent = row['ent']
+                unit = row['unit_var'].get()
+                v = ent.get().strip().replace(',', '')
+                if not v: continue
+                
+                # Update only the active unit's key
+                active_key = row['amt_key'] if unit == '원' else row['pct_key']
+                self.app.settings[active_key] = float(v)
+            
+            # [v4.5.3] Centralized save via ConfigHandler
+            if self.app.config_handler.save_settings(self.app.settings):
+                # 엔진 파라미터 업데이트 통보
+                if hasattr(self.app, 'stream_processor'):
+                    self.app.stream_processor.settings = self.app.settings
+                if hasattr(self.app, 'backtest_tab'):
+                    self.app.backtest_tab._sync_opt_toggles_with_settings()
+                
+                self.status_label.config(text="✅ 설정이 저장되었습니다.", foreground="#A3BE8C")
+                self.app.log('✅ 설정이 저장되었습니다. (유효 파라미터 동기화 완료)')
+            else:
+                raise Exception("파일 저장 실패")
         except Exception as e: 
+            self.status_label.config(text=f"❌ 저장 실패: {e}", foreground="#BF616A")
             messagebox.showerror('오류', f'저장 실패: {e}')
+
+    def update_criteria(self):
+        """[v4.5.3] SelectionService로부터 기준 요약 텍스트를 가져와서 UI에 반영 (Stub)"""
+        # [v4.2] UI에서 라벨이 제거되어 더 이상 사용하지 않음 (Stub)
+        pass
+
+    def get_criteria_text(self, format_type="ui"):
+        """[v4.5.3] SelectionService로부터 기준 요약 텍스트를 가져옵니다."""
+        return self.app.selection_service._get_criteria_summary(format_type)

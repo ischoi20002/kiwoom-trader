@@ -7,7 +7,8 @@ class PortfolioManager:
     """
     [v3.8] 가상 포지션 관리, 계좌 동기화(Reconciliation), DB 연동을 전담하는 모듈.
     """
-    def __init__(self, data_manager, order_manager, settings=None, log_func=None, gui_callback=None, telegram_callback=None):
+    def __init__(self, app, data_manager, order_manager, settings=None, log_func=None, gui_callback=None, telegram_callback=None):
+        self.app = app
         self.data_manager = data_manager
         self.order_manager = order_manager
         self.settings = settings or {}
@@ -22,6 +23,14 @@ class PortfolioManager:
         self.virtual_positions = {}
         self.virtual_history = []
         self.virtual_db_file = "virtual_db.json"
+        
+        # [v4.5 Asset Harden] 실시간 자산 현황 및 스로틀링(Throttling) 트래킹
+        self.total_equity = 0
+        self.d1_deposit = 0
+        self.d2_deposit = 0
+        self.actual_deposit = 0
+        self.last_sync_time = 0.0
+        self.min_sync_interval = 30.0 # [v4.5.3] 30초 간격으로 완화
         
         self.lock = threading.Lock()
         
@@ -69,10 +78,32 @@ class PortfolioManager:
 
     def sync_with_actual_account(self, silent=False):
         """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 가상 포지션을 동기화 (Reconciliation)"""
-        holdings = self.order_manager.get_holdings()
-        if holdings is None: 
-            self.log("[Error] [Sync] 계좌 정보를 실시간으로 가져올 수 없습니다.")
+        # [v4.5.1 API Throttle] 무분별한 API 호출 방질를 위해 60초 쿨다운 적용
+        import time
+        now = time.time()
+        if now - self.last_sync_time < self.min_sync_interval:
+            wait_s = int(self.min_sync_interval - (now - self.last_sync_time))
+            if not silent:
+                self.log(f"⏳ [Throttle] 계좌 조회가 너무 잦습니다. {wait_s}초 후에 업데이트가 가능합니다.")
             return
+
+        # [v4.5 Asset Harden] get_holdings()가 딕셔너리를 반환함에 따라 호출부 수정
+        account_data = self.order_manager.get_holdings()
+        if account_data is None: 
+            self.log("[Error] [Sync] 계좌 정보를 실시간으로 가져올 수 없습니다. (혹은 API 429 제한)")
+            return
+        
+        self.last_sync_time = now # 성공 시점 업데이트
+        
+        holdings = account_data.get('holdings', [])
+        total_equity = account_data.get('total_equity', 0)
+        
+        with self.lock:
+            self.total_equity = total_equity
+            self.d1_deposit = account_data.get('d1_deposit', 0)
+            self.d2_deposit = account_data.get('d2_deposit', 0)
+            # [v4.5.3] D+2 예수금을 실제 가용 예수금으로 우선 간주
+            self.actual_deposit = account_data.get('d2_deposit', 0)
         
         server_codes = set()
         updated_count = 0
@@ -136,8 +167,79 @@ class PortfolioManager:
         self.save_db()
         if self.gui_callback: self.gui_callback()
         
-        result_msg = f"동기화: 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
+        result_msg = f"✅ 계좌 동기화 완료: 총자산 {self.total_equity:,.0f}원 (D+2: {self.actual_deposit:,.0f}) | 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
         self.log(f"[Portfolio] {result_msg}")
+        
+    def sync_deposit(self):
+        """[v4.5.3] 전용 예수금 상세 조회 및 가용금 업데이트"""
+        d = self.order_manager.get_deposit()
+        if d is not None:
+            self.actual_deposit = d
+            if self.gui_callback: self.gui_callback()
+            return d
+        return None
+
+    def calculate_order_quantity(self, stage=1, is_simulation=False):
+        """[v2.2] 설정창의 비중 설정(원/%)에 따른 실제 투자금액 산출 (실전/시뮬레이션 로직 분리)"""
+        s = self.settings
+        unit = s.get(f's{stage}_sizing_unit', '원')
+        
+        if unit == '원':
+            invest_amt = int(float(str(s.get(f'stage{stage}_amt', 1000000)).replace(',', '')))
+        else:
+            pct = float(s.get(f's{stage}_equity_pct', 10.0))
+            # [v18.0] Separation of Logic: Real-time order vs Simulation
+            if is_simulation:
+                # 백테스팅/가상매매는 설정창의 기반 자산을 사용
+                total_cap = float(str(s.get('backtest_initial_capital', 10000000)).replace(',', ''))
+            else:
+                # [v4.5 Asset Harden] 실전/모의투자는 총 자산(Total Equity)을 우선 사용
+                if self.total_equity > 0:
+                    total_cap = self.total_equity
+                elif self.actual_deposit > 0:
+                    total_cap = self.actual_deposit
+                else:
+                    self.log("❌ [Risk] 실제 계좌 자산 정보를 가져오지 못해 주문을 발송할 수 없습니다. (계좌 조회를 확인하세요)")
+                    return 0
+            invest_amt = int(total_cap * pct / 100.0)
+        return invest_amt
+
+    def capture_snapshot(self, code, price, reason="N/A"):
+        """[v18.0] 현재 시점의 시장지수 및 보조지표 상황 정밀 캡처 (지식백과 반영)"""
+        if not hasattr(self, 'app') or not self.app: return {}
+        
+        info = self.app.monitor_info.get(code, {})
+        m_trend = getattr(self.app, 'market_trend', 'NEUTRAL')
+        
+        snapshot = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "price": price,
+            "market_trend": m_trend,
+            "vol_power": info.get('vol_power', 100.0),
+            "reason": reason,
+            "rsi": 0.0, "macd": 0.0, "osc": 0.0, "adx": 0.0,
+            "ma_alignment": "N/A", "bid_ask_ratio": 0.0
+        }
+        
+        # 호가 잔량
+        total_ask = info.get('total_ask', 0)
+        total_bid = info.get('total_bid', 1)
+        if total_ask > 0: snapshot["bid_ask_ratio"] = round(total_bid / total_ask, 2)
+
+        # 지표 데이터
+        if code in self.app.bars_data and not self.app.bars_data[code].empty:
+            ind = self.app.bars_data[code].iloc[-1]
+            snapshot["rsi"] = round(float(ind.get('RSI', 0)), 1)
+            snapshot["macd"] = round(float(ind.get('MACD', 0)), 2)
+            snapshot["osc"] = round(float(ind.get('OSC', 0)), 2)
+            snapshot["adx"] = round(float(ind.get('ADX', 0)), 1)
+            
+            ma5, ma20, ma60 = ind.get('MA5', 0), ind.get('MA20', 0), ind.get('MA60', 0)
+            if ma5 > ma20 > ma60: snapshot["ma_alignment"] = "정배열(Bull)"
+            elif ma5 < ma20 < ma60: snapshot["ma_alignment"] = "역배열(Bear)"
+            else: snapshot["ma_alignment"] = "혼조(Neutral)"
+            
+        return snapshot
 
     def _to_f(self, v):
         try: return float(v) if not isinstance(v, list) else 0.0
@@ -254,16 +356,31 @@ class PortfolioManager:
         if self.gui_callback: self.gui_callback()
 
     def sell_all(self):
-        """[v3.8] 비상 상황: 모든 가상/실제 포지션 즉시 시장가 매도 청산"""
+        """[v3.8/v4.5.4] 비상 상황: 모든 가상/실제 포지션 즉시 시장가 매도 청산"""
         with self.lock:
             codes = list(self.virtual_positions.keys())
+            if not codes: return
+            
             for code in codes:
                 pos = self.virtual_positions[code]
                 qty = pos.get('qty', 0)
-                if qty > 0:
-                    # 시장가(03) 매도 주문
-                    self.order_manager.place_order(code, qty, 0, order_type="03", side="sell")
-                self.data_manager.delete_active_position(code)
-            self.virtual_positions = {}
+                if qty <= 0: continue
+                
+                # [v3.8] 공격적 체결(매도)을 위한 보정가 산출 로직 유지
+                info = self.app.monitor_info.get(code, {})
+                curr_p = info.get('price', pos['avg_price'])
+                
+                # 실제 주문 발송 (허용된 경우)
+                use_mock = getattr(config, 'USE_MOCK', False)
+                allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
+                if allow_order:
+                    self.order_api.place_order(code, qty, curr_p, order_type="03", side="sell")
+                
+                # 가상 상태 업데이트 (즉시 삭제 대신 '매도 대기' 상태로 전환하여 체결 대기)
+                pos['exit_pending'] = True
+                pos['exit_reason'] = "EMERGENCY"
+                
+                self.log(f"🚨 [Emergency] {pos.get('name')}({code}) 비상 청산 주문 발송")
+                
         self.save_db()
         if self.gui_callback: self.gui_callback()
