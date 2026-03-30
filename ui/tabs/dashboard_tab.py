@@ -67,7 +67,7 @@ class DashboardTab:
         self.app.log_area.tag_configure("info", foreground="#88C0D0") # Frost Blue
         self.app.log_area.tag_configure("success", foreground="#A3BE8C") # Moss Green
         self.app.log_area.tag_configure("error", foreground="#BF616A") # Aurora Red
-        self.app.log_area.tag_configure("warning", foreground="#EBCB8B") # Yellow
+        self.app.log_area.tag_configure("warning", foreground="#D08770") # Aurora Orange
         self.app.log_area.tag_configure("header", foreground="#B48EAD", font=("Consolas", 10, "bold")) # Purple
 
     def _on_btn_harvest(self):

@@ -21,117 +21,56 @@ class BacktestTab:
         self._poll_queue()
 
     def _init_vars(self):
-        """[v25.0] 최적화 대상 파라미터 선택 변수 초기화"""
+        """[v26.0] 동적 테이블 렌더링을 위한 설정 초기화 (38개 파라미터 매핑)"""
         self.backtest_entries = {}
         self.backtest_force_refresh_var = tk.BooleanVar(value=False)
         from core.defaults import DEFAULT_SETTINGS
         self.base_backtest_settings = DEFAULT_SETTINGS.copy()
         
-        self.opt_params_vars = {
-            'buy_rsi_min': tk.BooleanVar(value=True),
-            'buy_rsi_max_a': tk.BooleanVar(value=True),
-            'buy_rsi_max_b': tk.BooleanVar(value=True),
-            'vol_surge': tk.BooleanVar(value=True),
-            'vol_surge_b': tk.BooleanVar(value=True),
-            'gc_window': tk.BooleanVar(value=True),
-            'rsi_window': tk.BooleanVar(value=True),
-            's1_a_take_profit': tk.BooleanVar(value=True),
-            's1_a_stop_loss': tk.BooleanVar(value=True),
-            's1_b_take_profit': tk.BooleanVar(value=True),
-            's1_b_stop_loss': tk.BooleanVar(value=True),
-            's2_take_profit': tk.BooleanVar(value=True),
-            's2_stop_loss': tk.BooleanVar(value=True),
-            's2_vol_ratio': tk.BooleanVar(value=True),
-            'atr_period': tk.BooleanVar(value=True),
-            'atr_multiplier_sl': tk.BooleanVar(value=True),
-            'atr_multiplier_trail': tk.BooleanVar(value=True),
-            's1_equity_pct': tk.BooleanVar(value=False),
-            's2_equity_pct': tk.BooleanVar(value=False),
-            'use_smart_exit': tk.BooleanVar(value=True),
-            'smart_exit_ba_ratio': tk.BooleanVar(value=False),
-            'smart_exit_vp': tk.BooleanVar(value=False),
-            'use_smart_buy_a': tk.BooleanVar(value=False),
-            'use_smart_buy_b': tk.BooleanVar(value=False),
-            'use_smart_buy_s2': tk.BooleanVar(value=False),
-            'smart_buy_ba_ratio': tk.BooleanVar(value=False),
-            'smart_buy_vp': tk.BooleanVar(value=False),
-            'smart_exit_price_threshold': tk.BooleanVar(value=False),
-            'macd_fast_daily': tk.BooleanVar(value=False),
-            'macd_slow_daily': tk.BooleanVar(value=False),
-            'macd_sig_daily': tk.BooleanVar(value=False),
-            'macd_fast_entry': tk.BooleanVar(value=False),
-            'macd_slow_entry': tk.BooleanVar(value=False),
-            'macd_sig_entry': tk.BooleanVar(value=False),
-            'backtest_initial_capital': tk.BooleanVar(value=False),
-            'sel_rsi_min': tk.BooleanVar(value=False),
-            'sel_rsi_max': tk.BooleanVar(value=False)
-        }
-        self.col_to_params = {
-            "vol_a": ["vol_surge"], "vol_b": ["vol_surge_b"],
-            "rsi_a": ["buy_rsi_max_a"], "rsi_b": ["buy_rsi_max_b"], "rsi_min": ["buy_rsi_min"],
-            "gc_w": ["gc_window"], "rsi_w": ["rsi_window"],
-            "tp_a": ["s1_a_take_profit"], "sl_a": ["s1_a_stop_loss"],
-            "macd_d": ["macd_fast_daily", "macd_slow_daily", "macd_sig_daily"],
-            "macd_e": ["macd_fast_entry", "macd_slow_entry", "macd_sig_entry"],
-            "cap": ["backtest_initial_capital"],
-            "sel_rsi": ["sel_rsi_min", "sel_rsi_max"],
-            "tp_b": ["s1_b_take_profit"], "sl_b": ["s1_b_stop_loss"],
-            "tp_s2": ["s2_take_profit"], "sl_s2": ["s2_stop_loss"],
-            "s2_vol": ["s2_vol_ratio"],
-            "atr_p": ["atr_period"], "atr_sl": ["atr_multiplier_sl"], "atr_tr": ["atr_multiplier_trail"],
-            "s1_%": ["s1_equity_pct"], "s2_%": ["s2_equity_pct"],
-            "sb_vp": ["smart_buy_vp"], "sb_ba": ["smart_buy_ba_ratio"],
-            "sx_vp": ["smart_exit_vp"], "sx_ba": ["smart_exit_ba_ratio"], "sx_thr": ["smart_exit_price_threshold"]
-        }
-        # [v15.7] 헤더 텍스트 매핑 (아이콘 업데이트용)
-        self.param_to_col_id = {
-            "vol_surge": "#6", "vol_surge_b": "#7", "buy_rsi_max_a": "#8",
-            "buy_rsi_max_b": "#9", "buy_rsi_min": "#10", "gc_window": "#11",
-            "rsi_window": "#12",
-            "s1_a_take_profit": "#13", "s1_a_stop_loss": "#14",
-            "s1_b_take_profit": "#15", "s1_b_stop_loss": "#16",
-            "s2_take_profit": "#17", "s2_stop_loss": "#18",
-            "s2_vol_ratio": "#19",
-            "atr_period": "#20", "atr_multiplier_sl": "#21", "atr_multiplier_trail": "#22",
-            "s1_equity_pct": "#23", "s2_equity_pct": "#1"  # Adjusted dynamically later
-        }
-        # 초기 동기화 수행
-        self._sync_opt_toggles_with_settings()
-
-    def _sync_opt_toggles_with_settings(self):
-        """[v15.7] 전략 설정 탭의 활성화 여부에 따라 최적화 체크박스 자동 동기화"""
-        s = self.app.settings
-        # 연동 맵 정의 (Settings Key -> Opt Params)
-        sync_map = {
-            "use_type_a": ["vol_surge", "buy_rsi_max_a", "s1_a_take_profit", "s1_a_stop_loss"],
-            "use_type_b": ["vol_surge_b", "buy_rsi_max_b", "s1_b_take_profit", "s1_b_stop_loss"],
-            "use_rsi_min": ["buy_rsi_min"],
-            "use_s1_tp": ["s1_a_take_profit", "s1_b_take_profit"],
-            "use_s1_stop_loss": ["s1_a_stop_loss", "s1_b_stop_loss"],
-            "use_s2_tp": ["s2_take_profit"],
-            "use_s2_stop_loss": ["s2_stop_loss"],
-            "use_atr_exit": ["atr_period"],
-            "use_atr_stop_loss": ["atr_multiplier_sl"],
-            "use_atr_trailing_stop": ["atr_multiplier_trail"],
-            "use_smart_buy_a": ["smart_buy_ba_ratio", "smart_buy_vp"],
-            "use_smart_buy_b": ["smart_buy_ba_ratio", "smart_buy_vp"],
-            "use_smart_buy_s2": ["smart_buy_ba_ratio", "smart_buy_vp"],
-            "use_smart_exit": ["smart_exit_ba_ratio", "smart_exit_vp", "smart_exit_price_threshold"]
-        }
+        # [v16.50] 최적화 상태 변수를 메인 앱의 중앙 저장소와 연동
+        self.opt_params_vars = self.app.opt_params_vars
         
-        for settings_key, opt_keys in sync_map.items():
-            is_enabled = s.get(settings_key, True)
-            # Sync the main toggle itself if it's in opt_params_vars
-            if settings_key in self.opt_params_vars:
-                self.opt_params_vars[settings_key].set(is_enabled)
-                
-            for k in opt_keys:
-                if k in self.opt_params_vars:
-                    self.opt_params_vars[k].set(is_enabled)
-        
-        # UI 업데이트 (헤더 아이콘 반영) - UI가 생성된 후라면 실행
-        if hasattr(self, 'tree_backtest') and self.tree_backtest is not None:
-            self._refresh_header_icons()
+        # [v26.0] 최적화 파라미터 상세 정보 사전 (표시명, 카테고리, 설명)
+        self.PARAM_INFO = {
+            's1_equity_pct': ('S1_Equity%', '자금관리', '1단계 비중 (%)'),
+            's2_equity_pct': ('S2_Equity%', '자금관리', '2단계 비중 (%)'),
+            'min_trde_val': ('Min_Trade_Amt', '종목선정필터', '최소 거래 대금 (억)'),
+            'vol_ratio': ('Vol_Surge_Ratio', '종목선정필터', '거래량 분출 비율 (배)'),
+            'vol_lookback': ('Vol_Check_Days', '종목선정필터', '분출 확인 기간 (일)'),
+            'ma_convergence': ('MA_Conv_Limit', '종목선정필터', '이평선 수렴도 기준 (%)'),
+            'sel_rsi_max': ('Sel_RSI_High', '종목선정필터', '종목 선정 RSI 상한'),
+            'sel_rsi_min': ('Sel_RSI_Low', '종목선정필터', '종목 선정 RSI 하한'),
+            'buy_rsi_max_a': ('A_RSI_High', '단계별 전략(A)', '눌림(A) RSI 상한선'),
+            'gc_window': ('A_GC_Window', '단계별 전략(A)', '눌림(A) 이평 골든크로스 기간'),
+            'vol_surge': ('A_Vol_Surge', '단계별 전략(A)', '눌림(A) 거래량 급증 배수'),
+            'atr_multiplier_sl_a': ('A_ATR_Stop', '단계별 전략(A)', '눌림(A) ATR 손절 배수'),
+            'atr_multiplier_trail_a': ('A_ATR_Trail', '단계별 전략(A)', '눌림(A) ATR 추격 익절 배수'),
+            'buy_rsi_max_b': ('B_RSI_High', '단계별 전략(B)', '돌파(B) RSI 상한선'),
+            'vol_surge_b': ('B_Vol_Surge', '단계별 전략(B)', '돌파(B) 거래량 급증 배수'),
+            'atr_multiplier_sl_b': ('B_ATR_Stop', '단계별 전략(B)', '돌파(B) ATR 손절 배수'),
+            'atr_multiplier_trail_b': ('B_ATR_Trail', '단계별 전략(B)', '돌파(B) ATR 추격 익절 배수'),
+            's2_vol_ratio': ('S2_Vol_Ratio', '2차 추매(S2)', '2단계 거래량 급증 배수'),
+            's2_profit_limit': ('S2_Min_Profit', '2차 추매(S2)', '2단계 최소 수익률 확보 (%)'),
+            's2_delay_hours': ('S2_Delay_Hrs', '2차 추매(S2)', '2단계 진입 후 대기시간 (시간)'),
+            'atr_multiplier_sl_s2': ('S2_ATR_Stop', '2차 추매(S2)', '2단계 ATR 손절 배수'),
+            'atr_multiplier_trail_s2': ('S2_ATR_Trail', '2차 추매(S2)', '2단계 ATR 추격 익절 배수'),
+            'smart_buy_vp': ('SB_Min_VP', '전술적 수급', 'Smart Buy 최소 체결강도 (%)'),
+            'smart_buy_ba_ratio': ('SB_BA_Ratio', '전술적 수급', 'Smart Buy 매도벽 비율 (배)'),
+            'smart_exit_vp': ('SX_Min_VP', '전술적 수급', 'Smart Exit 체결강도 하한 (%)'),
+            'smart_exit_ba_ratio': ('SX_BA_Ratio', '전술적 수급', 'Smart Exit 매수함정 비율 (배)'),
+            'smart_exit_price_threshold': ('SX_Price_Thr', '전술적 수급', 'Smart Exit 가격 하락 임계 (%)'),
+            'gap_down_limit': ('Gap_Limit', '공통 리스크', '갭하락 즉시 손절 기준 (%)'),
+            'atr_period': ('ATR_Period', '공통 리스크', 'ATR 분석 주기 (봉)'),
+            's1_a_take_profit': ('A_Take_Profit', '공통 리스크', '눌림(A) 목표 익절률 (%)'),
+            's1_a_stop_loss': ('A_Stop_Loss', '공통 리스크', '눌림(A) 최대 손절률 (%)'),
+            's1_b_take_profit': ('B_Take_Profit', '공통 리스크', '돌파(B) 목표 익절률 (%)'),
+            's1_b_stop_loss': ('B_Stop_Loss', '공통 리스크', '돌파(B) 최대 손절률 (%)'),
+            's2_take_profit': ('S2_Take_Profit', '공통 리스크', '2단계 목표 익절률 (%)'),
+            's2_stop_loss': ('S2_Stop_Loss', '공통 리스크', '2단계 최대 손절률 (%)'),
+            's1_a_flash_exit_pct': ('A_Flash_Exit', '공통 리스크', '눌림(A) Flash Exit 기준 (%)'),
+            's1_b_flash_exit_pct': ('B_Flash_Exit', '공통 리스크', '돌파(B) Flash Exit 기준 (%)'),
+            's2_flash_exit_pct': ('S2_Flash_Exit', '공통 리스크', '2단계 Flash Exit 기준 (%)')
+        }
 
     def _show_copyable_error(self, title, message):
         """[v4.10.10] 마우스 선택 및 복사가 가능한 커스텀 에러 다이얼로그"""
@@ -181,24 +120,6 @@ class BacktestTab:
             pass
         finally:
             self.parent.after(100, self._poll_queue)
-
-    def _refresh_header_icons(self):
-        """[v15.7] 현재 opt_params_vars 상태에 맞춰 헤더 아이콘(☑️/⬜) 일괄 업데이트"""
-        if not hasattr(self, 'tree_backtest') or self.tree_backtest is None:
-            return
-            
-        for col_name, params in self.col_to_params.items():
-            # 묶음 파라미터 중 하나라도 켜져 있으면 ON (일관성을 위해 첫 번째 기준)
-            is_active = self.opt_params_vars[params[0]].get()
-            icon = "☑️" if is_active else "⬜"
-            
-            # 컬럼 인덱스 찾기
-            cols = list(self.tree_backtest["columns"])
-            if col_name in cols:
-                col_id = f"#{cols.index(col_name) + 1}"
-                current_text = self.tree_backtest.heading(col_id, "text")
-                base_text = current_text.replace("☑️", "").replace("⬜", "").strip()
-                self.tree_backtest.heading(col_id, text=f"{icon} {base_text}")
 
     def _setup_ui(self):
         """백테스팅 탭 레이아웃 구성 (v16.8: 직관적인 그룹화 레이아웃 적용)"""
@@ -303,97 +224,21 @@ class BacktestTab:
         h_scroll.grid(row=1, column=0, sticky="ew")
 
         # Now create children with scroll_frame_bt as parent
-        # [v5.0] 노르딕 프로페셔널 카테고리 헤더
-        cat_frame = tk.Frame(self.scroll_frame_bt, height=30, bg="#3B4252")
-        cat_frame.pack(side=tk.TOP, fill=tk.X) 
+        # [v16.15] 상단 카테고리 프레임 제거 (UI 정예화를 위해 삭제)
+        pass
 
-        # 카테고리 컬러 (Nord Palette 기반 저채도 구성)
-        categories = [
-            ("📊 성과", 275, "#434C5E"),
-            ("🚀 매수 진입", 585, "#4C566A"),
-            ("💰 비중(%)", 130, "#3B4252"),
-            ("🎯 청산 및 추매", 845, "#2E3440")
-        ]
-        
-        for name, width, color in categories:
-            f = tk.Frame(cat_frame, width=width, height=28, bg=color)
-            f.pack_propagate(0)
-            f.pack(side=tk.LEFT)
-            lbl = tk.Label(f, text=name, font=("Segoe UI", 9, "bold"), 
-                         bg=color, fg="#D8DEE9", relief=tk.FLAT)
-            lbl.pack(fill=tk.BOTH, expand=True)
-
-        # [v3.5] 컬럼 설명 정의 (툴팁용)
-        self.header_tooltips = {
-            "rank": "순위: 수익률 기준 최적화 결과 순위",
-            "avg_ret": "수익률: 백테스트 대상 종목들의 평균 수익률 (%)",
-            "avg_mdd": "MDD: 평균 최대 낙폭 (Risk 지표, 낮을수록 안정적)",
-            "win_rate": "승률: 전체 매매 중 익절 마감 비율 (%)",
-            "trades": "매매수: 백테스트 기간 중 발생한 총 매매 횟수",
-            "vol_a": "vol_surge: Type A 거래량 급증 기준 (배)",
-            "vol_b": "vol_surge_b: Type B 거래량 급증 기준 (배)",
-            "rsi_b": "buy_rsi_max_b: 매수 조건 - RSI 상한선 (Type B)",
-            "rsi_a": "buy_rsi_max_a: 매수 조건 - Type A 전용 RSI 상한선",
-            "rsi_min": "buy_rsi_min: 매수 조건 - 전략 공통 RSI 하한선",
-            "macd_d": "Screening MACD: 일봉 MACD 크로스 지표 (Fast/Slow/Sig)",
-            "macd_e": "Entry MACD: 15분봉 MACD 크로스 지표 (Fast/Slow/Sig)",
-            "cap": "초기자금: 백테스트 시뮬레이션 초기 자산 (원)",
-            "sel_rsi": "Selection RSI: 상위 종목 선정 시 RSI 범위 (Min~Max)",
-            "gc_w": "gc_window: 이평선 골든크로스 유지시간 (분)",
-            "rsi_w": "rsi_window: RSI 50 상향돌파 유지시간 (분)",
-            "tp_a": "1단계(A) 익절: 목표 수익률 (%)",
-            "sl_a": "1단계(A) 손절: 손절 기준 (%)",
-            "tp_b": "1단계(B) 익절: 목표 수익률 (%)",
-            "sl_b": "1단계(B) 손절: 손절 기준 (%)",
-            "tp_s2": "2단계(S2) 익절: 목표 수익률 (%)",
-            "sl_s2": "2단계(S2) 손절: 손절 기준 (%)",
-            "s2_vol": "s2_vol_ratio: 2차 매수 시 필요한 최소 거래량 배수 (배)",
-            "atr_p": "atr_period: ATR 계산 기간",
-            "atr_sl": "atr_multiplier_sl: ATR 손절 배수",
-            "atr_tr": "atr_multiplier_trail: ATR 추격 매도시점 배수",
-            "s1_%": "s1_equity_pct: 1단계 투입 비중 (%)",
-            "s2_%": "s2_equity_pct: 2단계 투입 비중 (%)",
-            "sb_vp": "smart_buy_vp: Smart Buy 최소 체결강도",
-            "sb_ba": "smart_buy_ba_ratio: Smart Buy 최소 호가잔량비",
-            "sx_vp": "smart_exit_vp: Smart Exit 체결강도 하한선",
-            "sx_ba": "smart_exit_ba_ratio: Smart Exit 호가잔량비 상한선",
-            "sx_thr": "smart_exit_price_threshold: Smart Exit 낙폭 기준"
-        }
-
-        cols = ["rank", "avg_ret", "avg_mdd", "win_rate", "trades", 
-                "vol_a", "vol_b", "rsi_a", "rsi_b", "rsi_min", "gc_w", "rsi_w", "sb_vp", "sb_ba",
-                "s1_%", "s2_%",
-                "tp_a", "sl_a", "tp_b", "sl_b", "tp_s2", "sl_s2", "s2_vol",
-                "atr_p", "atr_sl", "atr_tr", "sx_vp", "sx_ba", "sx_thr"] 
+        # 대청소: 하드코딩된 트리뷰 셋업과 각종 헤더/툴팁 맵핑 완전히 삭제
+        # 최소한의 기본 결과용 뼈대만 남기고, 모든 옵션 컬럼은 결과값 기반 렌더링에서 동적 생성할 예정입니다.
+        cols = ["rank", "avg_ret", "avg_mdd", "win_rate", "trades"]
         self.tree_backtest = ttk.Treeview(self.scroll_frame_bt, columns=cols, show="headings", height=15)
         
         headers = {
-            "rank": "순위", "avg_ret": "수익률", "avg_mdd": "MDD", "win_rate": "승률", "trades": "횟수",
-            "vol_a": "☑️ V_A", "vol_b": "☑️ V_B", "rsi_a": "☑️ R_A", "rsi_b": "☑️ R_B", "rsi_min": "☑️ R_Min",
-            "gc_w": "☑️ G_Dur", "rsi_w": "☑️ R_Dur",
-            "tp_a": "☑️ T_A", "sl_a": "☑️ L_A", "tp_b": "☑️ T_B", "sl_b": "☑️ L_B",
-            "tp_s2": "☑️ T_S2", "sl_s2": "☑️ L_S2",
-            "s2_vol": "☑️ Vol", "atr_p": "☑️ ATR_P", "atr_sl": "☑️ ATR_SL", "atr_tr": "☑️ ATR_TR",
-            "s1_%": "☑️ S1%", "s2_%": "☑️ S2%",
-            "sb_vp": "☑️ SB_VP", "sb_ba": "☑️ SB_BA",
-            "sx_vp": "☑️ SX_VP", "sx_ba": "☑️ SX_BA", "sx_thr": "☑️ SX_Thr"
+            "rank": "순위", "avg_ret": "수익률(%)", "avg_mdd": "MDD", "win_rate": "승률(%)", "trades": "매매수"
         }
-        
         for col in cols:
             self.tree_backtest.heading(col, text=headers.get(col, col))
-            
-        col_widths = {
-            "rank": 40, "avg_ret": 60, "avg_mdd": 60, "win_rate": 60, "trades": 55,
-            "vol_a": 65, "vol_b": 65, "rsi_b": 65, "rsi_a": 65, "rsi_min": 65, "gc_w": 65, "rsi_w": 65,
-            "tp_a": 65, "sl_a": 65, "tp_b": 65, "sl_b": 65, "tp_s2": 65, "sl_s2": 65,
-            "s2_vol": 65, "atr_p": 65, "atr_sl": 65, "atr_tr": 65,
-            "s1_%": 65, "s2_%": 65,
-            "sb_vp": 65, "sb_ba": 65, "sx_vp": 65, "sx_ba": 65, "sx_thr": 65
-        }
-        for col in cols:
-            self.tree_backtest.column(col, width=col_widths.get(col, 60), anchor=tk.CENTER, stretch=False)
+            self.tree_backtest.column(col, width=65, anchor=tk.CENTER, stretch=False)
         
-        self.tree_backtest.bind("<Button-1>", self._on_header_click)
         self.tree_backtest.bind("<Double-1>", lambda e: self._on_btn_backtest_with_selected())
         
         v_scroll = ttk.Scrollbar(self.table_assembly, orient=tk.VERTICAL, command=self.tree_backtest.yview)
@@ -409,9 +254,12 @@ class BacktestTab:
 
         style = ttk.Style()
         style.configure("Treeview", rowheight=25)
+        self.tree_backtest.tag_configure('plus', foreground='#A3BE8C')
+        self.tree_backtest.tag_configure('minus', foreground='#BF616A')
         self.tree_backtest.tag_configure('odd', background='#FDFDFD')
         self.tree_backtest.tag_configure('even', background='#F7F9FB')
-
+        
+        # [v26.0] 지능형 툴팁 장착 (카테고리 정보 포함)
         from ui.gui_utils import ToolTip
         def get_header_tip(event):
             region = self.tree_backtest.identify_region(event.x, event.y)
@@ -422,29 +270,14 @@ class BacktestTab:
                     cols = self.tree_backtest["columns"]
                     col_name = cols[col_index]
                     
-                    tip = f"[{col_name}]\n{self.header_tooltips[col_name]}"
-                    
-                    if col_name in self.col_to_params:
-                        params = self.col_to_params[col_name]
-                        space = self._get_dynamic_search_space(self.app.settings)
-                        
-                        range_strs = []
-                        for p in params:
-                            is_active = self.opt_params_vars[p].get()
-                            if is_active:
-                                range_strs.append(f"🔍 탐색: {p} {space[p]}")
-                            else:
-                                range_strs.append(f"🔒 고정: {p} [{self.app.settings.get(p)}]")
-                        
-                        tip += "\n" + "-"*20 + "\n" + "\n".join(range_strs)
-                    
-                    return tip
+                    if col_name in self.PARAM_INFO:
+                        alias, category, desc = self.PARAM_INFO[col_name]
+                        return f"📂 {category}\n✨ {desc}\n(Key: {col_name})"
+                    return None
                 except: return None
             return None
-            
-        self.header_tip = ToolTip(self.tree_backtest, get_header_tip)
-        self.app.root.after(200, self._refresh_header_icons)
-
+        ToolTip(self.tree_backtest, get_header_tip)
+        
     def _get_dynamic_search_space(self, settings):
         """[v15.7] 현재 설정값을 기준으로 주변 탐색 범위를 동적으로 생성"""
         s = settings
@@ -489,33 +322,80 @@ class BacktestTab:
             'sel_rsi_min': [35.0], 'sel_rsi_max': [70.0]
         }
 
-    def _on_header_click(self, event):
-        """[v25.0] 헤더 클릭 시 최적화 여부 토글"""
-        region = self.tree_backtest.identify_region(event.x, event.y)
-        if region != "heading":
-            return
-            
-        col_id = self.tree_backtest.identify_column(event.x)
+    def _refresh_columns_from_settings(self):
+        """[v26.1] 설정 탭의 파라미터 선택 상태를 즉시 트리뷰 컬럼에 반영 (선택된 항목만!)"""
         try:
-            col_index = int(col_id.replace("#", "")) - 1
-            cols = self.tree_backtest["columns"]
-            col_name = cols[col_index]
+            if not hasattr(self, 'tree_backtest'): return
             
-            if col_name in self.col_to_params:
-                params = self.col_to_params[col_name]
-                is_active = not self.opt_params_vars[params[0]].get()
-                for p in params:
-                    self.opt_params_vars[p].set(is_active)
+            # 1. 기존 데이터 초기화 (기둥 구조 변경 시 데이터 정합성을 위해 일괄 삭제)
+            for item in self.tree_backtest.get_children():
+                self.tree_backtest.delete(item)
+            
+            # 2. 기본 결과 컬럼
+            base_cols = ["rank", "avg_ret", "avg_mdd", "win_rate", "trades"]
+            
+            # 3. 현재 선택된 최적화 대상 파라미터 감지 (순서 보장)
+            active_params = []
+            for k in self.PARAM_INFO.keys():
+                if k in self.opt_params_vars and self.opt_params_vars[k].get():
+                    active_params.append(k)
+            
+            # 4. 트리뷰 컬럼 명단 갱신 (선택되지 않은 파라미터는 리스트에서 제외됨)
+            new_cols = base_cols + active_params
+            
+            # [Core Fix] displaycolumns를 먼저 비워서 이전 기둥을 완전히 걷어냄
+            self.tree_backtest["displaycolumns"] = [] 
+            self.tree_backtest["columns"] = new_cols
+            self.tree_backtest["displaycolumns"] = new_cols
+            
+            # 5. 헤더 및 너비 설정
+            for col in new_cols:
+                if col in base_cols:
+                    header_text = {"rank": "순위", "avg_ret": "수익률(%)", "avg_mdd": "MDD", "win_rate": "승률(%)", "trades": "매매수"}[col]
+                    width = 75
+                else:
+                    alias, category, desc = self.PARAM_INFO[col]
+                    header_text = alias
+                    width = 110
                 
-                icon = "☑️" if is_active else "⬜"
-                current_text = self.tree_backtest.heading(col_id, "text")
-                base_text = current_text.replace("☑️", "").replace("⬜", "").strip()
-                self.tree_backtest.heading(col_id, text=f"{icon} {base_text}")
-                
-                status = "활성화" if is_active else "고정(Settings 기준)"
-                self.lbl_bt_status.config(text=f"파라미터 [{base_text}] 최적화 {status}", foreground="#81A1C1")
+                self.tree_backtest.heading(col, text=header_text)
+                self.tree_backtest.column(col, width=width, anchor=tk.CENTER, stretch=False)
+
+            # 6. 스크롤 영역 갱신 (테이블 너비 확장)
+            if hasattr(self, 'canvas_bt'):
+                self.canvas_bt.itemconfig(self.canvas_window, width=5000)
+                self.parent.update_idletasks()
+                req_w = self.scroll_frame_bt.winfo_reqwidth()
+                can_w = self.canvas_bt.winfo_width()
+                self.canvas_bt.itemconfig(self.canvas_window, width=max(can_w, req_w))
+                self.canvas_bt.configure(scrollregion=self.canvas_bt.bbox("all"))
         except Exception as _err:
-            print(f"Header Toggle Error: {_err}")
+            print(f"[ERROR] Column Refresh Fail: {_err}")
+            pass
+            
+            # 4. 헤더 및 너비 설정
+            for col in new_cols:
+                if col in base_cols:
+                    header_text = {"rank": "순위", "avg_ret": "수익률(%)", "avg_mdd": "MDD", "win_rate": "승률(%)", "trades": "매매수"}[col]
+                    width = 75
+                else:
+                    alias, category, desc = self.PARAM_INFO[col]
+                    header_text = alias
+                    width = 110
+                
+                self.tree_backtest.heading(col, text=header_text)
+                self.tree_backtest.column(col, width=width, anchor=tk.CENTER, stretch=False)
+
+            # 5. 스크롤 영역 갱신 (테이블 너비 확장)
+            if hasattr(self, 'canvas_bt'):
+                self.canvas_bt.itemconfig(self.canvas_window, width=5000)
+                self.parent.update_idletasks()
+                req_w = self.scroll_frame_bt.winfo_reqwidth()
+                can_w = self.canvas_bt.winfo_width()
+                self.canvas_bt.itemconfig(self.canvas_window, width=max(can_w, req_w))
+                self.canvas_bt.configure(scrollregion=self.canvas_bt.bbox("all"))
+        except:
+            pass
 
     def _on_btn_start_optimize(self):
         """최적화 버튼 클릭 핸들러"""
@@ -559,62 +439,47 @@ class BacktestTab:
             self.btn_start_optimize.config(state=tk.NORMAL)
 
     def _render_optimization_results(self, df):
-        """최적화 결과 랭킹 렌더링"""
+        """[v26.1] 최적화 결과 랭킹 렌더링 (결과 데이터 삽입)"""
+        if df is None or df.empty: return
+        
+        # 1. 화면의 트리뷰 데이터 초기화 (구조는 유지)
         for item in self.tree_backtest.get_children():
             self.tree_backtest.delete(item)
             
-        if df is None or df.empty:
-            return
-        
         self.last_opt_df = df.head(20)
-            
+        
+        # 2. 최신 설정 기반으로 컬럼 구조 강제 갱신 (선택된 것만 표시)
+        self._refresh_columns_from_settings()
+        
+        # 3. 현재 트리뷰에 설정된 컬럼 순서대로 데이터 추출 및 삽입
+        current_cols = self.tree_backtest["columns"]
+        
         for i, row in enumerate(df.head(20).itertuples(), 1):
-            res = row._asdict()
-            def fmt(key, val, decimal=1):
-                if isinstance(val, (float, int)):
-                    return f"{val:.{decimal}f}"
-                return str(val)
-
-            tp_a = fmt('s1_a_take_profit', res.get('s1_a_take_profit', 0))
-            sl_a = fmt('s1_a_stop_loss', res.get('s1_a_stop_loss', 0))
-            tp_b = fmt('s1_b_take_profit', res.get('s1_b_take_profit', 0))
-            sl_b = fmt('s1_b_stop_loss', res.get('s1_b_stop_loss', 0))
-            tp_s2 = fmt('s2_take_profit', res.get('s2_take_profit', 0))
-            sl_s2 = fmt('s2_stop_loss', res.get('s2_stop_loss', 0))
-            vol_a = fmt('vol_surge', res.get('vol_surge', 0))
-            vol_b = fmt('vol_surge_b', res.get('vol_surge_b', 0))
-            rsi_b = fmt('buy_rsi_max_b', res.get('buy_rsi_max_b', 0))
-            rsi_a = fmt('buy_rsi_max_a', res.get('buy_rsi_max_a', 0))
-            rsi_min = fmt('buy_rsi_min', res.get('buy_rsi_min', 0))
-            rsi_w = fmt('rsi_window', res.get('rsi_window', 0), 0)
-            gc_w = fmt('gc_window', res.get('gc_window', 0), 0)
-            s2_vol = fmt('s2_vol_ratio', res.get('s2_vol_ratio', 1.0))
-            atr_p = fmt('atr_period', res.get('atr_period', 14), 0)
-            atr_sl = fmt('atr_multiplier_sl', res.get('atr_multiplier_sl', 2.0))
-            atr_tr = fmt('atr_multiplier_trail', res.get('atr_multiplier_trail', 3.0))
-            s1_pct = fmt('s1_equity_pct', res.get('s1_equity_pct', 10.0))
-            s2_pct = fmt('s2_equity_pct', res.get('s2_equity_pct', 20.0))
-            sb_vp = fmt('smart_buy_vp', res.get('smart_buy_vp', 120))
-            sb_ba = fmt('smart_buy_ba_ratio', res.get('smart_buy_ba_ratio', 1.5))
-            sx_vp = fmt('smart_exit_vp', res.get('smart_exit_vp', 100))
-            sx_ba = fmt('smart_exit_ba_ratio', res.get('smart_exit_ba_ratio', 1.5))
-            sx_thr = fmt('smart_exit_price_threshold', res.get('smart_exit_price_threshold', -2.0))
+            res_dict = row._asdict()
+            values = []
+            for col in current_cols:
+                val = res_dict.get(col, 0)
+                if col == "rank": val = i
+                elif col == "trades": val = int(val)
+                elif isinstance(val, (float, np.float64, np.float32)): val = f"{val:+.2f}"
+                values.append(val)
             
             row_tag = 'even' if i % 2 == 0 else 'odd'
-            perf_tag = 'plus' if row.avg_ret > 0 else 'minus'
+            ret_val = float(res_dict.get('avg_ret', 0))
+            perf_tag = 'plus' if ret_val > 0 else 'minus'
             
-            self.tree_backtest.insert("", tk.END, values=(
-                i, f"{row.avg_ret:+.2f}", f"{row.avg_mdd:.2f}", f"{row.avg_win:.2f}", 
-                int(row.total_trades), vol_a, vol_b, rsi_a, rsi_b, rsi_min, gc_w, rsi_w, 
-                sb_vp, sb_ba, s1_pct, s2_pct,
-                tp_a, sl_a, tp_b, sl_b, tp_s2, sl_s2, s2_vol, atr_p, atr_sl, atr_tr,
-                sx_vp, sx_ba, sx_thr
-            ), tags=(perf_tag, row_tag))
-            
-        self.tree_backtest.tag_configure('plus', foreground='#A3BE8C')
-        self.tree_backtest.tag_configure('minus', foreground='#BF616A')
-        self.tree_backtest.tag_configure('odd', background='#FDFDFD')
-        self.tree_backtest.tag_configure('even', background='#F7F9FB')
+            self.tree_backtest.insert("", tk.END, values=values, tags=(perf_tag, row_tag))
+
+        # 6. 지오메트리 잠금 해제 (가로 스크롤 영역 갱신)
+        # 캔버스 너비를 임시로 크게 벌려 내부 프레임이 제약 없이 펴지게 유도
+        self.canvas_bt.itemconfig(self.canvas_window, width=5000)
+        self.parent.update_idletasks()
+        
+        req_w = self.scroll_frame_bt.winfo_reqwidth()
+        can_w = self.canvas_bt.winfo_width()
+        # 최종적으로 실제 필요한 너비와 캔버스 창 너비 중 큰 값으로 고정
+        self.canvas_bt.itemconfig(self.canvas_window, width=max(can_w, req_w))
+        self.canvas_bt.configure(scrollregion=self.canvas_bt.bbox("all"))
 
     def _run_optimize_thread(self, start, end, space, high_precision=False):
         try:

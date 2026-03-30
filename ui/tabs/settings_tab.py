@@ -17,15 +17,110 @@ class SettingsTab:
         self.type_b_widgets = []
         self.grid_rows = {} 
         self.sizing_rows = []
+        self.opt_sync_tasks = [] 
         self.window_id: tp.Any = None 
+        
+        self.colors = self.app.colors
         self._setup_ui()
 
+    def setup_section_columns(self, frame):
+        # [v4.16.16] 최적화 아이콘을 설명(Hint) 앞으로 이동하여 가시성 확보
+        frame.columnconfigure(0, weight=0, minsize=40)   # 체크박스
+        frame.columnconfigure(1, weight=0, minsize=220)  # 라벨
+        frame.columnconfigure(2, weight=0, minsize=100)  # 입력창
+        frame.columnconfigure(3, weight=0, minsize=60)   # 단위
+        frame.columnconfigure(4, weight=0, minsize=80)   # 최적화 토글 (중간에 배치하여 잘림 방지)
+        frame.columnconfigure(5, weight=1, minsize=200)  # 설명 (가로 확장)
+
+    def _bind_opt_interaction(self, widget, key, grid_row=None, grid_parent=None):
+        """[v16.50] 최적화 상태 관리 일원화: 메인 앱의 싱글턴 변수 사용"""
+        # [v4.16.41] 최적화 대상 리스트에 없는 항목은 아이콘 생성을 원천 차단
+        if not hasattr(self.app, 'opt_params_vars') or key not in self.app.opt_params_vars:
+            # 최적화 비대상 항목은 여기서 즉시 종료 (아이콘이 생성되지 않음)
+            return
+
+        bt = getattr(self.app, 'backtest_tab', None)
+        bg_col = self.colors.get('bg', '#2E3440')
+        fg_normal = "#616E88" # Eligible (Grey)
+        fg_active = "#8FBCBB" # Active (Mint)
+        fg_hover = "#88C0D0"  # Hover (Bright Blue)
+
+        # tk.Label을 사용하여 윈도우 환경에서의 손가락 커서 및 색상 변경 보장
+        opt_icon = tk.Label(grid_parent, text="○", cursor="hand2", 
+                            fg=fg_normal, bg=bg_col, font=('Malgun Gothic', 12))
+        opt_icon.grid(row=grid_row, column=4, padx=10)
+
+        def sync_style():
+            # [v16.50] 메인 앱의 싱글턴 변수에서 상태를 읽어와 UI 동기화
+            is_active = self.app.opt_params_vars[key].get()
+            if is_active:
+                widget.configure(style="Opt.TEntry")
+                opt_icon.config(text="●", fg=fg_active)
+            else:
+                widget.configure(style="TEntry")
+                opt_icon.config(text="○", fg=fg_normal)
+
+        def on_toggle(event=None):
+            current = self.app.opt_params_vars[key].get()
+            self.app.opt_params_vars[key].set(not current)
+            sync_style()
+            
+            # [v16.60] 비중(pct) 항목도 동시에 상태를 동기화하여 BacktestTab 인식률 100% 보장
+            if key == 'stage1_amt' and 's1_equity_pct' in self.app.opt_params_vars:
+                self.app.opt_params_vars['s1_equity_pct'].set(not current)
+                self.app.settings["opt_s1_equity_pct"] = not current
+            elif key == 'stage2_amt' and 's2_equity_pct' in self.app.opt_params_vars:
+                self.app.opt_params_vars['s2_equity_pct'].set(not current)
+                self.app.settings["opt_s2_equity_pct"] = not current
+
+            # [v26.1] 동적 테이블 방식 보완: 선택 즉시 백테스팅 탭의 컬럼 구조를 미리 갱신
+            if bt and hasattr(bt, '_refresh_columns_from_settings'):
+                bt._refresh_columns_from_settings()
+            
+            # [v16.50] 선택 상태를 설정 데이터에 즉시 반영 (영구 저장용)
+            self.app.settings[f"opt_{key}"] = not current
+            
+            state_str = "지정" if not current else "해제"
+            self.status_label.config(text=f"[{key}] 최적화 대상 {state_str} 완료")
+
+        # 마우스 이벤트 바인딩
+        opt_icon.bind("<Button-1>", on_toggle)
+        opt_icon.bind("<Button-3>", on_toggle) # 아이콘 우클릭 지원
+        opt_icon.bind("<Enter>", lambda e: opt_icon.config(fg=fg_hover)) # 밝게 반응
+        opt_icon.bind("<Leave>", lambda e: sync_style()) # 원래 상태로 복구
+        
+        # 입력창 우클릭 연동
+        widget.bind("<Button-3>", on_toggle)
+
+        # 초기 상태 반영 (0.5초 후 데이터 동기화)
+        self.parent.after(500, sync_style)
+        self.opt_sync_tasks.append(sync_style)
+
+    def clear_all_optimization(self):
+        """[v26.0] 최적화 전체 해제 기능 활성화 (38개 파라미터 대상)"""
+        # 1. 중앙 저장소의 모든 최적화 변수를 False로 리셋하고 설정 파일에 영구 등록
+        for key, var in self.app.opt_params_vars.items():
+            var.set(False)
+            self.app.settings[f"opt_{key}"] = False
+            
+        # 2. UI 동기화 (원형 토글 버튼 ○ 형태로 전체 리셋)
+        for task in self.opt_sync_tasks: 
+            try: task()
+            except: pass
+            
+        # 3. 백테스팅 탭 컬럼 즉시 비우기 (기본 지표만 남김)
+        bt = getattr(self.app, 'backtest_tab', None)
+        if bt and hasattr(bt, '_refresh_columns_from_settings'):
+            bt._refresh_columns_from_settings()
+            
+        # 4. 사용자 안내 및 업데이트
+        self.status_label.config(text="🧹 모든 최적화 선택이 해제되었습니다.")
+        self.save_settings(sync_to_backtest=False)
+
     def _setup_ui(self):
-        # --- Theme Styling ---
-        bg_col = self.app.colors.get('bg', '#2E3440')
-        txt_col = self.app.colors.get('text', '#EBCB8B') # Global warm gold for visibility
-        primary_col = self.app.colors.get('primary', '#88C0D0')
-        active_col = '#5E81AC' 
+        bg_col = self.colors.get('bg', '#2E3440')
+        txt_col = self.colors.get('fg', '#ECEFF4')
+        primary_col = self.colors.get('primary', '#88C0D0')
 
         style = ttk.Style()
         style.configure('Dimmed.TLabel', foreground='#666666')
@@ -40,7 +135,7 @@ class SettingsTab:
         canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), 'units'))
         self.window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor='nw')
         
-        canvas.bind('<Configure>', lambda e: canvas.itemconfig(self.window_id, width=e.width))
+        canvas.bind('<Configure>', lambda e: canvas.itemconfig(self.window_id, width=max(e.width, 1000)))
         canvas.configure(yscrollcommand=scrollbar.set)
 
         # 하단 버튼
@@ -50,10 +145,18 @@ class SettingsTab:
         ttk.Button(btn_frame, text='🔄 공장 초기화', command=self.reset_to_defaults, width=20).pack(side=tk.RIGHT, padx=10)
 
         # 헤더
-        header_sticky = ttk.Frame(self.parent, padding=(25, 15, 25, 0))
+        header_sticky = ttk.Frame(self.parent, padding=(25, 15, 25, 10))
         header_sticky.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(header_sticky, text='⚙️ 전략 파라미터 최적화', font=('Segoe UI', 18, 'bold'), foreground=primary_col).pack(side=tk.LEFT)
-        self.status_label = ttk.Label(header_sticky, text='', font=('Segoe UI', 10), foreground=self.app.colors.get('secondary', '#81A1C1'))
+        ttk.Label(header_sticky, text='⚙️ 전략 파라미터 최적화', font=('Malgun Gothic', 18, 'bold'), foreground=primary_col).pack(side=tk.LEFT)
+        
+        guide_f = ttk.Frame(header_sticky)
+        guide_f.pack(side=tk.LEFT, padx=30)
+        ttk.Label(guide_f, text='💡 [Tip] ○ (대기) / ● (지정) - 아이콘 또는 입력창 우클릭으로 전환', 
+                  font=('Malgun Gothic', 9, 'italic'), foreground=self.colors.get('secondary', '#81A1C1')).pack(side=tk.LEFT)
+
+        ttk.Button(header_sticky, text='🧹 최적화 전체 해제', width=18, command=self.clear_all_optimization).pack(side=tk.LEFT, padx=10)
+
+        self.status_label = ttk.Label(header_sticky, text='', font=('Malgun Gothic', 10), foreground=self.colors.get('secondary', '#81A1C1'))
         self.status_label.pack(side=tk.RIGHT)
 
         scrollbar.pack(side='right', fill='y')
@@ -61,25 +164,18 @@ class SettingsTab:
 
         st_main_frame = scrollable_frame
 
-        # --- Helper Methods for TRUE 5-Column Alignment ---
-        def setup_section_columns(frame):
-            frame.columnconfigure(0, weight=0, minsize=40)
-            frame.columnconfigure(1, weight=0, minsize=220)
-            frame.columnconfigure(2, weight=0, minsize=100)
-            frame.columnconfigure(3, weight=0, minsize=60)
-            frame.columnconfigure(4, weight=1)
-
+        # --- Helper Methods ---
         def get_next_row(parent):
             if parent not in self.grid_rows:
                 self.grid_rows[parent] = 0
-                setup_section_columns(parent)
+                self.setup_section_columns(parent)
             curr = self.grid_rows[parent]
             self.grid_rows[parent] += 1
             return curr
 
         def add_header(parent, text):
             r = get_next_row(parent)
-            ttk.Label(parent, text=text, font=('Segoe UI', 10, 'bold'), foreground=primary_col).grid(row=r, column=0, columnspan=5, sticky='w', pady=(15, 5))
+            ttk.Label(parent, text=text, font=('Malgun Gothic', 10, 'bold'), foreground=primary_col).grid(row=r, column=0, columnspan=6, sticky='w', pady=(15, 5))
 
         def add_param_row(parent, label, key=None, unit='', hint='', toggle_key=None, widget_list=None):
             r = get_next_row(parent)
@@ -87,34 +183,46 @@ class SettingsTab:
                 if toggle_key not in self.conf_vars:
                     def_val = self.default_settings.get(toggle_key, True)
                     self.conf_vars[toggle_key] = tk.BooleanVar(value=self.app.settings.get(toggle_key, def_val))
-                cb = tk.Checkbutton(parent, variable=self.conf_vars[toggle_key], bg=bg_col, fg=txt_col, activebackground=bg_col, selectcolor=active_col) 
+                cb = tk.Checkbutton(parent, variable=self.conf_vars[toggle_key], bg=bg_col, fg=txt_col, activebackground=bg_col, selectcolor='#5E81AC') 
                 cb.grid(row=r, column=0, sticky='w', padx=(5, 0))
-            lbl = ttk.Label(parent, text=label, font=('Segoe UI', 10), foreground='#EBCB8B')
+            
+            lbl = ttk.Label(parent, text=label, font=('Malgun Gothic', 10), foreground=txt_col)
             lbl.grid(row=r, column=1, sticky='w', pady=4)
+            
             if key:
                 val = self.app.settings.get(key, self.default_settings.get(key, ''))
-                ent = ttk.Entry(parent, width=12, justify='center')
+                ent = ttk.Entry(parent, width=12, justify='center', exportselection=0)
                 ent.insert(0, str(val))
                 ent.grid(row=r, column=2, sticky='w', padx=5)
+                ent.bind("<FocusIn>", lambda e: ent.selection_clear())
                 self.params_entries[key] = ent
                 if widget_list is not None: widget_list.append(ent)
+                self._bind_opt_interaction(ent, key, grid_row=r, grid_parent=parent)
+
             if unit:
-                un = ttk.Label(parent, text=unit, font=('Segoe UI', 9), foreground='#EBCB8B')
+                un = ttk.Label(parent, text=unit, font=('Malgun Gothic', 9), foreground=primary_col)
                 un.grid(row=r, column=3, sticky='w')
                 if widget_list is not None: widget_list.append(un)
+            
             if hint:
                 hn = ttk.Label(parent, text=f'  ({hint})', style='Dimmed.TLabel')
-                hn.grid(row=r, column=4, sticky='w', padx=10)
+                hn.grid(row=r, column=5, sticky='w', padx=10)
                 if widget_list is not None: widget_list.append(hn)
             if widget_list is not None: widget_list.append(lbl)
 
         def add_sizing_row(parent, label, amt_key, pct_key, unit_key):
             r = get_next_row(parent)
-            ttk.Label(parent, text=label, font=('Segoe UI', 10), foreground='#EBCB8B').grid(row=r, column=1, sticky='w', pady=4)
+            ttk.Label(parent, text=label, font=('Malgun Gothic', 10), foreground=txt_col).grid(row=r, column=1, sticky='w', pady=4)
             frame = ttk.Frame(parent)
             frame.grid(row=r, column=2, columnspan=2, sticky='w')
-            ent = ttk.Entry(frame, width=10, justify='center')
+            
+            ent = ttk.Entry(frame, width=10, justify='center', exportselection=0)
             ent.pack(side=tk.LEFT, padx=(5, 2))
+            ent.bind("<FocusIn>", lambda e: ent.selection_clear())
+            
+            # 최적화 아이콘 생성 위임 (비중 기준으로 통일)
+            self._bind_opt_interaction(ent, pct_key, grid_row=r, grid_parent=parent)
+
             if unit_key not in self.conf_vars:
                 self.conf_vars[unit_key] = tk.StringVar(value=self.app.settings.get(unit_key, '원'))
             cb = ttk.Combobox(frame, textvariable=self.conf_vars[unit_key], values=['원', '%'], width=3, state='readonly')
@@ -128,6 +236,7 @@ class SettingsTab:
             self.conf_vars[unit_key].trace_add('write', on_unit_change)
             on_unit_change()
 
+        # UI 빌드 (그리드 순서대로 배치)
         cap_f = ttk.LabelFrame(st_main_frame, text=' 💰 [1] 자금 및 계좌 관리 (Account & Fund) ', padding='15')
         cap_f.pack(fill=tk.X, pady=10)
         add_param_row(cap_f, '백테스팅용 초기자금', 'backtest_initial_capital', '원', '시뮬레이션 시작 및 잔고 부족 시 기준')
@@ -187,7 +296,6 @@ class SettingsTab:
 
         s2_f = ttk.LabelFrame(st_main_frame, text=' 📈 [5] 2단계 추매 전략 (Scaling Up) ', padding='15')
         s2_f.pack(fill=tk.X, pady=10)
-        add_header(s2_f, '추매 진입 조건 (순풍 전용)')
         add_param_row(s2_f, '1. 20일선 지지 확인', 's2_ma20_gap', '%', toggle_key='use_s2_ma20')
         add_param_row(s2_f, '2. 5일선 회복/지지', 's2_ma5_gap', '%', toggle_key='use_s2_ma5')
         add_param_row(s2_f, '3. RSI 시그널 확인', 's2_rsi_gap', '%', toggle_key='use_s2_rsi_sig', hint='RSI가 시그널선을 상향 돌파')
@@ -202,10 +310,8 @@ class SettingsTab:
 
         rt_f = ttk.LabelFrame(st_main_frame, text=' 🔫 [6] 전술적 수급 임계값 (Smart Wall System) ', padding='15')
         rt_f.pack(fill=tk.X, pady=10)
-        add_header(rt_f, '🚀 Smart Buy (진입 수급) 임계치')
         add_param_row(rt_f, 'Smart Buy 최소 체결강도 (VP)', 'smart_buy_vp', '%', '상승 에너지 확인')
         add_param_row(rt_f, 'Smart Buy 진입용 매도벽 비율', 'smart_buy_ba_ratio', '배', '뚫고 올라갈 물량 유무')
-        add_header(rt_f, '🛡️ Smart Exit (조기 탈출) 임계치')
         add_param_row(rt_f, 'Smart Exit 탈출용 체결강도 (VP)', 'smart_exit_vp', '%', '에너지 소멸 확인', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 탈출용 매수함정 비율', 'smart_exit_ba_ratio', '배', '허수매수세/지루함 포착', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락폭 제한', toggle_key='use_smart_exit')
@@ -215,19 +321,23 @@ class SettingsTab:
         add_param_row(exit_f, '1. 갭하락 즉시 손절', 'gap_down_limit', '%', '시가 붕괴 대응', toggle_key='use_gap_down_exit')
         add_param_row(exit_f, '2. 개장 초기 매도 유예', None, '', '휩소 방지(9:15까지)', toggle_key='use_gap_grace')
         add_param_row(exit_f, '3. ATR 분석 주기', 'atr_period', '봉', '공통 ATR 지표 주기', toggle_key='use_atr_exit')
-        add_header(exit_f, '고정 익절/손절 (Hard TP/SL)')
         add_param_row(exit_f, 'S1 눌림(A) 전용 익절', 's1_a_take_profit', '%', '눌림목 목표 수익률', toggle_key='use_s1_a_tp')
         add_param_row(exit_f, 'S1 눌림(A) 전용 손절', 's1_a_stop_loss', '%', '눌림목 최후 방어선', toggle_key='use_s1_a_stop_loss')
         add_param_row(exit_f, 'S1 돌파(B) 전용 익절', 's1_b_take_profit', '%', '돌파형 목표 수익률', toggle_key='use_s1_b_tp')
         add_param_row(exit_f, 'S1 돌파(B) 전용 손절', 's1_b_stop_loss', '%', '돌파형 최후 방어선', toggle_key='use_s1_b_stop_loss')
         add_param_row(exit_f, 'Stage 2 전용 익절', 's2_take_profit', '%', '추매 포지션 목표', toggle_key='use_s2_tp')
         add_param_row(exit_f, 'Stage 2 전용 손절', 's2_stop_loss', '%', '추매 포지션 가이드', toggle_key='use_s2_stop_loss')
-        add_header(exit_f, '⚡ Flash Exit (급격한 추세 반전 대응)')
         add_param_row(exit_f, 'S1 눌림(A) Flash Exit', 's1_a_flash_exit_pct', '%', 'A 전용 즉시 탈출 기준', toggle_key='use_s1_a_flash_exit')
         add_param_row(exit_f, 'S1 돌파(B) Flash Exit', 's1_b_flash_exit_pct', '%', 'B 전용 즉시 탈출 기준', toggle_key='use_s1_b_flash_exit')
         add_param_row(exit_f, 'Stage 2 Flash Exit', 's2_flash_exit_pct', '%', '추매 포지션 즉시 탈출', toggle_key='use_s2_flash_exit')
 
         self.app.root.after(100, self._init_toggles)
+        
+        def force_cleanup():
+            self.parent.focus_force()
+            for ent in self.params_entries.values():
+                ent.selection_clear()
+        self.parent.after(1000, force_cleanup)
 
     def _init_toggles(self):
         def apply_st(widgets, is_on):
@@ -247,7 +357,6 @@ class SettingsTab:
             self.conf_vars['use_type_b'].trace_add('write', lambda *a: apply_st(self.type_b_widgets, self.conf_vars['use_type_b'].get()))
             apply_st(self.type_b_widgets, self.conf_vars['use_type_b'].get())
 
-
     def reset_to_defaults(self):
         if messagebox.askyesno('초기화 확인', '모든 파라미터를 초기값으로 복원하시겠습니까?'):
             self.app.settings = self.default_settings.copy()
@@ -266,25 +375,20 @@ class SettingsTab:
             for k, var in self.conf_vars.items():
                 if hasattr(var, 'get'): self.app.settings[k] = var.get()
 
-            # [Audit Fix] Isolate sizing variables (Won vs %)
             for row in self.sizing_rows:
                 ent = row['ent']
                 unit = row['unit_var'].get()
                 v = ent.get().strip().replace(',', '')
                 if not v: continue
-                
-                # Update only the active unit's key
                 active_key = row['amt_key'] if unit == '원' else row['pct_key']
                 self.app.settings[active_key] = float(v)
             
-            # [v4.5.3] Centralized save via ConfigHandler
             if self.app.config_handler.save_settings(self.app.settings):
-                # 엔진 파라미터 업데이트 통보
                 if hasattr(self.app, 'stream_processor'):
                     self.app.stream_processor.settings = self.app.settings
                 if hasattr(self.app, 'backtest_tab'):
-                    self.app.backtest_tab._sync_opt_toggles_with_settings()
-                
+                    # [v16.48] 자동 동기화 로직 제거 (최적화 선택은 사용자가 직접 수동으로만 수행)
+                    pass
                 self.status_label.config(text="✅ 설정이 저장되었습니다.", foreground="#A3BE8C")
                 self.app.log('✅ 설정이 저장되었습니다. (유효 파라미터 동기화 완료)')
             else:
@@ -294,10 +398,7 @@ class SettingsTab:
             messagebox.showerror('오류', f'저장 실패: {e}')
 
     def update_criteria(self):
-        """[v4.5.3] SelectionService로부터 기준 요약 텍스트를 가져와서 UI에 반영 (Stub)"""
-        # [v4.2] UI에서 라벨이 제거되어 더 이상 사용하지 않음 (Stub)
         pass
 
     def get_criteria_text(self, format_type="ui"):
-        """[v4.5.3] SelectionService로부터 기준 요약 텍스트를 가져옵니다."""
         return self.app.selection_service._get_criteria_summary(format_type)

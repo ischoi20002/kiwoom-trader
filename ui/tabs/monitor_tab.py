@@ -31,11 +31,11 @@ class MonitorTab:
         self.btn_monitor_toggle = ttk.Button(self.ctrl_frame, text="▶️ 실시간 감시 시작", command=self.app.toggle_monitoring, style="Accent.TButton")
         self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=5)
         
-        self.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground="#EBCB8B")
+        self.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground=self.app.colors['primary'])
         self.lbl_monitor_status.pack(side=tk.RIGHT, padx=10)
 
         self.pb_warmup = ttk.Progressbar(self.ctrl_frame, orient=tk.HORIZONTAL, length=180, mode='determinate')
-        self.lbl_warmup_detail = ttk.Label(self.ctrl_frame, text="", font=("Malgun Gothic", 9), foreground="#EBCB8B") # Warm yellow for sync
+        self.lbl_warmup_detail = ttk.Label(self.ctrl_frame, text="", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']) 
         
         self.lbl_headwind_caution = ttk.Label(self.ctrl_frame, text="⚠️ 시장 역풍 - 매수 신호가 일시 정지되었습니다", 
                                                 font=("Malgun Gothic", 10, "bold"), foreground="#BF616A")
@@ -86,8 +86,8 @@ class MonitorTab:
         yscrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree_monitor.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         
-        # [v4.7.5] 'HD Crisp UI' 도입: 굵지 않고 날렵한 Segoe UI 및 차분한 프로 컬러 사용
-        row_font = ("Segoe UI", 9, "normal")
+        # [v4.7.5] 'HD Crisp UI' 도입: 굵지 않고 날렵한 Malgun Gothic 및 차분한 프로 컬러 사용
+        row_font = ("Malgun Gothic", 9, "normal")
         up_col = "#E35F5F" # 채도가 너무 높아 번져 보이는 #FF0000 대신 차분한 레드
         dn_col = "#81A1C3" # 너무 쨍한 파란색 대신 가시성 좋은 노르딕 블루
         

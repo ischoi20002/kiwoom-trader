@@ -85,6 +85,10 @@ class NordicStyle:
                         insertcolor=self.colors['primary'], borderwidth=1, relief=tk.FLAT)
         style.map("TEntry", fieldbackground=[("readonly", "#2E3440")], foreground=[("readonly", "#81A1C1")])
         
+        # [v4.15.0] 최적화 대상 강조 전용 스타일
+        style.configure("Opt.TEntry", fieldbackground="#434C5E", foreground=self.colors['primary'], 
+                        insertcolor=self.colors['primary'], borderwidth=1, relief=tk.SOLID)
+        
         style.configure("TCheckbutton", background=self.colors['bg'], foreground=self.colors['fg'], font=("Malgun Gothic", 10))
         style.map("TCheckbutton", background=[("active", self.colors['bg'])], foreground=[("active", self.colors['primary'])])
 
@@ -98,6 +102,13 @@ class NordicStyle:
                   selectbackground=[("readonly", "#242933")],
                   selectforeground=[("readonly", self.colors['primary'])])
         
+        # [v4.16.1] 최적화 전용 토글 라벨 스타일 (6열용)
+        style.configure("Opt.TLabel", foreground="#8FBCBB", font=("Malgun Gothic", 12, "bold")) # Frost 1: Bright Teal
+        style.configure("Eligible.TLabel", foreground="#616E88", font=("Malgun Gothic", 12))   # Polar Night 4: Medium Grey (Increased visibility)
+        
+        # [v4.15.1] 최적화 선택 시 입력창 스타일 (인필드 강조는 약하게, 6열 토글 위주)
+        style.configure("Opt.TEntry", fieldbackground="#3B4252", foreground=self.colors['primary'], bordercolor=self.colors['primary'])
+
         # [v33.1] Dropdown List (Listbox) 전역 스타일 (Combobox 팝업용)
         self.root.option_add("*TCombobox*Listbox.background", "#242933")
         self.root.option_add("*TCombobox*Listbox.foreground", self.colors['fg'])

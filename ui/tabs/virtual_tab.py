@@ -46,20 +46,20 @@ class VirtualTab:
         for label, var, color in [
             ("총 자산", "total", self.app.colors['primary']),
             ("예수금", "cash", None),
-            ("D+1 예상", "d1_cash", "#EBCB8B"),
-            ("D+2 예상", "d2_cash", "#EBCB8B"),
+            ("D+1 예상", "d1_cash", self.app.colors['primary']),
+            ("D+2 예상", "d2_cash", self.app.colors['primary']),
             ("주식 평가금", "stock", None),
             ("금일 손익", "day", "#BF616A"),
             ("누적 수익률", "cum", "#A3BE8C")
         ]:
             f = ttk.Frame(summary_f)
             f.pack(side=tk.LEFT, padx=(0, 15))
-            ttk.Label(f, text=label, font=("Segoe UI", 8), foreground="#EBCB8B").pack(anchor=tk.W)
-            ttk.Label(f, textvariable=self.vars[var], font=("Segoe UI", 10, "bold"), 
+            ttk.Label(f, text=label, font=("Malgun Gothic", 8), foreground=self.app.colors['primary']).pack(anchor=tk.W)
+            ttk.Label(f, textvariable=self.vars[var], font=("Malgun Gothic", 10, "bold"), 
                       foreground=color if color else self.app.colors['fg']).pack(anchor=tk.W)
 
         # [v3.9.1] 모의투자 잔고 조회 결과 라벨
-        self.lbl_mock_result = ttk.Label(summary_f, text="", font=("Segoe UI", 9), foreground="#A3BE8C")
+        self.lbl_mock_result = ttk.Label(summary_f, text="", font=("Malgun Gothic", 9), foreground="#A3BE8C")
         self.lbl_mock_result.pack(side=tk.LEFT, padx=10, pady=(15, 0))
 
         # 제어 버튼 (우측)
@@ -70,7 +70,7 @@ class VirtualTab:
         use_mock = getattr(config, 'USE_MOCK', False)
         mode_text = " 모의투자모드 " if use_mock else " 실전모드 "
         mode_bg = "#5E81AC" if use_mock else "#BF616A" 
-        self.lbl_mode_badge = tk.Label(control_f, text=mode_text, font=("Segoe UI", 9, "bold"), 
+        self.lbl_mode_badge = tk.Label(control_f, text=mode_text, font=("Malgun Gothic", 9, "bold"), 
                                       foreground="white", background=mode_bg, padx=10, pady=2)
         self.lbl_mode_badge.pack(side=tk.RIGHT, padx=(10, 0))
 

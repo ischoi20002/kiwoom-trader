@@ -204,6 +204,34 @@ class KiwoomApp:
             gui_callback=self._render_virtual_positions,
             telegram_callback=self.send_telegram_message
         )
+        
+        # [v16.50] 최적화 상태 데이터 중앙 집중화 (Singleton State Management)
+        # 탭 전환 시 데이터 유실 방지를 위해 메인 앱 인스턴스에서 직접 관리
+        self.opt_params_vars = {}
+        opt_keys = [
+            # 자금관리
+            's1_equity_pct', 's2_equity_pct',
+            # 종목선정필터
+            'min_trde_val', 'vol_ratio', 'vol_lookback', 
+            'ma_convergence', 'sel_rsi_max', 'sel_rsi_min',
+            # 단계별 매수 (A)
+            'buy_rsi_max_a', 'gc_window', 'vol_surge', 'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
+            # 단계별 매수 (B)
+            'buy_rsi_max_b', 'vol_surge_b', 'atr_multiplier_sl_b', 'atr_multiplier_trail_b',
+            # 2차 추매 (S2)
+            's2_vol_ratio', 's2_profit_limit', 's2_delay_hours', 'atr_multiplier_sl_s2', 'atr_multiplier_trail_s2',
+            # 전술적 수급
+            'smart_buy_vp', 'smart_buy_ba_ratio', 'smart_exit_vp', 'smart_exit_ba_ratio', 'smart_exit_price_threshold',
+            # 공통/리스크
+            'gap_down_limit', 'atr_period', 
+            's1_a_take_profit', 's1_a_stop_loss', 's1_b_take_profit', 's1_b_stop_loss',
+            's2_take_profit', 's2_stop_loss', 
+            's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct'
+        ]
+        for key in opt_keys:
+            # 설정 파일에 저장된 값이 있으면 그것을 사용, 없으면 False 초기화
+            saved_val = self.settings.get(f"opt_{key}", False)
+            self.opt_params_vars[key] = tk.BooleanVar(value=saved_val)
         self.market_service = MarketDataService(
             self.data_manager,
             log_func=self.log,
@@ -261,7 +289,7 @@ class KiwoomApp:
             self.header_frame.pack(side=tk.TOP, fill=tk.X)
             
             self.lbl_market_indices = ttk.Label(self.header_frame, text="시장 지수: 데이터 로딩 중...", 
-                                              font=("Helvetica", 10, "bold"), foreground=self.colors['primary'])
+                                              font=("Malgun Gothic", 10, "bold"), foreground=self.colors['primary'])
             self.lbl_market_indices.pack(side=tk.LEFT)
 
             status_frame = ttk.Frame(self.root)
@@ -276,13 +304,13 @@ class KiwoomApp:
             self.lbl_vp_calib = ttk.Label(self.learn_status_frame, text="⚡ VP: -", font=("Malgun Gothic", 8), foreground="#88C0D0")
             self.lbl_vp_calib.pack(side=tk.LEFT, padx=10)
             
-            self.lbl_ba_calib = ttk.Label(self.learn_status_frame, text="⚖️ BA: -", font=("Malgun Gothic", 8), foreground="#EBCB8B")
+            self.lbl_ba_calib = ttk.Label(self.learn_status_frame, text="⚖️ BA: -", font=("Malgun Gothic", 8), foreground="#81A1C1")
             self.lbl_ba_calib.pack(side=tk.LEFT, padx=10)
             
-            self.status_label = ttk.Label(status_frame, text="상태: 대기 중", foreground=self.colors['primary'])
+            self.status_label = ttk.Label(status_frame, text="상태: 대기 중", font=("Malgun Gothic", 9), foreground=self.colors['primary'])
             self.status_label.pack(side=tk.RIGHT, padx=5)
             
-            self.lbl_remote_status = ttk.Label(status_frame, text="원격: 비활성", foreground=self.colors['border'])
+            self.lbl_remote_status = ttk.Label(status_frame, text="원격: 비활성", font=("Malgun Gothic", 9), foreground=self.colors['border'])
             self.lbl_remote_status.pack(side=tk.LEFT, padx=10)
             
             self.notebook = ttk.Notebook(self.root)
@@ -306,9 +334,9 @@ class KiwoomApp:
 
         self.dashboard_tab = DashboardTab(self._tab_frames['dashboard'], self)
         self.monitor_tab = MonitorTab(self._tab_frames['monitor'], self)
+        self.backtest_tab = BacktestTab(self._tab_frames['backtest'], self)
         self.settings_tab = SettingsTab(self._tab_frames['settings'], self, DEFAULT_SETTINGS)
         self.virtual_tab = VirtualTab(self._tab_frames['virtual'], self)
-        self.backtest_tab = BacktestTab(self._tab_frames['backtest'], self)
         
         # Compatibility links
         self.tree_monitor = self.monitor_tab.tree_monitor
@@ -341,7 +369,8 @@ class KiwoomApp:
     def _on_tab_changed(self, event):
         tab_text = self.notebook.tab(self.notebook.select(), "text")
         if "백테스팅" in tab_text and hasattr(self, 'backtest_tab'):
-            self.backtest_tab._sync_opt_toggles_with_settings()
+            # [v26.1] 탭 전환 시 현재 선택된 최적화 항목만 컬럼으로 표시하도록 즉시 리프레시
+            self.backtest_tab._refresh_columns_from_settings()
 
     def log(self, message): self.gui_utils.log(message)
 
