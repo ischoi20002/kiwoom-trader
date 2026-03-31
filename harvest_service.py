@@ -67,10 +67,10 @@ class HarvestService:
         print(f"[{now}] {msg}", flush=True)
 
     def _fetch_minute_data(self, code, token, next_key=""):
-        """키움 REST API 분봉차트조회 호출 (v9.0: 인덱스 수집 보류 - 주식 전용 최적화)"""
-        code = str(code).strip()
-        # [v16.9.1] 지수 및 시장 지표는 전용 동기화(Daily/FDR)를 위해 REST 수집 생략 
-        if len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11']:
+        # [v16.9.1] 지수 및 시장 지표는 1분봉 대신 일봉(Daily/FDR) 수집이 주 목적이므로
+        # 1분봉 REST 수집은 생략하되, harvest_code에서 일봉 동기화 및 범위 출력을 수행합니다.
+        is_index = len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11']
+        if is_index:
             return None, "" 
 
         url = f"{config.URL}/api/dostk/chart"
@@ -132,16 +132,29 @@ class HarvestService:
 
     def harvest_code(self, code, token):
         """한 종목의 부족한 데이터를 모두 수집 (v6.6: 증분 즉시 저장 모델)"""
-        # [v16.0] 일봉 데이터(FinanceDataReader) 동기화 선행
-        self.db.update_daily_data(code)
-        
+        # [v16.9.5] 시장 지수 특수 처리 (일봉 전용 수집 및 범위 출력)
+        is_index = len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11']
+        if is_index:
+            self.log(f"📊 [MARKET INDEX] {code} 일봉 동기화 시작...")
+            self.db.update_daily_data(code)
+            
+            # DB에서 수집된 범위 확인 및 로그 출력
+            df_daily = self.db.get_daily_bars(code)
+            if not df_daily.empty:
+                start_d = df_daily['time'].min().strftime('%Y-%m-%d')
+                end_d = df_daily['time'].max().strftime('%Y-%m-%d')
+                self.log(f"✅ [MARKET INDEX] {code} 수집 완료: {start_d} ~ {end_d} ({len(df_daily)}일분)")
+                self.db.set_sync_status(code, "COMPLETE")
+            return
+
         if self.is_data_complete(code):
             self.log(f"[SKIP] {code}: 이미 모든 데이터가 충분하고 구멍이 없습니다.")
             return
 
-        last_sync = self.db.get_last_sync_time(code)
+        initial_last_sync = self.db.get_last_sync_time(code)
+        last_sync = initial_last_sync  # For logging/legacy checks
         earliest_sync = self.db.get_earliest_sync_time(code)
-        self.log(f"[SYNC] {code} 시작 (DB 범위: {earliest_sync or '미상'} ~ {last_sync or '없음'})")
+        self.log(f"[SYNC] {code} 시작 (DB 범위: {earliest_sync or '미상'} ~ {initial_last_sync or '없음'})")
         
         next_key = ""
         total_fetched = 0
@@ -153,11 +166,15 @@ class HarvestService:
             bars = self._parse_to_bars(raw_data)
             if not bars: break
             
-            # [v16.9] 첫 번째 청산을 가져왔을 때, 가장 최근 데이터가 이미 DB에 있다면 즉시 조기 종료 처리
-            if total_fetched == 0 and last_sync and bars[0]['time'] <= last_sync:
-                self.log(f"   >> {code}: 이미 최신 상태입니다. (최신 데이터: {bars[0]['time']})")
-                total_fetched = 0
-                break
+            # [v16.9] [Fixed] 이미 최신 데이터가 있더라도, 과거 데이터가 부족(COMPLETE 아님)하면 중단하지 않고 과거로 계속 내려갑니다.
+            if total_fetched == 0 and initial_last_sync and bars[0]['time'] <= initial_last_sync:
+                status = self.db.get_sync_status(code)
+                if status == "COMPLETE":
+                    self.log(f"   >> {code}: 이미 최신이며 과거 데이터(COMPLETE)까지 충분합니다.")
+                    total_fetched = 0
+                    break
+                else:
+                    self.log(f"   - {code}: 최신 데이터는 중복되지만, 과거 데이터(Backfill)를 위해 더 깊이 탐색합니다.")
 
             # [v16.9] 즉시 DB 저장 후 마지막 동기화 시간 갱신 (Incremental Sync 정확도 향상)
             df_chunk = pd.DataFrame(bars)
@@ -167,10 +184,12 @@ class HarvestService:
             total_fetched += len(bars)
             current_bottom_time = bars[-1]['time']
             
-            # [v16.9] Simplified: 기존 데이터와 조금이라도 겹치면 종료 (Incremental Sync)
-            if last_sync and current_bottom_time <= last_sync:
-                self.log(f"   - {code}: 기존 데이터와 연결됨. 조기 종료 (Overlapped).")
-                break
+            # [v16.9] [Fixed] 과거 데이터 수집 중 기존 데이터와 겹치더라도, 전체 수집(COMPLETE)이 목적이라면 계속 진행합니다.
+            if initial_last_sync and current_bottom_time <= initial_last_sync:
+                status = self.db.get_sync_status(code)
+                if status == "COMPLETE":
+                    self.log(f"   - {code}: 기존 데이터와 연결됨. 조기 종료 (Overlapped).")
+                    break
             
             self.log(f"   - {code}: {total_fetched}개 봉 누적 저장 중... ({current_bottom_time})")
             
@@ -235,34 +254,55 @@ class HarvestService:
             return False
 
     def run(self):
-        """메인 수집 루프"""
-        if not os.path.exists(self.target_list_path):
-            self.log(f"[ERROR] 대상 리스트 파일({self.target_list_path})이 없습니다.")
-            return
-
-        df_list = pd.read_csv(self.target_list_path, dtype={'Code': str})
-        codes = df_list['Code'].tolist()
+        """메인 수집 루프 (v18.0.0: KODEX 200 + KOSPI 500 통합 유니버스)"""
+        # 1. KOSPI 500 (CSV) 로드
+        codes_500 = []
+        if os.path.exists(self.target_list_path):
+            try:
+                df_500 = pd.read_csv(self.target_list_path, dtype={'Code': str}, encoding='utf-8-sig')
+                codes_500 = [str(c).strip().zfill(6) for c in df_500['Code'].tolist() if c]
+            except Exception as e:
+                self.log(f"[WARN] {self.target_list_path} 로드 실패: {e}")
         
-        # [v7.5] Ensure market indices are always synchronized for backtest context
-        # [v16.0] 주요 지수(KOSPI, KOSDAQ, VIX)를 수집 대상에 고정 추가
-        for idx_code in ['001', '101', 'KS11', 'KQ11', '^VIX']:
-            if idx_code not in codes:
-                codes.insert(0, idx_code) # 상단에 배치하여 우선 수집
+        # 2. KODEX 200 리스트 확보 (DataManager 활용 지수 1028 기반 자동 갱신)
+        df_k200 = self.db.get_kospi_list(200)
+        codes_k200 = df_k200['Code'].str.strip().zfill(6).tolist() if df_k200 is not None else []
+        
+        # 3. 합집합 통합 (KODEX 200 + KOSPI 500)
+        all_codes = []
+        seen = set()
+        
+        # 시장 지수 우선 순위 배치
+        indices = ['001', '101', '^VIX']
+        for c in indices:
+            if c not in seen:
+                all_codes.append(c)
+                seen.add(c)
+
+        # 500 리스트와 KODEX 200 리스트 병합
+        for c in codes_500 + codes_k200:
+            if c not in seen:
+                all_codes.append(c)
+                seen.add(c)
                 
-        self.log(f"[START] 총 {len(codes)}개 종목 수집을 시작합니다. (지수 포함)")
+        self.log(f"🚀 [START] 통합 유니버스 하베스팅 시작 (KODEX 200 + KOSPI 500 등 총 {len(all_codes)}개 종목)")
         
         token = self.token_manager.get_auth_token()
         if not token:
             self.log("[ERROR] 토큰을 가져올 수 없습니다. 종료합니다.")
             return
 
-        for idx, code in enumerate(codes):
+        for idx, code in enumerate(all_codes):
             if not self.running: break
             
-            self.log(f"[{idx+1}/{len(codes)}] 종목 분석 중 ({code})...")
+            self.log(f"[{idx+1}/{len(all_codes)}] 종목 분석 중 ({code})...")
             try:
                 # [v7.0] 수집 전 무결성/입수 완료 여부 판단하여 스킵
                 if self.is_data_complete(code):
+                    # 지수 종목은 스킵 로그 대신 범위 출력 (harvest_code 내부에서 처리됨)
+                    if code in indices:
+                        self.harvest_code(code, token)
+                        continue
                     self.log(f"   >> {code}: 이미 모든 구간이 동기화되어 있습니다. 건너뜁니다.")
                     continue
 

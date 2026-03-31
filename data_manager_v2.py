@@ -35,9 +35,35 @@ class DataManagerV2:
 
     def _get_connection(self):
         """SQLite 연결 확보 및 WAL 모드 활성화"""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL;")  # 동시성 확보를 위한 WAL 모드
-        return conn
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL;")  # 동시성 확보를 위한 WAL 모드
+            return conn
+        except sqlite3.DatabaseError as e:
+            if "malformed" in str(e).lower():
+                print(f"CRITICAL [DataManagerV2]: Database at {self.db_path} is malformed.")
+                self._handle_corrupted_db()
+                # Re-try once after handling
+                conn = sqlite3.connect(self.db_path, timeout=30)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                return conn
+            else:
+                raise e
+
+    def _handle_corrupted_db(self):
+        """손상된 데이터베이스 파일을 백업하고 새로운 파일을 생성할 수 있도록 준비"""
+        import time
+        timestamp = int(time.time())
+        backup_path = f"{self.db_path}.corrupted_{timestamp}"
+        print(f"CRITICAL [DataManagerV2]: Renaming corrupted DB to {backup_path}")
+        try:
+            # Handle potential file lock issues by trying to rename
+            if os.path.exists(self.db_path):
+                os.rename(self.db_path, backup_path)
+        except Exception as e:
+            print(f"CRITICAL [DataManagerV2]: Failed to rename corrupted DB: {e}")
+            # If rename fails, we might need manual intervention or just try to delete if permitted
+            raise e
 
     def _init_db(self):
         """데이터베이스 테이블 초기화"""
@@ -728,13 +754,53 @@ class DataManagerV2:
         with self._get_connection() as conn: conn.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('market_trend', ?)", (label,)); conn.commit()
 
     def get_kospi_list(self, count=200, force=False):
+        """[v17.0.5] KODEX 200(지수 1028) 또는 상위 종목 리스트 반환 (가로 채기 방지)"""
         import FinanceDataReader as fdr
-        cache_file = "kospi_200.csv" if count <= 200 else f"kospi_top_{count}.csv"
+        from pykrx import stock
+        # [v17.0.5] 파일명 kodex_200.csv 로 전격 교체 (KOSPI 200 명칭 금지 대응)
+        cache_file = "kodex_200.csv" if count <= 200 else f"kospi_top_{count}.csv"
         try:
-            if not force and os.path.exists(cache_file) and (time.time() - os.path.getmtime(cache_file)) / (24 * 3600) < 30: return pd.read_csv(cache_file, dtype={'Code': str})
-            df = fdr.StockListing('KOSPI'); df = df[df['Code'].str.endswith('0')].sort_values(by='Marcap', ascending=False).head(count)
-            df.to_csv(cache_file, index=False, encoding='utf-8-sig'); return df
-        except: return None
+            # 1. 30일 캐시 체크 (네트워크 부하 경감)
+            if not force and os.path.exists(cache_file) and (time.time() - os.path.getmtime(cache_file)) / (24 * 3600) < 30:
+                return pd.read_csv(cache_file, dtype={'Code': str}, encoding='utf-8-sig')
+            
+            # 2. 데이터 확보 (KODEX 200 전용 - 지수 1028 기반)
+            if count <= 200:
+                now_str = datetime.now().strftime('%Y%m%d')
+                tickers = None
+                # 휴장일 대응 (최대 10일 전까지 검색)
+                for i in range(0, 10):
+                    dt_str = (datetime.today() - timedelta(days=i)).strftime('%Y%m%d')
+                    tickers = stock.get_index_portfolio_deposit_file('1028', dt_str)
+                    
+                    # [v17.0.6 Fix] 데이터프레임/리스트 모호성 완벽 해결 (isinstance 사용)
+                    is_valid = False
+                    if tickers is not None:
+                        if isinstance(tickers, pd.DataFrame):
+                            is_valid = not tickers.empty
+                        elif isinstance(tickers, list):
+                            is_valid = len(tickers) > 0
+                    
+                    if is_valid: break # 정상 범위
+                
+                if tickers is not None:
+                    # 종목명 매핑
+                    names = [stock.get_market_ticker_name(t) for t in tickers]
+                    df = pd.DataFrame({'Code': tickers, 'Name': names})
+                else:
+                    raise Exception("Failed to fetch Index 1028 constituents")
+            else:
+                # 500개 이상은 기존처럼 FDR 시총순 추출 (FDR Fallback)
+                df = fdr.StockListing('KOSPI')
+                df = df[df['Code'].str.endswith('0')].sort_values(by='Marcap', ascending=False).head(count)
+            
+            # 3. CSV 저장 (최종 고정 리스트)
+            df.to_csv(cache_file, index=False, encoding='utf-8-sig')
+            return df
+        except Exception as e:
+            print(f"  [Error] 지수 리스트({cache_file}) 갱신 실패: {e}")
+            if os.path.exists(cache_file): return pd.read_csv(cache_file, dtype={'Code': str})
+            return None
 
     def get_remote_command(self):
         """[v4.6.9] 원격 명령 테이블에서 최신 명령어를 하나 가져오고 삭제합니다 (Pop-and-Delete)."""

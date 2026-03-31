@@ -144,11 +144,11 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
             logger_callback(f"  [Warn] pykrx 오류: {e}")
             tickers = []
             
-        # pykrx 실패 시 로컬 파일(kospi_200.csv) 또는 FDR 활용
+        # pykrx 실패 시 로컬 파일(kodex_200.csv) 또는 FDR 활용
         if tickers is None or len(tickers) == 0:
-            if os.path.exists("kospi_200.csv"):
-                logger_callback("  [Info] Local 'kospi_200.csv'에서 유니버스를 로드합니다.")
-                df_csv = pd.read_csv("kospi_200.csv", dtype={'Code': str})
+            if os.path.exists("kodex_200.csv"):
+                logger_callback("  [Info] Local 'kodex_200.csv'에서 유니버스를 로드합니다.")
+                df_csv = pd.read_csv("kodex_200.csv", dtype={'Code': str})
                 tickers = df_csv['Code'].tolist()
             else:
                 logger_callback("  [Info] FDR StockListing에서 상위 종목을 추출합니다.")
@@ -177,7 +177,7 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
         
         df_top = pd.DataFrame([{'Code': t, 'Name': name_map.get(t, stock.get_market_ticker_name(t))} for t in tickers])
     else:
-        input_file = "kospi_200.csv"
+        input_file = "kodex_200.csv"
         if os.path.exists(input_file):
             df_top = pd.read_csv(input_file, dtype={'Code': str})
         else:
@@ -354,10 +354,10 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                     return tickers
             except: pass
         
-        # [v18.0] 최종 Fallback: 루트의 kospi_200.csv 사용 (네트워크 무관)
-        if os.path.exists("kospi_200.csv"):
-            logger_callback("    - [Fallback] 'kospi_200.csv' 로컬 파일 사용")
-            df_f = pd.read_csv("kospi_200.csv", dtype=str)
+        # [v18.0] 최종 Fallback: 루트의 kodex_200.csv 사용 (네트워크 무관)
+        if os.path.exists("kodex_200.csv"):
+            logger_callback("    - [Fallback] 'kodex_200.csv' 로컬 파일 사용")
+            df_f = pd.read_csv("kodex_200.csv", dtype=str)
             tickers = df_f['Code'].tolist() if 'Code' in df_f.columns else df_f.iloc[:, 0].tolist()
             universe_cache[m_key] = tickers
             return tickers

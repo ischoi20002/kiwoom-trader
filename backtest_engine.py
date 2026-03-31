@@ -51,12 +51,12 @@ class TradingStrategy:
         if TradingStrategy._name_map is not None:
             return TradingStrategy._name_map
             
-        csv_path = "kospi_200.csv"  # [v30.5 Fixed] kospi_top_500.csv -> kospi_200.csv
+        csv_path = "kodex_200.csv"  # [v30.5 Fixed] kospi_top_500.csv -> kodex_200.csv
         try:
             if not os.path.exists(csv_path):
-                # 다른 kospi_*.csv 파일이 있는지 확인
+                # 다른 kodex_*.csv 또는 kospi_*.csv 파일이 있는지 확인
                 import glob
-                files = glob.glob("kospi_*.csv")
+                files = glob.glob("kodex_*.csv") + glob.glob("kospi_*.csv")
                 if files:
                     csv_path = files[0]
                 else:
