@@ -6,8 +6,8 @@ import config
 
 class StrategyEngine:
     """
-    [v4.5.3] 보유 중인 포지션의 상태를 분석하고 매매 결정을 내리는 전략 집행 엔진.
-    GUI 클래스에서 비즈니스 로직(익절, 손절, 추매 판단)을 완전히 분리합니다.
+    [v4.5.3] 보유 중인 포지션의 상태를 분석하고 매매 결정을 처리하는 전략 집행 엔진.
+    GUI 프레임워크에서 비즈니스 로직(익절, 손절, 추매 판단)을 완전히 분리합니다.
     """
     def __init__(self, app):
         self.app = app # KiwoomApp 인스턴스 (설정 및 데이터 참조용)
@@ -16,13 +16,15 @@ class StrategyEngine:
     def _get_val(self, data, key, default=0):
         """[v4.5.9] 헬퍼: 데이터(dict/Series)에서 안전하게 단일 스칼라 값 추출"""
         if data is None: return default
-        val = data.get(key, default)
-        if hasattr(val, 'iloc'): return val.iloc[0]
-        return val
+        if hasattr(data, 'get'): return data.get(key, default)
+        if hasattr(data, 'iloc'): 
+            try: return data.iloc[0].get(key, default)
+            except: return data.get(key, default)
+        return default
 
     def evaluate_position(self, code, now_price, **kwargs):
         """
-        보유 종목에 대한 실시간 상태 평가 및 액션 결정.
+        보유 종목의 현재 시세/상태 분석 및 액션 결정.
         결과 형태: {'action': 'EXIT'/'STAGE2'/'HOLD', 'reason': '...', 'data': {...}}
         """
         if now_price <= 0: return {'action': 'HOLD'}
@@ -31,93 +33,35 @@ class StrategyEngine:
         pos = self.app.virtual_positions[code]
         if pos.get('exit_pending', False): return {'action': 'HOLD'}
         
-        # 기본 정보 산출
-        stage = pos['stage']
-        avg_p = pos['avg_price']
-        profit_ratio = (now_price / avg_p - 1) * 100
+        # [v35.8] 통합 매도 판단 함수 호출 (Modularized)
+        from backtest_engine import TradingStrategy
+        res = TradingStrategy.evaluate_position(
+            code, now_price, pos, self.app.settings,
+            indicator_row=kwargs.get('ind'),
+            current_time=datetime.now(),
+            is_realtime=True,
+            kwargs=kwargs
+        )
+        
+        if res['action'] == 'EXIT':
+            return {'action': 'EXIT', 'reason': res['reason'], 'profit_ratio': res.get('profit_ratio', 0)}
+
+        # [v4.5.11] 상태 업데이트 (함수 내부에서 max_p 등은 이미 업데이트됨)
+        page_avg_p = pos.get('avg_price', now_price)
+        profit_ratio = (now_price / page_avg_p - 1) * 100
         pos['current_price'] = now_price
         
-        # 최고가 갱신 (ATR 및 고점 대비 하락 체크용)
-        max_now = max(pos.get('max_price', now_price), now_price)
-        pos['max_price'] = max_now
-        
-        # 지표 데이터 확보
-        ind = kwargs.get('ind') # SignalEngine에서 전달받은 마지막 봉 데이터
-        is_power_exhausted = kwargs.get('is_power_exhausted', False)
-        bid_ask_ratio = kwargs.get('bid_ask_ratio', 0)
-        ask_bid_ratio = kwargs.get('ask_bid_ratio', 0)
-        vol_power = kwargs.get('vol_power', 100.0)
-
-        is_exit = False
-        exit_reason = ""
-        is_type_b = "TYPE_B" in pos.get('reason', '')
+        # Helper variables for Scale-in logic
         s = self.app.settings
-
-        # ---------------------------------------------------------
-        # [1단계] 탈출(Exit) 조건 검사
-        # ---------------------------------------------------------
+        ind = kwargs.get('ind')
+        now = datetime.now()
+        vol_power = kwargs.get('vol_power', 100.0)
+        ask_bid_ratio = kwargs.get('ask_bid_ratio', 1.0)
         
-        # 0. Gap Down (Global)
-        if s.get('use_gap_down_exit', True):
-            gap_limit = float(s.get('gap_down_limit', -5.0))
-            if profit_ratio <= gap_limit:
-                is_exit, exit_reason = True, "GAP_DOWN"
-
-        # 1. 익절(Take Profit)
-        if not is_exit:
-            use_tp = s.get('use_s2_tp' if stage == 2 else ('use_s1_b_tp' if is_type_b else 'use_s1_a_tp'), True)
-            if use_tp:
-                tp_pct = float(s.get('s2_take_profit' if stage == 2 else ('s1_b_take_profit' if is_type_b else 's1_a_take_profit'), 5.0))
-                if now_price >= avg_p * (1.0 + tp_pct / 100.0):
-                    is_exit, exit_reason = True, "TAKE_PROFIT"
-
-        # 2. 손절(Stop Loss - % 기준)
-        if not is_exit:
-            use_sl = s.get('use_s2_stop_loss' if stage == 2 else ('use_s1_b_stop_loss' if is_type_b else 'use_s1_a_stop_loss'), True)
-            if use_sl:
-                sl_pct = float(s.get('s2_stop_loss' if stage == 2 else ('s1_b_stop_loss' if is_type_b else 's1_a_stop_loss'), 3.0))
-                if now_price <= avg_p * (1.0 - sl_pct / 100.0):
-                    is_exit, exit_reason = True, "STOP_LOSS"
-
-        # 3. Smart Exit (Supply/Demand Trap)
-        if not is_exit and s.get('use_smart_exit', True):
-            threshold = float(s.get('smart_exit_price_threshold', -0.5))
-            if now_price <= max_now * (1.0 + threshold / 100.0):
-                if is_power_exhausted:
-                    min_trap = float(s.get('smart_exit_ba_ratio', 1.3))
-                    if bid_ask_ratio >= min_trap:
-                        is_exit, exit_reason = True, "SMART_EXIT"
-
-        # 4. ATR 기반 손절 및 트레일링 스톱
-        if not is_exit and s.get('use_atr_exit', False):
-            curr_atr = float(self._get_val(ind, 'ATR', 0))
-            entry_atr = float(pos.get('atr_at_entry', curr_atr))
-            if curr_atr > 0:
-                suff = "_s2" if stage == 2 else ("_b" if is_type_b else "_a")
-                sl_mult = float(s.get(f'atr_multiplier_sl{suff}', 2.5))
-                trail_mult = float(s.get(f'atr_multiplier_trail{suff}', 4.0))
-                use_sl_atr = s.get(f'use_atr_stop_loss{suff}', True)
-                use_trail_atr = s.get(f'use_atr_trailing_stop{suff}', True)
-
-                if use_sl_atr and now_price <= avg_p - (sl_mult * entry_atr):
-                    is_exit, exit_reason = True, "ATR_SL"
-                elif use_trail_atr and now_price <= max_now - (trail_mult * curr_atr):
-                    is_exit, exit_reason = True, "ATR_TRAIL"
-
-        if is_exit:
-            # [v4.5.10] 개장 초기 매도 유예 (9:15까지 휩소 방어)
-            if s.get('use_gap_grace', True):
-                now = datetime.now()
-                if now.hour == 9 and now.minute < int(s.get('gap_grace_mins', 15)):
-                    # 익절(TAKE_PROFIT)을 제외한 모든 손실성 매도는 유예
-                    if exit_reason != "TAKE_PROFIT":
-                        return {'action': 'HOLD', 'reason': f'GRACE_PERIOD({exit_reason})'}
-
-            return {'action': 'EXIT', 'reason': exit_reason, 'profit_ratio': profit_ratio}
-
         # ---------------------------------------------------------
-        # [2단계] 추가 매수(Stage 2 Scale-in) 조건 검사
+        # [2단계] 추가 매수(Stage 2 Scale-in) 조건 검토
         # ---------------------------------------------------------
+        stage = pos.get('stage', 1)
         if stage == 1:
             # 0. 시장지수 필터
             if s.get('use_market_filter', True):
@@ -128,10 +72,12 @@ class StrategyEngine:
             if s.get('use_s2_delay', True):
                 min_h = float(s.get('s2_delay_hours', 24.0))
                 if pos.get('entry_time'):
-                    elapsed = (datetime.now() - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 3600
-                    if elapsed < min_h: return {'action': 'HOLD'}
+                    try:
+                        elapsed = (datetime.now() - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 3600
+                        if elapsed < min_h: return {'action': 'HOLD'}
+                    except: pass
 
-            # 2. 기술적 합치도 평가
+            # 2. 기술적 위치/합치 분석
             can_addon = True
             if ind is not None:
                 if s.get('use_s2_ma20', True):
@@ -165,7 +111,7 @@ class StrategyEngine:
                 if vol_power < float(s.get('smart_buy_vp', 120.0)) or ask_bid_ratio < float(s.get('smart_buy_ba_ratio', 1.5)):
                     can_addon = False
                     
-            # 4. 수익률 트리거 확인
+            # 4. 수익권/트리거 확인
             if can_addon:
                 s2_trigger = float(s.get('s2_profit_limit', 1.0))
                 if profit_ratio >= s2_trigger:
@@ -174,7 +120,7 @@ class StrategyEngine:
         return {'action': 'HOLD'}
 
     def calculate_confluence_status(self, code, now_price, ind, vol_power, ask_bid_ratio):
-        """[v22.0] 실시간 감시창의 '상태' 컬럼에 표시할 합합도 텍스트 산출"""
+        """[v22.0] 실시간 감시창의 '상태' 컬럼에 표시할 종합 지수 산출"""
         if code not in self.app.virtual_positions: return "-", 0.0
         pos = self.app.virtual_positions[code]
         if pos.get('stage', 1) == 2:
@@ -193,16 +139,19 @@ class StrategyEngine:
         if s.get('use_s2_delay', True):
             total += 1
             min_h = float(s.get('s2_delay_hours', 24.0))
-            if pos.get('entry_time') and (datetime.now() - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 3600 >= min_h:
-                met += 1
+            if pos.get('entry_time'):
+                try:
+                    if (datetime.now() - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 3600 >= min_h:
+                        met += 1
+                except: pass
         
-        # 2. 수익률 트리거
+        # 2. 수익권 트리거
         if s.get('use_s2_profit', True):
             total += 1
             profit = (now_price / pos['avg_price'] - 1) * 100
             if profit >= float(s.get('s2_profit_limit', 1.0)): met += 1
         
-        # 3. 기술적 지표 (MA20, MA5, RSI, MACD)
+        # 3. 기술적 지표(MA20, MA5, RSI, MACD)
         if ind is not None:
             if s.get('use_s2_ma20', True):
                 total += 1
@@ -226,7 +175,7 @@ class StrategyEngine:
                 prev_osc = float(self._get_val(ind, 'Prev_OSC', 0))
                 if macd >= macd_sig and osc > 0 and osc > prev_osc: met += 1
 
-        # 4. 수급 합치도
+        # 4. 수급 지표
         if s.get('use_smart_buy_s2', True):
             total += 1
             if vol_power >= float(s.get('smart_buy_vp', 120.0)) and ask_bid_ratio >= float(s.get('smart_buy_ba_ratio', 1.5)):

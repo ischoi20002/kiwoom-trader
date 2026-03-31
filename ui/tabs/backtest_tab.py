@@ -621,7 +621,7 @@ class BacktestTab:
             active = self.app.settings.copy()
             if override_params: active.update(override_params)
             tester = db.DynamicBacktester(active)
-            trades = tester.run(start, end, interval='15m', callback=update)
+            trades = tester.run(start, end, interval='15m', callback=update, high_precision=True)
             if trades is not None and not trades.empty:
                 self.gui_queue.put(lambda: self.lbl_bt_status.config(text="백테스트 완료!", foreground="#A3BE8C"))
                 report = os.path.abspath("dynamic_trade_report.html")

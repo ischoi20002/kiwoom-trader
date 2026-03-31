@@ -114,6 +114,83 @@ class TradingStrategy:
             return 'WATCH'
 
     @staticmethod
+    def simulate_intrabar_indicators(hist_df, current_15m_time, m1_row, settings):
+        """
+        [v37.9] 초고속 증분 지표 업데이트 (Incremental Update)
+        - 전체 재계산(O(N)) 대신 상수 시간(O(1)) 연산으로 속도 최적화
+        """
+        if hist_df is None or len(hist_df) < 1:
+            return None
+            
+        last_15m = hist_df.iloc[-1]
+        m1_p = m1_row['Close']
+        combined = last_15m.copy()
+        combined.name = current_15m_time
+        combined['Close'] = m1_p
+        
+        # [Optimization] 전체 재계산 대신 수학적 증분 업데이트 적용
+        # 1. Moving Averages (MA)
+        for n in [5, 20, 60]:
+            col = f'MA{n}'
+            if col in last_15m and len(hist_df) >= n:
+                # MA_new = (Sum(last n-1) + new_p) / n
+                prev_sum = hist_df['Close'].iloc[-(n-1):].sum()
+                combined[col] = (prev_sum + m1_p) / n
+
+        # 2. RSI (Wilder's Smoothing)
+        if 'RSI' in last_15m and len(hist_df) >= 14:
+            # RSI 증분 업데이트를 위한 Gain/Loss 계산
+            diff = m1_p - last_15m['Close']
+            gain = max(0, diff)
+            loss = max(0, -diff)
+            
+            # Wilder's Smoothing 공식: (prev_avg * 13 + current) / 14
+            # 기존 RSI로부터 역산하여 avg_gain/loss 추출 시도 (또는 근사치)
+            # 정확도를 위해 14개 데이터를 직접 사용하는 것이 안전함 (그래도 O(14)로 매우 빠름)
+            tail_15 = hist_df['Close'].tail(14)
+            diffs = np.diff(np.append(tail_15.values, [m1_p]))
+            gains = np.maximum(0, diffs)
+            losses = np.maximum(0, -diffs)
+            
+            # ewm fallback or direct mean (Wilder's ewm alpha=1/14)
+            # 여기서는 속도를 위해 직전 150개 복사 대신 필요한 최소 범위만 사용
+            alpha = 1/14.0
+            avg_gain = last_15m.get('_avg_gain', 0) # 만약 엔진에서 미리 계산해 뒀다면 최상
+            if avg_gain == 0: #Fallback
+                avg_gain = gains.mean()
+                avg_loss = losses.mean()
+            else:
+                avg_gain = alpha * gain + (1 - alpha) * last_15m['_avg_gain']
+                avg_loss = alpha * loss + (1 - alpha) * last_15m['_avg_loss']
+            
+            rs = avg_gain / (avg_loss + 1e-10)
+            combined['RSI'] = 100 - (100 / (1 + rs))
+
+        # 3. MACD (EMA based)
+        # EMA_new = price * alpha + prev_ema * (1 - alpha)
+        for span, col_prefix in [(12, '_ema12'), (26, '_ema26')]:
+            alpha = 2.0 / (span + 1.0)
+            prev_ema = last_15m.get(col_prefix, last_15m['Close']) # Fallback
+            new_ema = m1_p * alpha + prev_ema * (1 - alpha)
+            combined[col_prefix] = new_ema
+            
+        if '_ema12' in combined and '_ema26' in combined:
+            combined['MACD'] = combined['_ema12'] - combined['_ema26']
+            # Signal Line (EMA of MACD line)
+            sig_span = int(settings.get('macd_sig_entry', 9))
+            sig_alpha = 2.0 / (sig_span + 1.0)
+            prev_sig = last_15m.get('_macd_sig', last_15m['MACD'])
+            combined['_macd_sig'] = combined['MACD'] * sig_alpha + prev_sig * (1 - sig_alpha)
+            combined['MACD_Sig'] = combined['_macd_sig']
+            combined['OSC'] = combined['MACD'] - combined['MACD_Sig']
+
+        # [v37.9] Smart Buy 필터용 수급 지표 반영 (시뮬레이션 필요 없음. 1분봉 데이터 직결)
+        if 'bid_ask_ratio' in m1_row: combined['bid_ask_ratio'] = m1_row['bid_ask_ratio']
+        if 'vol_power' in m1_row: combined['vol_power'] = m1_row['vol_power']
+        
+        return combined
+
+    @staticmethod
     def get_buy_signals_detailed(df, settings, market_trend='UP'):
         """매수 신호 상세 분석 (v6.2: 상태값 포함)"""
         return signals.get_buy_signals_detailed(df, settings, market_trend)
@@ -186,13 +263,133 @@ class TradingStrategy:
             # [v27.2] MACD-Signal 상회 + OSC 양수 + OSC 증가 중 (S1과 동계열)
             if macd_val < macd_sig + gap or osc_val <= 0 or osc_val <= osc_prev:
                 return False
+
         # 6. 수익권 확인 (use_s2_profit)
         if s.get('use_s2_profit', True):
-            trigger = float(s.get('s2_profit_limit', 1.0))
-            if (curr_price / pos['avg_price'] - 1) * 100 < trigger:
-                return False
-                
+            profit_limit = float(s.get('s2_profit_limit', 1.0))
+            avg_price = pos.get('avg_price', pos.get('avg_p', curr_price))
+            if avg_price > 0:
+                current_profit_pct = (curr_price / avg_price - 1) * 100
+                if current_profit_pct < profit_limit:
+                    return False
+
         return True
+
+    @staticmethod
+    def evaluate_position(code, now_price, pos, settings, indicator_row=None, current_time=None, is_realtime=False, kwargs=None):
+        """
+        [v35.0] 실시간 감시와 모든 백테스팅(포트폴리오 포함)이 공유하는 통합 포지션 평가(매도 결정) 함수.
+        반환: {'action': 'EXIT'/'HOLD', 'reason': '...', 'profit_ratio': ...}
+        """
+        if now_price <= 0: return {'action': 'HOLD'}
+        
+        # 1. 기본 정보 산출 (필드명 호환성 유지: entry_n / stage, avg_p / avg_price)
+        stage = pos.get('entry_n', pos.get('stage', 1))
+        avg_p = pos.get('avg_p', pos.get('avg_price', now_price))
+        profit_ratio = (now_price / avg_p - 1) * 100
+        
+        # 2. 최고가 갱신 (max_p / max_price)
+        max_p = max(pos.get('max_p', now_price), pos.get('max_price', now_price), now_price)
+        if 'max_p' in pos: pos['max_p'] = max_p
+        if 'max_price' in pos: pos['max_price'] = max_p
+        
+        # 3. 지표 데이터 확보 (kwargs 또는 indicator_row)
+        ind = indicator_row
+        is_power_exhausted = False
+        bid_ask_ratio = 0
+        
+        if kwargs:
+            is_power_exhausted = kwargs.get('is_power_exhausted', False)
+            bid_ask_ratio = kwargs.get('bid_ask_ratio', 0)
+        elif ind is not None:
+            # Series나 Dict일 수 있음
+            try:
+                bid_ask_ratio = ind.get('bid_ask_ratio', ind.get('Bid_Ask_Ratio', 0))
+            except:
+                bid_ask_ratio = 0
+
+        is_exit = False
+        exit_reason = ""
+        # sig_type 또는 reason 필드에서 전략 타입 판별
+        sig_type_str = str(pos.get('sig_type', pos.get('reason', '')))
+        is_type_b = "TYPE_B" in sig_type_str
+        s = settings
+
+        # ---------------------------------------------------------
+        # [1단계] 탈출(Exit) 조건 검사
+        # ---------------------------------------------------------
+        
+        # 0. Gap Down (Global)
+        if s.get('use_gap_down_exit', True):
+            gap_limit = float(s.get('gap_down_limit', -5.0))
+            if profit_ratio <= gap_limit:
+                is_exit, exit_reason = True, "GAP_DOWN"
+
+        # 1. 익절(Take Profit)
+        if not is_exit:
+            use_tp = s.get('use_s2_tp' if stage == 2 else ('use_s1_b_tp' if is_type_b else 'use_s1_a_tp'), True)
+            if use_tp:
+                tp_pct = float(s.get('s2_take_profit' if stage == 2 else ('s1_b_take_profit' if is_type_b else 's1_a_take_profit'), 5.0))
+                if profit_ratio >= tp_pct:
+                    is_exit, exit_reason = True, "TAKE_PROFIT"
+
+        # 2. 손절(Stop Loss - % 기준)
+        if not is_exit:
+            use_sl = s.get('use_s2_stop_loss' if stage == 2 else ('use_s1_b_stop_loss' if is_type_b else 'use_s1_a_stop_loss'), True)
+            if use_sl:
+                sl_pct = float(s.get('s2_stop_loss' if stage == 2 else ('s1_b_stop_loss' if is_type_b else 's1_a_stop_loss'), 3.0))
+                if profit_ratio <= -sl_pct:
+                    is_exit, exit_reason = True, "STOP_LOSS"
+
+        # 3. Flash Exit (Trailing from High)
+        if not is_exit:
+            use_flash = s.get('use_s2_flash_exit' if stage == 2 else ('use_s1_b_flash_exit' if is_type_b else 'use_s1_a_flash_exit'), True)
+            if use_flash:
+                f_pct = float(s.get('s2_flash_exit_pct' if stage == 2 else ('s1_b_flash_exit_pct' if is_type_b else 's1_a_flash_exit_pct'), 3.0))
+                if now_price <= max_p * (1.0 - f_pct / 100.0):
+                    is_exit, exit_reason = True, "FLASH_EXIT"
+
+        # 4. Smart Exit (Supply/Demand Trap)
+        if not is_exit and s.get('use_smart_exit', True):
+            threshold = float(s.get('smart_exit_price_threshold', 0.0))
+            if threshold == 0 or now_price <= max_p * (1 + threshold / 100.0):
+                min_trap = float(s.get('smart_exit_ba_ratio', 1.3))
+                if bid_ask_ratio >= min_trap or (is_realtime and is_power_exhausted):
+                    is_exit, exit_reason = True, "SMART_EXIT"
+
+        # 5. ATR 기반 손절 및 트레일링 스톱
+        if not is_exit and s.get('use_atr_exit', False) and ind is not None:
+            try:
+                curr_atr = float(ind.get('ATR', 0))
+                entry_atr = float(pos.get('atr_at_entry', curr_atr))
+                if curr_atr > 0:
+                    suff = "_s2" if stage == 2 else ("_b" if is_type_b else "_a")
+                    sl_mult = float(s.get(f'atr_multiplier_sl{suff}', 2.5))
+                    trail_mult = float(s.get(f'atr_multiplier_trail{suff}', 4.0))
+                    use_sl_atr = s.get(f'use_atr_stop_loss{suff}', True)
+                    use_trail_atr = s.get(f'use_atr_trailing_stop{suff}', True)
+
+                    if use_sl_atr and now_price <= avg_p - (sl_mult * entry_atr):
+                        is_exit, exit_reason = True, "ATR_SL"
+                    elif use_trail_atr and now_price <= max_p - (trail_mult * curr_atr):
+                        is_exit, exit_reason = True, "ATR_TRAIL"
+            except: pass
+
+        if is_exit:
+            # [v4.5.10] 개장 초기 매도 유예 (휩소 방어)
+            if s.get('use_gap_grace', True):
+                if current_time:
+                    try:
+                        # 9시 00분 ~ 9시 N분 사이인 경우
+                        dt = pd.to_datetime(current_time)
+                        if dt.hour == 9 and dt.minute < int(s.get('gap_grace_mins', 15)):
+                            if exit_reason != "TAKE_PROFIT":
+                                return {'action': 'HOLD', 'reason': f'GRACE({exit_reason})'}
+                    except: pass
+
+            return {'action': 'EXIT', 'reason': exit_reason, 'profit_ratio': profit_ratio}
+
+        return {'action': 'HOLD'}
 
 
 
@@ -246,8 +443,10 @@ class SimpleBacktester:
             else:
                 df = df.copy(deep=False) # 얕은 복사로 메모리는 아끼고, Series 주소망 분리
             # 1. Initialization
+            self.df = df # [v36.9.2] 인스턴스 변수에 저장하여 정밀 루프에서 참조 가능하게 함
             if not skip_indicators:
                 df = TradingStrategy.calculate_indicators(df, self.settings)
+                self.df = df # 지표가 계산된 버전으로 갱신
             
             if log_to_csv:
                 print(f"  [Sim] Strategy Run: {code} | Data: {len(df)} rows | HighPrec: {high_precision}")
@@ -344,8 +543,9 @@ class SimpleBacktester:
                 # Find the starting index of 1M data for each 15M timestamp
                 times_15m = df.index
                 m1_times = m1_df_preloaded.index
-                start_idxs = np.searchsorted(m1_times, times_15m)
-                end_idxs = np.searchsorted(m1_times, times_15m + pd.Timedelta(minutes=14, seconds=59), side='right')
+                # [v37.6] 15분봉 시각(times_15m)은 마감 시각이므로 T-14분~T 구간의 1분봉을 매핑함
+                start_idxs = np.searchsorted(m1_times, times_15m - pd.Timedelta(minutes=14))
+                end_idxs = np.searchsorted(m1_times, times_15m, side='right')
                 # Store as (start, end) tuples or arrays
                 m1_boundaries = list(zip(start_idxs, end_idxs))
                 # [v4.5.10] Extract VP/BA for 1M Smart Exit simulation
@@ -631,77 +831,81 @@ class SimpleBacktester:
         return True
 
             
-    def _process_intra_bar_exit_only_v2(self, i, code, m1_highs, m1_closes, m1_times, params, time_h, time_m, m1_ba=None, m1_vp=None, indicators=None):
-        """[v35.0] Ultra-Fast Intra-bar Exit check (v4.5.10 ATR/Smart Sync)"""
-        pos = params['position']
-        sig_type = pos.get('sig_type', 'TYPE_A')
-        is_type_b = (sig_type == "TYPE_B" and self.use_type_b)
-        stage = pos['stage']
+    def _process_intra_bar_full_v3(self, i, code, m1_highs, m1_closes, m1_times, params, hour, minute, m1_ba=None, m1_vp=None, indicators=None, signal_shifted=False):
+        """[v36.9] SimpleBacktester 전용 1분 단위 정밀 루프 (실시간 지표 시뮬레이션 통합)"""
+        # 15분 단위 데이터 슬라이싱 (시뮬레이션용 과거 데이터)
+        hist_15m = self.df.iloc[:i]
+        curr_15m_time = self.df.index[i]
         
-        if stage == 1:
-            use_flash = self.use_s1b_flash_active if is_type_b else self.use_s1a_flash_active
-            f_pct = (self.s1b_flash if is_type_b else self.s1a_flash) if use_flash else 0.0
-            sl_pct = (self.s1b_sl if is_type_b else self.s1a_sl) * 100 if (self.use_s1b_sl_active if is_type_b else self.use_s1a_sl_active) else 0.0
-            tp_pct = (self.s1b_tp if is_type_b else self.s1a_tp) * 100 if (self.use_s1b_tp_active if is_type_b else self.use_s1a_tp_active) else 0.0
-        else:
-            f_pct = self.s2_flash if self.use_s2_flash else 0.0
-            sl_pct = self.s2_sl * 100 if self.use_s2_sl else 0.0
-            tp_pct = self.s2_tp * 100 if self.use_s2_tp_active else 0.0
-        
-        avg_price = pos['avg_price']
-        prev_max = pos.get('max_price', avg_price)
-        running_max = np.maximum.accumulate(m1_highs)
-        running_max = np.maximum(running_max, prev_max)
-        
-        flash_exited = (f_pct > 0) & (m1_closes < running_max * (1 - f_pct/100))
-        stop_lossed = (sl_pct > 0) & (m1_closes / avg_price - 1 <= -sl_pct/100)
-        take_profited = (tp_pct > 0) & (m1_highs / avg_price - 1 >= tp_pct/100)
-        gap_downed = (self.use_gap_down_exit) & (m1_closes / avg_price - 1 <= self.gap_down_limit / 100)
+        for idx in range(len(m1_highs)):
+            m1_p = m1_closes[idx]
+            m1_h = m1_highs[idx]
+            m1_t = m1_times[idx]
+            m1_ba_val = m1_ba[idx] if m1_ba is not None else 1.0
+            m1_vp_val = m1_vp[idx] if m1_vp is not None else 100.0
+            
+            # [v36.9] 초정밀 1분 지표 시뮬레이션
+            m1_row_data = {'Close': m1_p, 'High': m1_h, 'Low': m1_p, 'bid_ask_ratio': m1_ba_val, 'vol_power': m1_vp_val}
+            indicator_to_use = TradingStrategy.simulate_intrabar_indicators(hist_15m, curr_15m_time, m1_row_data, self.settings)
+            
+            # 시뮬레이션 실패 시(데이터 부족 등) 기존 15분 지표 Fallback
+            if indicator_to_use is None:
+                indicator_to_use = {k: v[i] for k, v in indicators.items()}
 
-        # [v4.5.10] ATR Exit Logic (Sync with StrategyEngine)
-        atr_exit = np.zeros(len(m1_closes), dtype=bool)
-        atr_trail = np.zeros(len(m1_closes), dtype=bool)
-        if self.use_atr and indicators is not None:
-            atr_val = indicators['ATR'][i]
-            entry_atr = pos.get('atr_at_entry', atr_val)
-            if not np.isnan(atr_val) and atr_val > 0:
-                suff = "_s2" if stage == 2 else ("_b" if is_type_b else "_a")
-                if getattr(self, f'use_atr_sl{suff}'):
-                    atr_exit = (m1_closes <= avg_price - (getattr(self, f'atr_sl_mult{suff}') * entry_atr))
-                if getattr(self, f'use_atr_trail{suff}'):
-                    atr_trail = (m1_closes <= running_max - (getattr(self, f'atr_trail_mult{suff}') * atr_val))
-
-        # [v4.5.10] Smart Exit Logic (Sync with DNA / StrategyEngine)
-        smart_exited = np.zeros(len(m1_closes), dtype=bool)
-        if self.use_sx and m1_ba is not None and m1_vp is not None:
-            # DNA/StrategyEngine rule: Bid Trap (High Bid wall + Weak VolPower + Price Stall)
-            # Bid/Ask >= 1.3 AND VolPower < 90 AND (optional) Price logic
-            smart_exited = (m1_ba >= self.sx_ba) & (m1_vp < self.sx_vp)
-            if self.sx_p_thr != 0:
-                smart_exited &= (m1_closes <= running_max * (1 + self.sx_p_thr / 100.0))
-
-        if self.use_gap_grace and time_h == 9 and time_m == 0:
-            grace_idx_limit = int(self.settings.get('gap_grace_mins', 15))
-            if len(stop_lossed) > 0: stop_lossed[:grace_idx_limit] = False
-            if len(gap_downed) > 0: gap_downed[:grace_idx_limit] = False
-            if len(flash_exited) > 0: flash_exited[:grace_idx_limit] = False
+            # 1. 매도(Exit) 및 추가매수(Addon) 감시 (보유 중인 경우)
+            if params['position'] is not None:
+                pos = params['position']
+                if m1_h > pos['max_price']: pos['max_price'] = m1_h
                 
-        exit_mask = flash_exited | stop_lossed | take_profited | gap_downed | atr_exit | atr_trail | smart_exited
-        exit_idxs = np.where(exit_mask)[0]
-        if len(exit_idxs) > 0:
-            idx = int(exit_idxs[0])
-            e_price, e_time = m1_closes[idx], m1_times[idx]
-            if bool(take_profited[idx]): e_price = avg_price * (1 + tp_pct/100)
+                # 시뮬레이션된 지표 행을 사용하여 정밀 평가
+                res = TradingStrategy.evaluate_position(code, m1_p, pos, self.settings, indicator_row=indicator_to_use, current_time=m1_t)
+                
+                if res['action'] == 'EXIT':
+                    e_price = m1_p
+                    if res['reason'] == 'TAKE_PROFIT':
+                        is_type_b = "TYPE_B" in pos.get('reason', '')
+                        tp_pct = float(self.settings.get('s2_take_profit' if pos['stage'] == 2 else ('s1_b_take_profit' if is_type_b else 's1_a_take_profit'), 5.0))
+                        e_price = pos['avg_price'] * (1 + tp_pct/100.0)
+                    
+                    params = self._execute_sell(m1_t, e_price, f"1M_{res['reason']}+{idx}m", params, indicators=indicators, i=i)
+                    return params # 매도 발생 시 블록 종료
+                
+                elif pos['stage'] == 1:
+                    # [v36.9] 시뮬레이션 지표 기반 S2 Approval 체크
+                    # 기존 정적 필터 대신 실시간 지표(indicator_to_use)를 라이브로 평가
+                    if TradingStrategy._check_s2_approval(pos, indicator_to_use, self.settings, market_trend=params.get('market_trend', 'UP')):
+                        can_buy_s2 = True
+                        if self.use_sb_s2:
+                            ab_ratio = 1.0 / (m1_ba_val + 1e-10)
+                            if ab_ratio < self.sb_ba or m1_vp_val < self.sb_vp:
+                                can_buy_s2 = False
+                        
+                        if can_buy_s2:
+                            s2_reason = f"1M_ADDON(S2)|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.2f}+{idx}m"
+                            if self.use_sb_s2: s2_reason = "1M_SmartBuy|" + s2_reason
+                            params = self._execute_buy(m1_t, m1_p, "BUY_2ND", params, stage=2, reason=s2_reason, indicators=indicators, i=i)
+                            return params # 추가매수 시 해당 분 사이클 종료
             
-            reason = "1M_SL"
-            if bool(gap_downed[idx]): reason = "1M_GapDown"
-            elif bool(flash_exited[idx]): reason = "1M_FlashExit"
-            elif bool(take_profited[idx]): reason = "1M_TP"
-            elif bool(atr_exit[idx]): reason = "1M_ATR_SL"
-            elif bool(atr_trail[idx]): reason = "1M_ATR_Trail"
-            elif bool(smart_exited[idx]): reason = f"1M_SmartExit(BA:{m1_ba[idx]:.2f}/VP:{m1_vp[idx]:.0f})"
-            
-            params = self._execute_sell(e_time, e_price, reason, params)
+            # 2. 신규 진입(Entry) 감시
+            else:
+                # [v36.9] 시뮬레이션 지표 기반 매수 신호 실시간 감지
+                is_buy_signal = (indicator_to_use.get('Signal', False) and indicator_to_use.get('Ready', False))
+                if is_buy_signal:
+                    sig_type = indicator_to_use.get('Sig_Type', 'TYPE_B')
+                    use_sb = self.use_sb_a if sig_type == 'TYPE_A' else self.use_sb_b
+                    
+                    can_buy = True
+                    if use_sb:
+                        ab_ratio = 1.0 / (m1_ba_val + 1e-10)
+                        if ab_ratio < self.sb_ba or m1_vp_val < self.sb_vp:
+                            can_buy = False
+                            
+                    if can_buy:
+                        b_reason = f"1M_SIG|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.2f}+{idx}m"
+                        if use_sb: b_reason = "1M_SmartBuy|" + b_reason
+                        params = self._execute_buy(m1_t, m1_p, "BUY_1ST", params, stage=1, reason=b_reason, indicators=indicators, i=i)
+                        return params
+
         return params
 
     def _sim_loop_step_v3(self, i, close_vals, high_vals, low_vals, time_indices, time_hours, time_minutes, signal_shifted, indicators, code, m1_info, high_precision, params, log_to_csv=False):
@@ -711,20 +915,26 @@ class SimpleBacktester:
         curr_high = high_vals[i]
         curr_low = low_vals[i]
         
-        # 1. High Precision Exit Monitoring
-        if high_precision and m1_info is not None and params['position'] is not None:
+        # 1. High Precision Entry/Exit/Addon Monitoring
+        if high_precision and m1_info is not None:
             m1_high_total, m1_close_total, m1_time_total, (s_idx, e_idx), m1_ba_total, m1_vp_total = m1_info
             if e_idx > s_idx:
                 m1_highs = m1_high_total[s_idx:e_idx]
                 m1_closes = m1_close_total[s_idx:e_idx]
                 m1_ba = m1_ba_total[s_idx:e_idx] if m1_ba_total is not None else None
                 m1_vp = m1_vp_total[s_idx:e_idx] if m1_vp_total is not None else None
-                params = self._process_intra_bar_exit_only_v2(
-                    i, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], 
-                    params, time_hours[i], time_minutes[i], 
-                    m1_ba=m1_ba, m1_vp=m1_vp, indicators=indicators
-                )
-                if params['position'] is None:
+                
+                # Check if we should process high-precision (Position exists OR Signal exists)
+                if params['position'] is not None or signal_shifted[i]:
+                    old_pos = params['position']
+                    params = self._process_intra_bar_full_v3(
+                        i, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], 
+                        params, time_hours[i], time_minutes[i], 
+                        m1_ba=m1_ba, m1_vp=m1_vp, indicators=indicators,
+                        signal_shifted=signal_shifted[i]
+                    )
+                    # If position status changed or a trade happened, we might skip standard logic
+                    # For simplicity, if we processed intra-bar, we skip standard logic for this 15m block
                     return params
 
         # 2. Standard Sim Logic
@@ -779,75 +989,31 @@ class SimpleBacktester:
         return params
 
     def _check_exits_optimized(self, date, price, high, low, pos, indicators=None, i=None):
-        """[v35.5] Ultra-Fast Exit check (v4.5 Granular ATR Sync)"""
-        sig_type = pos.get('sig_type', 'TYPE_A')
-        is_type_b = (sig_type == "TYPE_B" and self.use_type_b)
-        stage = pos.get('stage', 1)
-
-        # 1. Flash Exit
-        if stage == 1:
-            f_pct = (self.s1b_flash if is_type_b else self.s1a_flash) / 100.0
-            use_f = (self.use_s1b_flash_active if is_type_b else self.use_s1a_flash_active)
-        else:
-            f_pct = self.s2_flash / 100.0
-            use_f = self.use_s2_flash
+        """[v35.8] Unified Exit check using TradingStrategy.evaluate_position"""
+        ind_row = None
+        if indicators is not None and i is not None:
+            try:
+                ind_row = {k: v[i] for k, v in indicators.items()}
+            except: pass
             
-        if use_f and f_pct > 0 and price <= pos['max_price'] * (1.0 - f_pct):
-            return {'price': price, 'reason': f"FLASH_EXIT(S{stage})"}
+        res = TradingStrategy.evaluate_position(
+            None, price, pos, self.settings,
+            indicator_row=ind_row, current_time=date,
+            is_realtime=False
+        )
+        
+        if res['action'] == 'EXIT':
+            e_price = price
+            # TP 가격 보정 (필요시)
+            if res['reason'] == 'TAKE_PROFIT':
+                stage = pos.get('stage', 1)
+                is_type_b = "TYPE_B" in pos.get('reason', '')
+                tp_pct = float(self.settings.get('s2_take_profit' if stage == 2 else ('s1_b_take_profit' if is_type_b else 's1_a_take_profit'), 5.0))
+                e_price = pos['avg_price'] * (1 + tp_pct/100.0)
             
-        # 2. Gap Down (Global) - [v4.5 Sync] Toggle Enforcement
-        if self.use_gap_down_exit and (price / pos['avg_price'] - 1) * 100 <= self.gap_down_limit:
-            return {'price': price, 'reason': f"GAP_DOWN"}
-
-        # 3. Smart Exit (Tactical)
-        if self.use_sx and indicators is not None and i is not None:
-            bid_ratio = indicators['bid_ask_ratio'][i]
-            v_power = indicators['vol_power'][i]
-            # [v4.5 Audit] Smart Exit triggers on Bid Trap (High Bid/Ask) + Low Power
-            if bid_ratio >= self.sx_ba and v_power < self.sx_vp:
-                if self.sx_p_thr == 0 or price <= pos['max_price'] * (1 + self.sx_p_thr / 100.0):
-                    return {'price': price, 'reason': f"SMART_EXIT"}
-
-        # 4. ATR Exit (Granular)
-        if self.use_atr and indicators is not None and i is not None:
-            curr_atr = indicators['ATR'][i]
-            entry_atr = pos.get('atr_at_entry', curr_atr)
-            if curr_atr > 0:
-                if stage == 2:
-                    sl_mult = self.atr_sl_mult_s2
-                    trail_mult = self.atr_trail_mult_s2
-                    use_sl = self.use_atr_sl_s2
-                    use_trail = self.use_atr_trail_s2
-                else:
-                    sl_mult = self.atr_sl_mult_b if is_type_b else self.atr_sl_mult_a
-                    trail_mult = self.atr_trail_mult_b if is_type_b else self.atr_trail_mult_a
-                    use_sl = self.use_atr_sl_b if is_type_b else self.use_atr_sl_a
-                    use_trail = self.use_atr_trail_b if is_type_b else self.use_atr_trail_a
-
-                if use_sl and price <= pos['avg_price'] - (sl_mult * entry_atr):
-                    return {'price': price, 'reason': f"ATR_SL(S{stage})"}
-                if use_trail and price <= pos['max_price'] - (trail_mult * curr_atr):
-                    return {'price': price, 'reason': f"ATR_TRAIL(S{stage})"}
-
-        # 5. Fixed TP/SL
-        if stage == 1:
-            # TP
-            use_tp = self.use_s1b_tp_active if is_type_b else self.use_s1a_tp_active
-            tp_pct = self.s1b_tp if is_type_b else self.s1a_tp
-            if use_tp and (high / pos['avg_price'] - 1) >= tp_pct:
-                return {'price': pos['avg_price'] * (1.0 + tp_pct), 'reason': f"TP_LIMIT(S1)"}
-            # SL
-            use_sl = self.use_s1b_sl_active if is_type_b else self.use_s1a_sl_active
-            sl_pct = self.s1b_sl if is_type_b else self.s1a_sl
-            if use_sl and (low / pos['avg_price'] - 1) <= -sl_pct:
-                return {'price': pos['avg_price'] * (1.0 - sl_pct), 'reason': f"SL_LIMIT(S1)"}
-        else:
-            # TP
-            if self.use_s2_tp_active and (high / pos['avg_price'] - 1) >= self.s2_tp:
-                return {'price': pos['avg_price'] * (1.0 + self.s2_tp), 'reason': f"TP_LIMIT(S2)"}
-            # SL
-            if self.use_s2_sl and (low / pos['avg_price'] - 1) <= -self.s2_sl:
-                return {'price': pos['avg_price'] * (1.0 - self.s2_sl), 'reason': f"SL_LIMIT(S2)"}
+            return {'price': e_price, 'reason': res['reason']}
+            
+        return None
         
         return None
 
@@ -1063,7 +1229,7 @@ class PortfolioBacktester:
         
         # 3. 결과 리포트 생성
         if summaries:
-            self._generate_summary_reports(summaries, all_equity, market_df, vix_df, start_date, end_date, interval)
+            self._generate_summary_reports(summaries, all_equity, market_df, vix_df, start_date, end_date, interval, high_precision=high_precision)
             return pd.DataFrame(summaries)
         return None
 
@@ -1145,7 +1311,7 @@ class PortfolioBacktester:
                     print(f"  (!) Error backtesting {code}: {e}")
         return summaries, all_equity
 
-    def _generate_summary_reports(self, summaries, all_equity, market_df, vix_df, start_date, end_date, interval):
+    def _generate_summary_reports(self, summaries, all_equity, market_df, vix_df, start_date, end_date, interval, high_precision=False):
         """최종 통계 출력 및 리포트 생성"""
         df_sum = pd.DataFrame(summaries)
         
@@ -1197,7 +1363,7 @@ class PortfolioBacktester:
                               df_sum['win_rate'].mean(), df_sum['final_ret'].mean(), self.settings,
                               market_df=market_df, vix_df=vix_df, target_codes=self.codes,
                               start_date=start_date, end_date=end_date, daily_equity=daily_equity_list,
-                              high_precision=False)
+                              high_precision=high_precision)
 
 
 

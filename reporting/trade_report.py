@@ -19,29 +19,34 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     # [v8.1] 모드 텍스트 결정
     mode_label = "고정밀(1분봉)" if high_precision else f"일반({display_interval})"
     mode_color = "#38bdf8" if high_precision else "#94a3b8"
+
+    # [v37.2] Date 데이터 시계열 변환 강제 (인트라데이 매칭 오류 방지)
+    if not df.empty and 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'])
+
+    # [v37.1] 가독성 개선: 실제 매매 내역(BUY, SELL) 및 보유(HOLD) 상태만 표시
+    if not df.empty:
+        # Action 열에 'BUY', 'SELL', 'HOLD'가 포함된 경우만 유지
+        mask = df['Action'].astype(str).str.contains('BUY|SELL|HOLD', case=False, na=False)
+        df = df[mask].copy()
+
     if df.empty:
-        # [v15.4.3] No data found in DF
+        # 필터링 후 내역이 없으면 안내 메시지 출력
         try:
             with open(output_path, "w", encoding="utf-8") as f:
-                f.write(f"<html><body style='background:#0f172a; color:white; padding:50px; text-align:center;'><h1>매매 내역이 전혀 없습니다.</h1><p>데이터가 비어 있습니다.</p><p>Path: {output_path}</p></body></html>")
-            print(f"DEBUG [generate_trade_report]: Empty DF, placeholder written to {output_path}")
-        except Exception as e:
-            print(f"DEBUG [generate_trade_report]: Error writing placeholder: {e}")
+                f.write(f"<html><body style='background:#0f172a; color:white; padding:50px; text-align:center;'><h1>매매 성공 내역 없음</h1><p>필터링 결과 실제 체결된 내역이 없습니다.</p></body></html>")
+        except: pass
         return
 
     # [v15.4.0] Aggressive filtering to ensure ONLY target stocks are shown
-    debug_msg = "Filter Disabled (target_codes is None)"
     if target_codes is not None:
         codes_set = set([str(c).strip().zfill(6) for c in target_codes])
-        before_count = len(df)
         df = df[df['Code'].astype(str).str.strip().str.zfill(6).isin(codes_set)].copy()
-        after_count = len(df)
-        debug_msg = f"Filter Active: {len(codes_set)} stocks | Before: {before_count} rows | After: {after_count} rows"
         
         if df.empty:
             try:
                 with open(output_path, "w", encoding="utf-8") as f:
-                    f.write(f"<html><body style='background:#0f172a; color:white; padding:50px; text-align:center;'><h1>매매 내역 없음</h1><p>{debug_msg}</p><p>CWD: {os.getcwd()}</p></body></html>")
+                    f.write(f"<html><body style='background:#0f172a; color:white; padding:50px; text-align:center;'><h1>매매 내역 없음</h1><p>지정된 종목군에 대한 체결 내역이 없습니다.</p></body></html>")
             except: pass
             return
     
@@ -787,23 +792,68 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     msi, adx, vix_series = None, None, None
     if market_df is not None and not market_df.empty:
         try:
-            m_ma20 = market_df['Close'].rolling(20).mean()
-            m_ma60 = market_df['Close'].rolling(60).mean()
-            m_ma120 = market_df['Close'].rolling(120).mean()
-            msi = ((m_ma20 / m_ma60 - 1) + (m_ma60 / m_ma120 - 1)) * 100
+            mdf = market_df.copy()
+            # [v38.0] Daily index 강제 정규화 (DynamicBacktester 등에서 원시 DF 전달되는 경우 대응)
+            if not isinstance(mdf.index, pd.DatetimeIndex):
+                if 'time' in mdf.columns:
+                    mdf['time'] = pd.to_datetime(mdf['time'])
+                    mdf.set_index('time', inplace=True)
+                elif 'Date' in mdf.columns:
+                    mdf['Date'] = pd.to_datetime(mdf['Date'])
+                    mdf.set_index('Date', inplace=True)
+                else:
+                    # 인덱스에 날짜 정보가 없으면 시장지표 계산을 건너뜀
+                    raise ValueError("market_df has no datetime index or time/Date column")
             
-            def _calc_adx(df, n=14):
-                h, l, c = df['High'], df['Low'], df['Close']
-                tr = pd.concat([h-l, abs(h-c.shift(1)), abs(l-c.shift(1))], axis=1).max(axis=1)
-                pdm = np.where((h-h.shift(1))>(l.shift(1)-l), np.maximum(h-h.shift(1), 0), 0)
-                mdm = np.where((l.shift(1)-l)>(h-h.shift(1)), np.maximum(l.shift(1)-l, 0), 0)
-                trs, pdms, mdms = tr.rolling(n).sum(), pd.Series(pdm, index=df.index).rolling(n).sum(), pd.Series(mdm, index=df.index).rolling(n).sum()
-                pdi, mdi = 100*(pdms/trs), 100*(mdms/trs)
-                return 100*(abs(pdi-mdi)/(pdi+mdi)).rolling(n).mean()
-            adx = _calc_adx(market_df)
+            # 컬럼명 정규화 (대소문자 혼합 방지)
+            cols = {c.lower(): c for c in mdf.columns}
+            c_close = cols.get('close')
+            c_high = cols.get('high')
+            c_low = cols.get('low')
+            if not (c_close and c_high and c_low):
+                raise ValueError("market_df missing price columns")
+
+            close_s = mdf[c_close].astype(float)
+            high_s = mdf[c_high].astype(float)
+            low_s = mdf[c_low].astype(float)
+
+            m_ma20 = close_s.rolling(20).mean()
+            m_ma60 = close_s.rolling(60).mean()
+            m_ma120 = close_s.rolling(120).mean()
+            # [Standard] MSI scale alignment (Remove * 100 to match engine indicators.py)
+            msi = ((m_ma20 / m_ma60 - 1) + (m_ma60 / m_ma120 - 1)) 
+            
+            def _calc_adx_from_series(h, l, c, n=14):
+                tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+                pdm = np.where((h - h.shift(1)) > (l.shift(1) - l), np.maximum(h - h.shift(1), 0), 0)
+                mdm = np.where((l.shift(1) - l) > (h - h.shift(1)), np.maximum(l.shift(1) - l, 0), 0)
+                trs = tr.rolling(n).sum()
+                pdms = pd.Series(pdm, index=h.index).rolling(n).sum()
+                mdms = pd.Series(mdm, index=h.index).rolling(n).sum()
+                pdi = 100 * (pdms / (trs + 1e-10))
+                mdi = 100 * (mdms / (trs + 1e-10))
+                return 100 * (abs(pdi - mdi) / (pdi + mdi + 1e-10)).rolling(n).mean()
+
+            adx = _calc_adx_from_series(high_s, low_s, close_s)
+
+            # VIX 시리즈도 동일한 날짜 인덱스로 맞춰서 사용
             if vix_df is not None and not vix_df.empty:
-                vix_series = vix_df['Close'] if 'Close' in vix_df.columns else vix_df.iloc[:, 0]
-        except: pass
+                vdf = vix_df.copy()
+                if not isinstance(vdf.index, pd.DatetimeIndex):
+                    if 'time' in vdf.columns:
+                        vdf['time'] = pd.to_datetime(vdf['time'])
+                        vdf.set_index('time', inplace=True)
+                    elif 'Date' in vdf.columns:
+                        vdf['Date'] = pd.to_datetime(vdf['Date'])
+                        vdf.set_index('Date', inplace=True)
+                v_cols = {c.lower(): c for c in vdf.columns}
+                v_close = v_cols.get('close')
+                if v_close:
+                    # msi 인덱스 기준으로 패딩 리샘플
+                    vix_series = vdf[v_close].astype(float).reindex(msi.index, method='pad')
+        except Exception as _e:
+            # 시장지표 계산 실패 시, 기존처럼 '-' 배지를 유지
+            msi, adx, vix_series = None, None, None
 
     loader = BacktestDataLoader()
     content = []
@@ -829,7 +879,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             status_badge = "-"
             try:
                 if msi is not None and adx is not None and vix_series is not None:
-                    # [v18.0] Intraday Timestamp Handling: Match by nearest prior daily index
+                    # [v18.1] Intraday Timestamp Handling: Match by nearest prior daily index (pad method)
                     target_date = r['Date'].replace(hour=0, minute=0, second=0, microsecond=0)
                     m_idx = msi.index.get_indexer([target_date], method='pad')[0]
                     if m_idx == -1: # Try without time reset if pad failed
@@ -837,17 +887,31 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                         
                     if m_idx != -1:
                         m_val, a_val, v_val = msi.iloc[m_idx], adx.iloc[m_idx], vix_series.iloc[m_idx]
-                        if m_val > 0 and a_val > 25 and v_val < 20:
-                            status_badge = '<span style="background:#22c55e; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">UP (Aggressive)</span>'
-                        elif m_val > 0 and v_val < 25:
-                            status_badge = '<span style="background:#84cc16; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">UP (Safe)</span>'
-                        elif m_val < -1 or v_val > 30:
-                            status_badge = '<span style="background:#ef4444; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">DOWN (Risk)</span>'
-                        else:
-                            status_badge = '<span style="background:#f97316; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">NEUTRAL</span>'
+                        
+                        # [v38.1] 시장 수치 지표 및 판정 로직 동기화 (v4.5.10 Standard SSOT)
+                        m_val_p, a_val_p, v_val_p = float(m_val), float(a_val), float(v_val)
+                        badge_label = "UP (Safe)"
+                        badge_color = "#84cc16"
+                        
+                        # [Standard Rule: Exactly same as SimpleBacktester v4.5.10]
+                        lock_down = (m_val_p < -0.10) or (v_val_p > 30)
+                        lock_neutral = (a_val_p < 15) or (m_val_p >= -0.10 and m_val_p <= 0.05)
+                        
+                        if lock_down:
+                            badge_label, badge_color = "DOWN (Risk)", "#ef4444"
+                        elif lock_neutral:
+                            badge_label, badge_color = "NEUTRAL", "#f97316"
+                        elif m_val_p > 0 and a_val_p >= 25 and v_val_p < 20: # AGGRESSIVE
+                            badge_label, badge_color = "UP (Aggreg)", "#22c55e"
+                        
+                        status_badge = f"""
+                        <div style="display:flex; flex-direction:column; align-items:center; gap:2px;">
+                            <span style="background:{badge_color}; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem; white-space:nowrap;">{badge_label}</span>
+                            <span style="font-size:0.65rem; color:var(--dim); font-family:monospace; line-height:1;">M:{m_val_p:+.2f} V:{v_val_p:.1f} A:{a_val_p:.1f}</span>
+                        </div>
+                        """
                     else:
-                        # Fallback: Just show Neutral if data exists but index is slightly off
-                        status_badge = '<span style="background:#64748b; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">NEUTRAL</span>'
+                        status_badge = '<span style="background:#64748b; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">NEUTRAL (-)</span>'
             except: pass
 
             amt = r['Price'] * r['Qty']

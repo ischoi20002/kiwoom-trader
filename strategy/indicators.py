@@ -86,15 +86,39 @@ def calculate_all_indicators(df, settings):
     df['RSI'] = calculate_rsi(df['Close'], 14)
     rsi_sig_p = int(settings.get('rsi_sig_period', 9))
     df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
-    df['Prev_RSI'] = df['RSI'].shift(1)
-    
     # 4. MACD (v6.2: 실시간/백테스트 신호용 파라미터 분리 적용)
     fast = int(settings.get('macd_fast_entry', 12))
     slow = int(settings.get('macd_slow_entry', 26))
     sig = int(settings.get('macd_sig_entry', 9))
-    df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], max(1, fast), max(1, slow), max(1, sig))
+
+    # [v37.9] Optimization: Preserve raw calculation states for Incremental Updates in 1m simulation
+    # 1. MACD EMA states
+    df['_ema12'] = df['Close'].ewm(span=max(1, fast), adjust=False).mean()
+    df['_ema26'] = df['Close'].ewm(span=max(1, slow), adjust=False).mean()
+    df['MACD'] = df['_ema12'] - df['_ema26']
+    
+    sig_p = max(1, sig)
+    df['_macd_sig'] = df['MACD'].ewm(span=sig_p, adjust=False).mean()
+    df['MACD_Sig'] = df['_macd_sig']
+    df['OSC'] = df['MACD'] - df['MACD_Sig']
     df['Prev_OSC'] = df['OSC'].shift(1)
     
+    # 2. RSI Wilder's states
+    period = 14
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    df['_avg_gain'] = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    df['_avg_loss'] = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    
+    rs = df['_avg_gain'] / (df['_avg_loss'] + 1e-10)
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    rsi_sig_p = int(settings.get('rsi_sig_period', 9))
+    df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
+    df['Prev_RSI'] = df['RSI'].shift(1)
+
+    # ... rest of the original logic (MSI, ADX, ATR, etc.)
     # 5. MSI (Market Strength Index)
     if 'MA120' in df.columns:
         df['MSI'] = (df['MA20'] / (df['MA60'] + 1e-10) - 1) + (df['MA60'] / (df['MA120'] + 1e-10) - 1)
@@ -105,50 +129,22 @@ def calculate_all_indicators(df, settings):
         atr_p = int(settings.get('atr_period', 14))
         df['ATR'] = calculate_atr(df, max(1, atr_p))
         
-        # [Perf] Vectorized Prev Day Same Time Volume calculation (Replaces slow groupby.transform)
-        if len(df) > 0:
-            v_lookback = int(settings.get('vol_lookback', 10))
-            vol_lookback = max(1, v_lookback)
-            
-            # Create a pivot table of volumes by date and time
-            # Index is date, columns are time, values are volume
-            pivot_vol = df.copy()
-            # [v35.7] Safety: Ensure DatetimeIndex for normalize()
-            if not isinstance(pivot_vol.index, pd.DatetimeIndex):
-                if 'datetime' in pivot_vol.columns:
-                    pivot_vol.index = pd.to_datetime(pivot_vol['datetime'], errors='coerce')
-                elif 'time' in pivot_vol.columns:
-                    # [v35.7] HHMM 문자열(예: '1215')을 오늘 날짜와 결합하여 정상 타임스탬프로 변환
-                    from datetime import datetime
-                    today_str = datetime.now().strftime('%Y-%m-%d')
-                    # '1215' -> '2026-03-27 1215' -> Datetime
-                    t_series = pivot_vol['time'].astype(str).str.zfill(4)
-                    pivot_vol.index = pd.to_datetime(today_str + ' ' + t_series, format='%Y-%m-%d %H%M', errors='coerce')
-            
-            if not isinstance(pivot_vol.index, pd.DatetimeIndex):
-                # Fallback: create dummy date if index is not datetime-like
-                pivot_vol['date_only'] = pd.Timestamp.now().normalize()
-            else:
-                pivot_vol['date_only'] = pivot_vol.index.normalize()
-            
-            pivot_vol['time_only'] = pivot_vol.index.time
-            
-            # Use pivot_table to handle cases with missing bars
-            pivoted = pivot_vol.pivot_table(index='date_only', columns='time_only', values='Volume')
-            # Shift by 1 day and take rolling mean of previous days for each time slot
+        # [Perf] Vectorized Prev Day Same Time Volume calculation
+        v_lookback = int(settings.get('vol_lookback', 10))
+        vol_lookback = max(1, v_lookback)
+        
+        df_tmp = df[['Volume']].copy()
+        if isinstance(df_tmp.index, pd.DatetimeIndex):
+            df_tmp['date_only'] = df_tmp.index.normalize()
+            df_tmp['time_only'] = df_tmp.index.time
+            pivoted = df_tmp.pivot_table(index='date_only', columns='time_only', values='Volume')
             pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
-            
-            # Map back efficiently (v35.8: Avoid merge/KeyError issues)
             stacked = pivoted_rolled.stack(future_stack=True)
-            if isinstance(df.index, pd.DatetimeIndex):
-                lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
-            else:
-                # Fallback: Use current date for all rows if index is not datetime
-                now_norm = pd.Timestamp.now().normalize()
-                lookup_keys = pd.MultiIndex.from_arrays([[now_norm]*len(df), [None]*len(df)])
-                
+            lookup_keys = pd.MultiIndex.from_arrays([df_tmp.index.normalize(), df_tmp.index.time])
             df['Prev_Day_Vol'] = stacked.reindex(lookup_keys).values
             df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
+        else:
+            df['Prev_Day_Vol'] = 0
         
     return df
 

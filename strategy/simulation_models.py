@@ -91,7 +91,7 @@ class SimulatedRealtimeMetrics:
         return max(0.3, min(3.0, base_ratio + noise))
 
     @classmethod
-    def simulate_bid_ask_ratio_vectorized(cls, price_changes, vol_ratios, vol_powers=None, add_noise=True):
+    def simulate_bid_ask_ratio_vectorized(cls, price_changes, vol_ratios, vol_powers=None, add_noise=False):
         """[v35.8] Vectorized version of simulate_bid_ask_ratio for high-performance backtesting"""
         if not cls._initialized: cls.load_params()
         p = cls.params
@@ -131,7 +131,7 @@ class SimulatedRealtimeMetrics:
         return max(30.0, min(500.0, base_vp + noise))
 
     @classmethod
-    def simulate_vol_power_vectorized(cls, price_changes, vol_ratios, add_noise=True):
+    def simulate_vol_power_vectorized(cls, price_changes, vol_ratios, add_noise=False):
         """[v35.8] Vectorized version of simulate_vol_power for high-performance backtesting"""
         if not cls._initialized: cls.load_params()
         p = cls.params
