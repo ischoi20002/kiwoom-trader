@@ -83,6 +83,8 @@ DEFAULT_SETTINGS = {
     "vol_ratio": 1.5,
     "vol_lookback": 10.0,
     "ma_convergence": 0.05,
+    "use_sel_track_a": True,  # [v30.9] 안정형 선정 트랙 (수렴 중심)
+    "use_sel_track_b": True,  # [v30.9] 공격형 선정 트랙 (추세 중심)
     "use_gc": True,
     "gc_window": 75,
     "use_rsi_signal": True,

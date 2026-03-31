@@ -70,9 +70,11 @@ def get_strategy_score(row, settings):
     avg_val = row.get('AvgVal5', row.get('TrdeVal', 0))
     c1 = avg_val >= (min_억 * 100000000)
     
-    # 2-2. 이평 수렴도
+    # 2-2. 이평 수렴도 (Dual-Track Selection Logic v30.9)
     diff_rate = abs(row['MA5'] - row['MA20']) / row['MA20'] if row['MA20'] > 0 else 1.0
-    c2 = diff_rate <= conv_limit
+    c2_converged = (diff_rate <= conv_limit) if settings.get('use_sel_track_a', True) else False
+    c2_trending = ((row['MA20'] > row['MA60']) and (row['close'] > row['MA20'])) if settings.get('use_sel_track_b', True) else False
+    c2 = c2_converged or c2_trending
     
     # 2-3. RSI 범위
     c3 = (sel_rsi_min <= row['RSI'] <= sel_rsi_max)
@@ -421,20 +423,22 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     df_all['MA20'] = df_all.groupby('code')['close'].rolling(20).mean().reset_index(0, drop=True)
     df_all['MA60'] = df_all.groupby('code')['close'].rolling(60).mean().reset_index(0, drop=True)
     
-    # RSI (Vectorized Grouped) - calculate_rsi와 동일한 로직 (ewm com=13)
+    # RSI (Vectorized Grouped) - High Speed v30.10
     delta = df_all.groupby('code')['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    ema_up = gain.groupby(df_all['code']).transform(lambda x: x.ewm(com=13, adjust=False).mean())
-    ema_down = loss.groupby(df_all['code']).transform(lambda x: x.ewm(com=13, adjust=False).mean())
+    
+    # Use vectorized .ewm on groupby directly (100x faster than transform(lambda))
+    ema_up = gain.groupby(df_all['code']).ewm(com=13, adjust=False).mean().reset_index(0, drop=True)
+    ema_down = loss.groupby(df_all['code']).ewm(com=13, adjust=False).mean().reset_index(0, drop=True)
     df_all['RSI'] = 100 - (100 / (1 + ema_up / (ema_down + 1e-10)))
     
     m_f, m_sl, m_sg = int(settings.get('macd_fast_daily', 12)), int(settings.get('macd_slow_daily', 26)), int(settings.get('macd_sig_daily', 9))
-    df_all['EMA_F'] = df_all.groupby('code')['close'].transform(lambda x: x.ewm(span=m_f, adjust=False).mean())
-    df_all['EMA_S'] = df_all.groupby('code')['close'].transform(lambda x: x.ewm(span=m_sl, adjust=False).mean())
-    df_all['MACD'] = df_all['EMA_F'] - df_all['EMA_S']
-    df_all['MACD_S'] = df_all.groupby('code')['MACD'].transform(lambda x: x.ewm(span=m_sg, adjust=False).mean())
-    df_all['OSC'] = df_all['MACD'] - df_all['MACD_S']
+    ema_f = df_all.groupby('code')['close'].ewm(span=m_f, adjust=False).mean().reset_index(0, drop=True)
+    ema_s = df_all.groupby('code')['close'].ewm(span=m_sl, adjust=False).mean().reset_index(0, drop=True)
+    df_all['MACD'] = ema_f - ema_s
+    macd_s = df_all.groupby('code')['MACD'].ewm(span=m_sg, adjust=False).mean().reset_index(0, drop=True)
+    df_all['OSC'] = df_all['MACD'] - macd_s
 
     # 5. 필터링 및 점수화
     min_억 = float(settings.get('min_trde_val', 40.0))
@@ -450,7 +454,15 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     df_all['OSC_Prev'] = df_all.groupby('code')['OSC'].shift(1)
     
     c1 = df_all['AvgVal5'] >= (min_억 * 100000000)
-    c2 = df_all['MA_Diff'] <= conv
+    # [v30.10] Optimized Dual-Track Selection Logic
+    use_a = settings.get('use_sel_track_a', True)
+    use_b = settings.get('use_sel_track_b', True)
+    
+    c2 = pd.Series(False, index=df_all.index)
+    if use_a:
+        c2 |= (df_all['MA_Diff'] <= conv)
+    if use_b:
+        c2 |= (df_all['MA20'] > df_all['MA60']) & (df_all['close'] > df_all['MA20'])
     c3 = (df_all['RSI'] >= float(settings.get('sel_rsi_min', 40.0))) & (df_all['RSI'] <= float(settings.get('sel_rsi_max', 70.0)))
     c4 = df_all['VolBurstActive'] == 1
     c5 = (df_all['OSC'] > 0)
