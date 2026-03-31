@@ -100,7 +100,7 @@ class DynamicBacktester:
         
         # 1. 기초 데이터 (지수 및 VIX) 로드
         if callback: callback("시장지수 및 VIX 데이터 로드 중...", 2)
-        market_df = self.db.get_daily_bars('KS11', start_date, end_date)
+        market_df = self.db.get_daily_bars('001', start_date, end_date)
         vix_df = self.db.get_daily_bars('^VIX', start_date, end_date)
         if market_df is None or market_df.empty:
             print("[Error] [Dynamic] 시장 데이터(KS11)가 없어 백테스트를 진행할 수 없습니다.")
@@ -128,7 +128,11 @@ class DynamicBacktester:
         if callback: callback(msg, 5)
 
         # [v17.7] 성능 핵심 최적화 (Phase 2): 전 기간 15분봉 지표 사전 계산 (Batch)
-        self.cached_15m_data = self._prepare_15m_cached_data(universe_schedule, start_date, end_date, callback)
+        if not universe_schedule:
+            if callback: callback(f"  [Warning] 선택된 종목이 없습니다. 사전 계산(Phase 2)을 건너뜁니다.", 0)
+            self.cached_15m_data = {}
+        else:
+            self.cached_15m_data = self._prepare_15m_cached_data(universe_schedule, start_date, end_date, callback)
         
         # [v23.0] 고정밀 모사용 1분봉 데이터는 이제 '지연 로딩(Lazy Loading)' 방식으로 처리 (성능 최적화)
         self.cached_1m_data = {} # (code, date_str) -> DataFrame
@@ -194,15 +198,17 @@ class DynamicBacktester:
             for code in monitoring_list:
                 if code not in self.cached_15m_data: continue
                 
-                base_df = self.cached_15m_data[code]
-                day_base = base_df.loc[current_day:current_day + " 23:59:59"].copy()
-                if day_base.empty: continue
+                day_full = base_df.loc[current_day:current_day + " 23:59:59"].copy()
+                if day_full.empty: continue
                 
-                # 당일 시그널 계산 (m_trend 반영)
-                sigs = TradingStrategy.get_buy_signals_detailed(day_base, self.settings, m_trend)
-                # 시그널 정보를 당일 데이터와 결합
-                day_full = day_base.join(sigs.drop(columns='Signal', errors='ignore'))
-                day_full['Signal'] = sigs['Signal']
+                # [v16.92] Optimization: Signal calculation was moved to _prepare_15m_cached_data (PRE-CALC)
+                # The 'm_trend' filter is still applied here if needed, but the base signals are ready.
+                if self.settings.get('use_market_filter', True) and m_trend == 'DOWN':
+                    day_full['Signal'] = False
+                elif self.settings.get('use_market_filter', True) and m_trend == 'NEUTRAL':
+                    # Type B is blocked in NEUTRAL
+                    is_type_b = (day_full['Sig_Type'] == 'TYPE_B')
+                    day_full.loc[is_type_b, 'Signal'] = False
                 
                 day_data[code] = day_full
                 day_signals[code] = day_full
@@ -577,7 +583,7 @@ class DynamicBacktester:
                 print(f"[Error] Failed to save portfolio curve: {e}")
 
             generate_trade_report(trades_df, interval, trd_path, len(exit_trades), win_rate, avg_ret, self.settings, 
-                                  market_df=self.db.get_daily_bars('KS11', self.start_date, self.end_date),
+                                  market_df=self.db.get_daily_bars('001', self.start_date, self.end_date),
                                   vix_df=self.db.get_daily_bars('^VIX', self.start_date, self.end_date),
                                   start_date=self.start_date, end_date=self.end_date, daily_equity=self.daily_equity,
                                   high_precision=self.high_precision)
@@ -622,13 +628,15 @@ class DynamicBacktester:
                 tasks = group['Total_ask'].values
                 tbids = group['Total_bid'].values
                 
-                for i in range(len(group)):
-                    if pd.isna(vps[i]):
-                        vps[i] = SimulatedRealtimeMetrics.simulate_vol_power(p_changes[i], vol_ratios[i])
-                    if pd.isna(tasks[i]) or pd.isna(tbids[i]):
-                        r = SimulatedRealtimeMetrics.simulate_bid_ask_ratio(p_changes[i], vol_ratios[i], vps[i])
-                        tasks[i] = 100000
-                        tbids[i] = int(100000 * r)
+                nan_vp = np.isnan(vps)
+                if np.any(nan_vp):
+                    vps[nan_vp] = SimulatedRealtimeMetrics.simulate_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
+                
+                nan_ba = (np.isnan(tasks)) | (np.any(np.isnan(tbids)))
+                if np.any(nan_ba):
+                    r_vector = SimulatedRealtimeMetrics.simulate_bid_ask_ratio_vectorized(p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba])
+                    tasks[nan_ba] = 100000
+                    tbids[nan_ba] = (100000 * r_vector).astype(int)
                 
                 group = group.copy() # In-place modification warning prevention
                 group['Vol_power'] = vps
@@ -637,7 +645,24 @@ class DynamicBacktester:
                 group['bid_ask_ratio'] = group['Total_bid'] / (group['Total_ask'] + 1e-10)
                 group['vol_power'] = vps # [v31.5] Maintain lowercase for backward compatibility if needed
 
+            # [v16.92] Deep Optimization: Pre-calculate PULSE logic once per stock for the entire period
+            # This avoids O(N*M) redundant .groupby().cumsum() calls in the daily loop
+            is_ma_aligned = (group['MA5'] > group['MA20'])
+            ma_group_id = (~is_ma_aligned).cumsum()
+            group['MA_Maint_Count'] = is_ma_aligned.groupby(ma_group_id).cumsum()
+            
+            is_rsi_above_50 = (group['RSI'] >= 50.0)
+            rsi_group_id = (group['RSI'] < 50.0).cumsum()
+            group['RSI_Pulse_Count'] = is_rsi_above_50.groupby(rsi_group_id).cumsum()
+            
             df_ind = TradingStrategy.calculate_indicators(group, self.settings)
+            
+            # [v16.92] Pre-calculate signals for the ENTIRE time series at once (Vectorized)
+            # This makes the daily loop in run() a simple O(1) lookup
+            full_sigs = TradingStrategy.get_buy_signals_detailed(df_ind, self.settings, market_trend='UP') # Trend-independent pre-check
+            df_ind = df_ind.join(full_sigs.drop(columns='Signal', errors='ignore'))
+            df_ind['Signal'] = full_sigs['Signal']
+            
             df_ind['Ready'] = (df_ind.reset_index().index >= 19)
             cached[code] = df_ind
         return cached
@@ -676,12 +701,11 @@ class DynamicBacktester:
                     vol_mas = df['Volume'].rolling(20).mean().bfill().values
                     vol_ratios = (df['Volume'] / (vol_mas + 1e-10)).values
                     vps = df['Vol_power'].values
-                    ratios = np.full(len(df), np.nan)
+                    nan_vp = np.isnan(vps)
+                    if np.any(nan_vp):
+                        vps[nan_vp] = SimulatedRealtimeMetrics.simulate_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
                     
-                    for i in range(len(df)):
-                        if pd.isna(vps[i]):
-                            vps[i] = SimulatedRealtimeMetrics.simulate_vol_power(p_changes[i], vol_ratios[i])
-                        ratios[i] = SimulatedRealtimeMetrics.simulate_bid_ask_ratio(p_changes[i], vol_ratios[i], vps[i])
+                    ratios = SimulatedRealtimeMetrics.simulate_bid_ask_ratio_vectorized(p_changes, vol_ratios, vps)
                     
                     df = df.copy()
                     df['Vol_power'] = vps

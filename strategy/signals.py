@@ -38,17 +38,20 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     ma60_high = settings.get('ma60_max', 112)
     cond_ma60 = (ma60_ratio >= ma60_low) & (ma60_ratio <= ma60_high)
     
-    # [v4.5 Sync] ma_gap_limit -> ma_convergence
     ma_conv_limit = settings.get('ma_convergence', 5.0) 
     ma_gap = (df['MA5'] / df['MA20'] - 1) * 100
     
-    gc_bars = max(1, int(settings.get('gc_window', 90) / 15))
-    is_ma_aligned = (df['MA5'] > df['MA20'])
-    # [v3.5] MA Pulse: MA5 < MA20 이탈 시마다 그룹을 나누어 연속 정배열 유지 기간 계산
-    ma_group_id = (~is_ma_aligned).cumsum()
-    ma_count_maint = is_ma_aligned.groupby(ma_group_id).cumsum()
+    # [v16.92] Optimization: Check if maintenance/pulse columns were pre-calculated
+    # This avoids redundant .groupby().cumsum() calls in high-frequency loops
+    if 'MA_Maint_Count' in df.columns:
+        ma_count_maint = df['MA_Maint_Count']
+        is_ma_aligned = (df['MA5'] > df['MA20'])
+    else:
+        is_ma_aligned = (df['MA5'] > df['MA20'])
+        ma_group_id = (~is_ma_aligned).cumsum()
+        ma_count_maint = is_ma_aligned.groupby(ma_group_id).cumsum()
     
-    # 조건: 현재 정배열 상태이면서, 골든크로스 직후 설정된 바(N) 이내일 것
+    gc_bars = max(1, int(settings.get('gc_window', 90) / 15))
     cond_ma_gc = (is_ma_aligned) & (ma_count_maint >= 1) & (ma_count_maint <= gc_bars) & (ma_gap <= ma_conv_limit)
     
     # 4. 거래량 조건 (Prev Day Same Time 대비)
@@ -77,9 +80,14 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if settings.get('use_rsi_signal', True):
         r_window_bars = max(1, int(settings.get('rsi_window', 45) / 15))
         is_above_50 = (df['RSI'] >= 50.0)
-        # 50선 하향 이탈 시마다 그룹을 나누어 연속 돌파 유지 기간 계산
-        group_id = (df['RSI'] < 50.0).cumsum()
-        count_maint = is_above_50.groupby(group_id).cumsum()
+        
+        # [v16.92] Optimization: Check for pre-calculated Pulse Count
+        if 'RSI_Pulse_Count' in df.columns:
+            count_maint = df['RSI_Pulse_Count']
+        else:
+            # 50선 하향 이탈 시마다 그룹을 나누어 연속 돌파 유지 기간 계산
+            group_id = (df['RSI'] < 50.0).cumsum()
+            count_maint = is_above_50.groupby(group_id).cumsum()
         
         # 조건: 현재 50 이상 유지 중이면서, 돌파(카운트 시작) 후 설정된 바(N) 이내일 것
         cond_rsi_50_pulse = (is_above_50) & (count_maint >= 1) & (count_maint <= r_window_bars)

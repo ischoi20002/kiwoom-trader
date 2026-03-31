@@ -82,6 +82,9 @@ class SettingsTab:
             
             state_str = "지정" if not current else "해제"
             self.status_label.config(text=f"[{key}] 최적화 대상 {state_str} 완료")
+            
+            # [v16.70] 자동 저장 수행 (config_handler 직접 호출하여 필터링 우회 방지)
+            self.app.config_handler.save_settings(self.app.settings)
 
         # 마우스 이벤트 바인딩
         opt_icon.bind("<Button-1>", on_toggle)
@@ -267,7 +270,7 @@ class SettingsTab:
         add_param_row(entry_f, '  ㄴ Fast Period', 'macd_fast_entry', '', '기본값 12')
         add_param_row(entry_f, '  ㄴ Slow Period', 'macd_slow_entry', '', '기본값 26')
         add_param_row(entry_f, '  ㄴ Signal Period', 'macd_sig_entry', '', '기본값 9')
-        add_param_row(entry_f, 'RSI 시그널 필터', 'rsi_sig_period', '일', 'S1/S2 공통 지표 주기', toggle_key='use_rsi_sig_filter')
+        add_param_row(entry_f, 'RSI 시그널 필터', 'rsi_sig_period', '봉', 'S1/S2 공통 지표 주기', toggle_key='use_rsi_sig_filter')
 
         strat_f = ttk.LabelFrame(st_main_frame, text=' 🚀 [4] 단계별 매매 상세 전략 (Mastery Strategies) ', padding='15')
         strat_f.pack(fill=tk.X, pady=10)
@@ -275,8 +278,8 @@ class SettingsTab:
         add_param_row(strat_f, 'A 전용 사용', None, '', '중립/순풍 장세 사용 가능', toggle_key='use_type_a')
         add_param_row(strat_f, 'A RSI 상한선', 'buy_rsi_max_a', '', '눌림 깊이 확인용 (기본 65)', widget_list=self.type_a_widgets)
         add_param_row(strat_f, 'A Smart Buy', None, '', '진입 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_a', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'A 이평 골든크로스', 'gc_window', '일', 'N일 내 GC 발생 여부', toggle_key='use_gc', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'A RSI 상향돌파', None, '', 'RSI 50 돌파 모멘텀', toggle_key='use_rsi_signal', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'A 이평 골든크로스', 'gc_window', '분', 'N분 내 GC 발생 여부', toggle_key='use_gc', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'A RSI 상향돌파', 'rsi_window', '분', 'N분 내 RSI 50 돌파 여부', toggle_key='use_rsi_signal', widget_list=self.type_a_widgets)
         add_param_row(strat_f, 'A MA60 안전구역', None, '', '60일선 대비 이격 제한', toggle_key='use_ma60_safe', widget_list=self.type_a_widgets)
         add_param_row(strat_f, '  ㄴ MA60 하한', 'ma60_min', '%', '기본 100% 이상', widget_list=self.type_a_widgets)
         add_param_row(strat_f, '  ㄴ MA60 상한', 'ma60_max', '%', '기본 110% 이하', widget_list=self.type_a_widgets)
@@ -368,7 +371,7 @@ class SettingsTab:
                 if not ent: continue
                 v = ent.get().strip().replace(',', '')
                 if not v: continue
-                if k in ['backtest_initial_capital', 'max_slots', 'atr_period', 'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily', 'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry']:
+                if k in ['backtest_initial_capital', 'max_slots', 'atr_period', 'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily', 'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'gc_window', 'rsi_window']:
                     self.app.settings[k] = int(float(v))
                 else: 
                     self.app.settings[k] = float(v)

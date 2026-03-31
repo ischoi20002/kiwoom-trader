@@ -177,6 +177,7 @@ class KiwoomApp:
         self.pending_tree_updates = {} # [v4.5.3] UI 지연 업데이트용 큐
         
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        
         self.bars_data = self.config_handler.load_bars_cache() 
         self.volume_profiles = {} # [v4.0] 수급 분석 프로파일 (일일)
         self.min_volume_profiles = {} # [v4.0] 수급 분석 프로파일 (분봉)
@@ -215,7 +216,7 @@ class KiwoomApp:
             'min_trde_val', 'vol_ratio', 'vol_lookback', 
             'ma_convergence', 'sel_rsi_max', 'sel_rsi_min',
             # 단계별 매수 (A)
-            'buy_rsi_max_a', 'gc_window', 'vol_surge', 'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
+            'buy_rsi_max_a', 'gc_window', 'rsi_window', 'vol_surge', 'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
             # 단계별 매수 (B)
             'buy_rsi_max_b', 'vol_surge_b', 'atr_multiplier_sl_b', 'atr_multiplier_trail_b',
             # 2차 추매 (S2)

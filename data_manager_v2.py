@@ -204,6 +204,7 @@ class DataManagerV2:
             
             conn.commit()
 
+
     def update_historical_data(self, code, logger=None):
         """[Legacy Support] 1분/15분봉 및 일봉(bars_1d) 데이터를 서버에서 가져와 업데이트"""
         self.update_daily_data(code)
@@ -754,53 +755,70 @@ class DataManagerV2:
         with self._get_connection() as conn: conn.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('market_trend', ?)", (label,)); conn.commit()
 
     def get_kospi_list(self, count=200, force=False):
-        """[v17.0.5] KODEX 200(지수 1028) 또는 상위 종목 리스트 반환 (가로 채기 방지)"""
+        """
+        [v17.2] KODEX 200 유니버스 확보 (CSV 우선 -> Kiwoom API -> pykrx)
+        """
         import FinanceDataReader as fdr
         from pykrx import stock
-        # [v17.0.5] 파일명 kodex_200.csv 로 전격 교체 (KOSPI 200 명칭 금지 대응)
+        import pandas as pd
+        import os
+        import time
+
         cache_file = "kodex_200.csv" if count <= 200 else f"kospi_top_{count}.csv"
+        
         try:
-            # 1. 30일 캐시 체크 (네트워크 부하 경감)
-            if not force and os.path.exists(cache_file) and (time.time() - os.path.getmtime(cache_file)) / (24 * 3600) < 30:
-                return pd.read_csv(cache_file, dtype={'Code': str}, encoding='utf-8-sig')
-            
-            # 2. 데이터 확보 (KODEX 200 전용 - 지수 1028 기반)
+            # 1. kodex200.csv 파일 확인 (KODEX 200 전용 최우선 소스)
             if count <= 200:
-                now_str = datetime.now().strftime('%Y%m%d')
-                tickers = None
-                # 휴장일 대응 (최대 10일 전까지 검색)
-                for i in range(0, 10):
-                    dt_str = (datetime.today() - timedelta(days=i)).strftime('%Y%m%d')
-                    tickers = stock.get_index_portfolio_deposit_file('1028', dt_str)
-                    
-                    # [v17.0.6 Fix] 데이터프레임/리스트 모호성 완벽 해결 (isinstance 사용)
-                    is_valid = False
-                    if tickers is not None:
-                        if isinstance(tickers, pd.DataFrame):
-                            is_valid = not tickers.empty
-                        elif isinstance(tickers, list):
-                            is_valid = len(tickers) > 0
-                    
-                    if is_valid: break # 정상 범위
-                
-                if tickers is not None:
-                    # 종목명 매핑
-                    names = [stock.get_market_ticker_name(t) for t in tickers]
-                    df = pd.DataFrame({'Code': tickers, 'Name': names})
-                else:
-                    raise Exception("Failed to fetch Index 1028 constituents")
-            else:
-                # 500개 이상은 기존처럼 FDR 시총순 추출 (FDR Fallback)
+                csv_path = os.path.join(os.getcwd(), 'kodex200.csv')
+                if os.path.exists(csv_path):
+                    try:
+                        # 인코딩 문제 대응 (utf-8-sig or cp949)
+                        try:
+                            df_csv = pd.read_csv(csv_path, dtype={'종목코드': str}, encoding='utf-8-sig')
+                        except:
+                            df_csv = pd.read_csv(csv_path, dtype={'종목코드': str}, encoding='cp949')
+                        
+                        if '종목코드' in df_csv.columns:
+                            # 컬럼명 통일 (Code, Name)
+                            df_res = df_csv[['종목코드', '종목명']].copy()
+                            df_res.columns = ['Code', 'Name']
+                            if len(df_res) >= 190:
+                                print(f"DEBUG: Universe loaded from kodex200.csv ({len(df_res)} stocks)")
+                                # 내부 캐시 파일로도 복사하여 일관성 유지
+                                df_res.to_csv(cache_file, index=False, encoding='utf-8-sig')
+                                return df_res
+                    except Exception as e:
+                        print(f"DEBUG ERROR [DataManagerV2]: Failed to read kodex200.csv: {e}")
+
+            # 2. 데이터 확보 (KODEX 200 전용 Fallback)
+            df = None
+            if count <= 200:
+                # [v17.3 Fallback] KODEX 200 ETF(069500)의 PDF 구성 종목 직접 조회
+                print("  [Info] CSV 파일이 없어 pykrx를 통한 KODEX 200 ETF(069500) 구성을 요청합니다.")
+                try:
+                    tickers_df = stock.get_etf_portfolio_deposit_file("069500")
+                    if tickers_df is not None and not tickers_df.empty:
+                        tickers = tickers_df.index.tolist()
+                        tickers = [t for t in tickers if len(t) == 6 and t.isdigit()]
+                        names = [stock.get_market_ticker_name(t) for t in tickers]
+                        df = pd.DataFrame({'Code': tickers, 'Name': names})
+                except: pass
+            
+            if df is None or df.empty:
+                # 최종 Fallback: FDR 시총순 추출 (KOSPI 상위)
+                print("  [Info] 최종 Fallback으로 FDR 시총 상위 종목을 추출합니다.")
                 df = fdr.StockListing('KOSPI')
                 df = df[df['Code'].str.endswith('0')].sort_values(by='Marcap', ascending=False).head(count)
+                df = df[['Code', 'Name']]
             
             # 3. CSV 저장 (최종 고정 리스트)
-            df.to_csv(cache_file, index=False, encoding='utf-8-sig')
+            if df is not None and not df.empty:
+                df.to_csv(cache_file, index=False, encoding='utf-8-sig')
             return df
         except Exception as e:
-            print(f"  [Error] 지수 리스트({cache_file}) 갱신 실패: {e}")
+            print(f"  [Error] 종목 리스트 확보 중 오류: {e}")
             if os.path.exists(cache_file): return pd.read_csv(cache_file, dtype={'Code': str})
-            return None
+            return pd.DataFrame()
 
     def get_remote_command(self):
         """[v4.6.9] 원격 명령 테이블에서 최신 명령어를 하나 가져오고 삭제합니다 (Pop-and-Delete)."""

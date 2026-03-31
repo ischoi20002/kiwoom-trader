@@ -33,7 +33,7 @@ class ConfigHandler:
         try:
             # [v4.5.3 Modularization] core.defaults에서 허용된 키 가져오기
             from core.defaults import get_allowed_keys
-            allowed = get_allowed_keys()
+            allowed = get_allowed_keys(settings)
             
             # 필터링 수행 (DEFAULT_SETTINGS에 없는 좀비 파라미터 제거)
             filtered_settings = {k: v for k, v in settings.items() if k in allowed}

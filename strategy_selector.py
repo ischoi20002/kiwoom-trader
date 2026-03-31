@@ -148,9 +148,11 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
             
         # pykrx 실패 시 로컬 파일(kodex_200.csv) 또는 FDR 활용
         if tickers is None or len(tickers) == 0:
-            if os.path.exists("kodex_200.csv"):
-                logger_callback("  [Info] Local 'kodex_200.csv'에서 유니버스를 로드합니다.")
-                df_csv = pd.read_csv("kodex_200.csv", dtype={'Code': str})
+            if os.path.exists("kodex200.csv"):
+                logger_callback("  [Info] Local 'kodex200.csv'에서 유니버스를 로드합니다.")
+                df_csv = pd.read_csv("kodex200.csv", dtype={'종목코드': str, 'Code': str})
+                if '종목코드' in df_csv.columns:
+                    df_csv.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
                 tickers = df_csv['Code'].tolist()
             else:
                 logger_callback("  [Info] FDR StockListing에서 상위 종목을 추출합니다.")
@@ -179,9 +181,11 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
         
         df_top = pd.DataFrame([{'Code': t, 'Name': name_map.get(t, stock.get_market_ticker_name(t))} for t in tickers])
     else:
-        input_file = "kodex_200.csv"
+        input_file = "kodex200.csv"
         if os.path.exists(input_file):
-            df_top = pd.read_csv(input_file, dtype={'Code': str})
+            df_top = pd.read_csv(input_file, dtype={'종목코드': str, 'Code': str})
+            if '종목코드' in df_top.columns:
+                df_top.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
         else:
             # FDR 기반 자동 생성
             df_kospi = fdr.StockListing('KOSPI')
@@ -357,9 +361,11 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             except: pass
         
         # [v18.0] 최종 Fallback: 루트의 kodex_200.csv 사용 (네트워크 무관)
-        if os.path.exists("kodex_200.csv"):
-            logger_callback("    - [Fallback] 'kodex_200.csv' 로컬 파일 사용")
-            df_f = pd.read_csv("kodex_200.csv", dtype=str)
+        if os.path.exists("kodex200.csv"):
+            logger_callback("    - [Fallback] 'kodex200.csv' 로컬 파일 사용")
+            df_f = pd.read_csv("kodex200.csv", dtype=str)
+            if '종목코드' in df_f.columns:
+                df_f.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
             tickers = df_f['Code'].tolist() if 'Code' in df_f.columns else df_f.iloc[:, 0].tolist()
             universe_cache[m_key] = tickers
             return tickers
@@ -385,6 +391,20 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 last_m = curr_m
                 logger_callback(f"    - {d.strftime('%Y-%m')} 유니버스 체크 완료 (누적 {len(union_tickers)}종목)")
     
+    if not union_tickers:
+        # [v16.94] Robust Fallback: Use local kodex200.csv if monthly files are missing
+        logger_callback("  [Warning] 월별 유니버스 파일이 없어 로컬 리스트 활용을 시도합니다.")
+        for f_name in ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]:
+            if os.path.exists(f_name):
+                try:
+                    df_k = pd.read_csv(f_name, dtype=str)
+                    c_col = 'Code' if 'Code' in df_k.columns else ('종목코드' if '종목코드' in df_k.columns else None)
+                    if c_col:
+                        union_tickers = set(df_k[c_col].apply(lambda x: str(x).zfill(6)).tolist())
+                        logger_callback(f"    - {f_name}에서 {len(union_tickers)}종목 로드 완료")
+                        break
+                except: pass
+
     if not union_tickers:
         logger_callback("  [Error] 유니버스 종목 확보 실패.")
         return {}
@@ -445,12 +465,12 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     conv = float(settings.get('ma_convergence', 3.0)) / 100.0
     vol_lookback = int(settings.get('vol_lookback', 10))
     
-    df_all['AvgVal5'] = df_all.groupby('code')['trde_val'].transform(lambda x: x.rolling(5).mean())
+    df_all['AvgVal5'] = df_all.groupby('code')['trde_val'].rolling(5).mean().reset_index(0, drop=True)
     df_all['MA_Diff'] = (df_all['MA5'] - df_all['MA20']).abs() / df_all['MA20']
     df_all['Pos_Diff'] = (df_all['close'] - df_all['MA20']).abs() / df_all['MA20']
     df_all['VolRatio'] = df_all['volume'] / df_all.groupby('code')['volume'].shift(1)
     df_all['VolBurst'] = (df_all['VolRatio'] >= float(settings.get('vol_ratio', 1.5))) & (df_all['close'] > df_all.groupby('code')['close'].shift(1))
-    df_all['VolBurstActive'] = df_all.groupby('code')['VolBurst'].transform(lambda x: x.rolling(vol_lookback).max())
+    df_all['VolBurstActive'] = df_all.groupby('code')['VolBurst'].rolling(vol_lookback).max().reset_index(0, drop=True)
     df_all['OSC_Prev'] = df_all.groupby('code')['OSC'].shift(1)
     
     c1 = df_all['AvgVal5'] >= (min_억 * 100000000)
@@ -484,7 +504,10 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     max_s = int(settings.get('max_slots', 20))
     df_sim = df_all[df_all['time'] >= start_date].copy()
     
-    for d_str in trading_days:
+    # [v16.93] Fix: Explicitly define trading_days for the loop
+    trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
+    
+    for d_str in trading_days_list:
         # [v18.1] Lean 모드에서는 매일 유니버스를 다시 조회하지 않고 전체(union) 유니버스 사용
         if duration_days < 180:
             universe = all_codes 
@@ -495,5 +518,8 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         if not day_df.empty:
             schedule[d_str] = day_df.sort_values(by='Score', ascending=False).head(max_s)['code'].tolist()
 
-    logger_callback(f"[Batch] 완료. (총 {len(schedule)}일 추출됨)")
+    if not schedule:
+        logger_callback("  [Warning] 조건에 맞는 종목이 한 상단도 추출되지 않았습니다. 필터 설정을 확인하세요.")
+    else:
+        logger_callback(f"[Batch] 완료. (총 {len(schedule)}일 추출됨)")
     return schedule

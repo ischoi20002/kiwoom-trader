@@ -266,7 +266,7 @@ class HarvestService:
         
         # 2. KODEX 200 리스트 확보 (DataManager 활용 지수 1028 기반 자동 갱신)
         df_k200 = self.db.get_kospi_list(200)
-        codes_k200 = df_k200['Code'].str.strip().zfill(6).tolist() if df_k200 is not None else []
+        codes_k200 = df_k200['Code'].astype(str).str.strip().str.zfill(6).tolist() if df_k200 is not None and not df_k200.empty else []
         
         # 3. 합집합 통합 (KODEX 200 + KOSPI 500)
         all_codes = []

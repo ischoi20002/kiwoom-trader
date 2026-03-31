@@ -3,6 +3,8 @@ def normalize_code(code):
     if code is None: return ""
     c = str(code).strip()
     # Stocks are strictly 6-digit. Indices are 3 or 4.
+    if c == 'KS11': return '001'
+    if c == 'KQ11': return '101'
     if len(c) == 5:
         return c.zfill(6)
     return c

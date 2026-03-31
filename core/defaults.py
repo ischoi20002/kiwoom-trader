@@ -43,6 +43,7 @@ DEFAULT_SETTINGS = {
     "use_gc": True,
     "gc_window": 90.0,
     "use_rsi_signal": True,
+    "rsi_window": 45.0,
     "use_ma60_safe": True,
     "ma60_min": 100.0,
     "ma60_max": 110.0,
@@ -130,6 +131,11 @@ ALLOWED_EXTRA_KEYS = {
     'buy_fee_mock', 'sell_fee_mock'
 }
 
-def get_allowed_keys():
+def get_allowed_keys(current_settings=None):
     """설정 저장 시 필터링에 사용할 전체 유효 키 셋 반환"""
-    return set(DEFAULT_SETTINGS.keys()).union(ALLOWED_EXTRA_KEYS)
+    base = set(DEFAULT_SETTINGS.keys()).union(ALLOWED_EXTRA_KEYS)
+    if current_settings:
+        # [v16.62] opt_ 로 시작하는 최적화 상태 키들도 허용 목록에 포함
+        opt_keys = {k for k in current_settings.keys() if k.startswith('opt_')}
+        return base.union(opt_keys)
+    return base

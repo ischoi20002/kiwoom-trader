@@ -190,7 +190,7 @@ class ParameterOptimizer:
             return df_m
 
         try:
-            market_df = load_master_index(market_cache_path, 'KS11', w_start_dt, end_date)
+            market_df = load_master_index(market_cache_path, '001', w_start_dt, end_date)
             if os.path.exists(vix_cache_path):
                 try:
                     vix_df = pd.read_csv(vix_cache_path, index_col=0, parse_dates=True)

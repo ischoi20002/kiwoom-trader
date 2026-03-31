@@ -12,5 +12,8 @@ backtest_data/
 *.csv
 !kospi_200.csv
 !kospi_top_500.csv
+!kodex200.csv
+!kodex_200.csv
+!settings.json
 bars_cache.json
 *.png

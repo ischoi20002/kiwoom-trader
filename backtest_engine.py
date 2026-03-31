@@ -51,12 +51,12 @@ class TradingStrategy:
         if TradingStrategy._name_map is not None:
             return TradingStrategy._name_map
             
-        csv_path = "kodex_200.csv"  # [v30.5 Fixed] kospi_top_500.csv -> kodex_200.csv
+        csv_path = "kodex200.csv"  # [v30.5 Fixed] kospi_top_500.csv -> kodex200.csv
         try:
             if not os.path.exists(csv_path):
-                # 다른 kodex_*.csv 또는 kospi_*.csv 파일이 있는지 확인
+                # 다른 kodex_*.csv/kodex*.csv 또는 kospi_*.csv 파일이 있는지 확인
                 import glob
-                files = glob.glob("kodex_*.csv") + glob.glob("kospi_*.csv")
+                files = glob.glob("kodex*.csv") + glob.glob("kospi_*.csv")
                 if files:
                     csv_path = files[0]
                 else:
@@ -64,8 +64,11 @@ class TradingStrategy:
                     return {}
             
             if os.path.exists(csv_path):
-                # Unnamed: 0,Code,ISU_CD,Name ...
-                df_name = pd.read_csv(csv_path, dtype={'Code': str}, encoding='utf-8')
+                df_name = pd.read_csv(csv_path, dtype={'종목코드': str, 'Code': str}, encoding='utf-8')
+                # 한글 헤더 처리 (v31.0)
+                if '종목코드' in df_name.columns:
+                    df_name.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
+                
                 # 종목코드가 6자리가 되도록 패딩 (예: 660 -> 000660)
                 df_name['Code'] = df_name['Code'].apply(lambda x: str(x).zfill(6))
                 TradingStrategy._name_map = dict(zip(df_name['Code'], df_name['Name']))
@@ -265,10 +268,10 @@ class SimpleBacktester:
                 vol_mas = df['Vol_MA20'].values if 'Vol_MA20' in df.columns else df['Volume'].rolling(20).mean().bfill().values
                 vol_ratios = (df['Volume'] / (vol_mas + 1e-10)).values
                 
-                vps = df['vol_power'].values
-                tasks = df['total_ask'].values
-                tbids = df['total_bid'].values
-                ratios = df['bid_ask_ratio'].values
+                vps = df['vol_power'].values.copy()
+                tasks = df['total_ask'].values.copy()
+                tbids = df['total_bid'].values.copy()
+                ratios = df['bid_ask_ratio'].values.copy()
                 
                 # Vectorized Fill
                 nan_vp = np.isnan(vps)

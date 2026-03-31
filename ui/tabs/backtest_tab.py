@@ -54,6 +54,7 @@ class BacktestTab:
             's2_delay_hours': ('S2_Delay_Hrs', '2차 추매(S2)', '2단계 진입 후 대기시간 (시간)'),
             'atr_multiplier_sl_s2': ('S2_ATR_Stop', '2차 추매(S2)', '2단계 ATR 손절 배수'),
             'atr_multiplier_trail_s2': ('S2_ATR_Trail', '2차 추매(S2)', '2단계 ATR 추격 익절 배수'),
+            'rsi_window': ('RSI_Window', '전술적 수급', 'RSI 신호 유효 시간 (분)'),
             'smart_buy_vp': ('SB_Min_VP', '전술적 수급', 'Smart Buy 최소 체결강도 (%)'),
             'smart_buy_ba_ratio': ('SB_BA_Ratio', '전술적 수급', 'Smart Buy 매도벽 비율 (배)'),
             'smart_exit_vp': ('SX_Min_VP', '전술적 수급', 'Smart Exit 체결강도 하한 (%)'),
@@ -272,7 +273,10 @@ class BacktestTab:
                     
                     if col_name in self.PARAM_INFO:
                         alias, category, desc = self.PARAM_INFO[col_name]
-                        return f"📂 {category}\n✨ {desc}\n(Key: {col_name})"
+                        # [v16.90] 최적화 탐색 범위 정보 추가
+                        space = self._get_dynamic_search_space(self.app.settings)
+                        range_info = f"\n🔍 최적화 범위: {space[col_name]}" if col_name in space else ""
+                        return f"📂 {category}\n✨ {desc}{range_info}\n(Key: {col_name})"
                     return None
                 except: return None
             return None
@@ -300,29 +304,37 @@ class BacktestTab:
             's2_take_profit': range_for(s.get('s2_take_profit', 5.0), 2.0),
             's2_stop_loss': range_for(s.get('s2_stop_loss', 2.0), 0.5),
             's2_vol_ratio': range_for(s.get('s2_vol_ratio', 1.0), 0.2),
+            's2_profit_limit': range_for(s.get('s2_profit_limit', 1.5), 0.5),
+            's2_delay_hours': range_for(s.get('s2_delay_hours', 2.0), 1.0),
             'gc_window': range_for(s.get('gc_window', 90), 10),
-            'rsi_window': range_for(s.get('rsi_window', 45), 5),
-            'atr_period': range_for(s.get('atr_period', 14), 5),
-            'atr_multiplier_sl': range_for(s.get('atr_multiplier_sl', 2.0), 0.5),
-            'atr_multiplier_trail': range_for(s.get('atr_multiplier_trail', 3.0), 1.0),
+            'rsi_window': range_for(s.get('rsi_window', 45), 15),
+            'atr_period': range_for(s.get('atr_period', 14), 4),
+            'atr_multiplier_sl_a': range_for(s.get('atr_multiplier_sl_a', 2.5), 0.5),
+            'atr_multiplier_trail_a': range_for(s.get('atr_multiplier_trail_a', 3.0), 0.5),
+            'atr_multiplier_sl_b': range_for(s.get('atr_multiplier_sl_b', 2.5), 0.5),
+            'atr_multiplier_trail_b': range_for(s.get('atr_multiplier_trail_b', 3.0), 0.5),
+            'atr_multiplier_sl_s2': range_for(s.get('atr_multiplier_sl_s2', 2.5), 0.5),
+            'atr_multiplier_trail_s2': range_for(s.get('atr_multiplier_trail_s2', 3.0), 0.5),
             's1_equity_pct': range_for(s.get('s1_equity_pct', 10.0), 5.0),
             's2_equity_pct': range_for(s.get('s2_equity_pct', 20.0), 10.0),
             'smart_buy_vp': range_for(s.get('smart_buy_vp', 120.0), 10.0),
             'smart_buy_ba_ratio': range_for(s.get('smart_buy_ba_ratio', 1.5), 0.3),
             'smart_exit_vp': range_for(s.get('smart_exit_vp', 100.0), 10.0),
             'smart_exit_ba_ratio': range_for(s.get('smart_exit_ba_ratio', 1.5), 0.3),
-            'smart_exit_price_threshold': range_for(s.get('smart_exit_price_threshold', -2.0), -1.0),
-            'use_smart_buy_a': [s.get('use_smart_buy_a', True)],
-            'use_smart_buy_b': [s.get('use_smart_buy_b', True)],
-            'use_smart_buy_s2': [s.get('use_smart_buy_s2', True)],
-            'use_smart_exit': [s.get('use_smart_exit', True)],
-            'macd_fast_daily': [12], 'macd_slow_daily': [26], 'macd_sig_daily': [9],
-            'macd_fast_entry': [12], 'macd_slow_entry': [26], 'macd_sig_entry': [9],
-            'backtest_initial_capital': [s.get('backtest_initial_capital', 10000000)],
-            'sel_rsi_min': [35.0], 'sel_rsi_max': [70.0]
+            'smart_exit_price_threshold': range_for(s.get('smart_exit_price_threshold', -2.0), 1.0),
+            'gap_down_limit': range_for(s.get('gap_down_limit', -3.0), 1.0),
+            's1_a_flash_exit_pct': range_for(s.get('s1_a_flash_exit_pct', -5.0), 1.0),
+            's1_b_flash_exit_pct': range_for(s.get('s1_b_flash_exit_pct', -5.0), 1.0),
+            's2_flash_exit_pct': range_for(s.get('s2_flash_exit_pct', -5.0), 1.0),
+            'min_trde_val': range_for(s.get('min_trde_val', 10), 5),
+            'vol_ratio': range_for(s.get('vol_ratio', 1.0), 0.5),
+            'vol_lookback': range_for(s.get('vol_lookback', 20), 5),
+            'ma_convergence': range_for(s.get('ma_convergence', 5.0), 1.0),
+            'sel_rsi_min': range_for(s.get('sel_rsi_min', 35.0), 5.0),
+            'sel_rsi_max': range_for(s.get('sel_rsi_max', 70.0), 5.0)
         }
 
-    def _refresh_columns_from_settings(self):
+    def _refresh_columns_from_settings(self, re_render=True):
         """[v26.1] 설정 탭의 파라미터 선택 상태를 즉시 트리뷰 컬럼에 반영 (선택된 항목만!)"""
         try:
             if not hasattr(self, 'tree_backtest'): return
@@ -369,32 +381,13 @@ class BacktestTab:
                 can_w = self.canvas_bt.winfo_width()
                 self.canvas_bt.itemconfig(self.canvas_window, width=max(can_w, req_w))
                 self.canvas_bt.configure(scrollregion=self.canvas_bt.bbox("all"))
+
+            # 7. 데이터 재랜더링 (탭 전환 시 기존 결과 유지)
+            if re_render and self.last_opt_df is not None:
+                self._render_optimization_results(self.last_opt_df, refresh_cols=False)
+
         except Exception as _err:
             print(f"[ERROR] Column Refresh Fail: {_err}")
-            pass
-            
-            # 4. 헤더 및 너비 설정
-            for col in new_cols:
-                if col in base_cols:
-                    header_text = {"rank": "순위", "avg_ret": "수익률(%)", "avg_mdd": "MDD", "win_rate": "승률(%)", "trades": "매매수"}[col]
-                    width = 75
-                else:
-                    alias, category, desc = self.PARAM_INFO[col]
-                    header_text = alias
-                    width = 110
-                
-                self.tree_backtest.heading(col, text=header_text)
-                self.tree_backtest.column(col, width=width, anchor=tk.CENTER, stretch=False)
-
-            # 5. 스크롤 영역 갱신 (테이블 너비 확장)
-            if hasattr(self, 'canvas_bt'):
-                self.canvas_bt.itemconfig(self.canvas_window, width=5000)
-                self.parent.update_idletasks()
-                req_w = self.scroll_frame_bt.winfo_reqwidth()
-                can_w = self.canvas_bt.winfo_width()
-                self.canvas_bt.itemconfig(self.canvas_window, width=max(can_w, req_w))
-                self.canvas_bt.configure(scrollregion=self.canvas_bt.bbox("all"))
-        except:
             pass
 
     def _on_btn_start_optimize(self):
@@ -438,18 +431,22 @@ class BacktestTab:
             self._show_copyable_error("입력 오류", f"입력 형식을 확인해 주세요:\n{str(_err)}\n\n{traceback.format_exc()}")
             self.btn_start_optimize.config(state=tk.NORMAL)
 
-    def _render_optimization_results(self, df):
+    def _render_optimization_results(self, df, refresh_cols=True):
         """[v26.1] 최적화 결과 랭킹 렌더링 (결과 데이터 삽입)"""
         if df is None or df.empty: return
         
-        # 1. 화면의 트리뷰 데이터 초기화 (구조는 유지)
-        for item in self.tree_backtest.get_children():
-            self.tree_backtest.delete(item)
-            
+        # 0. 데이터 캐싱
         self.last_opt_df = df.head(20)
-        
-        # 2. 최신 설정 기반으로 컬럼 구조 강제 갱신 (선택된 것만 표시)
-        self._refresh_columns_from_settings()
+
+        # 1. 화면의 트리뷰 데이터 초기화 (구조는 유지)
+        if refresh_cols:
+            # 컬럼 구조 강제 갱신과 초기화 동시 수행
+            self._refresh_columns_from_settings(re_render=False)
+        else:
+            for item in self.tree_backtest.get_children():
+                self.tree_backtest.delete(item)
+
+        # (삭제 항목: 기존의 중복된 _refresh_columns_from_settings 호출 제거)
         
         # 3. 현재 트리뷰에 설정된 컬럼 순서대로 데이터 추출 및 삽입
         current_cols = self.tree_backtest["columns"]
@@ -484,7 +481,12 @@ class BacktestTab:
     def _run_optimize_thread(self, start, end, space, high_precision=False):
         try:
             import parameter_optimizer as opt_mod
-            optimizer = opt_mod.ParameterOptimizer(['005930', '000660', '005380', '055550', '051910', '012450', '035420', '015760', '028260', '009150'], space, self.app.settings)
+            # [v31.0] Derive optimization targets from KODEX 200 universe
+            from backtest_engine import TradingStrategy
+            name_map = TradingStrategy.get_stock_name_map()
+            opt_codes = list(name_map.keys())[:10] if name_map else ['005930', '000660', '005380', '055550', '051910', '012450', '035420', '015760', '028260', '009150']
+            
+            optimizer = opt_mod.ParameterOptimizer(opt_codes, space, self.app.settings)
             
             def update_progress(msg, value):
                 self.gui_queue.put(lambda: self.lbl_bt_status.config(text=msg))
