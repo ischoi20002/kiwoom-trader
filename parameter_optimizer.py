@@ -161,7 +161,11 @@ class ParameterOptimizer:
         market_df, vix_df = None, None
         w_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
         
+        # [Fix] 내부 DB 코드(001)와 FDR 티커(KS11) 매핑
+        FDR_TICKER_MAP = {'001': 'KS11', '^VIX': 'VIX'}
+        
         def load_master_index(path, symbol, start, end):
+            symbol = FDR_TICKER_MAP.get(symbol, symbol)
             df_m = None
             if os.path.exists(path):
                 try:
@@ -190,8 +194,28 @@ class ParameterOptimizer:
             return df_m
 
         try:
-            market_df = load_master_index(market_cache_path, '001', w_start_dt, end_date)
-            if os.path.exists(vix_cache_path):
+            # [Fix v38.1] 로컬 DB 우선 조회 (외부 API '001' 404 오류 방지)
+            try:
+                from data_manager_v2 import DataManagerV2 as _DM
+                _dm = _DM("trading_data.db")
+                _mdf = _dm.get_daily_bars('001', w_start_dt, end_date)
+                _vdf = _dm.get_daily_bars('^VIX', w_start_dt, end_date)
+                if _mdf is not None and not _mdf.empty:
+                    _mdf['time'] = pd.to_datetime(_mdf['time'])
+                    _mdf.set_index('time', inplace=True)
+                    market_df = _mdf
+                    print(f"  [DB] 시장지수(001) 로컬 DB 로드 완료 ({len(market_df)}일)")
+                if _vdf is not None and not _vdf.empty:
+                    _vdf['time'] = pd.to_datetime(_vdf['time'])
+                    _vdf.set_index('time', inplace=True)
+                    vix_df = _vdf
+                    print(f"  [DB] VIX 로컬 DB 로드 완료 ({len(vix_df)}일)")
+            except Exception as _db_e:
+                print(f"  [DB] 로컬 DB 조회 실패, API 폴백: {_db_e}")
+
+            if market_df is None:
+                market_df = load_master_index(market_cache_path, '001', w_start_dt, end_date)
+            if os.path.exists(vix_cache_path) and vix_df is None:
                 try:
                     vix_df = pd.read_csv(vix_cache_path, index_col=0, parse_dates=True)
                     v_start, v_end = vix_df.index.min(), vix_df.index.max()
