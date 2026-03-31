@@ -432,6 +432,9 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         logger_callback("  [Error] DB에서 데이터를 찾을 수 없습니다. (데이터 동기화 필요)")
         return {}
 
+    # [Bugfix] Convert time to datetime to use .dt accessor later
+    df_all['time'] = pd.to_datetime(df_all['time'])
+
     # 4. 벡터 지표 계산 (Vectorized Performance)
     logger_callback(f"  [Batch] {len(df_all)}개 데이터 포인트에 대해 고속 벡터 연산 중...")
     df_all['close'] = df_all['close'].astype(float)
@@ -502,7 +505,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     logger_callback("  [Batch] 날짜별 상위 종목 추출 중...")
     schedule = {}
     max_s = int(settings.get('max_slots', 20))
-    df_sim = df_all[df_all['time'] >= start_date].copy()
+    df_sim = df_all[df_all['time'] >= pd.to_datetime(start_date)].copy()
     
     # [v16.93] Fix: Explicitly define trading_days for the loop
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
@@ -514,7 +517,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         else:
             universe = get_monthly_universe(pd.to_datetime(d_str))
             
-        day_df = df_sim[(df_sim['time'] == d_str) & (df_sim['code'].isin(universe)) & (df_sim['Valid'])]
+        day_df = df_sim[(df_sim['time'] == pd.to_datetime(d_str)) & (df_sim['code'].isin(universe)) & (df_sim['Valid'])]
         if not day_df.empty:
             schedule[d_str] = day_df.sort_values(by='Score', ascending=False).head(max_s)['code'].tolist()
 

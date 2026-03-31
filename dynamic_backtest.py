@@ -109,8 +109,8 @@ class DynamicBacktester:
         market_df['time'] = pd.to_datetime(market_df['time'])
         market_df.set_index('time', inplace=True)
         
-        # [v4.5] MSI (Market Strength Index) 산출: 20일 모멘텀 기반
-        market_df['MSI'] = market_df['Close'].pct_change(20).fillna(0)
+        # [v4.5] 지수 지표 계산 (MA60, MSI 등 포함)
+        market_df = TradingStrategy.calculate_indicators(market_df, self.settings)
         
         trading_days = market_df.index.strftime('%Y-%m-%d').tolist()
         
@@ -179,6 +179,9 @@ class DynamicBacktester:
             try:
                 if prev_day_idx >= 0:
                     m_data = market_df.loc[trading_days[prev_day_idx]]
+                    price = m_data['Close']
+                    ma60 = m_data.get('MA60', price)
+                    msi = m_data.get('MSI', 0)
                     
                     # [Rule]
                     # 1. DOWN: Price < MA60 (가장 강력한 블로킹)
@@ -198,6 +201,7 @@ class DynamicBacktester:
             for code in monitoring_list:
                 if code not in self.cached_15m_data: continue
                 
+                base_df = self.cached_15m_data[code]
                 day_full = base_df.loc[current_day:current_day + " 23:59:59"].copy()
                 if day_full.empty: continue
                 
@@ -331,8 +335,24 @@ class DynamicBacktester:
                                 exit_reason = f"Smart Exit|BA:{ba_ratio:.2f}|VP:{v_power:.0f}"
                     
                     if exit_reason:
-                        self._execute_sell(code, curr_price, curr_time, exit_reason, indicator_row=curr_price_row)
-                        today_sells.add(code)
+                        # [v31.8] Gap Grace Period check (9:00 AM ~ N minutes)
+                        is_grace = False
+                        if self.settings.get('use_gap_grace', True):
+                            try:
+                                dt_time = pd.to_datetime(curr_time)
+                                grace_mins = int(self.settings.get('gap_grace_mins', 15))
+                                if dt_time.hour == 9 and dt_time.minute < grace_mins:
+                                    # 익절(Take Profit)을 제외한 모든 손실성 매도는 유예
+                                    if "Take Profit" not in exit_reason:
+                                        is_grace = True
+                            except: pass
+                        
+                        if is_grace:
+                            # Skip sell during grace period
+                            pass
+                        else:
+                            self._execute_sell(code, curr_price, curr_time, exit_reason, indicator_row=curr_price_row)
+                            today_sells.add(code)
 
                 # 2-4-2. 매수 감시
                 buy_candidates = [c for c in monitoring_list if (c not in self.holdings or self.holdings.get(c, {}).get('entry_n', 0) < 2) and (c not in today_sells)]
@@ -647,15 +667,15 @@ class DynamicBacktester:
 
             # [v16.92] Deep Optimization: Pre-calculate PULSE logic once per stock for the entire period
             # This avoids O(N*M) redundant .groupby().cumsum() calls in the daily loop
-            is_ma_aligned = (group['MA5'] > group['MA20'])
-            ma_group_id = (~is_ma_aligned).cumsum()
-            group['MA_Maint_Count'] = is_ma_aligned.groupby(ma_group_id).cumsum()
-            
-            is_rsi_above_50 = (group['RSI'] >= 50.0)
-            rsi_group_id = (group['RSI'] < 50.0).cumsum()
-            group['RSI_Pulse_Count'] = is_rsi_above_50.groupby(rsi_group_id).cumsum()
-            
             df_ind = TradingStrategy.calculate_indicators(group, self.settings)
+            
+            is_ma_aligned = (df_ind['MA5'] > df_ind['MA20'])
+            ma_group_id = (~is_ma_aligned).cumsum()
+            df_ind['MA_Maint_Count'] = is_ma_aligned.groupby(ma_group_id).cumsum()
+            
+            is_rsi_above_50 = (df_ind['RSI'] >= 50.0)
+            rsi_group_id = (df_ind['RSI'] < 50.0).cumsum()
+            df_ind['RSI_Pulse_Count'] = is_rsi_above_50.groupby(rsi_group_id).cumsum()
             
             # [v16.92] Pre-calculate signals for the ENTIRE time series at once (Vectorized)
             # This makes the daily loop in run() a simple O(1) lookup

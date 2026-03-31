@@ -528,7 +528,7 @@ class DataManagerV2:
             return row[0] if row and row[0] else None
 
     def get_trading_days(self, start_date, end_date):
-        query = "SELECT DISTINCT datetime FROM bars_1d WHERE code = 'KS11' AND datetime BETWEEN ? AND ? ORDER BY datetime ASC"
+        query = "SELECT DISTINCT datetime FROM bars_1d WHERE code = '001' AND datetime BETWEEN ? AND ? ORDER BY datetime ASC"
         with self._get_connection() as conn:
             return [row[0] for row in conn.execute(query, (start_date, end_date)).fetchall()]
 

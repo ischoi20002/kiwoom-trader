@@ -92,7 +92,7 @@ DEFAULT_SETTINGS = {
     "use_gap_down_exit": True,
     "gap_down_limit": -5.0,
     "use_gap_grace": True,
-    "use_atr_exit": True,
+    "gap_grace_mins": 15,
     "atr_period": 100,
     
     "use_s1_a_tp": True,

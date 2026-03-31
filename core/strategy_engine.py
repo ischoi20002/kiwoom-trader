@@ -108,7 +108,7 @@ class StrategyEngine:
             # [v4.5.10] 개장 초기 매도 유예 (9:15까지 휩소 방어)
             if s.get('use_gap_grace', True):
                 now = datetime.now()
-                if now.hour == 9 and now.minute < 15:
+                if now.hour == 9 and now.minute < int(s.get('gap_grace_mins', 15)):
                     # 익절(TAKE_PROFIT)을 제외한 모든 손실성 매도는 유예
                     if exit_reason != "TAKE_PROFIT":
                         return {'action': 'HOLD', 'reason': f'GRACE_PERIOD({exit_reason})'}

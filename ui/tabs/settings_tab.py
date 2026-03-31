@@ -322,7 +322,7 @@ class SettingsTab:
         exit_f = ttk.LabelFrame(st_main_frame, text=' 🛡️ [7] 공통 리스크 관리 (Global Exit & Safety) ', padding='15')
         exit_f.pack(fill=tk.X, pady=10)
         add_param_row(exit_f, '1. 갭하락 즉시 손절', 'gap_down_limit', '%', '시가 붕괴 대응', toggle_key='use_gap_down_exit')
-        add_param_row(exit_f, '2. 개장 초기 매도 유예', None, '', '휩소 방지(9:15까지)', toggle_key='use_gap_grace')
+        add_param_row(exit_f, '2. 개장 초기 매도 유예', 'gap_grace_mins', '분', '장 초반 휩소 방지(9:15까지)', toggle_key='use_gap_grace')
         add_param_row(exit_f, '3. ATR 분석 주기', 'atr_period', '봉', '공통 ATR 지표 주기', toggle_key='use_atr_exit')
         add_param_row(exit_f, 'S1 눌림(A) 전용 익절', 's1_a_take_profit', '%', '눌림목 목표 수익률', toggle_key='use_s1_a_tp')
         add_param_row(exit_f, 'S1 눌림(A) 전용 손절', 's1_a_stop_loss', '%', '눌림목 최후 방어선', toggle_key='use_s1_a_stop_loss')
@@ -371,7 +371,7 @@ class SettingsTab:
                 if not ent: continue
                 v = ent.get().strip().replace(',', '')
                 if not v: continue
-                if k in ['backtest_initial_capital', 'max_slots', 'atr_period', 'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily', 'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'gc_window', 'rsi_window']:
+                if k in ['backtest_initial_capital', 'max_slots', 'atr_period', 'gap_grace_mins', 'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily', 'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'gc_window', 'rsi_window']:
                     self.app.settings[k] = int(float(v))
                 else: 
                     self.app.settings[k] = float(v)

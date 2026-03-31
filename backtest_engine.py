@@ -681,7 +681,7 @@ class SimpleBacktester:
                 smart_exited &= (m1_closes <= running_max * (1 + self.sx_p_thr / 100.0))
 
         if self.use_gap_grace and time_h == 9 and time_m == 0:
-            grace_idx_limit = 15 
+            grace_idx_limit = int(self.settings.get('gap_grace_mins', 15))
             if len(stop_lossed) > 0: stop_lossed[:grace_idx_limit] = False
             if len(gap_downed) > 0: gap_downed[:grace_idx_limit] = False
             if len(flash_exited) > 0: flash_exited[:grace_idx_limit] = False

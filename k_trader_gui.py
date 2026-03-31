@@ -224,7 +224,7 @@ class KiwoomApp:
             # 전술적 수급
             'smart_buy_vp', 'smart_buy_ba_ratio', 'smart_exit_vp', 'smart_exit_ba_ratio', 'smart_exit_price_threshold',
             # 공통/리스크
-            'gap_down_limit', 'atr_period', 
+            'gap_down_limit', 'gap_grace_mins', 'atr_period', 
             's1_a_take_profit', 's1_a_stop_loss', 's1_b_take_profit', 's1_b_stop_loss',
             's2_take_profit', 's2_stop_loss', 
             's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct'
