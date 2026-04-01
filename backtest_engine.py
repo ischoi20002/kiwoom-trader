@@ -201,7 +201,7 @@ class TradingStrategy:
         return TradingStrategy.get_buy_signals_detailed(df, settings, market_trend)['Signal']
 
     @staticmethod
-    def _check_s2_approval(pos, last_row, settings, indicator_row=None, market_trend='UP'):
+    def _check_s2_approval(pos, last_row, settings, indicator_row=None, market_trend='UP', curr_dt=None):
         """[v22.2] 설정창의 7가지 조건과 100% 동기화된 2차 매수 승인 로직 (Static)"""
         s = settings
         
@@ -213,13 +213,24 @@ class TradingStrategy:
         if s.get('use_s2_delay', True):
             min_hours = float(s.get('s2_delay_hours', 24))
             entry_dt = pd.to_datetime(pos['entry_date'])
-            curr_dt = pd.to_datetime(last_row.name)
-            if (curr_dt - entry_dt).total_seconds() / 3600 < min_hours:
+            # last_row가 None일 때(SimpleBacktester 최적화 경로)는 curr_dt 파라미터 사용
+            if last_row is not None:
+                curr_dt = pd.to_datetime(last_row.name)
+            elif curr_dt is not None:
+                curr_dt = pd.to_datetime(curr_dt)
+            else:
+                curr_dt = None  # 시간 정보 없으면 대기 조건 스킵
+            if curr_dt is not None and (curr_dt - entry_dt).total_seconds() / 3600 < min_hours:
                 return False
 
-        # 기술 지표 참조 (indicator_row 우선)
+        # 기술 지표 참조 (indicator_row 우선, last_row가 None인 경우도 안전하게 처리)
         ind = indicator_row if indicator_row is not None else last_row
-        curr_price = last_row['Close']
+        if ind is None:
+            return True  # 지표 정보 없으면 조건 통과 불가 → 보수적으로 허용
+        try:
+            curr_price = float(ind['Close'])
+        except (KeyError, TypeError):
+            curr_price = 0.0
         
         # 1. 20일선 위 위치 (use_s2_ma20)
         if s.get('use_s2_ma20', True):
@@ -796,7 +807,7 @@ class SimpleBacktester:
             'stock_name': stock_name
         }
 
-    def _check_s2_approval_v2(self, pos, indicators, i):
+    def _check_s2_approval_v2(self, pos, indicators, i, curr_dt=None):
         # [v4.5 Rule] 시장지수 필터 (Stage 2 공통)
         m_trend = indicators['Market_Trend'][i] if 'Market_Trend' in indicators else 'UP'
         if self.settings.get('use_market_filter', True) and m_trend != 'UP':
@@ -805,7 +816,8 @@ class SimpleBacktester:
         return TradingStrategy._check_s2_approval(
             pos, None, self.settings, 
             indicator_row={k: v[i] for k, v in indicators.items()},
-            market_trend=m_trend
+            market_trend=m_trend,
+            curr_dt=curr_dt
         )
 
     def _check_s2_approval_legacy(self, pos, indicators, i):
@@ -949,7 +961,7 @@ class SimpleBacktester:
             
             # Stage 2 Buy Check
             elif pos['stage'] == 1:
-                if self._check_s2_approval_v2(pos, indicators, i):
+                if self._check_s2_approval_v2(pos, indicators, i, curr_dt=time_indices[i]):
                     can_buy_s2 = True
                     if self.use_sb_s2:
                         ab_ratio = indicators['ask_bid_ratio'][i]

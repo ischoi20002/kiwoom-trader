@@ -1,0 +1,57 @@
+---
+description: 과거에 수정된 버그 목록 및 주의사항
+alwaysApply: true
+---
+
+# 수정된 주요 버그 이력
+
+## backtest_engine.py
+
+### Bug 1 — SL 퍼센트 오독 (L331)
+`float(s.get('use_s1_a_stop_loss', 3.0))` → boolean `True`가 `1.0`으로 변환됨  
+**수정**: `s.get('s1_a_stop_loss', 3.0)` (키 이름 수정)
+
+### Bug 2 — Stage 2 수익권 체크 누락
+`_check_s2_approval`에서 `s2_profit_limit` 조건이 주석만 있고 실제 검증 없었음  
+**수정**: `current_profit_pct < s2_profit_limit`이면 False 반환
+
+### Bug 4 — TP 계산 시 Type A/B 미구분
+`_execute_sell`에서 항상 `s1_a_take_profit` 사용  
+**수정**: `h_info.get('sig_type')`으로 Type B 여부 판별 후 분기
+
+### Bug — `_check_s2_approval` `last_row=None` 충돌
+`SimpleBacktester` 최적화 경로에서 `last_row=None`으로 호출 시 `.name`, `['Close']` 오류  
+**수정**: `curr_dt` 파라미터 추가, `ind is None` 가드 처리
+
+## dynamic_backtest.py
+
+### Bug — S2 진단 로그 과도한 파일 I/O
+`_check_s2_approval` 1회 호출마다 파일 open/write/close → 후반 날짜 7~8초 소요  
+**수정**: `_s2_log_buffer`에 메모리 누적 후 하루 마감 시 일괄 flush
+
+### Bug — market_df warmup 부재
+백테스트 시작일 첫 날 MSI/ADX 계산이 NaN → 시장 추세 'UP' 오판  
+**수정**: 시작일 280일 이전부터 데이터 로드 후 지표 계산, 실제 기간만 슬라이스
+
+## strategy/simulation_models.py
+
+### Bug 5 — 비결정론적 백테스트 결과
+`simulate_bid_ask_ratio_vectorized`, `simulate_vol_power_vectorized`의 `add_noise=True` 기본값  
+**수정**: `add_noise=False`로 변경 (unseeded `np.random.normal` 제거)
+
+## settings.json
+
+### Bug A — s2_sizing_unit 오염
+`s2_sizing_unit` 값이 깨진 문자 `''`로 저장됨  
+**수정**: `'%'`로 수정 (Stage 2 포지션 사이징 정상화)
+
+## parameter_optimizer.py
+
+### Bug — signal_only_params 오분류
+`macd_fast_entry`, `macd_slow_entry`, `macd_sig_entry`가 `signal_only_params`에 포함됨  
+실제로는 `calculate_all_indicators`에서 MACD 계산에 직접 사용됨  
+**수정**: `signal_only_params`에서 제거 → 최적화 시 지표 재계산 올바르게 적용
+
+### Bug — 001 시장지수 Yahoo Finance 404 오류
+`FinanceDataReader`가 내부 코드 `'001'`을 Yahoo Finance로 조회 → 404  
+**수정**: 로컬 DB 우선 조회, FDR 폴백 시 `FDR_TICKER_MAP = {'001': 'KS11'}` 적용

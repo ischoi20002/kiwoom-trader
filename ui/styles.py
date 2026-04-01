@@ -92,6 +92,15 @@ class NordicStyle:
         style.configure("TCheckbutton", background=self.colors['bg'], foreground=self.colors['fg'], font=("Malgun Gothic", 10))
         style.map("TCheckbutton", background=[("active", self.colors['bg'])], foreground=[("active", self.colors['primary'])])
 
+        # Spinbox 스타일
+        style.configure("TSpinbox", fieldbackground="#242933", background="#434C5E",
+                        foreground=self.colors['fg'], arrowcolor=self.colors['primary'],
+                        insertcolor=self.colors['primary'], borderwidth=1, relief=tk.FLAT)
+        style.map("TSpinbox",
+                  fieldbackground=[("readonly", "#2E3440"), ("disabled", "#2E3440")],
+                  foreground=[("disabled", "#4C566A")],
+                  arrowcolor=[("disabled", "#4C566A")])
+
         # Combobox 스타일 [v33.1]
         style.configure("TCombobox", fieldbackground="#242933", background="#434C5E", 
                         foreground=self.colors['fg'], arrowcolor=self.colors['primary'], 

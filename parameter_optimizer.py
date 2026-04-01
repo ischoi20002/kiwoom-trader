@@ -25,10 +25,22 @@ _G_DATA = {}
 _G_M1 = {}
 _G_MKT = None
 _G_VIX = None
+# [Perf] 지표 계산 결과 캐시 (지표에 영향을 주는 파라미터가 같으면 재사용)
+_G_IND_CACHE: dict = {}
+
+# 지표 계산에 영향을 주는 파라미터 집합 (calculate_all_indicators 에서 실제로 사용하는 값들)
+# - macd_fast/slow/sig_entry → MACD, OSC, MACD_Sig
+# - rsi_sig_period           → RSI_Sig (rolling MA of RSI)
+# - atr_period               → ATR
+# - vol_lookback             → Prev_Day_Vol
+_INDICATOR_PARAMS = frozenset({
+    'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry',
+    'atr_period', 'vol_lookback', 'rsi_sig_period',
+})
 
 def init_worker(data_path):
     """프로세스 생성 시 데이터를 한 번만 로드하여 메모리에 상주"""
-    global _G_DATA, _G_M1, _G_MKT, _G_VIX
+    global _G_DATA, _G_M1, _G_MKT, _G_VIX, _G_IND_CACHE
     try:
         with open(data_path, 'rb') as f:
             cache = pickle.load(f)
@@ -36,7 +48,7 @@ def init_worker(data_path):
             _G_M1 = cache.get('m1', {})
             _G_MKT = cache.get('market', None)
             _G_VIX = cache.get('vix', None)
-        # print(f"  [Worker] Data loaded from {data_path}")
+        _G_IND_CACHE = {}  # 워커마다 독립적인 지표 캐시 초기화
     except Exception as e:
         print(f"  (!) Worker Init Error: {e}")
 
@@ -47,7 +59,7 @@ def run_single_combination(args):
     idx, settings, is_indicator_constant, high_precision = args
     
     # [v30.0] 워커 프로세스에서 데이터가 로드되지 않은 경우 지연 로딩 (Windows 최적화)
-    global _G_DATA, _G_M1, _G_MKT, _G_VIX
+    global _G_DATA, _G_M1, _G_MKT, _G_VIX, _G_IND_CACHE
     if not _G_DATA:
         tmp_cache_path = os.path.join(BASE_DIR, "bt_opt_cache.tmp")
         if os.path.exists(tmp_cache_path):
@@ -59,14 +71,29 @@ def run_single_combination(args):
     market_df = _G_MKT
     vix_df = _G_VIX
 
-    for code, data in data_cache.items():
+    # [Perf] 지표 재계산이 필요한 경우, 같은 지표 파라미터 조합이면 캐시 재사용
+    if not is_indicator_constant:
+        ind_key = tuple(sorted((k, settings.get(k)) for k in _INDICATOR_PARAMS if k in settings))
+        if ind_key not in _G_IND_CACHE:
+            # 지표 계산 후 캐시 저장 (원본 데이터 보호를 위해 copy 사용)
+            _G_IND_CACHE[ind_key] = {
+                code: TradingStrategy.calculate_indicators(data.copy(), settings)
+                for code, data in data_cache.items() if data is not None
+            }
+        effective_data = _G_IND_CACHE[ind_key]
+        skip_ind = True  # 이미 지표 계산 완료
+    else:
+        effective_data = data_cache
+        skip_ind = is_indicator_constant
+
+    for code, data in effective_data.items():
         if data is not None:
             # [v23.0] 가벼운 시뮬레이터를 사용하여 처리 (내부 쓰레드 제거로 오버헤드 최소화)
-            tester = SimpleBacktester(settings) # Renamed local_tester to tester as per user's edit
+            tester = SimpleBacktester(settings)
             m1_pre = data_cache_m1.get(code) if data_cache_m1 else None
             try:
                 summary = tester.run(data, code, market_df=market_df, vix_df=vix_df, log_to_csv=False, 
-                                      skip_indicators=is_indicator_constant, high_precision=high_precision, m1_df_preloaded=m1_pre)
+                                      skip_indicators=skip_ind, high_precision=high_precision, m1_df_preloaded=m1_pre)
                 if summary:
                     summaries.append(summary)
             except Exception as e: 
@@ -100,7 +127,7 @@ class ParameterOptimizer:
         self.param_ranges = param_ranges # {'rsi_min': [35, 40, 45], ...}
         self.base_settings = base_settings if base_settings else {}
         
-    def find_best_params(self, start_date, end_date, interval='1d', callback=None, force_refresh=False, high_precision=False, method='grid', n_trials=150, seed=42):
+    def find_best_params(self, start_date, end_date, interval='1d', callback=None, force_refresh=False, high_precision=False, method='grid', n_trials=50, seed=42):
         # [v18.8] Date Normalization (YYYY-MM-DD)
         start_date = pd.to_datetime(start_date).strftime('%Y-%m-%d')
         end_date = pd.to_datetime(end_date).strftime('%Y-%m-%d')
@@ -275,6 +302,13 @@ class ParameterOptimizer:
 
         # [v23.1] 지표 재계산 필요 여부 판단 (보수적 화이트리스트 방식)
         # 아래 파라미터들은 지표(Indicators) 계산에는 영향을 주지 않고, 신호(Signals)나 매매 로직에만 관여함
+        # 지표(Indicator) 계산에 영향을 주지 않는 파라미터 화이트리스트
+        # _INDICATOR_PARAMS에 포함된 값들은 여기서 제외해야 함
+        # 제외된 것(= 지표에 영향):
+        #   macd_fast_entry, macd_slow_entry, macd_sig_entry → MACD/OSC 계산에 사용
+        #   atr_period → ATR 계산에 사용
+        #   vol_lookback → Prev_Day_Vol 계산에 사용
+        #   rsi_sig_period → RSI_Sig 계산에 사용
         signal_only_params = {
             'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
             's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 
@@ -294,8 +328,11 @@ class ParameterOptimizer:
             'use_smart_buy_a', 'use_smart_buy_b', 'use_smart_buy_s2',
             'smart_buy_ba_ratio', 'smart_buy_vp', 'use_synthetic_realtime',
             'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
-            'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry',
-            'backtest_initial_capital', 'sel_rsi_min', 'sel_rsi_max'
+            # macd_fast_entry, macd_slow_entry, macd_sig_entry 는 제거 (지표에 영향)
+            'backtest_initial_capital', 'sel_rsi_min', 'sel_rsi_max',
+            'gap_grace_mins', 'min_trde_val', 'vol_ratio',
+            's2_ma5_gap', 'use_s2_ma20', 'use_s2_vol_surge', 'use_s2_rsi_sig', 'use_s2_macd_gc',
+            'use_market_filter', 'buy_rsi_min',
         }
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False

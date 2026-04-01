@@ -58,6 +58,8 @@ class DynamicBacktester:
         self.use_type_b = False
         self.gap_down_lmt = -5.0
         self.stock_name_map = {}
+        # [Perf] S2 진단 로그를 매 호출마다 파일에 쓰지 않고 메모리에 버퍼링 (일별 flush)
+        self._s2_log_buffer: list = []
         
     def run(self, start_date, end_date, interval='15m', callback=None, high_precision=False):
         """메인 시뮬레이션 루프 (일단위 유니버스 갱신 + 분단위/15분단위 체결)"""
@@ -153,7 +155,8 @@ class DynamicBacktester:
             if os.path.exists(f): 
                 try: os.remove(f)
                 except: pass
-        # s2_debug.csv 헤더 작성
+        # s2_debug.csv 헤더 작성 및 메모리 버퍼 초기화
+        self._s2_log_buffer = []
         try:
             with open(s2_debug_path, 'w', encoding='utf-8') as f:
                 f.write(f"# S2 진단 로그 | 기간: {start_date} ~ {end_date}\n")
@@ -375,6 +378,16 @@ class DynamicBacktester:
             # 2-5. 일일 정산
             current_equity = self.cash + sum(h['qty'] * day_data[c]['Close'].iloc[-1] for c, h in self.holdings.items() if c in day_data)
             self.daily_equity.append({'date': current_day, 'equity': current_equity, 'cash': self.cash, 'holdings_n': len(self.holdings)})
+            
+            # [Perf] S2 진단 로그 일괄 flush (매 호출마다 open/write/close 대신 하루치를 한번에 기록)
+            if self._s2_log_buffer:
+                try:
+                    s2_debug_path = os.path.join(BASE_DIR, "s2_debug.csv")
+                    with open(s2_debug_path, 'a', encoding='utf-8') as _f:
+                        _f.writelines(self._s2_log_buffer)
+                    self._s2_log_buffer.clear()
+                except Exception:
+                    self._s2_log_buffer.clear()
             
             day_t_duration = time.time() - day_t_start
             print(f"[Day] {current_day} 처리 완료 ({day_t_duration:.2f}초)")
@@ -870,16 +883,14 @@ class DynamicBacktester:
                 if profit_pct < profit_limit:
                     reasons.append(f"PROFIT:{profit_pct:.2f}%<{profit_limit}%")
 
-        # 로그 기록 (거절된 경우만, 또는 승인된 경우 간략 기록)
+        # [Perf] 로그를 파일에 직접 쓰지 않고 메모리 버퍼에 추가 (일별 flush로 I/O 최소화)
         try:
-            log_path = os.path.join(BASE_DIR, "s2_debug.csv")
             approved = len(reasons) == 0
             ts = str(getattr(last_row, 'name', ''))[:19]
             avg_p_val = h_info.get('avg_p', 0)
             profit_log = (curr_price / avg_p_val - 1) * 100 if avg_p_val > 0 else 0
             log_line = f"{ts},{code},{'OK' if approved else 'REJECT'},{profit_log:.2f}%,{';'.join(reasons) if reasons else 'ALL_PASS'}\n"
-            with open(log_path, 'a', encoding='utf-8') as f:
-                f.write(log_line)
+            self._s2_log_buffer.append(log_line)
         except Exception:
             pass
 

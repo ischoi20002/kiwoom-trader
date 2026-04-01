@@ -1,0 +1,47 @@
+---
+description: 파라미터 최적화 엔진 구조 및 성능 개선 맥락
+globs: parameter_optimizer.py
+alwaysApply: false
+---
+
+# 파라미터 최적화 엔진 (parameter_optimizer.py)
+
+## 실행 흐름
+
+1. **데이터 로드** (`BacktestDataLoader`) — 10개 대표주 15분봉
+2. **시장지수 로드** — 로컬 DB 우선 → FDR 폴백 (`KS11`, `VIX`)
+3. **지표 사전 계산** — `is_indicator_constant` 여부에 따라 분기
+4. **최적화 실행** — Bayesian(`optuna.TPESampler`) / Grid / Random
+5. **최종 백테스트** — best_settings로 재실행 + HTML 리포트 생성
+
+## 핵심 성능 구조
+
+### `_INDICATOR_PARAMS` (지표에 영향을 주는 파라미터)
+```python
+_INDICATOR_PARAMS = frozenset({
+    'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry',  # MACD 계산
+    'atr_period',    # ATR 계산
+    'vol_lookback',  # Prev_Day_Vol 계산
+    'rsi_sig_period' # RSI_Sig 계산
+})
+```
+이 파라미터들은 `signal_only_params`에 포함되면 **안 됨**.
+
+### `_G_IND_CACHE` (워커 프로세스별 지표 캐시)
+- 같은 지표 파라미터 조합이면 재계산 없이 재사용
+- 캐시 키: `ind_key = tuple(sorted((k, settings.get(k)) for k in _INDICATOR_PARAMS))`
+- 워커마다 독립 (`init_worker`에서 초기화)
+
+### `is_indicator_constant`
+- 최적화 대상 파라미터가 모두 `signal_only_params`에 속하면 `True`
+- `True`이면 데이터에 지표를 사전 계산 후 `skip_indicators=True`로 실행
+
+## UI 설정 (backtest_tab.py)
+- **Trials**: 스핀박스로 조절 (기본값 50, 범위 10~300)
+- **고정밀(1m)**: 체크박스 — 최적화 중 1분봉 사용 여부 (기본 OFF)
+- 최적화는 기본적으로 15분봉만 사용 (15배 빠름)
+
+## 주의사항
+- Bayesian 최적화는 `n_jobs=num_workers`로 멀티스레드 실행
+- `_G_IND_CACHE`는 Python GIL로 스레드 안전하게 처리됨
+- `objective` 함수에서 `trial.set_user_attr`로 결과 저장 후 `study_callback`에서 GUI 업데이트

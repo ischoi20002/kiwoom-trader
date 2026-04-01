@@ -159,6 +159,17 @@ class BacktestTab:
         self.btn_start_optimize.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_row_opt, text="📊 최적화결과 리포트", width=18, command=self._open_opt_trade_report).pack(side=tk.LEFT, padx=2)
 
+        # [Perf] 최적화 옵션 행 (trials 수 + 고정밀 토글)
+        opt_cfg_row = ttk.Frame(opt_lf)
+        opt_cfg_row.pack(pady=(6, 0))
+        ttk.Label(opt_cfg_row, text="Trials:", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(0, 2))
+        self.opt_n_trials_var = tk.StringVar(value="50")
+        ttk.Spinbox(opt_cfg_row, from_=10, to=300, increment=10, textvariable=self.opt_n_trials_var,
+                    width=5, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(0, 10))
+        self.opt_high_precision_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt_cfg_row, text="고정밀(1m)", variable=self.opt_high_precision_var,
+                        style="TCheckbutton").pack(side=tk.LEFT)
+
         # [v25.0] 최적화 대상 종목 안내 (2025 대표주 10선)
         target_info = "🔍 대상: 삼성전자, SK하이닉스 등 10개 대표주"
         lbl_targets = ttk.Label(opt_lf, text=target_info, font=("Segoe UI", 8), foreground="#EBCB8B", cursor="hand2")
@@ -256,10 +267,12 @@ class BacktestTab:
 
         style = ttk.Style()
         style.configure("Treeview", rowheight=25)
-        self.tree_backtest.tag_configure('plus', foreground='#A3BE8C')
+        # 다크 테마 기반 행 색상: 홀수/짝수 배경 + 텍스트 대비 확보
+        self.tree_backtest.tag_configure('odd',  background='#2E3440', foreground='#D8DEE9')
+        self.tree_backtest.tag_configure('even', background='#3B4252', foreground='#D8DEE9')
+        # 수익/손실 행은 foreground만 덮어씀 (배경은 odd/even 태그에서 결정)
+        self.tree_backtest.tag_configure('plus',  foreground='#A3BE8C')
         self.tree_backtest.tag_configure('minus', foreground='#BF616A')
-        self.tree_backtest.tag_configure('odd', background='#FDFDFD')
-        self.tree_backtest.tag_configure('even', background='#F7F9FB')
         
         # [v26.0] 지능형 툴팁 장착 (카테고리 정보 포함)
         from ui.gui_utils import ToolTip
@@ -427,8 +440,15 @@ class BacktestTab:
                 self.btn_start_optimize.config(state=tk.NORMAL)
                 return
             
-            high_precision = True
-            threading.Thread(target=self._run_optimize_thread, args=(start_date, end_date, search_space, high_precision), daemon=True).start()
+            # [Perf] 최적화는 기본적으로 15분봉만 사용 (고정밀 모드는 최종 백테스트에서만 활성화)
+            high_precision = getattr(self, 'opt_high_precision_var', None)
+            high_precision = high_precision.get() if high_precision else False
+            n_trials = getattr(self, 'opt_n_trials_var', None)
+            try:
+                n_trials = int(n_trials.get()) if n_trials else 50
+            except Exception:
+                n_trials = 50
+            threading.Thread(target=self._run_optimize_thread, args=(start_date, end_date, search_space, high_precision, n_trials), daemon=True).start()
         except Exception as _err:
             self._show_copyable_error("입력 오류", f"입력 형식을 확인해 주세요:\n{str(_err)}\n\n{traceback.format_exc()}")
             self.btn_start_optimize.config(state=tk.NORMAL)
@@ -480,7 +500,7 @@ class BacktestTab:
         self.canvas_bt.itemconfig(self.canvas_window, width=max(can_w, req_w))
         self.canvas_bt.configure(scrollregion=self.canvas_bt.bbox("all"))
 
-    def _run_optimize_thread(self, start, end, space, high_precision=False):
+    def _run_optimize_thread(self, start, end, space, high_precision=False, n_trials=50):
         try:
             import parameter_optimizer as opt_mod
             # [v31.0] Derive optimization targets from KODEX 200 universe
@@ -496,7 +516,7 @@ class BacktestTab:
                     self.gui_queue.put(lambda: self.app.progress_var.set(value))
 
             self.gui_queue.put(lambda: self.lbl_bt_status.config(text="최적화 시작...", foreground="orange"))
-            df_results = optimizer.find_best_params(start, end, interval='15m', callback=update_progress, high_precision=high_precision, method='bayesian', n_trials=150)
+            df_results = optimizer.find_best_params(start, end, interval='15m', callback=update_progress, high_precision=high_precision, method='bayesian', n_trials=n_trials)
             
             if df_results is not None and not df_results.empty:
                 self.gui_queue.put(lambda: self._render_optimization_results(df_results))
