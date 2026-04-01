@@ -192,24 +192,19 @@ class SettingsTab:
         ).pack(anchor='w', padx=10, pady=(8, 2))
         tk.Label(
             flow_wrap,
-            text='KODEX200 유니버스\n  ↓ ② Track A / B 선정\n  ↓ ③ S1 매수 신호\n  ↓ ④ S2 추매\n  ↓ ⑤⑥ 수급·시장\n  ↓ ⑦ 청산',
+            text=(
+                'KODEX200 유니버스\n'
+                '  ↓ ②-A 눌림목 / ②-B 돌파 선정\n'
+                '  ↓ ③ S1 (공통필터 → A → B)\n'
+                '  ↓ ④ S2 추매\n'
+                '  ↓ ⑤⑥ 수급·시장\n'
+                '  ↓ ⑦ 청산'
+            ),
             fg='#D8DEE9',
             bg=nord_deep,
             font=('Malgun Gothic', 9),
             justify=tk.LEFT,
         ).pack(anchor='w', padx=10, pady=(0, 8))
-
-        dual_hint = tk.Frame(sidebar_outer, bg=nord_box, highlightthickness=0)
-        dual_hint.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(
-            dual_hint,
-            text='📌 Track A = 눌림목  |  🚀 Track B = 돌파',
-            fg='#A3BE8C',
-            bg=nord_box,
-            font=('Malgun Gothic', 8),
-            wraplength=230,
-            justify=tk.LEFT,
-        ).pack(anchor='w', padx=8, pady=6)
 
         sb_list = tk.Listbox(
             sidebar_outer,
@@ -228,15 +223,15 @@ class SettingsTab:
         sb_list.pack(fill=tk.BOTH, expand=True)
 
         section_entries: tp.List[tp.Tuple[str, str]] = [
-            ('fund', '① 자금 · 포지션 사이징'),
-            ('univ_a', '②-A 유니버스 · Track A (눌림목)'),
-            ('univ_b', '②-B 유니버스 · Track B (돌파)'),
-            ('s1', '③ 1단계 진입 (S1) · 매수 신호'),
-            ('s2', '④ 2단계 추매 (S2)'),
-            ('s2b', '④-B S2 · Track B 오버라이드'),
-            ('smart', '⑤ 수급 · Smart Wall'),
-            ('mkt', '⑥ 시장 트렌드 게이트'),
-            ('exit', '⑦ 청산 · 공통 리스크'),
+            ('fund', '① 자금 · 사이징'),
+            ('univ_a', '②-A 유니버스 (눌림목)'),
+            ('univ_b', '②-B 유니버스 (돌파)'),
+            ('s1', '③ S1 진입 (공통→A→B)'),
+            ('s2', '④ S2 추매'),
+            ('s2b', '④-B S2 · B오버라이드'),
+            ('smart', '⑤ Smart Wall'),
+            ('mkt', '⑥ 시장 게이트'),
+            ('exit', '⑦ 청산 · 리스크'),
         ]
         self._settings_section_keys: list[str] = [k for k, _ in section_entries]
         self._section_by_key: dict[str, ttk.Frame] = {}
@@ -443,51 +438,30 @@ class SettingsTab:
         add_param_row(strat_f, '  ㄴ Signal Period', 'macd_sig_entry', '', '기본값 9')
         add_param_row(strat_f, 'RSI 시그널 주기', 'rsi_sig_period', '봉', 'S1/S2 공통 지표 주기', toggle_key='use_rsi_sig_filter')
 
-        # ── Type A / Type B 가로 병렬 배치 ──
-        ab_row = get_next_row(strat_f)
-        ab_container = ttk.Frame(strat_f)
-        ab_container.grid(row=ab_row, column=0, columnspan=6, sticky='ew', pady=(12, 4))
-        ab_container.columnconfigure(0, weight=1)
-        ab_container.columnconfigure(1, weight=1)
+        # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지
+        add_header(strat_f, '── Type A: 눌림목 진입 조건 ──')
+        add_param_row(strat_f, 'A 전용 사용', None, '', '중립/순풍 장세 사용 가능', toggle_key='use_type_a')
+        add_param_row(strat_f, 'RSI 하한 (과매도 회복)', 'buy_rsi_min', '', '과매도권/반등 확인용 최저선', toggle_key='use_rsi_min', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'RSI 상한선', 'buy_rsi_max_a', '', '눌림 깊이 확인용 (기본 65)', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'Smart Buy', None, '', '진입 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_a', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '이평 골든크로스', 'gc_window', '분', 'N분 내 GC 발생 여부', toggle_key='use_gc', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'RSI 상향돌파', 'rsi_window', '분', 'N분 내 RSI 50 돌파 여부', toggle_key='use_rsi_signal', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'MA60 안전구역', None, '', '60일선 대비 이격 제한', toggle_key='use_ma60_safe', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '  ㄴ MA60 하한', 'ma60_min', '%', '기본 100% 이상', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '  ㄴ MA60 상한', 'ma60_max', '%', '기본 110% 이하', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '거래량 급증확인', 'vol_surge', '배', '전일 평균 대비 폭발력', toggle_key='use_vol_surge', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'ATR 손절', 'atr_multiplier_sl_a', '배', '철벽 수비형 ATR 손절', toggle_key='use_atr_stop_loss_a', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, 'ATR 트레일링', 'atr_multiplier_trail_a', '배', '수익 극대화용 트레일링', toggle_key='use_atr_trailing_stop_a', widget_list=self.type_a_widgets)
 
-        type_a_col = ttk.LabelFrame(ab_container, text='  📌 Type A — 눌림목 진입 조건  ', padding='10')
-        type_a_col.grid(row=0, column=0, sticky='nsew', padx=(0, 6))
-        type_b_col = ttk.LabelFrame(ab_container, text='  🚀 Type B — 돌파형 진입 조건  ', padding='10')
-        type_b_col.grid(row=0, column=1, sticky='nsew', padx=(6, 0))
-
-        # 좁은 컬럼 레이아웃 (가로 분할 환경용)
-        for _col_frame in (type_a_col, type_b_col):
-            _col_frame.columnconfigure(0, weight=0, minsize=28)   # 체크박스
-            _col_frame.columnconfigure(1, weight=0, minsize=150)  # 라벨
-            _col_frame.columnconfigure(2, weight=0, minsize=72)   # 입력창
-            _col_frame.columnconfigure(3, weight=0, minsize=32)   # 단위
-            _col_frame.columnconfigure(4, weight=0, minsize=40)   # 최적화 토글
-            _col_frame.columnconfigure(5, weight=1, minsize=0)    # 설명(축소)
-            self.grid_rows[_col_frame] = 0  # pre-init → get_next_row가 setup_section_columns 재호출 방지
-
-        # Type A 파라미터
-        add_param_row(type_a_col, 'A 전용 사용', None, '', '', toggle_key='use_type_a')
-        add_param_row(type_a_col, 'RSI 하한 (과매도 회복)', 'buy_rsi_min', '', '', toggle_key='use_rsi_min', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, 'RSI 상한선', 'buy_rsi_max_a', '', '눌림 깊이 확인용', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, 'Smart Buy', None, '', '', toggle_key='use_smart_buy_a', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, '이평 골든크로스', 'gc_window', '분', 'N분 내 GC', toggle_key='use_gc', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, 'RSI 상향돌파', 'rsi_window', '분', 'RSI 50 돌파', toggle_key='use_rsi_signal', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, 'MA60 안전구역', None, '', '', toggle_key='use_ma60_safe', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, '  ㄴ MA60 하한', 'ma60_min', '%', '', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, '  ㄴ MA60 상한', 'ma60_max', '%', '', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, '거래량 급증확인', 'vol_surge', '배', '', toggle_key='use_vol_surge', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, 'ATR 손절', 'atr_multiplier_sl_a', '배', '', toggle_key='use_atr_stop_loss_a', widget_list=self.type_a_widgets)
-        add_param_row(type_a_col, 'ATR 트레일링', 'atr_multiplier_trail_a', '배', '', toggle_key='use_atr_trailing_stop_a', widget_list=self.type_a_widgets)
-
-        # Type B 파라미터
-        add_param_row(type_b_col, 'B 전용 사용', None, '', '', toggle_key='use_type_b')
-        add_param_row(type_b_col, 'RSI 상한선', 'buy_rsi_max_b', '', '돌파 강점 확인용', widget_list=self.type_b_widgets)
-        add_param_row(type_b_col, 'Smart Buy', None, '', '', toggle_key='use_smart_buy_b', widget_list=self.type_b_widgets)
-        add_param_row(type_b_col, '돌파 거래량', 'vol_surge_b', '배', '폭발적 수급', toggle_key='use_type_b_vol', widget_list=self.type_b_widgets)
-        add_param_row(type_b_col, '추세 정렬 확인', None, '', '일봉/1분봉 일치', toggle_key='use_trend_aligned_b', widget_list=self.type_b_widgets)
-        add_param_row(type_b_col, 'MACD GC 확인', None, '', '추가 모멘텀', toggle_key='use_macd_gc_b', widget_list=self.type_b_widgets)
-        add_param_row(type_b_col, 'ATR 손절', 'atr_multiplier_sl_b', '배', '', toggle_key='use_atr_stop_loss_b', widget_list=self.type_b_widgets)
-        add_param_row(type_b_col, 'ATR 트레일링', 'atr_multiplier_trail_b', '배', '', toggle_key='use_atr_trailing_stop_b', widget_list=self.type_b_widgets)
+        add_header(strat_f, '── Type B: 돌파형 진입 조건 ──')
+        add_param_row(strat_f, 'B 전용 사용', None, '', '순풍(UP) 장세 전용', toggle_key='use_type_b')
+        add_param_row(strat_f, 'RSI 상한선', 'buy_rsi_max_b', '', '돌파 강점 확인용 (기본 70)', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, 'Smart Buy', None, '', '돌파 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_b', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, '돌파 거래량', 'vol_surge_b', '배', '돌파 시점 폭발적 수급', toggle_key='use_type_b_vol', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, '추세 정렬 확인', None, '', '일봉/1분봉 추세 일치 여부', toggle_key='use_trend_aligned_b', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, 'MACD GC 확인', None, '', '추가 모멘텀(GC) 확인', toggle_key='use_macd_gc_b', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, 'ATR 손절', 'atr_multiplier_sl_b', '배', '공격적 수비형 ATR 손절', toggle_key='use_atr_stop_loss_b', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, 'ATR 트레일링', 'atr_multiplier_trail_b', '배', '고가추격형 트레일링', toggle_key='use_atr_trailing_stop_b', widget_list=self.type_b_widgets)
 
         s2_f = ttk.LabelFrame(_sec_parent('s2'), text=' 📈 [4] 2단계 추매 (S2) ', padding='15')
         s2_f.pack(fill=tk.X, pady=10)
