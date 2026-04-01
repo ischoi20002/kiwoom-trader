@@ -212,9 +212,11 @@ class KiwoomApp:
         opt_keys = [
             # 자금관리
             's1_equity_pct', 's2_equity_pct',
-            # 종목선정필터
+            # 종목선정필터 (Track A)
             'min_trde_val', 'vol_ratio', 'vol_lookback', 
             'ma_convergence', 'sel_rsi_max', 'sel_rsi_min',
+            # 종목선정필터 (Track B)
+            'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
             # 단계별 매수 (A)
             'buy_rsi_max_a', 'gc_window', 'rsi_window', 'vol_surge', 'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
             # 단계별 매수 (B)
@@ -227,7 +229,9 @@ class KiwoomApp:
             'gap_down_limit', 'gap_grace_mins', 'atr_period', 
             's1_a_take_profit', 's1_a_stop_loss', 's1_b_take_profit', 's1_b_stop_loss',
             's2_take_profit', 's2_stop_loss', 
-            's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct'
+            's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
+            # 시장 트렌드 필터 임계값 [v4.6]
+            'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
         ]
         for key in opt_keys:
             # 설정 파일에 저장된 값이 있으면 그것을 사용, 없으면 False 초기화

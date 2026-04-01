@@ -333,6 +333,10 @@ class ParameterOptimizer:
             'gap_grace_mins', 'min_trde_val', 'vol_ratio',
             's2_ma5_gap', 'use_s2_ma20', 'use_s2_vol_surge', 'use_s2_rsi_sig', 'use_s2_macd_gc',
             'use_market_filter', 'buy_rsi_min',
+            # [v4.6] 시장 트렌드 판정 임계값 (지표 계산과 무관, 신호/필터 로직에만 영향)
+            'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
+            # [Phase 2] Track B 종목 선정 파라미터 (지표 계산과 무관)
+            'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
         }
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False

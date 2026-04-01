@@ -95,7 +95,14 @@ class DynamicBacktester:
         self.use_atr = s.get('use_atr_exit', False)
         self.use_type_b = s.get('use_type_b', False)
         self.gap_down_lmt = float(s.get('gap_down_limit', -5.0))
-        
+
+        # [v4.6] 시장 트렌드 판정 임계값 캐싱 (settings.json 노출, 최적화 가능)
+        self.msi_down_thr = float(s.get('msi_down_threshold', -0.10))
+        self.msi_up_thr   = float(s.get('msi_up_threshold',   0.10))
+        self.adx_min_thr  = float(s.get('adx_min_threshold',  15))
+        self.adx_down_thr = float(s.get('adx_down_threshold', 20))   # [v4.7] 하락 조기감지용 ADX 임계값
+        self.vix_down_thr = float(s.get('vix_down_threshold', 30))
+
         self.stock_name_map = TradingStrategy.get_stock_name_map()
         
         if callback: callback("백테스트 준비 중...", 0)
@@ -121,15 +128,44 @@ class DynamicBacktester:
             return None
 
         trading_days = market_df.index.strftime('%Y-%m-%d').tolist()
-        
+
+        # [v4.6] VIX를 거래일 기준으로 ffill 전처리
+        # — DB에 VIX 데이터가 있으면 거래일 인덱스에 reindex 후 forward-fill
+        # — 이렇게 하면 루프 내에서 특정 날짜 데이터가 없어도 직전 유효값이 유지됨
+        vix_series: pd.Series | None = None
+        if vix_df is not None and not vix_df.empty:
+            try:
+                _vix = vix_df.copy()
+                _vix['time'] = pd.to_datetime(_vix['time']) if 'time' in _vix.columns else _vix.index
+                if 'time' in _vix.columns:
+                    _vix = _vix.set_index('time')
+                _vix.index = pd.to_datetime(_vix.index)
+                # 거래일 인덱스로 재색인 후 ffill (공휴일·누락일은 직전값으로 채움)
+                td_idx = pd.to_datetime(trading_days)
+                vix_series = _vix['Close'].reindex(td_idx, method='ffill')
+                filled = int(vix_series.notna().sum())
+                print(f"[Dynamic] VIX 전처리 완료 ({filled}/{len(trading_days)} 거래일 유효)")
+            except Exception as e:
+                print(f"[Dynamic] VIX 전처리 실패 (직전값 방식으로 계속 진행): {e}")
+                vix_series = None
+        else:
+            print("[Dynamic] [경고] VIX 데이터 없음 — 시장 트렌드 판정에서 VIX 필터 비활성화됨")
+
         print(f"[Dynamic] 백테스트 시작: {start_date} ~ {end_date} ({len(trading_days)} 영업일)")
         
-        # [v17.7] 성능 핵심 최적화 (Phase 1): 전 기간 유니우스 사전 계산 (Batch)
+        # [v17.7] 성능 핵심 최적화 (Phase 1): 전 기간 유니버스 사전 계산 (Batch)
         import time
         t_start = time.time()
-        universe_schedule = strategy_selector.prepare_dynamic_universe(
+        _result = strategy_selector.prepare_dynamic_universe(
             self.settings, start_date, end_date, self.db, callback if callback else print
         )
+        # [Phase 2] Track A/B 분리 스케줄 언패킹 (기존 호환: 합집합 schedule도 유지)
+        if isinstance(_result, tuple) and len(_result) == 3:
+            universe_schedule, self.schedule_a, self.schedule_b = _result
+        else:
+            universe_schedule = _result
+            self.schedule_a = universe_schedule
+            self.schedule_b = {}
         t_duration = time.time() - t_start
         msg = f"사전 계산 완료 ({t_duration:.2f}초)"
         print(f"[Done] {msg}")
@@ -170,13 +206,24 @@ class DynamicBacktester:
             progress = (idx / len(trading_days)) * 100
             if callback: callback(f"[{current_day}] 시계열 모의투자 중...", progress)
             
-            # 2-1. 오전 종목 선정 (사전 계산된 스케줄 활용)
+            # 2-1. 오전 종목 선정 (사전 계산된 스케줄 활용, Track A/B 분리)
             prev_day_idx = idx - 1
-            if prev_day_idx >= 0:
-                prev_day_str = trading_days[prev_day_idx]
-                top_codes = universe_schedule.get(prev_day_str, [])
-            else:
-                top_codes = universe_schedule.get(current_day, [])
+            ref_day = trading_days[prev_day_idx] if prev_day_idx >= 0 else current_day
+            
+            top_codes_a = self.schedule_a.get(ref_day, [])
+            top_codes_b = self.schedule_b.get(ref_day, [])
+            top_codes = list(dict.fromkeys(top_codes_a + top_codes_b))
+            
+            # Track A/B 소속 맵 (매수 시 sig_type 검증용, 1분봉 정밀 모드에서도 사용)
+            track_map: dict[str, str] = {}
+            for c in top_codes_a:
+                track_map[c] = 'A'
+            for c in top_codes_b:
+                if c in track_map:
+                    track_map[c] = 'AB'
+                else:
+                    track_map[c] = 'B'
+            self._current_track_map = track_map
             
             if not top_codes:
                 prev_day_dt = datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=1)
@@ -184,8 +231,10 @@ class DynamicBacktester:
                     self.settings, logger_callback=lambda x: None, target_date=prev_day_dt, data_manager=self.db
                 )
                 top_codes = candidates_df.head(int(self.settings.get('max_slots', 20)))['Code'].tolist() if candidates_df is not None else []
+                for c in top_codes:
+                    track_map.setdefault(c, 'A')
             
-            # 2-2. 감시 대상 확정
+            # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보)
             max_s = int(self.settings.get('max_slots', 20))
             holdings_codes = list(self.holdings.keys())
             new_candidates = [c for c in top_codes if c not in holdings_codes]
@@ -199,23 +248,32 @@ class DynamicBacktester:
                     msi = m_data.get('MSI', 0)
                     adx = m_data.get('ADX', 20)
                     
-                    # [v18.9] VIX 데이터 정밀 연동 (Reindex/FFill)
+                    # [v4.6] VIX 조회: 전처리된 ffill Series에서 직접 읽기
+                    # — 해당 날짜 값이 없으면 직전 거래일 값이 자동 유지됨
+                    # — vix_series 자체가 None이면 15.0 기본값 사용 (VIX 필터 비활성화)
                     v_val = 15.0
-                    if vix_df is not None and not vix_df.empty:
-                        # vix_df index와 m_data index(trading_days) 매칭
-                        current_dt = pd.to_datetime(trading_days[prev_day_idx])
+                    if vix_series is not None:
                         try:
-                            v_val = vix_df.loc[vix_df.index <= current_dt, 'Close'].iloc[-1]
-                        except: pass
+                            current_dt = pd.to_datetime(trading_days[prev_day_idx])
+                            looked_up = vix_series.get(current_dt)
+                            if looked_up is not None and not pd.isna(looked_up):
+                                v_val = float(looked_up)
+                        except Exception:
+                            pass
                     
-                    # [Rule v4.5.10 Hardened]
-                    # 1. DOWN (Stop All): MSI < -0.10 OR VIX > 30
-                    # 2. NEUTRAL (Stop Type B): ADX < 15 OR (-0.10 <= MSI <= 0.05)
-                    # 3. UP: Everything else
-                    if msi < -0.10 or v_val > 30:
+                    # [Rule v4.7] 4단계 트렌드 판정
+                    # 1. DOWN      : MSI 명백한 역배열 OR VIX 패닉
+                    #                OR (MSI 음수 AND ADX 강함) → 방향+강도로 하락 조기감지
+                    # 2. NEUTRAL   : ADX 약함 AND MSI 정배열 불충분 → Type B/S2 차단
+                    # 3. AGGRESSIVE: MSI 충분 AND ADX 강함 → 강세 확인 (진입동작은 UP과 동일)
+                    # 4. UP        : 정배열이나 추세 보통 수준
+                    if msi < self.msi_down_thr or v_val > self.vix_down_thr or \
+                            (msi < 0 and adx > self.adx_down_thr):
                         m_trend = 'DOWN'
-                    elif adx < 15 or (msi >= -0.10 and msi <= 0.05):
+                    elif adx < self.adx_min_thr and msi <= self.msi_up_thr:
                         m_trend = 'NEUTRAL'
+                    elif msi > self.msi_up_thr and adx > self.adx_down_thr:
+                        m_trend = 'AGGRESSIVE'
                     else:
                         m_trend = 'UP'
             except: pass
@@ -250,7 +308,14 @@ class DynamicBacktester:
                 timeline = sorted(list(set(all_times)))
             
             today_sells = set()
-            code_to_rank = {c: i for i, c in enumerate(top_codes)}
+            # [Phase 2] Track A 우선순위 → Track B 순서로 정렬
+            code_to_rank = {}
+            for i, c in enumerate(top_codes_a):
+                code_to_rank[c] = i
+            offset_b = len(top_codes_a)
+            for i, c in enumerate(top_codes_b):
+                if c not in code_to_rank:
+                    code_to_rank[c] = offset_b + i
             
             for curr_time in timeline:
                 # [v23.0] 고정밀 모드 처리 (지연 로딩 및 타켓팅 최적화)
@@ -330,8 +395,15 @@ class DynamicBacktester:
                                     can_execute = False
                             
                             if can_execute and not is_addon_target:
-                                # [v31.5] Smart Buy (Supply/Demand Confirmation)
+                                # [Phase 2] Track-Signal 교차 검증: 신호 유형이 종목 트랙과 일치하는지 확인
                                 sig_type = last_sig.get('Sig_Type', 'TYPE_B')
+                                code_track = track_map.get(code, 'A')
+                                if sig_type == 'TYPE_A' and code_track == 'B':
+                                    can_execute = False
+                                elif sig_type == 'TYPE_B' and code_track == 'A':
+                                    can_execute = False
+                                
+                                # [v31.5] Smart Buy (Supply/Demand Confirmation)
                                 use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
                                 
                                 if use_sb_for_type:
@@ -777,6 +849,13 @@ class DynamicBacktester:
                 
                 if is_buy_signal or is_addon_target:
                     sig_type = indicator_to_use.get('Sig_Type', 'TYPE_B')
+                    
+                    # [Phase 2] Track-Signal 교차 검증 (1분봉 경로)
+                    code_track = getattr(self, '_current_track_map', {}).get(code, 'A')
+                    if (sig_type == 'TYPE_A' and code_track == 'B') or \
+                       (sig_type == 'TYPE_B' and code_track == 'A'):
+                        continue
+                    
                     use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \
                                        self.use_sb_b if (sig_type == "TYPE_B" and not is_addon_target) else \
                                        self.use_sb_s2
@@ -818,7 +897,7 @@ class DynamicBacktester:
         reasons = []
 
         # 0. 시장 필터
-        if s.get('use_market_filter', True) and market_trend != 'UP':
+        if s.get('use_market_filter', True) and market_trend not in ('UP', 'AGGRESSIVE'):
             reasons.append(f"MARKET:{market_trend}")
 
         # 1. 24시간 대기

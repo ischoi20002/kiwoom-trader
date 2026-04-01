@@ -249,15 +249,25 @@ class SettingsTab:
         add_sizing_row(cap_f, '2단계(본대) 비중', 'stage2_amt', 's2_equity_pct', 's2_sizing_unit')
         add_param_row(cap_f, '가상 매매 자동화', None, '', '로직 포착 시 자동 진입 시뮬레이션', toggle_key='use_auto_virtual')
 
-        sel_f = ttk.LabelFrame(st_main_frame, text=' 🔍 [2] 종목 선정 필터 (Stock Selection - Daily) ', padding='15')
+        sel_f = ttk.LabelFrame(st_main_frame, text=' 🔍 [2] 종목 선정 필터 — Track A (눌림목) ', padding='15')
         sel_f.pack(fill=tk.X, pady=10)
+        add_param_row(sel_f, 'Track A 활성화', None, '', 'MA 수렴 + 눌림목 유니버스', toggle_key='use_sel_track_a')
         add_param_row(sel_f, '최소 거래대금', 'min_trde_val', '억', '5일 평균 거래대금 기준')
         add_param_row(sel_f, '거래량 분출 비율', 'vol_ratio', '배', '전일 대비 분출 시점 포착')
         add_param_row(sel_f, '분출 확인 기간', 'vol_lookback', '일', '최근 N일 내 분출 이력 확인')
         add_param_row(sel_f, '이평선 수렴도 기준', 'ma_convergence', '%', '에너지 응축(Short/Mid) 확인')
         add_param_row(sel_f, '종목 선정 RSI 상한', 'sel_rsi_max', '', '유니버스 선정 탄성 확인 (기본값 70)')
         add_param_row(sel_f, '종목 선정 RSI 하한', 'sel_rsi_min', '', '과매도권/반등 유니버스 확인 (기본값 30)')
+        add_param_row(sel_f, '최대 감시 종목 수 (A)', 'max_slots_a', '개', 'Track A 유니버스 상한 (기본값 20)')
         add_param_row(sel_f, '일봉 MACD(OSC) 필터', None, '', '일봉 OSC 양수 상시 확인')
+
+        sel_b_f = ttk.LabelFrame(st_main_frame, text=' 🔍 [2-B] 종목 선정 필터 — Track B (추세돌파) ', padding='15')
+        sel_b_f.pack(fill=tk.X, pady=10)
+        add_param_row(sel_b_f, 'Track B 활성화', None, '', 'MA 정배열 확산 + 추세돌파 유니버스', toggle_key='use_sel_track_b')
+        add_param_row(sel_b_f, '최소 거래대금 (B)', 'sel_b_min_trde_val', '억', 'Track B 전용 거래대금 기준 (기본값 60억)')
+        add_param_row(sel_b_f, '종목 선정 RSI 하한 (B)', 'sel_b_rsi_min', '', '추세 확인용 최저선 (기본값 45)')
+        add_param_row(sel_b_f, '종목 선정 RSI 상한 (B)', 'sel_b_rsi_max', '', '과열 방지 상한 (기본값 75)')
+        add_param_row(sel_b_f, '최대 감시 종목 수 (B)', 'max_slots_b', '개', 'Track B 유니버스 상한 (기본값 10)')
         add_param_row(sel_f, '  ㄴ Fast Period', 'macd_fast_daily', '', '기본값 12')
         add_param_row(sel_f, '  ㄴ Slow Period', 'macd_slow_daily', '', '기본값 26')
         add_param_row(sel_f, '  ㄴ Signal Period', 'macd_sig_daily', '', '기본값 9')
@@ -319,7 +329,15 @@ class SettingsTab:
         add_param_row(rt_f, 'Smart Exit 탈출용 매수함정 비율', 'smart_exit_ba_ratio', '배', '허수매수세/지루함 포착', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락폭 제한', toggle_key='use_smart_exit')
 
-        exit_f = ttk.LabelFrame(st_main_frame, text=' 🛡️ [7] 공통 리스크 관리 (Global Exit & Safety) ', padding='15')
+        mkt_f = ttk.LabelFrame(st_main_frame, text=' 🌐 [7] 시장 트렌드 필터 임계값 (Market Trend Gate) ', padding='15')
+        mkt_f.pack(fill=tk.X, pady=10)
+        add_param_row(mkt_f, '시장 지수 필터 사용', None, '', 'UP/NEUTRAL/DOWN 3단계 차등 적용', toggle_key='use_market_filter')
+        add_param_row(mkt_f, 'MSI 하락 임계값 (DOWN 기준)', 'msi_down_threshold', '', '이 값 미만이면 DOWN → 매수 전면 차단 (기본 -0.10)')
+        add_param_row(mkt_f, 'MSI 상승 임계값 (UP 기준)', 'msi_up_threshold', '', '이 값 이상이면 UP → 모든 진입 허용 (기본 0.10)')
+        add_param_row(mkt_f, 'ADX 최소 추세강도 (NEUTRAL 기준)', 'adx_min_threshold', '', 'ADX가 이 값 미만이면 NEUTRAL 판정 (기본 15)')
+        add_param_row(mkt_f, 'VIX 공포지수 상한 (DOWN 기준)', 'vix_down_threshold', '', '이 값 초과 시 DOWN → 매수 전면 차단 (기본 30)')
+
+        exit_f = ttk.LabelFrame(st_main_frame, text=' 🛡️ [8] 공통 리스크 관리 (Global Exit & Safety) ', padding='15')
         exit_f.pack(fill=tk.X, pady=10)
         add_param_row(exit_f, '1. 갭하락 즉시 손절', 'gap_down_limit', '%', '시가 붕괴 대응', toggle_key='use_gap_down_exit')
         add_param_row(exit_f, '2. 개장 초기 매도 유예', 'gap_grace_mins', '분', '장 초반 휩소 방지(9:15까지)', toggle_key='use_gap_grace')
@@ -371,7 +389,7 @@ class SettingsTab:
                 if not ent: continue
                 v = ent.get().strip().replace(',', '')
                 if not v: continue
-                if k in ['backtest_initial_capital', 'max_slots', 'atr_period', 'gap_grace_mins', 'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily', 'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'gc_window', 'rsi_window']:
+                if k in ['backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b', 'atr_period', 'gap_grace_mins', 'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily', 'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'gc_window', 'rsi_window']:
                     self.app.settings[k] = int(float(v))
                 else: 
                     self.app.settings[k] = float(v)

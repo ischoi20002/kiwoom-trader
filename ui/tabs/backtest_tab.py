@@ -34,12 +34,16 @@ class BacktestTab:
         self.PARAM_INFO = {
             's1_equity_pct': ('S1_Equity%', '자금관리', '1단계 비중 (%)'),
             's2_equity_pct': ('S2_Equity%', '자금관리', '2단계 비중 (%)'),
-            'min_trde_val': ('Min_Trade_Amt', '종목선정필터', '최소 거래 대금 (억)'),
-            'vol_ratio': ('Vol_Surge_Ratio', '종목선정필터', '거래량 분출 비율 (배)'),
-            'vol_lookback': ('Vol_Check_Days', '종목선정필터', '분출 확인 기간 (일)'),
-            'ma_convergence': ('MA_Conv_Limit', '종목선정필터', '이평선 수렴도 기준 (%)'),
-            'sel_rsi_max': ('Sel_RSI_High', '종목선정필터', '종목 선정 RSI 상한'),
-            'sel_rsi_min': ('Sel_RSI_Low', '종목선정필터', '종목 선정 RSI 하한'),
+            'min_trde_val': ('Min_Trade_Amt', '종목선정(A)', '최소 거래 대금 (억)'),
+            'vol_ratio': ('Vol_Surge_Ratio', '종목선정(A)', '거래량 분출 비율 (배)'),
+            'vol_lookback': ('Vol_Check_Days', '종목선정(A)', '분출 확인 기간 (일)'),
+            'ma_convergence': ('MA_Conv_Limit', '종목선정(A)', '이평선 수렴도 기준 (%)'),
+            'sel_rsi_max': ('Sel_RSI_High', '종목선정(A)', '종목 선정 RSI 상한'),
+            'sel_rsi_min': ('Sel_RSI_Low', '종목선정(A)', '종목 선정 RSI 하한'),
+            # Track B 전용
+            'sel_b_rsi_min': ('B_RSI_Low', '종목선정(B)', 'Track B RSI 하한'),
+            'sel_b_rsi_max': ('B_RSI_High', '종목선정(B)', 'Track B RSI 상한'),
+            'sel_b_min_trde_val': ('B_Min_Trade', '종목선정(B)', 'Track B 최소 거래대금 (억)'),
             'buy_rsi_max_a': ('A_RSI_High', '단계별 전략(A)', '눌림(A) RSI 상한선'),
             'gc_window': ('A_GC_Window', '단계별 전략(A)', '눌림(A) 이평 골든크로스 기간'),
             'vol_surge': ('A_Vol_Surge', '단계별 전략(A)', '눌림(A) 거래량 급증 배수'),
@@ -71,7 +75,12 @@ class BacktestTab:
             's2_stop_loss': ('S2_Stop_Loss', '공통 리스크', '2단계 최대 손절률 (%)'),
             's1_a_flash_exit_pct': ('A_Flash_Exit', '공통 리스크', '눌림(A) Flash Exit 기준 (%)'),
             's1_b_flash_exit_pct': ('B_Flash_Exit', '공통 리스크', '돌파(B) Flash Exit 기준 (%)'),
-            's2_flash_exit_pct': ('S2_Flash_Exit', '공통 리스크', '2단계 Flash Exit 기준 (%)')
+            's2_flash_exit_pct': ('S2_Flash_Exit', '공통 리스크', '2단계 Flash Exit 기준 (%)'),
+            # [v4.6] 시장 트렌드 필터 임계값
+            'msi_down_threshold': ('MSI_Down', '시장 트렌드 필터', 'DOWN 판정 MSI 하한선'),
+            'msi_up_threshold':   ('MSI_Up',   '시장 트렌드 필터', 'UP 판정 MSI 최소값'),
+            'adx_min_threshold':  ('ADX_Min',  '시장 트렌드 필터', 'NEUTRAL 판정 ADX 하한선'),
+            'vix_down_threshold': ('VIX_Down', '시장 트렌드 필터', 'DOWN 판정 VIX 상한선'),
         }
 
     def _show_copyable_error(self, title, message):
@@ -346,7 +355,20 @@ class BacktestTab:
             'vol_lookback': range_for(s.get('vol_lookback', 20), 5),
             'ma_convergence': range_for(s.get('ma_convergence', 5.0), 1.0),
             'sel_rsi_min': range_for(s.get('sel_rsi_min', 35.0), 5.0),
-            'sel_rsi_max': range_for(s.get('sel_rsi_max', 70.0), 5.0)
+            'sel_rsi_max': range_for(s.get('sel_rsi_max', 70.0), 5.0),
+            # Track B 종목선정 탐색 범위
+            'sel_b_rsi_min': range_for(s.get('sel_b_rsi_min', 45.0), 5.0),
+            'sel_b_rsi_max': range_for(s.get('sel_b_rsi_max', 75.0), 5.0),
+            'sel_b_min_trde_val': range_for(s.get('sel_b_min_trde_val', 60.0), 10),
+            # [v4.6] 시장 트렌드 필터 임계값 탐색 범위
+            # msi_down: 역배열 강도 (음수 깊을수록 엄격), step=0.05
+            'msi_down_threshold': range_for(s.get('msi_down_threshold', -0.10), 0.05),
+            # msi_up: 정배열 최소 기준 (0.05~0.20 탐색), step=0.05
+            'msi_up_threshold':   range_for(s.get('msi_up_threshold', 0.10), 0.05),
+            # adx_min: 추세 강도 하한 (10~20 탐색), step=5, int
+            'adx_min_threshold':  [10, 15, 20],
+            # vix_down: 공포지수 임계 (25~35 탐색), step=5, int
+            'vix_down_threshold': [25, 30, 35],
         }
 
     def _refresh_columns_from_settings(self, re_render=True):

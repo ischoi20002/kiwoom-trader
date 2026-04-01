@@ -472,57 +472,108 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     df_all['MA_Diff'] = (df_all['MA5'] - df_all['MA20']).abs() / df_all['MA20']
     df_all['Pos_Diff'] = (df_all['close'] - df_all['MA20']).abs() / df_all['MA20']
     df_all['VolRatio'] = df_all['volume'] / df_all.groupby('code')['volume'].shift(1)
-    df_all['VolBurst'] = (df_all['VolRatio'] >= float(settings.get('vol_ratio', 1.5))) & (df_all['close'] > df_all.groupby('code')['close'].shift(1))
-    df_all['VolBurstActive'] = df_all.groupby('code')['VolBurst'].rolling(vol_lookback).max().reset_index(0, drop=True)
     df_all['OSC_Prev'] = df_all.groupby('code')['OSC'].shift(1)
-    
+
+    # [Phase 2] Track A 거래량 분출
+    vol_ratio_a = float(settings.get('vol_ratio', 1.5))
+    df_all['VolBurst_A'] = (df_all['VolRatio'] >= vol_ratio_a) & (df_all['close'] > df_all.groupby('code')['close'].shift(1))
+    df_all['VolBurstActive_A'] = df_all.groupby('code')['VolBurst_A'].rolling(vol_lookback).max().reset_index(0, drop=True)
+
+    # [Phase 2] Track B 전용 거래량 분출 (별도 배율/기간)
+    vol_ratio_b = float(settings.get('sel_b_vol_ratio', vol_ratio_a))
+    vol_lookback_b = int(settings.get('sel_b_vol_lookback', vol_lookback))
+    df_all['VolBurst_B'] = (df_all['VolRatio'] >= vol_ratio_b) & (df_all['close'] > df_all.groupby('code')['close'].shift(1))
+    df_all['VolBurstActive_B'] = df_all.groupby('code')['VolBurst_B'].rolling(vol_lookback_b).max().reset_index(0, drop=True)
+
+    # 공통 필터
     c1 = df_all['AvgVal5'] >= (min_억 * 100000000)
-    # [v30.10] Optimized Dual-Track Selection Logic
-    use_a = settings.get('use_sel_track_a', True)
-    use_b = settings.get('use_sel_track_b', True)
-    
-    c2 = pd.Series(False, index=df_all.index)
-    if use_a:
-        c2 |= (df_all['MA_Diff'] <= conv)
-    if use_b:
-        c2 |= (df_all['MA20'] > df_all['MA60']) & (df_all['close'] > df_all['MA20'])
-    c3 = (df_all['RSI'] >= float(settings.get('sel_rsi_min', 40.0))) & (df_all['RSI'] <= float(settings.get('sel_rsi_max', 70.0)))
-    c4 = df_all['VolBurstActive'] == 1
     c5 = (df_all['OSC'] > 0)
-    
-    df_all['Valid'] = c1 & c2 & c3 & c4 & c5 & df_all['MA60'].notna()
-    
-    # Scoring (우상향 가산점 적용)
-    df_all['s1'] = (df_all['RSI'] / 70 * 100).clip(upper=100)
-    df_all['s2'] = ((1 - (df_all['MA_Diff'] / conv)) * 100).clip(lower=0)
-    df_all['s3'] = (df_all['AvgVal5'] / 50000000000 * 100).clip(upper=100)
-    df_all['s4'] = ((1 - (df_all['Pos_Diff'] / 0.03)) * 100).clip(lower=0)
-    
-    df_all['Score'] = (df_all['s2'] * 0.4) + (df_all['s1'] * 0.3) + (df_all['s3'] * 0.2) + (df_all['s4'] * 0.1)
-    df_all.loc[df_all['OSC'] > df_all['OSC_Prev'], 'Score'] += 10.0
-    
-    # 6. 스케줄 생성
-    logger_callback("  [Batch] 날짜별 상위 종목 추출 중...")
-    schedule = {}
+    c_ma60 = df_all['MA60'].notna()
+
+    # --- Track A: 눌림목 (MA 수렴 + 낮은 RSI) ---
+    use_a = settings.get('use_sel_track_a', True)
+    c2_a = (df_all['MA_Diff'] <= conv) if use_a else pd.Series(False, index=df_all.index)
+    c3_a = (df_all['RSI'] >= float(settings.get('sel_rsi_min', 35.0))) & \
+           (df_all['RSI'] <= float(settings.get('sel_rsi_max', 70.0)))
+    c4_a = df_all['VolBurstActive_A'] == 1
+    df_all['Valid_A'] = c1 & c4_a & c5 & c_ma60 & c2_a & c3_a
+
+    # Track A 점수 (수렴도 중심)
+    df_all['Score_A'] = (
+        ((1 - (df_all['MA_Diff'] / conv)) * 100).clip(lower=0) * 0.4 +
+        (df_all['RSI'] / 70 * 100).clip(upper=100) * 0.3 +
+        (df_all['AvgVal5'] / 50000000000 * 100).clip(upper=100) * 0.2 +
+        ((1 - (df_all['Pos_Diff'] / 0.03)) * 100).clip(lower=0) * 0.1
+    )
+    df_all.loc[df_all['OSC'] > df_all['OSC_Prev'], 'Score_A'] += 10.0
+
+    # --- Track B: 추세돌파 (정배열 확산 + 높은 RSI) ---
+    use_b = settings.get('use_sel_track_b', True)
+    c2_b = ((df_all['MA20'] > df_all['MA60']) & (df_all['close'] > df_all['MA20'])) if use_b else pd.Series(False, index=df_all.index)
+    # Track B는 별도의 RSI 범위와 거래대금 기준 적용
+    sel_b_rsi_min = float(settings.get('sel_b_rsi_min', 45.0))
+    sel_b_rsi_max = float(settings.get('sel_b_rsi_max', 75.0))
+    sel_b_min_val = float(settings.get('sel_b_min_trde_val', 60.0)) * 100000000
+    c3_b = (df_all['RSI'] >= sel_b_rsi_min) & (df_all['RSI'] <= sel_b_rsi_max)
+    c1_b = df_all['AvgVal5'] >= sel_b_min_val
+    c4_b = df_all['VolBurstActive_B'] == 1
+    df_all['Valid_B'] = c1_b & c2_b & c3_b & c4_b & c5 & c_ma60
+
+    # Track B 점수 (추세 강도 + 모멘텀 중심)
+    trend_strength = ((df_all['close'] / df_all['MA20'] - 1) * 100).clip(lower=0, upper=10) * 10
+    df_all['Score_B'] = (
+        trend_strength * 0.4 +
+        (df_all['RSI'] / 70 * 100).clip(upper=100) * 0.3 +
+        (df_all['AvgVal5'] / 50000000000 * 100).clip(upper=100) * 0.2 +
+        (df_all['OSC'].clip(lower=0) / (df_all['OSC'].abs().max() + 1e-10) * 100) * 0.1
+    )
+    df_all.loc[df_all['OSC'] > df_all['OSC_Prev'], 'Score_B'] += 10.0
+
+    # 기존 호환성: Valid와 Score 유지 (합집합)
+    df_all['Valid'] = df_all['Valid_A'] | df_all['Valid_B']
+    df_all['Score'] = df_all[['Score_A', 'Score_B']].max(axis=1)
+
+    # 6. 스케줄 생성 (Track A / Track B 분리)
+    logger_callback("  [Batch] 날짜별 상위 종목 추출 중 (Track A/B 분리)...")
+    schedule_a = {}
+    schedule_b = {}
+    schedule = {}  # 기존 호환용 (합집합)
+    max_s_a = int(settings.get('max_slots_a', 20))
+    max_s_b = int(settings.get('max_slots_b', 10))
     max_s = int(settings.get('max_slots', 20))
     df_sim = df_all[df_all['time'] >= pd.to_datetime(start_date)].copy()
     
-    # [v16.93] Fix: Explicitly define trading_days for the loop
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
     
     for d_str in trading_days_list:
-        # [v18.1] Lean 모드에서는 매일 유니버스를 다시 조회하지 않고 전체(union) 유니버스 사용
         if duration_days < 180:
             universe = all_codes 
         else:
             universe = get_monthly_universe(pd.to_datetime(d_str))
-            
-        day_df = df_sim[(df_sim['time'] == pd.to_datetime(d_str)) & (df_sim['code'].isin(universe)) & (df_sim['Valid'])]
-        if not day_df.empty:
-            schedule[d_str] = day_df.sort_values(by='Score', ascending=False).head(max_s)['code'].tolist()
+        
+        day_mask = (df_sim['time'] == pd.to_datetime(d_str)) & (df_sim['code'].isin(universe))
+        
+        # Track A 스케줄
+        day_a = df_sim[day_mask & df_sim['Valid_A']]
+        if not day_a.empty:
+            schedule_a[d_str] = day_a.sort_values(by='Score_A', ascending=False).head(max_s_a)['code'].tolist()
+        
+        # Track B 스케줄
+        day_b = df_sim[day_mask & df_sim['Valid_B']]
+        if not day_b.empty:
+            schedule_b[d_str] = day_b.sort_values(by='Score_B', ascending=False).head(max_s_b)['code'].tolist()
+        
+        # 기존 호환 스케줄 (합집합, 중복 제거)
+        combined = list(dict.fromkeys(
+            schedule_a.get(d_str, []) + schedule_b.get(d_str, [])
+        ))[:max_s]
+        if combined:
+            schedule[d_str] = combined
 
+    a_days = len(schedule_a)
+    b_days = len(schedule_b)
     if not schedule:
-        logger_callback("  [Warning] 조건에 맞는 종목이 한 상단도 추출되지 않았습니다. 필터 설정을 확인하세요.")
+        logger_callback("  [Warning] 조건에 맞는 종목이 한 건도 추출되지 않았습니다. 필터 설정을 확인하세요.")
     else:
-        logger_callback(f"[Batch] 완료. (총 {len(schedule)}일 추출됨)")
-    return schedule
+        logger_callback(f"[Batch] 완료. Track A: {a_days}일, Track B: {b_days}일, 합산: {len(schedule)}일")
+    return schedule, schedule_a, schedule_b

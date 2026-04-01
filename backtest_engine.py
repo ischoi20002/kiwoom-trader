@@ -202,82 +202,91 @@ class TradingStrategy:
 
     @staticmethod
     def _check_s2_approval(pos, last_row, settings, indicator_row=None, market_trend='UP', curr_dt=None):
-        """[v22.2] 설정창의 7가지 조건과 100% 동기화된 2차 매수 승인 로직 (Static)"""
+        """[Phase 2] Type A/B 완전 분리된 2차 매수 승인 로직"""
         s = settings
-        
-        # [v4.5 Rule] 시장지수 필터 (Stage 2 공통)
-        if s.get('use_market_filter', True) and market_trend != 'UP':
+
+        # Type B 여부 판별 → 파라미터 키 분기 헬퍼
+        _sig = pos.get('sig_type', pos.get('reason', ''))
+        _is_b = 'TYPE_B' in str(_sig)
+
+        def _k(key: str, default=None):
+            """Type B이면 B전용 키 우선 조회, 없으면 기존(A) 키로 폴백"""
+            if _is_b:
+                b_key = key.replace('s2_', 's2_b_').replace('use_s2_', 'use_s2_b_')
+                val = s.get(b_key)
+                if val is not None:
+                    return val
+            return s.get(key, default)
+
+        # [v4.7] AGGRESSIVE는 UP과 동일하게 S2 허용
+        if s.get('use_market_filter', True) and market_trend not in ('UP', 'AGGRESSIVE'):
             return False
-        
-        # 0. 최소 대기 기간 (use_s2_delay)
-        if s.get('use_s2_delay', True):
-            min_hours = float(s.get('s2_delay_hours', 24))
+
+        # 0. 최소 대기 기간
+        if _k('use_s2_delay', True):
+            min_hours = float(_k('s2_delay_hours', 24))
             entry_dt = pd.to_datetime(pos['entry_date'])
-            # last_row가 None일 때(SimpleBacktester 최적화 경로)는 curr_dt 파라미터 사용
             if last_row is not None:
                 curr_dt = pd.to_datetime(last_row.name)
             elif curr_dt is not None:
                 curr_dt = pd.to_datetime(curr_dt)
             else:
-                curr_dt = None  # 시간 정보 없으면 대기 조건 스킵
+                curr_dt = None
             if curr_dt is not None and (curr_dt - entry_dt).total_seconds() / 3600 < min_hours:
                 return False
 
-        # 기술 지표 참조 (indicator_row 우선, last_row가 None인 경우도 안전하게 처리)
+        # 기술 지표 참조
         ind = indicator_row if indicator_row is not None else last_row
         if ind is None:
-            return True  # 지표 정보 없으면 조건 통과 불가 → 보수적으로 허용
+            return True
         try:
             curr_price = float(ind['Close'])
         except (KeyError, TypeError):
             curr_price = 0.0
-        
-        # 1. 20일선 위 위치 (use_s2_ma20)
-        if s.get('use_s2_ma20', True):
+
+        # 1. 20일선 위치
+        if _k('use_s2_ma20', True):
             ma20_val = ind.get('MA20', 0)
-            gap = float(s.get('s2_ma20_gap', 0.0))
-            if curr_price < ma20_val * (1 + gap/100.0):
+            gap = float(_k('s2_ma20_gap', 0.0))
+            if curr_price < ma20_val * (1 + gap / 100.0):
                 return False
 
-        # 2. MA5 지지 확인 (use_s2_ma5)
-        if s.get('use_s2_ma5', True):
+        # 2. MA5 지지
+        if _k('use_s2_ma5', True):
             ma5_val = ind.get('MA5', 0)
-            gap = float(s.get('s2_ma5_gap', -0.5)) # 기본값 -0.5% (유격 허용)
-            if curr_price < ma5_val * (1 + gap/100.0):
+            gap = float(_k('s2_ma5_gap', -0.5))
+            if curr_price < ma5_val * (1 + gap / 100.0):
                 return False
-                
-        # 3. 거래 수급 확인 (use_s2_vol_surge)
-        if s.get('use_s2_vol_surge', True):
-            # [v4.5 Sync] Use Prev_Day_Vol for better intraday surge detection
+
+        # 3. 거래 수급
+        if _k('use_s2_vol_surge', True):
             vol_target = ind.get('Prev_Day_Vol', ind.get('Vol_MA20', ind.get('Volume', 0)))
-            ratio = float(s.get('s2_vol_ratio', 1.5))
+            ratio = float(_k('s2_vol_ratio', 1.5))
             if ind.get('Volume', 0) < vol_target * ratio:
                 return False
 
-        # 4. RSI 강세 유지 및 모멘텀 상승 (use_s2_rsi_sig)
-        if s.get('use_s2_rsi_sig', True):
+        # 4. RSI 강세 + 모멘텀
+        if _k('use_s2_rsi_sig', True):
             rsi_sig = ind.get('RSI_Sig', 50)
             rsi_val = ind.get('RSI', 0)
-            rsi_prev = ind.get('Prev_RSI', rsi_val) # 이전값이 없으면 동일한 값 취급
-            gap = float(s.get('s2_rsi_gap', 0.0))
-            # [v27.1] RSI-Signal 상회(Level) + RSI 상승 중(Momentum) 동시 만족 조건 (S1과 동계열)
-            if rsi_val < rsi_sig * (1 + gap/100.0) or rsi_val <= rsi_prev:
+            rsi_prev = ind.get('Prev_RSI', rsi_val)
+            gap = float(_k('s2_rsi_gap', 0.0))
+            if rsi_val < rsi_sig * (1 + gap / 100.0) or rsi_val <= rsi_prev:
                 return False
 
-        # 5. MACD 정배열 및 모멘텀 상승 (use_s2_macd_gc)
-        if s.get('use_s2_macd_gc', True):
+        # 5. MACD 정배열 + 모멘텀
+        if _k('use_s2_macd_gc', True):
             macd_val = ind.get('MACD', 0)
             macd_sig = ind.get('MACD_Sig', 0)
-            osc_val = ind.get('OSC', 1) 
+            osc_val = ind.get('OSC', 1)
             osc_prev = ind.get('Prev_OSC', osc_val)
-            gap = float(s.get('s2_macd_gap', 0.0))
-            # [v27.2] MACD-Signal 상회 + OSC 양수 + OSC 증가 중 (S1과 동계열)
+            gap = float(_k('s2_macd_gap', 0.0))
             if macd_val < macd_sig + gap or osc_val <= 0 or osc_val <= osc_prev:
                 return False
 
-        # 6. 수익권 확인 (use_s2_profit)
-        if s.get('use_s2_profit', True):
-            profit_limit = float(s.get('s2_profit_limit', 1.0))
+        # 6. 수익권 확인
+        if _k('use_s2_profit', True):
+            profit_limit = float(_k('s2_profit_limit', 1.0))
             avg_price = pos.get('avg_price', pos.get('avg_p', curr_price))
             if avg_price > 0:
                 current_profit_pct = (curr_price / avg_price - 1) * 100
@@ -336,27 +345,33 @@ class TradingStrategy:
             if profit_ratio <= gap_limit:
                 is_exit, exit_reason = True, "GAP_DOWN"
 
+        # [Phase 2] S2 청산 키도 Type A/B 분리
+        def _exit_key(a_key: str, b_key: str, s2_a_key: str, s2_b_key: str):
+            if stage == 2:
+                return s2_b_key if is_type_b else s2_a_key
+            return b_key if is_type_b else a_key
+
         # 1. 익절(Take Profit)
         if not is_exit:
-            use_tp = s.get('use_s2_tp' if stage == 2 else ('use_s1_b_tp' if is_type_b else 'use_s1_a_tp'), True)
+            use_tp = s.get(_exit_key('use_s1_a_tp', 'use_s1_b_tp', 'use_s2_tp', 'use_s2_b_tp'), True)
             if use_tp:
-                tp_pct = float(s.get('s2_take_profit' if stage == 2 else ('s1_b_take_profit' if is_type_b else 's1_a_take_profit'), 5.0))
+                tp_pct = float(s.get(_exit_key('s1_a_take_profit', 's1_b_take_profit', 's2_take_profit', 's2_b_take_profit'), 5.0))
                 if profit_ratio >= tp_pct:
                     is_exit, exit_reason = True, "TAKE_PROFIT"
 
         # 2. 손절(Stop Loss - % 기준)
         if not is_exit:
-            use_sl = s.get('use_s2_stop_loss' if stage == 2 else ('use_s1_b_stop_loss' if is_type_b else 'use_s1_a_stop_loss'), True)
+            use_sl = s.get(_exit_key('use_s1_a_stop_loss', 'use_s1_b_stop_loss', 'use_s2_stop_loss', 'use_s2_b_stop_loss'), True)
             if use_sl:
-                sl_pct = float(s.get('s2_stop_loss' if stage == 2 else ('s1_b_stop_loss' if is_type_b else 's1_a_stop_loss'), 3.0))
+                sl_pct = float(s.get(_exit_key('s1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 's2_b_stop_loss'), 3.0))
                 if profit_ratio <= -sl_pct:
                     is_exit, exit_reason = True, "STOP_LOSS"
 
         # 3. Flash Exit (Trailing from High)
         if not is_exit:
-            use_flash = s.get('use_s2_flash_exit' if stage == 2 else ('use_s1_b_flash_exit' if is_type_b else 'use_s1_a_flash_exit'), True)
+            use_flash = s.get(_exit_key('use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 'use_s2_b_flash_exit'), True)
             if use_flash:
-                f_pct = float(s.get('s2_flash_exit_pct' if stage == 2 else ('s1_b_flash_exit_pct' if is_type_b else 's1_a_flash_exit_pct'), 3.0))
+                f_pct = float(s.get(_exit_key('s1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct', 's2_b_flash_exit_pct'), 3.0))
                 if now_price <= max_p * (1.0 - f_pct / 100.0):
                     is_exit, exit_reason = True, "FLASH_EXIT"
 
@@ -374,7 +389,10 @@ class TradingStrategy:
                 curr_atr = float(ind.get('ATR', 0))
                 entry_atr = float(pos.get('atr_at_entry', curr_atr))
                 if curr_atr > 0:
-                    suff = "_s2" if stage == 2 else ("_b" if is_type_b else "_a")
+                    if stage == 2:
+                        suff = "_s2_b" if is_type_b else "_s2"
+                    else:
+                        suff = "_b" if is_type_b else "_a"
                     sl_mult = float(s.get(f'atr_multiplier_sl{suff}', 2.5))
                     trail_mult = float(s.get(f'atr_multiplier_trail{suff}', 4.0))
                     use_sl_atr = s.get(f'use_atr_stop_loss{suff}', True)
@@ -644,6 +662,13 @@ class SimpleBacktester:
             s2_pct = float(self.settings.get('s2_equity_pct', 30.0))
             self.s2_amt = total_capital_val * (s2_pct / 100.0)
 
+        # [Phase 2] Type B S2 사이징 (별도 비중)
+        if s2_unit == '원':
+            self.s2_b_amt = self.s2_amt
+        else:
+            s2_b_pct = float(self.settings.get('s2_b_equity_pct', s2_pct))
+            self.s2_b_amt = total_capital_val * (s2_b_pct / 100.0)
+
         self.buy_f_rate = self.settings.get('buy_fee_bt', self.settings.get('buy_fee_rate', 0.015)) / 100.0
         self.sell_f_rate = self.settings.get('sell_fee_bt', self.settings.get('sell_fee_rate', 0.215)) / 100.0
         
@@ -810,7 +835,8 @@ class SimpleBacktester:
     def _check_s2_approval_v2(self, pos, indicators, i, curr_dt=None):
         # [v4.5 Rule] 시장지수 필터 (Stage 2 공통)
         m_trend = indicators['Market_Trend'][i] if 'Market_Trend' in indicators else 'UP'
-        if self.settings.get('use_market_filter', True) and m_trend != 'UP':
+        # [v4.7] AGGRESSIVE는 UP과 동일하게 S2 허용
+        if self.settings.get('use_market_filter', True) and m_trend not in ('UP', 'AGGRESSIVE'):
             return False
             
         return TradingStrategy._check_s2_approval(
@@ -875,8 +901,13 @@ class SimpleBacktester:
                 if res['action'] == 'EXIT':
                     e_price = m1_p
                     if res['reason'] == 'TAKE_PROFIT':
-                        is_type_b = "TYPE_B" in pos.get('reason', '')
-                        tp_pct = float(self.settings.get('s2_take_profit' if pos['stage'] == 2 else ('s1_b_take_profit' if is_type_b else 's1_a_take_profit'), 5.0))
+                        _is_b = "TYPE_B" in pos.get('reason', '')
+                        _stg = pos['stage']
+                        if _stg == 2:
+                            tp_key = 's2_b_take_profit' if _is_b else 's2_take_profit'
+                        else:
+                            tp_key = 's1_b_take_profit' if _is_b else 's1_a_take_profit'
+                        tp_pct = float(self.settings.get(tp_key, 5.0))
                         e_price = pos['avg_price'] * (1 + tp_pct/100.0)
                     
                     params = self._execute_sell(m1_t, e_price, f"1M_{res['reason']}+{idx}m", params, indicators=indicators, i=i)
@@ -1019,9 +1050,13 @@ class SimpleBacktester:
             # TP 가격 보정 (필요시)
             if res['reason'] == 'TAKE_PROFIT':
                 stage = pos.get('stage', 1)
-                is_type_b = "TYPE_B" in pos.get('reason', '')
-                tp_pct = float(self.settings.get('s2_take_profit' if stage == 2 else ('s1_b_take_profit' if is_type_b else 's1_a_take_profit'), 5.0))
-                e_price = pos['avg_price'] * (1 + tp_pct/100.0)
+                _is_b = "TYPE_B" in pos.get('reason', '')
+                if stage == 2:
+                    tp_key = 's2_b_take_profit' if _is_b else 's2_take_profit'
+                else:
+                    tp_key = 's1_b_take_profit' if _is_b else 's1_a_take_profit'
+                tp_pct = float(self.settings.get(tp_key, 5.0))
+                e_price = pos['avg_price'] * (1 + tp_pct / 100.0)
             
             return {'price': e_price, 'reason': res['reason']}
             

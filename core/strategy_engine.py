@@ -133,7 +133,8 @@ class StrategyEngine:
         # 0. 시장지수
         if s.get('use_market_filter', True):
             total += 1
-            if getattr(self.app, 'market_trend', 'NEUTRAL') == 'UP': met += 1
+            # [v4.7] AGGRESSIVE는 UP과 동일하게 충족으로 처리
+            if getattr(self.app, 'market_trend', 'NEUTRAL') in ('UP', 'AGGRESSIVE'): met += 1
         
         # 1. 시간 지연
         if s.get('use_s2_delay', True):
