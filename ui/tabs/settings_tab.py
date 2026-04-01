@@ -120,52 +120,211 @@ class SettingsTab:
         self.status_label.config(text="🧹 모든 최적화 선택이 해제되었습니다.")
         self.save_settings(sync_to_backtest=False)
 
-    def _setup_ui(self):
+    def _setup_ui(self) -> None:
+        """설정 탭: 좌측 사이드바(전략 흐름) + 우측 섹션별 패널(스크롤)."""
         bg_col = self.colors.get('bg', '#2E3440')
         txt_col = self.colors.get('fg', '#ECEFF4')
         primary_col = self.colors.get('primary', '#88C0D0')
+        secondary_col = self.colors.get('secondary', '#81A1C1')
+        nord_box = '#3B4252'
+        nord_deep = '#242933'
 
         style = ttk.Style()
         style.configure('Dimmed.TLabel', foreground='#666666')
         style.configure('Dimmed.TEntry', foreground='#666666')
         style.map('Dimmed.TEntry', fieldbackground=[('disabled', '#3B4252')])
 
-        canvas = tk.Canvas(self.parent, background=bg_col, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.parent, orient='vertical', command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas, padding='30')
-
-        scrollable_frame.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
-        canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), 'units'))
-        self.window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor='nw')
-        
-        canvas.bind('<Configure>', lambda e: canvas.itemconfig(self.window_id, width=max(e.width, 1000)))
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        # 하단 버튼
+        # ── 하단 버튼 (먼저 pack → 상단 본문이 남은 공간 채움) ──
         btn_frame = ttk.Frame(self.parent, padding='20')
         btn_frame.pack(side=tk.BOTTOM, fill=tk.X)
         ttk.Button(btn_frame, text='💾 설정 저장 및 즉시 적용', command=self.save_settings, width=30, style='Action.TButton').pack(side=tk.RIGHT, padx=10)
         ttk.Button(btn_frame, text='🔄 공장 초기화', command=self.reset_to_defaults, width=20).pack(side=tk.RIGHT, padx=10)
 
-        # 헤더
-        header_sticky = ttk.Frame(self.parent, padding=(25, 15, 25, 10))
+        # ── 헤더 ──
+        header_sticky = ttk.Frame(self.parent, padding=(25, 12, 25, 8))
         header_sticky.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(header_sticky, text='⚙️ 전략 파라미터 최적화', font=('Malgun Gothic', 18, 'bold'), foreground=primary_col).pack(side=tk.LEFT)
-        
+        ttk.Label(header_sticky, text='⚙️ 전략 파라미터', font=('Malgun Gothic', 18, 'bold'), foreground=primary_col).pack(side=tk.LEFT)
+
         guide_f = ttk.Frame(header_sticky)
-        guide_f.pack(side=tk.LEFT, padx=30)
-        ttk.Label(guide_f, text='💡 [Tip] ○ (대기) / ● (지정) - 아이콘 또는 입력창 우클릭으로 전환', 
-                  font=('Malgun Gothic', 9, 'italic'), foreground=self.colors.get('secondary', '#81A1C1')).pack(side=tk.LEFT)
+        guide_f.pack(side=tk.LEFT, padx=24)
+        ttk.Label(
+            guide_f,
+            text='💡 좌측에서 단계 선택 · ○/● 최적화는 입력창 우클릭',
+            font=('Malgun Gothic', 9, 'italic'),
+            foreground=secondary_col,
+        ).pack(side=tk.LEFT)
 
         ttk.Button(header_sticky, text='🧹 최적화 전체 해제', width=18, command=self.clear_all_optimization).pack(side=tk.LEFT, padx=10)
 
-        self.status_label = ttk.Label(header_sticky, text='', font=('Malgun Gothic', 10), foreground=self.colors.get('secondary', '#81A1C1'))
+        self.status_label = ttk.Label(header_sticky, text='', font=('Malgun Gothic', 10), foreground=secondary_col)
         self.status_label.pack(side=tk.RIGHT)
 
-        scrollbar.pack(side='right', fill='y')
-        canvas.pack(side='left', fill='both', expand=True)
+        # ── 본문: Paned (사이드바 | 스크롤 콘텐츠) ──
+        main_body = ttk.Frame(self.parent)
+        main_body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        st_main_frame = scrollable_frame
+        paned = ttk.Panedwindow(main_body, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        sidebar_outer = ttk.Frame(paned, padding=(10, 8, 6, 8))
+        paned.add(sidebar_outer, weight=0)
+
+        scroll_host = ttk.Frame(paned, padding=0)
+        paned.add(scroll_host, weight=1)
+
+        try:
+            paned.pane(sidebar_outer, width=248)
+        except tk.TclError:
+            try:
+                paned.paneconfigure(sidebar_outer, width=248)
+            except tk.TclError:
+                pass
+
+        # 사이드바: 파이프라인 안내 + 목록
+        flow_wrap = tk.Frame(sidebar_outer, bg=nord_deep, highlightthickness=1, highlightbackground=nord_box)
+        flow_wrap.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(
+            flow_wrap,
+            text='전략 파이프라인',
+            fg=primary_col,
+            bg=nord_deep,
+            font=('Malgun Gothic', 9, 'bold'),
+        ).pack(anchor='w', padx=10, pady=(8, 2))
+        tk.Label(
+            flow_wrap,
+            text='KODEX200 유니버스\n  ↓ ② Track A / B 선정\n  ↓ ③ S1 매수 신호\n  ↓ ④ S2 추매\n  ↓ ⑤⑥ 수급·시장\n  ↓ ⑦ 청산',
+            fg='#D8DEE9',
+            bg=nord_deep,
+            font=('Malgun Gothic', 9),
+            justify=tk.LEFT,
+        ).pack(anchor='w', padx=10, pady=(0, 8))
+
+        dual_hint = tk.Frame(sidebar_outer, bg=nord_box, highlightthickness=0)
+        dual_hint.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(
+            dual_hint,
+            text='📌 Track A = 눌림목  |  🚀 Track B = 돌파',
+            fg='#A3BE8C',
+            bg=nord_box,
+            font=('Malgun Gothic', 8),
+            wraplength=230,
+            justify=tk.LEFT,
+        ).pack(anchor='w', padx=8, pady=6)
+
+        sb_list = tk.Listbox(
+            sidebar_outer,
+            height=14,
+            font=('Malgun Gothic', 10),
+            bg=nord_box,
+            fg=txt_col,
+            selectbackground='#5E81AC',
+            selectforeground=txt_col,
+            activestyle='none',
+            highlightthickness=0,
+            relief='flat',
+            bd=0,
+            exportselection=False,
+        )
+        sb_list.pack(fill=tk.BOTH, expand=True)
+
+        section_entries: tp.List[tp.Tuple[str, str]] = [
+            ('fund', '① 자금 · 포지션 사이징'),
+            ('univ_a', '②-A 유니버스 · Track A (눌림목)'),
+            ('univ_b', '②-B 유니버스 · Track B (돌파)'),
+            ('s1', '③ 1단계 진입 (S1) · 매수 신호'),
+            ('s2', '④ 2단계 추매 (S2)'),
+            ('s2b', '④-B S2 · Track B 오버라이드'),
+            ('smart', '⑤ 수급 · Smart Wall'),
+            ('mkt', '⑥ 시장 트렌드 게이트'),
+            ('exit', '⑦ 청산 · 공통 리스크'),
+        ]
+        self._settings_section_keys: list[str] = [k for k, _ in section_entries]
+        self._section_by_key: dict[str, ttk.Frame] = {}
+        for sid, label in section_entries:
+            sb_list.insert(tk.END, f'  {label}')
+        sb_list.selection_set(0)
+
+        # 우측 스크롤 영역
+        sb_right = ttk.Scrollbar(scroll_host, orient=tk.VERTICAL)
+        canvas = tk.Canvas(scroll_host, background=bg_col, highlightthickness=0)
+        sb_right.config(command=canvas.yview)
+        canvas.configure(yscrollcommand=sb_right.set)
+        sb_right.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        content_inner = ttk.Frame(canvas, padding=(16, 12, 28, 24))
+        self.window_id = canvas.create_window((0, 0), window=content_inner, anchor='nw')
+
+        def _on_canvas_configure(event: tk.Event) -> None:
+            try:
+                w = max(int(event.width) - 8, 520)
+                canvas.itemconfig(self.window_id, width=w)
+            except (tk.TclError, ValueError):
+                pass
+
+        canvas.bind('<Configure>', _on_canvas_configure)
+
+        def _update_scrollregion(_event: tk.Event | None = None) -> None:
+            try:
+                canvas.configure(scrollregion=canvas.bbox('all'))
+            except tk.TclError:
+                pass
+
+        content_inner.bind('<Configure>', _update_scrollregion)
+
+        def _on_mousewheel(event: tk.Event) -> None:
+            try:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            except tk.TclError:
+                pass
+
+        def _bind_wheel(_e: tk.Event | None = None) -> None:
+            try:
+                canvas.bind_all('<MouseWheel>', _on_mousewheel)
+            except tk.TclError:
+                pass
+
+        def _unbind_wheel(_e: tk.Event | None = None) -> None:
+            try:
+                canvas.unbind_all('<MouseWheel>')
+            except tk.TclError:
+                pass
+
+        scroll_host.bind('<Enter>', _bind_wheel)
+        scroll_host.bind('<Leave>', _unbind_wheel)
+
+        for sid, _lbl in section_entries:
+            self._section_by_key[sid] = ttk.Frame(content_inner)
+
+        def _show_settings_section(section_id: str) -> None:
+            try:
+                for fr in self._section_by_key.values():
+                    fr.pack_forget()
+                fr = self._section_by_key.get(section_id)
+                if fr is not None:
+                    fr.pack(fill=tk.BOTH, expand=True)
+                content_inner.update_idletasks()
+                _update_scrollregion()
+                canvas.yview_moveto(0)
+            except (tk.TclError, KeyError):
+                pass
+
+        def _on_sidebar_select(_event: tk.Event | None = None) -> None:
+            try:
+                sel = sb_list.curselection()
+                if not sel:
+                    return
+                idx = int(sel[0])
+                if 0 <= idx < len(self._settings_section_keys):
+                    _show_settings_section(self._settings_section_keys[idx])
+            except (tk.TclError, ValueError, IndexError):
+                pass
+
+        sb_list.bind('<<ListboxSelect>>', _on_sidebar_select)
+
+        # 각 섹션별로 UI 빌드 (부모 프레임만 분리)
+        def _sec_parent(sid: str) -> ttk.Frame:
+            return self._section_by_key[sid]
 
         # --- Helper Methods ---
         def get_next_row(parent):
@@ -240,7 +399,7 @@ class SettingsTab:
             on_unit_change()
 
         # UI 빌드 (그리드 순서대로 배치)
-        cap_f = ttk.LabelFrame(st_main_frame, text=' 💰 [1] 자금 및 계좌 관리 (Account & Fund) ', padding='15')
+        cap_f = ttk.LabelFrame(_sec_parent('fund'), text=' 💰 [1] 자금 및 계좌 관리 ', padding='15')
         cap_f.pack(fill=tk.X, pady=10)
         add_param_row(cap_f, '백테스팅용 초기자금', 'backtest_initial_capital', '원', '시뮬레이션 시작 및 잔고 부족 시 기준')
         add_header(cap_f, '포지션 사이징 (배분 방식)')
@@ -248,7 +407,7 @@ class SettingsTab:
         add_sizing_row(cap_f, '2단계(본대) 비중', 'stage2_amt', 's2_equity_pct', 's2_sizing_unit')
         add_param_row(cap_f, '가상 매매 자동화', None, '', '로직 포착 시 자동 진입 시뮬레이션', toggle_key='use_auto_virtual')
 
-        sel_f = ttk.LabelFrame(st_main_frame, text=' 🔍 [2] 종목 선정 필터 — Track A (눌림목) ', padding='15')
+        sel_f = ttk.LabelFrame(_sec_parent('univ_a'), text=' 🔍 [2-A] 종목 선정 — Track A (눌림목) ', padding='15')
         sel_f.pack(fill=tk.X, pady=10)
         add_param_row(sel_f, 'Track A 활성화', None, '', 'MA 수렴 + 눌림목 유니버스', toggle_key='use_sel_track_a')
         add_param_row(sel_f, '최소 거래대금', 'min_trde_val', '억', '5일 평균 거래대금 기준')
@@ -260,7 +419,7 @@ class SettingsTab:
         add_param_row(sel_f, '최대 감시 종목 수 (A)', 'max_slots_a', '개', 'Track A 유니버스 상한 (기본값 20)')
         add_param_row(sel_f, '일봉 MACD(OSC) 필터', None, '', '일봉 OSC 양수 상시 확인')
 
-        sel_b_f = ttk.LabelFrame(st_main_frame, text=' 🔍 [2-B] 종목 선정 필터 — Track B (추세돌파) ', padding='15')
+        sel_b_f = ttk.LabelFrame(_sec_parent('univ_b'), text=' 🔍 [2-B] 종목 선정 — Track B (추세돌파) ', padding='15')
         sel_b_f.pack(fill=tk.X, pady=10)
         add_param_row(sel_b_f, 'Track B 활성화', None, '', 'MA 정배열 확산 + 추세돌파 유니버스', toggle_key='use_sel_track_b')
         add_param_row(sel_b_f, '최소 거래대금 (B)', 'sel_b_min_trde_val', '억', 'Track B 전용 거래대금 기준 (기본값 60억)')
@@ -273,7 +432,7 @@ class SettingsTab:
         add_param_row(sel_f, '  ㄴ Slow Period', 'macd_slow_daily', '', '기본값 26')
         add_param_row(sel_f, '  ㄴ Signal Period', 'macd_sig_daily', '', '기본값 9')
 
-        strat_f = ttk.LabelFrame(st_main_frame, text=' 🎯 [3] 1단계 진입전략 (Stage 1 Entry Strategy) ', padding='15')
+        strat_f = ttk.LabelFrame(_sec_parent('s1'), text=' 🎯 [3] 1단계 진입 (S1) — 감시 후 매수 신호 ', padding='15')
         strat_f.pack(fill=tk.X, pady=10)
 
         add_header(strat_f, '── 단계 공통 필수 필터 (A/B 모두 적용) ──')
@@ -330,7 +489,7 @@ class SettingsTab:
         add_param_row(type_b_col, 'ATR 손절', 'atr_multiplier_sl_b', '배', '', toggle_key='use_atr_stop_loss_b', widget_list=self.type_b_widgets)
         add_param_row(type_b_col, 'ATR 트레일링', 'atr_multiplier_trail_b', '배', '', toggle_key='use_atr_trailing_stop_b', widget_list=self.type_b_widgets)
 
-        s2_f = ttk.LabelFrame(st_main_frame, text=' 📈 [4] 2단계 추매 전략 (Scaling Up) ', padding='15')
+        s2_f = ttk.LabelFrame(_sec_parent('s2'), text=' 📈 [4] 2단계 추매 (S2) ', padding='15')
         s2_f.pack(fill=tk.X, pady=10)
         add_param_row(s2_f, '1. 20일선 지지 확인', 's2_ma20_gap', '%', toggle_key='use_s2_ma20')
         add_param_row(s2_f, '2. 5일선 회복/지지', 's2_ma5_gap', '%', toggle_key='use_s2_ma5')
@@ -344,7 +503,7 @@ class SettingsTab:
         add_param_row(s2_f, 'S2 ATR 손절', 'atr_multiplier_sl_s2', '배', '평단 보호 최선책', toggle_key='use_atr_stop_loss_s2')
         add_param_row(s2_f, 'S2 추격 익절', 'atr_multiplier_trail_s2', '배', '피라미딩 익절 보호', toggle_key='use_atr_trailing_stop_s2')
 
-        s2b_f = ttk.LabelFrame(st_main_frame, text=' 📈 [4-B] 2단계 추매 전략 — Track B 전용 오버라이드 ', padding='15')
+        s2b_f = ttk.LabelFrame(_sec_parent('s2b'), text=' 📈 [4-B] S2 — Track B 전용 오버라이드 ', padding='15')
         s2b_f.pack(fill=tk.X, pady=10)
         add_header(s2b_f, '공통 s2_* 값과 다르게 설정 시 Type B 종목에만 적용됩니다')
         add_param_row(s2b_f, '1. 20일선 지지 확인 (B)', 's2_b_ma20_gap', '%', toggle_key='use_s2_b_ma20')
@@ -355,7 +514,7 @@ class SettingsTab:
         add_param_row(s2b_f, '6. 최소 수익률 확보 (B)', 's2_b_profit_limit', '%', toggle_key='use_s2_b_profit', hint='진입가 대비 최소 수익률')
         add_param_row(s2b_f, '7. 진입 후 대기 시간 (B)', 's2_b_delay_hours', '시간', '최소 보유 시간 허들', toggle_key='use_s2_b_delay')
 
-        rt_f = ttk.LabelFrame(st_main_frame, text=' 🔫 [5] 전술적 수급 임계값 (Smart Wall System) ', padding='15')
+        rt_f = ttk.LabelFrame(_sec_parent('smart'), text=' 🔫 [5] 전술적 수급 (Smart Wall) ', padding='15')
         rt_f.pack(fill=tk.X, pady=10)
         add_param_row(rt_f, 'Smart Buy 최소 체결강도 (VP)', 'smart_buy_vp', '%', '상승 에너지 확인')
         add_param_row(rt_f, 'Smart Buy 진입용 매도벽 비율', 'smart_buy_ba_ratio', '배', '뚫고 올라갈 물량 유무')
@@ -363,15 +522,15 @@ class SettingsTab:
         add_param_row(rt_f, 'Smart Exit 탈출용 매수함정 비율', 'smart_exit_ba_ratio', '배', '허수매수세/지루함 포착', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락폭 제한', toggle_key='use_smart_exit')
 
-        mkt_f = ttk.LabelFrame(st_main_frame, text=' 🌐 [6] 시장 트렌드 필터 임계값 (Market Trend Gate) ', padding='15')
+        mkt_f = ttk.LabelFrame(_sec_parent('mkt'), text=' 🌐 [6] 시장 트렌드 게이트 (임계값) ', padding='15')
         mkt_f.pack(fill=tk.X, pady=10)
-        add_param_row(mkt_f, '시장 지수 필터 사용', None, '', 'UP/NEUTRAL/DOWN 3단계 차등 적용', toggle_key='use_market_filter')
+        add_header(mkt_f, '※ 시장필터 ON/OFF는 ③ S1 공통에서 설정합니다')
         add_param_row(mkt_f, 'MSI 하락 임계값 (DOWN 기준)', 'msi_down_threshold', '', '이 값 미만이면 DOWN → 매수 전면 차단 (기본 -0.10)')
         add_param_row(mkt_f, 'MSI 상승 임계값 (UP 기준)', 'msi_up_threshold', '', '이 값 이상이면 UP → 모든 진입 허용 (기본 0.10)')
         add_param_row(mkt_f, 'ADX 최소 추세강도 (NEUTRAL 기준)', 'adx_min_threshold', '', 'ADX가 이 값 미만이면 NEUTRAL 판정 (기본 15)')
         add_param_row(mkt_f, 'VIX 공포지수 상한 (DOWN 기준)', 'vix_down_threshold', '', '이 값 초과 시 DOWN → 매수 전면 차단 (기본 30)')
 
-        exit_f = ttk.LabelFrame(st_main_frame, text=' 🛡️ [7] 공통 리스크 관리 (Global Exit & Safety) ', padding='15')
+        exit_f = ttk.LabelFrame(_sec_parent('exit'), text=' 🛡️ [7] 청산 · 공통 리스크 ', padding='15')
         exit_f.pack(fill=tk.X, pady=10)
         add_param_row(exit_f, '1. 갭하락 즉시 손절', 'gap_down_limit', '%', '시가 붕괴 대응', toggle_key='use_gap_down_exit')
         add_param_row(exit_f, '2. 개장 초기 매도 유예', 'gap_grace_mins', '분', '장 초반 휩소 방지(9:15까지)', toggle_key='use_gap_grace')
@@ -385,6 +544,9 @@ class SettingsTab:
         add_param_row(exit_f, 'S1 눌림(A) Flash Exit', 's1_a_flash_exit_pct', '%', 'A 전용 즉시 탈출 기준', toggle_key='use_s1_a_flash_exit')
         add_param_row(exit_f, 'S1 돌파(B) Flash Exit', 's1_b_flash_exit_pct', '%', 'B 전용 즉시 탈출 기준', toggle_key='use_s1_b_flash_exit')
         add_param_row(exit_f, 'Stage 2 Flash Exit', 's2_flash_exit_pct', '%', '추매 포지션 즉시 탈출', toggle_key='use_s2_flash_exit')
+
+        # 초기 표시: 첫 번째 사이드바 항목
+        _show_settings_section('fund')
 
         self.app.root.after(100, self._init_toggles)
         
