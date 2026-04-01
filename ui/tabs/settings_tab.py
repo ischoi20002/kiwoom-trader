@@ -274,19 +274,19 @@ class SettingsTab:
         add_param_row(sel_f, '  ㄴ Slow Period', 'macd_slow_daily', '', '기본값 26')
         add_param_row(sel_f, '  ㄴ Signal Period', 'macd_sig_daily', '', '기본값 9')
 
-        entry_f = ttk.LabelFrame(st_main_frame, text=' 🎯 [3] 진입 시그널 필터 (Signal Logic - 15m) ', padding='15')
-        entry_f.pack(fill=tk.X, pady=10)
-        add_param_row(entry_f, '시장 지수 필터 (3단계-매수공통)', None, '', 'UP/NEUTRAL/DOWN 차등 가중치', toggle_key='use_market_filter')
-        add_param_row(entry_f, '매수 진입 RSI 하한', 'buy_rsi_min', '', '과매도권/반등 확인용 최저선', toggle_key='use_rsi_min')
-        add_param_row(entry_f, '15분봉 MACD 필터', None, '', '실시간 수급 모멘텀 확인', toggle_key='use_macd_signal')
-        add_param_row(entry_f, '  ㄴ Fast Period', 'macd_fast_entry', '', '기본값 12')
-        add_param_row(entry_f, '  ㄴ Slow Period', 'macd_slow_entry', '', '기본값 26')
-        add_param_row(entry_f, '  ㄴ Signal Period', 'macd_sig_entry', '', '기본값 9')
-        add_param_row(entry_f, 'RSI 시그널 필터', 'rsi_sig_period', '봉', 'S1/S2 공통 지표 주기', toggle_key='use_rsi_sig_filter')
-
-        strat_f = ttk.LabelFrame(st_main_frame, text=' 🚀 [4] 단계별 매매 상세 전략 (Mastery Strategies) ', padding='15')
+        strat_f = ttk.LabelFrame(st_main_frame, text=' 🎯 [3] 1단계 진입전략 (Stage 1 Entry Strategy) ', padding='15')
         strat_f.pack(fill=tk.X, pady=10)
-        add_header(strat_f, '1단계 (S1) [Type A: 눌림목 가이드]')
+
+        add_header(strat_f, '── 단계 공통 필수 필터 (15분봉 기반) ──')
+        add_param_row(strat_f, '시장 지수 필터 (매수공통)', None, '', 'UP/NEUTRAL/DOWN 차등 가중치', toggle_key='use_market_filter')
+        add_param_row(strat_f, '매수 진입 RSI 하한', 'buy_rsi_min', '', '과매도권/반등 확인용 최저선', toggle_key='use_rsi_min')
+        add_param_row(strat_f, '15분봉 MACD 필터', None, '', '실시간 수급 모멘텀 확인', toggle_key='use_macd_signal')
+        add_param_row(strat_f, '  ㄴ Fast Period', 'macd_fast_entry', '', '기본값 12')
+        add_param_row(strat_f, '  ㄴ Slow Period', 'macd_slow_entry', '', '기본값 26')
+        add_param_row(strat_f, '  ㄴ Signal Period', 'macd_sig_entry', '', '기본값 9')
+        add_param_row(strat_f, 'RSI 시그널 필터', 'rsi_sig_period', '봉', 'S1/S2 공통 지표 주기', toggle_key='use_rsi_sig_filter')
+
+        add_header(strat_f, '── Type A: 눌림목 진입 조건 ──')
         add_param_row(strat_f, 'A 전용 사용', None, '', '중립/순풍 장세 사용 가능', toggle_key='use_type_a')
         add_param_row(strat_f, 'A RSI 상한선', 'buy_rsi_max_a', '', '눌림 깊이 확인용 (기본 65)', widget_list=self.type_a_widgets)
         add_param_row(strat_f, 'A Smart Buy', None, '', '진입 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_a', widget_list=self.type_a_widgets)
@@ -298,8 +298,8 @@ class SettingsTab:
         add_param_row(strat_f, 'A 거래량 급증확인', 'vol_surge', '배', '전일 평균 대비 폭발력', toggle_key='use_vol_surge', widget_list=self.type_a_widgets)
         add_param_row(strat_f, 'A ATR 손절', 'atr_multiplier_sl_a', '배', '철벽 수비형 ATR 손절', toggle_key='use_atr_stop_loss_a', widget_list=self.type_a_widgets)
         add_param_row(strat_f, 'A 추격 익절', 'atr_multiplier_trail_a', '배', '수익 극대화용 트레일링', toggle_key='use_atr_trailing_stop_a', widget_list=self.type_a_widgets)
-        
-        add_header(strat_f, '1단계 (S1) [Type B: 돌파형 가이드]')
+
+        add_header(strat_f, '── Type B: 돌파형 진입 조건 ──')
         add_param_row(strat_f, 'B 전용 사용', None, '', '순풍(UP) 장세 전용', toggle_key='use_type_b')
         add_param_row(strat_f, 'B RSI 상한선', 'buy_rsi_max_b', '', '돌파 강점 확인용 (기본 70)', widget_list=self.type_b_widgets)
         add_param_row(strat_f, 'B Smart Buy', None, '', '돌파 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_b', widget_list=self.type_b_widgets)
@@ -309,7 +309,7 @@ class SettingsTab:
         add_param_row(strat_f, 'B ATR 손절', 'atr_multiplier_sl_b', '배', '공격적 수비형 ATR 손절', toggle_key='use_atr_stop_loss_b', widget_list=self.type_b_widgets)
         add_param_row(strat_f, 'B 추격 익절', 'atr_multiplier_trail_b', '배', '고가추격형 트레일링', toggle_key='use_atr_trailing_stop_b', widget_list=self.type_b_widgets)
 
-        s2_f = ttk.LabelFrame(st_main_frame, text=' 📈 [5] 2단계 추매 전략 (Scaling Up) ', padding='15')
+        s2_f = ttk.LabelFrame(st_main_frame, text=' 📈 [4] 2단계 추매 전략 (Scaling Up) ', padding='15')
         s2_f.pack(fill=tk.X, pady=10)
         add_param_row(s2_f, '1. 20일선 지지 확인', 's2_ma20_gap', '%', toggle_key='use_s2_ma20')
         add_param_row(s2_f, '2. 5일선 회복/지지', 's2_ma5_gap', '%', toggle_key='use_s2_ma5')
@@ -323,7 +323,7 @@ class SettingsTab:
         add_param_row(s2_f, 'S2 ATR 손절', 'atr_multiplier_sl_s2', '배', '평단 보호 최선책', toggle_key='use_atr_stop_loss_s2')
         add_param_row(s2_f, 'S2 추격 익절', 'atr_multiplier_trail_s2', '배', '피라미딩 익절 보호', toggle_key='use_atr_trailing_stop_s2')
 
-        s2b_f = ttk.LabelFrame(st_main_frame, text=' 📈 [5-B] 2단계 추매 전략 — Track B 전용 오버라이드 ', padding='15')
+        s2b_f = ttk.LabelFrame(st_main_frame, text=' 📈 [4-B] 2단계 추매 전략 — Track B 전용 오버라이드 ', padding='15')
         s2b_f.pack(fill=tk.X, pady=10)
         add_header(s2b_f, '공통 s2_* 값과 다르게 설정 시 Type B 종목에만 적용됩니다')
         add_param_row(s2b_f, '1. 20일선 지지 확인 (B)', 's2_b_ma20_gap', '%', toggle_key='use_s2_b_ma20')
@@ -334,7 +334,7 @@ class SettingsTab:
         add_param_row(s2b_f, '6. 최소 수익률 확보 (B)', 's2_b_profit_limit', '%', toggle_key='use_s2_b_profit', hint='진입가 대비 최소 수익률')
         add_param_row(s2b_f, '7. 진입 후 대기 시간 (B)', 's2_b_delay_hours', '시간', '최소 보유 시간 허들', toggle_key='use_s2_b_delay')
 
-        rt_f = ttk.LabelFrame(st_main_frame, text=' 🔫 [6] 전술적 수급 임계값 (Smart Wall System) ', padding='15')
+        rt_f = ttk.LabelFrame(st_main_frame, text=' 🔫 [5] 전술적 수급 임계값 (Smart Wall System) ', padding='15')
         rt_f.pack(fill=tk.X, pady=10)
         add_param_row(rt_f, 'Smart Buy 최소 체결강도 (VP)', 'smart_buy_vp', '%', '상승 에너지 확인')
         add_param_row(rt_f, 'Smart Buy 진입용 매도벽 비율', 'smart_buy_ba_ratio', '배', '뚫고 올라갈 물량 유무')
@@ -342,7 +342,7 @@ class SettingsTab:
         add_param_row(rt_f, 'Smart Exit 탈출용 매수함정 비율', 'smart_exit_ba_ratio', '배', '허수매수세/지루함 포착', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락폭 제한', toggle_key='use_smart_exit')
 
-        mkt_f = ttk.LabelFrame(st_main_frame, text=' 🌐 [7] 시장 트렌드 필터 임계값 (Market Trend Gate) ', padding='15')
+        mkt_f = ttk.LabelFrame(st_main_frame, text=' 🌐 [6] 시장 트렌드 필터 임계값 (Market Trend Gate) ', padding='15')
         mkt_f.pack(fill=tk.X, pady=10)
         add_param_row(mkt_f, '시장 지수 필터 사용', None, '', 'UP/NEUTRAL/DOWN 3단계 차등 적용', toggle_key='use_market_filter')
         add_param_row(mkt_f, 'MSI 하락 임계값 (DOWN 기준)', 'msi_down_threshold', '', '이 값 미만이면 DOWN → 매수 전면 차단 (기본 -0.10)')
@@ -350,7 +350,7 @@ class SettingsTab:
         add_param_row(mkt_f, 'ADX 최소 추세강도 (NEUTRAL 기준)', 'adx_min_threshold', '', 'ADX가 이 값 미만이면 NEUTRAL 판정 (기본 15)')
         add_param_row(mkt_f, 'VIX 공포지수 상한 (DOWN 기준)', 'vix_down_threshold', '', '이 값 초과 시 DOWN → 매수 전면 차단 (기본 30)')
 
-        exit_f = ttk.LabelFrame(st_main_frame, text=' 🛡️ [8] 공통 리스크 관리 (Global Exit & Safety) ', padding='15')
+        exit_f = ttk.LabelFrame(st_main_frame, text=' 🛡️ [7] 공통 리스크 관리 (Global Exit & Safety) ', padding='15')
         exit_f.pack(fill=tk.X, pady=10)
         add_param_row(exit_f, '1. 갭하락 즉시 손절', 'gap_down_limit', '%', '시가 붕괴 대응', toggle_key='use_gap_down_exit')
         add_param_row(exit_f, '2. 개장 초기 매도 유예', 'gap_grace_mins', '분', '장 초반 휩소 방지(9:15까지)', toggle_key='use_gap_grace')
