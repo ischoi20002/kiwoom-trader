@@ -119,6 +119,42 @@ DEFAULT_SETTINGS = {
     "atr_multiplier_sl_b": 2.5,
     "atr_multiplier_trail_a": 5.0,
     "atr_multiplier_trail_b": 4.0,
+
+    # Track A/B 종목선정 활성화 플래그
+    "use_sel_track_a": True,
+    "use_sel_track_b": True,
+    "max_slots_a": 20,
+    "max_slots_b": 10,
+
+    # Track B 전용 종목선정 파라미터
+    "sel_b_min_trde_val": 60.0,
+    "sel_b_rsi_min": 45.0,
+    "sel_b_rsi_max": 75.0,
+    "sel_b_vol_ratio": 1.5,
+    "sel_b_vol_lookback": 10.0,
+
+    # 시장 트렌드 게이트 임계값
+    "msi_down_threshold": -0.10,
+    "msi_up_threshold": 0.10,
+    "adx_min_threshold": 15.0,
+    "vix_down_threshold": 30.0,
+
+    # S2 Type B 전용 오버라이드 (None이면 공통 s2_* 값 사용)
+    # 아래 값은 초기 기본값 — 공통 s2_* 와 동일하게 설정하여 중립 출발
+    "use_s2_b_ma20": True,
+    "s2_b_ma20_gap": 0.0,
+    "use_s2_b_ma5": True,
+    "s2_b_ma5_gap": -0.5,
+    "use_s2_b_rsi_sig": True,
+    "s2_b_rsi_gap": 0.0,
+    "use_s2_b_macd_gc": True,
+    "s2_b_macd_gap": 0.0,
+    "use_s2_b_vol_surge": True,
+    "s2_b_vol_ratio": 1.5,
+    "use_s2_b_profit": True,
+    "s2_b_profit_limit": 1.0,
+    "use_s2_b_delay": True,
+    "s2_b_delay_hours": 24.0,
 }
 
 # [Zombie Parameter Prevention] 유효 키 목록

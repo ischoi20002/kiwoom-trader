@@ -226,13 +226,22 @@ class DynamicBacktester:
             self._current_track_map = track_map
             
             if not top_codes:
+                # [v4.7] 폴백: select_monitoring_targets 결과에서 Track A/B 구분 시도
                 prev_day_dt = datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=1)
                 candidates_df = strategy_selector.select_monitoring_targets(
                     self.settings, logger_callback=lambda x: None, target_date=prev_day_dt, data_manager=self.db
                 )
-                top_codes = candidates_df.head(int(self.settings.get('max_slots', 20)))['Code'].tolist() if candidates_df is not None else []
-                for c in top_codes:
-                    track_map.setdefault(c, 'A')
+                if candidates_df is not None and not candidates_df.empty:
+                    max_s_fb = int(self.settings.get('max_slots', 20))
+                    use_b_fb = self.settings.get('use_sel_track_b', True)
+                    for _, row in candidates_df.head(max_s_fb).iterrows():
+                        c = row['Code']
+                        top_codes.append(c)
+                        # Valid_B 컬럼이 있으면 B 트랙 여부를 판별, 없으면 A로 기본 처리
+                        if use_b_fb and row.get('Valid_B', False):
+                            track_map[c] = 'B' if row.get('Valid_A', True) is False else 'AB'
+                        else:
+                            track_map.setdefault(c, 'A')
             
             # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보)
             max_s = int(self.settings.get('max_slots', 20))
@@ -888,10 +897,28 @@ class DynamicBacktester:
             # 15분 내내 조건을 만족하지 못한 경우라도 리포트에는 실제 체결 내역만 남김
 
     def _check_s2_approval(self, code, h_info, last_row, indicator_row=None, market_trend='UP'):
-        """[v22.1] 2차 매수 승인 로직 (backtest_engine.TradingStrategy._check_s2_approval 통합 연동)"""
+        """[v22.2] 2차 매수 승인 로직 (backtest_engine.TradingStrategy._check_s2_approval 통합 연동)
+        
+        수정 내용:
+        - pos 딕셔너리에 sig_type 포함 → 엔진의 Type B 판별(_is_b) 정확도 보장
+        - 진단 로그도 _k() 동일 로직으로 Type A/B 파라미터 분기 반영
+        """
         s = self.settings
         ind = indicator_row if indicator_row is not None else last_row
         curr_price = last_row['Close'] if hasattr(last_row, '__getitem__') else 0
+
+        # Type B 여부 판별 (엔진과 동일한 기준)
+        _sig = h_info.get('sig_type', h_info.get('reason', ''))
+        _is_b = 'TYPE_B' in str(_sig)
+
+        def _k(key: str, default=None):
+            """Type B이면 B전용 키 우선 조회, 없으면 공통(A) 키로 폴백"""
+            if _is_b:
+                b_key = key.replace('s2_', 's2_b_').replace('use_s2_', 'use_s2_b_')
+                val = s.get(b_key)
+                if val is not None:
+                    return val
+            return s.get(key, default)
 
         # --- 진단용 조건별 평가 (Stage 2 거절 원인 추적) ---
         reasons = []
@@ -900,62 +927,62 @@ class DynamicBacktester:
         if s.get('use_market_filter', True) and market_trend not in ('UP', 'AGGRESSIVE'):
             reasons.append(f"MARKET:{market_trend}")
 
-        # 1. 24시간 대기
-        if s.get('use_s2_delay', True):
+        # 1. 대기 시간 (Type B 오버라이드 반영)
+        if _k('use_s2_delay', True):
             try:
                 entry_dt = pd.to_datetime(h_info['entry_date'])
                 curr_dt = pd.to_datetime(last_row.name)
                 elapsed_h = (curr_dt - entry_dt).total_seconds() / 3600
-                min_hours = float(s.get('s2_delay_hours', 24))
+                min_hours = float(_k('s2_delay_hours', 24))
                 if elapsed_h < min_hours:
                     reasons.append(f"DELAY:{elapsed_h:.1f}h<{min_hours}h")
             except Exception:
                 pass
 
-        # 2. MA20 위치
-        if s.get('use_s2_ma20', True):
+        # 2. MA20 위치 (Type B 오버라이드 반영)
+        if _k('use_s2_ma20', True):
             ma20 = ind.get('MA20', 0) if hasattr(ind, 'get') else 0
-            gap = float(s.get('s2_ma20_gap', 0.0))
+            gap = float(_k('s2_ma20_gap', 0.0))
             if curr_price < ma20 * (1 + gap / 100.0):
                 reasons.append(f"MA20:{curr_price}<{ma20*(1+gap/100.0):.0f}")
 
-        # 3. MA5 지지
-        if s.get('use_s2_ma5', True):
+        # 3. MA5 지지 (Type B 오버라이드 반영)
+        if _k('use_s2_ma5', True):
             ma5 = ind.get('MA5', 0) if hasattr(ind, 'get') else 0
-            gap = float(s.get('s2_ma5_gap', -0.5))
+            gap = float(_k('s2_ma5_gap', -0.5))
             if curr_price < ma5 * (1 + gap / 100.0):
                 reasons.append(f"MA5:{curr_price}<{ma5*(1+gap/100.0):.0f}")
 
-        # 4. 거래량
-        if s.get('use_s2_vol_surge', True):
+        # 4. 거래량 (Type B 오버라이드 반영)
+        if _k('use_s2_vol_surge', True):
             vol = ind.get('Volume', 0) if hasattr(ind, 'get') else 0
             vol_tgt = ind.get('Prev_Day_Vol', ind.get('Vol_MA20', ind.get('Volume', 0))) if hasattr(ind, 'get') else 0
-            ratio = float(s.get('s2_vol_ratio', 1.5))
+            ratio = float(_k('s2_vol_ratio', 1.5))
             if vol < vol_tgt * ratio:
                 reasons.append(f"VOL:{vol}<{vol_tgt*ratio:.0f}")
 
-        # 5. RSI
-        if s.get('use_s2_rsi_sig', True):
+        # 5. RSI (Type B 오버라이드 반영)
+        if _k('use_s2_rsi_sig', True):
             rsi_val = ind.get('RSI', 0) if hasattr(ind, 'get') else 0
             rsi_sig = ind.get('RSI_Sig', 50) if hasattr(ind, 'get') else 50
             rsi_prev = ind.get('Prev_RSI', rsi_val) if hasattr(ind, 'get') else rsi_val
-            gap = float(s.get('s2_rsi_gap', 0.0))
+            gap = float(_k('s2_rsi_gap', 0.0))
             if rsi_val < rsi_sig * (1 + gap / 100.0) or rsi_val <= rsi_prev:
                 reasons.append(f"RSI:{rsi_val:.1f}<sig{rsi_sig:.1f}orDn")
 
-        # 6. MACD/OSC
-        if s.get('use_s2_macd_gc', True):
+        # 6. MACD/OSC (Type B 오버라이드 반영)
+        if _k('use_s2_macd_gc', True):
             macd_val = ind.get('MACD', 0) if hasattr(ind, 'get') else 0
             macd_sig = ind.get('MACD_Sig', 0) if hasattr(ind, 'get') else 0
             osc_val = ind.get('OSC', 1) if hasattr(ind, 'get') else 1
             osc_prev = ind.get('Prev_OSC', osc_val) if hasattr(ind, 'get') else osc_val
-            gap = float(s.get('s2_macd_gap', 0.0))
+            gap = float(_k('s2_macd_gap', 0.0))
             if macd_val < macd_sig + gap or osc_val <= 0 or osc_val <= osc_prev:
                 reasons.append(f"MACD:{macd_val:.3f}<sig{macd_sig:.3f}orOSC:{osc_val:.3f}")
 
-        # 7. 수익권
-        if s.get('use_s2_profit', True):
-            profit_limit = float(s.get('s2_profit_limit', 1.0))
+        # 7. 수익권 (Type B 오버라이드 반영)
+        if _k('use_s2_profit', True):
+            profit_limit = float(_k('s2_profit_limit', 1.0))
             avg_p = h_info.get('avg_p', curr_price)
             if avg_p > 0:
                 profit_pct = (curr_price / avg_p - 1) * 100
@@ -968,17 +995,24 @@ class DynamicBacktester:
             ts = str(getattr(last_row, 'name', ''))[:19]
             avg_p_val = h_info.get('avg_p', 0)
             profit_log = (curr_price / avg_p_val - 1) * 100 if avg_p_val > 0 else 0
-            log_line = f"{ts},{code},{'OK' if approved else 'REJECT'},{profit_log:.2f}%,{';'.join(reasons) if reasons else 'ALL_PASS'}\n"
+            track_label = 'B' if _is_b else 'A'
+            log_line = (
+                f"{ts},{code},Track{track_label},"
+                f"{'OK' if approved else 'REJECT'},{profit_log:.2f}%,"
+                f"{';'.join(reasons) if reasons else 'ALL_PASS'}\n"
+            )
             self._s2_log_buffer.append(log_line)
         except Exception:
             pass
 
         # backtest_engine 형식을 맞추기 위해 가상의 pos 객체 생성
+        # [Bug Fix] sig_type 포함 → 엔진의 _is_b 판별이 정확하게 동작
         pos = {
             'entry_date': h_info['entry_date'],
             'avg_price': h_info['avg_p'],
             'qty': h_info['qty'],
-            'invested': h_info['avg_p'] * h_info['qty']
+            'invested': h_info['avg_p'] * h_info['qty'],
+            'sig_type': _sig,
         }
         # backtest_engine의 정적 메서드 호출
         return TradingStrategy._check_s2_approval(pos, last_row, self.settings, indicator_row=indicator_row, market_trend=market_trend)
