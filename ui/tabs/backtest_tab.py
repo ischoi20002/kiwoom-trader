@@ -31,19 +31,11 @@ class BacktestTab:
         self.opt_params_vars = self.app.opt_params_vars
         
         # [v26.0] 최적화 파라미터 상세 정보 사전 (표시명, 카테고리, 설명)
+        # [주의] 종목선정 파라미터(min_trde_val, vol_ratio, vol_lookback, ma_convergence, sel_rsi_max/min 등)는
+        # SimpleBacktester 기반 최적화와 무관 (DynamicBacktester에서만 유효) → 의도적으로 제외
         self.PARAM_INFO = {
             's1_equity_pct': ('S1_Equity%', '자금관리', '1단계 비중 (%)'),
             's2_equity_pct': ('S2_Equity%', '자금관리', '2단계 비중 (%)'),
-            'min_trde_val': ('Min_Trade_Amt', '종목선정(A)', '최소 거래 대금 (억)'),
-            'vol_ratio': ('Vol_Surge_Ratio', '종목선정(A)', '거래량 분출 비율 (배)'),
-            'vol_lookback': ('Vol_Check_Days', '종목선정(A)', '분출 확인 기간 (일)'),
-            'ma_convergence': ('MA_Conv_Limit', '종목선정(A)', '이평선 수렴도 기준 (%)'),
-            'sel_rsi_max': ('Sel_RSI_High', '종목선정(A)', '종목 선정 RSI 상한'),
-            'sel_rsi_min': ('Sel_RSI_Low', '종목선정(A)', '종목 선정 RSI 하한'),
-            # Track B 전용
-            'sel_b_rsi_min': ('B_RSI_Low', '종목선정(B)', 'Track B RSI 하한'),
-            'sel_b_rsi_max': ('B_RSI_High', '종목선정(B)', 'Track B RSI 상한'),
-            'sel_b_min_trde_val': ('B_Min_Trade', '종목선정(B)', 'Track B 최소 거래대금 (억)'),
             'buy_rsi_max_a': ('A_RSI_High', '단계별 전략(A)', '눌림(A) RSI 상한선'),
             'gc_window': ('A_GC_Window', '단계별 전략(A)', '눌림(A) 이평 골든크로스 기간'),
             'vol_surge': ('A_Vol_Surge', '단계별 전략(A)', '눌림(A) 거래량 급증 배수'),

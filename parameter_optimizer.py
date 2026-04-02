@@ -330,7 +330,7 @@ class ParameterOptimizer:
             'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
             # macd_fast_entry, macd_slow_entry, macd_sig_entry 는 제거 (지표에 영향)
             'backtest_initial_capital', 'sel_rsi_min', 'sel_rsi_max',
-            'gap_grace_mins', 'min_trde_val', 'vol_ratio',
+            'gap_grace_mins', 'min_trde_val', 'vol_ratio', 'vol_lookback',
             's2_ma5_gap', 'use_s2_ma20', 'use_s2_vol_surge', 'use_s2_rsi_sig', 'use_s2_macd_gc',
             'use_market_filter', 'buy_rsi_min',
             # [v4.6] 시장 트렌드 판정 임계값 (지표 계산과 무관, 신호/필터 로직에만 영향)

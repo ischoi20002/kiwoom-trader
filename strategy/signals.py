@@ -116,8 +116,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     signal = signal_a | signal_b
     
     if settings.get('use_macd_signal', True):
-        # [v26.10] MACD Momentum Filter: Ensure OSC is positive AND increasing (energy strengthening)
-        signal &= (df['OSC'] > 0) & (df['OSC'] > df['OSC'].shift(1))
+        osc_rising = df['OSC'] > df['OSC'].shift(1)
+        osc_filter = (df['OSC'] > 0) & osc_rising if settings.get('use_osc_positive', False) else osc_rising
+        signal &= osc_filter
     
     # 8. 수급 합치도 (Confluence Score) 계산 - [v3.5]
     def calc_met_count(sig_type):
@@ -137,9 +138,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         else:
             return 0, 1
         
-        # 공통 필터 추가
         if settings.get('use_macd_signal', True):
-            conds.append((df['OSC'] > 0) & (df['OSC'] > df['OSC'].shift(1)))
+            osc_r = df['OSC'] > df['OSC'].shift(1)
+            conds.append((df['OSC'] > 0) & osc_r if settings.get('use_osc_positive', False) else osc_r)
         
         met = sum([c.astype(int) for c in conds])
         return met, len(conds)

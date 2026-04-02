@@ -83,6 +83,8 @@ class DataManagerV2:
             """)
             
             # 2. 15분봉 테이블 (조회 성능을 위해 별도 관리)
+            # PK(code, datetime)로 (code, 구간) 조회가 이미 최적화됨. 아래 idx_bars_15m_code_dt는
+            # 구 스키마/마이그레이션 호환 및 EXPLAIN 일관성용 CREATE INDEX IF NOT EXISTS.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bars_15m (
                     code TEXT,

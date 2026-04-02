@@ -140,7 +140,11 @@ class SignalEngine:
                         vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
                         ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
                         min_p = float(self.app.settings.get('smart_buy_vp', 100.0))
-                        min_r = float(self.app.settings.get('smart_buy_ratio', 1.0))
+                        # S2·백테스트와 동일 키. 구버전에 smart_buy_ratio만 있으면 폴백
+                        _st = self.app.settings
+                        min_r = float(
+                            _st.get("smart_buy_ba_ratio", _st.get("smart_buy_ratio", 1.5))
+                        )
                         
                         if vol_power < min_p or ask_bid_ratio < min_r:
                             is_buy = False

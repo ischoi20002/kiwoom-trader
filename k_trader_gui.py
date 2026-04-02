@@ -223,7 +223,7 @@ class KiwoomApp:
             'buy_rsi_max_b', 'vol_surge_b', 'atr_multiplier_sl_b', 'atr_multiplier_trail_b',
             # 2차 추매 (S2)
             's2_vol_ratio', 's2_profit_limit', 's2_delay_hours', 'atr_multiplier_sl_s2', 'atr_multiplier_trail_s2',
-            # 전술적 수급
+            # 전술적 수급 (S1 진입 Smart Buy + Exit)
             'smart_buy_vp', 'smart_buy_ba_ratio', 'smart_exit_vp', 'smart_exit_ba_ratio', 'smart_exit_price_threshold',
             # 공통/리스크
             'gap_down_limit', 'gap_grace_mins', 'atr_period', 

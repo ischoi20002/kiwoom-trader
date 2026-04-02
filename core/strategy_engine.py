@@ -106,7 +106,7 @@ class StrategyEngine:
                     if macd < m_sig + float(s.get('s2_macd_gap', 0.0)) or osc <= 0 or osc <= prev_osc: 
                         can_addon = False
 
-            # 3. 수급 컨펌 (Smart Buy S2)
+            # 3. 수급 컨펌 (Smart Buy S2) — 전술적 수급 VP/BA와 동일 키 사용
             if can_addon and s.get('use_smart_buy_s2', True):
                 if vol_power < float(s.get('smart_buy_vp', 120.0)) or ask_bid_ratio < float(s.get('smart_buy_ba_ratio', 1.5)):
                     can_addon = False
@@ -176,7 +176,7 @@ class StrategyEngine:
                 prev_osc = float(self._get_val(ind, 'Prev_OSC', 0))
                 if macd >= macd_sig and osc > 0 and osc > prev_osc: met += 1
 
-        # 4. 수급 지표
+        # 4. 수급 지표 (추매 Smart Buy — smart_buy_vp / smart_buy_ba_ratio)
         if s.get('use_smart_buy_s2', True):
             total += 1
             if vol_power >= float(s.get('smart_buy_vp', 120.0)) and ask_bid_ratio >= float(s.get('smart_buy_ba_ratio', 1.5)):

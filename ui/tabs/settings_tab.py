@@ -433,6 +433,7 @@ class SettingsTab:
         add_header(strat_f, '── 단계 공통 필수 필터 (A/B 모두 적용) ──')
         add_param_row(strat_f, '시장 지수 필터', None, '', 'UP/NEUTRAL/DOWN 차등 가중치', toggle_key='use_market_filter')
         add_param_row(strat_f, '15분봉 MACD 필터', None, '', '실시간 수급 모멘텀 확인', toggle_key='use_macd_signal')
+        add_param_row(strat_f, '  ㄴ OSC>0 양수 요구', None, '', 'OFF=OSC상승만, ON=양수+상승', toggle_key='use_osc_positive')
         add_param_row(strat_f, '  ㄴ Fast Period', 'macd_fast_entry', '', '기본값 12')
         add_param_row(strat_f, '  ㄴ Slow Period', 'macd_slow_entry', '', '기본값 26')
         add_param_row(strat_f, '  ㄴ Signal Period', 'macd_sig_entry', '', '기본값 9')
@@ -470,8 +471,9 @@ class SettingsTab:
         add_param_row(s2_f, '3. RSI 시그널 확인', 's2_rsi_gap', '%', toggle_key='use_s2_rsi_sig', hint='RSI가 시그널선을 상향 돌파')
         add_param_row(s2_f, '4. MACD GC 확인', 's2_macd_gap', '', toggle_key='use_s2_macd_gc', hint='MACD가 시그널 상향 돌파')
         add_param_row(s2_f, '5. 거래량 급증 확인', 's2_vol_ratio', '배', toggle_key='use_s2_vol_surge', hint='이전 평균 거래량 대비 배수')
+        add_param_row(s2_f, '  ㄴ 전일동시간 평균 기간', 'prev_vol_lookback', '일', '기준 거래량(Prev_Day_Vol) 산출 기간')
         add_param_row(s2_f, '6. 최소 수익률 확보', 's2_profit_limit', '%', toggle_key='use_s2_profit', hint='진입가 대비 최소 수익률')
-        add_param_row(s2_f, '7. 추매용 Smart Buy', None, '', '추매용 수급 임계치 적용', toggle_key='use_smart_buy_s2')
+        add_param_row(s2_f, '7. 추매용 Smart Buy', None, '', '켜면 [5] 전술적 수급의 VP/BA로 추매도 필터', toggle_key='use_smart_buy_s2')
         add_param_row(s2_f, '8. 진입 후 대기 시간', 's2_delay_hours', '시간', '최소 보유 시간 허들', toggle_key='use_s2_delay')
         add_header(s2_f, 'S2 전용 리스크 제어')
         add_param_row(s2_f, 'S2 ATR 손절', 'atr_multiplier_sl_s2', '배', '평단 보호 최선책', toggle_key='use_atr_stop_loss_s2')
@@ -488,10 +490,10 @@ class SettingsTab:
         add_param_row(s2b_f, '6. 최소 수익률 확보 (B)', 's2_b_profit_limit', '%', toggle_key='use_s2_b_profit', hint='진입가 대비 최소 수익률')
         add_param_row(s2b_f, '7. 진입 후 대기 시간 (B)', 's2_b_delay_hours', '시간', '최소 보유 시간 허들', toggle_key='use_s2_b_delay')
 
-        rt_f = ttk.LabelFrame(_sec_parent('smart'), text=' 🔫 [5] 전술적 수급 (Smart Wall) ', padding='15')
+        rt_f = ttk.LabelFrame(_sec_parent('smart'), text=' 🔫 [5] 전술적 수급 (Smart Buy / Smart Exit) ', padding='15')
         rt_f.pack(fill=tk.X, pady=10)
-        add_param_row(rt_f, 'Smart Buy 최소 체결강도 (VP)', 'smart_buy_vp', '%', '상승 에너지 확인')
-        add_param_row(rt_f, 'Smart Buy 진입용 매도벽 비율', 'smart_buy_ba_ratio', '배', '뚫고 올라갈 물량 유무')
+        add_param_row(rt_f, 'Smart Buy 최소 체결강도 (VP)', 'smart_buy_vp', '%', 'S1 진입 + (옵션) S2 추매 Smart Buy 공통')
+        add_param_row(rt_f, 'Smart Buy 매도벽 비율 (BA)', 'smart_buy_ba_ratio', '배', 'S1 진입 + (옵션) S2 추매 Smart Buy 공통')
         add_param_row(rt_f, 'Smart Exit 탈출용 체결강도 (VP)', 'smart_exit_vp', '%', '에너지 소멸 확인', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 탈출용 매수함정 비율', 'smart_exit_ba_ratio', '배', '허수매수세/지루함 포착', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락폭 제한', toggle_key='use_smart_exit')
@@ -509,6 +511,14 @@ class SettingsTab:
         add_param_row(exit_f, '1. 갭하락 즉시 손절', 'gap_down_limit', '%', '시가 붕괴 대응', toggle_key='use_gap_down_exit')
         add_param_row(exit_f, '2. 개장 초기 매도 유예', 'gap_grace_mins', '분', '장 초반 휩소 방지(9:15까지)', toggle_key='use_gap_grace')
         add_param_row(exit_f, '3. ATR 분석 주기', 'atr_period', '봉', '공통 ATR 지표 주기', toggle_key='use_atr_exit')
+        add_param_row(
+            exit_f,
+            '4. ATR 트레일: 목표 익절% 이후만',
+            None,
+            '',
+            '켜면 익절 목표% 미만 구간은 트레일 미적용(ATR SL은 유효)',
+            toggle_key='use_atr_trail_only_after_tp',
+        )
         add_param_row(exit_f, 'S1 눌림(A) 전용 익절', 's1_a_take_profit', '%', '눌림목 목표 수익률', toggle_key='use_s1_a_tp')
         add_param_row(exit_f, 'S1 눌림(A) 전용 손절', 's1_a_stop_loss', '%', '눌림목 최후 방어선', toggle_key='use_s1_a_stop_loss')
         add_param_row(exit_f, 'S1 돌파(B) 전용 익절', 's1_b_take_profit', '%', '돌파형 목표 수익률', toggle_key='use_s1_b_tp')

@@ -20,6 +20,7 @@ DEFAULT_SETTINGS = {
     "min_trde_val": 50.0,
     "vol_ratio": 1.5,
     "vol_lookback": 10.0,
+    "prev_vol_lookback": 10,
     "ma_convergence": 5.0,
     "sel_rsi_max": 70.0,
     "sel_rsi_min": 30.0,
@@ -31,6 +32,7 @@ DEFAULT_SETTINGS = {
     "use_rsi_min": True,
     "buy_rsi_min": 30.0,
     "use_macd_signal": True,
+    "use_osc_positive": False,
     "macd_fast_entry": 12,
     "macd_slow_entry": 26,
     "macd_sig_entry": 9,
@@ -113,6 +115,8 @@ DEFAULT_SETTINGS = {
     "s1_b_flash_exit_pct": 3.0,
     "use_s2_flash_exit": True,
     "s2_flash_exit_pct": 3.0,
+    # True: ATR 트레일은 해당 구간 목표 익절%(s1_a/b_take_profit, s2_take_profit) 이상 수익일 때만 평가
+    "use_atr_trail_only_after_tp": False,
     
     # ATR Multipliers (Global)
     "atr_multiplier_sl_a": 2.5,

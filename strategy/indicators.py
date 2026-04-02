@@ -130,7 +130,7 @@ def calculate_all_indicators(df, settings):
         df['ATR'] = calculate_atr(df, max(1, atr_p))
         
         # [Perf] Vectorized Prev Day Same Time Volume calculation
-        v_lookback = int(settings.get('vol_lookback', 10))
+        v_lookback = int(settings.get('prev_vol_lookback', settings.get('vol_lookback', 10)))
         vol_lookback = max(1, v_lookback)
         
         df_tmp = df[['Volume']].copy()
@@ -168,7 +168,7 @@ def calculate_buy_indicators_light(df, settings):
     df['Prev_OSC'] = df['OSC'].shift(1)
     
     # Prev Day same time vol (전일 동시간 거래량 평균) - Optimized for v35.8
-    v_lookback = int(settings.get('vol_lookback', 10))
+    v_lookback = int(settings.get('prev_vol_lookback', settings.get('vol_lookback', 10)))
     vol_lookback = max(1, v_lookback)
     
     if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:

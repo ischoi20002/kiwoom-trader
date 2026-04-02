@@ -41,6 +41,46 @@ TRADE_CSV = os.path.join(BASE_DIR, "backtest_trades.csv")
 # print(f"DEBUG [backtest_engine]: BASE_DIR={BASE_DIR}")
 # print(f"DEBUG [backtest_engine]: TRADE_CSV={TRADE_CSV}")
 
+# Dynamic 백테스트 등에서 매 거래마다 파일 open/append 하지 않도록 행 단위 버퍼
+TRADE_CSV_HEADER_LINE: str = "Date,Code,Name,Action,Price,Qty,Return,Reason,Fee,Sig_Type\n"
+_trade_csv_buffer: list[str] = []
+
+
+def clear_trade_csv_buffer() -> None:
+    """TRADE_CSV 버퍼만 비움 (시뮬 시작 시 로그 파일 삭제와 함께 호출)."""
+    with csv_lock:
+        _trade_csv_buffer.clear()
+
+
+def append_trade_csv_line(line: str) -> None:
+    """TRADE_CSV용 한 행(끝에 \\n 포함)을 버퍼에 적재. 스레드 안전."""
+    with csv_lock:
+        _trade_csv_buffer.append(line)
+
+
+def flush_trade_csv_buffer() -> None:
+    """버퍼 내용을 TRADE_CSV에 일괄 기록. 실패 시 버퍼를 유지해 이후 flush에서 재시도 가능."""
+    with csv_lock:
+        if not _trade_csv_buffer:
+            return
+        try:
+            need_header = (not os.path.exists(TRADE_CSV)) or os.path.getsize(TRADE_CSV) == 0
+            with open(TRADE_CSV, "a", encoding="utf-8-sig") as f:
+                if need_header:
+                    f.write(TRADE_CSV_HEADER_LINE)
+                f.writelines(_trade_csv_buffer)
+            _trade_csv_buffer.clear()
+        except OSError as e:
+            try:
+                print(f"[WARN] TRADE_CSV flush 실패(OSError): {e}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                print(f"[WARN] TRADE_CSV flush 실패: {e}")
+            except Exception:
+                pass
+
 class TradingStrategy:
     """[v6.4] 실시간 감시와 백테스팅이 공유하는 매매 전략 엔진"""
     _name_map = None
@@ -218,9 +258,14 @@ class TradingStrategy:
                     return val
             return s.get(key, default)
 
-        # [v4.7] AGGRESSIVE는 UP과 동일하게 S2 허용
-        if s.get('use_market_filter', True) and market_trend not in ('UP', 'AGGRESSIVE'):
-            return False
+        # [v4.8] 시장 필터: Type A는 NEUTRAL에서도 S2 허용, Type B는 UP/AGGRESSIVE만
+        if s.get('use_market_filter', True):
+            if _is_b:
+                if market_trend not in ('UP', 'AGGRESSIVE'):
+                    return False
+            else:
+                if market_trend not in ('UP', 'AGGRESSIVE', 'NEUTRAL'):
+                    return False
 
         # 0. 최소 대기 기간
         if _k('use_s2_delay', True):
@@ -244,47 +289,50 @@ class TradingStrategy:
         except (KeyError, TypeError):
             curr_price = 0.0
 
-        # 1. 20일선 위치
-        if _k('use_s2_ma20', True):
-            ma20_val = ind.get('MA20', 0)
-            gap = float(_k('s2_ma20_gap', 0.0))
-            if curr_price < ma20_val * (1 + gap / 100.0):
-                return False
-
-        # 2. MA5 지지
+        # 1. MA5 지지 (MA20 검사는 MA5에 통합 — MA5>MA20이면 MA20도 대부분 충족)
         if _k('use_s2_ma5', True):
             ma5_val = ind.get('MA5', 0)
             gap = float(_k('s2_ma5_gap', -0.5))
             if curr_price < ma5_val * (1 + gap / 100.0):
                 return False
 
-        # 3. 거래 수급
+        # 2. 거래 수급
         if _k('use_s2_vol_surge', True):
             vol_target = ind.get('Prev_Day_Vol', ind.get('Vol_MA20', ind.get('Volume', 0)))
             ratio = float(_k('s2_vol_ratio', 1.5))
             if ind.get('Volume', 0) < vol_target * ratio:
                 return False
 
-        # 4. RSI 강세 + 모멘텀
+        # 3. 모멘텀 확인 (RSI **또는** MACD — 둘 중 하나만 충족하면 통과)
+        rsi_ok = True
+        macd_ok = True
         if _k('use_s2_rsi_sig', True):
             rsi_sig = ind.get('RSI_Sig', 50)
             rsi_val = ind.get('RSI', 0)
             rsi_prev = ind.get('Prev_RSI', rsi_val)
             gap = float(_k('s2_rsi_gap', 0.0))
-            if rsi_val < rsi_sig * (1 + gap / 100.0) or rsi_val <= rsi_prev:
-                return False
+            rsi_ok = rsi_val >= rsi_sig * (1 + gap / 100.0) and rsi_val > rsi_prev
 
-        # 5. MACD 정배열 + 모멘텀
         if _k('use_s2_macd_gc', True):
             macd_val = ind.get('MACD', 0)
-            macd_sig = ind.get('MACD_Sig', 0)
+            macd_sig_val = ind.get('MACD_Sig', 0)
             osc_val = ind.get('OSC', 1)
             osc_prev = ind.get('Prev_OSC', osc_val)
             gap = float(_k('s2_macd_gap', 0.0))
-            if macd_val < macd_sig + gap or osc_val <= 0 or osc_val <= osc_prev:
-                return False
+            macd_ok = macd_val >= macd_sig_val + gap and osc_val > 0 and osc_val > osc_prev
 
-        # 6. 수익권 확인
+        # 둘 다 켜져 있으면 OR, 하나만 켜져 있으면 그 조건, 둘 다 꺼져 있으면 통과
+        use_rsi = _k('use_s2_rsi_sig', True)
+        use_macd = _k('use_s2_macd_gc', True)
+        if use_rsi and use_macd:
+            if not (rsi_ok or macd_ok):
+                return False
+        elif use_rsi and not rsi_ok:
+            return False
+        elif use_macd and not macd_ok:
+            return False
+
+        # 4. 수익권 확인
         if _k('use_s2_profit', True):
             profit_limit = float(_k('s2_profit_limit', 1.0))
             avg_price = pos.get('avg_price', pos.get('avg_p', curr_price))
@@ -351,6 +399,12 @@ class TradingStrategy:
                 return s2_b_key if is_type_b else s2_a_key
             return b_key if is_type_b else a_key
 
+        def _atr_track_suff() -> str:
+            """ATR SL/트레일용 접미사 (_a / _b / _s2 / _s2_b)"""
+            if stage == 2:
+                return "_s2_b" if is_type_b else "_s2"
+            return "_b" if is_type_b else "_a"
+
         # 1. 익절(Take Profit)
         if not is_exit:
             use_tp = s.get(_exit_key('use_s1_a_tp', 'use_s1_b_tp', 'use_s2_tp', 'use_s2_b_tp'), True)
@@ -360,17 +414,27 @@ class TradingStrategy:
                     is_exit, exit_reason = True, "TAKE_PROFIT"
 
         # 2. 손절(Stop Loss - % 기준)
+        # ATR SL이 켜져 있고 ATR이 유효하면 % 손절은 생략(평단 기준 이중 손절 방지)
         if not is_exit:
             use_sl = s.get(_exit_key('use_s1_a_stop_loss', 'use_s1_b_stop_loss', 'use_s2_stop_loss', 'use_s2_b_stop_loss'), True)
-            if use_sl:
+            skip_pct_sl = False
+            if s.get("use_atr_exit", False) and ind is not None:
+                try:
+                    _ca = float(ind.get("ATR", 0) or 0)
+                    _sfx = _atr_track_suff()
+                    if _ca > 0 and s.get(f"use_atr_stop_loss{_sfx}", True):
+                        skip_pct_sl = True
+                except Exception:
+                    pass
+            if use_sl and not skip_pct_sl:
                 sl_pct = float(s.get(_exit_key('s1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 's2_b_stop_loss'), 3.0))
                 if profit_ratio <= -sl_pct:
                     is_exit, exit_reason = True, "STOP_LOSS"
 
-        # 3. Flash Exit (Trailing from High)
+        # 3. Flash Exit (Trailing from High) — 수익 구간에서만 발동 (손실 방어는 SL에 위임)
         if not is_exit:
             use_flash = s.get(_exit_key('use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 'use_s2_b_flash_exit'), True)
-            if use_flash:
+            if use_flash and profit_ratio >= 0:
                 f_pct = float(s.get(_exit_key('s1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct', 's2_b_flash_exit_pct'), 3.0))
                 if now_price <= max_p * (1.0 - f_pct / 100.0):
                     is_exit, exit_reason = True, "FLASH_EXIT"
@@ -389,18 +453,30 @@ class TradingStrategy:
                 curr_atr = float(ind.get('ATR', 0))
                 entry_atr = float(pos.get('atr_at_entry', curr_atr))
                 if curr_atr > 0:
-                    if stage == 2:
-                        suff = "_s2_b" if is_type_b else "_s2"
-                    else:
-                        suff = "_b" if is_type_b else "_a"
+                    suff = _atr_track_suff()
                     sl_mult = float(s.get(f'atr_multiplier_sl{suff}', 2.5))
                     trail_mult = float(s.get(f'atr_multiplier_trail{suff}', 4.0))
                     use_sl_atr = s.get(f'use_atr_stop_loss{suff}', True)
                     use_trail_atr = s.get(f'use_atr_trailing_stop{suff}', True)
+                    # 목표 익절% 이상에서만 트레일 평가(설정 ON 시). 임계는 TP와 동일 키의 %값.
+                    trail_armed = True
+                    if s.get("use_atr_trail_only_after_tp", False) and use_trail_atr:
+                        tp_arm_pct = float(
+                            s.get(
+                                _exit_key(
+                                    "s1_a_take_profit",
+                                    "s1_b_take_profit",
+                                    "s2_take_profit",
+                                    "s2_b_take_profit",
+                                ),
+                                5.0,
+                            )
+                        )
+                        trail_armed = profit_ratio >= tp_arm_pct
 
                     if use_sl_atr and now_price <= avg_p - (sl_mult * entry_atr):
                         is_exit, exit_reason = True, "ATR_SL"
-                    elif use_trail_atr and now_price <= max_p - (trail_mult * curr_atr):
+                    elif use_trail_atr and trail_armed and now_price <= max_p - (trail_mult * curr_atr):
                         is_exit, exit_reason = True, "ATR_TRAIL"
             except: pass
 
@@ -918,10 +994,10 @@ class SimpleBacktester:
                     # 기존 정적 필터 대신 실시간 지표(indicator_to_use)를 라이브로 평가
                     if TradingStrategy._check_s2_approval(pos, indicator_to_use, self.settings, market_trend=params.get('market_trend', 'UP')):
                         can_buy_s2 = True
-                        if self.use_sb_s2:
-                            ab_ratio = 1.0 / (m1_ba_val + 1e-10)
-                            if ab_ratio < self.sb_ba or m1_vp_val < self.sb_vp:
-                                can_buy_s2 = False
+                    if self.use_sb_s2:
+                        ab_ratio = 1.0 / (m1_ba_val + 1e-10)
+                        if ab_ratio < self.sb_ba or m1_vp_val < self.sb_vp:
+                            can_buy_s2 = False
                         
                         if can_buy_s2:
                             s2_reason = f"1M_ADDON(S2)|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.2f}+{idx}m"
@@ -997,7 +1073,6 @@ class SimpleBacktester:
                     if self.use_sb_s2:
                         ab_ratio = indicators['ask_bid_ratio'][i]
                         v_power = indicators['vol_power'][i]
-                        # [v4.4] S2 추매 정석: 매도벽(Ask) 두터울 때
                         if ab_ratio < self.sb_ba or v_power < self.sb_vp:
                             can_buy_s2 = False
                     

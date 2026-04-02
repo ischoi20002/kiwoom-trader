@@ -11,7 +11,15 @@ importlib.reload(strategy.signals) # [Force] 시그널 로직 업데이트 반�
 importlib.reload(strategy_selector) 
 importlib.reload(bt) 
 import numpy as np
-from backtest_engine import TradingStrategy, csv_lock, SIGNAL_CSV, TRADE_CSV, BASE_DIR
+from backtest_engine import (
+    TradingStrategy,
+    SIGNAL_CSV,
+    TRADE_CSV,
+    BASE_DIR,
+    append_trade_csv_line,
+    clear_trade_csv_buffer,
+    flush_trade_csv_buffer,
+)
 from strategy.simulation_models import SimulatedRealtimeMetrics
 
 class DynamicBacktester:
@@ -58,8 +66,6 @@ class DynamicBacktester:
         self.use_type_b = False
         self.gap_down_lmt = -5.0
         self.stock_name_map = {}
-        # [Perf] S2 진단 로그를 매 호출마다 파일에 쓰지 않고 메모리에 버퍼링 (일별 flush)
-        self._s2_log_buffer: list = []
         
     def run(self, start_date, end_date, interval='15m', callback=None, high_precision=False):
         """메인 시뮬레이션 루프 (일단위 유니버스 갱신 + 분단위/15분단위 체결)"""
@@ -186,17 +192,14 @@ class DynamicBacktester:
         self.daily_equity = [{'date': start_date + " 08:59:00", 'equity': self.initial_cash, 'cash': self.initial_cash, 'holdings_n': 0}]
         
         # 신호 기록 초기화
-        s2_debug_path = os.path.join(BASE_DIR, "s2_debug.csv")
-        for f in [SIGNAL_CSV, TRADE_CSV, s2_debug_path]:
-            if os.path.exists(f): 
-                try: os.remove(f)
-                except: pass
-        # s2_debug.csv 헤더 작성 및 메모리 버퍼 초기화
-        self._s2_log_buffer = []
+        for f in [SIGNAL_CSV, TRADE_CSV]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
         try:
-            with open(s2_debug_path, 'w', encoding='utf-8') as f:
-                f.write(f"# S2 진단 로그 | 기간: {start_date} ~ {end_date}\n")
-                f.write("datetime,code,result,profit_pct,reject_reason\n")
+            clear_trade_csv_buffer()
         except Exception:
             pass
 
@@ -392,7 +395,7 @@ class DynamicBacktester:
                                     can_execute_s2 = True
                                     if self.use_sb_s2:
                                         ab_ratio = last_sig.get('ask_bid_ratio', last_sig.get('Ask_Bid_Ratio', 1.0 / (last_sig.get('bid_ask_ratio', 1.0) + 1e-10)))
-                                        v_power = last_sig.get('vol_power', 100.0)
+                                        v_power = float(last_sig.get('vol_power', last_sig.get('Vol_power', 100.0)))
                                         if ab_ratio < self.sb_ba or v_power < self.sb_vp:
                                             can_execute_s2 = False
                                     
@@ -460,15 +463,11 @@ class DynamicBacktester:
             current_equity = self.cash + sum(h['qty'] * day_data[c]['Close'].iloc[-1] for c, h in self.holdings.items() if c in day_data)
             self.daily_equity.append({'date': current_day, 'equity': current_equity, 'cash': self.cash, 'holdings_n': len(self.holdings)})
             
-            # [Perf] S2 진단 로그 일괄 flush (매 호출마다 open/write/close 대신 하루치를 한번에 기록)
-            if self._s2_log_buffer:
-                try:
-                    s2_debug_path = os.path.join(BASE_DIR, "s2_debug.csv")
-                    with open(s2_debug_path, 'a', encoding='utf-8') as _f:
-                        _f.writelines(self._s2_log_buffer)
-                    self._s2_log_buffer.clear()
-                except Exception:
-                    self._s2_log_buffer.clear()
+            # [Perf] 매매 CSV 버퍼 일괄 flush (하루 단위로 디스크 I/O 감소)
+            try:
+                flush_trade_csv_buffer()
+            except Exception:
+                pass
             
             day_t_duration = time.time() - day_t_start
             print(f"[Day] {current_day} 처리 완료 ({day_t_duration:.2f}초)")
@@ -483,13 +482,20 @@ class DynamicBacktester:
                     ret = (last_price / h_info['avg_p'] - 1) * 100
                     last_row = day_data[code].iloc[-1]
                     reason = f"Final Evaluation|RSI:{last_row['RSI']:.1f}|MA5:{int(last_row['MA5']):,}|OSC:{last_row['OSC']:.2f}"
-                    self._log_trade_to_csv(last_time, code, 'HOLD', last_price, h_info['qty'], reason, ret=ret, fee=sell_fee, sig_type=h_info.get('sig_type', 'TYPE_A'))
+                    self._log_trade_to_csv(
+                        last_time, code, "HOLD", last_price, h_info["qty"], reason,
+                        ret=ret, fee=sell_fee, sig_type=h_info.get("sig_type", "TYPE_A"),
+                    )
                     self.trades_history.append({
                         'Date': last_time, 'Code': code, 'Name': TradingStrategy.get_stock_name_map().get(code, code), 
                         'Action': 'HOLD', 'Price': last_price, 'Qty': h_info['qty'], 'Amount': h_info['qty'] * last_price, 
                         'Return': ret, 'Reason': reason, 'Cash': self.cash, 'Fee': sell_fee,
                         'Sig_Type': h_info.get('sig_type', 'TYPE_A')
                     })
+        try:
+            flush_trade_csv_buffer()
+        except Exception:
+            pass
         return self._finalize_backtest(interval)
 
     def _handle_buy_execution(self, code, sig_res, curr_time, last_row, indicator_row=None) -> bool:
@@ -601,15 +607,28 @@ class DynamicBacktester:
         self._log_trade_to_csv(curr_time, code, action, price, sell_qty, reason, ret=ret, fee=fee, sig_type=sig_type)
 
     def _log_trade_to_csv(self, dt, code, action, price, qty, reason, ret=0, fee=0, sig_type=None):
+        """매매 한 건을 메모리 버퍼에 적재. 일 단위로 flush_trade_csv_buffer 호출됨."""
         name = self.stock_name_map.get(code, code)
-        safe_reason = str(reason).replace(',', ';')
-        row = [pd.to_datetime(dt).strftime('%Y-%m-%d %H:%M'), code, name, action, price, qty, f"{ret:.2f}", safe_reason, fee, sig_type]
-        with csv_lock:
-            if not os.path.exists(TRADE_CSV):
-                with open(TRADE_CSV, 'w', encoding='utf-8-sig') as f:
-                    f.write("Date,Code,Name,Action,Price,Qty,Return,Reason,Fee,Sig_Type\n")
-            with open(TRADE_CSV, 'a', encoding='utf-8-sig') as f:
-                f.write(",".join(map(str, row)) + "\n")
+        safe_reason = str(reason).replace(",", ";")
+        row = [
+            pd.to_datetime(dt).strftime("%Y-%m-%d %H:%M"),
+            code,
+            name,
+            action,
+            price,
+            qty,
+            f"{ret:.2f}",
+            safe_reason,
+            fee,
+            sig_type,
+        ]
+        try:
+            append_trade_csv_line(",".join(map(str, row)) + "\n")
+        except Exception as e:
+            try:
+                print(f"[WARN] 매매 CSV 버퍼 적재 실패: {e}")
+            except Exception:
+                pass
 
     def _finalize_backtest(self, interval):
         print(f"[Dynamic] 시뮬레이션 완료. 총 {len(self.trades_history)}건의 매매(평가 포함) 발생.")
@@ -873,13 +892,39 @@ class DynamicBacktester:
                     reason_base = "1M_SIG" if not is_addon_target else f"1M_ADDON(S2)|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.1f}"
                     
                     if is_addon_target:
-                        if not self._check_s2_approval(code, h_info, indicator_to_use, market_trend=m_trend):
-                            can_execute = False 
-                    
+                        if not self._check_s2_approval(
+                            code, h_info, indicator_to_use, market_trend=m_trend, curr_dt_for_delay=m1_time
+                        ):
+                            can_execute = False
+
                     if can_execute and use_sb_for_type:
-                        # [High Precision] 1분봉의 개별 호가/체결강도 데이터 사용
-                        ab_ratio = m1_r.get('ask_bid_ratio', 1.0 / (m1_r.get('bid_ask_ratio', 1.0) + 1e-10))
-                        v_power = m1_r.get('vol_power', 100.0)
+                        # 고정밀: S1은 1분 합성 수급으로 체결 정밀도 유지.
+                        # S2는 15분봉(curr_15m) 수급을 사용 — 1분 VP/BA가 임계를 거의 못 넘겨 추매 0건이 되는 현상 방지
+                        # (일반 모드 15분 경로의 last_sig 수급과 동일 계열)
+                        if is_addon_target and curr_15m is not None:
+                            try:
+                                _cr = curr_15m
+                                if hasattr(_cr, "get"):
+                                    _ba = float(_cr.get("bid_ask_ratio", 1.0))
+                                    ab_ratio = float(
+                                        _cr.get(
+                                            "ask_bid_ratio",
+                                            _cr.get("Ask_Bid_Ratio", 1.0 / (_ba + 1e-10)),
+                                        )
+                                    )
+                                    v_power = float(_cr.get("vol_power", _cr.get("Vol_power", 100.0)))
+                                else:
+                                    raise TypeError("curr_15m row has no .get")
+                            except (TypeError, ValueError, KeyError, AttributeError):
+                                ab_ratio = m1_r.get(
+                                    "ask_bid_ratio", 1.0 / (m1_r.get("bid_ask_ratio", 1.0) + 1e-10)
+                                )
+                                v_power = float(m1_r.get("vol_power", m1_r.get("Vol_power", 100.0)))
+                        else:
+                            ab_ratio = m1_r.get(
+                                "ask_bid_ratio", 1.0 / (m1_r.get("bid_ask_ratio", 1.0) + 1e-10)
+                            )
+                            v_power = float(m1_r.get("vol_power", m1_r.get("Vol_power", 100.0)))
                         if ab_ratio < self.sb_ba or v_power < self.sb_vp:
                             can_execute = False
                     
@@ -896,16 +941,34 @@ class DynamicBacktester:
             # [v36.8] 사용자 요청에 따라 'REJECTED_SIG' 리포트 로그 생성 중단 (클러터 제거)
             # 15분 내내 조건을 만족하지 못한 경우라도 리포트에는 실제 체결 내역만 남김
 
-    def _check_s2_approval(self, code, h_info, last_row, indicator_row=None, market_trend='UP'):
-        """[v22.2] 2차 매수 승인 로직 (backtest_engine.TradingStrategy._check_s2_approval 통합 연동)
-        
-        수정 내용:
-        - pos 딕셔너리에 sig_type 포함 → 엔진의 Type B 판별(_is_b) 정확도 보장
-        - 진단 로그도 _k() 동일 로직으로 Type A/B 파라미터 분기 반영
+    def _check_s2_approval(
+        self,
+        code,
+        h_info,
+        last_row,
+        indicator_row=None,
+        market_trend="UP",
+        curr_dt_for_delay=None,
+    ):
+        """[v23.0] 2차 매수 승인 로직 — 단일 패스로 승인 판정.
+
+        [Perf v23.0] 이전 버전은 조건을 2번 평가(진단 + 엔진 위임)했음.
+        이제 이 함수가 유일한 판정 주체이며 TradingStrategy._check_s2_approval 호출 제거.
+
+        curr_dt_for_delay: 고정밀 1분 루프에서 대기시간(s2_delay) 판정에 쓸 실제 시각.
+            None이면 last_row.name 사용 (15분 경로).
         """
         s = self.settings
         ind = indicator_row if indicator_row is not None else last_row
-        curr_price = last_row['Close'] if hasattr(last_row, '__getitem__') else 0
+
+        # 지표 참조 불가 시 조기 반환
+        if ind is None:
+            return True
+
+        try:
+            curr_price = float(ind['Close'])
+        except (KeyError, TypeError):
+            curr_price = 0.0
 
         # Type B 여부 판별 (엔진과 동일한 기준)
         _sig = h_info.get('sig_type', h_info.get('reason', ''))
@@ -920,99 +983,80 @@ class DynamicBacktester:
                     return val
             return s.get(key, default)
 
-        # --- 진단용 조건별 평가 (Stage 2 거절 원인 추적) ---
-        reasons = []
+        # [Perf v23.0] 단일 패스 평가 — 조건 실패 시 즉시 False 반환 (조기 종료로 속도 최적화)
 
-        # 0. 시장 필터
-        if s.get('use_market_filter', True) and market_trend not in ('UP', 'AGGRESSIVE'):
-            reasons.append(f"MARKET:{market_trend}")
+        # 0. 시장 필터: Type A는 NEUTRAL 허용, Type B는 UP/AGGRESSIVE만
+        if s.get('use_market_filter', True):
+            if _is_b:
+                _mkt_ok = market_trend in ('UP', 'AGGRESSIVE')
+            else:
+                _mkt_ok = market_trend in ('UP', 'AGGRESSIVE', 'NEUTRAL')
+            if not _mkt_ok:
+                return False
 
-        # 1. 대기 시간 (Type B 오버라이드 반영)
+        # 1. 대기 시간
         if _k('use_s2_delay', True):
             try:
                 entry_dt = pd.to_datetime(h_info['entry_date'])
-                curr_dt = pd.to_datetime(last_row.name)
+                _ts = curr_dt_for_delay if curr_dt_for_delay is not None else getattr(last_row, "name", None)
+                curr_dt = pd.to_datetime(_ts)
                 elapsed_h = (curr_dt - entry_dt).total_seconds() / 3600
                 min_hours = float(_k('s2_delay_hours', 24))
                 if elapsed_h < min_hours:
-                    reasons.append(f"DELAY:{elapsed_h:.1f}h<{min_hours}h")
+                    return False
             except Exception:
                 pass
 
-        # 2. MA20 위치 (Type B 오버라이드 반영)
-        if _k('use_s2_ma20', True):
-            ma20 = ind.get('MA20', 0) if hasattr(ind, 'get') else 0
-            gap = float(_k('s2_ma20_gap', 0.0))
-            if curr_price < ma20 * (1 + gap / 100.0):
-                reasons.append(f"MA20:{curr_price}<{ma20*(1+gap/100.0):.0f}")
-
-        # 3. MA5 지지 (Type B 오버라이드 반영)
+        # 2. MA5 지지
         if _k('use_s2_ma5', True):
             ma5 = ind.get('MA5', 0) if hasattr(ind, 'get') else 0
             gap = float(_k('s2_ma5_gap', -0.5))
             if curr_price < ma5 * (1 + gap / 100.0):
-                reasons.append(f"MA5:{curr_price}<{ma5*(1+gap/100.0):.0f}")
+                return False
 
-        # 4. 거래량 (Type B 오버라이드 반영)
+        # 3. 거래량
         if _k('use_s2_vol_surge', True):
             vol = ind.get('Volume', 0) if hasattr(ind, 'get') else 0
             vol_tgt = ind.get('Prev_Day_Vol', ind.get('Vol_MA20', ind.get('Volume', 0))) if hasattr(ind, 'get') else 0
             ratio = float(_k('s2_vol_ratio', 1.5))
             if vol < vol_tgt * ratio:
-                reasons.append(f"VOL:{vol}<{vol_tgt*ratio:.0f}")
+                return False
 
-        # 5. RSI (Type B 오버라이드 반영)
-        if _k('use_s2_rsi_sig', True):
+        # 4. 모멘텀 (RSI OR MACD)
+        use_rsi = _k('use_s2_rsi_sig', True)
+        use_macd = _k('use_s2_macd_gc', True)
+        _rsi_ok = True
+        _macd_ok = True
+        if use_rsi:
             rsi_val = ind.get('RSI', 0) if hasattr(ind, 'get') else 0
-            rsi_sig = ind.get('RSI_Sig', 50) if hasattr(ind, 'get') else 50
+            rsi_sig_v = ind.get('RSI_Sig', 50) if hasattr(ind, 'get') else 50
             rsi_prev = ind.get('Prev_RSI', rsi_val) if hasattr(ind, 'get') else rsi_val
             gap = float(_k('s2_rsi_gap', 0.0))
-            if rsi_val < rsi_sig * (1 + gap / 100.0) or rsi_val <= rsi_prev:
-                reasons.append(f"RSI:{rsi_val:.1f}<sig{rsi_sig:.1f}orDn")
-
-        # 6. MACD/OSC (Type B 오버라이드 반영)
-        if _k('use_s2_macd_gc', True):
+            _rsi_ok = rsi_val >= rsi_sig_v * (1 + gap / 100.0) and rsi_val > rsi_prev
+        if use_macd:
             macd_val = ind.get('MACD', 0) if hasattr(ind, 'get') else 0
-            macd_sig = ind.get('MACD_Sig', 0) if hasattr(ind, 'get') else 0
+            macd_sig_v = ind.get('MACD_Sig', 0) if hasattr(ind, 'get') else 0
             osc_val = ind.get('OSC', 1) if hasattr(ind, 'get') else 1
             osc_prev = ind.get('Prev_OSC', osc_val) if hasattr(ind, 'get') else osc_val
             gap = float(_k('s2_macd_gap', 0.0))
-            if macd_val < macd_sig + gap or osc_val <= 0 or osc_val <= osc_prev:
-                reasons.append(f"MACD:{macd_val:.3f}<sig{macd_sig:.3f}orOSC:{osc_val:.3f}")
+            _macd_ok = macd_val >= macd_sig_v + gap and osc_val > 0 and osc_val > osc_prev
 
-        # 7. 수익권 (Type B 오버라이드 반영)
+        _momentum_fail = (
+            (use_rsi and use_macd and not _rsi_ok and not _macd_ok) or
+            (use_rsi and not use_macd and not _rsi_ok) or
+            (use_macd and not use_rsi and not _macd_ok)
+        )
+        if _momentum_fail:
+            return False
+
+        # 5. 수익권
         if _k('use_s2_profit', True):
             profit_limit = float(_k('s2_profit_limit', 1.0))
             avg_p = h_info.get('avg_p', curr_price)
             if avg_p > 0:
                 profit_pct = (curr_price / avg_p - 1) * 100
                 if profit_pct < profit_limit:
-                    reasons.append(f"PROFIT:{profit_pct:.2f}%<{profit_limit}%")
+                    return False
 
-        # [Perf] 로그를 파일에 직접 쓰지 않고 메모리 버퍼에 추가 (일별 flush로 I/O 최소화)
-        try:
-            approved = len(reasons) == 0
-            ts = str(getattr(last_row, 'name', ''))[:19]
-            avg_p_val = h_info.get('avg_p', 0)
-            profit_log = (curr_price / avg_p_val - 1) * 100 if avg_p_val > 0 else 0
-            track_label = 'B' if _is_b else 'A'
-            log_line = (
-                f"{ts},{code},Track{track_label},"
-                f"{'OK' if approved else 'REJECT'},{profit_log:.2f}%,"
-                f"{';'.join(reasons) if reasons else 'ALL_PASS'}\n"
-            )
-            self._s2_log_buffer.append(log_line)
-        except Exception:
-            pass
-
-        # backtest_engine 형식을 맞추기 위해 가상의 pos 객체 생성
-        # [Bug Fix] sig_type 포함 → 엔진의 _is_b 판별이 정확하게 동작
-        pos = {
-            'entry_date': h_info['entry_date'],
-            'avg_price': h_info['avg_p'],
-            'qty': h_info['qty'],
-            'invested': h_info['avg_p'] * h_info['qty'],
-            'sig_type': _sig,
-        }
-        # backtest_engine의 정적 메서드 호출
-        return TradingStrategy._check_s2_approval(pos, last_row, self.settings, indicator_row=indicator_row, market_trend=market_trend)
+        # 전 조건 통과 → 승인
+        return True
