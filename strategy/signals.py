@@ -1,6 +1,28 @@
 import pandas as pd
 import numpy as np
 
+
+def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bool:
+    """JSON/최적화 경로에서 bool·0/1·문자열이 섞여도 안전하게 불리언으로 해석."""
+    try:
+        if settings is None:
+            return default
+        v = settings.get(key, default)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return int(v) != 0
+        if isinstance(v, str):
+            t = v.strip().lower()
+            if t in ("true", "1", "yes", "on"):
+                return True
+            if t in ("false", "0", "no", "off", ""):
+                return False
+        return bool(v) if v is not None else default
+    except Exception:
+        return default
+
+
 def get_buy_signals_detailed(df, settings, market_trend='UP'):
     """매수 신호 상세 분석 (Type A/B 통합)"""
     # [v4.4 Rule] 1. 시장지수 필터링 (3단계 차등 적용)
@@ -29,7 +51,8 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     
     # [v26.11] RSI Signal Filter: Ensure RSI is above signal AND increasing (momentum strengthening)
     cond_rsi_sig = (df['RSI'] >= df['RSI_Sig']) & (df['RSI'] > df['RSI'].shift(1))
-    use_rsi_sig_filter = settings.get('use_rsi_sig_filter', False)
+    # defaults.py·실제 적용과 동일하게 True 기본 (이전 False 기본은 Type B 분기만 흔들던 버그)
+    use_rsi_sig_filter = _settings_bool(settings, "use_rsi_sig_filter", True)
     
     # 3. MACD/이평선 조건
     cond_macd_basic = (df['MACD'] >= df['MACD_Sig']) 
@@ -73,8 +96,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     # MA5 Recovery: 가격이 단기 이평선(5일선) 위로 올라타는 확정 시점에만 진입
     signal_a &= (df['Close'] >= df['MA5']) 
     
-    # [Point] RSI 반등은 이미 구현된 cond_rsi_sig 필터(L27)를 활성화하여 처리
-    if settings.get('use_rsi_sig_filter', True): signal_a &= cond_rsi_sig
+    # [Point] RSI 반등은 cond_rsi_sig로 처리 — Type A만 쓸 때도 기본 ON이면 전봉 대비 RSI 상승이 먼저 걸러짐
+    if use_rsi_sig_filter:
+        signal_a &= cond_rsi_sig
     
     # [v26.7] Type A RSI 50 Pulse Logic (Breakthrough + Duration + Invalidation)
     if settings.get('use_rsi_signal', True):
@@ -115,10 +139,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     # 7. 최종 신호 및 공통 필터
     signal = signal_a | signal_b
     
-    if settings.get('use_macd_signal', True):
-        osc_rising = df['OSC'] > df['OSC'].shift(1)
-        osc_filter = (df['OSC'] > 0) & osc_rising if settings.get('use_osc_positive', False) else osc_rising
-        signal &= osc_filter
+    if _settings_bool(settings, "use_macd_signal", True):
+        # 15분 MACD 필터 ON: 히스토그램 양수(OSC>0)만 적용 (전봉 대비 상승 조건은 Type A/B와 중복되어 제거됨)
+        signal &= df["OSC"] > 0
     
     # 8. 수급 합치도 (Confluence Score) 계산 - [v3.5]
     def calc_met_count(sig_type):
@@ -127,7 +150,8 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
             if settings.get('use_gc', True): conds.append(cond_ma_gc)
             if settings.get('use_vol_surge', True): conds.append(cond_vol_a)
             if settings.get('use_ma60_safe', True): conds.append(cond_ma60)
-            if settings.get('use_rsi_sig_filter', True): conds.append(cond_rsi_sig)
+            if use_rsi_sig_filter:
+                conds.append(cond_rsi_sig)
             if settings.get('use_rsi_signal', True): conds.append(cond_rsi_50_pulse)
         elif sig_type == 'TYPE_B':
             conds = [cond_rsi_range]
@@ -138,9 +162,8 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         else:
             return 0, 1
         
-        if settings.get('use_macd_signal', True):
-            osc_r = df['OSC'] > df['OSC'].shift(1)
-            conds.append((df['OSC'] > 0) & osc_r if settings.get('use_osc_positive', False) else osc_r)
+        if _settings_bool(settings, "use_macd_signal", True):
+            conds.append(df["OSC"] > 0)
         
         met = sum([c.astype(int) for c in conds])
         return met, len(conds)

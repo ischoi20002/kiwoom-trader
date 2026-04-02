@@ -299,6 +299,22 @@ class DynamicBacktester:
                 base_df = self.cached_15m_data[code]
                 day_full = base_df.loc[current_day:current_day + " 23:59:59"].copy()
                 if day_full.empty: continue
+
+                # [v39.0] 전일 레짐에 맞는 Type A 보정 신호 열 선택
+                if self.settings.get("use_type_a_regime_phase1", False) and m_trend in (
+                    "AGGRESSIVE",
+                    "UP",
+                    "NEUTRAL",
+                ):
+                    try:
+                        reg_ix = {"AGGRESSIVE": 0, "UP": 1, "NEUTRAL": 2}[m_trend]
+                        day_full["Signal"] = day_full[f"Signal_TA_REG{reg_ix}"]
+                        day_full["Sig_Type"] = day_full[f"Sig_Type_TA_REG{reg_ix}"]
+                    except (KeyError, TypeError) as e:
+                        try:
+                            print(f"[WARN] 레짐 신호 열 없음, 기본 Signal 유지: {e}")
+                        except Exception:
+                            pass
                 
                 # [v16.92] Optimization: Signal calculation was moved to _prepare_15m_cached_data (PRE-CALC)
                 # The 'm_trend' filter is still applied here if needed, but the base signals are ready.
@@ -733,7 +749,42 @@ class DynamicBacktester:
             
             # [v16.92] Pre-calculate signals for the ENTIRE time series at once (Vectorized)
             # This makes the daily loop in run() a simple O(1) lookup
-            full_sigs = TradingStrategy.get_buy_signals_detailed(df_ind, self.settings, market_trend='UP') # Trend-independent pre-check
+            # [v39.0] Type A 레짐 1차 보정 시 AGGRESSIVE/UP/NEUTRAL 각각 신호를 미리 계산해 일자별로 선택
+            if self.settings.get("use_type_a_regime_phase1", False):
+                try:
+                    from strategy.type_a_regime import apply_type_a_phase1_settings
+
+                    s_aggr = apply_type_a_phase1_settings(self.settings, "AGGRESSIVE")
+                    s_up = apply_type_a_phase1_settings(self.settings, "UP")
+                    s_neu = apply_type_a_phase1_settings(self.settings, "NEUTRAL")
+                    sig_aggr = TradingStrategy.get_buy_signals_detailed(
+                        df_ind, s_aggr, market_trend="UP"
+                    )
+                    sig_up = TradingStrategy.get_buy_signals_detailed(
+                        df_ind, s_up, market_trend="UP"
+                    )
+                    sig_neu = TradingStrategy.get_buy_signals_detailed(
+                        df_ind, s_neu, market_trend="UP"
+                    )
+                    df_ind["Signal_TA_REG0"] = sig_aggr["Signal"]
+                    df_ind["Sig_Type_TA_REG0"] = sig_aggr["Sig_Type"]
+                    df_ind["Signal_TA_REG1"] = sig_up["Signal"]
+                    df_ind["Sig_Type_TA_REG1"] = sig_up["Sig_Type"]
+                    df_ind["Signal_TA_REG2"] = sig_neu["Signal"]
+                    df_ind["Sig_Type_TA_REG2"] = sig_neu["Sig_Type"]
+                    full_sigs = sig_aggr
+                except Exception as e:
+                    try:
+                        print(f"[WARN] Type A 레짐 신호 사전계산 실패, 단일 경로로 폴백: {e}")
+                    except Exception:
+                        pass
+                    full_sigs = TradingStrategy.get_buy_signals_detailed(
+                        df_ind, self.settings, market_trend="UP"
+                    )
+            else:
+                full_sigs = TradingStrategy.get_buy_signals_detailed(
+                    df_ind, self.settings, market_trend="UP"
+                )
             df_ind = df_ind.join(full_sigs.drop(columns='Signal', errors='ignore'))
             df_ind['Signal'] = full_sigs['Signal']
             

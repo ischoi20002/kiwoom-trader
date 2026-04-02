@@ -31,6 +31,12 @@ importlib.reload(reporting.trade_report)
 from reporting.trade_report import generate_trade_report
 from strategy import indicators, signals
 from strategy.indicators import calculate_all_indicators
+from strategy.indicator_constants import (
+    MACD_ENTRY_FAST,
+    MACD_ENTRY_SLOW,
+    MACD_ENTRY_SIGNAL,
+    RSI_MAIN_PERIOD,
+)
 from strategy.simulation_models import SimulatedRealtimeMetrics
 
 csv_lock = threading.Lock()
@@ -177,24 +183,21 @@ class TradingStrategy:
                 prev_sum = hist_df['Close'].iloc[-(n-1):].sum()
                 combined[col] = (prev_sum + m1_p) / n
 
-        # 2. RSI (Wilder's Smoothing)
-        if 'RSI' in last_15m and len(hist_df) >= 14:
+        # 2. RSI (Wilder's Smoothing) — RSI_MAIN_PERIOD 고정
+        _rp = max(2, int(RSI_MAIN_PERIOD))
+        if 'RSI' in last_15m and len(hist_df) >= _rp:
             # RSI 증분 업데이트를 위한 Gain/Loss 계산
             diff = m1_p - last_15m['Close']
             gain = max(0, diff)
             loss = max(0, -diff)
-            
-            # Wilder's Smoothing 공식: (prev_avg * 13 + current) / 14
-            # 기존 RSI로부터 역산하여 avg_gain/loss 추출 시도 (또는 근사치)
-            # 정확도를 위해 14개 데이터를 직접 사용하는 것이 안전함 (그래도 O(14)로 매우 빠름)
-            tail_15 = hist_df['Close'].tail(14)
+
+            # 정확도를 위해 최근 _rp개 데이터 사용 (O(_rp))
+            tail_15 = hist_df['Close'].tail(_rp)
             diffs = np.diff(np.append(tail_15.values, [m1_p]))
             gains = np.maximum(0, diffs)
             losses = np.maximum(0, -diffs)
-            
-            # ewm fallback or direct mean (Wilder's ewm alpha=1/14)
-            # 여기서는 속도를 위해 직전 150개 복사 대신 필요한 최소 범위만 사용
-            alpha = 1/14.0
+
+            alpha = 1.0 / float(_rp)
             avg_gain = last_15m.get('_avg_gain', 0) # 만약 엔진에서 미리 계산해 뒀다면 최상
             if avg_gain == 0: #Fallback
                 avg_gain = gains.mean()
@@ -206,18 +209,18 @@ class TradingStrategy:
             rs = avg_gain / (avg_loss + 1e-10)
             combined['RSI'] = 100 - (100 / (1 + rs))
 
-        # 3. MACD (EMA based)
+        # 3. MACD (EMA based) — MACD_ENTRY_* 고정
         # EMA_new = price * alpha + prev_ema * (1 - alpha)
-        for span, col_prefix in [(12, '_ema12'), (26, '_ema26')]:
+        for span, col_prefix in [(MACD_ENTRY_FAST, '_ema12'), (MACD_ENTRY_SLOW, '_ema26')]:
             alpha = 2.0 / (span + 1.0)
             prev_ema = last_15m.get(col_prefix, last_15m['Close']) # Fallback
             new_ema = m1_p * alpha + prev_ema * (1 - alpha)
             combined[col_prefix] = new_ema
-            
+
         if '_ema12' in combined and '_ema26' in combined:
             combined['MACD'] = combined['_ema12'] - combined['_ema26']
             # Signal Line (EMA of MACD line)
-            sig_span = int(settings.get('macd_sig_entry', 9))
+            sig_span = max(1, int(MACD_ENTRY_SIGNAL))
             sig_alpha = 2.0 / (sig_span + 1.0)
             prev_sig = last_15m.get('_macd_sig', last_15m['MACD'])
             combined['_macd_sig'] = combined['MACD'] * sig_alpha + prev_sig * (1 - sig_alpha)
@@ -405,13 +408,44 @@ class TradingStrategy:
                 return "_s2_b" if is_type_b else "_s2"
             return "_b" if is_type_b else "_a"
 
+        # 고정 익절 vs "목표% 이후 ATR 트레일만": 옵션 ON이면 TP%는 트레일 무장 기준이며 TAKE_PROFIT 청산은 하지 않음
+        defer_fixed_tp_for_trail = False
+        if s.get("use_atr_trail_only_after_tp", False) and s.get("use_atr_exit", False):
+            try:
+                _sfx_defer = _atr_track_suff()
+                if s.get(f"use_atr_trailing_stop{_sfx_defer}", True):
+                    defer_fixed_tp_for_trail = True
+            except Exception:
+                pass
+
+        # 고정TP 연기 모드에서 목표% 무장 후에는 Flash가 ATR 트레일보다 먼저 청산하는 것을 막음(리포트에 ATR_TRAIL이 0건으로 남는 주원인)
+        tp_pct_for_trail_arm = float(
+            s.get(
+                _exit_key(
+                    "s1_a_take_profit",
+                    "s1_b_take_profit",
+                    "s2_take_profit",
+                    "s2_b_take_profit",
+                ),
+                5.0,
+            )
+        )
+        try:
+            peak_profit_pct_gate = (
+                (max_p / float(avg_p) - 1.0) * 100.0 if avg_p is not None and float(avg_p) > 0 else profit_ratio
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            peak_profit_pct_gate = profit_ratio
+        skip_flash_for_atr_trail = defer_fixed_tp_for_trail and peak_profit_pct_gate >= tp_pct_for_trail_arm
+
         # 1. 익절(Take Profit)
         if not is_exit:
             use_tp = s.get(_exit_key('use_s1_a_tp', 'use_s1_b_tp', 'use_s2_tp', 'use_s2_b_tp'), True)
             if use_tp:
                 tp_pct = float(s.get(_exit_key('s1_a_take_profit', 's1_b_take_profit', 's2_take_profit', 's2_b_take_profit'), 5.0))
                 if profit_ratio >= tp_pct:
-                    is_exit, exit_reason = True, "TAKE_PROFIT"
+                    if not defer_fixed_tp_for_trail:
+                        is_exit, exit_reason = True, "TAKE_PROFIT"
 
         # 2. 손절(Stop Loss - % 기준)
         # ATR SL이 켜져 있고 ATR이 유효하면 % 손절은 생략(평단 기준 이중 손절 방지)
@@ -434,7 +468,7 @@ class TradingStrategy:
         # 3. Flash Exit (Trailing from High) — 수익 구간에서만 발동 (손실 방어는 SL에 위임)
         if not is_exit:
             use_flash = s.get(_exit_key('use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 'use_s2_b_flash_exit'), True)
-            if use_flash and profit_ratio >= 0:
+            if use_flash and profit_ratio >= 0 and not skip_flash_for_atr_trail:
                 f_pct = float(s.get(_exit_key('s1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct', 's2_b_flash_exit_pct'), 3.0))
                 if now_price <= max_p * (1.0 - f_pct / 100.0):
                     is_exit, exit_reason = True, "FLASH_EXIT"
@@ -448,6 +482,8 @@ class TradingStrategy:
                     is_exit, exit_reason = True, "SMART_EXIT"
 
         # 5. ATR 기반 손절 및 트레일링 스톱
+        #    S1: _a / _b 토글·배수. Type A S1에서 ATR 끄려면 use_atr_stop/trail_*_a 끔.
+        #    S2: _s2 / _s2_b (추매 진입 후 stage==2에서 자동 적용)
         if not is_exit and s.get('use_atr_exit', False) and ind is not None:
             try:
                 curr_atr = float(ind.get('ATR', 0))
@@ -459,6 +495,7 @@ class TradingStrategy:
                     use_sl_atr = s.get(f'use_atr_stop_loss{suff}', True)
                     use_trail_atr = s.get(f'use_atr_trailing_stop{suff}', True)
                     # 목표 익절% 이상에서만 트레일 평가(설정 ON 시). 임계는 TP와 동일 키의 %값.
+                    # 고가(max_p) 기준 최고 수익률로 무장 — 한번 목표% 터치 후 되밀려도 트레일 유지
                     trail_armed = True
                     if s.get("use_atr_trail_only_after_tp", False) and use_trail_atr:
                         tp_arm_pct = float(
@@ -472,7 +509,11 @@ class TradingStrategy:
                                 5.0,
                             )
                         )
-                        trail_armed = profit_ratio >= tp_arm_pct
+                        try:
+                            peak_pct = (max_p / avg_p - 1.0) * 100.0 if avg_p and float(avg_p) > 0 else profit_ratio
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            peak_pct = profit_ratio
+                        trail_armed = peak_pct >= tp_arm_pct
 
                     if use_sl_atr and now_price <= avg_p - (sl_mult * entry_atr):
                         is_exit, exit_reason = True, "ATR_SL"
@@ -881,7 +922,44 @@ class SimpleBacktester:
             df['Market_Trend'] = 'UP'
 
         # [v26.1] 신호 미리 계산 (최적화 시 신호 파라미터가 바뀔 수 있으므로 매번 수행)
-        sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend='UP')
+        # [v39.0] Type A 레짐 1차 보정: 행별로 AGGRESSIVE/UP/NEUTRAL 신호 병합 (단일 종목 백테스트)
+        if self.settings.get("use_type_a_regime_phase1", False):
+            try:
+                from strategy.type_a_regime import apply_type_a_phase1_settings
+
+                s_aggr = apply_type_a_phase1_settings(self.settings, "AGGRESSIVE")
+                s_up = apply_type_a_phase1_settings(self.settings, "UP")
+                s_neu = apply_type_a_phase1_settings(self.settings, "NEUTRAL")
+                sig_aggr = TradingStrategy.get_buy_signals_detailed(df, s_aggr, market_trend="UP")
+                sig_up = TradingStrategy.get_buy_signals_detailed(df, s_up, market_trend="UP")
+                sig_neu = TradingStrategy.get_buy_signals_detailed(df, s_neu, market_trend="UP")
+                trend = df["Market_Trend"]
+                status = df["Market_Status"]
+                is_neutral = trend == "NEUTRAL"
+                is_aggr = (trend == "UP") & (status == "AGGRESSIVE")
+                is_up_rest = (trend == "UP") & (~is_aggr)
+                sig_combined = (
+                    (sig_aggr["Signal"] & is_aggr)
+                    | (sig_up["Signal"] & is_up_rest)
+                    | (sig_neu["Signal"] & is_neutral)
+                )
+                type_ag = sig_aggr["Sig_Type"].astype(str)
+                type_up = sig_up["Sig_Type"].astype(str)
+                type_ne = sig_neu["Sig_Type"].astype(str)
+                type_combined = np.where(
+                    is_aggr, type_ag, np.where(is_up_rest, type_up, np.where(is_neutral, type_ne, "NONE"))
+                )
+                sigs = sig_aggr.copy()
+                sigs["Signal"] = sig_combined
+                sigs["Sig_Type"] = type_combined
+            except Exception as e:
+                try:
+                    print(f"[WARN] Type A 레짐 신호 병합 실패, 단일 경로로 폴백: {e}")
+                except Exception:
+                    pass
+                sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend="UP")
+        else:
+            sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend="UP")
         for c in sigs.columns:
             df[c] = sigs[c]
         # [v4.5 Rule] 시장지수 필터링 (UP/NEUTRAL/DOWN 3단계)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import json
 from collections import defaultdict
@@ -227,15 +229,9 @@ def _build_depth_analytics_html(df: pd.DataFrame) -> str:
             """
 
         return f"""
-        <div id="depth-analytics" class="depth-section">
-            <h2 class="depth-title">심층 분석 · 완료 라운드트립</h2>
-            <p class="depth-lead">
-                매수 체인(BUY*) 이후 <b>SELL 또는 HOLD</b>로 닫힌 거래만 집계합니다.
-                수익률(%)은 리포트의 매도 행 <code>Return</code> 값입니다. 원화 손익은 매수·매도 금액과 Fee 합으로 추정합니다.
-            </p>
             {open_html}
-            <div class="depth-grid">
-                <div>
+            <div class="analysis-stack-spaced">
+                <div class="analysis-subblock">
                     <div class="depth-subtitle">수익률 분포 (%)</div>
                     <table class="depth-table">
                         <thead>
@@ -250,21 +246,23 @@ def _build_depth_analytics_html(df: pd.DataFrame) -> str:
                         </tbody>
                     </table>
                 </div>
-                <div>
+                <div class="analysis-subblock">
                     <div class="depth-subtitle">손익 집중도 (원화 추정)</div>
                     {conc_rows}
                     <p class="depth-verdict"><b>해석:</b> {verdict}</p>
                 </div>
+                <div class="analysis-subblock">
+                    <div class="depth-subtitle">청산 유형별 수익률 (%) — S2 없음</div>
+                    {bucket_rows_s1}
+                </div>
+                <div class="analysis-subblock">
+                    <div class="depth-subtitle">청산 유형별 수익률 (%) — S2 포함</div>
+                    {bucket_rows_s2}
+                </div>
             </div>
-            <div class="depth-subtitle" style="margin-top:20px;">청산 유형별 수익률 (%)</div>
-            <div class="depth-bucket-grid">
-                <div>{bucket_rows_s1}</div>
-                <div>{bucket_rows_s2}</div>
-            </div>
-        </div>
         """
     except Exception as e:
-        return f'<div class="depth-section"><p class="depth-err">심층 분석 생성 오류: {e}</p></div>'
+        return f'<p class="depth-err">심층 분석 생성 오류: {e}</p>'
 
 
 def _reason_matches_smart_exit(reason_series: pd.Series) -> pd.Series:
@@ -277,6 +275,282 @@ def _reason_matches_smart_buy(reason_series: pd.Series) -> pd.Series:
     """SmartBuy|, 1M_SmartBuy|, SmartBuy Rejected, smart_buy 등 변형 인식."""
     r = reason_series.fillna('').astype(str)
     return r.str.contains(r'SmartBuy|SMART_BUY|smart_buy', case=False, na=False, regex=True)
+
+
+def _classify_market_regime_row(
+    msi: float,
+    adx: float,
+    v_val: float,
+    settings: dict | None,
+) -> str:
+    """DynamicBacktester Triple-Lock과 동일 분기 (settings 임계값 사용)."""
+    s = settings or {}
+    try:
+        msi_down = float(s.get("msi_down_threshold", -0.10))
+        msi_up = float(s.get("msi_up_threshold", 0.10))
+        adx_min = float(s.get("adx_min_threshold", 15))
+        adx_down = float(s.get("adx_down_threshold", 20))
+        vix_down = float(s.get("vix_down_threshold", 30))
+    except (TypeError, ValueError):
+        msi_down, msi_up, adx_min, adx_down, vix_down = -0.10, 0.10, 15.0, 20.0, 30.0
+    try:
+        if msi < msi_down or v_val > vix_down or (msi < 0 and adx > adx_down):
+            return "DOWN"
+        if adx < adx_min and msi <= msi_up:
+            return "NEUTRAL"
+        if msi > msi_up and adx > adx_down:
+            return "AGGRESSIVE"
+        return "UP"
+    except Exception:
+        return "UP"
+
+
+def _build_regime_lookup_prev_day(
+    market_df: pd.DataFrame | None,
+    vix_df: pd.DataFrame | None,
+    settings: dict | None,
+) -> dict:
+    """
+    영업일(당일) -> 레짐 문자열.
+    당일 D의 레짐은 전 영업일(D-1) 종가 시점 MSI/ADX 및 해당일 VIX로 판정 (다이나믹 백테스트 SSOT).
+    """
+    out: dict = {}
+    try:
+        if market_df is None or market_df.empty:
+            return out
+        mdf = market_df.copy()
+        if not isinstance(mdf.index, pd.DatetimeIndex):
+            if "time" in mdf.columns:
+                mdf["time"] = pd.to_datetime(mdf["time"])
+                mdf.set_index("time", inplace=True)
+            elif "Date" in mdf.columns:
+                mdf["Date"] = pd.to_datetime(mdf["Date"])
+                mdf.set_index("Date", inplace=True)
+            else:
+                return out
+        col_map = {c.lower(): c for c in mdf.columns}
+        for need in ("close", "high", "low"):
+            if need not in col_map:
+                return out
+        c_close = col_map["close"]
+        c_high = col_map["high"]
+        c_low = col_map["low"]
+        mdf = mdf[[c_close, c_high, c_low]].copy()
+        mdf.columns = ["Close", "High", "Low"]
+        vol_key = col_map.get("volume")
+        if vol_key:
+            mdf["Volume"] = pd.to_numeric(market_df[vol_key], errors="coerce").fillna(0)
+        else:
+            mdf["Volume"] = 0
+
+        from strategy.indicators import calculate_all_indicators
+
+        m_ind = calculate_all_indicators(mdf, settings or {})
+        if "MSI" not in m_ind.columns or "ADX" not in m_ind.columns:
+            return out
+
+        n = len(m_ind)
+        vix_vals = np.full(n, 15.0, dtype=float)
+        if vix_df is not None and not vix_df.empty:
+            try:
+                vdf = vix_df.copy()
+                if not isinstance(vdf.index, pd.DatetimeIndex):
+                    if "time" in vdf.columns:
+                        vdf["time"] = pd.to_datetime(vdf["time"])
+                        vdf.set_index("time", inplace=True)
+                    elif "Date" in vdf.columns:
+                        vdf["Date"] = pd.to_datetime(vdf["Date"])
+                        vdf.set_index("Date", inplace=True)
+                vc = {c.lower(): c for c in vdf.columns}.get("close")
+                if vc:
+                    vs = vdf[vc].astype(float).reindex(m_ind.index, method="pad")
+                    vix_vals = vs.fillna(15.0).values.astype(float)
+            except Exception:
+                pass
+
+        for i, ts in enumerate(m_ind.index):
+            ts_norm = pd.Timestamp(ts).normalize()
+            if i == 0:
+                out[ts_norm] = "UP"
+                continue
+            prev_i = i - 1
+            try:
+                row = m_ind.iloc[prev_i]
+                msi = float(row["MSI"])
+                adx = float(row["ADX"])
+                v_val = float(vix_vals[prev_i])
+            except Exception:
+                out[ts_norm] = "UP"
+                continue
+            out[ts_norm] = _classify_market_regime_row(msi, adx, v_val, settings)
+        return out
+    except Exception:
+        return out
+
+
+def _build_market_regime_fragment(
+    df: pd.DataFrame,
+    regime_lookup: dict,
+    best_settings: dict | None,
+) -> str:
+    """완료 라운드트립을 진입일 기준 시장 레짐별로 집계한 HTML (통합 분석 섹션용 조각)."""
+    try:
+        if df is None or df.empty:
+            return '<p class="depth-subnote">매매 데이터가 없습니다.</p>'
+        if not regime_lookup:
+            return '<p class="depth-subnote">시장 지수 데이터가 없어 레짐별 집계를 할 수 없습니다.</p>'
+
+        work = df.sort_values(["Code", "Date"]).copy()
+        rows = work.to_dict("records")
+        n = len(rows)
+        idx = 0
+
+        by_reg: dict[str, dict[str, float | int]] = defaultdict(
+            lambda: {"trips": 0, "wins": 0, "profit": 0.0, "ret_num": 0.0, "ret_den": 0.0}
+        )
+
+        while idx < n:
+            r = rows[idx]
+            act = str(r.get("Action", ""))
+            if not act.upper().startswith("BUY"):
+                idx += 1
+                continue
+            code = str(r.get("Code", ""))
+            first_buy_dt = r.get("Date")
+            cost = 0.0
+            j = idx
+            while j < n and str(rows[j].get("Code", "")) == code:
+                a = str(rows[j].get("Action", ""))
+                if not a.upper().startswith("BUY"):
+                    break
+                px = float(rows[j].get("Price", 0) or 0)
+                qy = int(float(rows[j].get("Qty", 0) or 0))
+                fee = float(rows[j].get("Fee", 0) or 0) if not pd.isna(rows[j].get("Fee", 0)) else 0.0
+                cost += px * qy + fee
+                j += 1
+
+            if j >= n or str(rows[j].get("Code", "")) != code:
+                idx = j
+                continue
+
+            ex = rows[j]
+            if str(ex.get("Action", "")) not in ("SELL", "HOLD"):
+                idx = j + 1
+                continue
+
+            sell_p = float(ex.get("Price", 0) or 0)
+            sell_q = int(float(ex.get("Qty", 0) or 0))
+            ret_pct = float(ex.get("Return", 0) or 0) if not pd.isna(ex.get("Return", 0)) else 0.0
+            fee_s = float(ex.get("Fee", 0) or 0) if not pd.isna(ex.get("Fee", 0)) else 0.0
+            gross = sell_p * sell_q
+            profit_krw = gross - cost - fee_s
+            amt = float(cost) if cost > 0 else 1.0
+
+            try:
+                d_key = pd.Timestamp(first_buy_dt).normalize()
+            except Exception:
+                d_key = None
+            reg = "UNKNOWN"
+            if d_key is not None:
+                reg = regime_lookup.get(d_key, "UNKNOWN")
+
+            b = by_reg[reg]
+            b["trips"] = int(b["trips"]) + 1
+            if ret_pct > 0:
+                b["wins"] = int(b["wins"]) + 1
+            b["profit"] = float(b["profit"]) + profit_krw
+            b["ret_num"] = float(b["ret_num"]) + ret_pct * amt
+            b["ret_den"] = float(b["ret_den"]) + amt
+
+            idx = j + 1
+
+        if sum(int(by_reg[k]["trips"]) for k in by_reg) == 0:
+            return '<p class="depth-subnote">완료 라운드트립이 없어 레짐별 집계를 생략합니다.</p>'
+
+        order = ["AGGRESSIVE", "UP", "NEUTRAL", "DOWN", "UNKNOWN"]
+        keys_sorted = [k for k in order if k in by_reg] + [k for k in sorted(by_reg.keys()) if k not in order]
+
+        body_rows = []
+        for reg in keys_sorted:
+            b = by_reg[reg]
+            trips = int(b["trips"])
+            if trips == 0:
+                continue
+            wins = int(b["wins"])
+            wr = 100.0 * wins / trips
+            prof = float(b["profit"])
+            den = float(b["ret_den"])
+            avg_r = (float(b["ret_num"]) / den) if den > 0 else 0.0
+            pc = "var(--gain)" if prof >= 0 else "var(--loss)"
+            body_rows.append(
+                f"<tr><td><b>{reg}</b></td>"
+                f"<td class='num'>{trips}</td>"
+                f"<td class='num'>{wr:.1f}%</td>"
+                f"<td class='num'>{avg_r:+.2f}%</td>"
+                f"<td class='num' style='color:{pc};font-weight:700;'>{int(prof):+,}</td></tr>"
+            )
+
+        filt_on = True
+        try:
+            filt_on = bool((best_settings or {}).get("use_market_filter", True))
+        except Exception:
+            pass
+
+        return f"""
+            <p class="depth-subnote" style="margin-bottom:14px;">
+                첫 매수 영업일 기준 매핑 · 레짐은 <b>전 영업일 종가</b> MSI·ADX·VIX 및 설정 임계값으로 판정 (다이나믹 SSOT).
+                시장지수 필터: <b>{'ON' if filt_on else 'OFF'}</b>.
+                아래 종목별 체결표의 시장 배지도 <b>동일 lookup</b>을 씁니다(구버전의 당일 일봉 OR식 NEUTRAL 표기와 다를 수 있음).
+            </p>
+            <table class="depth-table">
+                <thead>
+                    <tr>
+                        <th>레짐</th>
+                        <th class="num">완료 건수</th>
+                        <th class="num">승률</th>
+                        <th class="num">금액가중 평균 수익률</th>
+                        <th class="num">합계 실현손익(원)</th>
+                    </tr>
+                </thead>
+                <tbody>{"".join(body_rows)}</tbody>
+            </table>
+            <p class="depth-subnote">미결제·진행 중 라운드트립은 제외합니다.</p>
+        """
+    except Exception as e:
+        return f'<p class="depth-err">시장 레짐 집계 오류: {e}</p>'
+
+
+def _html_stock_row_regime_badge(
+    regime_key: str,
+    m_val_p: float | None,
+    a_val_p: float | None,
+    v_val_p: float | None,
+) -> str:
+    """
+    종목별 체결 행의 시장 배지 — §3 regime_lookup과 동일한 레짐 문자열 사용.
+    M/V/A는 가능하면 전 영업일(집계와 동일한 판정 입력) 근사치로 표시.
+    """
+    reg = str(regime_key or "UNKNOWN").upper()
+    if reg == "AGGRESSIVE":
+        label, color = "AGGRESSIVE", "#22c55e"
+    elif reg == "UP":
+        label, color = "UP", "#84cc16"
+    elif reg == "NEUTRAL":
+        label, color = "NEUTRAL", "#f97316"
+    elif reg == "DOWN":
+        label, color = "DOWN", "#ef4444"
+    else:
+        label, color = reg, "#64748b"
+    if m_val_p is not None and a_val_p is not None and v_val_p is not None:
+        sub = f"M:{m_val_p:+.2f} V:{v_val_p:.1f} A:{a_val_p:.1f} (전일·SSOT)"
+    else:
+        sub = "전일 종가 기준 SSOT"
+    return f"""
+                        <div style="display:flex; flex-direction:column; align-items:center; gap:2px;">
+                            <span style="background:{color}; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem; white-space:nowrap;">{label}</span>
+                            <span style="font-size:0.65rem; color:var(--dim); font-family:monospace; line-height:1;">{sub}</span>
+                        </div>
+                        """
 
 
 def generate_trade_report(df, interval, output_path="trade_report.html", total_trades=0, win_rate=0, avg_ret=0, best_settings=None, market_df=None, vix_df=None, callback=None, target_codes=None, start_date=None, end_date=None, daily_equity=None, high_precision=False):
@@ -349,16 +623,14 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             "name": "🎯 [3] 진입 시그널 필터 (Signal Logic - 15m)",
             "items": [
                 {"label": "매수 진입 RSI 하한", "toggle": "use_rsi_min", "key": "buy_rsi_min"},
-                {"label": "15분봉 MACD 필터", "toggle": "use_macd_signal"},
-                {"label": "  ㄴ MACD E-Periods", "keys": ["macd_fast_entry", "macd_slow_entry", "macd_sig_entry"], "sep": "/"},
-                {"label": "RSI 시그널 필터", "toggle": "use_rsi_sig_filter", "key": "rsi_sig_period", "unit": "일"}
+                {"label": "15분봉 MACD 필터 (12/26/9 고정)", "toggle": "use_macd_signal"},
+                {"label": "RSI 시그널 필터 (RSI14·시그널9 고정)", "toggle": "use_rsi_sig_filter"},
             ]
         },
         {
             "name": "🚀 [4] 1단계 진입 전략 (Stage 1 Master)",
             "items": [
                 {"label": "Type A (눌림목) 활성화", "toggle": "use_type_a", "key": "buy_rsi_max_a", "unit": " RSI"},
-                {"label": "ㄴ Smart Buy (Type A)", "toggle": "use_smart_buy_a"},
                 {"label": "ㄴ 거래량 급증 확인(A)", "toggle": "use_vol_surge", "key": "vol_surge", "unit": "배"},
                 {"label": "ㄴ MA60 지지(상/하)", "keys": ["ma60_min", "ma60_max"], "unit": "%", "sep": "~"},
                 {"label": "ㄴ 이평 골든크로스(분)", "toggle": "use_gc", "key": "gc_window", "unit": "분"},
@@ -613,6 +885,8 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             .action-hold {{ color: #a855f7; font-weight: 700; background: rgba(168,85,247,0.1); padding: 2px 6px; border-radius: 4px; }}
             .profit {{ color: var(--gain); font-weight: 700; }}
             .loss {{ color: var(--loss); font-weight: 700; }}
+            td.gain, span.gain {{ color: var(--gain); font-weight: 600; }}
+            td.loss, span.loss {{ color: var(--loss); font-weight: 600; }}
             .reason-text {{ color: var(--dim); font-size: 0.75rem; cursor: help; border-bottom: 1px dotted #444; display: block; padding: 2px 0; }}
             .reason-cell {{ width: 100%; position: relative; }}
             .indicator-panel {{ 
@@ -666,6 +940,17 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             .depth-subnote {{ font-size: 0.8rem; color: var(--dim); margin-top: 10px; line-height: 1.5; }}
             .depth-subnote div {{ margin: 4px 0; }}
             .depth-err {{ color: #f87171; padding: 12px; }}
+            /* [v40.0] 통합 분석 통계 (수직 스택) */
+            .analysis-report-section {{ background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 28px 32px 36px; margin-bottom: 40px; clear: both; width: 100%; box-sizing: border-box; }}
+            .analysis-main-title {{ margin: 0 0 8px 0; font-size: 1.45rem; font-weight: 800; color: var(--buy); letter-spacing: -0.02em; }}
+            .analysis-main-lead {{ color: var(--dim); font-size: 0.88rem; line-height: 1.65; margin: 0 0 8px 0; max-width: 960px; }}
+            .analysis-h3 {{ font-size: 1.02rem; font-weight: 700; color: #e2e8f0; margin: 28px 0 12px 0; padding-bottom: 8px; border-bottom: 1px solid #334155; }}
+            .analysis-h3:first-of-type {{ margin-top: 4px; }}
+            .analysis-subblock {{ margin-bottom: 4px; }}
+            .analysis-stack-spaced > .analysis-subblock + .analysis-subblock {{ margin-top: 22px; }}
+            .analysis-type-card {{ background: rgba(15, 23, 42, 0.45); border: 1px solid #334155; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }}
+            .analysis-type-card.type-a {{ border-left: 4px solid #4ade80; }}
+            .analysis-type-card.type-b {{ border-left: 4px solid #38bdf8; }}
         </style>
     </head>
     <body>
@@ -692,8 +977,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                         <div class="stat-val" style="color:{total_profit_color}; font-size:1.6rem; font-weight:800;">{total_profit:+,} <small style="font-size:0.8rem;">KRW</small></div>
                     </div>
                 </div>
-                {depth_analytics_html}
-                {strategy_stats_html}
+                {analysis_stats_html}
                 {equity_chart_html}
                 <div style="margin-top:20px; color:var(--dim); font-size:0.85rem; margin-bottom:5px;">Strategy Parameters</div>
                 {param_html}
@@ -798,17 +1082,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     count_b = len(df[(df['Action'].str.startswith('BUY', na=False)) & (df['Reason'].str.contains('TYPE_B', case=False, na=False))])
     count_s2 = len(df[(df['Action'].str.contains('BUY2', na=False)) | (df['Action'] == 'ADDON') | (df['Reason'].str.contains('Stage 2|ADDON', case=False, na=False))])
     
-    # [v4.0] Precise Stage 1 Type A/B Filtering (Excluding S2/ADDON)
-    s1_a_mask = (df['Action'].isin(['SELL', 'HOLD'])) & \
-                (df['Sig_Type'] == 'TYPE_A') & \
-                (~df['Reason'].str.contains('S2|Stage 2|추매|ADDON', case=False, na=False))
-    s1_a_rets = df[s1_a_mask]['Return'].tolist()
-    
-    s1_b_mask = (df['Action'].isin(['SELL', 'HOLD'])) & \
-                (df['Sig_Type'] == 'TYPE_B') & \
-                (~df['Reason'].str.contains('S2|Stage 2|추매|ADDON', case=False, na=False))
-    s1_b_rets = df[s1_b_mask]['Return'].tolist()
-    
     # [v27.5] Smart Buy/Exit Tracking & End-of-Test Holdings (HOLD)
     # [v38.0] Reason 접두어(1M_SMART_EXIT, SMART_EXIT 등) 및 df_stats(REJECTED_SIG) 반영
     _sb_on_buy = _reason_matches_smart_buy(df['Reason'])
@@ -892,139 +1165,90 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
 
     # [v4.7] Refined Statistics (Signals vs Fills)
     count_fills = len(df[df['Action'].isin(['SELL', 'HOLD'])])
+    completed_rounds = len(total_s1_p) + len(total_s2_p)
 
-    # [v39.0] 완료 라운드트립 심층 분석(분위·집중도·S2·청산유형)
-    depth_analytics_html = _build_depth_analytics_html(df)
+    depth_fragment = _build_depth_analytics_html(df)
+    regime_lookup = _build_regime_lookup_prev_day(market_df, vix_df, best_settings)
+    regime_fragment = _build_market_regime_fragment(df, regime_lookup, best_settings)
 
-    strategy_stats_html = f"""
-    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:12px;">Strategy Execution Map (전략별 실행 성과 지도)</div>
-    <div class="strategy-stats" style="display: flex; flex-direction: column; gap: 15px;">
-        
-        <!-- Type A Section (눌림목) -->
-        <div class="strategy-card" style="display: block; border-left: 5px solid var(--type-a); padding: 15px; background: var(--card-bg); border-radius: 8px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #334155; padding-bottom:10px; margin-bottom:12px;">
-                <span style="color:var(--type-a); font-weight:800; font-size:1.1rem;">Type A (눌림목)</span>
-                <span style="font-size:0.9rem; color:var(--dim);">총 진입 횟수: <b style="color:#fff; font-size:1.1rem;">{len(a_s1_p)+len(a_s2_p)}</b> 건</span>
+    ca1, ca2 = len(a_s1_p), len(a_s2_p)
+    cb1, cb2 = len(b_s1_p), len(b_s2_p)
+    c_all_s1, c_all_s2 = len(total_s1_p), len(total_s2_p)
+
+    analysis_stats_html = f"""
+    <div id="analysis-stats" class="analysis-report-section depth-section">
+        <h2 class="analysis-main-title">📋 백테스트 분석 통계</h2>
+        <p class="analysis-main-lead">
+            체결 로그 기준으로 실행 요약, Type A/B·스테이지별 실현, 시장 레짐별 실현, 완료 라운드트립 심층(분포·집중도·청산유형)을 한 흐름으로 정리했습니다.
+            상단 카드(승률·순손익 등)와 중복되는 수치는 여기서 한 번만 표 형태로 봅니다.
+        </p>
+
+        <h3 class="analysis-h3">1. 실행·신호 요약</h3>
+        <table class="depth-table">
+            <thead><tr><th>항목</th><th class="num">값</th><th>비고</th></tr></thead>
+            <tbody>
+                <tr><td>청산 행 (SELL/HOLD)</td><td class="num">{count_fills}건</td><td style="color:var(--dim);font-size:0.82rem;">로그 상 청산·평가 행 수</td></tr>
+                <tr><td>완료 라운드트립</td><td class="num">{completed_rounds}건</td><td style="color:var(--dim);font-size:0.82rem;">종목별 매수체인→매도/평가 단위</td></tr>
+                <tr><td>종료 시 보유 (HOLD 종목 수)</td><td class="num">{hold_count}종목</td><td style="color:var(--dim);font-size:0.82rem;">고유 종목</td></tr>
+                <tr><td>스마트 진입 통과 / 시도</td><td class="num">{count_smart_buy} / {total_smart_buy_events}건</td><td style="color:var(--dim);font-size:0.82rem;">통과율 {pass_rate:.1f}%</td></tr>
+                <tr><td>스마트 진입 거절 (수급)</td><td class="num">{count_smart_buy_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">REJECTED_SIG 중 SmartBuy 패턴</td></tr>
+                <tr><td>신호 거절 전체 (REJECTED_SIG)</td><td class="num">{count_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">df_stats 기준</td></tr>
+                <tr><td>스마트 청산 (SELL·스마트 패턴)</td><td class="num">{count_smart_exit}건</td><td style="color:var(--dim);font-size:0.82rem;">Smart Exit 변형 포함</td></tr>
+                <tr><td>신호 후보 대비 완료 라운드 비중</td><td class="num">{100.0 * completed_rounds / max(1, total_signals):.1f}%</td><td style="color:var(--dim);font-size:0.82rem;">분모 {total_signals}건(SmartBuy 관련+REJECTED_SIG), 분자는 완료 라운드 {completed_rounds}건</td></tr>
+                <tr><td>매수 행·Reason 기준 TYPE_A / TYPE_B</td><td class="num">{count_a} / {count_b}건</td><td style="color:var(--dim);font-size:0.82rem;">참고용(Reason 문자열)</td></tr>
+                <tr><td>추매 관련 매수 행</td><td class="num">{count_s2}건</td><td style="color:var(--dim);font-size:0.82rem;">BUY2·ADDON·Reason 키워드</td></tr>
+            </tbody>
+        </table>
+
+        <h3 class="analysis-h3">2. 전략·스테이지별 실현 (Type A/B)</h3>
+        <div class="analysis-type-card type-a">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <span style="color:#4ade80;font-weight:800;font-size:1.05rem;">Type A (눌림목)</span>
+                <span style="color:var(--dim);font-size:0.88rem;">완료 라운드 <b style="color:#fff;">{ca1 + ca2}</b>건</span>
             </div>
-            <table style="width: 100%; border-collapse: collapse;">
-                <thead>
-                    <tr style="color:var(--dim); text-align:left;">
-                        <th style="width: 30%;">진입 구분</th>
-                        <th style="text-align:center; width: 20%;">건수</th>
-                        <th style="text-align:center; width: 20%;">가중 수익률</th>
-                        <th style="text-align:right; width: 30%;">총 수익금 (Net KRW)</th>
-                    </tr>
-                </thead>
+            <table class="depth-table">
+                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
                 <tbody>
-                    <tr>
-                        <td style="padding: 8px 0;">Stage 1 Only (1차만 진행)</td>
-                        <td style="text-align:center; font-weight:600;">{len(a_s1_p)}건</td>
-                        <td style="text-align:center;" class="{'gain' if s_a1 >= 0 else 'loss'}">{y_a1:+.2f}%</td>
-                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_a1 >= 0 else 'loss'}">{int(s_a1):,}원</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px 0;">with Stage 2 (추매 포함)</td>
-                        <td style="text-align:center; font-weight:600;">{len(a_s2_p)}건</td>
-                        <td style="text-align:center;" class="{'gain' if s_a2 >= 0 else 'loss'}">{y_a2:+.2f}%</td>
-                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_a2 >= 0 else 'loss'}">{int(s_a2):,}원</td>
-                    </tr>
+                    <tr><td>Stage 1만</td><td class="num">{ca1}</td><td class="num {'gain' if s_a1 >= 0 else 'loss'}">{y_a1:+.2f}%</td><td class="num {'gain' if s_a1 >= 0 else 'loss'}">{int(s_a1):,}원</td></tr>
+                    <tr><td>S2 포함</td><td class="num">{ca2}</td><td class="num {'gain' if s_a2 >= 0 else 'loss'}">{y_a2:+.2f}%</td><td class="num {'gain' if s_a2 >= 0 else 'loss'}">{int(s_a2):,}원</td></tr>
                 </tbody>
             </table>
-            <div style="margin-top:15px; padding-top:12px; border-top:2px solid #334155; text-align:right;">
-                <span style="color:var(--dim); font-size:0.85rem; margin-right:10px;">Type A 합계 수익:</span> 
-                <span class="{'gain' if (s_a1+s_a2) >= 0 else 'loss'}" style="font-size:1.3rem; font-weight:900;">{int(s_a1+s_a2):,}원</span>
-            </div>
+            <div style="text-align:right;margin-top:8px;color:var(--dim);font-size:0.85rem;">Type A 합계 <span class="{'gain' if (s_a1+s_a2) >= 0 else 'loss'}" style="font-weight:800;font-size:1.05rem;">{int(s_a1+s_a2):,}원</span></div>
         </div>
-
-        <!-- Type B Section (추세돌파) -->
-        <div class="strategy-card" style="display: block; border-left: 5px solid var(--type-b); padding: 15px; background: var(--card-bg); border-radius: 8px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #334155; padding-bottom:10px; margin-bottom:12px;">
-                <span style="color:var(--type-b); font-weight:800; font-size:1.1rem;">Type B (추세돌파)</span>
-                <span style="font-size:0.9rem; color:var(--dim);">총 진입 횟수: <b style="color:#fff; font-size:1.1rem;">{len(b_s1_p)+len(b_s2_p)}</b> 건</span>
+        <div class="analysis-type-card type-b">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <span style="color:#38bdf8;font-weight:800;font-size:1.05rem;">Type B (추세돌파)</span>
+                <span style="color:var(--dim);font-size:0.88rem;">완료 라운드 <b style="color:#fff;">{cb1 + cb2}</b>건</span>
             </div>
-            <table style="width: 100%; border-collapse: collapse;">
-                <thead>
-                    <tr style="color:var(--dim); text-align:left;">
-                        <th style="width: 30%;">진입 구분</th>
-                        <th style="text-align:center; width: 20%;">건수</th>
-                        <th style="text-align:center; width: 20%;">가중 수익률</th>
-                        <th style="text-align:right; width: 30%;">총 수익금 (Net KRW)</th>
-                    </tr>
-                </thead>
+            <table class="depth-table">
+                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
                 <tbody>
-                    <tr>
-                        <td style="padding: 8px 0;">Stage 1 Only (1차만 진행)</td>
-                        <td style="text-align:center; font-weight:600;">{len(b_s1_p)}건</td>
-                        <td style="text-align:center;" class="{'gain' if s_b1 >= 0 else 'loss'}">{y_b1:+.2f}%</td>
-                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_b1 >= 0 else 'loss'}">{int(s_b1):,}원</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px 0;">with Stage 2 (추매 포함)</td>
-                        <td style="text-align:center; font-weight:600;">{len(b_s2_p)}건</td>
-                        <td style="text-align:center;" class="{'gain' if s_b2 >= 0 else 'loss'}">{y_b2:+.2f}%</td>
-                        <td style="text-align:right; font-weight:700;" class="{'gain' if s_b2 >= 0 else 'loss'}">{int(s_b2):,}원</td>
-                    </tr>
+                    <tr><td>Stage 1만</td><td class="num">{cb1}</td><td class="num {'gain' if s_b1 >= 0 else 'loss'}">{y_b1:+.2f}%</td><td class="num {'gain' if s_b1 >= 0 else 'loss'}">{int(s_b1):,}원</td></tr>
+                    <tr><td>S2 포함</td><td class="num">{cb2}</td><td class="num {'gain' if s_b2 >= 0 else 'loss'}">{y_b2:+.2f}%</td><td class="num {'gain' if s_b2 >= 0 else 'loss'}">{int(s_b2):,}원</td></tr>
                 </tbody>
             </table>
         </div>
+        <div class="analysis-subblock">
+            <div class="depth-subtitle">전체 합산 (타입 무관)</div>
+            <table class="depth-table">
+                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
+                <tbody>
+                    <tr><td>S1만 (전 타입)</td><td class="num">{c_all_s1}</td><td class="num {'gain' if s_s1 >= 0 else 'loss'}">{y_s1:.2f}%</td><td class="num {'gain' if s_s1 >= 0 else 'loss'}">{int(s_s1):,}원</td></tr>
+                    <tr><td>S2 포함 (전 타입)</td><td class="num">{c_all_s2}</td><td class="num {'gain' if s_s2 >= 0 else 'loss'}">{y_s2:.2f}%</td><td class="num {'gain' if s_s2 >= 0 else 'loss'}">{int(s_s2):,}원</td></tr>
+                </tbody>
+            </table>
+        </div>
 
-        <div style="display:flex; flex-wrap: wrap; gap:15px; width:100%;">
-            <!-- Overall Summary Section -->
-            <div class="strategy-card" style="flex:2; min-width:300px;">
-                <span class="str-label" style="border-bottom:1px solid #444; padding-bottom:5px; display:block; margin-bottom:10px;">Overall Execution (전체 실행 정산)</span>
-                <div style="display:flex; justify-content:space-between; font-size:0.9rem; margin-bottom:8px;">
-                    <span style="color:var(--dim)">S1 Only (1단계 전용):</span>
-                    <span class="{'gain' if s_s1 >= 0 else 'loss'}" style="font-weight:700;">{y_s1:.2f}% ({int(s_s1):,}원 / {len(total_s1_p)}건)</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:0.9rem;">
-                    <span style="color:var(--dim)">with S2 (추매 포함):</span>
-                    <span class="{'gain' if s_s2 >= 0 else 'loss'}" style="font-weight:700;">{y_s2:.2f}% ({int(s_s2):,}원 / {len(total_s2_p)}건)</span>
-                </div>
-            </div>
+        <h3 class="analysis-h3">3. 시장 레짐별 실현</h3>
+        <div class="analysis-subblock">{regime_fragment}</div>
 
-            <!-- Signal Stats Section -->
-            <div class="strategy-card" style="flex:1; min-width:200px;">
-                <span class="str-label" style="border-bottom:1px solid #444; padding-bottom:5px; display:block; margin-bottom:10px;">Signal Stats (신호 통계)</span>
-                <div style="display:flex; justify-content:space-between; font-size:0.85rem; margin-bottom:6px;">
-                    <span style="color:var(--dim)">실제 진입:</span>
-                    <span>{len(total_s1_p)+len(total_s2_p)} 건 / {total_signals} 건</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:0.85rem;">
-                    <span style="color:var(--dim)">SmartBuy 통과:</span>
-                    <span style="color:#22c55e; font-weight:bold;">{pass_rate:.1f}%</span>
-                </div>
-            </div>
-        </div>
+        <h3 class="analysis-h3">4. 완료 라운드트립 심층</h3>
+        <p class="depth-lead" style="margin-bottom:16px;">
+            매수 체인(BUY*) 이후 <b>SELL 또는 HOLD</b>로 닫힌 거래만 집계합니다.
+            수익률(%)은 매도 행 <code>Return</code>, 원화 손익은 매수·매도 금액과 수수료로 추정합니다.
+        </p>
+        <div class="analysis-subblock">{depth_fragment if depth_fragment else '<p class="depth-subnote">완료 라운드가 없거나 심층 분석을 생성할 수 없습니다.</p>'}</div>
     </div>
-    
-    <div style="color:var(--dim); font-size:0.85rem; margin-bottom:10px; margin-top:20px;">Performance Metrics (실행 및 결과 상세 통계)</div>
-    <div class="strategy-stats">
-        <div class="strategy-card">
-            <span class="str-label">Total Sells (전체 매도)</span>
-            <span class="str-count" style="color:#fff">{count_fills} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
-        </div>
-        <div class="strategy-card" style="border-left:3px solid #a855f7;">
-            <span class="str-label">Stocks Held (테스트 종료 시 보유)</span>
-            <span class="str-count" style="color:#a855f7">{hold_count} <small style="font-size:0.7rem; color:var(--dim)">종목</small></span>
-        </div>
-        <div class="strategy-card">
-            <span class="str-label">Smart Exit (실시간 매도)</span>
-            <span class="str-count" style="color:#ef4444">{count_smart_exit} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
-        </div>
-        <div class="strategy-card">
-            <span class="str-label">Smart Buy (통과율: {pass_rate:.1f}%)</span>
-            <span class="str-count" style="color:#22c55e">{count_smart_buy} <small style="font-size:0.7rem; color:var(--dim)">/ {total_smart_buy_events} 건</small></span>
-        </div>
-        <div class="strategy-card">
-            <span class="str-label">Smart Buy 거절 (수급 미달)</span>
-            <span class="str-count" style="color:#f59e0b">{count_smart_buy_rejected} <small style="font-size:0.7rem; color:var(--dim)">건</small></span>
-        </div>
-        <div class="strategy-card">
-            <span class="str-label">Signals Rejected (신호 거절 전체)</span>
-            <span class="str-count" style="color:var(--dim)">{count_rejected} <small style="font-size:0.7rem;">건</small></span>
-        </div>
-    </div>
-    
     """
 
     # Portfolio Equity Chart
@@ -1179,41 +1403,33 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         for _, r in group.iterrows():
             status_badge = "-"
             try:
+                d_norm = pd.Timestamp(r["Date"]).normalize()
+                m_val_p = a_val_p = v_val_p = None
                 if msi is not None and adx is not None and vix_series is not None:
-                    # [v18.1] Intraday Timestamp Handling: Match by nearest prior daily index (pad method)
-                    target_date = r['Date'].replace(hour=0, minute=0, second=0, microsecond=0)
-                    m_idx = msi.index.get_indexer([target_date], method='pad')[0]
-                    if m_idx == -1: # Try without time reset if pad failed
-                        m_idx = msi.index.get_indexer([r['Date']], method='pad')[0]
-                        
-                    if m_idx != -1:
-                        m_val, a_val, v_val = msi.iloc[m_idx], adx.iloc[m_idx], vix_series.iloc[m_idx]
-                        
-                        # [v38.1] 시장 수치 지표 및 판정 로직 동기화 (v4.5.10 Standard SSOT)
-                        m_val_p, a_val_p, v_val_p = float(m_val), float(a_val), float(v_val)
-                        badge_label = "UP (Safe)"
-                        badge_color = "#84cc16"
-                        
-                        # [Standard Rule: Exactly same as SimpleBacktester v4.5.10]
-                        lock_down = (m_val_p < -0.10) or (v_val_p > 30)
-                        lock_neutral = (a_val_p < 15) or (m_val_p >= -0.10 and m_val_p <= 0.05)
-                        
-                        if lock_down:
-                            badge_label, badge_color = "DOWN (Risk)", "#ef4444"
-                        elif lock_neutral:
-                            badge_label, badge_color = "NEUTRAL", "#f97316"
-                        elif m_val_p > 0 and a_val_p >= 25 and v_val_p < 20: # AGGRESSIVE
-                            badge_label, badge_color = "UP (Aggreg)", "#22c55e"
-                        
-                        status_badge = f"""
-                        <div style="display:flex; flex-direction:column; align-items:center; gap:2px;">
-                            <span style="background:{badge_color}; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem; white-space:nowrap;">{badge_label}</span>
-                            <span style="font-size:0.65rem; color:var(--dim); font-family:monospace; line-height:1;">M:{m_val_p:+.2f} V:{v_val_p:.1f} A:{a_val_p:.1f}</span>
-                        </div>
-                        """
-                    else:
-                        status_badge = '<span style="background:#64748b; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem;">NEUTRAL (-)</span>'
-            except: pass
+                    m_idx = msi.index.get_indexer([d_norm], method="pad")[0]
+                    if m_idx == -1:
+                        m_idx = msi.index.get_indexer([r["Date"]], method="pad")[0]
+                    # §3·다이나믹 SSOT: 영업일 D의 레짐은 전 영업일(D-1) 종가 지표로 판정 → 표시도 D-1 행
+                    if m_idx >= 1:
+                        m_val_p = float(msi.iloc[m_idx - 1])
+                        a_val_p = float(adx.iloc[m_idx - 1])
+                        v_val_p = float(vix_series.iloc[m_idx - 1])
+
+                if regime_lookup:
+                    reg = regime_lookup.get(d_norm, "UNKNOWN")
+                    status_badge = _html_stock_row_regime_badge(reg, m_val_p, a_val_p, v_val_p)
+                elif m_val_p is not None:
+                    reg = _classify_market_regime_row(
+                        m_val_p, a_val_p, v_val_p, best_settings
+                    )
+                    status_badge = _html_stock_row_regime_badge(reg, m_val_p, a_val_p, v_val_p)
+                else:
+                    status_badge = (
+                        '<span style="background:#64748b; color:white; padding:2px 8px; '
+                        'border-radius:4px; font-weight:800; font-size:0.75rem;">-</span>'
+                    )
+            except Exception:
+                pass
 
             amt = r['Price'] * r['Qty']
             fee = r.get('Fee', 0) if not pd.isna(r.get('Fee', 0)) else 0
@@ -1305,7 +1521,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
 
     sidebar_items.insert(
         0,
-        '<li class="nav-item"><a href="#depth-analytics" style="color:#38bdf8;font-weight:700;">📉 심층 분석</a></li>',
+        '<li class="nav-item"><a href="#analysis-stats" style="color:#38bdf8;font-weight:700;">📋 분석 통계</a></li>',
     )
 
     ret_color = "var(--gain)" if avg_ret > 0 else "var(--loss)"
@@ -1331,11 +1547,8 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             content="".join(content), 
             start_date=start_date if start_date else "Simulation", 
             end_date=end_date if end_date else "End", 
-            equity_chart_html=equity_chart_html, 
-            strategy_stats_html=strategy_stats_html, 
-            depth_analytics_html=depth_analytics_html,
+            equity_chart_html=equity_chart_html,
+            analysis_stats_html=analysis_stats_html,
             avg_cash_ratio=avg_cash_ratio,
-            count_smart_exit=count_smart_exit,
-            hold_count=hold_count
         ))
     print(f"  [Report] Execution log saved: {output_path}")

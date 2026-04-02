@@ -1,6 +1,14 @@
 import pandas as pd
 import numpy as np
 
+from strategy.indicator_constants import (
+    MACD_ENTRY_FAST,
+    MACD_ENTRY_SLOW,
+    MACD_ENTRY_SIGNAL,
+    RSI_MAIN_PERIOD,
+    RSI_SIG_LOOKBACK,
+)
+
 def calculate_atr(df, period=14):
     """ATR (Average True Range) 계산 (Wilder's Smoothing)"""
     if df.empty or len(df) < period:
@@ -82,40 +90,31 @@ def calculate_all_indicators(df, settings):
     df['Vol_MA20'] = calculate_ma(df['Volume'], 20)
     df['Vol_Ratio'] = df['Volume'] / (df['Vol_MA20'] + 1e-10)
     
-    # 3. RSI
-    df['RSI'] = calculate_rsi(df['Close'], 14)
-    rsi_sig_p = int(settings.get('rsi_sig_period', 9))
-    df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
-    # 4. MACD (v6.2: 실시간/백테스트 신호용 파라미터 분리 적용)
-    fast = int(settings.get('macd_fast_entry', 12))
-    slow = int(settings.get('macd_slow_entry', 26))
-    sig = int(settings.get('macd_sig_entry', 9))
-
+    # 3–4. MACD + RSI (S1 공통 15분: MACD·RSI 시그널 주기는 indicator_constants 고정)
+    fast, slow, sig = MACD_ENTRY_FAST, MACD_ENTRY_SLOW, MACD_ENTRY_SIGNAL
     # [v37.9] Optimization: Preserve raw calculation states for Incremental Updates in 1m simulation
-    # 1. MACD EMA states
     df['_ema12'] = df['Close'].ewm(span=max(1, fast), adjust=False).mean()
     df['_ema26'] = df['Close'].ewm(span=max(1, slow), adjust=False).mean()
     df['MACD'] = df['_ema12'] - df['_ema26']
-    
+
     sig_p = max(1, sig)
     df['_macd_sig'] = df['MACD'].ewm(span=sig_p, adjust=False).mean()
     df['MACD_Sig'] = df['_macd_sig']
     df['OSC'] = df['MACD'] - df['MACD_Sig']
     df['Prev_OSC'] = df['OSC'].shift(1)
-    
-    # 2. RSI Wilder's states
-    period = 14
+
+    period = RSI_MAIN_PERIOD
     delta = df['Close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    df['_avg_gain'] = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    df['_avg_loss'] = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    
+    df['_avg_gain'] = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    df['_avg_loss'] = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
     rs = df['_avg_gain'] / (df['_avg_loss'] + 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
-    
-    rsi_sig_p = int(settings.get('rsi_sig_period', 9))
-    df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
+
+    rsi_sig_p = max(1, RSI_SIG_LOOKBACK)
+    df['RSI_Sig'] = calculate_ma(df['RSI'], rsi_sig_p)
     df['Prev_RSI'] = df['RSI'].shift(1)
 
     # ... rest of the original logic (MSI, ADX, ATR, etc.)
@@ -156,15 +155,17 @@ def calculate_buy_indicators_light(df, settings):
     df['MA60'] = calculate_ma(df['Close'], 60)
     df['Vol_MA20'] = calculate_ma(df['Volume'], 20)
     
-    df['RSI'] = calculate_rsi(df['Close'], 14)
-    rsi_sig_p = int(settings.get('rsi_sig_period', 9))
-    df['RSI_Sig'] = calculate_ma(df['RSI'], max(1, rsi_sig_p))
+    df['RSI'] = calculate_rsi(df['Close'], RSI_MAIN_PERIOD)
+    rsi_sig_p = max(1, RSI_SIG_LOOKBACK)
+    df['RSI_Sig'] = calculate_ma(df['RSI'], rsi_sig_p)
     df['Prev_RSI'] = df['RSI'].shift(1)
-    
-    fast = int(settings.get('macd_fast_entry', 12))
-    slow = int(settings.get('macd_slow_entry', 26))
-    sig = int(settings.get('macd_sig_entry', 9))
-    df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(df['Close'], max(1, fast), max(1, slow), max(1, sig))
+
+    df['MACD'], df['MACD_Sig'], df['OSC'] = calculate_macd(
+        df['Close'],
+        max(1, MACD_ENTRY_FAST),
+        max(1, MACD_ENTRY_SLOW),
+        max(1, MACD_ENTRY_SIGNAL),
+    )
     df['Prev_OSC'] = df['OSC'].shift(1)
     
     # Prev Day same time vol (전일 동시간 거래량 평균) - Optimized for v35.8

@@ -2,6 +2,13 @@
 from datetime import datetime
 import pandas as pd
 from backtest_engine import TradingStrategy
+from strategy.indicator_constants import (
+    MACD_ENTRY_FAST,
+    MACD_ENTRY_SLOW,
+    MACD_ENTRY_SIGNAL,
+    RSI_MAIN_PERIOD,
+    RSI_SIG_LOOKBACK,
+)
 
 class StreamProcessor:
     """실시간 시세 데이터 처리 및 지표 계산 전용 클래스"""
@@ -70,36 +77,34 @@ class StreamProcessor:
             bars_data[code] = df
         return bars_data
 
-    def calculate_indicators(self, df, period=14):
-        """RSI 및 MACD 지표 계산"""
-        if df is None or len(df) <= period: 
-            return 0.0, 0.0, 0.0, 0.0 # RSI, RSI_Sig, MACD, OSC
-        
+    def calculate_indicators(self, df, period=None):
+        """RSI 및 MACD 지표 계산 (RSI·MACD 파라미터는 indicator_constants 고정)"""
+        p = int(RSI_MAIN_PERIOD if period is None else period)
+        if df is None or len(df) <= p:
+            return 0.0, 0.0, 0.0, 0.0  # RSI, RSI_Sig, MACD, OSC
+
         try:
             # 1. RSI
             delta = df['Close'].diff()
             up = delta.clip(lower=0)
             down = -1 * delta.clip(upper=0)
-            avg_up = up.ewm(com=period-1, adjust=False).mean()
-            avg_down = down.ewm(com=period-1, adjust=False).mean()
+            avg_up = up.ewm(com=p - 1, adjust=False).mean()
+            avg_down = down.ewm(com=p - 1, adjust=False).mean()
             rs = avg_up / (avg_down + 1e-10)
             rsi = 100 - (100 / (1 + rs))
-            
-            rsi_sig_period = int(self.settings.get('rsi_sig_period', 9))
-            rsi_sig = rsi.rolling(rsi_sig_period).mean().iloc[-1]
+
+            rsi_sig_p = max(1, int(RSI_SIG_LOOKBACK))
+            rsi_sig = rsi.rolling(rsi_sig_p).mean().iloc[-1]
             rsi_val = float(rsi.iloc[-1])
-            
+
             # 2. MACD
-            macd_fast = int(self.settings.get('macd_fast_entry', 12))
-            macd_slow = int(self.settings.get('macd_slow_entry', 26))
-            macd_sig = int(self.settings.get('macd_sig_entry', 9))
-            
-            ema_f = df['Close'].ewm(span=macd_fast, adjust=False).mean()
-            ema_s = df['Close'].ewm(span=macd_slow, adjust=False).mean()
+            mf, ms, msg = int(MACD_ENTRY_FAST), int(MACD_ENTRY_SLOW), int(MACD_ENTRY_SIGNAL)
+            ema_f = df['Close'].ewm(span=mf, adjust=False).mean()
+            ema_s = df['Close'].ewm(span=ms, adjust=False).mean()
             macd_line = ema_f - ema_s
-            macd_signal = macd_line.ewm(span=macd_sig, adjust=False).mean()
+            macd_signal = macd_line.ewm(span=msg, adjust=False).mean()
             osc = macd_line - macd_signal
-            
+
             return rsi_val, float(rsi_sig), float(macd_line.iloc[-1]), float(osc.iloc[-1])
-        except: 
+        except Exception:
             return 0.0, 0.0, 0.0, 0.0

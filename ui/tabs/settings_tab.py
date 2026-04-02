@@ -412,7 +412,13 @@ class SettingsTab:
         add_param_row(sel_f, '종목 선정 RSI 상한', 'sel_rsi_max', '', '유니버스 선정 탄성 확인 (기본값 70)')
         add_param_row(sel_f, '종목 선정 RSI 하한', 'sel_rsi_min', '', '과매도권/반등 유니버스 확인 (기본값 30)')
         add_param_row(sel_f, '최대 감시 종목 수 (A)', 'max_slots_a', '개', 'Track A 유니버스 상한 (기본값 20)')
-        add_param_row(sel_f, '일봉 MACD(OSC) 필터', None, '', '일봉 OSC 양수 상시 확인')
+        add_param_row(
+            sel_f,
+            '일봉 MACD(OSC) 필터',
+            None,
+            '',
+            '일봉 OSC>0 상시 확인 · MACD 고정: Fast 12 / Slow 26 / Signal 9 (변경 불가)',
+        )
 
         sel_b_f = ttk.LabelFrame(_sec_parent('univ_b'), text=' 🔍 [2-B] 종목 선정 — Track B (추세돌파) ', padding='15')
         sel_b_f.pack(fill=tk.X, pady=10)
@@ -423,40 +429,120 @@ class SettingsTab:
         add_param_row(sel_b_f, '최대 감시 종목 수 (B)', 'max_slots_b', '개', 'Track B 유니버스 상한 (기본값 10)')
         add_param_row(sel_b_f, '거래량 분출 비율 (B)', 'sel_b_vol_ratio', '배', 'Track B 전용 거래량 분출 배수 (기본값 1.5)')
         add_param_row(sel_b_f, '분출 확인 기간 (B)', 'sel_b_vol_lookback', '일', 'Track B 전용 분출 이력 확인 기간 (기본값 10일)')
-        add_param_row(sel_f, '  ㄴ Fast Period', 'macd_fast_daily', '', '기본값 12')
-        add_param_row(sel_f, '  ㄴ Slow Period', 'macd_slow_daily', '', '기본값 26')
-        add_param_row(sel_f, '  ㄴ Signal Period', 'macd_sig_daily', '', '기본값 9')
 
         strat_f = ttk.LabelFrame(_sec_parent('s1'), text=' 🎯 [3] 1단계 진입 (S1) — 감시 후 매수 신호 ', padding='15')
         strat_f.pack(fill=tk.X, pady=10)
 
         add_header(strat_f, '── 단계 공통 필수 필터 (A/B 모두 적용) ──')
         add_param_row(strat_f, '시장 지수 필터', None, '', 'UP/NEUTRAL/DOWN 차등 가중치', toggle_key='use_market_filter')
-        add_param_row(strat_f, '15분봉 MACD 필터', None, '', '실시간 수급 모멘텀 확인', toggle_key='use_macd_signal')
-        add_param_row(strat_f, '  ㄴ OSC>0 양수 요구', None, '', 'OFF=OSC상승만, ON=양수+상승', toggle_key='use_osc_positive')
-        add_param_row(strat_f, '  ㄴ Fast Period', 'macd_fast_entry', '', '기본값 12')
-        add_param_row(strat_f, '  ㄴ Slow Period', 'macd_slow_entry', '', '기본값 26')
-        add_param_row(strat_f, '  ㄴ Signal Period', 'macd_sig_entry', '', '기본값 9')
-        add_param_row(strat_f, 'RSI 시그널 주기', 'rsi_sig_period', '봉', 'S1/S2 공통 지표 주기', toggle_key='use_rsi_sig_filter')
+        add_param_row(
+            strat_f,
+            '15분봉 MACD 필터',
+            None,
+            '',
+            '켜면 15분 OSC>0 필수(기본). MACD 고정 12/26/9 · 실시간 수급 모멘텀',
+            toggle_key='use_macd_signal',
+        )
+        add_param_row(
+            strat_f,
+            'RSI 시그널 필터',
+            None,
+            '',
+            'RSI(14) vs 시그널(9봉 단순이평) 등 — 지표 주기 UI 비노출·고정 14/9',
+            toggle_key='use_rsi_sig_filter',
+        )
 
         # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지
         add_header(strat_f, '── Type A: 눌림목 진입 조건 ──')
         add_param_row(strat_f, 'A 전용 사용', None, '', '중립/순풍 장세 사용 가능', toggle_key='use_type_a')
-        add_param_row(strat_f, 'RSI 하한 (과매도 회복)', 'buy_rsi_min', '', '과매도권/반등 확인용 최저선', toggle_key='use_rsi_min', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'RSI 상한선', 'buy_rsi_max_a', '', '눌림 깊이 확인용 (기본 65)', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'Smart Buy', None, '', '진입 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_a', widget_list=self.type_a_widgets)
+        add_param_row(
+            strat_f,
+            'RSI 하한 (과매도 회복)',
+            'buy_rsi_min',
+            '',
+            '과매도권/반등 확인용 최저선 · 기준선 Wilder RSI(14)',
+            toggle_key='use_rsi_min',
+            widget_list=self.type_a_widgets,
+        )
+        add_param_row(
+            strat_f,
+            'RSI 상한선',
+            'buy_rsi_max_a',
+            '',
+            '눌림 깊이 확인용 (기본 65) · 기준선 Wilder RSI(14)',
+            widget_list=self.type_a_widgets,
+        )
+        # Type A Smart Buy(use_smart_buy_a)는 미사용 예정 — 설정 UI 비노출(로직·설정 키는 유지)
         add_param_row(strat_f, '이평 골든크로스', 'gc_window', '분', 'N분 내 GC 발생 여부', toggle_key='use_gc', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'RSI 상향돌파', 'rsi_window', '분', 'N분 내 RSI 50 돌파 여부', toggle_key='use_rsi_signal', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'MA60 안전구역', None, '', '60일선 대비 이격 제한', toggle_key='use_ma60_safe', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, '  ㄴ MA60 하한', 'ma60_min', '%', '기본 100% 이상', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, '  ㄴ MA60 상한', 'ma60_max', '%', '기본 110% 이하', widget_list=self.type_a_widgets)
+        add_param_row(
+            strat_f,
+            'RSI 상향돌파',
+            'rsi_window',
+            '분',
+            'N분 내 RSI(14) 50선 돌파 여부',
+            toggle_key='use_rsi_signal',
+            widget_list=self.type_a_widgets,
+        )
+        add_param_row(
+            strat_f,
+            'MA60 안전구역',
+            None,
+            '',
+            'Type A 전용. (종가÷MA60)×100%가 아래 하한·상한 사이일 때만 통과 — MA60 지표값의 최소/최대가 아님',
+            toggle_key='use_ma60_safe',
+            widget_list=self.type_a_widgets,
+        )
+        add_param_row(
+            strat_f,
+            '  ㄴ 이격 하한(%)',
+            'ma60_min',
+            '%',
+            '입력=허용 최소 이격%(기본 100≈60일선 가격 이상)',
+            widget_list=self.type_a_widgets,
+        )
+        add_param_row(
+            strat_f,
+            '  ㄴ 이격 상한(%)',
+            'ma60_max',
+            '%',
+            '입력=허용 최대 이격%(기본 110≈60일선 대비 +10%까지)',
+            widget_list=self.type_a_widgets,
+        )
         add_param_row(strat_f, '거래량 급증확인', 'vol_surge', '배', '전일 평균 대비 폭발력', toggle_key='use_vol_surge', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'ATR 손절', 'atr_multiplier_sl_a', '배', '철벽 수비형 ATR 손절', toggle_key='use_atr_stop_loss_a', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, 'ATR 트레일링', 'atr_multiplier_trail_a', '배', '수익 극대화용 트레일링', toggle_key='use_atr_trailing_stop_a', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '시장레짐 Type A 보정(1차)', None, '', 'AGGRESSIVE=기준, UP/NEUTRAL에서 vol·MA60만 보수화', toggle_key='use_type_a_regime_phase1', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '  ㄴ UP 거래량 +Δ', 'type_a_phase1_up_vol_surge_add', '배', '기준 vol_surge에 가산', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '  ㄴ NEUTRAL 거래량 +Δ', 'type_a_phase1_neutral_vol_surge_add', '배', 'UP보다 크게', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '  ㄴ UP MA60 폭 축소', 'type_a_phase1_up_ma60_shrink_pct', '%p', '하한↑·상한↓ 각각 이 만큼', widget_list=self.type_a_widgets)
+        add_param_row(strat_f, '  ㄴ NEUTRAL MA60 폭 축소', 'type_a_phase1_neutral_ma60_shrink_pct', '%p', 'UP보다 크게', widget_list=self.type_a_widgets)
+        add_param_row(
+            strat_f,
+            'ATR 손절',
+            'atr_multiplier_sl_a',
+            '배',
+            'S1용 토글·배수(OFF면 %손절). 추매(S2) ATR은 [4] S2 전용 항목',
+            toggle_key='use_atr_stop_loss_a',
+            widget_list=self.type_a_widgets,
+        )
+        add_param_row(
+            strat_f,
+            'ATR 트레일링',
+            'atr_multiplier_trail_a',
+            '배',
+            'S1용(OFF면 S1 구간 ATR 트레일 없음). S2는 [4] S2 ATR 트레일',
+            toggle_key='use_atr_trailing_stop_a',
+            widget_list=self.type_a_widgets,
+        )
 
         add_header(strat_f, '── Type B: 돌파형 진입 조건 ──')
         add_param_row(strat_f, 'B 전용 사용', None, '', '순풍(UP) 장세 전용', toggle_key='use_type_b')
-        add_param_row(strat_f, 'RSI 상한선', 'buy_rsi_max_b', '', '돌파 강점 확인용 (기본 70)', widget_list=self.type_b_widgets)
+        add_param_row(
+            strat_f,
+            'RSI 상한선',
+            'buy_rsi_max_b',
+            '',
+            '돌파 강점 확인용 (기본 70) · 기준선 Wilder RSI(14)',
+            widget_list=self.type_b_widgets,
+        )
         add_param_row(strat_f, 'Smart Buy', None, '', '돌파 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_b', widget_list=self.type_b_widgets)
         add_param_row(strat_f, '돌파 거래량', 'vol_surge_b', '배', '돌파 시점 폭발적 수급', toggle_key='use_type_b_vol', widget_list=self.type_b_widgets)
         add_param_row(strat_f, '추세 정렬 확인', None, '', '일봉/1분봉 추세 일치 여부', toggle_key='use_trend_aligned_b', widget_list=self.type_b_widgets)
@@ -468,7 +554,14 @@ class SettingsTab:
         s2_f.pack(fill=tk.X, pady=10)
         add_param_row(s2_f, '1. 20일선 지지 확인', 's2_ma20_gap', '%', toggle_key='use_s2_ma20')
         add_param_row(s2_f, '2. 5일선 회복/지지', 's2_ma5_gap', '%', toggle_key='use_s2_ma5')
-        add_param_row(s2_f, '3. RSI 시그널 확인', 's2_rsi_gap', '%', toggle_key='use_s2_rsi_sig', hint='RSI가 시그널선을 상향 돌파')
+        add_param_row(
+            s2_f,
+            '3. RSI 시그널 확인',
+            's2_rsi_gap',
+            '%',
+            toggle_key='use_s2_rsi_sig',
+            hint='RSI(14)가 시그널(9봉 MA) 대비 상향 돌파',
+        )
         add_param_row(s2_f, '4. MACD GC 확인', 's2_macd_gap', '', toggle_key='use_s2_macd_gc', hint='MACD가 시그널 상향 돌파')
         add_param_row(s2_f, '5. 거래량 급증 확인', 's2_vol_ratio', '배', toggle_key='use_s2_vol_surge', hint='이전 평균 거래량 대비 배수')
         add_param_row(s2_f, '  ㄴ 전일동시간 평균 기간', 'prev_vol_lookback', '일', '기준 거래량(Prev_Day_Vol) 산출 기간')
@@ -484,7 +577,14 @@ class SettingsTab:
         add_header(s2b_f, '공통 s2_* 값과 다르게 설정 시 Type B 종목에만 적용됩니다')
         add_param_row(s2b_f, '1. 20일선 지지 확인 (B)', 's2_b_ma20_gap', '%', toggle_key='use_s2_b_ma20')
         add_param_row(s2b_f, '2. 5일선 회복/지지 (B)', 's2_b_ma5_gap', '%', toggle_key='use_s2_b_ma5')
-        add_param_row(s2b_f, '3. RSI 시그널 확인 (B)', 's2_b_rsi_gap', '%', toggle_key='use_s2_b_rsi_sig', hint='RSI가 시그널선을 상향 돌파')
+        add_param_row(
+            s2b_f,
+            '3. RSI 시그널 확인 (B)',
+            's2_b_rsi_gap',
+            '%',
+            toggle_key='use_s2_b_rsi_sig',
+            hint='RSI(14)가 시그널(9봉 MA) 대비 상향 돌파',
+        )
         add_param_row(s2b_f, '4. MACD GC 확인 (B)', 's2_b_macd_gap', '', toggle_key='use_s2_b_macd_gc', hint='MACD가 시그널 상향 돌파')
         add_param_row(s2b_f, '5. 거래량 급증 확인 (B)', 's2_b_vol_ratio', '배', toggle_key='use_s2_b_vol_surge', hint='이전 평균 거래량 대비 배수')
         add_param_row(s2b_f, '6. 최소 수익률 확보 (B)', 's2_b_profit_limit', '%', toggle_key='use_s2_b_profit', hint='진입가 대비 최소 수익률')
@@ -516,7 +616,7 @@ class SettingsTab:
             '4. ATR 트레일: 목표 익절% 이후만',
             None,
             '',
-            '켜면 익절 목표% 미만 구간은 트레일 미적용(ATR SL은 유효)',
+            'ON: 해당 스테이지 ATR 트레일 켜짐 시 고정TP 생략·최고가로 목표% 도달 후 트레일만(미만은 트레일 미적용, ATR SL은 유효)',
             toggle_key='use_atr_trail_only_after_tp',
         )
         add_param_row(exit_f, 'S1 눌림(A) 전용 익절', 's1_a_take_profit', '%', '눌림목 목표 수익률', toggle_key='use_s1_a_tp')
@@ -569,7 +669,7 @@ class SettingsTab:
                 if not ent: continue
                 v = ent.get().strip().replace(',', '')
                 if not v: continue
-                if k in ['backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b', 'atr_period', 'gap_grace_mins', 'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily', 'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'gc_window', 'rsi_window']:
+                if k in ['backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b', 'atr_period', 'gap_grace_mins', 'gc_window', 'rsi_window']:
                     self.app.settings[k] = int(float(v))
                 else: 
                     self.app.settings[k] = float(v)

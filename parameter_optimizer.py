@@ -29,13 +29,11 @@ _G_VIX = None
 _G_IND_CACHE: dict = {}
 
 # 지표 계산에 영향을 주는 파라미터 집합 (calculate_all_indicators 에서 실제로 사용하는 값들)
-# - macd_fast/slow/sig_entry → MACD, OSC, MACD_Sig
-# - rsi_sig_period           → RSI_Sig (rolling MA of RSI)
+# - 15분 MACD 진입·RSI 시그널 주기는 strategy.indicator_constants 고정 (설정 키 무시)
 # - atr_period               → ATR
 # - vol_lookback             → Prev_Day_Vol
 _INDICATOR_PARAMS = frozenset({
-    'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry',
-    'atr_period', 'vol_lookback', 'rsi_sig_period',
+    'atr_period', 'vol_lookback',
 })
 
 def init_worker(data_path):
@@ -305,10 +303,9 @@ class ParameterOptimizer:
         # 지표(Indicator) 계산에 영향을 주지 않는 파라미터 화이트리스트
         # _INDICATOR_PARAMS에 포함된 값들은 여기서 제외해야 함
         # 제외된 것(= 지표에 영향):
-        #   macd_fast_entry, macd_slow_entry, macd_sig_entry → MACD/OSC 계산에 사용
         #   atr_period → ATR 계산에 사용
         #   vol_lookback → Prev_Day_Vol 계산에 사용
-        #   rsi_sig_period → RSI_Sig 계산에 사용
+        #   (15분 MACD·RSI 시그널 주기는 indicator_constants 고정)
         signal_only_params = {
             'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
             's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 
@@ -328,11 +325,12 @@ class ParameterOptimizer:
             'use_smart_buy_a', 'use_smart_buy_b', 'use_smart_buy_s2',
             'smart_buy_ba_ratio', 'smart_buy_vp', 'use_synthetic_realtime',
             'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
-            # macd_fast_entry, macd_slow_entry, macd_sig_entry 는 제거 (지표에 영향)
+            'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'rsi_sig_period',
+            # 위 MACD/RSI 시그널 키는 JSON 잔존 가능하나 지표 계산에는 미사용(상수 고정)
             'backtest_initial_capital', 'sel_rsi_min', 'sel_rsi_max',
             'gap_grace_mins', 'min_trde_val', 'vol_ratio', 'vol_lookback',
             's2_ma5_gap', 'use_s2_ma20', 'use_s2_vol_surge', 'use_s2_rsi_sig', 'use_s2_macd_gc',
-            'use_market_filter', 'buy_rsi_min',
+            'use_market_filter', 'buy_rsi_min', 'use_macd_signal',
             # [v4.6] 시장 트렌드 판정 임계값 (지표 계산과 무관, 신호/필터 로직에만 영향)
             'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
             # [Phase 2] Track B 종목 선정 파라미터 (지표 계산과 무관)

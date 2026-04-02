@@ -110,7 +110,16 @@ class SignalEngine:
             if code in self.app.bars_data and len(self.app.bars_data[code]) >= 60:
                 if should_recalc or 'last_detailed_sig' not in info:
                     df_with_ind = TradingStrategy.calculate_indicators(self.app.bars_data[code], self.app.settings)
-                    info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(df_with_ind, self.app.settings, getattr(self.app, 'market_trend', 'UP'))
+                    try:
+                        from strategy.type_a_regime import apply_type_a_phase1_settings
+
+                        _mt = getattr(self.app, "market_trend", "UP") or "UP"
+                        _eff = apply_type_a_phase1_settings(self.app.settings, _mt)
+                    except Exception:
+                        _eff = self.app.settings
+                    info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(
+                        df_with_ind, _eff, getattr(self.app, "market_trend", "UP")
+                    )
                     info['last_bar_count'] = current_bar_count
                     info['last_row_cache'] = df_with_ind.iloc[-1].to_dict()
                 

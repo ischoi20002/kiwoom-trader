@@ -32,7 +32,7 @@ DEFAULT_SETTINGS = {
     "use_rsi_min": True,
     "buy_rsi_min": 30.0,
     "use_macd_signal": True,
-    "use_osc_positive": False,
+    # 아래 MACD/rsi_sig 키는 JSON 호환용(지표는 strategy.indicator_constants 고정값 사용)
     "macd_fast_entry": 12,
     "macd_slow_entry": 26,
     "macd_sig_entry": 9,
@@ -51,6 +51,12 @@ DEFAULT_SETTINGS = {
     "ma60_max": 110.0,
     "use_vol_surge": True,
     "vol_surge": 1.5,
+    # Type A 시장 레짐 1차 보정 (vol_surge·MA60만, RSI 밴드 제외). OFF면 기존과 동일.
+    "use_type_a_regime_phase1": False,
+    "type_a_phase1_up_vol_surge_add": 0.2,
+    "type_a_phase1_neutral_vol_surge_add": 0.45,
+    "type_a_phase1_up_ma60_shrink_pct": 1.0,
+    "type_a_phase1_neutral_ma60_shrink_pct": 2.0,
     "use_atr_stop_loss_a": False,
     "use_atr_trailing_stop_a": False,
     
