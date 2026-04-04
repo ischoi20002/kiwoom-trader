@@ -260,6 +260,13 @@ class PortfolioManager:
                     meta = self.data_manager.get_latest_order_meta(code)
                     reg_name = name or (meta[0] if meta else "Unknown")
                     reg_reason = reason or (meta[1] if meta else "SIGNAL")
+                    # Type B 판별: evaluate_position·S2·균형게이트가 sig_type 키를 우선 참조
+                    try:
+                        _sig_type = (
+                            "TYPE_B" if "TYPE_B" in str(reg_reason).upper() else "TYPE_A"
+                        )
+                    except Exception:
+                        _sig_type = "TYPE_A"
                     
                     fp = self._to_f(price)
                     iq = self._to_i(qty)
@@ -271,7 +278,9 @@ class PortfolioManager:
                         "name": reg_name, "avg_price": fp, "qty": iq,
                         "stage": 1, "invested": total_invested,
                         "entry_time": datetime.now().isoformat(),
-                        "reason": reg_reason, "events": [], "max_now": fp
+                        "reason": reg_reason,
+                        "sig_type": _sig_type,
+                        "events": [], "max_now": fp
                     }
                     if snapshot:
                         self.virtual_positions[code]['events'].append({

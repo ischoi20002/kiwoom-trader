@@ -4,6 +4,7 @@ from datetime import datetime
 import traceback
 from backtest_engine import TradingStrategy
 from strategy.simulation_models import SimulatedRealtimeMetrics
+from ui.tabs.monitor_tab import format_strategy_type_label
 
 class SignalEngine:
     """[v25.7] 실시간 체결 데이터 분석 및 시그널 포착 엔진 클래스"""
@@ -101,20 +102,47 @@ class SignalEngine:
             # 5. 지표 및 시그널 계산 주기 관리 (100틱마다 또는 분봉 변경 시)
             info['tick_count'] = info.get('tick_count', 0) + 1
             last_bar_count = info.get('last_bar_count', 0)
-            current_bar_count = len(self.app.bars_data[code])
-            
+            try:
+                _min_sig_bars = max(1, int(float(self.app.settings.get("min_15m_bars_for_signal", 60))))
+            except (TypeError, ValueError):
+                _min_sig_bars = 60
+            _bd = (self.app.bars_data or {}).get(code)
+            try:
+                current_bar_count = len(_bd) if _bd is not None and not getattr(_bd, "empty", True) else 0
+            except Exception:
+                current_bar_count = 0
+            # 15분봉(마지막 미완성 1봉 포함) 행 수가 기준 미만이면 S1 신호·청산·S2 전부 보류
+            bars_ready = (
+                _bd is not None
+                and not getattr(_bd, "empty", True)
+                and current_bar_count >= _min_sig_bars
+            )
+
             should_recalc = (current_bar_count > last_bar_count) or (info['tick_count'] % 100 == 1)
-            
+
             is_buy = False
             last_row = None
-            if code in self.app.bars_data and len(self.app.bars_data[code]) >= 60:
+            if bars_ready:
                 if should_recalc or 'last_detailed_sig' not in info:
                     df_with_ind = TradingStrategy.calculate_indicators(self.app.bars_data[code], self.app.settings)
                     try:
                         from strategy.type_a_regime import apply_type_a_phase1_settings
+                        from strategy.type_b_regime import apply_type_b_phase1_overlay
 
                         _mt = getattr(self.app, "market_trend", "UP") or "UP"
-                        _eff = apply_type_a_phase1_settings(self.app.settings, _mt)
+                        _s = self.app.settings
+                        _need = (
+                            bool(_s.get("use_type_a_regime_phase1", False))
+                            and bool(_s.get("use_type_a", False))
+                        ) or (
+                            bool(_s.get("use_type_b_regime_phase1", False))
+                            and bool(_s.get("use_type_b", False))
+                        )
+                        if _need:
+                            _eff = apply_type_a_phase1_settings(self.app.settings, _mt)
+                            _eff = apply_type_b_phase1_overlay(self.app.settings, _eff, _mt)
+                        else:
+                            _eff = self.app.settings
                     except Exception:
                         _eff = self.app.settings
                     info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(
@@ -168,35 +196,51 @@ class SignalEngine:
                 if is_buy and is_cool and code not in self.app.virtual_positions:
                     self.last_buy_sig_time[code] = datetime.now()
                     self.app._on_buy_signal_received(code, now_price, rsi_sig, macd_val, osc_val, ma60_ratio)
+            else:
+                info['confluence'] = f"봉 충전 {current_bar_count}/{_min_sig_bars} (신호·매매 대기)"
+                info['met_ratio'] = 0.0
 
-            # 7. 실시간 가상 포지션 시나리오 처리
-            # is_power_exhausted는 이미 Line 88~95에서 계산됨
+            # 7. 실시간 가상 포지션: 봉 기준 충족 시에만 청산·S2 판단 (충전 중에는 매매 없음)
             bid_ask_ratio = float(self._to_scalar(info.get('bid_ask_ratio', 1.0), 1.0))
             ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
             vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
-            
-            res = self.app.strategy_engine.evaluate_position(
-                code, now_price, 
-                ind=last_row,
-                is_power_exhausted=is_power_exhausted,
-                bid_ask_ratio=bid_ask_ratio,
-                ask_bid_ratio=ask_bid_ratio,
-                vol_power=vol_power
-            )
-            
-            if res['action'] != 'HOLD':
-                self.app._on_strategy_action_needed(code, res['action'], res['reason'], now_price=now_price, profit_ratio=res.get('profit_ratio', 0))
+
+            if bars_ready:
+                res = self.app.strategy_engine.evaluate_position(
+                    code,
+                    now_price,
+                    ind=last_row,
+                    is_power_exhausted=is_power_exhausted,
+                    bid_ask_ratio=bid_ask_ratio,
+                    ask_bid_ratio=ask_bid_ratio,
+                    vol_power=vol_power,
+                )
+                if res["action"] != "HOLD":
+                    self.app._on_strategy_action_needed(
+                        code,
+                        res["action"],
+                        res["reason"],
+                        now_price=now_price,
+                        profit_ratio=res.get("profit_ratio", 0),
+                    )
 
             # 8. 트리뷰 업데이트 큐잉
             p_tag = "price_up" if diff_val > 0 else ("price_down" if diff_val < 0 else "price_stable")
             sign = "▲" if diff_val > 0 else ("▼" if diff_val < 0 else "")
             abs_ratio = abs(diff_val / open_price * 100) if open_price != 0 else 0
             
+            strat_label = format_strategy_type_label(
+                info.get("sel_track", info.get("SelTrack", "AB"))
+            )
             full_values = (
-                f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}", code, info['name'],
-                f"{int(now_price):,}", f"{sign} {abs_ratio:.2f}%" if sign else "0.00%",
-                f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%", 
-                str(info.get('confluence', '-')),
+                f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
+                code,
+                info["name"],
+                strat_label,
+                f"{int(now_price):,}",
+                f"{sign} {abs_ratio:.2f}%" if sign else "0.00%",
+                str(info.get("confluence", "-")),
+                f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%",
                 f"{int(float(self._to_scalar(info.get('total_ask', 0), 0))):,}",
                 f"{int(float(self._to_scalar(info.get('total_bid', 0), 0))):,}",
                 f"{int(volume):,}", f"{trde_val:,}"
@@ -245,15 +289,3 @@ class SignalEngine:
         rs = gain / (loss + 1e-10)
         rsi = 100 - (100 / (1 + rs))
         return rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 0.0
-
-    def _check_volume_spike(self, code, current_vol):
-        """실시간 거래량 급증 탐지"""
-        if not hasattr(self.app, 'min_volume_profiles') or code not in self.app.min_volume_profiles:
-            return False
-        now_hm = datetime.now().strftime('%H%M')
-        # [v4.5.9] Series Ambiguity 방어: 볼륨 프로필에서 스칼라값 안전 추출
-        avg_min_vol_v = self.app.min_volume_profiles[code].get(now_hm, 0)
-        avg_min_vol = float(self._to_scalar(avg_min_vol_v, 0.0))
-        
-        c_vol = float(self._to_scalar(current_vol, 0.0))
-        return bool(c_vol > (avg_min_vol * 3.0) and c_vol > 5000)

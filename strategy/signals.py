@@ -2,6 +2,60 @@ import pandas as pd
 import numpy as np
 
 
+def _normalize_same_bar_priority(settings: dict | None) -> str:
+    """동일 봉 A+B 동시 신호 시 Sig_Type 우선순위 (settings 키: same_bar_sig_priority)."""
+    try:
+        if settings is None:
+            return "confluence"
+        raw = settings.get("same_bar_sig_priority", "confluence")
+        p = str(raw).strip().lower()
+        if p in ("prefer_b", "prefer_a", "confluence"):
+            return p
+        return "confluence"
+    except Exception:
+        return "confluence"
+
+
+def _compute_sig_type_column(
+    signal_a: np.ndarray,
+    signal_b: np.ndarray,
+    ratio_a: np.ndarray,
+    ratio_b: np.ndarray,
+    priority: str,
+) -> np.ndarray:
+    """
+    Sig_Type 열 산출. 동일 봉에서 signal_a·signal_b가 모두 True일 때만 priority 규칙 적용.
+    - confluence: Met_Ratio(합치도)가 더 큰 타입(동점이면 TYPE_A — NEUTRAL·Track A 정합성)
+    - prefer_a / prefer_b: 동시 만족 봉에서 각각 고정
+    """
+    try:
+        sa = np.asarray(signal_a, dtype=bool)
+        sb = np.asarray(signal_b, dtype=bool)
+        ra = np.asarray(ratio_a, dtype=float)
+        rb = np.asarray(ratio_b, dtype=float)
+        only_b = sb & ~sa
+        only_a = sa & ~sb
+        both = sa & sb
+        out = np.where(only_b, "TYPE_B", np.where(only_a, "TYPE_A", "NONE"))
+        pri = (priority or "confluence").strip().lower()
+        if pri not in ("prefer_b", "prefer_a", "confluence"):
+            pri = "confluence"
+        if pri == "prefer_b":
+            return np.where(both, "TYPE_B", out)
+        if pri == "prefer_a":
+            return np.where(both, "TYPE_A", out)
+        # confluence
+        valid = np.isfinite(ra) & np.isfinite(rb)
+        both_valid = both & valid
+        both_invalid = both & ~valid
+        out = np.where(both_invalid, "TYPE_B", out)
+        # both_valid: rb>ra → B, 그 외(ra>rb 또는 동점) → A
+        sub = np.where(both_valid & (rb > ra), "TYPE_B", np.where(both_valid, "TYPE_A", "NONE"))
+        return np.where(both_valid, sub, out)
+    except Exception:
+        return np.where(np.asarray(signal_b, dtype=bool), "TYPE_B", np.where(np.asarray(signal_a, dtype=bool), "TYPE_A", "NONE"))
+
+
 def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bool:
     """JSON/최적화 경로에서 bool·0/1·문자열이 섞여도 안전하게 불리언으로 해석."""
     try:
@@ -40,8 +94,7 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     settings = settings or {}
     ma60_ratio = (df['Close'] / df['MA60']) * 100
     
-    # 2. RSI 조건
-    # [v4.5 Sync] Respect use_rsi_min toggle
+    # 2. RSI 조건 — 하한은 S1 공통(use_rsi_min·buy_rsi_min), 상한만 A/B 분리
     buy_rsi_min = settings.get('buy_rsi_min', 30.0) if settings.get('use_rsi_min', True) else 0.0
     buy_rsi_max_b = settings.get('buy_rsi_max_b', 70.0)
     buy_rsi_max_a = settings.get('buy_rsi_max_a', 65.0) # [v4.5 Sync] Default 55.0 -> 65.0
@@ -81,8 +134,11 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     v_surge_a = settings.get('vol_surge', 2.0)
     v_surge_b = settings.get('vol_surge_b', 2.0)
     
-    cond_vol_a = (df['Volume'] > df['Prev_Day_Vol'] * v_surge_a)
-    cond_vol_b = (df['Volume'] > df['Prev_Day_Vol'] * v_surge_b)
+    # S1 전용 기준열 (lookback은 prev_vol_lookback_s1_a / s1_b)
+    col_s1a = "Prev_Day_Vol_S1_A" if "Prev_Day_Vol_S1_A" in df.columns else "Prev_Day_Vol"
+    col_s1b = "Prev_Day_Vol_S1_B" if "Prev_Day_Vol_S1_B" in df.columns else "Prev_Day_Vol_B"
+    cond_vol_a = (df["Volume"] > df[col_s1a] * v_surge_a)
+    cond_vol_b = (df["Volume"] > df[col_s1b] * v_surge_b)
     
     # 5. Type A: 눌림목 (RSI 40-65 + MA_GC + MA60 근접)
     # 이미 구현되어 있는 RSI/MA 필터를 활용하여 중복 제거
@@ -142,6 +198,13 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if _settings_bool(settings, "use_macd_signal", True):
         # 15분 MACD 필터 ON: 히스토그램 양수(OSC>0)만 적용 (전봉 대비 상승 조건은 Type A/B와 중복되어 제거됨)
         signal &= df["OSC"] > 0
+
+    # 동시 신호: A·B 원시 조건이 모두 참이고 최종 Signal 도 참 — 동적 백테에서 보유 균형 동점 시 TYPE_B 우선에 사용
+    s1_simul_ab = (
+        np.asarray(signal_a, dtype=bool)
+        & np.asarray(signal_b, dtype=bool)
+        & np.asarray(signal, dtype=bool)
+    )
     
     # 8. 수급 합치도 (Confluence Score) 계산 - [v3.5]
     def calc_met_count(sig_type):
@@ -172,15 +235,18 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     met_b, total_b = calc_met_count('TYPE_B')
     
     # 더 높은 합치도를 가진 타입을 기준으로 점수 산출
-    ratio_a = met_a / total_a
-    ratio_b = met_b / total_b
-    
-    final_met = np.where(ratio_b >= ratio_a, met_b, met_a)
-    final_total = np.where(ratio_b >= ratio_a, total_b, total_a)
+    ratio_a = met_a / np.maximum(total_a, 1)
+    ratio_b = met_b / np.maximum(total_b, 1)
+
+    same_bar_pri = _normalize_same_bar_priority(settings)
+    sig_type_col = _compute_sig_type_column(signal_a, signal_b, ratio_a, ratio_b, same_bar_pri)
+    is_type_b_row = sig_type_col == "TYPE_B"
+    final_met = np.where(is_type_b_row, met_b, met_a)
+    final_total = np.where(is_type_b_row, total_b, total_a)
 
     return pd.DataFrame({
         'Signal': signal,
-        'Sig_Type': np.where(signal_b, 'TYPE_B', np.where(signal_a, 'TYPE_A', 'NONE')),
+        'Sig_Type': sig_type_col,
         'Met_Count': final_met,
         'Total_Count': final_total,
         'Met_Ratio': np.where(final_total > 0, final_met / final_total, 0),
@@ -188,7 +254,8 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         'MACD_OK': cond_macd_basic,
         'MA60_Range': cond_ma60,
         'MA_GC': cond_ma_gc,
-        'Vol_Surge': cond_vol_a | cond_vol_b
+        "Vol_Surge": cond_vol_a | cond_vol_b,
+        "S1_Simultaneous_AB": s1_simul_ab,
     }, index=df.index)
 
 def get_buy_signals(df, settings, market_trend='UP'):

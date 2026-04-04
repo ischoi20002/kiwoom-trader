@@ -24,6 +24,9 @@ def apply_type_a_phase1_settings(
     try:
         if not bool(s.get("use_type_a_regime_phase1", False)):
             return s
+        # Type A 미사용 시 레짐 보정 비적용 — B 전용 백테에서 A 레짐 토글이 결과를 오염시키지 않음
+        if not bool(s.get("use_type_a", False)):
+            return s
     except (TypeError, ValueError):
         return s
 

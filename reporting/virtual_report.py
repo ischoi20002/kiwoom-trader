@@ -22,12 +22,41 @@ def generate_virtual_narrative_report(history, output_path="virtual_trade_report
             {"name": "💰 [1] 자금관리", "items": [{"label": "초기자금", "key": "backtest_initial_capital", "unit": "원"}, {"label": "비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"}]},
             {"name": "🔍 [2] 종목선정", "items": [{"label": "RSI 범위", "keys": ["sel_rsi_min", "sel_rsi_max"], "sep": "~"}, {"label": "거래대금", "key": "min_trde_val", "unit": "억"}]},
             {"name": "🚀 [4] S1 전략", "items": [{"label": "Type A", "toggle": "use_type_a", "key": "buy_rsi_max_a"}, {"label": "Type B", "toggle": "use_type_b", "key": "buy_rsi_max_b"}, {"label": "Smart Buy", "keys": ["smart_buy_vp", "smart_buy_ba_ratio"], "sep": "/"}]},
-            {"name": "📈 [5] S2 전략", "items": [{"label": "S2 활성화", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"}, {"label": "추매 Smart Buy", "toggle": "use_smart_buy_s2"}]},
-            {"name": "🛡️ [7] 리스크 제어", "items": [
+            {"name": "📈 [5] S2 전략", "items": [
+                {"label": "S2(A) 추매 전체", "toggle": "use_s2_master_a"},
+                {"label": "S2(B) 추매 전체", "toggle": "use_s2_master_b"},
+                {"label": "S2(A) 수익 필터", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"},
+                {"label": "Smart Buy S2(A)", "toggle": "use_smart_buy_s2"},
+                {"label": "Smart Buy S2(B)", "toggle": "use_smart_buy_s2_b"},
+            ]},
+            {"name": "🛡️ [7] Smart Exit (공통)", "items": [
                 {"label": "Smart Exit", "toggle": "use_smart_exit", "key": "smart_exit_ba_ratio"},
-                {"label": "갭하락손절", "toggle": "use_gap_down_exit", "key": "gap_down_limit", "unit": "%"},
-                {"label": "A 익절/손절", "toggle": "use_s1_a_tp", "keys": ["s1_a_take_profit", "s1_a_stop_loss"], "sep": "/"},
-                {"label": "B 익절/손절", "toggle": "use_s1_b_tp", "keys": ["s1_b_take_profit", "s1_b_stop_loss"], "sep": "/"}
+            ]},
+            {"name": "🛡️ [7-A] Type A 청산", "items": [
+                {"label": "갭하락", "toggle": "use_gap_down_exit_a", "key": "gap_down_limit_a", "unit": "%"},
+                {"label": "매도유예(분)", "toggle": "use_gap_grace_a", "key": "gap_grace_mins_a"},
+                {"label": "ATR 주기", "toggle": "use_atr_exit_a", "key": "atr_period_a"},
+                {"label": "S1 익절/손절", "toggle": "use_s1_a_tp", "keys": ["s1_a_take_profit", "s1_a_stop_loss"], "sep": "/"},
+                {"label": "S1 Flash", "toggle": "use_s1_a_flash_exit", "key": "s1_a_flash_exit_pct"},
+                {"label": "S1 ATR 손절", "toggle": "use_atr_stop_loss_a", "key": "atr_multiplier_sl_a"},
+                {"label": "S1 ATR 트레일", "toggle": "use_atr_trailing_stop_a", "key": "atr_multiplier_trail_a"},
+                {"label": "ATR 트레일 익절%후(A-S1)", "toggle": "use_atr_trail_only_after_tp_s1_a"},
+                {"label": "S2 익절/손절/Flash", "toggle": "use_s2_tp", "keys": ["s2_take_profit", "s2_stop_loss", "s2_flash_exit_pct"], "sep": "/"},
+                {"label": "S2 ATR SL/Trl", "toggle": "use_atr_stop_loss_s2", "keys": ["atr_multiplier_sl_s2", "atr_multiplier_trail_s2"], "sep": "/"},
+                {"label": "ATR 트레일 익절%후(A-S2)", "toggle": "use_atr_trail_only_after_tp_s2_a"},
+            ]},
+            {"name": "🛡️ [7-B] Type B 청산", "items": [
+                {"label": "갭하락", "toggle": "use_gap_down_exit_b", "key": "gap_down_limit_b", "unit": "%"},
+                {"label": "매도유예(분)", "toggle": "use_gap_grace_b", "key": "gap_grace_mins_b"},
+                {"label": "ATR 주기", "toggle": "use_atr_exit_b", "key": "atr_period_b"},
+                {"label": "S1 익절/손절", "toggle": "use_s1_b_tp", "keys": ["s1_b_take_profit", "s1_b_stop_loss"], "sep": "/"},
+                {"label": "S1 Flash", "toggle": "use_s1_b_flash_exit", "key": "s1_b_flash_exit_pct"},
+                {"label": "S1 ATR 손절", "toggle": "use_atr_stop_loss_b", "key": "atr_multiplier_sl_b"},
+                {"label": "S1 ATR 트레일", "toggle": "use_atr_trailing_stop_b", "key": "atr_multiplier_trail_b"},
+                {"label": "ATR 트레일 익절%후(B-S1)", "toggle": "use_atr_trail_only_after_tp_s1_b"},
+                {"label": "S2 익절/손절/Flash", "toggle": "use_s2_b_tp", "keys": ["s2_b_take_profit", "s2_b_stop_loss", "s2_b_flash_exit_pct"], "sep": "/"},
+                {"label": "S2 ATR SL/Trl", "toggle": "use_atr_stop_loss_s2_b", "keys": ["atr_multiplier_sl_s2_b", "atr_multiplier_trail_s2_b"], "sep": "/"},
+                {"label": "ATR 트레일 익절%후(B-S2)", "toggle": "use_atr_trail_only_after_tp_s2_b"},
             ]}
         ]
         

@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import tkinter as tk
-import typing as tp
 from tkinter import ttk, scrolledtext, messagebox, simpledialog
 import requests
 import pandas as pd
@@ -178,9 +177,7 @@ class KiwoomApp:
         
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
-        self.bars_data = self.config_handler.load_bars_cache() 
-        self.volume_profiles = {} # [v4.0] 수급 분석 프로파일 (일일)
-        self.min_volume_profiles = {} # [v4.0] 수급 분석 프로파일 (분봉)
+        self.bars_data = self.config_handler.load_bars_cache()
 
         # [v4.5.7] Essential attributes for SignalEngine
         from core.stream_processor import StreamProcessor
@@ -209,29 +206,31 @@ class KiwoomApp:
         # [v16.50] 최적화 상태 데이터 중앙 집중화 (Singleton State Management)
         # 탭 전환 시 데이터 유실 방지를 위해 메인 앱 인스턴스에서 직접 관리
         self.opt_params_vars = {}
+        # 최적화 대상(○/●): tools/optimization_params_audit.xlsx 사용자 표시(2026-04) 기준 72키
         opt_keys = [
-            # 자금관리
-            's1_equity_pct', 's2_equity_pct',
-            # 종목선정필터 (Track A)
-            'min_trde_val', 'vol_ratio', 'vol_lookback', 
-            'ma_convergence', 'sel_rsi_max', 'sel_rsi_min',
-            # 종목선정필터 (Track B)
-            'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
-            # 단계별 매수 (A)
-            'buy_rsi_max_a', 'gc_window', 'rsi_window', 'vol_surge', 'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
-            # 단계별 매수 (B)
-            'buy_rsi_max_b', 'vol_surge_b', 'atr_multiplier_sl_b', 'atr_multiplier_trail_b',
-            # 2차 추매 (S2)
-            's2_vol_ratio', 's2_profit_limit', 's2_delay_hours', 'atr_multiplier_sl_s2', 'atr_multiplier_trail_s2',
-            # 전술적 수급 (S1 진입 Smart Buy + Exit)
+            'stage1_amt', 's1_equity_pct', 'stage2_amt', 's2_equity_pct', 'type_balance_a_pct',
+            'buy_rsi_min', 'buy_rsi_max_a', 'gc_window', 'rsi_window', 'ma60_min', 'ma60_max',
+            'vol_surge', 'prev_vol_lookback_s1_a',
+            'type_a_phase1_up_vol_surge_add', 'type_a_phase1_neutral_vol_surge_add',
+            'type_a_phase1_up_ma60_shrink_pct', 'type_a_phase1_neutral_ma60_shrink_pct',
+            'buy_rsi_max_b', 'vol_surge_b', 'prev_vol_lookback_s1_b',
+            'type_b_phase1_up_vol_surge_add', 'type_b_phase1_neutral_vol_surge_add',
+            's2_ma20_gap', 's2_ma5_gap', 's2_rsi_gap', 's2_macd_gap', 's2_vol_ratio',
+            'prev_vol_lookback_s2_a', 's2_profit_limit', 's2_delay_hours',
+            's2_b_ma20_gap', 's2_b_rsi_gap', 's2_b_macd_gap', 's2_b_vol_ratio',
+            'prev_vol_lookback_s2_b', 's2_b_profit_limit', 's2_b_delay_hours',
             'smart_buy_vp', 'smart_buy_ba_ratio', 'smart_exit_vp', 'smart_exit_ba_ratio', 'smart_exit_price_threshold',
-            # 공통/리스크
-            'gap_down_limit', 'gap_grace_mins', 'atr_period', 
-            's1_a_take_profit', 's1_a_stop_loss', 's1_b_take_profit', 's1_b_stop_loss',
-            's2_take_profit', 's2_stop_loss', 
-            's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
-            # 시장 트렌드 필터 임계값 [v4.6]
             'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
+            'gap_down_limit_a', 'gap_grace_mins_a', 'atr_period_a',
+            's1_a_take_profit', 's1_a_stop_loss', 's1_a_flash_exit_pct',
+            'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
+            's2_take_profit', 's2_stop_loss', 's2_flash_exit_pct',
+            'atr_multiplier_sl_s2', 'atr_multiplier_trail_s2',
+            'gap_down_limit_b', 'gap_grace_mins_b', 'atr_period_b',
+            's1_b_take_profit', 's1_b_stop_loss', 's1_b_flash_exit_pct',
+            'atr_multiplier_sl_b', 'atr_multiplier_trail_b',
+            's2_b_take_profit', 's2_b_stop_loss', 's2_b_flash_exit_pct',
+            'atr_multiplier_sl_s2_b', 'atr_multiplier_trail_s2_b',
         ]
         for key in opt_keys:
             # 설정 파일에 저장된 값이 있으면 그것을 사용, 없으면 False 초기화
@@ -254,9 +253,9 @@ class KiwoomApp:
         )
         from core.warmup_service import WarmupService
         self.warmup_service = WarmupService(
-            self, 
+            self,
             logger_callback=self.log,
-            progress_callback=self._on_warmup_progress
+            stock_prep_callback=self._on_warmup_stock_prep,
         )
         self.strategy_engine = StrategyEngine(self)
         self.selection_service = SelectionService(self, logger_callback=self.log)
@@ -416,62 +415,6 @@ class KiwoomApp:
         if hasattr(self, 'header_frame'): self.header_frame.config(style="Header.TFrame")
         if hasattr(self, 'lbl_market_indices'): self.lbl_market_indices.config(background=bg_col, foreground=fg_col)
         if hasattr(self, 'monitor_tab'): self.monitor_tab._update_visual_theme(trend)
-        
-    def _display_selected_targets(self, df):
-        """[v2.9] 선정된 종목 리스트를 팝업으로 보여주고 확정"""
-        popup = tk.Toplevel(self.root)
-        popup.title("🎯 선정 종목 확인")
-        popup.geometry("600x450")
-        popup.configure(bg="#2E3440")
-        
-        ttk.Label(popup, text=f"검색된 후보: {len(df)}개 (전략 점수순)", font=("Malgun Gothic", 10, "bold")).pack(pady=10)
-        
-        tree_f = ttk.Frame(popup)
-        tree_f.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
-        
-        cols = ("Rank", "Code", "Name", "Score", "Reason")
-        tree = ttk.Treeview(tree_f, columns=cols, show="headings", height=10)
-        for c in cols: tree.heading(c, text=c); tree.column(c, width=80, anchor=tk.CENTER)
-        tree.column("Name", width=120, anchor=tk.W)
-        tree.column("Reason", width=180, anchor=tk.W)
-        
-        sb = ttk.Scrollbar(tree_f, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=sb.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # [v4.5.6] Normalize ALL columns for subsequent DataFrame access (confirm function etc)
-        df.columns = [c.lower() for c in df.columns]
-        
-        # [v4.5.5] Robust Key Mapping (Loop)
-        def safe_get(row, key, default=""):
-            for k in [key, key.upper(), 'stk_cd']:
-                if k in row: return row[k]
-            return default
-
-        for i, row in df.iterrows():
-            c_code = str(safe_get(row, 'code', '000000')).zfill(6)
-            c_name = safe_get(row, 'name', 'Unknown')
-            c_score = safe_get(row, 'score', 0.0)
-            c_reason = safe_get(row, 'reason', '전략 조건 수렴')
-            
-            try: f_score = float(c_score)
-            except: f_score = 0.0
-            tree.insert("", tk.END, values=(i+1, c_code, c_name, f"{f_score:.1f}", c_reason))
-            
-        def confirm():
-            # [v4.5.6] Service Layer를 통해 종목 등록 일원화
-            self.trading_controller.set_monitor_targets(df)
-            self.monitor_codes = self.trading_controller.monitor_codes
-            self.monitor_info = self.trading_controller.monitor_info
-            
-            if hasattr(self, 'monitor_tab'):
-                self.monitor_tab.update_watchlist(self.monitor_info)
-                
-            self.log(f"✅ {len(self.monitor_codes)}개 종목이 실시간 감시 대상으로 확정되었습니다.")
-            popup.destroy()
-            
-        ttk.Button(popup, text="확정 및 감시 등록", command=confirm, style="Accent.TButton").pack(pady=15)
 
     def _render_tree_updates(self):
         if not self.monitor_tab or not self.is_monitoring: return
@@ -487,7 +430,37 @@ class KiwoomApp:
         elif status == "TARGETS_LOADED":
             self.monitor_codes = self.trading_controller.monitor_codes
             self.monitor_info = self.trading_controller.monitor_info
-            if hasattr(self, 'monitor_tab'): self.monitor_tab.load_targets(data)
+            if hasattr(self, "monitor_tab"):
+                self.monitor_tab.update_watchlist(self.monitor_info)
+        elif status == "WARMUP_BEGIN":
+            codes = data if isinstance(data, list) else []
+            if hasattr(self, "monitor_tab"):
+                self.monitor_tab.reset_warmup_row_states(codes)
+        elif status == "WARMUP_FAILED":
+            results = (data or {}).get("results", {})
+            failed = (data or {}).get("failed", [])
+            lines = []
+            for c in failed:
+                r = results.get(c, {})
+                nm = self.monitor_info.get(c, {}).get("name", c)
+                lines.append(f"• {nm} ({c}): {r.get('reason', '알 수 없음')}")
+            body = (
+                "다음 종목의 15분봉·장중 구간을 API·DB로 채우지 못해 감시를 시작할 수 없습니다.\n\n"
+                + "\n".join(lines)
+            )
+            self.root.after(
+                0, lambda msg=body: messagebox.showerror("워밍업 실패", msg)
+            )
+            if self.lbl_monitor_status:
+                self.lbl_monitor_status.config(
+                    text="상태: 워밍업 실패 — 감시 미시작",
+                    foreground=self.colors["danger"],
+                )
+        elif status == "MONITOR_CODES_FILTERED":
+            self.monitor_codes = list((data or {}).get("codes", []))
+            self.trading_controller.monitor_codes = self.monitor_codes
+            if hasattr(self, "monitor_tab"):
+                self.monitor_tab.update_watchlist(self.monitor_info)
         elif status == "STARTED":
             self.is_monitoring = True
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
@@ -498,10 +471,29 @@ class KiwoomApp:
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="▶️ 실시간 감시 시작", style="Accent.TButton")
             if self.lbl_monitor_status: self.lbl_monitor_status.config(text="상태: 대기 중", foreground=self.colors['primary'])
 
-    def _on_warmup_progress(self, cur, total, name, code):
-        def update():
-            self.status_label.config(text=f"상태: 분석 중 ({cur}/{total})")
-            if hasattr(self, 'monitor_tab'): self.monitor_tab.update_warmup(cur, total, name, code)
+    def _on_warmup_stock_prep(
+        self, event: str, cur: int, total: int, name: str, code: str, reason: str = ""
+    ) -> None:
+        """워커 스레드 → 메인 스레드: 종목별 워밍업 상태(트리·라벨)."""
+
+        def update() -> None:
+            try:
+                if hasattr(self, "monitor_tab"):
+                    self.monitor_tab.update_warmup_stock_prep(
+                        event, cur, total, name, code, reason
+                    )
+                if hasattr(self, "lbl_monitor_status"):
+                    self.lbl_monitor_status.config(
+                        text=f"상태: 데이터 준비 중 ({cur}/{total}) {name}",
+                        foreground=self.colors["primary"],
+                    )
+                if self.status_label:
+                    self.status_label.config(
+                        text=f"상태: 데이터 준비 ({cur}/{total}) {name}"
+                    )
+            except Exception as e:
+                self.log(f"⚠️ [UI] 워밍업 표시 갱신 실패: {e}")
+
         self.root.after(0, update)
 
     def on_close(self):
@@ -514,6 +506,56 @@ class KiwoomApp:
         
     def _virtual_buy_stage_1(self, code, name, price, reason="TYPE_A"):
         return self.trading_controller.execute_buy_signal(code, name, price, reason)
+
+    def _on_buy_signal_received(
+        self,
+        code: str,
+        now_price: float,
+        rsi_sig: float,
+        macd_val: float,
+        osc_val: float,
+        ma60_ratio: float,
+    ) -> None:
+        """
+        SignalEngine 1차 매수 포착 콜백.
+        DynamicBacktester 와 동일하게: 확정 Sig_Type(동시신호·동점 B우선), TypeBalanceGate,
+        (선택) 선정 트랙(sel_track) 교차 검증 후 주문.
+        """
+        try:
+            code = str(code).zfill(6)
+            info = self.monitor_info.get(code, {})
+            name = str(info.get("name", "Unknown"))
+            detailed = info.get("last_detailed_sig")
+            if detailed is None or getattr(detailed, "empty", True):
+                self.log(f"⚠️ [Skip] {code} 신호 캐시 없음")
+                return
+            last_sig = detailed.iloc[-1]
+            row = last_sig.to_dict() if hasattr(last_sig, "to_dict") else dict(last_sig)
+            sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
+                self.settings, row, self.portfolio.virtual_positions
+            )
+            # CSV/선정 단계에서 SelTrack(A/B/AB)을 넣은 경우에만 백테 트랙 검증과 동일
+            tr = str(
+                info.get("sel_track", info.get("SelTrack", info.get("seltrack", "AB")))
+            ).strip().upper()
+            if tr == "A" and sig_type == "TYPE_B":
+                self.log(f"⚠️ [Skip] {name}({code}) Track A 종목에 Type B 신호")
+                return
+            if tr == "B" and sig_type == "TYPE_A":
+                self.log(f"⚠️ [Skip] {name}({code}) Track B 종목에 Type A 신호")
+                return
+            if not TradingStrategy.type_balance_allows_new_s1(
+                self.settings, sig_type, self.portfolio.virtual_positions
+            ):
+                self.log(f"⚠️ [Skip] {name}({code}) TypeBalanceGate (A/B 비중)")
+                return
+            self.trading_controller.execute_buy_signal(code, name, now_price, reason=sig_type)
+        except Exception as e:
+            self.log(f"❌ [BuySignal] {code} 처리 실패: {e}")
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
         
     def _on_strategy_action_needed(self, code, action, reason, **kwargs):
         return self.trading_controller.handle_strategy_action(code, action, reason, **kwargs)

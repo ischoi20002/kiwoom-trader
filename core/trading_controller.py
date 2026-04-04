@@ -82,7 +82,12 @@ class TradingController:
         if 'Code' not in temp_df.columns and 'code' in df.columns:
             temp_df.rename(columns={'code': 'Code'}, inplace=True)
             
-        max_slots = int(self.app.settings.get('max_slots', 20))
+        # 감시 상한: Track A/B 합 (구 max_slots 단일 키는 폴백)
+        max_sa = int(self.app.settings.get('max_slots_a', 20))
+        max_sb = int(self.app.settings.get('max_slots_b', 10))
+        max_slots = max_sa + max_sb
+        if max_slots <= 0:
+            max_slots = int(self.app.settings.get('max_slots', 20))
         self.monitor_codes = temp_df['Code'].tolist()[:max_slots]
         self._initialize_monitor_info(temp_df.head(max_slots))
         self.log(f"✅ [Controller] {len(self.monitor_codes)}개 종목이 감시 대상으로 등록되었습니다.")
@@ -100,32 +105,111 @@ class TradingController:
                 'score': row.get('Score', 0.0),
                 'ma_buffer_scale': float(row.get('MABufScale', 1.0)),
                 'open': float(row.get('Open', 0)),
-                'last_price': float(row.get('Price', 0)) if row.get('Price') else 0
+                'last_price': float(row.get('Price', 0)) if row.get('Price') else 0,
+                'sel_track': str(
+                    row.get('SelTrack', row.get('sel_track', row.get('seltrack', 'AB')))
+                ).strip().upper()
+                or 'AB',
             }
 
     def _run_start_sequence(self):
         """워밍업부터 웹소켓 연결까지 마스터 시퀀스"""
         try:
-            # [Step 1] Warmup 로직 위임 (v4.6.0: DB 우선 로드 방식)
-            if self.status_cb: self.status_cb("STATUS_TEXT", f"상태: 분석 중 ({len(self.monitor_codes)}종목)")
-            
-            # run()은 이제 DB 로드만 마치고 배경 스레드를 생성한 뒤 즉시 리턴함
-            self.app.warmup_service.run(
-                self.monitor_codes, self.monitor_info, 
-                self.app.bars_data, self.app.volume_profiles, self.app.min_volume_profiles
+            # [Step 1] Warmup: 전 종목 15분봉·장중 구간 검증 통과 시에만 감시 진행
+            if self.status_cb:
+                self.status_cb("STATUS_TEXT", f"상태: 분석 중 ({len(self.monitor_codes)}종목)")
+            if self.status_cb:
+                self.status_cb("WARMUP_BEGIN", list(self.monitor_codes))
+
+            results = self.app.warmup_service.run(
+                self.monitor_codes,
+                self.monitor_info,
+                self.app.bars_data,
             )
-            
-            # [Step 2] 즉시 모니터링 활성화 (Instant-On)
-            self.log(f"✅ [System] 로컬 데이터 로드 완료. 실시간 모니터링을 즉시 시작합니다.")
+
+            require_full = bool(
+                self.app.settings.get("require_full_warmup_for_monitoring", True)
+            )
+            failed = [
+                c for c in self.monitor_codes if not results.get(c, {}).get("ok")
+            ]
+            if failed:
+                if require_full:
+                    for c in self.monitor_codes:
+                        try:
+                            self.app.bars_data.pop(c, None)
+                        except Exception:
+                            pass
+                    if self.status_cb:
+                        self.status_cb(
+                            "WARMUP_FAILED",
+                            {"results": results, "failed": failed},
+                        )
+                    if self.status_cb:
+                        self.status_cb(
+                            "STATUS_TEXT",
+                            "상태: 워밍업 실패 — 감시 미시작 (신호상태 열 참고)",
+                        )
+                    self.log(
+                        "❌ [System] 워밍업 미달 종목이 있어 실시간 감시를 시작하지 않습니다."
+                    )
+                    return
+                # 완화 모드: 실패 종목만 제외 (미권장)
+                for c in failed:
+                    try:
+                        self.app.bars_data.pop(c, None)
+                    except Exception:
+                        pass
+                    try:
+                        self.monitor_info.pop(c, None)
+                    except Exception:
+                        pass
+                self.monitor_codes = [
+                    c for c in self.monitor_codes if c not in failed
+                ]
+                if not self.monitor_codes:
+                    if self.status_cb:
+                        self.status_cb(
+                            "WARMUP_FAILED",
+                            {"results": results, "failed": failed},
+                        )
+                    if self.status_cb:
+                        self.status_cb(
+                            "STATUS_TEXT",
+                            "상태: 워밍업 실패 — 감시 대상 없음",
+                        )
+                    self.log("❌ [System] 워밍업 실패로 감시 가능 종목이 없습니다.")
+                    return
+                self.log(
+                    f"⚠️ [System] 워밍업 실패 {len(failed)}종목 제외 후 감시 진행 "
+                    f"(require_full_warmup_for_monitoring=False)"
+                )
+                if self.status_cb:
+                    self.status_cb(
+                        "MONITOR_CODES_FILTERED",
+                        {
+                            "codes": list(self.monitor_codes),
+                            "dropped": failed,
+                            "results": results,
+                        },
+                    )
+
+            self.log(
+                "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 모니터링을 시작합니다."
+            )
+
             self.is_monitoring = True
-            if self.status_cb: self.status_cb("STARTED", len(self.monitor_codes))
-            
-            # [Step 3] 가상 실천 엔진(WS Worker) 구동
+            if self.status_cb:
+                self.status_cb("STARTED", len(self.monitor_codes))
+
+            # [Step 2] 가상 실천 엔진(WS Worker) 구동
             self._stop_event.clear()
-            self.monitor_thread = threading.Thread(target=self._ws_worker_loop, daemon=True)
+            self.monitor_thread = threading.Thread(
+                target=self._ws_worker_loop, daemon=True
+            )
             self.monitor_thread.start()
-            
-            # [Step 4] 주기적 관리 루프 시작
+
+            # [Step 3] 주기적 관리 루프 시작
             self._start_periodic_routines()
 
         except Exception as e:

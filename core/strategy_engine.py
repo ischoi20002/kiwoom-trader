@@ -2,6 +2,9 @@
 
 import threading
 from datetime import datetime
+
+import pandas as pd
+
 import config
 
 class StrategyEngine:
@@ -63,59 +66,49 @@ class StrategyEngine:
         # ---------------------------------------------------------
         stage = pos.get('stage', 1)
         if stage == 1:
-            # 0. 시장지수 필터
-            if s.get('use_market_filter', True):
-                if getattr(self.app, 'market_trend', 'NEUTRAL') in ['NEUTRAL', 'DOWN']:
-                    return {'action': 'HOLD'}
+            # 백테스트와 동일한 S2 승인(Type A: s2_* / Type B: s2_b_* 완전 분리)
+            pos_s2 = dict(pos)
+            try:
+                et = pos.get("entry_time") or pos.get("entry_date")
+                pos_s2["entry_date"] = pd.to_datetime(et) if et is not None else datetime.now()
+            except Exception:
+                pos_s2["entry_date"] = datetime.now()
+            pos_s2["avg_p"] = pos.get("avg_price", now_price)
+            pos_s2["sig_type"] = pos.get("sig_type", "TYPE_A")
 
-            # 1. 시간 지연 필터 (Stage 2 Delay)
-            if s.get('use_s2_delay', True):
-                min_h = float(s.get('s2_delay_hours', 24.0))
-                if pos.get('entry_time'):
-                    try:
-                        elapsed = (datetime.now() - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 3600
-                        if elapsed < min_h: return {'action': 'HOLD'}
-                    except: pass
+            try:
+                if not TradingStrategy._check_s2_approval(
+                    pos_s2,
+                    None,
+                    s,
+                    indicator_row=ind,
+                    market_trend=str(getattr(self.app, "market_trend", "UP")),
+                    curr_dt=datetime.now(),
+                ):
+                    return {"action": "HOLD"}
+            except Exception:
+                return {"action": "HOLD"}
 
-            # 2. 기술적 위치/합치 분석
-            can_addon = True
-            if ind is not None:
-                if s.get('use_s2_ma20', True):
-                    gap = float(s.get('s2_ma20_gap', 0.0))
-                    ma20 = float(self._get_val(ind, 'MA20', 0))
-                    if now_price < ma20 * (1 + gap/100.0): can_addon = False
-                if can_addon and s.get('use_s2_ma5', True):
-                    gap = float(s.get('s2_ma5_gap', -0.5))
-                    ma5 = float(self._get_val(ind, 'MA5', 0))
-                    if now_price < ma5 * (1 + gap/100.0): can_addon = False
-                if can_addon and s.get('use_s2_vol_surge', True):
-                    vol_ma20 = float(self._get_val(ind, 'Vol_MA20', self._get_val(ind, 'Volume', 0)))
-                    curr_vol = float(self._get_val(ind, 'Volume', 0))
-                    if curr_vol < vol_ma20 * float(s.get('s2_vol_ratio', 1.0)): can_addon = False
-                if can_addon and s.get('use_s2_rsi_sig', True):
-                    r_sig = float(self._get_val(ind, 'RSI_Sig', 50))
-                    rsi = float(self._get_val(ind, 'RSI', 0))
-                    prev_rsi = float(self._get_val(ind, 'Prev_RSI', 0))
-                    if rsi < r_sig * (1 + float(s.get('s2_rsi_gap', 0.0))/100.0) or rsi <= prev_rsi: 
-                        can_addon = False
-                if can_addon and s.get('use_s2_macd_gc', True):
-                    m_sig = float(self._get_val(ind, 'MACD_Sig', 0))
-                    macd = float(self._get_val(ind, 'MACD', 0))
-                    osc = float(self._get_val(ind, 'OSC', 0))
-                    prev_osc = float(self._get_val(ind, 'Prev_OSC', 0))
-                    if macd < m_sig + float(s.get('s2_macd_gap', 0.0)) or osc <= 0 or osc <= prev_osc: 
-                        can_addon = False
+            _is_b = TradingStrategy._holding_sig_is_type_b(pos)
+            if not _is_b:
+                try:
+                    _is_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+                except Exception:
+                    _is_b = False
+            use_sb_s2 = (
+                s.get("use_smart_buy_s2_b", True) if _is_b else s.get("use_smart_buy_s2", True)
+            )
+            if use_sb_s2:
+                if vol_power < float(s.get("smart_buy_vp", 120.0)) or ask_bid_ratio < float(
+                    s.get("smart_buy_ba_ratio", 1.5)
+                ):
+                    return {"action": "HOLD"}
 
-            # 3. 수급 컨펌 (Smart Buy S2) — 전술적 수급 VP/BA와 동일 키 사용
-            if can_addon and s.get('use_smart_buy_s2', True):
-                if vol_power < float(s.get('smart_buy_vp', 120.0)) or ask_bid_ratio < float(s.get('smart_buy_ba_ratio', 1.5)):
-                    can_addon = False
-                    
-            # 4. 수익권/트리거 확인
-            if can_addon:
-                s2_trigger = float(s.get('s2_profit_limit', 1.0))
-                if profit_ratio >= s2_trigger:
-                    return {'action': 'STAGE2', 'reason': 'PROFIT_TRIGGER', 'profit_ratio': profit_ratio}
+            return {
+                "action": "STAGE2",
+                "reason": "PROFIT_TRIGGER",
+                "profit_ratio": profit_ratio,
+            }
 
         return {'action': 'HOLD'}
 
@@ -129,55 +122,74 @@ class StrategyEngine:
             
         s = self.app.settings
         total, met = 0, 0
-        
-        # 0. 시장지수
+        _is_b = pos.get("sig_type") == "TYPE_B"
+
+        def _s2x(a_key: str, b_key: str, default):
+            """S2 표시용: Type A는 s2_* 만, Type B는 s2_b_* 만."""
+            return s.get(b_key, default) if _is_b else s.get(a_key, default)
+
+        # 0. 시장지수 (A는 NEUTRAL 허용, B는 UP/AGGRESSIVE만)
         if s.get('use_market_filter', True):
             total += 1
-            # [v4.7] AGGRESSIVE는 UP과 동일하게 충족으로 처리
-            if getattr(self.app, 'market_trend', 'NEUTRAL') in ('UP', 'AGGRESSIVE'): met += 1
+            mt = getattr(self.app, 'market_trend', 'NEUTRAL')
+            if _is_b:
+                if mt in ('UP', 'AGGRESSIVE'):
+                    met += 1
+            else:
+                if mt in ('UP', 'AGGRESSIVE', 'NEUTRAL'):
+                    met += 1
         
         # 1. 시간 지연
-        if s.get('use_s2_delay', True):
+        if _s2x('use_s2_delay', 'use_s2_b_delay', True):
             total += 1
-            min_h = float(s.get('s2_delay_hours', 24.0))
+            min_h = float(_s2x('s2_delay_hours', 's2_b_delay_hours', 24.0))
             if pos.get('entry_time'):
                 try:
                     if (datetime.now() - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 3600 >= min_h:
                         met += 1
-                except: pass
+                except Exception:
+                    pass
         
         # 2. 수익권 트리거
-        if s.get('use_s2_profit', True):
+        if _s2x('use_s2_profit', 'use_s2_b_profit', True):
             total += 1
             profit = (now_price / pos['avg_price'] - 1) * 100
-            if profit >= float(s.get('s2_profit_limit', 1.0)): met += 1
+            if profit >= float(_s2x('s2_profit_limit', 's2_b_profit_limit', 1.0)):
+                met += 1
         
         # 3. 기술적 지표(MA20, MA5, RSI, MACD)
         if ind is not None:
-            if s.get('use_s2_ma20', True):
+            if _s2x('use_s2_ma20', 'use_s2_b_ma20', True):
                 total += 1
                 ma20 = float(self._get_val(ind, 'MA20', 0))
-                if now_price >= ma20 * (1 + float(s.get('s2_ma20_gap', 0.0))/100.0): met += 1
-            if s.get('use_s2_ma5', True):
+                if now_price >= ma20 * (1 + float(_s2x('s2_ma20_gap', 's2_b_ma20_gap', 0.0))/100.0):
+                    met += 1
+            if _s2x('use_s2_ma5', 'use_s2_b_ma5', True):
                 total += 1
                 ma5 = float(self._get_val(ind, 'MA5', 0))
-                if now_price >= ma5 * (1 + float(s.get('s2_ma5_gap', -0.5))/100.0): met += 1
-            if s.get('use_s2_rsi_sig', True):
+                if now_price >= ma5 * (1 + float(_s2x('s2_ma5_gap', 's2_b_ma5_gap', -0.5))/100.0):
+                    met += 1
+            if _s2x('use_s2_rsi_sig', 'use_s2_b_rsi_sig', True):
                 total += 1
                 rsi = float(self._get_val(ind, 'RSI', 0))
                 rsi_sig = float(self._get_val(ind, 'RSI_Sig', 50))
                 prev_rsi = float(self._get_val(ind, 'Prev_RSI', 0))
-                if rsi >= rsi_sig and rsi > prev_rsi: met += 1
-            if s.get('use_s2_macd_gc', True):
+                gap = float(_s2x('s2_rsi_gap', 's2_b_rsi_gap', 0.0))
+                if rsi >= rsi_sig * (1 + gap / 100.0) and rsi > prev_rsi:
+                    met += 1
+            if _s2x('use_s2_macd_gc', 'use_s2_b_macd_gc', True):
                 total += 1
                 macd = float(self._get_val(ind, 'MACD', 0))
                 macd_sig = float(self._get_val(ind, 'MACD_Sig', 0))
                 osc = float(self._get_val(ind, 'OSC', 0))
                 prev_osc = float(self._get_val(ind, 'Prev_OSC', 0))
-                if macd >= macd_sig and osc > 0 and osc > prev_osc: met += 1
+                mgap = float(_s2x('s2_macd_gap', 's2_b_macd_gap', 0.0))
+                if macd >= macd_sig + mgap and osc > 0 and osc > prev_osc:
+                    met += 1
 
-        # 4. 수급 지표 (추매 Smart Buy — smart_buy_vp / smart_buy_ba_ratio)
-        if s.get('use_smart_buy_s2', True):
+        # 4. 수급 지표 (추매 Smart Buy)
+        use_s2_sb = s.get("use_smart_buy_s2_b", True) if _is_b else s.get("use_smart_buy_s2", True)
+        if use_s2_sb:
             total += 1
             if vol_power >= float(s.get('smart_buy_vp', 120.0)) and ask_bid_ratio >= float(s.get('smart_buy_ba_ratio', 1.5)):
                 met += 1

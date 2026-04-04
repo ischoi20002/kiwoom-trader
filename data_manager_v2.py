@@ -50,6 +50,29 @@ class DataManagerV2:
             else:
                 raise e
 
+    def run_analyze(self) -> bool:
+        """
+        SQLite 통계(sqlite_stat*) 갱신으로 쿼리 플래너 품질 개선.
+        대량 INSERT 후(하베스팅 종료 등) 한 번 호출하는 것을 권장.
+        """
+        try:
+            with self._get_connection() as conn:
+                conn.execute("ANALYZE")
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] ANALYZE 실패: {e}")
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] ANALYZE 예외: {e}")
+            except Exception:
+                pass
+            return False
+
     def _handle_corrupted_db(self):
         """손상된 데이터베이스 파일을 백업하고 새로운 파일을 생성할 수 있도록 준비"""
         import time
@@ -408,42 +431,6 @@ class DataManagerV2:
                 AND timestamp >= ?
             """, (new_status, filled_price, filled_qty, code, order_no, datetime.now().strftime("%Y-%m-%d 00:00:00")))
             conn.commit()
-
-    def sync_historical_vol_power(self, code, token):
-        code = normalize_code(code)
-        url = f"{config.URL}/api/dostk/mrkcond"
-        headers = {"Content-Type": "application/json;charset=UTF-8", "authorization": f"Bearer {token}", "api-id": "ka10046"}
-        current_date = datetime.now()
-        next_key = ""; total_saved = 0; last_tm = "999999"
-        while True:
-            body = {"stk_cd": code, "tic_scope": "1", "vol_pow_tp": "1"}
-            if next_key: headers["cont-yn"] = "Y"; headers["next-key"] = next_key
-            try:
-                res = requests.post(url, headers=headers, json=body, timeout=10)
-                if res.status_code != 200: break
-                data = res.json()
-                raw_list = data.get('stk_cntg_hour_trnd_qry', data.get('output', []))
-                next_key = res.headers.get('next-key', "")
-                if not raw_list: break
-                snapshots = []
-                for item in raw_list:
-                    tm = str(item.get('cntg_tm', '000000')).strip().zfill(6)
-                    if tm > last_tm: current_date -= timedelta(days=1)
-                    last_tm = tm
-                    dt_str = f"{current_date.strftime('%Y-%m-%d')} {tm[:2]}:{tm[2:4]}:{tm[4:6]}"
-                    price = int(str(item.get('cur_prc', '0')).replace('+', '').replace('-', '').strip())
-                    vol_pow = float(item.get('cntr_str', '0'))
-                    snapshots.append((code, dt_str, price, vol_pow))
-                with self._lock, self._get_connection() as conn:
-                    conn.executemany("INSERT OR REPLACE INTO realtime_snapshots (code, datetime, price, vol_power) VALUES (?, ?, ?, ?)", snapshots)
-                    conn.commit()
-                total_saved += len(snapshots)
-                if not next_key: break
-                time.sleep(0.2)
-            except Exception as e:
-                print(f"  (!) VolPower Sync Error ({code}): {e}")
-                break
-        return total_saved
 
     def get_bars(self, code, start_dt=None, end_dt=None, interval='1m', limit=None):
         code = normalize_code(code)

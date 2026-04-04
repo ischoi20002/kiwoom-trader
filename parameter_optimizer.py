@@ -30,10 +30,68 @@ _G_IND_CACHE: dict = {}
 
 # 지표 계산에 영향을 주는 파라미터 집합 (calculate_all_indicators 에서 실제로 사용하는 값들)
 # - 15분 MACD 진입·RSI 시그널 주기는 strategy.indicator_constants 고정 (설정 키 무시)
-# - atr_period               → ATR
+# - atr_period / atr_period_a / atr_period_b → ATR / ATR_A / ATR_B
 # - vol_lookback             → Prev_Day_Vol
+# - prev_vol_lookback_s1_a/b, s2_a/b → Prev_Day_Vol_S* (구 prev_vol_lookback 폴백)
 _INDICATOR_PARAMS = frozenset({
-    'atr_period', 'vol_lookback',
+    'atr_period', 'atr_period_a', 'atr_period_b',
+    'vol_lookback',
+    'prev_vol_lookback',
+    'prev_vol_lookback_b',
+    'prev_vol_lookback_s1_a',
+    'prev_vol_lookback_s1_b',
+    'prev_vol_lookback_s2_a',
+    'prev_vol_lookback_s2_b',
+})
+
+# 최적화 시 지표 재계산 스킵 판정용(신호·매매 로직만 영향). _INDICATOR_PARAMS 와 교집합 없어야 함.
+SIGNAL_ONLY_PARAMS = frozenset({
+    'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
+    's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 's2_b_stop_loss',
+    's1_a_take_profit', 's1_b_take_profit', 's2_take_profit', 's2_b_take_profit',
+    'take_profit', 'stop_loss',
+    'gap_down_limit', 'gap_down_limit_a', 'gap_down_limit_b',
+    'use_gap_down_exit', 'use_gap_down_exit_a', 'use_gap_down_exit_b',
+    'use_gap_grace', 'use_gap_grace_a', 'use_gap_grace_b',
+    'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
+    'use_atr_exit', 'use_atr_exit_a', 'use_atr_exit_b',
+    'use_atr_trail_only_after_tp', 'use_atr_trail_only_after_tp_a', 'use_atr_trail_only_after_tp_b',
+    'use_atr_trail_only_after_tp_s1_a', 'use_atr_trail_only_after_tp_s2_a',
+    'use_atr_trail_only_after_tp_s1_b', 'use_atr_trail_only_after_tp_s2_b',
+    's2_delay_hours', 's2_profit_limit',
+    's2_b_delay_hours', 's2_b_profit_limit',
+    's2_ma20_gap', 's2_vol_ratio', 's2_rsi_gap', 's2_macd_gap',
+    's2_b_ma20_gap', 's2_b_vol_ratio', 's2_b_rsi_gap', 's2_b_macd_gap',
+    'use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 'use_s2_b_flash_exit',
+    'use_s1_a_stop_loss', 'use_s1_b_stop_loss', 'use_s2_stop_loss', 'use_s2_b_stop_loss',
+    'use_s1_a_tp', 'use_s1_b_tp', 'use_s2_tp', 'use_s2_b_tp',
+    's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct', 's2_b_flash_exit_pct',
+    'use_s2_ma5', 'use_s2_profit', 'use_s2_delay', 'gc_window', 'rsi_window',
+    'atr_multiplier_sl_a', 'atr_multiplier_sl_b', 'atr_multiplier_sl_s2', 'atr_multiplier_sl_s2_b',
+    'atr_multiplier_trail_a', 'atr_multiplier_trail_b', 'atr_multiplier_trail_s2', 'atr_multiplier_trail_s2_b',
+    'ma_convergence', 'use_rsi_min',
+    's1_equity_pct', 's2_equity_pct', 's1_sizing_unit', 's2_sizing_unit',
+    'use_smart_exit', 'smart_exit_ba_ratio', 'smart_exit_vp', 'smart_exit_price_threshold',
+    'use_smart_buy_a', 'use_smart_buy_b', 'use_smart_buy_s2', 'use_smart_buy_s2_b',
+    'use_s2_master_a', 'use_s2_master_b',
+    'smart_buy_ba_ratio', 'smart_buy_vp', 'use_synthetic_realtime',
+    'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
+    'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'rsi_sig_period',
+    'backtest_initial_capital', 'sel_rsi_min', 'sel_rsi_max',
+    'min_trde_val', 'vol_ratio',
+    'stage1_amt', 'stage2_amt',
+    'ma60_min', 'ma60_max',
+    'type_a_phase1_up_vol_surge_add', 'type_a_phase1_neutral_vol_surge_add',
+    'type_a_phase1_up_ma60_shrink_pct', 'type_a_phase1_neutral_ma60_shrink_pct',
+    'type_b_phase1_up_vol_surge_add', 'type_b_phase1_neutral_vol_surge_add',
+    's2_ma5_gap', 'use_s2_ma20', 'use_s2_vol_surge', 'use_s2_rsi_sig', 'use_s2_macd_gc',
+    'use_s2_b_ma20', 'use_s2_b_ma5', 'use_s2_b_vol_surge', 'use_s2_b_rsi_sig', 'use_s2_b_macd_gc',
+    'use_s2_b_profit', 'use_s2_b_delay',
+    'use_atr_stop_loss_s2_b', 'use_atr_trailing_stop_s2_b',
+    'use_market_filter', 'use_macd_signal',
+    'use_type_balance_gate', 'type_balance_a_pct',
+    'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
+    'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
 })
 
 def init_worker(data_path):
@@ -298,44 +356,8 @@ class ParameterOptimizer:
                 if res_1m is not None:
                     data_cache_m1[code] = res_1m.sort_index()
 
-        # [v23.1] 지표 재계산 필요 여부 판단 (보수적 화이트리스트 방식)
-        # 아래 파라미터들은 지표(Indicators) 계산에는 영향을 주지 않고, 신호(Signals)나 매매 로직에만 관여함
-        # 지표(Indicator) 계산에 영향을 주지 않는 파라미터 화이트리스트
-        # _INDICATOR_PARAMS에 포함된 값들은 여기서 제외해야 함
-        # 제외된 것(= 지표에 영향):
-        #   atr_period → ATR 계산에 사용
-        #   vol_lookback → Prev_Day_Vol 계산에 사용
-        #   (15분 MACD·RSI 시그널 주기는 indicator_constants 고정)
-        signal_only_params = {
-            'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
-            's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 
-            's1_a_take_profit', 's1_b_take_profit', 's2_take_profit',
-            'take_profit', 'stop_loss', 'gap_down_limit', 's2_delay_hours', 's2_profit_limit',
-            's2_ma20_gap', 's2_vol_ratio', 's2_rsi_gap', 's2_macd_gap',
-            'use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 
-            'use_s1_a_stop_loss', 'use_s1_b_stop_loss', 'use_s2_stop_loss',
-            'use_s1_a_tp', 'use_s1_b_tp', 'use_s2_tp',
-            's1_a_flash_exit_pct', 's1_b_flash_exit_pct', 's2_flash_exit_pct',
-            'use_s2_ma5', 'use_s2_profit', 'use_s2_delay', 'gc_window', 'rsi_window',
-            'atr_multiplier_sl_a', 'atr_multiplier_sl_b', 'atr_multiplier_sl_s2',
-            'atr_multiplier_trail_a', 'atr_multiplier_trail_b', 'atr_multiplier_trail_s2',
-            'ma_convergence', 'use_rsi_min',
-            's1_equity_pct', 's2_equity_pct', 's1_sizing_unit', 's2_sizing_unit',
-            'use_smart_exit', 'smart_exit_ba_ratio', 'smart_exit_vp', 'smart_exit_price_threshold',
-            'use_smart_buy_a', 'use_smart_buy_b', 'use_smart_buy_s2',
-            'smart_buy_ba_ratio', 'smart_buy_vp', 'use_synthetic_realtime',
-            'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
-            'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry', 'rsi_sig_period',
-            # 위 MACD/RSI 시그널 키는 JSON 잔존 가능하나 지표 계산에는 미사용(상수 고정)
-            'backtest_initial_capital', 'sel_rsi_min', 'sel_rsi_max',
-            'gap_grace_mins', 'min_trde_val', 'vol_ratio', 'vol_lookback',
-            's2_ma5_gap', 'use_s2_ma20', 'use_s2_vol_surge', 'use_s2_rsi_sig', 'use_s2_macd_gc',
-            'use_market_filter', 'buy_rsi_min', 'use_macd_signal',
-            # [v4.6] 시장 트렌드 판정 임계값 (지표 계산과 무관, 신호/필터 로직에만 영향)
-            'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
-            # [Phase 2] Track B 종목 선정 파라미터 (지표 계산과 무관)
-            'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
-        }
+        # [v23.1] 지표 재계산 필요 여부: SIGNAL_ONLY_PARAMS 화이트리스트(모듈 상수)와 대조
+        signal_only_params = SIGNAL_ONLY_PARAMS
         
         # 최적화 대상 파라미터 중 하나라도 지표에 영향을 줄 가능성이 있으면 False
         is_indicator_constant = all(k in signal_only_params for k in keys)
@@ -442,11 +464,16 @@ class ParameterOptimizer:
                 best_settings = self.base_settings.copy()
                 for k in keys:
                     val = best[k]
-                    if k in ['vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig', 
+                    if k in ['vol_lookback', 'macd_fast', 'macd_slow', 'macd_sig',
                             'macd_fast_daily', 'macd_slow_daily', 'macd_sig_daily',
                             'macd_fast_entry', 'macd_slow_entry', 'macd_sig_entry',
-                            'gc_window', 'rsi_window', 'atr_period', 'ma_convergence', 
-                            'ma60_safe_ratio', 'backtest_initial_capital']:
+                            'gc_window', 'rsi_window', 'atr_period', 'atr_period_a', 'atr_period_b',
+                            'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b', 'ma_convergence',
+                            'ma60_safe_ratio', 'backtest_initial_capital',
+                            'stage1_amt', 'stage2_amt',
+                            'prev_vol_lookback', 'prev_vol_lookback_b',
+                            'prev_vol_lookback_s1_a', 'prev_vol_lookback_s1_b',
+                            'prev_vol_lookback_s2_a', 'prev_vol_lookback_s2_b']:
                         try: val = int(float(val))
                         except: pass
                     best_settings[k] = val

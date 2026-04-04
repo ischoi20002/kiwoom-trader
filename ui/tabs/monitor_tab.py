@@ -13,6 +13,25 @@ import FinanceDataReader as fdr
 import config
 from kiwoom_rest_api.auth.token import TokenManager
 
+
+def format_strategy_type_label(sel_track: object) -> str:
+    """
+    선정 트랙(sel_track: A / B / AB) → 실시간 감시 '전략유형' 컬럼 표시문자열.
+    SignalEngine 등에서 동일 문구를 쓰려면 이 함수를 import 해 사용합니다.
+    """
+    try:
+        tr = str(sel_track if sel_track is not None else "").strip().upper()
+        if tr == "A":
+            return "전략 A"
+        if tr == "B":
+            return "전략 B"
+        if tr in ("AB", "A+B"):
+            return "전략 A+B"
+        return "전략 A+B"
+    except Exception:
+        return "전략 A+B"
+
+
 class MonitorTab:
     def __init__(self, parent, app):
         self.parent = parent
@@ -34,9 +53,6 @@ class MonitorTab:
         self.lbl_monitor_status = ttk.Label(self.ctrl_frame, text="상태: 대기 중", font=("Malgun Gothic", 10), foreground=self.app.colors['primary'])
         self.lbl_monitor_status.pack(side=tk.RIGHT, padx=10)
 
-        self.pb_warmup = ttk.Progressbar(self.ctrl_frame, orient=tk.HORIZONTAL, length=180, mode='determinate')
-        self.lbl_warmup_detail = ttk.Label(self.ctrl_frame, text="", font=("Malgun Gothic", 9), foreground=self.app.colors['secondary']) 
-        
         self.lbl_headwind_caution = ttk.Label(self.ctrl_frame, text="⚠️ 시장 역풍 - 매수 신호가 일시 정지되었습니다", 
                                                 font=("Malgun Gothic", 10, "bold"), foreground="#BF616A")
         
@@ -52,25 +68,54 @@ class MonitorTab:
         watchlist_frame = ttk.LabelFrame(paned, text=" 👁️ 실시간 감시 목록 (Watchlist) ", padding="5")
         paned.add(watchlist_frame, weight=1)
         
-        columns = ("Score", "Code", "Name", "Price", "Ratio", "VolPower", "Status", "TotalAsk", "TotalBid", "Volume", "TrdeVal")
+        columns = (
+            "Score",
+            "Code",
+            "Name",
+            "StratType",
+            "Price",
+            "Ratio",
+            "Status",
+            "VolPower",
+            "TotalAsk",
+            "TotalBid",
+            "Volume",
+            "TrdeVal",
+        )
         headings = {
-            "Score": "가점", "Code": "코드", "Name": "종목명",
-            "Price": "현재가", "Ratio": "등락률", 
-            "VolPower": "체결강도", "Status": "신호상태", "TotalAsk": "매도잔량", "TotalBid": "매수잔량",
-            "Volume": "거래량", "TrdeVal": "대금(억)"
+            "Score": "가점",
+            "Code": "코드",
+            "Name": "종목명",
+            "StratType": "전략유형",
+            "Price": "현재가",
+            "Ratio": "등락률",
+            "Status": "신호상태",
+            "VolPower": "체결강도",
+            "TotalAsk": "매도잔량",
+            "TotalBid": "매수잔량",
+            "Volume": "거래량",
+            "TrdeVal": "대금(억)",
         }
         col_widths = {
-            "Score": 50, "Code": 75, "Name": 120,
-            "Price": 100, "Ratio": 95, 
-            "VolPower": 85, "Status": 90, "TotalAsk": 100, "TotalBid": 100,
-            "Volume": 110, "TrdeVal": 75
+            "Score": 50,
+            "Code": 75,
+            "Name": 120,
+            "StratType": 88,
+            "Price": 100,
+            "Ratio": 95,
+            "Status": 240,
+            "VolPower": 85,
+            "TotalAsk": 100,
+            "TotalBid": 100,
+            "Volume": 110,
+            "TrdeVal": 75,
         }
 
         # 1. 상단 트리뷰 (Active) - 높이 축소
         self.tree_active_monitor = ttk.Treeview(active_frame, columns=columns, show="headings", selectmode="browse", height=3)
         for col in columns:
             self.tree_active_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
-            anchor = tk.W if col == "Name" else tk.CENTER
+            anchor = tk.W if col in ("Name", "StratType") else tk.CENTER
             self.tree_active_monitor.column(col, width=col_widths[col], anchor=anchor)
         self.tree_active_monitor.pack(fill=tk.BOTH, expand=True)
 
@@ -78,7 +123,7 @@ class MonitorTab:
         self.tree_monitor = ttk.Treeview(watchlist_frame, columns=columns, show="headings", selectmode="browse")
         for col in columns:
             self.tree_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
-            anchor = tk.W if col == "Name" else tk.CENTER
+            anchor = tk.W if col in ("Name", "StratType") else tk.CENTER
             self.tree_monitor.column(col, width=col_widths[col], anchor=anchor)
         
         yscrollbar = ttk.Scrollbar(watchlist_frame, orient=tk.VERTICAL, command=self.tree_monitor.yview)
@@ -112,6 +157,26 @@ class MonitorTab:
             # 5. 보조 상태 (합치도)
             t.tag_configure("status_high", foreground="#EBCB8B", font=row_font)
             t.tag_configure("status_low", foreground="#616E88", font=row_font)
+
+            # 6. 워밍업(15분봉 API·DB 검증) 단계 구분
+            t.tag_configure(
+                "warmup_pending",
+                foreground="#ECEFF4",
+                background="#434C5E",
+                font=row_font,
+            )
+            t.tag_configure(
+                "warmup_ok_row",
+                foreground="#A3BE8C",
+                background="#3B4252",
+                font=row_font,
+            )
+            t.tag_configure(
+                "warmup_fail_row",
+                foreground="#ECEFF4",
+                background="#5c3d3d",
+                font=row_font,
+            )
 
     async def _ws_client_loop(self):
         """키움 REST API 방식 웹소켓 루프 (자동 재연결 및 안정성 강화)"""
@@ -344,41 +409,76 @@ class MonitorTab:
         
         for code, info in sorted_items:
             now_p = info.get('price', 0)
+            strat = format_strategy_type_label(
+                info.get("sel_track", info.get("SelTrack", "AB"))
+            )
             values = (
-                f"{info.get('score', 0):.1f}", code, info['name'],
-                f"{now_p:,.0f}", info.get('ratio', '0'), 
-                f"{info.get('vol_power', 0):.1f}%", info.get('status_text', '대기'),
-                f"{info.get('total_ask', 0):,}", f"{info.get('total_bid', 0):,}",
-                f"{info.get('volume', 0):,}", f"{info.get('trde_val', 0):,.1f}"
+                f"{info.get('score', 0):.1f}",
+                code,
+                info["name"],
+                strat,
+                f"{now_p:,.0f}",
+                info.get("ratio", "0"),
+                info.get("status_text", "대기"),
+                f"{info.get('vol_power', 0):.1f}%",
+                f"{info.get('total_ask', 0):,}",
+                f"{info.get('total_bid', 0):,}",
+                f"{info.get('volume', 0):,}",
+                f"{info.get('trde_val', 0):,.1f}",
             )
             self.tree_monitor.insert("", tk.END, iid=code, values=values)
 
     def load_targets(self, codes_or_info):
-        """KiwoomApp과의 호환성을 위한 래퍼"""
-        if isinstance(codes_or_info, dict):
-            self.update_watchlist(codes_or_info)
-        else:
-            # codes 리스트인 경우 (TradingController로부터 받은 경우 등)
-            pass
+        """KiwoomApp과의 호환성을 위한 래퍼 (DataFrame 전달 시 app.monitor_info 사용)."""
+        try:
+            if isinstance(codes_or_info, dict):
+                self.update_watchlist(codes_or_info)
+            elif hasattr(self.app, "monitor_info") and self.app.monitor_info:
+                self.update_watchlist(self.app.monitor_info)
+        except Exception as e:
+            print(f"[UI Error] load_targets: {e}")
 
-    def update_warmup(self, cur, total, name, code):
-        """[v4.6.0] 비동기 배경 동기화(Sync) 진행률 UI 업데이트"""
-        if not hasattr(self, 'pb_warmup'): return
-        
-        # [v4.6.0] 동기화 중임을 적극적으로 알림
-        if not self.pb_warmup.winfo_ismapped():
-            self.pb_warmup.pack(side=tk.LEFT, padx=(20, 10))
-            self.lbl_warmup_detail.pack(side=tk.LEFT, padx=5)
-            
-        pct = (cur / total) * 100
-        self.pb_warmup['value'] = pct
-        self.lbl_warmup_detail.config(text=f"🔄 동기화 중: {name} ({cur}/{total})")
-        
-        if cur >= total:
-            self.lbl_warmup_detail.config(text="✅ 동기화 완료", foreground="#A3BE8C") # Success Green
-            self.app.root.after(5000, self._hide_warmup)
+    def reset_warmup_row_states(self, codes: list) -> None:
+        """감시 시작 워밍업 직전: 지정 종목 행을 '대기' 표시로 통일."""
+        try:
+            for code in codes:
+                for tree in (self.tree_monitor, self.tree_active_monitor):
+                    if tree and tree.exists(code):
+                        vals = list(tree.item(code, "values"))
+                        if len(vals) >= 7:
+                            vals[6] = "⏳ 워밍업 대기…"
+                        tree.item(code, values=tuple(vals), tags=("warmup_pending",))
+        except Exception as e:
+            print(f"[UI Error] reset_warmup_row_states: {e}")
 
-    def _hide_warmup(self):
-        if hasattr(self, 'pb_warmup'):
-            self.pb_warmup.pack_forget()
-            self.lbl_warmup_detail.pack_forget()
+    def update_warmup_stock_prep(
+        self,
+        event: str,
+        cur: int,
+        total: int,
+        name: str,
+        code: str,
+        reason: str = "",
+    ) -> None:
+        """종목별 워밍업 진행·성공·실패를 신호상태 열·행 배경으로 구분."""
+        try:
+            code = str(code).zfill(6)
+            if event == "prep_start":
+                st = f"⏳ 데이터 준비 중… ({cur}/{total})"
+                tag = "warmup_pending"
+            elif event == "prep_ok":
+                st = "✅ 15분봉·검증 완료"
+                tag = "warmup_ok_row"
+            else:
+                short = (reason or "실패")[:120]
+                st = f"❌ 워밍업 실패: {short}"
+                tag = "warmup_fail_row"
+            for tree in (self.tree_monitor, self.tree_active_monitor):
+                if not tree or not tree.exists(code):
+                    continue
+                vals = list(tree.item(code, "values"))
+                if len(vals) >= 7:
+                    vals[6] = st
+                tree.item(code, values=tuple(vals), tags=(tag,))
+        except Exception as e:
+            print(f"[UI Error] update_warmup_stock_prep: {e}")

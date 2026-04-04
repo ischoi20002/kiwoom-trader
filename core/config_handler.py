@@ -20,9 +20,38 @@ class ConfigHandler:
             try:
                 with open(self.settings_file, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
+                    loaded_keys = set(loaded.keys())
                     # 기본 설정과 병합 (새로운 설정 항목 대응)
                     full_settings = default_settings.copy()
                     full_settings.update(loaded)
+                    try:
+                        # ATR 트레일 무장: JSON에 S1/S2 분리 키가 없으면 구 트랙 단일 키로 양쪽 채움
+                        if (
+                            "use_atr_trail_only_after_tp_s1_a" not in loaded_keys
+                            and "use_atr_trail_only_after_tp_s2_a" not in loaded_keys
+                        ):
+                            leg_a = bool(
+                                loaded.get(
+                                    "use_atr_trail_only_after_tp_a",
+                                    full_settings.get("use_atr_trail_only_after_tp", False),
+                                )
+                            )
+                            full_settings["use_atr_trail_only_after_tp_s1_a"] = leg_a
+                            full_settings["use_atr_trail_only_after_tp_s2_a"] = leg_a
+                        if (
+                            "use_atr_trail_only_after_tp_s1_b" not in loaded_keys
+                            and "use_atr_trail_only_after_tp_s2_b" not in loaded_keys
+                        ):
+                            leg_b = bool(
+                                loaded.get(
+                                    "use_atr_trail_only_after_tp_b",
+                                    full_settings.get("use_atr_trail_only_after_tp", False),
+                                )
+                            )
+                            full_settings["use_atr_trail_only_after_tp_s1_b"] = leg_b
+                            full_settings["use_atr_trail_only_after_tp_s2_b"] = leg_b
+                    except Exception:
+                        pass
                     return full_settings
             except Exception as e:
                 self.log(f"⚠️ 설정 로드 에러: {e}")

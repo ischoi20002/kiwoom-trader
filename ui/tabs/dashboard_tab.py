@@ -2,7 +2,9 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 import os
+import pandas as pd
 import strategy_selector
+
 
 class DashboardTab:
     def __init__(self, parent, app):
@@ -22,7 +24,12 @@ class DashboardTab:
         # [타일 1] 전략 종목 스캔 (Scanner) - 가장 왼쪽, 큰 비중
         scan_tile = ttk.LabelFrame(tiles_frame, text=" 🎯 종목 스캐너 ", padding="15")
         scan_tile.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        ttk.Label(scan_tile, text="KOSPI 200 종목 중\n최적 전략 종목을 찾습니다.", foreground="#81A1C1").pack(expand=True)
+        ttk.Label(
+            scan_tile,
+            text="KOSPI 200 중 Type A·B 유니버스를 각각 선정합니다.\n"
+            "결과는 로그창에 표시되며 감시 대상으로 바로 등록됩니다.",
+            foreground="#81A1C1",
+        ).pack(expand=True)
         self.btn_select = ttk.Button(scan_tile, text="종목 선정 실행", style="Action.TButton", 
                                         command=self.start_selection_thread, state=tk.DISABLED)
         self.btn_select.pack(side=tk.BOTTOM, fill=tk.X, pady=(15,0))
@@ -83,47 +90,113 @@ class DashboardTab:
             messagebox.showerror("오류", f"수집 프로세스 실행 중 오류 발생: {e}")
 
     def start_selection_thread(self, auto_confirm=False):
-        if self.btn_select: self.btn_select.config(state=tk.DISABLED)
-        threading.Thread(target=self.select_monitoring_targets, args=(auto_confirm,), daemon=True).start()
+        if self.btn_select:
+            self.btn_select.config(state=tk.DISABLED)
+        threading.Thread(
+            target=self.select_monitoring_targets, args=(auto_confirm,), daemon=True
+        ).start()
+
+    @staticmethod
+    def _log_selection_results(app, df: pd.DataFrame) -> None:
+        """선정 결과를 로그창에 표 형태로 출력 (팝업 대체)."""
+        try:
+            d = df.copy()
+            d.columns = [str(c).lower() for c in d.columns]
+            app.log("\n" + "=" * 102)
+            app.log(f"🎯 [종목 선정 결과] {len(d)}개 → 실시간 감시 대상으로 바로 등록합니다.")
+            app.log("-" * 102)
+            app.log(
+                f"{'#':>3} | {'코드':8} | {'종목명':18} | {'가점':>6} | {'트랙':^5} | "
+                f"{'현재가':>10} | {'등락%':>7} | {'RSI':>5} | {'5일대금(억)':>10}"
+            )
+            app.log("-" * 102)
+            for i, (_, row) in enumerate(d.iterrows(), 1):
+                code = str(row.get("code", "")).zfill(6)
+                name = str(row.get("name", "Unknown"))[:18]
+                try:
+                    sc = float(row.get("score", 0))
+                except (TypeError, ValueError):
+                    sc = 0.0
+                st = str(row.get("seltrack", "")).strip().upper() or "-"
+                try:
+                    price = int(float(row.get("price", 0)))
+                except (TypeError, ValueError):
+                    price = 0
+                try:
+                    ratio = float(row.get("ratio", 0))
+                except (TypeError, ValueError):
+                    ratio = 0.0
+                try:
+                    rsi = float(row.get("rsi", 0))
+                except (TypeError, ValueError):
+                    rsi = 0.0
+                try:
+                    tv = int(float(row.get("avgtrdeval", 0)))
+                except (TypeError, ValueError):
+                    tv = 0
+                app.log(
+                    f"{i:3d} | {code} | {name:18} | {sc:6.1f} | {st:^5} | "
+                    f"{price:10,d} | {ratio:7.2f} | {rsi:5.1f} | {tv:10d}"
+                )
+            app.log("=" * 102 + "\n")
+        except Exception as e:
+            app.log(f"⚠️ [선정] 결과 로그 출력 실패: {e}")
 
     def select_monitoring_targets(self, auto_confirm=False):
-        """[v2.9/v4.5.7] 선정 로직을 실행하고 결과에 따라 팝업 또는 자동 확정 처리"""
+        """선정 스캔 후 로그 출력 + 감시 대상 즉시 등록 (확인 팝업 없음)."""
+        df_snap = None
         try:
             df_result = strategy_selector.select_monitoring_targets(
                 settings=self.app.settings,
                 logger_callback=self.app.log,
-                data_manager=self.app.data_manager
+                data_manager=self.app.data_manager,
             )
-            
             if df_result is not None and not df_result.empty:
-                if auto_confirm:
-                    # [v4.5.7] 원격 명령(/select) 대응: 팝업 없이 즉시 기동
-                    self.app.trading_controller.set_monitor_targets(df_result)
-                    self.app.monitor_codes = self.app.trading_controller.monitor_codes
-                    self.app.monitor_info = self.app.trading_controller.monitor_info
-                    
-                    if hasattr(self.app, 'monitor_tab'):
-                        self.app.monitor_tab.update_watchlist(self.app.monitor_info)
-                    
-                    self.app.log(f"✅ [Remote] {len(self.app.monitor_codes)}개 종목이 자동으로 실시간 감시 대상으로 등록되었습니다.")
-                    
-                    # 텔레그램 결과 전송
-                    msg = f"<b>🎯 [원격 종목 선정 완료]</b>\n"
-                    msg += f"총 {len(self.app.monitor_codes)}개 종목이 감시 대상으로 등록되었습니다.\n"
-                    top_5 = df_result.head(5)
-                    for i, row in top_5.iterrows():
-                        msg += f"- {row.get('Name','')} ({row.get('Code','')})\n"
-                    
-                    import threading
-                    threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
-                else:
-                    self.app._display_selected_targets(df_result)
-            
-            # 버튼 상태 복구
-            self.app.root.after(0, lambda: self.btn_select.config(state=tk.NORMAL) if self.btn_select else None)
-            
+                df_snap = df_result.copy()
         except Exception as e:
             import traceback
+
             self.app.log(f"❌ 종목 선정 중 예외 발생: {e}")
             self.app.log(f"DEBUG Traceback:\n{traceback.format_exc()}")
-            self.app.root.after(0, lambda: self.btn_select.config(state=tk.NORMAL) if self.btn_select else None)
+
+        def finish_on_main() -> None:
+            try:
+                if df_snap is None or df_snap.empty:
+                    self.app.log("⚠️ [선정] 조건에 부합하는 종목이 없습니다.")
+                    return
+                self._log_selection_results(self.app, df_snap)
+                self.app.trading_controller.set_monitor_targets(df_snap)
+                self.app.monitor_codes = self.app.trading_controller.monitor_codes
+                self.app.monitor_info = self.app.trading_controller.monitor_info
+                if hasattr(self.app, "monitor_tab"):
+                    self.app.monitor_tab.update_watchlist(self.app.monitor_info)
+                tag = "[원격] " if auto_confirm else ""
+                self.app.log(
+                    f"✅ {tag}{len(self.app.monitor_codes)}개 종목을 실시간 감시 대상으로 등록했습니다."
+                )
+                if auto_confirm:
+                    msg = "<b>🎯 [원격 종목 선정 완료]</b>\n"
+                    msg += f"총 {len(self.app.monitor_codes)}개 종목이 감시 대상으로 등록되었습니다.\n"
+                    for _, row in df_snap.head(5).iterrows():
+                        nm = row.get("Name", row.get("name", ""))
+                        cd = row.get("Code", row.get("code", ""))
+                        msg += f"- {nm} ({cd})\n"
+                    threading.Thread(
+                        target=self.app.send_telegram_message, args=(msg,), daemon=True
+                    ).start()
+            except Exception as ex:
+                self.app.log(f"❌ [선정] 등록·로그 후처리 실패: {ex}")
+
+        try:
+            self.app.root.after(0, finish_on_main)
+        except Exception:
+            finish_on_main()
+
+        try:
+            self.app.root.after(
+                0,
+                lambda: self.btn_select.config(state=tk.NORMAL) if self.btn_select else None,
+            )
+        except Exception:
+            if self.btn_select:
+                self.btn_select.config(state=tk.NORMAL)

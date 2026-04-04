@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import FinanceDataReader as fdr
 import os
 import pandas as pd
@@ -14,8 +16,9 @@ import matplotlib
 matplotlib.use('Agg')
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from concurrent.futures import ThreadPoolExecutor as TPE, as_completed
+from concurrent.futures import ThreadPoolExecutor as TPE, ProcessPoolExecutor as PPE, as_completed
 import threading
+import pickle
 from data_manager_v2 import DataManagerV2
 import strategy_selector
 import itertools
@@ -52,6 +55,46 @@ TRADE_CSV_HEADER_LINE: str = "Date,Code,Name,Action,Price,Qty,Return,Reason,Fee,
 _trade_csv_buffer: list[str] = []
 
 
+def derive_market_regime_scalar(trend: str | None, status: str | None) -> str:
+    """
+    매수·S2 게이트 전용 4단계 레짐.
+    Market_Status(WATCH/SAFE/RISK 등)는 내부 산출용이며, 매수 제한에는 본 함수 결과만 사용한다.
+    """
+    try:
+        t = str(trend or "UP").strip().upper()
+        s = str(status or "SAFE").strip().upper()
+        if t == "DOWN":
+            return "DOWN"
+        if t == "NEUTRAL":
+            return "NEUTRAL"
+        if t == "UP" and s == "AGGRESSIVE":
+            return "AGGRESSIVE"
+        if t == "UP":
+            return "UP"
+        return "UP"
+    except Exception:
+        return "UP"
+
+
+def derive_market_regime_series(trend_s: pd.Series, status_s: pd.Series) -> pd.Series:
+    """일별 Market_Trend·Market_Status로부터 Market_Regime 열을 벡터화 산출."""
+    try:
+        t = trend_s.astype(str).str.strip().str.upper()
+        s = status_s.astype(str).str.strip().str.upper()
+        reg = np.where(
+            t == "DOWN",
+            "DOWN",
+            np.where(
+                t == "NEUTRAL",
+                "NEUTRAL",
+                np.where((t == "UP") & (s == "AGGRESSIVE"), "AGGRESSIVE", "UP"),
+            ),
+        )
+        return pd.Series(reg, index=trend_s.index, dtype=object)
+    except Exception:
+        return pd.Series("UP", index=trend_s.index, dtype=object)
+
+
 def clear_trade_csv_buffer() -> None:
     """TRADE_CSV 버퍼만 비움 (시뮬 시작 시 로그 파일 삭제와 함께 호출)."""
     with csv_lock:
@@ -86,6 +129,48 @@ def flush_trade_csv_buffer() -> None:
                 print(f"[WARN] TRADE_CSV flush 실패: {e}")
             except Exception:
                 pass
+
+# [v40.0] Multiprocessing Infrastructure for Portfolio Backtesting
+_G_BT_DATA = {}
+_G_BT_M1 = {}
+_G_BT_MKT = None
+_G_BT_VIX = None
+
+def init_bt_worker(cache_path):
+    """Worker process initialization: Load data from pickle cache once."""
+    global _G_BT_DATA, _G_BT_M1, _G_BT_MKT, _G_BT_VIX
+    try:
+        if os.path.exists(cache_path):
+            with open(cache_path, 'rb') as f:
+                cache = pickle.load(f)
+                _G_BT_DATA = cache.get('data', {})
+                _G_BT_M1 = cache.get('m1', {})
+                _G_BT_MKT = cache.get('market', None)
+                _G_BT_VIX = cache.get('vix', None)
+    except Exception as e:
+        print(f"  (!) BT Worker Init Error: {e}")
+
+def _run_single_backtest_task(args):
+    """Top-level function for ProcessPoolExecutor to run a single stock backtest."""
+    code, settings, interval, force_refresh, high_precision = args
+    
+    global _G_BT_DATA, _G_BT_M1, _G_BT_MKT, _G_BT_VIX
+    
+    data = _G_BT_DATA.get(code)
+    m1_pre = _G_BT_M1.get(code)
+    market_df = _G_BT_MKT
+    vix_df = _G_BT_VIX
+    
+    if data is not None:
+        tester = SimpleBacktester(settings)
+        try:
+            summary = tester.run(data, code, market_df=market_df, vix_df=vix_df, 
+                              log_to_csv=True, high_precision=high_precision, 
+                              m1_df_preloaded=m1_pre)
+            return code, data, summary
+        except Exception as e:
+            print(f"  (!) PPE Task Error ({code}): {e}")
+    return code, None, None
 
 class TradingStrategy:
     """[v6.4] 실시간 감시와 백테스팅이 공유하는 매매 전략 엔진"""
@@ -160,54 +245,65 @@ class TradingStrategy:
             return 'WATCH'
 
     @staticmethod
-    def simulate_intrabar_indicators(hist_df, current_15m_time, m1_row, settings):
+    def simulate_intrabar_indicators(last_15m_dict, m1_row, settings, hist_df_prices_tail=None):
         """
-        [v37.9] 초고속 증분 지표 업데이트 (Incremental Update)
-        - 전체 재계산(O(N)) 대신 상수 시간(O(1)) 연산으로 속도 최적화
+        [v40.0] Optimized Incremental Indicator Update
+        - Accepts dict for O(1) access and avoids Series copying.
         """
-        if hist_df is None or len(hist_df) < 1:
-            return None
-            
-        last_15m = hist_df.iloc[-1]
         m1_p = m1_row['Close']
-        combined = last_15m.copy()
-        combined.name = current_15m_time
+        # Dictionary copy is faster than Series copy
+        combined = last_15m_dict.copy()
         combined['Close'] = m1_p
         
-        # [Optimization] 전체 재계산 대신 수학적 증분 업데이트 적용
-        # 1. Moving Averages (MA)
+        # 1. Moving Averages (MA) - Using pre-calculated sums if available or simple mean
         for n in [5, 20, 60]:
             col = f'MA{n}'
-            if col in last_15m and len(hist_df) >= n:
+            if col in last_15m_dict and hist_df_prices_tail is not None and n in hist_df_prices_tail:
                 # MA_new = (Sum(last n-1) + new_p) / n
-                prev_sum = hist_df['Close'].iloc[-(n-1):].sum()
-                combined[col] = (prev_sum + m1_p) / n
+                combined[col] = (hist_df_prices_tail[n] + m1_p) / n
 
-        # 2. RSI (Wilder's Smoothing) — RSI_MAIN_PERIOD 고정
+        # 2. RSI (Wilder's Smoothing)
         _rp = max(2, int(RSI_MAIN_PERIOD))
-        if 'RSI' in last_15m and len(hist_df) >= _rp:
-            # RSI 증분 업데이트를 위한 Gain/Loss 계산
-            diff = m1_p - last_15m['Close']
+        if 'RSI' in last_15m_dict and hist_df_prices_tail is not None and 'rsi_vals' in hist_df_prices_tail:
+            diff = m1_p - last_15m_dict['Close']
             gain = max(0, diff)
             loss = max(0, -diff)
 
-            # 정확도를 위해 최근 _rp개 데이터 사용 (O(_rp))
-            tail_15 = hist_df['Close'].tail(_rp)
-            diffs = np.diff(np.append(tail_15.values, [m1_p]))
-            gains = np.maximum(0, diffs)
-            losses = np.maximum(0, -diffs)
-
             alpha = 1.0 / float(_rp)
-            avg_gain = last_15m.get('_avg_gain', 0) # 만약 엔진에서 미리 계산해 뒀다면 최상
-            if avg_gain == 0: #Fallback
-                avg_gain = gains.mean()
-                avg_loss = losses.mean()
+            avg_gain = last_15m_dict.get('_avg_gain', 0)
+            avg_loss = last_15m_dict.get('_avg_loss', 0)
+            
+            if avg_gain == 0: # Fallback using tail prices
+                vals = hist_df_prices_tail['rsi_vals']
+                diffs = np.diff(np.append(vals, [m1_p]))
+                avg_gain = np.maximum(0, diffs).mean()
+                avg_loss = np.maximum(0, -diffs).mean()
             else:
-                avg_gain = alpha * gain + (1 - alpha) * last_15m['_avg_gain']
-                avg_loss = alpha * loss + (1 - alpha) * last_15m['_avg_loss']
+                avg_gain = alpha * gain + (1 - alpha) * avg_gain
+                avg_loss = alpha * loss + (1 - alpha) * avg_loss
             
             rs = avg_gain / (avg_loss + 1e-10)
             combined['RSI'] = 100 - (100 / (1 + rs))
+
+        # 3. MACD (EMA)
+        for span, col_prefix in [(MACD_ENTRY_FAST, '_ema12'), (MACD_ENTRY_SLOW, '_ema26')]:
+            alpha = 2.0 / (span + 1.0)
+            prev_ema = last_15m_dict.get(col_prefix, last_15m_dict['Close'])
+            combined[col_prefix] = m1_p * alpha + prev_ema * (1 - alpha)
+
+        if '_ema12' in combined and '_ema26' in combined:
+            combined['MACD'] = combined['_ema12'] - combined['_ema26']
+            sig_span = max(1, int(MACD_ENTRY_SIGNAL))
+            sig_alpha = 2.0 / (sig_span + 1.0)
+            prev_sig = last_15m_dict.get('_macd_sig', last_15m_dict['MACD'])
+            combined['_macd_sig'] = combined['MACD'] * sig_alpha + prev_sig * (1 - sig_alpha)
+            combined['MACD_Sig'] = combined['_macd_sig']
+            combined['OSC'] = combined['MACD'] - combined['MACD_Sig']
+
+        if 'bid_ask_ratio' in m1_row: combined['bid_ask_ratio'] = m1_row['bid_ask_ratio']
+        if 'vol_power' in m1_row: combined['vol_power'] = m1_row['vol_power']
+        
+        return combined
 
         # 3. MACD (EMA based) — MACD_ENTRY_* 고정
         # EMA_new = price * alpha + prev_ema * (1 - alpha)
@@ -244,24 +340,47 @@ class TradingStrategy:
         return TradingStrategy.get_buy_signals_detailed(df, settings, market_trend)['Signal']
 
     @staticmethod
-    def _check_s2_approval(pos, last_row, settings, indicator_row=None, market_trend='UP', curr_dt=None):
-        """[Phase 2] Type A/B 완전 분리된 2차 매수 승인 로직"""
+    def _check_s2_approval(pos, last_row, settings, indicator_row=None, market_trend='UP', curr_dt=None, indicators_dict=None, i=None):
+        """[Phase 2] Type A/B 완전 분리된 2차 매수 승인 로직 (v40.0: Optimized)"""
         s = settings
 
-        # Type B 여부 판별 → 파라미터 키 분기 헬퍼
-        _sig = pos.get('sig_type', pos.get('reason', ''))
-        _is_b = 'TYPE_B' in str(_sig)
+        # 0. 기술 지표 참조 (Dict created if not provided - O(1) if passed directly)
+        ind = indicator_row
+        if ind is None and indicators_dict is not None and i is not None:
+             # Lazy-access pattern to avoid dict creation for entire row
+             pass # Use indicators_dict[key][i] directly below
+        elif ind is None:
+             ind = last_row
+        
+        def _get_val(key, default=0):
+            if indicators_dict is not None and i is not None:
+                return indicators_dict.get(key, {}).get(i, default) if hasattr(indicators_dict.get(key), 'get') else indicators_dict[key][i] if key in indicators_dict else default
+            return ind.get(key, default) if ind is not None else default
 
-        def _k(key: str, default=None):
-            """Type B이면 B전용 키 우선 조회, 없으면 기존(A) 키로 폴백"""
+        # Type A / Type B: S2 파라미터 완전 분리 (교차 폴백 없음)
+        _is_b = TradingStrategy._holding_sig_is_type_b(pos)
+        if not _is_b:
+            try:
+                _is_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+            except Exception:
+                _is_b = False
+
+        # Type A/B 각각 추매(S2) 전체 ON/OFF — OFF면 세부 조건과 무관하게 2차 매수 불가
+        try:
             if _is_b:
-                b_key = key.replace('s2_', 's2_b_').replace('use_s2_', 'use_s2_b_')
-                val = s.get(b_key)
-                if val is not None:
-                    return val
-            return s.get(key, default)
+                if not bool(s.get("use_s2_master_b", True)):
+                    return False
+            else:
+                if not bool(s.get("use_s2_master_a", True)):
+                    return False
+        except Exception:
+            pass
 
-        # [v4.8] 시장 필터: Type A는 NEUTRAL에서도 S2 허용, Type B는 UP/AGGRESSIVE만
+        def _s2(a_key: str, b_key: str, default):
+            """Type A는 s2_* 만, Type B는 s2_b_* 만 사용."""
+            return s.get(b_key, default) if _is_b else s.get(a_key, default)
+
+        # [v4.8] 시장 필터
         if s.get('use_market_filter', True):
             if _is_b:
                 if market_trend not in ('UP', 'AGGRESSIVE'):
@@ -271,62 +390,69 @@ class TradingStrategy:
                     return False
 
         # 0. 최소 대기 기간
-        if _k('use_s2_delay', True):
-            min_hours = float(_k('s2_delay_hours', 24))
+        if _s2('use_s2_delay', 'use_s2_b_delay', True):
+            min_hours = float(_s2('s2_delay_hours', 's2_b_delay_hours', 24))
             entry_dt = pd.to_datetime(pos['entry_date'])
-            if last_row is not None:
-                curr_dt = pd.to_datetime(last_row.name)
-            elif curr_dt is not None:
-                curr_dt = pd.to_datetime(curr_dt)
+            if curr_dt is None:
+                if last_row is not None: curr_dt = pd.to_datetime(last_row.name)
             else:
-                curr_dt = None
+                curr_dt = pd.to_datetime(curr_dt)
+            
             if curr_dt is not None and (curr_dt - entry_dt).total_seconds() / 3600 < min_hours:
                 return False
 
-        # 기술 지표 참조
-        ind = indicator_row if indicator_row is not None else last_row
-        if ind is None:
-            return True
-        try:
-            curr_price = float(ind['Close'])
-        except (KeyError, TypeError):
-            curr_price = 0.0
+        curr_price = float(_get_val('Close', 0.0))
 
-        # 1. MA5 지지 (MA20 검사는 MA5에 통합 — MA5>MA20이면 MA20도 대부분 충족)
-        if _k('use_s2_ma5', True):
-            ma5_val = ind.get('MA5', 0)
-            gap = float(_k('s2_ma5_gap', -0.5))
+        # 1. MA20 지지 (Type A/B 각각 전용 키)
+        if _s2('use_s2_ma20', 'use_s2_b_ma20', True):
+            ma20_val = _get_val('MA20', 0)
+            gap = float(_s2('s2_ma20_gap', 's2_b_ma20_gap', 0.0))
+            if ma20_val == 0 or curr_price < ma20_val * (1 + gap / 100.0):
+                return False
+
+        # 2. MA5 지지
+        if _s2('use_s2_ma5', 'use_s2_b_ma5', True):
+            ma5_val = _get_val('MA5', 0)
+            gap = float(_s2('s2_ma5_gap', 's2_b_ma5_gap', -0.5))
             if curr_price < ma5_val * (1 + gap / 100.0):
                 return False
 
-        # 2. 거래 수급
-        if _k('use_s2_vol_surge', True):
-            vol_target = ind.get('Prev_Day_Vol', ind.get('Vol_MA20', ind.get('Volume', 0)))
-            ratio = float(_k('s2_vol_ratio', 1.5))
-            if ind.get('Volume', 0) < vol_target * ratio:
+        # 3. 거래 수급 — S2 전용 기준열 (lookback은 prev_vol_lookback_s2_a / s2_b)
+        if _s2('use_s2_vol_surge', 'use_s2_b_vol_surge', True):
+            if _is_b:
+                vol_target = _get_val(
+                    "Prev_Day_Vol_S2_B",
+                    _get_val("Prev_Day_Vol_B", _get_val("Vol_MA20", _get_val("Volume", 0))),
+                )
+            else:
+                vol_target = _get_val(
+                    "Prev_Day_Vol_S2_A",
+                    _get_val("Prev_Day_Vol", _get_val("Vol_MA20", _get_val("Volume", 0))),
+                )
+            ratio = float(_s2('s2_vol_ratio', 's2_b_vol_ratio', 1.5))
+            if _get_val('Volume', 0) < vol_target * ratio:
                 return False
 
-        # 3. 모멘텀 확인 (RSI **또는** MACD — 둘 중 하나만 충족하면 통과)
+        # 4. 모멘텀 확인
         rsi_ok = True
         macd_ok = True
-        if _k('use_s2_rsi_sig', True):
-            rsi_sig = ind.get('RSI_Sig', 50)
-            rsi_val = ind.get('RSI', 0)
-            rsi_prev = ind.get('Prev_RSI', rsi_val)
-            gap = float(_k('s2_rsi_gap', 0.0))
+        if _s2('use_s2_rsi_sig', 'use_s2_b_rsi_sig', True):
+            rsi_sig = _get_val('RSI_Sig', 50)
+            rsi_val = _get_val('RSI', 0)
+            rsi_prev = _get_val('Prev_RSI', rsi_val)
+            gap = float(_s2('s2_rsi_gap', 's2_b_rsi_gap', 0.0))
             rsi_ok = rsi_val >= rsi_sig * (1 + gap / 100.0) and rsi_val > rsi_prev
 
-        if _k('use_s2_macd_gc', True):
-            macd_val = ind.get('MACD', 0)
-            macd_sig_val = ind.get('MACD_Sig', 0)
-            osc_val = ind.get('OSC', 1)
-            osc_prev = ind.get('Prev_OSC', osc_val)
-            gap = float(_k('s2_macd_gap', 0.0))
+        if _s2('use_s2_macd_gc', 'use_s2_b_macd_gc', True):
+            macd_val = _get_val('MACD', 0)
+            macd_sig_val = _get_val('MACD_Sig', 0)
+            osc_val = _get_val('OSC', 1)
+            osc_prev = _get_val('Prev_OSC', osc_val)
+            gap = float(_s2('s2_macd_gap', 's2_b_macd_gap', 0.0))
             macd_ok = macd_val >= macd_sig_val + gap and osc_val > 0 and osc_val > osc_prev
 
-        # 둘 다 켜져 있으면 OR, 하나만 켜져 있으면 그 조건, 둘 다 꺼져 있으면 통과
-        use_rsi = _k('use_s2_rsi_sig', True)
-        use_macd = _k('use_s2_macd_gc', True)
+        use_rsi = _s2('use_s2_rsi_sig', 'use_s2_b_rsi_sig', True)
+        use_macd = _s2('use_s2_macd_gc', 'use_s2_b_macd_gc', True)
         if use_rsi and use_macd:
             if not (rsi_ok or macd_ok):
                 return False
@@ -335,9 +461,9 @@ class TradingStrategy:
         elif use_macd and not macd_ok:
             return False
 
-        # 4. 수익권 확인
-        if _k('use_s2_profit', True):
-            profit_limit = float(_k('s2_profit_limit', 1.0))
+        # 5. 수익권 확인
+        if _s2('use_s2_profit', 'use_s2_b_profit', True):
+            profit_limit = float(_s2('s2_profit_limit', 's2_b_profit_limit', 1.0))
             avg_price = pos.get('avg_price', pos.get('avg_p', curr_price))
             if avg_price > 0:
                 current_profit_pct = (curr_price / avg_price - 1) * 100
@@ -347,14 +473,207 @@ class TradingStrategy:
         return True
 
     @staticmethod
-    def evaluate_position(code, now_price, pos, settings, indicator_row=None, current_time=None, is_realtime=False, kwargs=None):
+    def _holding_sig_is_type_b(pos: dict) -> bool:
+        """보유 dict의 Type B 판별(sig_type / Sig_Type, NaN·누락은 False)."""
+        try:
+            raw = pos.get("sig_type", pos.get("Sig_Type"))
+            if raw is None:
+                return False
+            if pd.isna(raw):
+                return False
+            return "TYPE_B" in str(raw).upper()
+        except Exception:
+            return False
+
+    @staticmethod
+    def type_balance_allows_new_s1(settings: dict, sig_type: str, holdings: dict) -> bool:
+        """
+        신규 S1(Type A/B) 진입 허용 여부. 보유 종목 수로 A/B를 세고 type_balance_a_pct 와 비교.
+        DynamicBacktester._type_balance_allows_new_s1 과 동일 (실시간 virtual_positions 에도 공통 적용).
+        """
+        try:
+            s = settings or {}
+            if not bool(s.get("use_type_balance_gate", True)):
+                return True
+            use_a = bool(s.get("use_type_a", True))
+            use_b = bool(s.get("use_type_b", False))
+            if use_a and not use_b:
+                return True
+            if use_b and not use_a:
+                return True
+            if not use_a and not use_b:
+                return False
+            n_a = 0
+            n_b = 0
+            for h in (holdings or {}).values():
+                try:
+                    if "TYPE_B" in str(h.get("sig_type", "") or "").upper():
+                        n_b += 1
+                    else:
+                        n_a += 1
+                except Exception:
+                    continue
+            want_b = "TYPE_B" in str(sig_type or "").upper()
+            try:
+                pct_a = float(s.get("type_balance_a_pct", 50.0))
+            except (TypeError, ValueError):
+                pct_a = 50.0
+            pct_a = max(0.1, min(99.9, pct_a))
+            t = pct_a / 100.0
+            tb = 1.0 - t
+            total = n_a + n_b
+            if total <= 0:
+                return True
+            if want_b:
+                if (n_b * t) > (n_a * tb):
+                    return False
+            else:
+                if (n_a * tb) > (n_b * t):
+                    return False
+            return True
+        except Exception:
+            return True
+
+    @staticmethod
+    def _s1_sig_type_simultaneous_balance_tie_b(
+        settings: dict, sig_type: str, simultaneous_ab: bool, holdings: dict
+    ) -> str:
+        """
+        A·B 동시 신호이고 보유 TYPE_A / TYPE_B 가 동수이면 TYPE_B 우선.
+        """
+        try:
+            if not bool(simultaneous_ab):
+                return sig_type
+            s = settings or {}
+            use_a = bool(s.get("use_type_a", True))
+            use_b = bool(s.get("use_type_b", False))
+            if not (use_a and use_b):
+                return sig_type
+            n_a = sum(
+                1
+                for h in (holdings or {}).values()
+                if "TYPE_B" not in str(h.get("sig_type", "") or "").upper()
+            )
+            n_b = sum(
+                1
+                for h in (holdings or {}).values()
+                if "TYPE_B" in str(h.get("sig_type", "") or "").upper()
+            )
+            if n_a == n_b:
+                return "TYPE_B"
+        except Exception:
+            pass
+        return sig_type
+
+    @staticmethod
+    def effective_s1_sig_type_for_buy(settings: dict, row, holdings: dict) -> str:
+        """15분 행·실시간 last_sig 등에서 Sig_Type 확정(동시신호+동점 시 B 우선)."""
+        try:
+            if row is None:
+                return "TYPE_B"
+            if hasattr(row, "get"):
+                base = str(row.get("Sig_Type", "TYPE_B"))
+                sim = bool(row.get("S1_Simultaneous_AB", False))
+            else:
+                return "TYPE_B"
+            return TradingStrategy._s1_sig_type_simultaneous_balance_tie_b(settings, base, sim, holdings)
+        except Exception:
+            return "TYPE_B"
+
+    @staticmethod
+    def _entry_atr_for_atr_sl(pos: dict, curr_atr: float) -> float:
+        """
+        ATR_SL 손절선용 진입 ATR.
+        pos.get('atr_at_entry', curr_atr)는 키가 있고 값이 0이면 0을 그대로 반환해
+        (sl_mult * 0)으로 배수가 무력화될 수 있음 → 유효할 때만 저장값 사용, 아니면 curr_atr.
+        """
+        try:
+            c = float(curr_atr)
+            if pd.isna(c) or c <= 0:
+                return 0.0
+        except (TypeError, ValueError):
+            return 0.0
+        try:
+            if "atr_at_entry" not in pos:
+                return c
+            raw = pos["atr_at_entry"]
+            if raw is None or pd.isna(raw):
+                return c
+            e = float(raw)
+            if pd.isna(e) or e <= 0:
+                return c
+            return e
+        except Exception:
+            return c
+
+    @staticmethod
+    def _exit_track_risk_bundle(settings: dict | None, is_type_b: bool) -> dict:
+        """
+        갭하락·개장유예·ATR(전역) — Type A/B 완전 분리.
+        '목표 익절% 이후만 트레일'은 단계별 키로 _use_atr_trail_only_after_tp_for_stage에서 처리.
+        구버전 공통 키(use_gap_down_exit 등)는 Type A 폴백으로만 사용.
+        """
+        s = settings or {}
+        if is_type_b:
+            return {
+                "use_gap_down_exit": bool(s.get("use_gap_down_exit_b", True)),
+                "gap_down_limit": float(s.get("gap_down_limit_b", s.get("gap_down_limit", -5.0))),
+                "use_gap_grace": bool(s.get("use_gap_grace_b", True)),
+                "gap_grace_mins": int(float(s.get("gap_grace_mins_b", s.get("gap_grace_mins", 15)))),
+                "use_atr_exit": bool(s.get("use_atr_exit_b", s.get("use_atr_exit", False))),
+            }
+        return {
+            "use_gap_down_exit": bool(s.get("use_gap_down_exit_a", s.get("use_gap_down_exit", True))),
+            "gap_down_limit": float(s.get("gap_down_limit_a", s.get("gap_down_limit", -5.0))),
+            "use_gap_grace": bool(s.get("use_gap_grace_a", s.get("use_gap_grace", True))),
+            "gap_grace_mins": int(float(s.get("gap_grace_mins_a", s.get("gap_grace_mins", 15)))),
+            "use_atr_exit": bool(s.get("use_atr_exit_a", s.get("use_atr_exit", False))),
+        }
+
+    @staticmethod
+    def _use_atr_trail_only_after_tp_for_stage(
+        settings: dict | None, is_type_b: bool, stage: int | float
+    ) -> bool:
+        """
+        S1/S2 단계별 '목표 익절% 이후에만 ATR 트레일' 여부.
+        신규 키가 없으면 구버전 트랙 단일 키(use_atr_trail_only_after_tp_a/b)로 폴백.
+        """
+        s = settings or {}
+        try:
+            st = int(stage)
+        except (TypeError, ValueError):
+            st = 1
+        is_s2 = st == 2
+        try:
+            if is_type_b:
+                legacy = bool(s.get("use_atr_trail_only_after_tp_b", s.get("use_atr_trail_only_after_tp", False)))
+                k = "use_atr_trail_only_after_tp_s2_b" if is_s2 else "use_atr_trail_only_after_tp_s1_b"
+                return bool(s.get(k, legacy))
+            legacy = bool(s.get("use_atr_trail_only_after_tp_a", s.get("use_atr_trail_only_after_tp", False)))
+            k = "use_atr_trail_only_after_tp_s2_a" if is_s2 else "use_atr_trail_only_after_tp_s1_a"
+            return bool(s.get(k, legacy))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _atr_column_for_holdings(is_type_b: bool) -> str:
+        """보유 종목 트랙에 맞는 ATR 시리즈 컬럼명."""
+        return "ATR_B" if is_type_b else "ATR_A"
+
+    @staticmethod
+    def evaluate_position(code, now_price, pos, settings, indicator_row=None, current_time=None, is_realtime=False, kwargs=None, indicators_dict=None, i=None):
         """
         [v35.0] 실시간 감시와 모든 백테스팅(포트폴리오 포함)이 공유하는 통합 포지션 평가(매도 결정) 함수.
-        반환: {'action': 'EXIT'/'HOLD', 'reason': '...', 'profit_ratio': ...}
+        (v40.0: Optimized direct indexing support)
         """
         if now_price <= 0: return {'action': 'HOLD'}
         
-        # 1. 기본 정보 산출 (필드명 호환성 유지: entry_n / stage, avg_p / avg_price)
+        def _get_val(key, default=0):
+            if indicators_dict is not None and i is not None:
+                return indicators_dict.get(key, {}).get(i, default) if hasattr(indicators_dict.get(key), 'get') else indicators_dict[key][i] if key in indicators_dict else default
+            return indicator_row.get(key, default) if indicator_row is not None else default
+
+        # 1. 기본 정보 산출
         stage = pos.get('entry_n', pos.get('stage', 1))
         avg_p = pos.get('avg_p', pos.get('avg_price', now_price))
         profit_ratio = (now_price / avg_p - 1) * 100
@@ -364,35 +683,49 @@ class TradingStrategy:
         if 'max_p' in pos: pos['max_p'] = max_p
         if 'max_price' in pos: pos['max_price'] = max_p
         
-        # 3. 지표 데이터 확보 (kwargs 또는 indicator_row)
-        ind = indicator_row
+        # 3. 지표 데이터 확보
         is_power_exhausted = False
         bid_ask_ratio = 0
         
         if kwargs:
             is_power_exhausted = kwargs.get('is_power_exhausted', False)
             bid_ask_ratio = kwargs.get('bid_ask_ratio', 0)
-        elif ind is not None:
-            # Series나 Dict일 수 있음
-            try:
-                bid_ask_ratio = ind.get('bid_ask_ratio', ind.get('Bid_Ask_Ratio', 0))
-            except:
-                bid_ask_ratio = 0
+        else:
+            bid_ask_ratio = _get_val('bid_ask_ratio', _get_val('Bid_Ask_Ratio', 0))
 
         is_exit = False
         exit_reason = ""
-        # sig_type 또는 reason 필드에서 전략 타입 판별
-        sig_type_str = str(pos.get('sig_type', pos.get('reason', '')))
-        is_type_b = "TYPE_B" in sig_type_str
+        is_type_b = TradingStrategy._holding_sig_is_type_b(pos)
+        if not is_type_b:
+            try:
+                is_type_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+            except Exception:
+                is_type_b = False
         s = settings
+        tp_pct_applied = None  # TAKE_PROFIT 시 체결가 보정용(판정과 동일 %)
+        _rx = TradingStrategy._exit_track_risk_bundle(s, is_type_b)
+        _atr_col = TradingStrategy._atr_column_for_holdings(is_type_b)
+
+        def _curr_atr() -> float:
+            """트랙별 ATR_A/ATR_B 우선, 없으면 구버전 ATR."""
+            try:
+                v = float(_get_val(_atr_col, 0.0) or 0.0)
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+            try:
+                return float(_get_val("ATR", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
 
         # ---------------------------------------------------------
         # [1단계] 탈출(Exit) 조건 검사
         # ---------------------------------------------------------
         
-        # 0. Gap Down (Global)
-        if s.get('use_gap_down_exit', True):
-            gap_limit = float(s.get('gap_down_limit', -5.0))
+        # 0. Gap Down (트랙별)
+        if _rx["use_gap_down_exit"]:
+            gap_limit = float(_rx["gap_down_limit"])
             if profit_ratio <= gap_limit:
                 is_exit, exit_reason = True, "GAP_DOWN"
 
@@ -409,8 +742,10 @@ class TradingStrategy:
             return "_b" if is_type_b else "_a"
 
         # 고정 익절 vs "목표% 이후 ATR 트레일만": 옵션 ON이면 TP%는 트레일 무장 기준이며 TAKE_PROFIT 청산은 하지 않음
+        _trail_only_after_tp = TradingStrategy._use_atr_trail_only_after_tp_for_stage(s, is_type_b, stage)
+        # 트레일 '익절% 이후만'은 ATR 분석 주기(use_atr_exit)와 별개로, ATR 트레일 토글만 켜져 있으면 적용
         defer_fixed_tp_for_trail = False
-        if s.get("use_atr_trail_only_after_tp", False) and s.get("use_atr_exit", False):
+        if _trail_only_after_tp:
             try:
                 _sfx_defer = _atr_track_suff()
                 if s.get(f"use_atr_trailing_stop{_sfx_defer}", True):
@@ -446,26 +781,27 @@ class TradingStrategy:
                 if profit_ratio >= tp_pct:
                     if not defer_fixed_tp_for_trail:
                         is_exit, exit_reason = True, "TAKE_PROFIT"
+                        tp_pct_applied = tp_pct
 
         # 2. 손절(Stop Loss - % 기준)
-        # ATR SL이 켜져 있고 ATR이 유효하면 % 손절은 생략(평단 기준 이중 손절 방지)
         if not is_exit:
             use_sl = s.get(_exit_key('use_s1_a_stop_loss', 'use_s1_b_stop_loss', 'use_s2_stop_loss', 'use_s2_b_stop_loss'), True)
             skip_pct_sl = False
-            if s.get("use_atr_exit", False) and ind is not None:
-                try:
-                    _ca = float(ind.get("ATR", 0) or 0)
-                    _sfx = _atr_track_suff()
-                    if _ca > 0 and s.get(f"use_atr_stop_loss{_sfx}", True):
-                        skip_pct_sl = True
-                except Exception:
-                    pass
+            # ATR SL 토글만 켜도(청산 'ATR 분석 주기'와 무관) %손절과 이중 적용하지 않음 — 지표는 항상 ATR_A/B 계산
+            try:
+                _ca = float(_curr_atr())
+                _sfx = _atr_track_suff()
+                if _ca > 0 and s.get(f"use_atr_stop_loss{_sfx}", True):
+                    skip_pct_sl = True
+            except Exception:
+                pass
+
             if use_sl and not skip_pct_sl:
                 sl_pct = float(s.get(_exit_key('s1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 's2_b_stop_loss'), 3.0))
                 if profit_ratio <= -sl_pct:
                     is_exit, exit_reason = True, "STOP_LOSS"
 
-        # 3. Flash Exit (Trailing from High) — 수익 구간에서만 발동 (손실 방어는 SL에 위임)
+        # 3. Flash Exit (Trailing from High)
         if not is_exit:
             use_flash = s.get(_exit_key('use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 'use_s2_b_flash_exit'), True)
             if use_flash and profit_ratio >= 0 and not skip_flash_for_atr_trail:
@@ -482,58 +818,63 @@ class TradingStrategy:
                     is_exit, exit_reason = True, "SMART_EXIT"
 
         # 5. ATR 기반 손절 및 트레일링 스톱
-        #    S1: _a / _b 토글·배수. Type A S1에서 ATR 끄려면 use_atr_stop/trail_*_a 끔.
-        #    S2: _s2 / _s2_b (추매 진입 후 stage==2에서 자동 적용)
-        if not is_exit and s.get('use_atr_exit', False) and ind is not None:
+        # use_atr_exit: ATR 주기 UI 마스터. OFF여도 ATR SL/트레일 개별 토글이면 해당 로직만 수행(지표 ATR은 이미 존재)
+        if not is_exit:
             try:
-                curr_atr = float(ind.get('ATR', 0))
-                entry_atr = float(pos.get('atr_at_entry', curr_atr))
-                if curr_atr > 0:
-                    suff = _atr_track_suff()
-                    sl_mult = float(s.get(f'atr_multiplier_sl{suff}', 2.5))
-                    trail_mult = float(s.get(f'atr_multiplier_trail{suff}', 4.0))
-                    use_sl_atr = s.get(f'use_atr_stop_loss{suff}', True)
-                    use_trail_atr = s.get(f'use_atr_trailing_stop{suff}', True)
-                    # 목표 익절% 이상에서만 트레일 평가(설정 ON 시). 임계는 TP와 동일 키의 %값.
-                    # 고가(max_p) 기준 최고 수익률로 무장 — 한번 목표% 터치 후 되밀려도 트레일 유지
-                    trail_armed = True
-                    if s.get("use_atr_trail_only_after_tp", False) and use_trail_atr:
-                        tp_arm_pct = float(
-                            s.get(
-                                _exit_key(
-                                    "s1_a_take_profit",
-                                    "s1_b_take_profit",
-                                    "s2_take_profit",
-                                    "s2_b_take_profit",
-                                ),
-                                5.0,
-                            )
-                        )
-                        try:
-                            peak_pct = (max_p / avg_p - 1.0) * 100.0 if avg_p and float(avg_p) > 0 else profit_ratio
-                        except (TypeError, ValueError, ZeroDivisionError):
-                            peak_pct = profit_ratio
-                        trail_armed = peak_pct >= tp_arm_pct
+                curr_atr = float(_curr_atr())
+                suff = _atr_track_suff()
+                use_sl_atr = s.get(f"use_atr_stop_loss{suff}", True)
+                use_trail_atr = s.get(f"use_atr_trailing_stop{suff}", True)
+                run_atr_exit = _rx["use_atr_exit"] or (
+                    curr_atr > 0 and (use_sl_atr or use_trail_atr)
+                )
+                if run_atr_exit:
+                    entry_atr = TradingStrategy._entry_atr_for_atr_sl(pos, curr_atr)
+                    if curr_atr > 0:
+                        sl_mult = float(s.get(f"atr_multiplier_sl{suff}", 2.5))
+                        trail_mult = float(s.get(f"atr_multiplier_trail{suff}", 4.0))
 
-                    if use_sl_atr and now_price <= avg_p - (sl_mult * entry_atr):
-                        is_exit, exit_reason = True, "ATR_SL"
-                    elif use_trail_atr and trail_armed and now_price <= max_p - (trail_mult * curr_atr):
-                        is_exit, exit_reason = True, "ATR_TRAIL"
-            except: pass
+                        trail_armed = True
+                        if _trail_only_after_tp and use_trail_atr:
+                            tp_arm_pct = float(
+                                s.get(
+                                    _exit_key(
+                                        "s1_a_take_profit",
+                                        "s1_b_take_profit",
+                                        "s2_take_profit",
+                                        "s2_b_take_profit",
+                                    ),
+                                    5.0,
+                                )
+                            )
+                            peak_pct = (
+                                (max_p / avg_p - 1.0) * 100.0 if avg_p and float(avg_p) > 0 else profit_ratio
+                            )
+                            trail_armed = peak_pct >= tp_arm_pct
+
+                        if use_sl_atr and now_price <= avg_p - (sl_mult * entry_atr):
+                            is_exit, exit_reason = True, "ATR_SL"
+                        elif use_trail_atr and trail_armed and now_price <= max_p - (trail_mult * curr_atr):
+                            is_exit, exit_reason = True, "ATR_TRAIL"
+            except Exception:
+                pass
 
         if is_exit:
-            # [v4.5.10] 개장 초기 매도 유예 (휩소 방어)
-            if s.get('use_gap_grace', True):
+            # [v4.5.10] 개장 초기 매도 유예 (휩소 방어, 트랙별)
+            if _rx["use_gap_grace"]:
                 if current_time:
                     try:
-                        # 9시 00분 ~ 9시 N분 사이인 경우
                         dt = pd.to_datetime(current_time)
-                        if dt.hour == 9 and dt.minute < int(s.get('gap_grace_mins', 15)):
+                        if dt.hour == 9 and dt.minute < int(_rx["gap_grace_mins"]):
                             if exit_reason != "TAKE_PROFIT":
                                 return {'action': 'HOLD', 'reason': f'GRACE({exit_reason})'}
-                    except: pass
+                    except Exception:
+                        pass
 
-            return {'action': 'EXIT', 'reason': exit_reason, 'profit_ratio': profit_ratio}
+            out = {'action': 'EXIT', 'reason': exit_reason, 'profit_ratio': profit_ratio}
+            if exit_reason == "TAKE_PROFIT" and tp_pct_applied is not None:
+                out["tp_pct_applied"] = tp_pct_applied
+            return out
 
         return {'action': 'HOLD'}
 
@@ -554,7 +895,8 @@ class SimpleBacktester:
         self.use_sb = False
         self.use_sb_a = False
         self.use_sb_b = False
-        self.use_sb_s2 = False
+        self.use_sb_s2_a = False
+        self.use_sb_s2_b = False
         self.sb_ba = 1.2
         self.sb_vp = 110.0
         self.use_sx = False
@@ -663,17 +1005,33 @@ class SimpleBacktester:
                 'MA20': df['MA20'].values if 'MA20' in df.columns else np.zeros(len(df)),
                 'Vol_MA20': vol_ma_vals,
                 'ATR': df['ATR'].values if 'ATR' in df.columns else np.zeros(len(df)),
+                'ATR_A': df['ATR_A'].values if 'ATR_A' in df.columns else (df['ATR'].values if 'ATR' in df.columns else np.zeros(len(df))),
+                'ATR_B': df['ATR_B'].values if 'ATR_B' in df.columns else (df['ATR'].values if 'ATR' in df.columns else np.zeros(len(df))),
                 'RSI_Sig': df['RSI_Sig'].values if 'RSI_Sig' in df.columns else np.zeros(len(df)),
                 'Prev_RSI': df['Prev_RSI'].values if 'Prev_RSI' in df.columns else np.zeros(len(df)),
                 'Market_Status': df['Market_Status'].values if 'Market_Status' in df.columns else np.full(len(df), 'SAFE', dtype=object),
                 'Market_Trend': df['Market_Trend'].values if 'Market_Trend' in df.columns else np.full(len(df), 'UP', dtype=object),
+                'Market_Regime': df['Market_Regime'].values if 'Market_Regime' in df.columns else np.full(len(df), 'UP', dtype=object),
                 'Sig_Type': df['Sig_Type'].values if 'Sig_Type' in df.columns else np.full(len(df), 'TYPE_A', dtype=object),
                 'bid_ask_ratio': df['bid_ask_ratio'].values if 'bid_ask_ratio' in df.columns else np.full(len(df), 1.0),
                 'ask_bid_ratio': df['ask_bid_ratio'].values if 'ask_bid_ratio' in df.columns else np.full(len(df), 1.0),
                 'vol_power': df['vol_power'].values if 'vol_power' in df.columns else np.full(len(df), 100.0),
                 'Signal': df['Signal'].values if 'Signal' in df.columns else np.zeros(len(df), dtype=bool),
                 'MA60': df['MA60'].values if 'MA60' in df.columns else np.zeros(len(df)),
-                'Prev_Day_Vol': df['Prev_Day_Vol'].values if 'Prev_Day_Vol' in df.columns else np.zeros(len(df))
+                "Prev_Day_Vol": df["Prev_Day_Vol"].values if "Prev_Day_Vol" in df.columns else np.zeros(len(df)),
+                "Prev_Day_Vol_B": df["Prev_Day_Vol_B"].values if "Prev_Day_Vol_B" in df.columns else np.zeros(len(df)),
+                "Prev_Day_Vol_S1_A": df["Prev_Day_Vol_S1_A"].values
+                if "Prev_Day_Vol_S1_A" in df.columns
+                else np.zeros(len(df)),
+                "Prev_Day_Vol_S1_B": df["Prev_Day_Vol_S1_B"].values
+                if "Prev_Day_Vol_S1_B" in df.columns
+                else np.zeros(len(df)),
+                "Prev_Day_Vol_S2_A": df["Prev_Day_Vol_S2_A"].values
+                if "Prev_Day_Vol_S2_A" in df.columns
+                else np.zeros(len(df)),
+                "Prev_Day_Vol_S2_B": df["Prev_Day_Vol_S2_B"].values
+                if "Prev_Day_Vol_S2_B" in df.columns
+                else np.zeros(len(df)),
             }
             
             time_indices = df.index
@@ -719,8 +1077,6 @@ class SimpleBacktester:
             # Dictionary lookups are slow in million-bar loops. Unpack arrays to local variables once.
             ind_signal = np_indicators['Signal']
             ind_sig_type = np_indicators['Sig_Type']
-            ind_mkt_status = np_indicators['Market_Status']
-            ind_mkt_trend = np_indicators['Market_Trend']
             ind_ba_ratio = np_indicators['bid_ask_ratio']
             ind_vp = np_indicators['vol_power']
             ind_rsi = np_indicators['RSI']
@@ -796,7 +1152,8 @@ class SimpleBacktester:
         s = self.settings
         self.use_sb_a = s.get('use_smart_buy_a', True)
         self.use_sb_b = s.get('use_smart_buy_b', True)
-        self.use_sb_s2 = s.get('use_smart_buy_s2', True)
+        self.use_sb_s2_a = s.get("use_smart_buy_s2", True)
+        self.use_sb_s2_b = s.get("use_smart_buy_s2_b", True)
         self.sb_ba = float(s.get('smart_buy_ba_ratio', 1.2))
         self.sb_vp = float(s.get('smart_buy_vp', 110.0))
         
@@ -821,8 +1178,11 @@ class SimpleBacktester:
         
         self.use_type_b = s.get('use_type_b', False)
         
-        # [Perf] Cache ATR & Gap Down settings (v33.7) - Granular S1A/S1B/S2 (v4.5 Sync)
-        self.use_atr = s.get('use_atr_exit', False)
+        # [Perf] Cache ATR & Gap (트랙별 토글 OR — 핫루프는 evaluate_position이 설정 전체 참조)
+        self.use_atr = bool(
+            s.get("use_atr_exit_a", s.get("use_atr_exit", False))
+            or s.get("use_atr_exit_b", s.get("use_atr_exit", False))
+        )
         
         self.use_atr_sl_a = s.get('use_atr_stop_loss_a', True)
         self.use_atr_sl_b = s.get('use_atr_stop_loss_b', True)
@@ -840,10 +1200,10 @@ class SimpleBacktester:
         self.atr_trail_mult_b = float(s.get('atr_multiplier_trail_b', 4.0))
         self.atr_trail_mult_s2 = float(s.get('atr_multiplier_trail_s2', 4.0))
         
-        self.gap_down_limit = float(s.get('gap_down_limit', -5.0))
-        self.use_gap_down_exit = s.get('use_gap_down_exit', True) # [v4.5 Sync] New toggle
+        self.gap_down_limit = float(s.get("gap_down_limit_a", s.get("gap_down_limit", -5.0)))
+        self.use_gap_down_exit = s.get("use_gap_down_exit_a", s.get("use_gap_down_exit", True))
         self.use_s2_tp_active = s.get('use_s2_tp', True)
-        self.use_gap_grace = s.get('use_gap_grace', True)
+        self.use_gap_grace = s.get("use_gap_grace_a", s.get("use_gap_grace", True))
         
         # [Perf] Cache Flash Exit settings
         self.use_s1a_flash_active = s.get('use_s1_a_flash_exit', True)
@@ -921,23 +1281,37 @@ class SimpleBacktester:
             df['Market_Status'] = 'SAFE'
             df['Market_Trend'] = 'UP'
 
+        try:
+            df["Market_Regime"] = derive_market_regime_series(df["Market_Trend"], df["Market_Status"])
+        except Exception:
+            df["Market_Regime"] = "UP"
+
         # [v26.1] 신호 미리 계산 (최적화 시 신호 파라미터가 바뀔 수 있으므로 매번 수행)
-        # [v39.0] Type A 레짐 1차 보정: 행별로 AGGRESSIVE/UP/NEUTRAL 신호 병합 (단일 종목 백테스트)
-        if self.settings.get("use_type_a_regime_phase1", False):
+        # [v39.0] 레짐 1차: 해당 타입이 켜져 있을 때만 병합 (A만 레짐 ON·A OFF인 유령 경로 제거)
+        _reg_a = bool(self.settings.get("use_type_a_regime_phase1", False)) and bool(
+            self.settings.get("use_type_a", False)
+        )
+        _reg_b = bool(self.settings.get("use_type_b_regime_phase1", False)) and bool(
+            self.settings.get("use_type_b", False)
+        )
+        if _reg_a or _reg_b:
             try:
                 from strategy.type_a_regime import apply_type_a_phase1_settings
+                from strategy.type_b_regime import apply_type_b_phase1_overlay
 
                 s_aggr = apply_type_a_phase1_settings(self.settings, "AGGRESSIVE")
                 s_up = apply_type_a_phase1_settings(self.settings, "UP")
                 s_neu = apply_type_a_phase1_settings(self.settings, "NEUTRAL")
+                s_aggr = apply_type_b_phase1_overlay(self.settings, s_aggr, "AGGRESSIVE")
+                s_up = apply_type_b_phase1_overlay(self.settings, s_up, "UP")
+                s_neu = apply_type_b_phase1_overlay(self.settings, s_neu, "NEUTRAL")
                 sig_aggr = TradingStrategy.get_buy_signals_detailed(df, s_aggr, market_trend="UP")
                 sig_up = TradingStrategy.get_buy_signals_detailed(df, s_up, market_trend="UP")
                 sig_neu = TradingStrategy.get_buy_signals_detailed(df, s_neu, market_trend="UP")
-                trend = df["Market_Trend"]
-                status = df["Market_Status"]
-                is_neutral = trend == "NEUTRAL"
-                is_aggr = (trend == "UP") & (status == "AGGRESSIVE")
-                is_up_rest = (trend == "UP") & (~is_aggr)
+                reg = df["Market_Regime"]
+                is_neutral = reg == "NEUTRAL"
+                is_aggr = reg == "AGGRESSIVE"
+                is_up_rest = reg == "UP"
                 sig_combined = (
                     (sig_aggr["Signal"] & is_aggr)
                     | (sig_up["Signal"] & is_up_rest)
@@ -954,7 +1328,7 @@ class SimpleBacktester:
                 sigs["Sig_Type"] = type_combined
             except Exception as e:
                 try:
-                    print(f"[WARN] Type A 레짐 신호 병합 실패, 단일 경로로 폴백: {e}")
+                    print(f"[WARN] 레짐 신호 병합 실패, 단일 경로로 폴백: {e}")
                 except Exception:
                     pass
                 sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend="UP")
@@ -987,17 +1361,30 @@ class SimpleBacktester:
         }
 
     def _check_s2_approval_v2(self, pos, indicators, i, curr_dt=None):
-        # [v4.5 Rule] 시장지수 필터 (Stage 2 공통)
-        m_trend = indicators['Market_Trend'][i] if 'Market_Trend' in indicators else 'UP'
-        # [v4.7] AGGRESSIVE는 UP과 동일하게 S2 허용
-        if self.settings.get('use_market_filter', True) and m_trend not in ('UP', 'AGGRESSIVE'):
-            return False
-            
+        try:
+            if "Market_Regime" in indicators:
+                m_reg = indicators["Market_Regime"][i]
+            else:
+                m_reg = derive_market_regime_scalar(
+                    indicators["Market_Trend"][i] if "Market_Trend" in indicators else "UP",
+                    indicators["Market_Status"][i] if "Market_Status" in indicators else "SAFE",
+                )
+        except Exception:
+            m_reg = "UP"
+        if self.settings.get("use_market_filter", True):
+            _sb = "TYPE_B" in str(pos.get("sig_type", pos.get("reason", "")))
+            if _sb:
+                if m_reg not in ("UP", "AGGRESSIVE"):
+                    return False
+            else:
+                if m_reg not in ("UP", "AGGRESSIVE", "NEUTRAL"):
+                    return False
+
         return TradingStrategy._check_s2_approval(
-            pos, None, self.settings, 
-            indicator_row={k: v[i] for k, v in indicators.items()},
-            market_trend=m_trend,
-            curr_dt=curr_dt
+            pos, None, self.settings,
+            market_trend=m_reg,
+            curr_dt=curr_dt,
+            indicators_dict=indicators, i=i
         )
 
     def _check_s2_approval_legacy(self, pos, indicators, i):
@@ -1009,8 +1396,13 @@ class SimpleBacktester:
             ma5 = indicators['MA5'][i]
             if ma5 > 0 and indicators['Close'][i] < ma5 * (1 + self.s2_ma5_g/100.0): return False
         if self.use_s2_vol:
-            # [v35.8] Unified Volume Strategy: Use Same-Time Average (Prev_Day_Vol) instead of MA20
-            if indicators['Volume'][i] < indicators['Prev_Day_Vol'][i] * self.s2_vol_r: return False
+            _pv = indicators.get("Prev_Day_Vol_S2_A")
+            if _pv is None:
+                _pv = indicators.get("Prev_Day_Vol")
+            if _pv is None or float(_pv[i]) <= 0:
+                return False
+            if indicators["Volume"][i] < float(_pv[i]) * self.s2_vol_r:
+                return False
         if self.use_s2_rsi:
             rsi = indicators['RSI'][i]
             if rsi < indicators['RSI_Sig'][i] * (1 + self.s2_rsi_g/100.0) or rsi <= indicators['Prev_RSI'][i]: return False
@@ -1024,11 +1416,19 @@ class SimpleBacktester:
 
             
     def _process_intra_bar_full_v3(self, i, code, m1_highs, m1_closes, m1_times, params, hour, minute, m1_ba=None, m1_vp=None, indicators=None, signal_shifted=False):
-        """[v36.9] SimpleBacktester 전용 1분 단위 정밀 루프 (실시간 지표 시뮬레이션 통합)"""
-        # 15분 단위 데이터 슬라이싱 (시뮬레이션용 과거 데이터)
-        hist_15m = self.df.iloc[:i]
-        curr_15m_time = self.df.index[i]
+        """[v40.0] Optimized High-Precision Simulation (O(1) Indicator Updates)"""
+        # [Perf] Pre-calculated tail data for incremental indicator updates
+        # Using index i-1 as the base for the current 15m bar simulation
+        base_idx = max(0, i-1)
+        last_15m_dict = {k: v[base_idx] for k, v in indicators.items()}
         
+        prices_tail = {
+            5: self.df['Close'].iloc[max(0, i-4):i].sum(),
+            20: self.df['Close'].iloc[max(0, i-19):i].sum(),
+            60: self.df['Close'].iloc[max(0, i-59):i].sum(),
+            'rsi_vals': self.df['Close'].iloc[max(0, i-15):i].values
+        }
+
         for idx in range(len(m1_highs)):
             m1_p = m1_closes[idx]
             m1_h = m1_highs[idx]
@@ -1036,11 +1436,10 @@ class SimpleBacktester:
             m1_ba_val = m1_ba[idx] if m1_ba is not None else 1.0
             m1_vp_val = m1_vp[idx] if m1_vp is not None else 100.0
             
-            # [v36.9] 초정밀 1분 지표 시뮬레이션
+            # [v40.0] Incremental Indicator Simulation
             m1_row_data = {'Close': m1_p, 'High': m1_h, 'Low': m1_p, 'bid_ask_ratio': m1_ba_val, 'vol_power': m1_vp_val}
-            indicator_to_use = TradingStrategy.simulate_intrabar_indicators(hist_15m, curr_15m_time, m1_row_data, self.settings)
+            indicator_to_use = TradingStrategy.simulate_intrabar_indicators(last_15m_dict, m1_row_data, self.settings, hist_df_prices_tail=prices_tail)
             
-            # 시뮬레이션 실패 시(데이터 부족 등) 기존 15분 지표 Fallback
             if indicator_to_use is None:
                 indicator_to_use = {k: v[i] for k, v in indicators.items()}
 
@@ -1049,46 +1448,62 @@ class SimpleBacktester:
                 pos = params['position']
                 if m1_h > pos['max_price']: pos['max_price'] = m1_h
                 
-                # 시뮬레이션된 지표 행을 사용하여 정밀 평가
                 res = TradingStrategy.evaluate_position(code, m1_p, pos, self.settings, indicator_row=indicator_to_use, current_time=m1_t)
                 
                 if res['action'] == 'EXIT':
                     e_price = m1_p
                     if res['reason'] == 'TAKE_PROFIT':
-                        _is_b = "TYPE_B" in pos.get('reason', '')
-                        _stg = pos['stage']
-                        if _stg == 2:
-                            tp_key = 's2_b_take_profit' if _is_b else 's2_take_profit'
+                        tpp = res.get('tp_pct_applied')
+                        if tpp is not None:
+                            e_price = float(pos['avg_price']) * (1 + float(tpp) / 100.0)
                         else:
-                            tp_key = 's1_b_take_profit' if _is_b else 's1_a_take_profit'
-                        tp_pct = float(self.settings.get(tp_key, 5.0))
-                        e_price = pos['avg_price'] * (1 + tp_pct/100.0)
+                            stage_eff = int(pos.get('entry_n', pos.get('stage', 1)) or 1)
+                            _is_b = TradingStrategy._holding_sig_is_type_b(pos)
+                            tp_key = (
+                                ('s2_b_take_profit' if _is_b else 's2_take_profit')
+                                if stage_eff == 2
+                                else ('s1_b_take_profit' if _is_b else 's1_a_take_profit')
+                            )
+                            e_price = float(pos['avg_price']) * (
+                                1 + float(self.settings.get(tp_key, 5.0)) / 100.0
+                            )
                     
                     params = self._execute_sell(m1_t, e_price, f"1M_{res['reason']}+{idx}m", params, indicators=indicators, i=i)
                     return params # 매도 발생 시 블록 종료
                 
                 elif pos['stage'] == 1:
                     # [v36.9] 시뮬레이션 지표 기반 S2 Approval 체크
-                    # 기존 정적 필터 대신 실시간 지표(indicator_to_use)를 라이브로 평가
-                    if TradingStrategy._check_s2_approval(pos, indicator_to_use, self.settings, market_trend=params.get('market_trend', 'UP')):
+                    if TradingStrategy._check_s2_approval(pos, None, self.settings, indicator_row=indicator_to_use, market_trend=params.get('market_trend', 'UP')):
                         can_buy_s2 = True
-                    if self.use_sb_s2:
-                        ab_ratio = 1.0 / (m1_ba_val + 1e-10)
-                        if ab_ratio < self.sb_ba or m1_vp_val < self.sb_vp:
-                            can_buy_s2 = False
-                        
+                        _use_s2_sb = self.use_sb_s2_b if pos.get("sig_type") == "TYPE_B" else self.use_sb_s2_a
+                        if _use_s2_sb:
+                            ab_ratio = 1.0 / (m1_ba_val + 1e-10)
+                            if ab_ratio < self.sb_ba or m1_vp_val < self.sb_vp:
+                                can_buy_s2 = False
+                            
                         if can_buy_s2:
                             s2_reason = f"1M_ADDON(S2)|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.2f}+{idx}m"
-                            if self.use_sb_s2: s2_reason = "1M_SmartBuy|" + s2_reason
+                            if _use_s2_sb:
+                                s2_reason = "1M_SmartBuy|" + s2_reason
                             params = self._execute_buy(m1_t, m1_p, "BUY_2ND", params, stage=2, reason=s2_reason, indicators=indicators, i=i)
                             return params # 추가매수 시 해당 분 사이클 종료
             
             # 2. 신규 진입(Entry) 감시
             else:
-                # [v36.9] 시뮬레이션 지표 기반 매수 신호 실시간 감지
                 is_buy_signal = (indicator_to_use.get('Signal', False) and indicator_to_use.get('Ready', False))
                 if is_buy_signal:
                     sig_type = indicator_to_use.get('Sig_Type', 'TYPE_B')
+                    try:
+                        m_reg = indicator_to_use.get("Market_Regime")
+                        if m_reg is None:
+                            m_reg = derive_market_regime_scalar(
+                                indicator_to_use.get("Market_Trend", "UP"),
+                                indicator_to_use.get("Market_Status", "SAFE"),
+                            )
+                    except Exception:
+                        m_reg = "UP"
+                    if m_reg == "DOWN" or (m_reg == "NEUTRAL" and str(sig_type).upper() != "TYPE_A"):
+                        return params
                     use_sb = self.use_sb_a if sig_type == 'TYPE_A' else self.use_sb_b
                     
                     can_buy = True
@@ -1148,7 +1563,8 @@ class SimpleBacktester:
             elif pos['stage'] == 1:
                 if self._check_s2_approval_v2(pos, indicators, i, curr_dt=time_indices[i]):
                     can_buy_s2 = True
-                    if self.use_sb_s2:
+                    _use_s2_sb = self.use_sb_s2_b if pos.get("sig_type") == "TYPE_B" else self.use_sb_s2_a
+                    if _use_s2_sb:
                         ab_ratio = indicators['ask_bid_ratio'][i]
                         v_power = indicators['vol_power'][i]
                         if ab_ratio < self.sb_ba or v_power < self.sb_vp:
@@ -1156,16 +1572,27 @@ class SimpleBacktester:
                     
                     if can_buy_s2:
                         s2_reason = f"ADDON(S2)|R:{indicators['RSI'][i]:.1f}|M:{indicators['MACD'][i]:.1f}|O:{indicators['OSC'][i]:.2f}|V:{indicators['Volume'][i]}"
-                        if self.use_sb_s2: s2_reason = "SmartBuy|" + s2_reason
+                        if _use_s2_sb:
+                            s2_reason = "SmartBuy|" + s2_reason
                         params = self._execute_buy(curr_date, curr_close, "BUY_2ND", params, stage=2, reason=s2_reason, indicators=indicators, i=i)
         
         # 3. Entry Check
         elif signal_shifted[i]:
-            mkt_status = indicators['Market_Status'][i]
+            try:
+                if "Market_Regime" in indicators:
+                    m_reg = indicators["Market_Regime"][i]
+                else:
+                    m_reg = derive_market_regime_scalar(
+                        indicators["Market_Trend"][i] if "Market_Trend" in indicators else "UP",
+                        indicators["Market_Status"][i] if "Market_Status" in indicators else "SAFE",
+                    )
+            except Exception:
+                m_reg = "UP"
             sig_type = indicators['Sig_Type'][i]
-            is_ok = (mkt_status != 'RISK')
-            if mkt_status == 'WATCH' and sig_type != 'TYPE_A': is_ok = False
-            
+            is_ok = m_reg != "DOWN"
+            if m_reg == "NEUTRAL" and str(sig_type).upper() != "TYPE_A":
+                is_ok = False
+
             if is_ok:
                 use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
                 if use_sb_for_type:
@@ -1194,22 +1621,27 @@ class SimpleBacktester:
             
         res = TradingStrategy.evaluate_position(
             None, price, pos, self.settings,
-            indicator_row=ind_row, current_time=date,
-            is_realtime=False
+            current_time=date, is_realtime=False,
+            indicators_dict=indicators, i=i
         )
         
         if res['action'] == 'EXIT':
             e_price = price
-            # TP 가격 보정 (필요시)
+            # TP 가격 보정: evaluate_position과 동일 % (entry_n/stage 불일치·키 재조회 오류 방지)
             if res['reason'] == 'TAKE_PROFIT':
-                stage = pos.get('stage', 1)
-                _is_b = "TYPE_B" in pos.get('reason', '')
-                if stage == 2:
-                    tp_key = 's2_b_take_profit' if _is_b else 's2_take_profit'
+                tpp = res.get('tp_pct_applied')
+                if tpp is not None:
+                    avg_u = float(pos.get('avg_p', pos.get('avg_price', price)))
+                    e_price = avg_u * (1 + float(tpp) / 100.0)
                 else:
-                    tp_key = 's1_b_take_profit' if _is_b else 's1_a_take_profit'
-                tp_pct = float(self.settings.get(tp_key, 5.0))
-                e_price = pos['avg_price'] * (1 + tp_pct / 100.0)
+                    stage_eff = int(pos.get('entry_n', pos.get('stage', 1)) or 1)
+                    _is_b = TradingStrategy._holding_sig_is_type_b(pos)
+                    if stage_eff == 2:
+                        tp_key = 's2_b_take_profit' if _is_b else 's2_take_profit'
+                    else:
+                        tp_key = 's1_b_take_profit' if _is_b else 's1_a_take_profit'
+                    tp_pct = float(self.settings.get(tp_key, 5.0))
+                    e_price = float(pos.get('avg_p', pos.get('avg_price', price))) * (1 + tp_pct / 100.0)
             
             return {'price': e_price, 'reason': res['reason']}
             
@@ -1277,11 +1709,22 @@ class SimpleBacktester:
         params['balance'] -= (qty * price + fee)
         
         if stage == 1:
+            _atr_e = 0.0
+            if indicators is not None and i is not None:
+                try:
+                    _is_b1 = "TYPE_B" in str(sig_type).upper()
+                    _acol = "ATR_B" if _is_b1 else "ATR_A"
+                    if _acol in indicators:
+                        _atr_e = float(indicators[_acol][i])
+                    elif "ATR" in indicators:
+                        _atr_e = float(indicators["ATR"][i])
+                except (TypeError, ValueError, KeyError, IndexError):
+                    _atr_e = 0.0
             params['position'] = {
                 'entry_date': date, 'entry_idx': entry_idx, 
                 'avg_price': price, 'qty': qty, 'stage': 1, 'max_price': max_p,
                 'sig_type': sig_type,
-                'atr_at_entry': indicators['ATR'][i] if indicators is not None and i is not None else 0
+                'atr_at_entry': _atr_e
             }
         else:
             old_q = params['position']['qty']
@@ -1289,6 +1732,16 @@ class SimpleBacktester:
             pos['avg_price'] = (pos['avg_price'] * old_q + price * qty) / (old_q + qty)
             pos['qty'] += qty
             pos['stage'] = 2
+            # S2 체결 시점 ATR로 손절선 갱신(기존: S1 진입 ATR만 유지 → SL 배수가 체감되기 어려움)
+            try:
+                if indicators is not None and i is not None:
+                    _is_b2 = TradingStrategy._holding_sig_is_type_b(pos)
+                    _acol2 = "ATR_B" if _is_b2 else "ATR_A"
+                    _atr = float(indicators[_acol2][i]) if _acol2 in indicators else float(indicators["ATR"][i])
+                    if _atr > 0:
+                        pos['atr_at_entry'] = _atr
+            except Exception:
+                pass
 
         curr_sig_type = params['position']['sig_type']
         self.collect_trade(date, action, price, qty, params['position']['qty'], params['position']['qty'] * price, reason_str=reason, fee=fee, sig_type=curr_sig_type)
@@ -1475,40 +1928,78 @@ class PortfolioBacktester:
             return None, None
 
     def _run_parallel_backtests(self, start_date, end_date, market_df, vix_df, interval, force_refresh, high_precision):
-        """병렬로 개별 종목 백테스트 수행"""
+        """병렬로 개별 종목 백테스트 수행 (v40.0: Multiprocessing Optimized)"""
         w_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
         self.tester.settings['_original_start_dt'] = start_date
         
-        data_cache_m1 = {}
-        if high_precision:
-            print(f"  [Perf] Pre-loading 1m data...")
-            for code in self.codes:
-                m1_data = self.loader.get_data(code, w_start_dt, end_date, interval='1m')
-                if m1_data is not None: data_cache_m1[code] = m1_data
+        # 1. 시장 지표 선행 계산 (중복 계산 방지)
+        if market_df is not None and not market_df.empty:
+            if 'MSI' not in market_df.columns:
+                print("  [Perf] Pre-calculating market indicators...")
+                market_df = TradingStrategy.calculate_indicators(market_df.copy(), {})
 
+        # 2. 전 종목 데이터 선행 로딩 (PPE 오버헤드 감소)
+        data_cache = {}
+        data_cache_m1 = {}
+        print(f"  [Perf] Pre-loading historical data for {len(self.codes)} stocks...")
+        
+        def _load_data(code):
+            d15 = self.loader.get_data(code, w_start_dt, end_date, interval, force_refresh=force_refresh)
+            dm1 = None
+            if high_precision:
+                dm1 = self.loader.get_data(code, w_start_dt, end_date, interval='1m')
+            return code, d15, dm1
+
+        # 데이터 로딩은 I/O 바운드이므로 스레드 사용
+        with TPE(max_workers=min(len(self.codes), 8)) as loader_executor:
+            for code, d15, dm1 in loader_executor.map(_load_data, self.codes):
+                if d15 is not None:
+                    data_cache[code] = d15
+                    if dm1 is not None:
+                        data_cache_m1[code] = dm1
+
+        # 3. 데이터 캐싱 및 워커 초기화 준비 (Windows 최적화)
+        cache_data = {'data': data_cache, 'm1': data_cache_m1, 'market': market_df, 'vix': vix_df}
+        cache_path = os.path.join(BASE_DIR, "bt_portfolio_cache.tmp")
+        try:
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cache_data, f)
+        except Exception as e:
+            print(f"  (!) Cache Write Error: {e}")
+
+        # 4. 멀티프로세싱 실행
         summaries = []
         all_equity = pd.DataFrame()
-
-        def _run_single(code):
-            data = self.loader.get_data(code, w_start_dt, end_date, interval, force_refresh=force_refresh)
-            if data is not None:
-                # tester.run now modifies 'data' in place (adds 'Equity' column) and returns summary
-                summary = self.tester.run(data, code, market_df=market_df, vix_df=vix_df, log_to_csv=True, high_precision=high_precision, m1_df_preloaded=data_cache_m1.get(code))
-                return data, summary
-            return None, None
-
-        with TPE(max_workers=5) as executor:
-            future_to_code = {executor.submit(_run_single, code): code for code in self.codes}
-            for future in as_completed(future_to_code):
-                code = future_to_code[future]
-                try:
-                    res_df, summary = future.result()
+        
+        # CPU 코어 수에 맞춰 워커 설정 (사용자 정보 반영)
+        num_workers = min(os.cpu_count() or 4, len(self.codes))
+        # [Perf] 워커 개수가 너무 적으면 오버헤드가 더 클 수 있음
+        if num_workers > 1:
+            print(f"  [Perf] Executing Parallel Backtest with {num_workers} processes...")
+            tasks = [(code, self.settings, interval, force_refresh, high_precision) for code in data_cache.keys()]
+            
+            with PPE(max_workers=num_workers, initializer=init_bt_worker, initargs=(cache_path,)) as executor:
+                for code, res_df, summary in executor.map(_run_single_backtest_task, tasks):
                     if summary:
                         summaries.append(summary)
                         if res_df is not None and 'Equity' in res_df.columns:
                             all_equity[code] = res_df['Equity']
-                except Exception as e:
-                    print(f"  (!) Error backtesting {code}: {e}")
+        else:
+            # 1개 프로세스인 경우 (디버그 또는 저사양 환경)
+            print(f"  [Perf] Executing Serial Backtest...")
+            init_bt_worker(cache_path) # 메인 프로세스 데이터 설정
+            for code in data_cache.keys():
+                _, res_df, summary = _run_single_backtest_task((code, self.settings, interval, force_refresh, high_precision))
+                if summary:
+                    summaries.append(summary)
+                    if res_df is not None and 'Equity' in res_df.columns:
+                        all_equity[code] = res_df['Equity']
+
+        # 임시 캐시 삭제
+        if os.path.exists(cache_path):
+            try: os.remove(cache_path)
+            except: pass
+            
         return summaries, all_equity
 
     def _generate_summary_reports(self, summaries, all_equity, market_df, vix_df, start_date, end_date, interval, high_precision=False):

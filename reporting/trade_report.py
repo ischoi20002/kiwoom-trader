@@ -601,7 +601,8 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             "name": "💰 [1] 자금 및 계좌 관리 (Account & Fund)",
             "items": [
                 {"label": "백테스팅용 초기자금", "key": "backtest_initial_capital", "unit": "원", "is_amt": True},
-                {"label": "최대 감시 종목 수", "key": "max_slots", "unit": "개"},
+                {"label": "최대 감시 종목 수 (Track A)", "key": "max_slots_a", "unit": "개"},
+                {"label": "최대 감시 종목 수 (Track B)", "key": "max_slots_b", "unit": "개"},
                 {"label": "1단계(정찰) 비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"},
                 {"label": "2단계(본대) 비중", "keys": ["stage2_amt", "s2_equity_pct"], "unit_key": "s2_sizing_unit"},
                 {"label": "가상 매매 자동화", "toggle": "use_auto_virtual"}
@@ -616,13 +617,12 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "종목 선정 RSI 범위", "keys": ["sel_rsi_min", "sel_rsi_max"], "sep": "~"},
                 {"label": "일봉 MACD 필터", "keys": ["macd_fast_daily", "macd_slow_daily", "macd_sig_daily"], "sep": "/"},
                 {"label": "이평선 수렴도 기준", "key": "ma_convergence", "unit": "%"},
-                {"label": "시장 지수 필터", "toggle": "use_market_filter"},
             ]
         },
         {
-            "name": "🎯 [3] 진입 시그널 필터 (Signal Logic - 15m)",
+            "name": "🎯 [3] S1 공통 필수 + 15m 보조 필터",
             "items": [
-                {"label": "매수 진입 RSI 하한", "toggle": "use_rsi_min", "key": "buy_rsi_min"},
+                {"label": "S1 진입 RSI 하한 (A/B 공통)", "toggle": "use_rsi_min", "key": "buy_rsi_min"},
                 {"label": "15분봉 MACD 필터 (12/26/9 고정)", "toggle": "use_macd_signal"},
                 {"label": "RSI 시그널 필터 (RSI14·시그널9 고정)", "toggle": "use_rsi_sig_filter"},
             ]
@@ -632,33 +632,51 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             "items": [
                 {"label": "Type A (눌림목) 활성화", "toggle": "use_type_a", "key": "buy_rsi_max_a", "unit": " RSI"},
                 {"label": "ㄴ 거래량 급증 확인(A)", "toggle": "use_vol_surge", "key": "vol_surge", "unit": "배"},
+                {"label": "ㄴ 전일동시간 평균(S1·A)", "key": "prev_vol_lookback_s1_a", "unit": "일"},
                 {"label": "ㄴ MA60 지지(상/하)", "keys": ["ma60_min", "ma60_max"], "unit": "%", "sep": "~"},
                 {"label": "ㄴ 이평 골든크로스(분)", "toggle": "use_gc", "key": "gc_window", "unit": "분"},
                 {"label": "ㄴ RSI 50 돌파 컨펌(분)", "toggle": "use_rsi_signal", "key": "rsi_window", "unit": "분"},
-                {"label": "ㄴ A 전용 ATR 손절(SL)", "toggle": "use_atr_stop_loss_a", "key": "atr_multiplier_sl_a", "unit": "배"},
-                {"label": "ㄴ A 전용 추격 익절(Trl)", "toggle": "use_atr_trailing_stop_a", "key": "atr_multiplier_trail_a", "unit": "배"},
                 {"label": "Type B (돌파 타점) 활성화", "toggle": "use_type_b", "key": "buy_rsi_max_b", "unit": " RSI"},
+                {"label": "ㄴ 전일동시간 평균(S1·B)", "key": "prev_vol_lookback_s1_b", "unit": "일"},
                 {"label": "ㄴ Smart Buy (Type B)", "toggle": "use_smart_buy_b"},
                 {"label": "ㄴ MACD 골든크로스(B)", "toggle": "use_macd_gc_b"},
                 {"label": "ㄴ 정배열 추세 확인(B)", "toggle": "use_trend_aligned_b"},
                 {"label": "ㄴ 돌파 시 거래량 분출", "toggle": "use_type_b_vol", "key": "vol_surge_b", "unit": "배"},
-                {"label": "ㄴ B 전용 ATR 손절(SL)", "toggle": "use_atr_stop_loss_b", "key": "atr_multiplier_sl_b", "unit": "배"},
-                {"label": "ㄴ B 전용 추격 익절(Trl)", "toggle": "use_atr_trailing_stop_b", "key": "atr_multiplier_trail_b", "unit": "배"}
             ]
         },
         {
-            "name": "📈 [5] 2단계 추매 전략 (Scaling Up)",
+            "name": "📈 [5] 2단계 추매 (Type A: s2_* / Type B: s2_b_*)",
             "items": [
-                {"label": "1. 20일선 지지 확인", "toggle": "use_s2_ma20", "key": "s2_ma20_gap", "unit": "%"},
-                {"label": "2. 5일선 회복/지지", "toggle": "use_s2_ma5", "key": "s2_ma5_gap", "unit": "%"},
-                {"label": "3. 추매용 Smart Buy", "toggle": "use_smart_buy_s2"},
-                {"label": "4. 추매 시 거래량 급증", "toggle": "use_s2_vol_surge", "key": "s2_vol_ratio", "unit": "배"},
-                {"label": "5. RSI 모멘텀 상승", "toggle": "use_s2_rsi_sig", "key": "s2_rsi_gap", "unit": "%"},
-                {"label": "6. MACD 모멘텀 상승", "toggle": "use_s2_macd_gc", "key": "s2_macd_gap", "unit": "%"},
-                {"label": "7. 수익권 진입 필터", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"},
-                {"label": "8. 진입 후 대기 시간", "toggle": "use_s2_delay", "key": "s2_delay_hours", "unit": "시간"},
-                {"label": "ㄴ S2 전용 ATR 손절(SL)", "toggle": "use_atr_stop_loss_s2", "key": "atr_multiplier_sl_s2", "unit": "배"},
-                {"label": "ㄴ S2 전용 추격 익절(Trl)", "toggle": "use_atr_trailing_stop_s2", "key": "atr_multiplier_trail_s2", "unit": "배"}
+                {"label": "A) 추매(S2) 전체", "toggle": "use_s2_master_a"},
+                {"label": "A) 20일선 지지", "toggle": "use_s2_ma20", "key": "s2_ma20_gap", "unit": "%"},
+                {"label": "A) 5일선 지지", "toggle": "use_s2_ma5", "key": "s2_ma5_gap", "unit": "%"},
+                {"label": "A) Smart Buy S2", "toggle": "use_smart_buy_s2"},
+                {"label": "A) 거래량 급증", "toggle": "use_s2_vol_surge", "key": "s2_vol_ratio", "unit": "배"},
+                {"label": "A) 전일동시간 기간(S2·A)", "key": "prev_vol_lookback_s2_a", "unit": "일"},
+                {"label": "A) RSI 모멘텀", "toggle": "use_s2_rsi_sig", "key": "s2_rsi_gap", "unit": "%"},
+                {"label": "A) MACD 모멘텀", "toggle": "use_s2_macd_gc", "key": "s2_macd_gap", "unit": "%"},
+                {"label": "A) 수익권 필터", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"},
+                {"label": "A) 대기 시간", "toggle": "use_s2_delay", "key": "s2_delay_hours", "unit": "시간"},
+                {"label": "B) 추매(S2) 전체", "toggle": "use_s2_master_b"},
+                {"label": "B) 20일선 지지", "toggle": "use_s2_b_ma20", "key": "s2_b_ma20_gap", "unit": "%"},
+                {"label": "B) 5일선 지지", "toggle": "use_s2_b_ma5", "key": "s2_b_ma5_gap", "unit": "%"},
+                {"label": "B) Smart Buy S2", "toggle": "use_smart_buy_s2_b"},
+                {"label": "B) 거래량 급증", "toggle": "use_s2_b_vol_surge", "key": "s2_b_vol_ratio", "unit": "배"},
+                {"label": "B) 전일동시간 기간(S2·B)", "key": "prev_vol_lookback_s2_b", "unit": "일"},
+                {"label": "B) RSI 모멘텀", "toggle": "use_s2_b_rsi_sig", "key": "s2_b_rsi_gap", "unit": "%"},
+                {"label": "B) MACD 모멘텀", "toggle": "use_s2_b_macd_gc", "key": "s2_b_macd_gap", "unit": "%"},
+                {"label": "B) 수익권 필터", "toggle": "use_s2_b_profit", "key": "s2_b_profit_limit", "unit": "%"},
+                {"label": "B) 대기 시간", "toggle": "use_s2_b_delay", "key": "s2_b_delay_hours", "unit": "시간"},
+            ]
+        },
+        {
+            "name": "🌐 시장 트렌드 게이트 (MSI/ADX/VIX — S1·S2 공통)",
+            "items": [
+                {"label": "시장 게이트 전체", "toggle": "use_market_filter"},
+                {"label": "MSI 하한 (DOWN)", "key": "msi_down_threshold"},
+                {"label": "MSI 상한 (UP)", "key": "msi_up_threshold"},
+                {"label": "ADX 최소 (NEUTRAL)", "key": "adx_min_threshold"},
+                {"label": "VIX 상한 (DOWN)", "key": "vix_down_threshold"},
             ]
         },
         {
@@ -669,19 +687,42 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             ]
         },
         {
-            "name": "🛡️ [7] 공통 매도 및 리스크 관리 (Exit & Trap)",
+            "name": "🛡️ [7] Smart Exit (A/B 공통)",
             "items": [
                 {"label": "Smart Exit (조기탈출)", "toggle": "use_smart_exit", "keys": ["smart_exit_vp", "smart_exit_ba_ratio"], "sep": "VP / Ratio: "},
                 {"label": "ㄴ 가격 하락 임계", "key": "smart_exit_price_threshold", "unit": "%"},
-                {"label": "갭하락 즉시 손절(Cut)", "key": "gap_down_limit", "unit": "%"},
-                {"label": "개장 초기 매도 유예", "toggle": "use_gap_grace"},
-                {"label": "ATR 공통 제어", "toggle": "use_atr_exit", "key": "atr_period", "unit": "일"},
-                {"label": "ㄴ ATR 트레일: 익절% 도달 후만", "toggle": "use_atr_trail_only_after_tp"},
-                {"label": "S1 눌림 익절/손절", "toggle": "use_s1_a_tp", "keys": ["s1_a_take_profit", "s1_a_stop_loss"], "unit": "%", "sep": "TP / SL: "},
-                {"label": "S1 돌파 익절/손절", "toggle": "use_s1_b_tp", "keys": ["s1_b_take_profit", "s1_b_stop_loss"], "unit": "%", "sep": "TP / SL: "},
-                {"label": "S1 눌림 Flash Exit", "toggle": "use_s1_a_flash_exit", "key": "s1_a_flash_exit_pct", "unit": "%"},
-                {"label": "S1 돌파 Flash Exit", "toggle": "use_s1_b_flash_exit", "key": "s1_b_flash_exit_pct", "unit": "%"},
-                {"label": "S2 익절/손절/Flash", "toggle": "use_s2_tp", "keys": ["s2_take_profit", "s2_stop_loss", "s2_flash_exit_pct"], "unit": "%", "sep": " / "}
+            ]
+        },
+        {
+            "name": "🛡️ [7-A] Type A 청산 · 리스크",
+            "items": [
+                {"label": "갭하락 즉시 손절", "toggle": "use_gap_down_exit_a", "key": "gap_down_limit_a", "unit": "%"},
+                {"label": "개장 초기 매도 유예", "toggle": "use_gap_grace_a", "key": "gap_grace_mins_a", "unit": "분"},
+                {"label": "ATR 주기·활성", "toggle": "use_atr_exit_a", "key": "atr_period_a", "unit": "봉"},
+                {"label": "S1(A) 익절/손절", "toggle": "use_s1_a_tp", "keys": ["s1_a_take_profit", "s1_a_stop_loss"], "unit": "%", "sep": "TP / SL: "},
+                {"label": "S1(A) Flash", "toggle": "use_s1_a_flash_exit", "key": "s1_a_flash_exit_pct", "unit": "%"},
+                {"label": "S1(A) ATR 손절(SL)", "toggle": "use_atr_stop_loss_a", "key": "atr_multiplier_sl_a", "unit": "배"},
+                {"label": "S1(A) ATR 추격(Trl)", "toggle": "use_atr_trailing_stop_a", "key": "atr_multiplier_trail_a", "unit": "배"},
+                {"label": "ATR 트레일: 익절% 이후만 (A-S1)", "toggle": "use_atr_trail_only_after_tp_s1_a"},
+                {"label": "S2(A) 익절/손절/Flash", "toggle": "use_s2_tp", "keys": ["s2_take_profit", "s2_stop_loss", "s2_flash_exit_pct"], "unit": "%", "sep": " / "},
+                {"label": "S2(A) ATR SL / Trl", "toggle": "use_atr_stop_loss_s2", "keys": ["atr_multiplier_sl_s2", "atr_multiplier_trail_s2"], "unit": "배", "sep": " / "},
+                {"label": "ATR 트레일: 익절% 이후만 (A-S2)", "toggle": "use_atr_trail_only_after_tp_s2_a"},
+            ]
+        },
+        {
+            "name": "🛡️ [7-B] Type B 청산 · 리스크",
+            "items": [
+                {"label": "갭하락 즉시 손절", "toggle": "use_gap_down_exit_b", "key": "gap_down_limit_b", "unit": "%"},
+                {"label": "개장 초기 매도 유예", "toggle": "use_gap_grace_b", "key": "gap_grace_mins_b", "unit": "분"},
+                {"label": "ATR 주기·활성", "toggle": "use_atr_exit_b", "key": "atr_period_b", "unit": "봉"},
+                {"label": "S1(B) 익절/손절", "toggle": "use_s1_b_tp", "keys": ["s1_b_take_profit", "s1_b_stop_loss"], "unit": "%", "sep": "TP / SL: "},
+                {"label": "S1(B) Flash", "toggle": "use_s1_b_flash_exit", "key": "s1_b_flash_exit_pct", "unit": "%"},
+                {"label": "S1(B) ATR 손절(SL)", "toggle": "use_atr_stop_loss_b", "key": "atr_multiplier_sl_b", "unit": "배"},
+                {"label": "S1(B) ATR 추격(Trl)", "toggle": "use_atr_trailing_stop_b", "key": "atr_multiplier_trail_b", "unit": "배"},
+                {"label": "ATR 트레일: 익절% 이후만 (B-S1)", "toggle": "use_atr_trail_only_after_tp_s1_b"},
+                {"label": "S2(B) 익절/손절/Flash", "toggle": "use_s2_b_tp", "keys": ["s2_b_take_profit", "s2_b_stop_loss", "s2_b_flash_exit_pct"], "unit": "%", "sep": " / "},
+                {"label": "S2(B) ATR SL / Trl", "toggle": "use_atr_stop_loss_s2_b", "keys": ["atr_multiplier_sl_s2_b", "atr_multiplier_trail_s2_b"], "unit": "배", "sep": " / "},
+                {"label": "ATR 트레일: 익절% 이후만 (B-S2)", "toggle": "use_atr_trail_only_after_tp_s2_b"},
             ]
         }
     ]

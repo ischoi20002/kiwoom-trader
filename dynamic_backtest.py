@@ -21,6 +21,66 @@ from backtest_engine import (
     flush_trade_csv_buffer,
 )
 from strategy.simulation_models import SimulatedRealtimeMetrics
+from typing import Any, Callable, List, Optional
+
+
+def _dual_track_new_candidates(
+    top_codes_a: List[str],
+    top_codes_b: List[str],
+    holdings_codes: List[str],
+    max_sa: int,
+    max_sb: int,
+) -> List[str]:
+    """
+    신규 감시 후보만 Track A/B 각각 max_slots_a·max_slots_b 상한으로 잘라 합친다.
+    (구버전 단일 max_slots로 B가 잘리던 문제 제거)
+    """
+    try:
+        hc = set(holdings_codes)
+        picked: set[str] = set()
+        new_a: list[str] = []
+        for c in top_codes_a:
+            if len(new_a) >= max(0, max_sa):
+                break
+            if c not in hc and c not in picked:
+                picked.add(c)
+                new_a.append(str(c))
+        new_b: list[str] = []
+        for c in top_codes_b:
+            if len(new_b) >= max(0, max_sb):
+                break
+            if c not in hc and c not in picked:
+                picked.add(c)
+                new_b.append(str(c))
+        return _interleave_track_codes(new_a, new_b)
+    except Exception:
+        return []
+
+
+def _interleave_track_codes(codes_a: List[str], codes_b: List[str]) -> List[str]:
+    """
+    Track A 전체 뒤에 B를 붙이면 감시·정렬 순서에서 B가 뒤로 밀릴 수 있음.
+    인덱스 기준으로 A·B를 교차 병합해 듀얼 트랙에서 B도 앞쪽 타임라인에 섞이게 한다.
+    """
+    try:
+        seen: set[str] = set()
+        out: list[str] = []
+        na, nb = len(codes_a), len(codes_b)
+        for i in range(max(na, nb)):
+            if i < na:
+                c = str(codes_a[i])
+                if c not in seen:
+                    seen.add(c)
+                    out.append(c)
+            if i < nb:
+                c = str(codes_b[i])
+                if c not in seen:
+                    seen.add(c)
+                    out.append(c)
+        return out
+    except Exception:
+        return list(dict.fromkeys(list(codes_a or []) + list(codes_b or [])))
+
 
 class DynamicBacktester:
     """[v16.0] 동적 포트폴리오 백테스터: 매일 종목을 새로 선정하고 1,000만원 예산을 공유하여 운용"""
@@ -48,7 +108,8 @@ class DynamicBacktester:
         self.use_sb = False
         self.use_sb_a = False
         self.use_sb_b = False
-        self.use_sb_s2 = False
+        self.use_sb_s2_a = False
+        self.use_sb_s2_b = False
         self.sb_ba = 1.2
         self.sb_vp = 110.0
         self.use_sx = False
@@ -66,7 +127,273 @@ class DynamicBacktester:
         self.use_type_b = False
         self.gap_down_lmt = -5.0
         self.stock_name_map = {}
-        
+
+    def _cache_run_hot_settings(self) -> None:
+        """run / 진단 공통: 루프에서 자주 읽는 설정·임계값 캐시"""
+        s = self.settings
+        self.use_sb_a = self.settings.get('use_smart_buy_a', False)
+        self.use_sb_b = self.settings.get('use_smart_buy_b', False)
+        self.use_sb_s2_a = self.settings.get("use_smart_buy_s2", False)
+        self.use_sb_s2_b = self.settings.get("use_smart_buy_s2_b", False)
+        self.sb_ba = float(s.get('smart_buy_ba_ratio', 1.2))
+        self.sb_vp = float(s.get('smart_buy_vp', 110.0))
+        self.use_sx = s.get('use_smart_exit', False)
+        self.sx_ba = float(s.get('smart_exit_ba_ratio', 0.8))
+        self.sx_vp = float(s.get('smart_exit_vp', 90.0))
+        self.sx_p_thr = float(s.get('smart_exit_price_threshold', 0.0))
+        self.use_s1a_tp = s.get('use_s1_a_tp', True)
+        self.use_s1b_tp = s.get('use_s1_b_tp', True)
+        self.use_s1a_sl = s.get('use_s1_a_stop_loss', True)
+        self.use_s1b_sl = s.get('use_s1_b_stop_loss', True)
+        self.use_s2_tp = s.get('use_s2_tp', True)
+        self.use_s2_sl = s.get('use_s2_stop_loss', True)
+        self.use_s1a_flash = s.get('use_s1_a_flash_exit', True)
+        self.use_s1b_flash = s.get('use_s1_b_flash_exit', True)
+        self.use_s2_flash = s.get('use_s2_flash_exit', True)
+        self.use_atr = bool(
+            s.get("use_atr_exit_a", s.get("use_atr_exit", False))
+            or s.get("use_atr_exit_b", s.get("use_atr_exit", False))
+        )
+        self.use_type_b = s.get('use_type_b', False)
+        self.gap_down_lmt = float(s.get("gap_down_limit_a", s.get("gap_down_limit", -5.0)))
+        self.msi_down_thr = float(s.get('msi_down_threshold', -0.10))
+        self.msi_up_thr = float(s.get('msi_up_threshold', 0.10))
+        self.adx_min_thr = float(s.get('adx_min_threshold', 15))
+        self.adx_down_thr = float(s.get('adx_down_threshold', 20))
+        self.vix_down_thr = float(s.get('vix_down_threshold', 30))
+
+    def _type_balance_allows_new_s1(self, sig_type: str) -> bool:
+        """
+        신규 S1(Type A/B) 진입 허용 여부. 보유 **종목 수**로 A/B를 세고,
+        목표 비율(settings: type_balance_a_pct % vs (100−A)%)에 비해 과다인 타입의 신규만 차단한다.
+        (로직 본문은 TradingStrategy.type_balance_allows_new_s1 에 단일화)
+        """
+        return TradingStrategy.type_balance_allows_new_s1(self.settings, sig_type, self.holdings)
+
+    def _effective_s1_sig_type_for_buy(self, row: Any) -> str:
+        """15분 행·1분 indicator dict 등에서 Sig_Type 확정(동시신호+보유 A/B 동점 시 B 우선)."""
+        return TradingStrategy.effective_s1_sig_type_for_buy(self.settings, row, self.holdings)
+
+    def _bootstrap_portfolio_data(
+        self,
+        start_date: str,
+        end_date: str,
+        callback: Optional[Callable[[str, Any], None]],
+    ) -> bool:
+        """
+        시장지표·유니버스·15분 캐시까지 로드. 성공 시 self._bt_trading_days 등 설정.
+        """
+        if callback:
+            callback("시장지수 및 VIX 데이터 로드 중...", 2)
+        warmup_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=280)).strftime("%Y-%m-%d")
+        market_df_raw = self.db.get_daily_bars("001", warmup_start, end_date)
+        vix_df = self.db.get_daily_bars("^VIX", warmup_start, end_date)
+        if market_df_raw is None or market_df_raw.empty:
+            print("[Error] [Dynamic] 시장 데이터(KS11)가 없어 백테스트를 진행할 수 없습니다.")
+            return False
+        market_df_raw["time"] = pd.to_datetime(market_df_raw["time"])
+        market_df_raw.set_index("time", inplace=True)
+        market_df_full = TradingStrategy.calculate_indicators(market_df_raw, self.settings)
+        market_df = market_df_full.loc[start_date:]
+        if market_df.empty:
+            print(f"[Error] [Dynamic] {start_date} 이후 시장 데이터가 없습니다.")
+            return False
+        trading_days = market_df.index.strftime("%Y-%m-%d").tolist()
+        vix_series: pd.Series | None = None
+        if vix_df is not None and not vix_df.empty:
+            try:
+                _vix = vix_df.copy()
+                _vix["time"] = pd.to_datetime(_vix["time"]) if "time" in _vix.columns else _vix.index
+                if "time" in _vix.columns:
+                    _vix = _vix.set_index("time")
+                _vix.index = pd.to_datetime(_vix.index)
+                td_idx = pd.to_datetime(trading_days)
+                vix_series = _vix["Close"].reindex(td_idx, method="ffill")
+                filled = int(vix_series.notna().sum())
+                print(f"[Dynamic] VIX 전처리 완료 ({filled}/{len(trading_days)} 거래일 유효)")
+            except Exception as e:
+                print(f"[Dynamic] VIX 전처리 실패 (직전값 방식으로 계속 진행): {e}")
+                vix_series = None
+        else:
+            print("[Dynamic] [경고] VIX 데이터 없음 — 시장 트렌드 판정에서 VIX 필터 비활성화됨")
+        print(f"[Dynamic] 백테스트 시작: {start_date} ~ {end_date} ({len(trading_days)} 영업일)")
+        t_start = time.time()
+        _result = strategy_selector.prepare_dynamic_universe(
+            self.settings, start_date, end_date, self.db, callback if callback else print
+        )
+        if isinstance(_result, tuple) and len(_result) == 3:
+            universe_schedule, self.schedule_a, self.schedule_b = _result
+        else:
+            universe_schedule = _result
+            self.schedule_a = universe_schedule
+            self.schedule_b = {}
+        t_duration = time.time() - t_start
+        msg = f"사전 계산 완료 ({t_duration:.2f}초)"
+        print(f"[Done] {msg}")
+        if callback:
+            callback(msg, 5)
+        if not universe_schedule:
+            if callback:
+                callback("  [Warning] 선택된 종목이 없습니다. 사전 계산(Phase 2)을 건너뜁니다.", 0)
+            self.cached_15m_data = {}
+        else:
+            self.cached_15m_data = self._prepare_15m_cached_data(
+                universe_schedule, start_date, end_date, callback
+            )
+        self.cached_1m_data = {}
+        self._bt_trading_days = trading_days
+        self._bt_market_df = market_df
+        self._bt_vix_series = vix_series
+        return True
+
+    def diagnose_intraday_entry_potential(
+        self,
+        start_date: str,
+        end_date: str,
+        *,
+        high_precision: bool = True,
+        callback: Optional[Callable[[str, Any], None]] = None,
+    ) -> pd.DataFrame:
+        """
+        포트폴리오 백테스트와 동일한 데이터·시장필터 기준으로,
+        일자별 15분봉 'Signal∧Ready' 개수를 집계하여 미체결이 전략상 자연스러운지 확인한다.
+        (고정밀 1분 체결·잔고 유무·Smart Buy 최종 차단은 이 표에 포함되지 않음)
+        """
+        self.high_precision = high_precision
+        start_date = pd.to_datetime(start_date).strftime("%Y-%m-%d")
+        end_date = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+        self.start_date = start_date
+        self.end_date = end_date
+        self._cache_run_hot_settings()
+        self.stock_name_map = TradingStrategy.get_stock_name_map()
+        if callback:
+            callback("진단: 백테스트와 동일 컨텍스트 로드 중...", 0)
+        if not self._bootstrap_portfolio_data(start_date, end_date, callback):
+            return pd.DataFrame()
+        trading_days = self._bt_trading_days
+        market_df = self._bt_market_df
+        vix_series = self._bt_vix_series
+        rows: list[dict[str, Any]] = []
+        saved_holdings = self.holdings
+        self.holdings = {}
+        try:
+            for idx, current_day in enumerate(trading_days):
+                prev_day_idx = idx - 1
+                ref_day = trading_days[prev_day_idx] if prev_day_idx >= 0 else current_day
+                top_codes_a = self.schedule_a.get(ref_day, [])
+                top_codes_b = self.schedule_b.get(ref_day, [])
+                top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
+                if not top_codes:
+                    prev_day_dt = datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=1)
+                    candidates_df = strategy_selector.select_monitoring_targets(
+                        self.settings, logger_callback=lambda x: None, target_date=prev_day_dt, data_manager=self.db
+                    )
+                    if candidates_df is not None and not candidates_df.empty:
+                        max_fb = int(self.settings.get("max_slots_a", 20)) + int(
+                            self.settings.get("max_slots_b", 10)
+                        )
+                        for _, row in candidates_df.head(max_fb).iterrows():
+                            top_codes.append(row["Code"])
+                max_sa = int(self.settings.get("max_slots_a", 20))
+                max_sb = int(self.settings.get("max_slots_b", 10))
+                if top_codes_a or top_codes_b:
+                    monitoring_list = _dual_track_new_candidates(
+                        top_codes_a, top_codes_b, [], max_sa, max_sb
+                    )
+                else:
+                    monitoring_list = top_codes[: max_sa + max_sb]
+                m_trend = "UP"
+                try:
+                    if prev_day_idx >= 0:
+                        m_data = market_df.loc[trading_days[prev_day_idx]]
+                        msi = m_data.get("MSI", 0)
+                        adx = m_data.get("ADX", 20)
+                        v_val = 15.0
+                        if vix_series is not None:
+                            try:
+                                current_dt = pd.to_datetime(trading_days[prev_day_idx])
+                                looked_up = vix_series.get(current_dt)
+                                if looked_up is not None and not pd.isna(looked_up):
+                                    v_val = float(looked_up)
+                            except Exception:
+                                pass
+                        if (
+                            msi < self.msi_down_thr
+                            or v_val > self.vix_down_thr
+                            or (msi < 0 and adx > self.adx_down_thr)
+                        ):
+                            m_trend = "DOWN"
+                        elif adx < self.adx_min_thr and msi <= self.msi_up_thr:
+                            m_trend = "NEUTRAL"
+                        elif msi > self.msi_up_thr and adx > self.adx_down_thr:
+                            m_trend = "AGGRESSIVE"
+                        else:
+                            m_trend = "UP"
+                except Exception:
+                    pass
+                n_before = 0
+                n_after = 0
+                n_bars = 0
+                n_codes_with_data = 0
+                for code in monitoring_list:
+                    if code not in self.cached_15m_data:
+                        continue
+                    base_df = self.cached_15m_data[code]
+                    day_full = base_df.loc[current_day : current_day + " 23:59:59"].copy()
+                    if day_full.empty:
+                        continue
+                    n_codes_with_data += 1
+                    n_bars += len(day_full)
+                    if (
+                        (
+                            bool(self.settings.get("use_type_a_regime_phase1", False))
+                            and bool(self.settings.get("use_type_a", False))
+                        )
+                        or (
+                            bool(self.settings.get("use_type_b_regime_phase1", False))
+                            and bool(self.settings.get("use_type_b", False))
+                        )
+                    ) and m_trend in (
+                        "AGGRESSIVE",
+                        "UP",
+                        "NEUTRAL",
+                    ):
+                        try:
+                            reg_ix = {"AGGRESSIVE": 0, "UP": 1, "NEUTRAL": 2}[m_trend]
+                            day_full["Signal"] = day_full[f"Signal_TA_REG{reg_ix}"]
+                            day_full["Sig_Type"] = day_full[f"Sig_Type_TA_REG{reg_ix}"]
+                        except (KeyError, TypeError) as _reg_e:
+                            try:
+                                print(
+                                    f"[WARN] 레짐 열 없음 {code} {current_day}: {_reg_e} "
+                                    f"(설정 저장 후 재실행·캐시 무효 확인)"
+                                )
+                            except Exception:
+                                pass
+                    sig_r = day_full["Signal"].astype(bool) & day_full["Ready"].astype(bool)
+                    n_before += int(sig_r.sum())
+                    if self.settings.get("use_market_filter", True) and m_trend == "DOWN":
+                        day_full["Signal"] = False
+                    elif self.settings.get("use_market_filter", True) and m_trend == "NEUTRAL":
+                        is_type_b = day_full["Sig_Type"] == "TYPE_B"
+                        day_full.loc[is_type_b, "Signal"] = False
+                    sig_a = day_full["Signal"].astype(bool) & day_full["Ready"].astype(bool)
+                    n_after += int(sig_a.sum())
+                rows.append(
+                    {
+                        "date": current_day,
+                        "m_trend": m_trend,
+                        "n_monitor_codes": len(monitoring_list),
+                        "n_codes_15m": n_codes_with_data,
+                        "n_15m_bars": n_bars,
+                        "n_signal_ready_pre_mkt": n_before,
+                        "n_signal_ready_post_mkt": n_after,
+                    }
+                )
+        finally:
+            self.holdings = saved_holdings
+        return pd.DataFrame(rows)
+
     def run(self, start_date, end_date, interval='15m', callback=None, high_precision=False):
         """메인 시뮬레이션 루프 (일단위 유니버스 갱신 + 분단위/15분단위 체결)"""
         self.high_precision = high_precision
@@ -77,115 +404,17 @@ class DynamicBacktester:
         self.start_date = start_date
         self.end_date = end_date
         
-        # [Perf] Cache settings and maps once to avoid lookups in hot loops (v33.8)
-        s = self.settings
-        self.use_sb_a = self.settings.get('use_smart_buy_a', False)
-        self.use_sb_b = self.settings.get('use_smart_buy_b', False)
-        self.use_sb_s2 = self.settings.get('use_smart_buy_s2', False)
-        self.sb_ba = float(s.get('smart_buy_ba_ratio', 1.2))
-        self.sb_vp = float(s.get('smart_buy_vp', 110.0))
-        self.use_sx = s.get('use_smart_exit', False)
-        self.sx_ba = float(s.get('smart_exit_ba_ratio', 0.8))
-        self.sx_vp = float(s.get('smart_exit_vp', 90.0))
-        self.sx_p_thr = float(s.get('smart_exit_price_threshold', 0.0))
-        
-        self.use_s1a_tp = s.get('use_s1_a_tp', True)
-        self.use_s1b_tp = s.get('use_s1_b_tp', True)
-        self.use_s1a_sl = s.get('use_s1_a_stop_loss', True)
-        self.use_s1b_sl = s.get('use_s1_b_stop_loss', True)
-        self.use_s2_tp = s.get('use_s2_tp', True)
-        self.use_s2_sl = s.get('use_s2_stop_loss', True)
-        self.use_s1a_flash = s.get('use_s1_a_flash_exit', True)
-        self.use_s1b_flash = s.get('use_s1_b_flash_exit', True)
-        self.use_s2_flash = s.get('use_s2_flash_exit', True)
-        self.use_atr = s.get('use_atr_exit', False)
-        self.use_type_b = s.get('use_type_b', False)
-        self.gap_down_lmt = float(s.get('gap_down_limit', -5.0))
-
-        # [v4.6] 시장 트렌드 판정 임계값 캐싱 (settings.json 노출, 최적화 가능)
-        self.msi_down_thr = float(s.get('msi_down_threshold', -0.10))
-        self.msi_up_thr   = float(s.get('msi_up_threshold',   0.10))
-        self.adx_min_thr  = float(s.get('adx_min_threshold',  15))
-        self.adx_down_thr = float(s.get('adx_down_threshold', 20))   # [v4.7] 하락 조기감지용 ADX 임계값
-        self.vix_down_thr = float(s.get('vix_down_threshold', 30))
-
+        self._cache_run_hot_settings()
         self.stock_name_map = TradingStrategy.get_stock_name_map()
         
         if callback: callback("백테스트 준비 중...", 0)
         
-        # 1. 기초 데이터 (지수 및 VIX) 로드
-        if callback: callback("시장지수 및 VIX 데이터 로드 중...", 2)
-        # [v38.0] Warmup: MA120/MSI 등 지표 정확도를 위해 시작일 200영업일 이전부터 데이터 로드
-        warmup_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=280)).strftime("%Y-%m-%d")
-        market_df_raw = self.db.get_daily_bars('001', warmup_start, end_date)
-        vix_df = self.db.get_daily_bars('^VIX', warmup_start, end_date)
-        if market_df_raw is None or market_df_raw.empty:
-            print("[Error] [Dynamic] 시장 데이터(KS11)가 없어 백테스트를 진행할 수 없습니다.")
-            return None
-            
-        market_df_raw['time'] = pd.to_datetime(market_df_raw['time'])
-        market_df_raw.set_index('time', inplace=True)
-        
-        # [v38.0] 지표를 warmup 포함 전체 데이터로 계산 후, 실제 백테스트 기간만 잘라냄
-        market_df_full = TradingStrategy.calculate_indicators(market_df_raw, self.settings)
-        market_df = market_df_full.loc[start_date:]
-        if market_df.empty:
-            print(f"[Error] [Dynamic] {start_date} 이후 시장 데이터가 없습니다.")
+        if not self._bootstrap_portfolio_data(start_date, end_date, callback):
             return None
 
-        trading_days = market_df.index.strftime('%Y-%m-%d').tolist()
-
-        # [v4.6] VIX를 거래일 기준으로 ffill 전처리
-        # — DB에 VIX 데이터가 있으면 거래일 인덱스에 reindex 후 forward-fill
-        # — 이렇게 하면 루프 내에서 특정 날짜 데이터가 없어도 직전 유효값이 유지됨
-        vix_series: pd.Series | None = None
-        if vix_df is not None and not vix_df.empty:
-            try:
-                _vix = vix_df.copy()
-                _vix['time'] = pd.to_datetime(_vix['time']) if 'time' in _vix.columns else _vix.index
-                if 'time' in _vix.columns:
-                    _vix = _vix.set_index('time')
-                _vix.index = pd.to_datetime(_vix.index)
-                # 거래일 인덱스로 재색인 후 ffill (공휴일·누락일은 직전값으로 채움)
-                td_idx = pd.to_datetime(trading_days)
-                vix_series = _vix['Close'].reindex(td_idx, method='ffill')
-                filled = int(vix_series.notna().sum())
-                print(f"[Dynamic] VIX 전처리 완료 ({filled}/{len(trading_days)} 거래일 유효)")
-            except Exception as e:
-                print(f"[Dynamic] VIX 전처리 실패 (직전값 방식으로 계속 진행): {e}")
-                vix_series = None
-        else:
-            print("[Dynamic] [경고] VIX 데이터 없음 — 시장 트렌드 판정에서 VIX 필터 비활성화됨")
-
-        print(f"[Dynamic] 백테스트 시작: {start_date} ~ {end_date} ({len(trading_days)} 영업일)")
-        
-        # [v17.7] 성능 핵심 최적화 (Phase 1): 전 기간 유니버스 사전 계산 (Batch)
-        import time
-        t_start = time.time()
-        _result = strategy_selector.prepare_dynamic_universe(
-            self.settings, start_date, end_date, self.db, callback if callback else print
-        )
-        # [Phase 2] Track A/B 분리 스케줄 언패킹 (기존 호환: 합집합 schedule도 유지)
-        if isinstance(_result, tuple) and len(_result) == 3:
-            universe_schedule, self.schedule_a, self.schedule_b = _result
-        else:
-            universe_schedule = _result
-            self.schedule_a = universe_schedule
-            self.schedule_b = {}
-        t_duration = time.time() - t_start
-        msg = f"사전 계산 완료 ({t_duration:.2f}초)"
-        print(f"[Done] {msg}")
-        if callback: callback(msg, 5)
-
-        # [v17.7] 성능 핵심 최적화 (Phase 2): 전 기간 15분봉 지표 사전 계산 (Batch)
-        if not universe_schedule:
-            if callback: callback(f"  [Warning] 선택된 종목이 없습니다. 사전 계산(Phase 2)을 건너뜁니다.", 0)
-            self.cached_15m_data = {}
-        else:
-            self.cached_15m_data = self._prepare_15m_cached_data(universe_schedule, start_date, end_date, callback)
-        
-        # [v23.0] 고정밀 모사용 1분봉 데이터는 이제 '지연 로딩(Lazy Loading)' 방식으로 처리 (성능 최적화)
-        self.cached_1m_data = {} # (code, date_str) -> DataFrame
+        trading_days = self._bt_trading_days
+        market_df = self._bt_market_df
+        vix_series = self._bt_vix_series
         
         # [v17.3] 시작 시점(Day 0) 자산 기록 (트레이딩 시작 전일 혹은 시작일 아침으로 기록하여 중복 방지)
         # [v18.9] Plotly date parsing 호환성을 위해 유효한 시간 형식(08:59) 사용
@@ -215,8 +444,8 @@ class DynamicBacktester:
             
             top_codes_a = self.schedule_a.get(ref_day, [])
             top_codes_b = self.schedule_b.get(ref_day, [])
-            top_codes = list(dict.fromkeys(top_codes_a + top_codes_b))
-            
+            top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
+
             # Track A/B 소속 맵 (매수 시 sig_type 검증용, 1분봉 정밀 모드에서도 사용)
             track_map: dict[str, str] = {}
             for c in top_codes_a:
@@ -235,9 +464,11 @@ class DynamicBacktester:
                     self.settings, logger_callback=lambda x: None, target_date=prev_day_dt, data_manager=self.db
                 )
                 if candidates_df is not None and not candidates_df.empty:
-                    max_s_fb = int(self.settings.get('max_slots', 20))
+                    max_fb = int(self.settings.get("max_slots_a", 20)) + int(
+                        self.settings.get("max_slots_b", 10)
+                    )
                     use_b_fb = self.settings.get('use_sel_track_b', True)
-                    for _, row in candidates_df.head(max_s_fb).iterrows():
+                    for _, row in candidates_df.head(max_fb).iterrows():
                         c = row['Code']
                         top_codes.append(c)
                         # Valid_B 컬럼이 있으면 B 트랙 여부를 판별, 없으면 A로 기본 처리
@@ -246,11 +477,20 @@ class DynamicBacktester:
                         else:
                             track_map.setdefault(c, 'A')
             
-            # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보)
-            max_s = int(self.settings.get('max_slots', 20))
+            # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보: Track A/B 각각 max_slots_a·max_slots_b)
+            max_sa = int(self.settings.get("max_slots_a", 20))
+            max_sb = int(self.settings.get("max_slots_b", 10))
             holdings_codes = list(self.holdings.keys())
-            new_candidates = [c for c in top_codes if c not in holdings_codes]
-            monitoring_list = holdings_codes + new_candidates[:max(0, max_s - len(holdings_codes))]
+            if top_codes_a or top_codes_b:
+                new_candidates = _dual_track_new_candidates(
+                    top_codes_a, top_codes_b, holdings_codes, max_sa, max_sb
+                )
+            else:
+                hc_set = set(holdings_codes)
+                new_candidates = [
+                    c for c in top_codes if c not in hc_set
+                ][: max_sa + max_sb]
+            monitoring_list = holdings_codes + new_candidates
             
             # 2-2. [v4.5.10] Unified Triple-Lock 기반 시장 트렌드 통합 판별 (Single Source of Truth)
             m_trend = 'UP'
@@ -300,8 +540,17 @@ class DynamicBacktester:
                 day_full = base_df.loc[current_day:current_day + " 23:59:59"].copy()
                 if day_full.empty: continue
 
-                # [v39.0] 전일 레짐에 맞는 Type A 보정 신호 열 선택
-                if self.settings.get("use_type_a_regime_phase1", False) and m_trend in (
+                # [v39.0] 전일 레짐에 맞는 보정 신호 열 선택 (해당 타입 ON일 때만)
+                if (
+                    (
+                        bool(self.settings.get("use_type_a_regime_phase1", False))
+                        and bool(self.settings.get("use_type_a", False))
+                    )
+                    or (
+                        bool(self.settings.get("use_type_b_regime_phase1", False))
+                        and bool(self.settings.get("use_type_b", False))
+                    )
+                ) and m_trend in (
                     "AGGRESSIVE",
                     "UP",
                     "NEUTRAL",
@@ -310,9 +559,12 @@ class DynamicBacktester:
                         reg_ix = {"AGGRESSIVE": 0, "UP": 1, "NEUTRAL": 2}[m_trend]
                         day_full["Signal"] = day_full[f"Signal_TA_REG{reg_ix}"]
                         day_full["Sig_Type"] = day_full[f"Sig_Type_TA_REG{reg_ix}"]
-                    except (KeyError, TypeError) as e:
+                    except (KeyError, TypeError) as _reg_e:
                         try:
-                            print(f"[WARN] 레짐 신호 열 없음, 기본 Signal 유지: {e}")
+                            print(
+                                f"[WARN] 레짐 열 없음 {code} {current_day}: {_reg_e} "
+                                f"(use_type_*_regime_phase1 ON인데 사전계산 실패 시 기본 Signal 유지)"
+                            )
                         except Exception:
                             pass
                 
@@ -378,10 +630,17 @@ class DynamicBacktester:
                         # TP인 경우 가격 보정 (고가 돌파 기준)
                         e_price = curr_row['Close']
                         if res['reason'] == 'TAKE_PROFIT':
-                            is_type_b_h = "TYPE_B" in str(h_info.get('sig_type', ''))
-                            tp_key = 's2_take_profit' if h_info['entry_n'] == 2 else ('s1_b_take_profit' if is_type_b_h else 's1_a_take_profit')
-                            tp_pct = float(self.settings.get(tp_key, 5.0))
-                            e_price = h_info['avg_p'] * (1 + tp_pct/100.0)
+                            tpp = res.get('tp_pct_applied')
+                            if tpp is not None:
+                                e_price = float(h_info['avg_p']) * (1 + float(tpp) / 100.0)
+                            else:
+                                is_type_b_h = "TYPE_B" in str(h_info.get('sig_type', ''))
+                                if h_info['entry_n'] == 2:
+                                    tp_key = 's2_b_take_profit' if is_type_b_h else 's2_take_profit'
+                                else:
+                                    tp_key = 's1_b_take_profit' if is_type_b_h else 's1_a_take_profit'
+                                tp_pct = float(self.settings.get(tp_key, 5.0))
+                                e_price = h_info['avg_p'] * (1 + tp_pct/100.0)
                         
                         self._execute_sell(code, e_price, curr_time, res['reason'], indicator_row=curr_row)
                         today_sells.add(code)
@@ -409,7 +668,7 @@ class DynamicBacktester:
                                 if self._check_s2_approval(code, h_info, last_sig, market_trend=m_trend):
                                     # [v33.9] Stage 2 Smart Buy Filter
                                     can_execute_s2 = True
-                                    if self.use_sb_s2:
+                                    if (self.use_sb_s2_b if "TYPE_B" in str(h_info.get("sig_type", "")) else self.use_sb_s2_a):
                                         ab_ratio = last_sig.get('ask_bid_ratio', last_sig.get('Ask_Bid_Ratio', 1.0 / (last_sig.get('bid_ask_ratio', 1.0) + 1e-10)))
                                         v_power = float(last_sig.get('vol_power', last_sig.get('Vol_power', 100.0)))
                                         if ab_ratio < self.sb_ba or v_power < self.sb_vp:
@@ -424,7 +683,8 @@ class DynamicBacktester:
                             
                             if can_execute and not is_addon_target:
                                 # [Phase 2] Track-Signal 교차 검증: 신호 유형이 종목 트랙과 일치하는지 확인
-                                sig_type = last_sig.get('Sig_Type', 'TYPE_B')
+                                # 동시 A/B 신호 + 보유 A/B 동점 시 B 우선(트랙·스마트바이·체결 일치)
+                                sig_type = self._effective_s1_sig_type_for_buy(last_sig)
                                 code_track = track_map.get(code, 'A')
                                 if sig_type == 'TYPE_A' and code_track == 'B':
                                     can_execute = False
@@ -464,16 +724,25 @@ class DynamicBacktester:
                                         })
                             
                             if can_execute:
-                                sig_type = last_sig.get('Sig_Type', 'TYPE_B')
+                                if h_info is None and not is_addon_target:
+                                    sig_type = self._effective_s1_sig_type_for_buy(last_sig)
+                                else:
+                                    sig_type = str(last_sig.get('Sig_Type', 'TYPE_B'))
                                 use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \
                                                    self.use_sb_b if (sig_type == "TYPE_B" and not is_addon_target) else \
-                                                   self.use_sb_s2
+                                                   (self.use_sb_s2_b if "TYPE_B" in str(h_info.get("sig_type", "")) else self.use_sb_s2_a)
                                 
                                 # [v33.9] Prefix "SmartBuy|" if it was enabled and passed
                                 if use_sb_for_type:
                                     reason = "SmartBuy|" + reason
                                     
-                                self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': sig_type}, curr_time, d_df.loc[curr_time], indicator_row=d_df.loc[curr_time])
+                                self._handle_buy_execution(
+                                    code,
+                                    {"reason": reason, "Sig_Type": sig_type},
+                                    curr_time,
+                                    d_df.loc[curr_time],
+                                    indicator_row=d_df.loc[curr_time],
+                                )
 
             # 2-5. 일일 정산
             current_equity = self.cash + sum(h['qty'] * day_data[c]['Close'].iloc[-1] for c, h in self.holdings.items() if c in day_data)
@@ -540,17 +809,44 @@ class DynamicBacktester:
                 s2_amt = total_equity * (s2_pct / 100.0)
 
         if h_info is None:
-            if self.cash < s1_amt * 0.5: return False
+            sig_type = str(sig_res.get("Sig_Type", "TYPE_A"))
+            if not self._type_balance_allows_new_s1(str(sig_type)):
+                try:
+                    lab = "TYPE_B" if "TYPE_B" in str(sig_type).upper() else "TYPE_A"
+                    na = sum(
+                        1
+                        for h in self.holdings.values()
+                        if "TYPE_B" not in str(h.get("sig_type", "") or "").upper()
+                    )
+                    nb = sum(
+                        1
+                        for h in self.holdings.values()
+                        if "TYPE_B" in str(h.get("sig_type", "") or "").upper()
+                    )
+                    try:
+                        _tp = float(self.settings.get("type_balance_a_pct", 50.0))
+                    except (TypeError, ValueError):
+                        _tp = 50.0
+                    reason_rej = (
+                        f"TypeBalanceGate|목표A:{_tp:.1f}% B:{100.0 - _tp:.1f}%|보유A:{na} B:{nb}|{lab}신규차단"
+                    )
+                    self._log_trade_to_csv(
+                        curr_time, code, "REJECTED_BALANCE", float(price), 0, reason_rej, sig_type=lab
+                    )
+                except Exception:
+                    pass
+                return False
+            if self.cash < s1_amt * 0.5:
+                return False
             target_amt = s1_amt
             entry_n = 1
-            sig_type = sig_res.get('Sig_Type', 'TYPE_A')
         else:
             if h_info['entry_n'] >= 2: return
             # market_trend는 handle_buy_execution 호출부에서 넘겨받기 어렵지만, s2_approval은 이미 위에서 체크됨
             # 하지만 안전을 위해 다시 체크하려면 파라미터 추가 필요 (일단 위 339라인에서 체크 완료됨)
             target_amt = s2_amt
             entry_n = 2
-            sig_type = h_info.get('sig_type', 'TYPE_A')
+            sig_type = h_info.get("sig_type", "TYPE_A")
             
         qty = int(target_amt // (price * (1 + self.buy_f_rate)))
         if qty <= 0: return False
@@ -571,6 +867,14 @@ class DynamicBacktester:
             h_info['avg_p'] = (h_info['avg_p'] * old_qty + real_amt) / (old_qty + qty)
             h_info['qty'] += qty
             h_info['entry_n'] = 2
+            # S2 체결 시점 ATR로 ATR_SL 기준 갱신(S1 ATR 고정이면 배수 조정 효과가 거의 없을 수 있음)
+            try:
+                if indicator_row is not None:
+                    _atr = float(indicator_row.get('ATR', 0) or 0)
+                    if _atr > 0:
+                        h_info['atr_at_entry'] = _atr
+            except Exception:
+                pass
             
         # [v27.0] 전략 타입(A/B/S2)을 매수 사유(Reason) 접두어로 명시하여 리포트 집계 정확도 향상
         prefix = f"[{sig_type}] " if entry_n == 1 else "[Stage 2] "
@@ -749,14 +1053,24 @@ class DynamicBacktester:
             
             # [v16.92] Pre-calculate signals for the ENTIRE time series at once (Vectorized)
             # This makes the daily loop in run() a simple O(1) lookup
-            # [v39.0] Type A 레짐 1차 보정 시 AGGRESSIVE/UP/NEUTRAL 각각 신호를 미리 계산해 일자별로 선택
-            if self.settings.get("use_type_a_regime_phase1", False):
+            # [v39.0] 레짐 1차: Type A(vol·MA60) 및/또는 Type B(vol_surge_b) — 3열 사전계산
+            _reg_a = bool(self.settings.get("use_type_a_regime_phase1", False)) and bool(
+                self.settings.get("use_type_a", False)
+            )
+            _reg_b = bool(self.settings.get("use_type_b_regime_phase1", False)) and bool(
+                self.settings.get("use_type_b", False)
+            )
+            if _reg_a or _reg_b:
                 try:
                     from strategy.type_a_regime import apply_type_a_phase1_settings
+                    from strategy.type_b_regime import apply_type_b_phase1_overlay
 
                     s_aggr = apply_type_a_phase1_settings(self.settings, "AGGRESSIVE")
                     s_up = apply_type_a_phase1_settings(self.settings, "UP")
                     s_neu = apply_type_a_phase1_settings(self.settings, "NEUTRAL")
+                    s_aggr = apply_type_b_phase1_overlay(self.settings, s_aggr, "AGGRESSIVE")
+                    s_up = apply_type_b_phase1_overlay(self.settings, s_up, "UP")
+                    s_neu = apply_type_b_phase1_overlay(self.settings, s_neu, "NEUTRAL")
                     sig_aggr = TradingStrategy.get_buy_signals_detailed(
                         df_ind, s_aggr, market_trend="UP"
                     )
@@ -775,7 +1089,7 @@ class DynamicBacktester:
                     full_sigs = sig_aggr
                 except Exception as e:
                     try:
-                        print(f"[WARN] Type A 레짐 신호 사전계산 실패, 단일 경로로 폴백: {e}")
+                        print(f"[WARN] 레짐 신호 사전계산 실패, 단일 경로로 폴백: {e}")
                     except Exception:
                         pass
                     full_sigs = TradingStrategy.get_buy_signals_detailed(
@@ -865,32 +1179,46 @@ class DynamicBacktester:
             m1_r = m1_chunk.iloc[m1_idx]
             m1_time = m1_chunk.index[m1_idx]
             
-            # [v36.8] 초정밀 1분 지표 시뮬레이션 (Intra-bar Indicator Simulation)
-            # 15분봉 고정 지표가 아니라, 현재 1분봉 가격을 반영한 실시간 지표를 매 루프마다 생성
+            # [v40.0] Optimized 1m Indicator Simulation
             full_15m = self.cached_15m_data.get(code)
-            sim_15m = None
-            if full_15m is not None and curr_15m is not None:
-                # 현재 15분봉(curr_15m) 직전까지의 데이터만 슬라이싱
-                hist_15m = full_15m.loc[:curr_15m.name].iloc[:-1]
-                sim_15m = TradingStrategy.simulate_intrabar_indicators(hist_15m, curr_15m.name, m1_r, self.settings)
+            indicator_to_use = curr_15m # Fallback
             
-            # 시뮬레이션 지표(1M 기반)로 RSI/MACD 등을 업데이트하되,
-            # 매수/추매 판단에 직접 쓰는 Signal/Ready/Sig_Type은
-            # 반드시 현재 타겟 15분봉(curr_15m)의 값을 유지해야 한다.
-            # 그렇지 않으면 sim_15m이 참조한 "직전 15분봉"의 Signal 상태가 그대로 남아
-            # buy 타점이 영영 발생하지 않을 수 있다.
-            if sim_15m is not None and curr_15m is not None:
-                for k in ["Signal", "Ready", "Sig_Type", "Volume", "Prev_Day_Vol", "Vol_MA20"]:
-                    try:
-                        if hasattr(curr_15m, "get"):
-                            sim_15m[k] = curr_15m.get(k, sim_15m.get(k))
-                        else:
-                            sim_15m[k] = sim_15m.get(k)
-                    except Exception:
-                        pass
-                indicator_to_use = sim_15m
-            else:
-                indicator_to_use = curr_15m
+            if full_15m is not None and curr_15m is not None:
+                # [Perf] Pre-calculate values needed for incremental update once per 15m bar
+                if m1_idx == 0:
+                    base_idx = full_15m.index.get_loc(curr_15m.name)
+                    # prev_15m is the last finished bar
+                    prev_idx = max(0, base_idx - 1)
+                    self._last_15m_dict = full_15m.iloc[prev_idx].to_dict()
+                    
+                    # Pre-calculate sums for MA
+                    self._prices_tail = {
+                        5: full_15m['Close'].iloc[max(0, base_idx-4):base_idx].sum(),
+                        20: full_15m['Close'].iloc[max(0, base_idx-19):base_idx].sum(),
+                        60: full_15m['Close'].iloc[max(0, base_idx-59):base_idx].sum(),
+                        'rsi_vals': full_15m['Close'].iloc[max(0, base_idx-15):base_idx].values
+                    }
+                
+                sim_15m = TradingStrategy.simulate_intrabar_indicators(self._last_15m_dict, m1_r, self.settings, hist_df_prices_tail=self._prices_tail)
+                
+                if sim_15m is not None:
+                    # Sync static fields from current 15m bar
+                    for k in [
+                        "Signal",
+                        "Ready",
+                        "Sig_Type",
+                        "S1_Simultaneous_AB",
+                        "Volume",
+                        "Prev_Day_Vol",
+                        "Prev_Day_Vol_B",
+                        "Prev_Day_Vol_S1_A",
+                        "Prev_Day_Vol_S1_B",
+                        "Prev_Day_Vol_S2_A",
+                        "Prev_Day_Vol_S2_B",
+                        "Vol_MA20",
+                    ]:
+                        if k in curr_15m: sim_15m[k] = curr_15m[k]
+                    indicator_to_use = sim_15m
 
             # 1. 매도(Exit) 감시 - 보유 중인 경우 최우선 순위
             if h_info is not None:
@@ -910,10 +1238,17 @@ class DynamicBacktester:
                     e_price = m1_r['Close']
                     # 익절(TP)인 경우 지침에 따라 가격 보정 (평단 + 목표익절%)
                     if res['reason'] == 'TAKE_PROFIT':
-                        is_type_b_h = "TYPE_B" in str(h_info.get('sig_type', ''))
-                        tp_key = 's2_take_profit' if h_info['entry_n'] == 2 else ('s1_b_take_profit' if is_type_b_h else 's1_a_take_profit')
-                        tp_val = self.settings.get(tp_key, 5.0)
-                        e_price = h_info['avg_p'] * (1 + float(tp_val)/100.0)
+                        tpp = res.get('tp_pct_applied')
+                        if tpp is not None:
+                            e_price = float(h_info['avg_p']) * (1 + float(tpp) / 100.0)
+                        else:
+                            is_type_b_h = "TYPE_B" in str(h_info.get('sig_type', ''))
+                            if h_info['entry_n'] == 2:
+                                tp_key = 's2_b_take_profit' if is_type_b_h else 's2_take_profit'
+                            else:
+                                tp_key = 's1_b_take_profit' if is_type_b_h else 's1_a_take_profit'
+                            tp_val = self.settings.get(tp_key, 5.0)
+                            e_price = h_info['avg_p'] * (1 + float(tp_val)/100.0)
                     
                     reason = f"1M_{res['reason']}+{m1_idx}m"
                     self._execute_sell(code, e_price, m1_time, reason, indicator_row=indicator_to_use)
@@ -927,7 +1262,10 @@ class DynamicBacktester:
                 is_addon_target = (h_info is not None and h_info['entry_n'] < 2)
                 
                 if is_buy_signal or is_addon_target:
-                    sig_type = indicator_to_use.get('Sig_Type', 'TYPE_B')
+                    if h_info is None:
+                        sig_type = self._effective_s1_sig_type_for_buy(indicator_to_use)
+                    else:
+                        sig_type = str(indicator_to_use.get('Sig_Type', 'TYPE_B'))
                     
                     # [Phase 2] Track-Signal 교차 검증 (1분봉 경로)
                     code_track = getattr(self, '_current_track_map', {}).get(code, 'A')
@@ -937,7 +1275,7 @@ class DynamicBacktester:
                     
                     use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \
                                        self.use_sb_b if (sig_type == "TYPE_B" and not is_addon_target) else \
-                                       self.use_sb_s2
+                                       (self.use_sb_s2_b if "TYPE_B" in str(h_info.get("sig_type", "")) else self.use_sb_s2_a)
                     
                     can_execute = True
                     reason_base = "1M_SIG" if not is_addon_target else f"1M_ADDON(S2)|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.1f}"
@@ -985,7 +1323,13 @@ class DynamicBacktester:
                             reason = "SmartBuy|" + reason
                         # [v36.0] 1분 단위 타임스탬프 기록
                         reason += f"+{m1_idx}m"
-                        executed = self._handle_buy_execution(code, {'reason': reason, 'Sig_Type': sig_type}, m1_time, m1_r, indicator_row=indicator_to_use)
+                        executed = self._handle_buy_execution(
+                            code,
+                            {"reason": reason, "Sig_Type": sig_type},
+                            m1_time,
+                            m1_r,
+                            indicator_row=indicator_to_use,
+                        )
                         if executed:
                             return # 매수 실제 체결된 경우에만 해당 15분 청크 종료
 
@@ -994,120 +1338,33 @@ class DynamicBacktester:
 
     def _check_s2_approval(
         self,
-        code,
-        h_info,
-        last_row,
-        indicator_row=None,
-        market_trend="UP",
-        curr_dt_for_delay=None,
-    ):
-        """[v23.0] 2차 매수 승인 로직 — 단일 패스로 승인 판정.
-
-        [Perf v23.0] 이전 버전은 조건을 2번 평가(진단 + 엔진 위임)했음.
-        이제 이 함수가 유일한 판정 주체이며 TradingStrategy._check_s2_approval 호출 제거.
-
-        curr_dt_for_delay: 고정밀 1분 루프에서 대기시간(s2_delay) 판정에 쓸 실제 시각.
-            None이면 last_row.name 사용 (15분 경로).
-        """
-        s = self.settings
+        code: str,
+        h_info: dict[str, Any],
+        last_row: Any,
+        indicator_row: Any = None,
+        market_trend: str = "UP",
+        curr_dt_for_delay: Any = None,
+    ) -> bool:
+        """2차 매수 승인 — TradingStrategy._check_s2_approval과 동일 규칙(Type A/B 파라미터 완전 분리)."""
         ind = indicator_row if indicator_row is not None else last_row
-
-        # 지표 참조 불가 시 조기 반환
         if ind is None:
             return True
-
+        pos = {
+            "entry_date": h_info.get("entry_date"),
+            "avg_p": h_info.get("avg_p"),
+            "avg_price": h_info.get("avg_p"),
+            "sig_type": h_info.get("sig_type", ""),
+        }
         try:
-            curr_price = float(ind['Close'])
-        except (KeyError, TypeError):
-            curr_price = 0.0
-
-        # Type B 여부 판별 (엔진과 동일한 기준)
-        _sig = h_info.get('sig_type', h_info.get('reason', ''))
-        _is_b = 'TYPE_B' in str(_sig)
-
-        def _k(key: str, default=None):
-            """Type B이면 B전용 키 우선 조회, 없으면 공통(A) 키로 폴백"""
-            if _is_b:
-                b_key = key.replace('s2_', 's2_b_').replace('use_s2_', 'use_s2_b_')
-                val = s.get(b_key)
-                if val is not None:
-                    return val
-            return s.get(key, default)
-
-        # [Perf v23.0] 단일 패스 평가 — 조건 실패 시 즉시 False 반환 (조기 종료로 속도 최적화)
-
-        # 0. 시장 필터: Type A는 NEUTRAL 허용, Type B는 UP/AGGRESSIVE만
-        if s.get('use_market_filter', True):
-            if _is_b:
-                _mkt_ok = market_trend in ('UP', 'AGGRESSIVE')
-            else:
-                _mkt_ok = market_trend in ('UP', 'AGGRESSIVE', 'NEUTRAL')
-            if not _mkt_ok:
-                return False
-
-        # 1. 대기 시간
-        if _k('use_s2_delay', True):
-            try:
-                entry_dt = pd.to_datetime(h_info['entry_date'])
-                _ts = curr_dt_for_delay if curr_dt_for_delay is not None else getattr(last_row, "name", None)
-                curr_dt = pd.to_datetime(_ts)
-                elapsed_h = (curr_dt - entry_dt).total_seconds() / 3600
-                min_hours = float(_k('s2_delay_hours', 24))
-                if elapsed_h < min_hours:
-                    return False
-            except Exception:
-                pass
-
-        # 2. MA5 지지
-        if _k('use_s2_ma5', True):
-            ma5 = ind.get('MA5', 0) if hasattr(ind, 'get') else 0
-            gap = float(_k('s2_ma5_gap', -0.5))
-            if curr_price < ma5 * (1 + gap / 100.0):
-                return False
-
-        # 3. 거래량
-        if _k('use_s2_vol_surge', True):
-            vol = ind.get('Volume', 0) if hasattr(ind, 'get') else 0
-            vol_tgt = ind.get('Prev_Day_Vol', ind.get('Vol_MA20', ind.get('Volume', 0))) if hasattr(ind, 'get') else 0
-            ratio = float(_k('s2_vol_ratio', 1.5))
-            if vol < vol_tgt * ratio:
-                return False
-
-        # 4. 모멘텀 (RSI OR MACD)
-        use_rsi = _k('use_s2_rsi_sig', True)
-        use_macd = _k('use_s2_macd_gc', True)
-        _rsi_ok = True
-        _macd_ok = True
-        if use_rsi:
-            rsi_val = ind.get('RSI', 0) if hasattr(ind, 'get') else 0
-            rsi_sig_v = ind.get('RSI_Sig', 50) if hasattr(ind, 'get') else 50
-            rsi_prev = ind.get('Prev_RSI', rsi_val) if hasattr(ind, 'get') else rsi_val
-            gap = float(_k('s2_rsi_gap', 0.0))
-            _rsi_ok = rsi_val >= rsi_sig_v * (1 + gap / 100.0) and rsi_val > rsi_prev
-        if use_macd:
-            macd_val = ind.get('MACD', 0) if hasattr(ind, 'get') else 0
-            macd_sig_v = ind.get('MACD_Sig', 0) if hasattr(ind, 'get') else 0
-            osc_val = ind.get('OSC', 1) if hasattr(ind, 'get') else 1
-            osc_prev = ind.get('Prev_OSC', osc_val) if hasattr(ind, 'get') else osc_val
-            gap = float(_k('s2_macd_gap', 0.0))
-            _macd_ok = macd_val >= macd_sig_v + gap and osc_val > 0 and osc_val > osc_prev
-
-        _momentum_fail = (
-            (use_rsi and use_macd and not _rsi_ok and not _macd_ok) or
-            (use_rsi and not use_macd and not _rsi_ok) or
-            (use_macd and not use_rsi and not _macd_ok)
-        )
-        if _momentum_fail:
+            return bool(
+                TradingStrategy._check_s2_approval(
+                    pos,
+                    last_row,
+                    self.settings,
+                    indicator_row=ind,
+                    market_trend=market_trend,
+                    curr_dt=curr_dt_for_delay,
+                )
+            )
+        except Exception:
             return False
-
-        # 5. 수익권
-        if _k('use_s2_profit', True):
-            profit_limit = float(_k('s2_profit_limit', 1.0))
-            avg_p = h_info.get('avg_p', curr_price)
-            if avg_p > 0:
-                profit_pct = (curr_price / avg_p - 1) * 100
-                if profit_pct < profit_limit:
-                    return False
-
-        # 전 조건 통과 → 승인
-        return True

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 
@@ -75,6 +77,98 @@ def calculate_adx(df, period=14):
     
     return plus_di, minus_di, adx
 
+
+def _read_prev_vol_lookback_days(
+    settings: dict | None,
+    key_candidates: tuple[str, ...],
+    *,
+    default: int,
+) -> int:
+    """신규·구 설정 키에서 전일 동시간 거래량 평균 일수를 읽는다."""
+    if settings is None:
+        return max(1, int(default))
+    for k in key_candidates:
+        try:
+            if k in settings and settings[k] is not None and settings[k] != "":
+                return max(1, int(float(settings[k])))
+        except (TypeError, ValueError):
+            continue
+    return max(1, int(default))
+
+
+def attach_prev_day_volume_quartet(df: pd.DataFrame, settings: dict | None) -> None:
+    """
+    S1/S2 × A/B 각각 독립 lookback으로 4열을 만든 뒤,
+    레거시 호환용 Prev_Day_Vol(=S1A)·Prev_Day_Vol_B(=S1B)를 동기화한다.
+    """
+    s = settings or {}
+    lb_s1a = _read_prev_vol_lookback_days(
+        s, ("prev_vol_lookback_s1_a", "prev_vol_lookback", "vol_lookback"), default=10
+    )
+    lb_s1b = _read_prev_vol_lookback_days(s, ("prev_vol_lookback_s1_b", "prev_vol_lookback_b"), default=lb_s1a)
+    lb_s2a = _read_prev_vol_lookback_days(
+        s, ("prev_vol_lookback_s2_a", "prev_vol_lookback", "vol_lookback"), default=lb_s1a
+    )
+    lb_s2b = _read_prev_vol_lookback_days(s, ("prev_vol_lookback_s2_b", "prev_vol_lookback_b"), default=lb_s2a)
+
+    cols = (
+        "Prev_Day_Vol_S1_A",
+        "Prev_Day_Vol_S1_B",
+        "Prev_Day_Vol_S2_A",
+        "Prev_Day_Vol_S2_B",
+        "Prev_Day_Vol",
+        "Prev_Day_Vol_B",
+    )
+    if not isinstance(df.index, pd.DatetimeIndex) or len(df) == 0 or "Volume" not in df.columns:
+        for c in cols:
+            df[c] = 0
+        return
+
+    done_lb: dict[int, str] = {}
+    for lb, col in (
+        (lb_s1a, "Prev_Day_Vol_S1_A"),
+        (lb_s1b, "Prev_Day_Vol_S1_B"),
+        (lb_s2a, "Prev_Day_Vol_S2_A"),
+        (lb_s2b, "Prev_Day_Vol_S2_B"),
+    ):
+        src = done_lb.get(lb)
+        if src is not None:
+            df[col] = df[src].copy()
+        else:
+            attach_prev_day_same_time_volume(df, lb, col)
+            done_lb[lb] = col
+
+    df["Prev_Day_Vol"] = df["Prev_Day_Vol_S1_A"].copy()
+    df["Prev_Day_Vol_B"] = df["Prev_Day_Vol_S1_B"].copy()
+
+
+def attach_prev_day_same_time_volume(
+    df: pd.DataFrame,
+    vol_lookback_days: int,
+    out_column: str,
+) -> None:
+    """
+    전일 동시간대 거래량의 rolling 평균을 out_column에 기록.
+    attach_prev_day_volume_quartet에서 S1/S2·A/B 열별로 호출된다.
+    """
+    vol_lookback = max(1, int(vol_lookback_days))
+    if not isinstance(df.index, pd.DatetimeIndex) or len(df) == 0:
+        df[out_column] = 0
+        return
+    try:
+        df_tmp = df[["Volume"]].copy()
+        df_tmp["date_only"] = df_tmp.index.normalize()
+        df_tmp["time_only"] = df_tmp.index.time
+        pivoted = df_tmp.pivot_table(index="date_only", columns="time_only", values="Volume")
+        pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
+        stacked = pivoted_rolled.stack(future_stack=True)
+        lookup_keys = pd.MultiIndex.from_arrays([df_tmp.index.normalize(), df_tmp.index.time])
+        df[out_column] = stacked.reindex(lookup_keys).values
+        df[out_column] = df[out_column].ffill().fillna(0)
+    except Exception:
+        df[out_column] = 0
+
+
 def calculate_all_indicators(df, settings):
     """백테스팅 및 실시간 감시 통합 지표 계산"""
     df = df.copy()
@@ -125,26 +219,17 @@ def calculate_all_indicators(df, settings):
     # 6. ADX & ATR
     if 'High' in df.columns and 'Low' in df.columns:
         _, _, df['ADX'] = calculate_adx(df, 14)
-        atr_p = int(settings.get('atr_period', 14))
-        df['ATR'] = calculate_atr(df, max(1, atr_p))
-        
-        # [Perf] Vectorized Prev Day Same Time Volume calculation
-        v_lookback = int(settings.get('prev_vol_lookback', settings.get('vol_lookback', 10)))
-        vol_lookback = max(1, v_lookback)
-        
-        df_tmp = df[['Volume']].copy()
-        if isinstance(df_tmp.index, pd.DatetimeIndex):
-            df_tmp['date_only'] = df_tmp.index.normalize()
-            df_tmp['time_only'] = df_tmp.index.time
-            pivoted = df_tmp.pivot_table(index='date_only', columns='time_only', values='Volume')
-            pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
-            stacked = pivoted_rolled.stack(future_stack=True)
-            lookup_keys = pd.MultiIndex.from_arrays([df_tmp.index.normalize(), df_tmp.index.time])
-            df['Prev_Day_Vol'] = stacked.reindex(lookup_keys).values
-            df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
-        else:
-            df['Prev_Day_Vol'] = 0
-        
+        # Type A/B 청산용 ATR 주기 분리 (구버전 atr_period → A 트랙 폴백)
+        atr_pa = int(settings.get("atr_period_a", settings.get("atr_period", 14)))
+        atr_pb = int(settings.get("atr_period_b", settings.get("atr_period", 14)))
+        df["ATR_A"] = calculate_atr(df, max(1, atr_pa))
+        df["ATR_B"] = calculate_atr(df, max(1, atr_pb))
+        df["ATR"] = df["ATR_A"]
+
+    # 전일 동시간 거래량: S1/S2 × A/B lookback 완전 분리 (+ 레거시 2열)
+    if "Volume" in df.columns:
+        attach_prev_day_volume_quartet(df, settings)
+
     return df
 
 def calculate_buy_indicators_light(df, settings):
@@ -168,36 +253,26 @@ def calculate_buy_indicators_light(df, settings):
     )
     df['Prev_OSC'] = df['OSC'].shift(1)
     
-    # Prev Day same time vol (전일 동시간 거래량 평균) - Optimized for v35.8
-    v_lookback = int(settings.get('prev_vol_lookback', settings.get('vol_lookback', 10)))
-    vol_lookback = max(1, v_lookback)
-    
     if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
-        # Vectorized pivot-based approach (v35.8: Optimized with reindex)
-        df_tmp = df[['Volume']].copy()
-        df_tmp['date_only'] = df_tmp.index.normalize()
-        df_tmp['time_only'] = df_tmp.index.time
-        
-        pivoted = df_tmp.pivot_table(index='date_only', columns='time_only', values='Volume')
-        pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
-        
-        # Map back efficiently (Avoid merge/KeyError issues)
-        stacked = pivoted_rolled.stack(future_stack=True)
-        if isinstance(df.index, pd.DatetimeIndex):
-            lookup_keys = pd.MultiIndex.from_arrays([df.index.normalize(), df.index.time])
-        else:
-            now_norm = pd.Timestamp.now().normalize()
-            lookup_keys = pd.MultiIndex.from_arrays([[now_norm]*len(df), [None]*len(df)])
-            
-        df['Prev_Day_Vol'] = stacked.reindex(lookup_keys).values
-        df['Prev_Day_Vol'] = df['Prev_Day_Vol'].ffill().fillna(0)
+        attach_prev_day_volume_quartet(df, settings)
     else:
-        df['Prev_Day_Vol'] = 0
-    
+        for c in (
+            "Prev_Day_Vol_S1_A",
+            "Prev_Day_Vol_S1_B",
+            "Prev_Day_Vol_S2_A",
+            "Prev_Day_Vol_S2_B",
+            "Prev_Day_Vol",
+            "Prev_Day_Vol_B",
+        ):
+            df[c] = 0
+
     # ATR (v31.0: Added for exit monitoring)
     # If High/Low exist, calculate ATR (required for SL/Trail)
     if 'High' in df.columns and 'Low' in df.columns:
-        atr_p = int(settings.get('atr_period', 14))
-        df['ATR'] = calculate_atr(df, max(1, atr_p))
+        atr_pa = int(settings.get("atr_period_a", settings.get("atr_period", 14)))
+        atr_pb = int(settings.get("atr_period_b", settings.get("atr_period", 14)))
+        df["ATR_A"] = calculate_atr(df, max(1, atr_pa))
+        df["ATR_B"] = calculate_atr(df, max(1, atr_pb))
+        df["ATR"] = df["ATR_A"]
     
     return df

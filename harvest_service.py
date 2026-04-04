@@ -22,8 +22,8 @@ class HarvestService:
         # [v16.9.3] 하베스팅 실전 서버 강제 설정
         # -----------------------------------------------------------------------
         # 모의투자(config.USE_MOCK=True) 상태에서도 하베스팅은 항상 실전 서버를 사용해야
-        # 합니다. 모의투자 서버는 체결강도(VolPower) 등 일부 시장 데이터를 제공하지 않아
-        # DB에 0건이 저장되는 문제가 있기 때문입니다.
+        # 합니다. 모의투자 서버는 일부 시장 데이터가 빈약해 DB 적재가 어긋날 수 있습니다.
+        # 체결강도(VolPower)는 하베스팅에서 수집하지 않으며, 실시간 감시 등 별도 경로에서만 다룹니다.
         # 반드시 AuthManager()/DataManagerV2() 생성 전에 config를 변경해야 합니다.
         config.USE_MOCK = False
         config.URL = config.REAL_URL
@@ -203,9 +203,7 @@ class HarvestService:
         if total_fetched > 0:
             self.log(f"   - {code}: 15분봉 데이터 갱신 중...")
             self.db.refresh_resampled_data(code)
-            self.log(f"   - {code}: 과거 체결강도(VolPower) 동기화 중...")
-            vp_count = self.db.sync_historical_vol_power(code, token)
-            self.log(f"[OK] {code} 처리 완료: 신규 봉 {total_fetched}개, 체결강도 {vp_count}개 저장됨")
+            self.log(f"[OK] {code} 처리 완료: 신규 봉 {total_fetched}개 저장됨")
         else:
             # [v16.9.1] 개선된 원인별 로그 세분화 (지수/최신/미수집)
             is_idx = (len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11'])
@@ -312,6 +310,16 @@ class HarvestService:
             
             # 종목 간 대기 (서버 부하 분산)
             time.sleep(0.5)
+
+        # 대량 적재 후 플래너 통계 갱신 (조회 지연 완화에 유리, 락은 짧음)
+        self.log("📈 DB ANALYZE 실행 중… (쿼리 플래너 통계 갱신)")
+        try:
+            if self.db.run_analyze():
+                self.log("✅ ANALYZE 완료")
+            else:
+                self.log("⚠️ ANALYZE 실패 — 콘솔 로그를 확인하세요.")
+        except Exception as e:
+            self.log(f"⚠️ ANALYZE 예외: {e}")
 
         self.log("[FINISH] 모든 수집 작업이 종료되었습니다.")
 

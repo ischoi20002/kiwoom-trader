@@ -107,18 +107,179 @@ def get_strategy_score(row, settings):
     res.update({"valid": True, "score": total_score, "pos_diff": pos_diff})
     return res
 
+
+def _add_vol_burst_ab_columns(df_valid: pd.DataFrame, settings: dict) -> pd.DataFrame:
+    """
+    prepare_dynamic_universe 와 동일: Track A/B 각각 거래량 분출(배율·룩백 분리).
+    """
+    vol_ratio_a = float(settings.get("vol_ratio", 1.5))
+    lookback_a = int(settings.get("vol_lookback", 10))
+    df_valid = df_valid.copy()
+    df_valid["VolRatio"] = df_valid["volume"] / df_valid["volume"].shift(1)
+    df_valid["VolBurst_A"] = (df_valid["VolRatio"] >= vol_ratio_a) & (
+        df_valid["close"] > df_valid["close"].shift(1)
+    )
+    df_valid["VolBurstActive_A"] = df_valid["VolBurst_A"].rolling(lookback_a).max().astype(bool)
+    vol_ratio_b = float(settings.get("sel_b_vol_ratio", vol_ratio_a))
+    lookback_b = int(settings.get("sel_b_vol_lookback", lookback_a))
+    df_valid["VolBurst_B"] = (df_valid["VolRatio"] >= vol_ratio_b) & (
+        df_valid["close"] > df_valid["close"].shift(1)
+    )
+    df_valid["VolBurstActive_B"] = df_valid["VolBurst_B"].rolling(lookback_b).max().astype(bool)
+    return df_valid
+
+
+def dual_track_selection_metrics(last_row: pd.Series, settings: dict) -> dict:
+    """
+    일봉 최신 행에 대해 prepare_dynamic_universe 의 Valid_A/B·Score_A/B 와 동일한 판정.
+    반환: valid_a, score_a, valid_b, score_b (무효 트랙은 점수 0).
+    """
+    try:
+        min_억_a = float(settings.get("min_trde_val", 40.0)) * 100000000
+        conv = max(float(settings.get("ma_convergence", 3.0)) / 100.0, 1e-9)
+        use_a = bool(settings.get("use_sel_track_a", True))
+        use_b = bool(settings.get("use_sel_track_b", True))
+        sel_rsi_min = float(settings.get("sel_rsi_min", 35.0))
+        sel_rsi_max = float(settings.get("sel_rsi_max", 70.0))
+        sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
+        sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))
+        sel_b_min_val = float(settings.get("sel_b_min_trde_val", 60.0)) * 100000000
+
+        avg5 = float(last_row.get("AvgVal5", 0) or 0)
+        ma5 = float(last_row.get("MA5", 0) or 0)
+        ma20 = float(last_row.get("MA20", 0) or 0)
+        ma60 = float(last_row.get("MA60", 0) or 0)
+        close = float(last_row.get("close", 0) or 0)
+        rsi = float(last_row.get("RSI", 0) or 0)
+        osc = float(last_row.get("OSC", 0) or 0)
+        osc_prev = float(last_row.get("OSC_Prev", osc) or 0)
+        vba = bool(last_row.get("VolBurstActive_A", False))
+        vbb = bool(last_row.get("VolBurstActive_B", False))
+
+        ma_diff = abs(ma5 - ma20) / ma20 if ma20 > 0 else 1.0
+        pos_diff = abs(close - ma20) / ma20 if ma20 > 0 else 1.0
+
+        c1_a = avg5 >= min_억_a
+        c2_a = (ma_diff <= conv) if use_a else False
+        c3_a = (sel_rsi_min <= rsi <= sel_rsi_max)
+        c4_a = vba
+        c5 = osc > 0
+        c_ma60 = pd.notna(last_row.get("MA60")) and ma60 > 0
+        valid_a = bool(c1_a and c2_a and c3_a and c4_a and c5 and c_ma60)
+
+        c1_b = avg5 >= sel_b_min_val
+        c2_b = (ma20 > ma60) and (close > ma20) if use_b else False
+        c3_b = (sel_b_rsi_min <= rsi <= sel_b_rsi_max)
+        c4_b = vbb
+        valid_b = bool(c1_b and c2_b and c3_b and c4_b and c5 and c_ma60)
+
+        score_a = 0.0
+        if valid_a:
+            score_a = (
+                max(0.0, (1 - (ma_diff / conv)) * 100) * 0.4
+                + min(100.0, (rsi / 70.0) * 100) * 0.3
+                + min(100.0, (avg5 / 50000000000.0) * 100) * 0.2
+                + max(0.0, (1 - (pos_diff / 0.03)) * 100) * 0.1
+            )
+            if osc > osc_prev:
+                score_a += 10.0
+
+        score_b = 0.0
+        if valid_b:
+            trend_strength = min(10.0, max(0.0, (close / ma20 - 1.0) * 100)) * 10.0
+            osc_term = (
+                min(
+                    100.0,
+                    max(0.0, osc) / (abs(osc) + 1e-10) * 100.0,
+                )
+                * 0.1
+            )
+            score_b = (
+                trend_strength * 0.4
+                + min(100.0, (rsi / 70.0) * 100) * 0.3
+                + min(100.0, (avg5 / 50000000000.0) * 100) * 0.2
+                + osc_term
+            )
+            if osc > osc_prev:
+                score_b += 10.0
+
+        return {
+            "valid_a": valid_a,
+            "score_a": round(float(score_a), 1),
+            "valid_b": valid_b,
+            "score_b": round(float(score_b), 1),
+        }
+    except Exception:
+        return {
+            "valid_a": False,
+            "score_a": 0.0,
+            "valid_b": False,
+            "score_b": 0.0,
+        }
+
+
+def _merge_dual_track_picks(
+    selected_rows: list,
+    settings: dict,
+    logger_callback,
+) -> list:
+    """
+    Track A 상위 max_slots_a + Track B 상위 max_slots_b 를 합치되,
+    양쪽에 모두 든 종목은 SelTrack=AB·Score=max 로 1행만 유지.
+    """
+    max_a = max(0, int(settings.get("max_slots_a", 20)))
+    max_b = max(0, int(settings.get("max_slots_b", 10)))
+    cand_a = [d for d in selected_rows if d.get("_valid_a")]
+    cand_b = [d for d in selected_rows if d.get("_valid_b")]
+    cand_a.sort(key=lambda x: -float(x.get("_score_a", 0)))
+    cand_b.sort(key=lambda x: -float(x.get("_score_b", 0)))
+    picked_a = cand_a[:max_a]
+    picked_b = cand_b[:max_b]
+    code_to_sb = {str(d["Code"]).zfill(6): float(d.get("_score_b", 0)) for d in picked_b}
+    seen = set()
+    final = []
+
+    def strip_internal(d: dict) -> dict:
+        return {k: v for k, v in d.items() if not str(k).startswith("_")}
+
+    for d in picked_a:
+        code = str(d["Code"]).zfill(6)
+        seen.add(code)
+        sa = float(d.get("_score_a", 0))
+        in_b_top = code in code_to_sb
+        if in_b_top:
+            sb = code_to_sb[code]
+            row = strip_internal(d)
+            row["SelTrack"] = "AB"
+            row["Score"] = round(max(sa, sb), 1)
+        else:
+            row = strip_internal(d)
+            row["SelTrack"] = "A"
+            row["Score"] = round(sa, 1)
+        final.append(row)
+
+    for d in picked_b:
+        code = str(d["Code"]).zfill(6)
+        if code in seen:
+            continue
+        seen.add(code)
+        row = strip_internal(d)
+        row["SelTrack"] = "B"
+        row["Score"] = round(float(d.get("_score_b", 0)), 1)
+        final.append(row)
+
+    logger_callback(
+        f"[DualTrack] A후보 {len(cand_a)}→채택 {len(picked_a)}, "
+        f"B후보 {len(cand_b)}→채택 {len(picked_b)}, 최종 행 {len(final)}"
+    )
+    return final
+
+
 def select_monitoring_targets(settings, logger_callback, target_date=None, data_manager=None):
     """
-    [v16.0] KOSPI 200 종목 리스트를 읽어와 설정된 전략 기준에 맞는 종목을 병렬 분석하여 선정합니다.
-    
-    Args:
-        settings (dict): 필터링 기준 설정값 객체
-        logger_callback (function): 로그 출력용 콜백
-        target_date (datetime, optional): 분석 기준일 (None이면 오늘)
-        data_manager (DataManagerV2, optional): 로컬 DB 매니저
-        
-    Returns:
-        pd.DataFrame: 선정 및 점수화된 종목 리스트
+    KOSPI 200을 스캔해 Track A(눌림)·Track B(추세) 유니버스를 **분리** 선정합니다.
+    prepare_dynamic_universe 와 동일 필터(거래량 분출 A/B, RSI·대금 기준 분리 등)를 사용하며,
+    상위 max_slots_a + max_slots_b 를 합산해 CSV/GUI에 반환합니다.
     """
     logger_callback("\n" + "="*50)
     t_str = target_date.strftime('%Y-%m-%d') if target_date else "실시간"
@@ -233,51 +394,69 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
             df_valid = df.dropna(subset=['MA20', 'MA60', 'RSI', 'MACD']).copy()
             if len(df_valid) < 2: return None, status
             
-            # 4. 필터링 준비 (공용 함수를 위한 추가 필드 계산)
-            df_valid['AvgVal5'] = df_valid['TrdeVal'].rolling(5).mean()
-            
-            # 거래량 분출 확인 (공용 로직과 일치)
-            vol_thresh = float(settings.get('vol_ratio', 1.5))
-            lookback = int(settings.get('vol_lookback', 10))
-            df_valid['VolRatio'] = df_valid['volume'] / df_valid['volume'].shift(1)
-            df_valid['VolBurst'] = (df_valid['VolRatio'] >= vol_thresh) & (df_valid['close'] > df_valid['close'].shift(1))
-            df_valid['VolBurstActive'] = df_valid['VolBurst'].rolling(lookback).max().astype(bool)
-            df_valid['OSC_Prev'] = df_valid['OSC'].shift(1)
+            # 4. 필터링 준비: 5일 평균 대금 + Track A/B 분리 거래량 분출
+            df_valid["AvgVal5"] = df_valid["TrdeVal"].rolling(5).mean()
+            df_valid["OSC_Prev"] = df_valid["OSC"].shift(1)
+            df_valid = _add_vol_burst_ab_columns(df_valid, settings)
             last_full = df_valid.iloc[-1]
-            
-            # 5. 전략 필터링 및 점수 산정 (공용 함수 사용)
-            strat_res = get_strategy_score(last_full, settings)
-            
-            # 상세 상태 업데이트 (하위 호환성용)
-            if last_full['AvgVal5'] >= min_val_krw: status["value"] = 1
-            if abs(last_full['MA5'] - last_full['MA20']) / last_full['MA20'] <= float(settings.get('ma_convergence', 3.0)) / 100.0: status["trend"] = 1
-            if float(settings.get('sel_rsi_min', 40.0)) <= last_full['RSI'] <= float(settings.get('sel_rsi_max', 70.0)): status["rsi"] = 1
-            if last_full['VolBurstActive']: status["vol"] = 1
-            
-            if not strat_res["valid"]:
+
+            dm = dual_track_selection_metrics(last_full, settings)
+            valid_a = bool(dm["valid_a"])
+            valid_b = bool(dm["valid_b"])
+            if not valid_a and not valid_b:
                 return None, status
-            
-            total_score = strat_res["score"]
-            pos_diff = strat_res["pos_diff"]
-            
+
+            pos_diff = (
+                abs(last_full["close"] - last_full["MA20"]) / last_full["MA20"]
+                if last_full["MA20"] > 0
+                else 1.0
+            )
+
+            # 상세 상태(통계) — 하위 호환
+            if last_full["AvgVal5"] >= min_val_krw:
+                status["value"] = 1
+            conv_stat = float(settings.get("ma_convergence", 3.0)) / 100.0
+            if last_full["MA20"] > 0 and abs(last_full["MA5"] - last_full["MA20"]) / last_full[
+                "MA20"
+            ] <= conv_stat:
+                status["trend"] = 1
+            if float(settings.get("sel_rsi_min", 40.0)) <= last_full["RSI"] <= float(
+                settings.get("sel_rsi_max", 70.0)
+            ):
+                status["rsi"] = 1
+            if bool(last_full.get("VolBurstActive_A", False)) or bool(
+                last_full.get("VolBurstActive_B", False)
+            ):
+                status["vol"] = 1
+
             res = {
-                'Code': code, 'Name': name, 'Score': total_score,
-                'Price': int(last_full['close']), 
-                'Open': int(last_full['open']),
-                'Diff': int(last_full['close'] - df_valid.iloc[-2]['close']),
-                'Ratio': round((last_full['close'] / df_valid.iloc[-2]['close'] - 1) * 100, 2),
-                'RSI': round(last_full['RSI'], 1), 'MA20Dist': round(pos_diff * 100, 2),
-                'MA60Ratio': round((last_full['close'] / last_full['MA60']) * 100, 2),
-                'MA20': float(last_full['MA20']), 'MA60': float(last_full['MA60']),
-                'MACD': float(last_full['MACD']), 'MACD_Sig': float(last_full['MACD_Sig']), 'OSC': float(last_full['OSC']),
-                'Volume': int(last_full['volume']), 'PrevVol': int(df_valid.iloc[-2]['volume']),
-                'VolMax': int(df_valid['volume'].max()),
-                'MABufScale': 1.0,  # 기본값
-                'AvgTrdeVal': int(last_full['AvgVal5'] / 100000000) # [Fix] 억 단위 추가
+                "Code": code,
+                "Name": name,
+                "Price": int(last_full["close"]),
+                "Open": int(last_full["open"]),
+                "Diff": int(last_full["close"] - df_valid.iloc[-2]["close"]),
+                "Ratio": round(
+                    (last_full["close"] / df_valid.iloc[-2]["close"] - 1) * 100, 2
+                ),
+                "RSI": round(last_full["RSI"], 1),
+                "MA20Dist": round(pos_diff * 100, 2),
+                "MA60Ratio": round((last_full["close"] / last_full["MA60"]) * 100, 2),
+                "MA20": float(last_full["MA20"]),
+                "MA60": float(last_full["MA60"]),
+                "MACD": float(last_full["MACD"]),
+                "MACD_Sig": float(last_full["MACD_Sig"]),
+                "OSC": float(last_full["OSC"]),
+                "Volume": int(last_full["volume"]),
+                "PrevVol": int(df_valid.iloc[-2]["volume"]),
+                "VolMax": int(df_valid["volume"].max()),
+                "MABufScale": 1.0,
+                "AvgTrdeVal": int(last_full["AvgVal5"] / 100000000),
+                "_valid_a": valid_a,
+                "_score_a": dm["score_a"],
+                "_valid_b": valid_b,
+                "_score_b": dm["score_b"],
             }
             return res, status
-        except Exception:
-            return None, status
         except Exception:
             return None, status
 
@@ -286,26 +465,29 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
         raw_results = list(executor.map(process_code, [row for _, row in df_top.iterrows()]))
     
     selected = [r[0] for r in raw_results if r[0] is not None]
-    
+
     # 통계 출력
     stats = {"total": 0, "data": 0, "value": 0, "trend": 0, "rsi": 0, "vol": 0}
     for _, s in raw_results:
-        for k in stats: stats[k] += s.get(k, 0)
-    
-    logger_callback(f"[Stats] 분석: {stats['total']}, 대금: {stats['value']}, 수렴: {stats['trend']}, RSI: {stats['rsi']}, 분출: {stats['vol']}")
-    
-    df_result = pd.DataFrame(selected)
+        for k in stats:
+            stats[k] += s.get(k, 0)
+
+    logger_callback(
+        f"[Stats] 분석: {stats['total']}, 대금: {stats['value']}, "
+        f"수렴: {stats['trend']}, RSI: {stats['rsi']}, 분출: {stats['vol']}"
+    )
+
+    merged_rows = _merge_dual_track_picks(selected, settings, logger_callback)
+    df_result = pd.DataFrame(merged_rows)
     if not df_result.empty:
-        df_result = df_result.sort_values(by='Score', ascending=False)
-        # [v18.9] 선정 결과 개수 제한 적용 (최대 N개)
-        max_mon = int(settings.get('max_slots', 20))
-        df_result = df_result.head(max_mon)
-        
         # 캐시 저장 (실시간일 때만)
         if not target_date:
-            df_result.to_csv("selected_targets.csv", index=False, encoding='utf-8-sig')
-            
-    logger_callback(f"[Done] 최종 {len(df_result)}개 종목 선정 완료. (상위 {len(df_result)}개 필터링됨)")
+            df_result.to_csv("selected_targets.csv", index=False, encoding="utf-8-sig")
+
+    logger_callback(
+        f"[Done] 최종 {len(df_result)}개 종목 선정 완료. "
+        f"(Track A·B 분리 상한 적용, 동적 백테 유니버스와 동일 로직)"
+    )
     return df_result
 
 def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logger_callback):
@@ -540,7 +722,6 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     schedule = {}  # 기존 호환용 (합집합)
     max_s_a = int(settings.get('max_slots_a', 20))
     max_s_b = int(settings.get('max_slots_b', 10))
-    max_s = int(settings.get('max_slots', 20))
     df_sim = df_all[df_all['time'] >= pd.to_datetime(start_date)].copy()
     
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
@@ -563,10 +744,8 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         if not day_b.empty:
             schedule_b[d_str] = day_b.sort_values(by='Score_B', ascending=False).head(max_s_b)['code'].tolist()
         
-        # 기존 호환 스케줄 (합집합, 중복 제거)
-        combined = list(dict.fromkeys(
-            schedule_a.get(d_str, []) + schedule_b.get(d_str, [])
-        ))[:max_s]
+        # 기존 호환 스케줄 (합집합, 중복 제거 — 일별로 이미 A/B 각각 상한 적용됨)
+        combined = list(dict.fromkeys(schedule_a.get(d_str, []) + schedule_b.get(d_str, [])))
         if combined:
             schedule[d_str] = combined
 
