@@ -112,17 +112,59 @@ class TradingController:
                 or 'AB',
             }
 
+    def _merged_warmup_codes(self):
+        """감시 종목 ∪ 관심목록 (순서 유지·중복 제거)."""
+        mc = [str(c).zfill(6) for c in (self.monitor_codes or [])]
+        try:
+            wl = [str(c).zfill(6) for c in self.app.watchlist_store.get_codes()]
+        except Exception:
+            wl = []
+        return list(dict.fromkeys(mc + wl))
+
+    def _ensure_watchlist_monitor_info(self) -> None:
+        """관심목록 전용 종목은 monitor_info 최소 항목을 채웁니다 (감시 트리와 별도)."""
+        try:
+            wl = set(str(c).zfill(6) for c in self.app.watchlist_store.get_codes())
+        except Exception:
+            wl = set()
+        mc = set(str(c).zfill(6) for c in (self.monitor_codes or []))
+        for c in wl - mc:
+            if c in self.monitor_info:
+                continue
+            try:
+                name = self.app.watchlist_store.get_name(c)
+            except Exception:
+                name = c
+            self.monitor_info[c] = {
+                "name": name,
+                "ma20": 0.0,
+                "ma60": 0.0,
+                "prev_vol": 0.0,
+                "score": 0.0,
+                "ma_buffer_scale": 1.0,
+                "open": 0.0,
+                "last_price": 0.0,
+                "sel_track": "B",
+            }
+
     def _run_start_sequence(self):
         """워밍업부터 웹소켓 연결까지 마스터 시퀀스"""
         try:
+            self.app._active_stream_codes = []
+            merged = self._merged_warmup_codes()
+            self._ensure_watchlist_monitor_info()
+
             # [Step 1] Warmup: 전 종목 15분봉·장중 구간 검증 통과 시에만 감시 진행
             if self.status_cb:
-                self.status_cb("STATUS_TEXT", f"상태: 분석 중 ({len(self.monitor_codes)}종목)")
+                self.status_cb(
+                    "STATUS_TEXT",
+                    f"상태: 분석 중 (감시 {len(self.monitor_codes)} + 스트림 합계 {len(merged)})",
+                )
             if self.status_cb:
-                self.status_cb("WARMUP_BEGIN", list(self.monitor_codes))
+                self.status_cb("WARMUP_BEGIN", list(merged))
 
             results = self.app.warmup_service.run(
-                self.monitor_codes,
+                merged,
                 self.monitor_info,
                 self.app.bars_data,
             )
@@ -130,12 +172,10 @@ class TradingController:
             require_full = bool(
                 self.app.settings.get("require_full_warmup_for_monitoring", True)
             )
-            failed = [
-                c for c in self.monitor_codes if not results.get(c, {}).get("ok")
-            ]
+            failed = [c for c in merged if not results.get(c, {}).get("ok")]
             if failed:
                 if require_full:
-                    for c in self.monitor_codes:
+                    for c in merged:
                         try:
                             self.app.bars_data.pop(c, None)
                         except Exception:
@@ -167,7 +207,9 @@ class TradingController:
                 self.monitor_codes = [
                     c for c in self.monitor_codes if c not in failed
                 ]
-                if not self.monitor_codes:
+                if not [
+                    c for c in merged if results.get(c, {}).get("ok")
+                ]:
                     if self.status_cb:
                         self.status_cb(
                             "WARMUP_FAILED",
@@ -194,13 +236,16 @@ class TradingController:
                         },
                     )
 
+            successful = [c for c in merged if results.get(c, {}).get("ok")]
+            self.app._active_stream_codes = successful
+
             self.log(
                 "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 모니터링을 시작합니다."
             )
 
             self.is_monitoring = True
             if self.status_cb:
-                self.status_cb("STARTED", len(self.monitor_codes))
+                self.status_cb("STARTED", len(successful))
 
             # [Step 2] 가상 실천 엔진(WS Worker) 구동
             self._stop_event.clear()
@@ -248,11 +293,40 @@ class TradingController:
 
     def execute_buy_signal(self, code, name, price, reason="TYPE_A"):
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합)"""
-        if code in self.app.portfolio.virtual_positions: return
-        
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "buy_execute_start",
+                    {"code": code, "name": name, "price": float(price), "reason": reason},
+                )
+        except Exception:
+            pass
+
+        if code in self.app.portfolio.virtual_positions:
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "buy_skipped",
+                        {"code": code, "reason": "already_in_position"},
+                    )
+            except Exception:
+                pass
+            return
+
         # 0. 자동 매매 마스터 스위치 확인 (UI 연동)
         if not self.app.settings.get('use_auto_virtual', False):
             self.log(f"🔔 [Signal] {name}({code}) {reason} 포착! (자동 매매 OFF 상태)")
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "buy_skipped",
+                        {"code": code, "name": name, "reason": "use_auto_virtual_off"},
+                    )
+            except Exception:
+                pass
             return
 
         # 1. 투자금액 산출 (Risk Management)
@@ -262,6 +336,15 @@ class TradingController:
         invest_amt = self.app.portfolio.calculate_order_quantity(stage=1, is_simulation=not allow_order)
         if invest_amt <= 0:
             self.log(f"⚠️ [Skip] {name}({code}) 진입 건너뜀 (투자금액 0 또는 자산 정보 부재)")
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "buy_skipped",
+                        {"code": code, "name": name, "reason": "zero_invest_amt"},
+                    )
+            except Exception:
+                pass
             return
             
         # 2. 주문 수량 및 가격 보정
@@ -270,11 +353,31 @@ class TradingController:
         
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
         if allow_order:
-            self.app.order_manager.place_order(code, qty, price, order_type="03", side="buy", name=name, reason=reason)
+            ord_no = self.app.order_manager.place_order(
+                code, qty, price, order_type="03", side="buy", name=name, reason=reason
+            )
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "order_buy",
+                        {
+                            "code": code,
+                            "name": name,
+                            "qty": int(qty),
+                            "price": int(adj_price),
+                            "order_type": "03",
+                            "result": "submitted" if ord_no else "failed",
+                            "order_no": ord_no or "",
+                            "reason": reason,
+                        },
+                    )
+            except Exception:
+                pass
         else:
             snapshot = self.app.portfolio.capture_snapshot(code, price, reason=reason)
             self.app.portfolio.on_fill(code, "buy", price, qty, name=name, reason=reason, snapshot=snapshot)
-            
+
         self.log(f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 ({price:,}원, {qty}주)")
         
         # 4. 텔레그램 알림 (비동기)
@@ -284,11 +387,29 @@ class TradingController:
 
     def handle_strategy_action(self, code, action, reason, **kwargs):
         """[v4.5.3/v4.5.4] StrategyEngine에서 결정된 액션(EXIT/STAGE2)을 처리합니다."""
-        if action == "HOLD": return
-        
+        if action == "HOLD":
+            return
+
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "strategy_action",
+                    {
+                        "code": code,
+                        "action": action,
+                        "reason": reason,
+                        "now_price": float(kwargs.get("now_price", 0) or 0),
+                        "profit_ratio": float(kwargs.get("profit_ratio", 0) or 0),
+                    },
+                )
+        except Exception:
+            pass
+
         pos = self.app.portfolio.virtual_positions.get(code)
-        if not pos: return
-        
+        if not pos:
+            return
+
         now_price = kwargs.get('now_price', 0)
         profit_ratio = kwargs.get('profit_ratio', 0.0)
         
@@ -296,12 +417,47 @@ class TradingController:
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
 
         # 0. 자동 매매 마스터 스위치 확인 (UI 연동)
-        if not self.app.settings.get('use_auto_virtual', False): return
+        if not self.app.settings.get('use_auto_virtual', False):
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "strategy_action_skipped",
+                        {"code": code, "action": action, "reason": "use_auto_virtual_off"},
+                    )
+            except Exception:
+                pass
+            return
 
         if action == "EXIT":
             # [Audit] Exit Execution
             if allow_order:
-                self.app.order_manager.place_order(code, pos['qty'], now_price, order_type="03", side="sell", name=pos['name'], reason=f"EXIT_{reason}")
+                ord_no = self.app.order_manager.place_order(
+                    code,
+                    pos['qty'],
+                    now_price,
+                    order_type="03",
+                    side="sell",
+                    name=pos['name'],
+                    reason=f"EXIT_{reason}",
+                )
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "order_sell",
+                            {
+                                "code": code,
+                                "name": pos.get("name", ""),
+                                "qty": int(pos.get("qty", 0)),
+                                "price": int(now_price),
+                                "result": "submitted" if ord_no else "failed",
+                                "order_no": ord_no or "",
+                                "reason": f"EXIT_{reason}",
+                            },
+                        )
+                except Exception:
+                    pass
             else:
                 snapshot = self.app.portfolio.capture_snapshot(code, now_price, reason=f"EXIT_{reason}")
                 self.app.portfolio.on_fill(code, "sell", now_price, pos['qty'], snapshot=snapshot)
@@ -325,7 +481,32 @@ class TradingController:
             
             if add_qty > 0:
                 if allow_order:
-                    self.app.order_manager.place_order(code, add_qty, now_price, order_type="03", side="buy", name=pos['name'], reason="Stage 2 Scaling")
+                    ord_no = self.app.order_manager.place_order(
+                        code,
+                        add_qty,
+                        now_price,
+                        order_type="03",
+                        side="buy",
+                        name=pos['name'],
+                        reason="Stage 2 Scaling",
+                    )
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "order_buy_s2",
+                                {
+                                    "code": code,
+                                    "name": pos.get("name", ""),
+                                    "qty": int(add_qty),
+                                    "price": int(adj_price),
+                                    "result": "submitted" if ord_no else "failed",
+                                    "order_no": ord_no or "",
+                                    "reason": "Stage 2 Scaling",
+                                },
+                            )
+                    except Exception:
+                        pass
                 else:
                     snapshot = self.app.portfolio.capture_snapshot(code, now_price, reason="Stage 2 Scaling")
                     self.app.portfolio.on_fill(code, "buy", now_price, add_qty, snapshot=snapshot)

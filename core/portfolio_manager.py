@@ -249,8 +249,20 @@ class PortfolioManager:
         try: return int(v) if not isinstance(v, list) else 0
         except: return 0
 
-    def on_fill(self, code, side, price, qty, name=None, reason=None, snapshot=None):
-        """[v18.0] 체결(CHE) 데이터를 처리하여 포지션을 업데이트하며, 시점 스냅샷을 함께 기록합니다."""
+    def on_fill(
+        self,
+        code,
+        side,
+        price,
+        qty,
+        name=None,
+        reason=None,
+        snapshot=None,
+        fill_channel: str = "virtual",
+    ):
+        """[v18.0] 체결(CHE) 데이터를 처리하여 포지션을 업데이트하며, 시점 스냅샷을 함께 기록합니다.
+        fill_channel: \"virtual\" | \"exchange\" — 일별 세션 로그 구분용.
+        """
         now_str = datetime.now().strftime('%H:%M:%S')
         with self.lock:
             if side == "buy":
@@ -352,7 +364,26 @@ class PortfolioManager:
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
 
         self.save_db()
-        if self.gui_callback: self.gui_callback()
+        if self.gui_callback:
+            self.gui_callback()
+
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "fill",
+                    {
+                        "code": code,
+                        "side": side,
+                        "price": self._to_f(price),
+                        "qty": self._to_i(qty),
+                        "name": name or "",
+                        "reason": reason or "",
+                        "fill_channel": fill_channel,
+                    },
+                )
+        except Exception:
+            pass
 
     def clear_all(self):
         """모든 가상 포지션을 초기화합니다."""

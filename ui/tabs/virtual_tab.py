@@ -79,6 +79,8 @@ class VirtualTab:
         
         ttk.Button(btn_group, text="🔄 동기화", width=8, command=self.app._sync_account_deposit).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_group, text="📊 리포트", width=8, command=self.generate_report).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_group, text="📋 일일결산", width=10, command=self.generate_daily_settlement).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_group, text="⭐ 관심목록", width=10, command=self._open_watchlist_dialog).pack(side=tk.LEFT, padx=2)
         
         # [v3.9.5] 버튼명 '서버 전환'으로 변경
         self.btn_env = ttk.Button(btn_group, text="서버 전환", width=10, command=self._toggle_environment)
@@ -161,6 +163,36 @@ class VirtualTab:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         return tree
 
+    def _open_watchlist_dialog(self) -> None:
+        """텔레그램 전용 관심목록 편집 (추가·삭제·저장)."""
+        try:
+            from ui.watchlist_dialog import open_watchlist_dialog
+
+            open_watchlist_dialog(self.app.root, self.app)
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", f"관심목록 창을 열 수 없습니다: {e}")
+            except Exception:
+                pass
+
+    def _watchlist_hide_codes(self) -> set:
+        """관심목록 종목은 가상포지션 탭에서 숨김 (감시목록과 별도, 전체 관심 코드)."""
+        try:
+            return self.app.watchlist_store.codes_set()
+        except Exception:
+            return set()
+
+    def _watchlist_report_exclude_codes(self) -> set:
+        """나러티브 리포트에서만 제외: 관심만·비감시. 감시와 겹치면 리포트에 포함."""
+        try:
+            mc = getattr(self.app.trading_controller, "monitor_codes", None) or []
+        except Exception:
+            mc = []
+        try:
+            return self.app.watchlist_store.codes_report_exclusion_set(mc)
+        except Exception:
+            return set()
+
     def _render_virtual_positions(self):
         """데이터(app.virtual_positions / history / today_orders) 동기화"""
         # 1. 보유 종목
@@ -169,10 +201,16 @@ class VirtualTab:
         total_unrealized_pnl = 0
         
         existing_active = set(self.tree_active.get_children())
-        active_list = list(self.app.portfolio.virtual_positions.items())
+        wl_hide = self._watchlist_hide_codes()
+        active_list = [
+            (c, p)
+            for c, p in self.app.portfolio.virtual_positions.items()
+            if str(c).zfill(6) not in wl_hide
+        ]
         
+        mi = getattr(self.app, "monitor_info", None) or {}
         for idx, (code, pos) in enumerate(active_list):
-            info = self.app.monitor_info.get(code, {})
+            info = mi.get(code, {})
             curr_p = info.get('price', pos['avg_price'])
             profit_pct = (curr_p / pos['avg_price'] - 1) * 100
             eval_amt = curr_p * pos['qty']
@@ -207,7 +245,10 @@ class VirtualTab:
         today_str = datetime.now().strftime("%Y-%m-%d")
         
         self.tree_history.delete(*self.tree_history.get_children())
-        for idx, pos in enumerate(self.app.portfolio.virtual_history):
+        hist_row = 0
+        for pos in self.app.portfolio.virtual_history:
+            if str(pos.get("code", "")).zfill(6) in wl_hide:
+                continue
             last_event = pos['events'][-1] if pos.get('events') else {}
             pnl_amt = pos.get('realized_pnl_amt', 0)
             total_realized_pnl += pnl_amt
@@ -215,7 +256,8 @@ class VirtualTab:
             if pos.get('entry_time', '').startswith(today_str):
                 total_day_realized_pnl += pnl_amt
             
-            tag_base = "even" if idx % 2 == 0 else "odd"
+            tag_base = "even" if hist_row % 2 == 0 else "odd"
+            hist_row += 1
             p_tag = "price_up" if pos.get('final_pnl_pct', 0) > 0 else "price_down"
             self.tree_history.insert("", tk.END, values=(
                 pos.get('exit_time', last_event.get('time', '-')), 
@@ -263,10 +305,14 @@ class VirtualTab:
         """[v4.5.3] 실시간 틱 수신 시 보유 종목 수익률만 부분 렌더링 (최적화)"""
         if not self.tree_active: return
         
+        wl_hide = self._watchlist_hide_codes()
+        mi = getattr(self.app, "monitor_info", None) or {}
         for code in self.app.portfolio.virtual_positions:
+            if str(code).zfill(6) in wl_hide:
+                continue
             if self.tree_active.exists(code):
                 pos = self.app.portfolio.virtual_positions[code]
-                info = self.app.monitor_info.get(code, {})
+                info = mi.get(code, {})
                 curr_p = info.get('price', pos['avg_price'])
                 profit_pct = (curr_p / pos['avg_price'] - 1) * 100
                 eval_amt = curr_p * pos['qty']
@@ -295,14 +341,19 @@ class VirtualTab:
         self.tree_orders.delete(*self.tree_orders.get_children())
         try:
             orders = self.app.data_manager.get_today_orders()
-            for i, ord_data in enumerate(orders):
+            wl_hide = self._watchlist_hide_codes()
+            row_i = 0
+            for ord_data in orders:
                 # ts, code, side, qty, price, f_price, f_qty, result, name, reason
                 ts, code, side, qty, price, f_price, f_qty, result, name, reason = ord_data
+                if str(code).zfill(6) in wl_hide:
+                    continue
                 tm = ts.split(" ")[1] if " " in ts else ts
                 side_kr = "매수" if side == "buy" else "매도"
                 f_p_str = f"{f_price:,}" if f_price > 0 else "-"
                 
-                tag_base = "even" if i % 2 == 0 else "odd"
+                tag_base = "even" if row_i % 2 == 0 else "odd"
+                row_i += 1
                 side_tag = "price_up" if side == "buy" else "price_down"
                 
                 self.tree_orders.insert("", tk.END, values=(
@@ -379,7 +430,13 @@ class VirtualTab:
             import webbrowser
             
             output_file = "virtual_trade_report.html"
-            generate_virtual_narrative_report(self.app.portfolio.virtual_history, output_file, self.app.settings)
+            excl = self._watchlist_report_exclude_codes()
+            hist_vis = [
+                h
+                for h in self.app.portfolio.virtual_history
+                if str(h.get("code", "")).zfill(6) not in excl
+            ]
+            generate_virtual_narrative_report(hist_vis, output_file, self.app.settings)
             
             abs_path = os.path.abspath(output_file)
             if os.path.exists(abs_path):
@@ -389,6 +446,23 @@ class VirtualTab:
                 self.app.log("[Error] 리포트 파일 생성 실패")
         except Exception as e:
             self.app.log(f"[Error] 리포트 생성 중 오류: {e}")
+
+    def generate_daily_settlement(self):
+        """실시간 감시 일일 결산 HTML (요약 + 종목별 주문/체결 + JSONL 이벤트)."""
+        try:
+            import webbrowser
+            from pathlib import Path
+
+            from reporting.daily_settlement_report import generate_daily_settlement_report
+
+            path = generate_daily_settlement_report(self.app)
+            if os.path.isfile(path):
+                webbrowser.open(Path(path).as_uri())
+                self.app.log(f"[일일결산] 저장 및 열기: {path}")
+            else:
+                self.app.log("[Error] 일일 결산 파일 생성 실패")
+        except Exception as e:
+            self.app.log(f"[Error] 일일 결산 생성 중 오류: {e}")
 
     def open_report_folder(self):
         """리포트 저장 폴더 열기"""

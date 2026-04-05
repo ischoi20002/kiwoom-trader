@@ -190,8 +190,13 @@ class MonitorTab:
                     await asyncio.sleep(10)
                     continue
                 
-                if not self.app.monitor_codes:
-                    self.app.root.after(0, self.app.log, "⚠️ [시스템] 감시 대상 종목이 없습니다.")
+                stream_codes = []
+                try:
+                    stream_codes = self.app.stream_subscription_codes()
+                except Exception:
+                    stream_codes = list(getattr(self.app.trading_controller, "monitor_codes", []) or [])
+                if not stream_codes:
+                    self.app.root.after(0, self.app.log, "⚠️ [시스템] 웹소켓 등록할 종목이 없습니다.")
                     self.app.is_monitoring = False
                     return
 
@@ -218,10 +223,23 @@ class MonitorTab:
                                 trnm = packet.get('trnm')
                                 if trnm == 'LOGIN':
                                     if packet.get('return_code') == 0:
-                                        self.app.log(f"✅ [시스템] 로그인 성공. 종목 등록 ({len(self.app.monitor_codes)}개)...")
+                                        try:
+                                            _sc = self.app.stream_subscription_codes()
+                                        except Exception:
+                                            _sc = list(
+                                                getattr(
+                                                    self.app.trading_controller,
+                                                    "monitor_codes",
+                                                    [],
+                                                )
+                                                or []
+                                            )
+                                        self.app.log(
+                                            f"✅ [시스템] 로그인 성공. 종목 등록 ({len(_sc)}개)..."
+                                        )
                                         reg_packet = {
                                             'trnm': 'REG', 'grp_no': '1', 'refresh': '1', 'market': 'AL',
-                                            'data': [{'item': self.app.monitor_codes, 'type': ['0B', '0D']}]
+                                            'data': [{'item': _sc, 'type': ['0B', '0D']}]
                                         }
                                         await ws.send(json.dumps(reg_packet))
                                     else:
@@ -353,6 +371,13 @@ class MonitorTab:
         if self.app.status_label:
             self.app.status_label.config(text=f"장세: {trend}", foreground=t['fg'], background=t['bg'])
 
+    def _watchlist_codes_set(self) -> set:
+        """관심목록 코드(6자리). 감시목록과 독립이며, 이 집합은 감시 화면에서 숨김."""
+        try:
+            return self.app.watchlist_store.codes_set()
+        except Exception:
+            return set()
+
     def update_view(self, updates, virtual_positions):
         """[v4.5.3] App으로부터 전달받은 실시간 틱 데이터를 화면에 렌더링 (캡슐화)"""
         if not self.tree_monitor: return
@@ -361,8 +386,15 @@ class MonitorTab:
             if updates:
                 items = list(updates.items())
                 updates.clear()
+                wl = self._watchlist_codes_set()
                 
                 for iid, (values, tag, _) in items:
+                    cid = str(iid).zfill(6)
+                    if cid in wl:
+                        for tree in (self.tree_monitor, self.tree_active_monitor):
+                            if tree and tree.exists(iid):
+                                tree.delete(iid)
+                        continue
                     # 보유 여부에 따라 타겟 트리 결정
                     is_active = iid in virtual_positions
                     target_tree = self.tree_active_monitor if is_active else self.tree_monitor
@@ -406,8 +438,11 @@ class MonitorTab:
         
         # [v4.5.7] 가점(Score) 기준 내림차순 정렬하여 초기 삽입
         sorted_items = sorted(monitor_info.items(), key=lambda x: x[1].get('score', 0), reverse=True)
+        wl = self._watchlist_codes_set()
         
         for code, info in sorted_items:
+            if str(code).zfill(6) in wl:
+                continue
             now_p = info.get('price', 0)
             strat = format_strategy_type_label(
                 info.get("sel_track", info.get("SelTrack", "AB"))
@@ -441,7 +476,10 @@ class MonitorTab:
     def reset_warmup_row_states(self, codes: list) -> None:
         """감시 시작 워밍업 직전: 지정 종목 행을 '대기' 표시로 통일."""
         try:
+            wl = self._watchlist_codes_set()
             for code in codes:
+                if str(code).zfill(6) in wl:
+                    continue
                 for tree in (self.tree_monitor, self.tree_active_monitor):
                     if tree and tree.exists(code):
                         vals = list(tree.item(code, "values"))
@@ -463,6 +501,8 @@ class MonitorTab:
         """종목별 워밍업 진행·성공·실패를 신호상태 열·행 배경으로 구분."""
         try:
             code = str(code).zfill(6)
+            if code in self._watchlist_codes_set():
+                return
             if event == "prep_start":
                 st = f"⏳ 데이터 준비 중… ({cur}/{total})"
                 tag = "warmup_pending"

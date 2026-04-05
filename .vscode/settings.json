@@ -1,0 +1,15 @@
+{
+  "terminal.integrated.cwd": "${workspaceFolder}",
+  "python.terminal.executeInFileDir": false,
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": ["${workspaceFolder}"],
+
+  "code-runner.runInTerminal": true,
+  "code-runner.clearPreviousOutput": false,
+  "code-runner.saveFileBeforeRun": true,
+  "code-runner.showExecutionMessage": true,
+  "code-runner.fileDirectoryAsCwd": false,
+  "code-runner.executorMap": {
+    "python": "python -u \"$fullFileName\""
+  }
+}

@@ -1,3 +1,6 @@
+
+
+
 # -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog
@@ -25,6 +28,7 @@ from data_manager_v2 import DataManagerV2 as DataManager
 import strategy_selector
 from reporting.trade_report import generate_trade_report
 from reporting.virtual_report import generate_virtual_narrative_report
+from reporting.realtime_session_logger import RealtimeSessionLogger
 from strategy.data_loader import BacktestDataLoader
 
 # Modularized UI Tabs [v4.5.3 Restructured]
@@ -164,6 +168,8 @@ class KiwoomApp:
         self.auth_manager = AuthManager(logger_callback=self.log)
         self.config_handler = ConfigHandler(logger_callback=self.log)
         self.data_manager = DataManager()
+        # 실시간 감시 일별 JSONL (신호·주문·체결 추적)
+        self.session_logger = RealtimeSessionLogger()
         self.config = config
         self.nordic_style = NordicStyle(self.root)
 
@@ -188,8 +194,12 @@ class KiwoomApp:
         self._updaate_timer_active = False # [Typo Alias Safety]
         
         from core.order_manager import OrderManager
+        from core.watchlist_store import WatchlistStore
         from core.signal_engine import SignalEngine
-        self.order_manager = OrderManager(self) 
+        self.watchlist_store = WatchlistStore(logger_callback=self.log)
+        self.watchlist_synth_state = {}
+        self._active_stream_codes = []
+        self.order_manager = OrderManager(self)
         self.signal_engine = SignalEngine(self)
 
         # [v3.8] Core 매니저 통합 (Service Layer 중심)
@@ -261,6 +271,16 @@ class KiwoomApp:
         self.selection_service = SelectionService(self, logger_callback=self.log)
 
         self.portfolio.load_all()
+        # VirtualTab·콜백이 TARGETS_LOADED 전에 참조할 수 있음 — 미초기화 시 AttributeError로 즉시 종료
+        try:
+            self.monitor_codes = list(self.trading_controller.monitor_codes or [])
+        except Exception:
+            self.monitor_codes = []
+        try:
+            self.monitor_info = dict(self.trading_controller.monitor_info or {})
+        except Exception:
+            self.monitor_info = {}
+
         self._setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
@@ -404,7 +424,9 @@ class KiwoomApp:
     def _on_execution_received(self, code, order_no, qty, price, side):
         self.data_manager.update_order_status(code, order_no, "FILLED", filled_price=price, filled_qty=qty)
         snapshot = self.portfolio.capture_snapshot(code, price, reason=f"EXEC_{side.upper()}")
-        self.portfolio.on_fill(code, side, price, qty, snapshot=snapshot)
+        self.portfolio.on_fill(
+            code, side, price, qty, snapshot=snapshot, fill_channel="exchange"
+        )
         self.log(f"✅ [체결] {code} {'매수' if side=='buy' else '매도'} {qty}주 완료 ({price:,}원)")
 
     def _update_market_visuals(self, trend):
@@ -420,6 +442,32 @@ class KiwoomApp:
         if not self.monitor_tab or not self.is_monitoring: return
         self.monitor_tab.update_view(self.pending_tree_updates, self.portfolio.virtual_positions)
         self.root.after(200, self._render_tree_updates)
+
+    def stream_subscription_codes(self):
+        """웹소켓 등록 후보: 감시 종목 ∪ 관심목록(중복 제거). 워밍업 직후에는 _active_stream_codes 우선."""
+        ac = getattr(self, "_active_stream_codes", None)
+        if isinstance(ac, list) and ac:
+            return list(ac)
+        try:
+            mc = list(getattr(self.trading_controller, "monitor_codes", []) or [])
+        except Exception:
+            mc = []
+        try:
+            mc = mc or list(self.monitor_codes or [])
+        except Exception:
+            pass
+        try:
+            wl = self.watchlist_store.get_codes()
+        except Exception:
+            wl = []
+        base = [str(c).zfill(6) for c in list(mc) + list(wl)]
+        seen = set()
+        out = []
+        for c in base:
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
 
     def toggle_monitoring(self): return self.trading_controller.toggle()
 
@@ -442,7 +490,8 @@ class KiwoomApp:
             lines = []
             for c in failed:
                 r = results.get(c, {})
-                nm = self.monitor_info.get(c, {}).get("name", c)
+                mi = getattr(self, "monitor_info", None) or {}
+                nm = mi.get(c, {}).get("name", c)
                 lines.append(f"• {nm} ({c}): {r.get('reason', '알 수 없음')}")
             body = (
                 "다음 종목의 15분봉·장중 구간을 API·DB로 채우지 못해 감시를 시작할 수 없습니다.\n\n"
@@ -468,6 +517,7 @@ class KiwoomApp:
             self._render_tree_updates()
         elif status == "STOPPED":
             self.is_monitoring = False
+            self._active_stream_codes = []
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="▶️ 실시간 감시 시작", style="Accent.TButton")
             if self.lbl_monitor_status: self.lbl_monitor_status.config(text="상태: 대기 중", foreground=self.colors['primary'])
 
@@ -523,11 +573,19 @@ class KiwoomApp:
         """
         try:
             code = str(code).zfill(6)
-            info = self.monitor_info.get(code, {})
+            mi = getattr(self, "monitor_info", None) or {}
+            info = mi.get(code, {})
             name = str(info.get("name", "Unknown"))
             detailed = info.get("last_detailed_sig")
             if detailed is None or getattr(detailed, "empty", True):
                 self.log(f"⚠️ [Skip] {code} 신호 캐시 없음")
+                try:
+                    self.session_logger.log(
+                        "signal_buy_skipped",
+                        {"code": code, "name": name, "reason": "no_signal_cache"},
+                    )
+                except Exception:
+                    pass
                 return
             last_sig = detailed.iloc[-1]
             row = last_sig.to_dict() if hasattr(last_sig, "to_dict") else dict(last_sig)
@@ -540,18 +598,79 @@ class KiwoomApp:
             ).strip().upper()
             if tr == "A" and sig_type == "TYPE_B":
                 self.log(f"⚠️ [Skip] {name}({code}) Track A 종목에 Type B 신호")
+                try:
+                    self.session_logger.log(
+                        "signal_buy_skipped",
+                        {
+                            "code": code,
+                            "name": name,
+                            "reason": "track_mismatch",
+                            "detail": "track_A_vs_type_B",
+                            "sig_type": sig_type,
+                        },
+                    )
+                except Exception:
+                    pass
                 return
             if tr == "B" and sig_type == "TYPE_A":
                 self.log(f"⚠️ [Skip] {name}({code}) Track B 종목에 Type A 신호")
+                try:
+                    self.session_logger.log(
+                        "signal_buy_skipped",
+                        {
+                            "code": code,
+                            "name": name,
+                            "reason": "track_mismatch",
+                            "detail": "track_B_vs_type_A",
+                            "sig_type": sig_type,
+                        },
+                    )
+                except Exception:
+                    pass
                 return
             if not TradingStrategy.type_balance_allows_new_s1(
                 self.settings, sig_type, self.portfolio.virtual_positions
             ):
                 self.log(f"⚠️ [Skip] {name}({code}) TypeBalanceGate (A/B 비중)")
+                try:
+                    self.session_logger.log(
+                        "signal_buy_skipped",
+                        {
+                            "code": code,
+                            "name": name,
+                            "reason": "type_balance_gate",
+                            "sig_type": sig_type,
+                        },
+                    )
+                except Exception:
+                    pass
                 return
+            try:
+                self.session_logger.log(
+                    "signal_buy_accepted",
+                    {
+                        "code": code,
+                        "name": name,
+                        "price": float(now_price),
+                        "sig_type": sig_type,
+                        "sel_track": tr,
+                        "rsi_sig": float(rsi_sig),
+                        "macd": float(macd_val),
+                        "osc": float(osc_val),
+                        "ma60_ratio": float(ma60_ratio),
+                    },
+                )
+            except Exception:
+                pass
             self.trading_controller.execute_buy_signal(code, name, now_price, reason=sig_type)
         except Exception as e:
             self.log(f"❌ [BuySignal] {code} 처리 실패: {e}")
+            try:
+                self.session_logger.log(
+                    "signal_buy_error", {"code": code, "error": str(e)}
+                )
+            except Exception:
+                pass
             try:
                 traceback.print_exc()
             except Exception:
@@ -583,11 +702,22 @@ class KiwoomApp:
             self.root.after(1000, self.on_close)
 
 if __name__ == "__main__":
+    import sys
+
+    # Run Python File / 터미널에서 곧바로 출력이 보이도록 (버퍼링 완화·실행 여부 확인)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        print("K-Trader: 시작 중… (이 메시지가 보이면 터미널 연결은 정상)", flush=True)
+    except Exception:
+        pass
+
     root = tk.Tk()
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
     except: pass
-    import sys
     app = KiwoomApp(root, auto_start="--auto-start" in sys.argv)
     root.mainloop()

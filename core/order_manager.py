@@ -54,6 +54,21 @@ class OrderManager:
         
         if not allow_order:
             self.app.log(f"⚠️ [{mode_str}] 주문 차단됨 (Safety Switch: OFF)")
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "order_blocked",
+                        {
+                            "code": code,
+                            "side": side,
+                            "qty": int(qty),
+                            "reason": "safety_switch_off",
+                            "name": name,
+                        },
+                    )
+            except Exception:
+                pass
             return None
 
         if not self.order_api:
@@ -98,7 +113,7 @@ class OrderManager:
                 self.app.log(f"✅ [{mode_str}] 주문 성공! 번호: {ord_no}")
                 # [v3.8] DB 로그 기록
                 self.app.data_manager.log_order(code, side, qty, adj_price, order_type, ord_no, "SUCCESS", name=name, reason=reason)
-                
+
                 # 텔레그램 알림
                 side_kr = "매수" if side == "buy" else "매도"
                 msg = f"<b>🚀 [주문 성공]</b>\n종목: {code}({name})\n구분: {side_kr}\n가격: {adj_price:,}원 / 수량: {qty}주\n번호: {ord_no}"
@@ -107,10 +122,36 @@ class OrderManager:
                 return ord_no
             else:
                 self.app.log(f"❌ [{mode_str}] 주문 거부: {ret_msg} (ErrorCode: {ret_code})")
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "order_api_reject",
+                            {
+                                "code": code,
+                                "side": side,
+                                "qty": int(qty),
+                                "ret_code": ret_code,
+                                "ret_msg": str(ret_msg),
+                                "name": name,
+                                "reason": reason,
+                            },
+                        )
+                except Exception:
+                    pass
                 return None
 
         except Exception as e:
             self.app.log(f"💥 주문 프로세스 오류: {str(e)}")
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "order_api_exception",
+                        {"code": code, "side": side, "error": str(e)},
+                    )
+            except Exception:
+                pass
             return None
 
     def get_holdings(self):

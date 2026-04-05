@@ -4,7 +4,7 @@ __pycache__/
 *.html
 *.log
 .idea/
-.vscode/
+# 워크스페이스 launch/tasks 등 백업 포함 (.vscode)
 *.cache
 *.bak
 *.ruined
@@ -17,3 +17,12 @@ backtest_data/
 !settings.json
 bars_cache.json
 *.png
+
+# 로컬 임시·디버그·SQLite WAL
+tmp/
+tmp_engine.py
+debug_engine.txt
+fix_tail.txt
+hex_engine.txt
+*.db-shm
+*.db-wal

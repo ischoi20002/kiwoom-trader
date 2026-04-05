@@ -253,37 +253,107 @@ class HarvestService:
 
     def run(self):
         """메인 수집 루프 (v18.0.0: KODEX 200 + KOSPI 500 통합 유니버스)"""
-        # 1. KOSPI 500 (CSV) 로드
-        codes_500 = []
-        if os.path.exists(self.target_list_path):
+        # 0. 공공데이터포털 KRX 상장종목(금융위 API) — 인증키가 있으면 최신 KOSPI 전체를 우선 사용
+        codes_kospi_official: list = []
+        svc_key = str(getattr(config, "DATA_GO_KR_SERVICE_KEY", "") or "").strip()
+        if svc_key:
             try:
-                df_500 = pd.read_csv(self.target_list_path, dtype={'Code': str}, encoding='utf-8-sig')
-                codes_500 = [str(c).strip().zfill(6) for c in df_500['Code'].tolist() if c]
+                from utils.krx_public_listing import (
+                    describe_delisting_policy,
+                    fetch_kospi_official_dataframe,
+                )
+
+                self.log(f"ℹ️ [유니버스] {describe_delisting_policy()}")
+                df_k = fetch_kospi_official_dataframe(svc_key)
+                st = self.db.merge_official_krx_listing(df_k)
+                bas_hint = str(df_k["basDt"].iloc[0]) if len(df_k) and "basDt" in df_k.columns else "-"
+                self.log(
+                    f"📋 [KRX공식] 기준일(basDt)={bas_hint} | 스냅샷 {st['snapshot_rows']}종목 | "
+                    f"DB ACTIVE {st['active_count']} | 이번에 EXITED 전환 {st['newly_exited_count']}건 (차트 DB는 유지)"
+                )
+                codes_kospi_official = (
+                    df_k["Code"].astype(str).str.strip().str.zfill(6).tolist()
+                    if len(df_k)
+                    else []
+                )
             except Exception as e:
-                self.log(f"[WARN] {self.target_list_path} 로드 실패: {e}")
-        
-        # 2. KODEX 200 리스트 확보 (DataManager 활용 지수 1028 기반 자동 갱신)
-        df_k200 = self.db.get_kospi_list(200)
-        codes_k200 = df_k200['Code'].astype(str).str.strip().str.zfill(6).tolist() if df_k200 is not None and not df_k200.empty else []
-        
-        # 3. 합집합 통합 (KODEX 200 + KOSPI 500)
+                self.log(f"[WARN] KRX 공식 목록 실패 — FDR/CSV 폴백: {e}")
+
+        # 1. KOSPI 주식 유니버스
+        #    - 공공데이터 성공 시: 공식 KOSPI 전체
+        #    - 그 외: FDR StockListing('KOSPI') 전체(코드 끝 0 휴리스틱, 시총순 상한 대량)
+        #    - FDR 실패 시에만 kospi_top_500.csv 등 기존 CSV
+        codes_stocks: list = []
+        if codes_kospi_official:
+            codes_stocks = list(codes_kospi_official)
+            self.log(f"📊 [유니버스] 공공데이터 KOSPI {len(codes_stocks)}종목")
+        else:
+            try:
+                # count>200 이면 kodex200.csv 경로를 건너뛰고 FDR 전체에 가깝게 로드
+                df_fdr = self.db.get_kospi_list(count=100000)
+                if df_fdr is not None and not df_fdr.empty:
+                    codes_stocks = [
+                        str(c).strip().zfill(6)
+                        for c in df_fdr["Code"].astype(str).tolist()
+                        if c
+                    ]
+                    self.log(
+                        f"📊 [유니버스] 공공데이터 미적용 → FDR KOSPI {len(codes_stocks)}종목 "
+                        f"(DATA_GO_KR_SERVICE_KEY 미설정 시 이 경로가 사용됩니다)"
+                    )
+            except Exception as e:
+                self.log(f"[WARN] FDR KOSPI 유니버스 로드 실패: {e}")
+            if not codes_stocks and os.path.exists(self.target_list_path):
+                try:
+                    df_500 = pd.read_csv(
+                        self.target_list_path, dtype={"Code": str}, encoding="utf-8-sig"
+                    )
+                    codes_stocks = [
+                        str(c).strip().zfill(6)
+                        for c in df_500["Code"].tolist()
+                        if c
+                    ]
+                    self.log(
+                        f"📊 [유니버스] CSV 폴백 {self.target_list_path} ({len(codes_stocks)}종목)"
+                    )
+                except Exception as e:
+                    self.log(f"[WARN] {self.target_list_path} 로드 실패: {e}")
+
+        # 2. KODEX 200: 소규모 CSV 유니버스(~500)일 때만 보강. 전체 유니버스면 중복이므로 생략
+        codes_k200: list = []
+        if len(codes_stocks) < 600:
+            try:
+                df_k200 = self.db.get_kospi_list(200)
+                if df_k200 is not None and not df_k200.empty:
+                    codes_k200 = (
+                        df_k200["Code"].astype(str).str.strip().str.zfill(6).tolist()
+                    )
+                    self.log(
+                        f"📊 [유니버스] KODEX 200 보강 {len(codes_k200)}종목 (소규모 목록과 합집합)"
+                    )
+            except Exception as e:
+                self.log(f"[WARN] KODEX 200 보강 로드 실패: {e}")
+
+        # 3. 합집합 (지수 + 주식 + [선택] K200)
         all_codes = []
         seen = set()
-        
-        # 시장 지수 우선 순위 배치
-        indices = ['001', '101', '^VIX']
+
+        indices = ["001", "101", "^VIX"]
         for c in indices:
             if c not in seen:
                 all_codes.append(c)
                 seen.add(c)
 
-        # 500 리스트와 KODEX 200 리스트 병합
-        for c in codes_500 + codes_k200:
+        for c in codes_stocks + codes_k200:
             if c not in seen:
                 all_codes.append(c)
                 seen.add(c)
-                
-        self.log(f"🚀 [START] 통합 유니버스 하베스팅 시작 (KODEX 200 + KOSPI 500 등 총 {len(all_codes)}개 종목)")
+
+        _k200_note = f" + K200보강 {len(codes_k200)}" if codes_k200 else ""
+        self.log(
+            f"🚀 [START] 하베스팅 유니버스 총 {len(all_codes)}개 종목 "
+            f"(지수 3 + 주식 {len(codes_stocks)}{_k200_note})"
+        )
         
         token = self.token_manager.get_auth_token()
         if not token:

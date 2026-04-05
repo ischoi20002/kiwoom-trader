@@ -1,6 +1,12 @@
 # config.py
 # 키움증권 REST API 공용 설정 파일
 
+import os
+
+# 공공데이터포털 — 금융위 KRX 상장종목정보 API (선택).
+# 발급: https://www.data.go.kr (환경변수 DATA_GO_KR_SERVICE_KEY 권장)
+DATA_GO_KR_SERVICE_KEY = os.environ.get("DATA_GO_KR_SERVICE_KEY", "").strip()
+
 # 1. 본인의 정보를 입력하세요 (따옴표 안에 넣으세요)
 APP_KEY = "3qV0WGDfHHTDrievzvsl0Yvt-7u6VLSOwS469J_AYP0"
 APP_SECRET = "-TZiGwo1WpQSTPDnoDJAAblpcbkuCqpPpCC9mPlFA80"

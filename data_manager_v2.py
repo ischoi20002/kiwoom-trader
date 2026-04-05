@@ -226,9 +226,136 @@ class DataManagerV2:
                 conn.execute("ALTER TABLE order_history ADD COLUMN reason TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
+
+            # [v4.10] 공공데이터 KRX 상장 스냅샷 반영용 (하베스팅 유니버스·탈락 추적)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS listing_universe_state (
+                    code TEXT PRIMARY KEY,
+                    state TEXT NOT NULL DEFAULT 'ACTIVE',
+                    name TEXT,
+                    market_id TEXT,
+                    last_official_bas_dt TEXT,
+                    updated_at TEXT,
+                    exited_at TEXT
+                )
+            """)
             
             conn.commit()
 
+
+    def merge_official_krx_listing(self, df) -> dict:
+        """
+        공공데이터포털 KRX KOSPI 스냅샷을 반영합니다.
+
+        - 스냅샷에 포함된 종목: state=ACTIVE, exited_at=NULL
+        - 기존 ACTIVE였으나 스냅샷에 없음: state=EXITED, exited_at 기록
+        - bars_1m/bars_15m 등 가격 데이터는 삭제하지 않습니다 (과거 백테스트 보존).
+
+        Returns
+        -------
+        dict
+            active_count, snapshot_rows, newly_exited_count
+        """
+        import pandas as pd
+        from datetime import datetime
+
+        if df is None or (hasattr(df, "empty") and df.empty):
+            return {"active_count": 0, "snapshot_rows": 0, "newly_exited_count": 0}
+
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("df는 pandas.DataFrame 이어야 합니다.")
+
+        now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if "Code" not in df.columns:
+            raise ValueError("DataFrame에 Code 컬럼이 필요합니다.")
+
+        work = df.copy()
+        work["Code"] = work["Code"].astype(str).str.strip().str.zfill(6)
+        current_codes = set(work["Code"].tolist())
+
+        newly_exited = 0
+        with self._lock, self._get_connection() as conn:
+            prev = conn.execute(
+                "SELECT code FROM listing_universe_state WHERE state = 'ACTIVE'"
+            ).fetchall()
+            active_before = {str(r[0]).zfill(6) for r in prev}
+            to_exit = active_before - current_codes
+            for code in to_exit:
+                conn.execute(
+                    """
+                    UPDATE listing_universe_state
+                    SET state = 'EXITED', exited_at = ?, updated_at = ?
+                    WHERE code = ? AND state = 'ACTIVE'
+                    """,
+                    (now_iso, now_iso, code),
+                )
+            newly_exited = len(to_exit)
+
+            for _, row in work.iterrows():
+                code = str(row["Code"]).zfill(6)
+                name = ""
+                if "Name" in work.columns:
+                    try:
+                        name = str(row.get("Name", "") or "")
+                    except Exception:
+                        name = ""
+                mkt = ""
+                if "mrktCtg" in work.columns:
+                    try:
+                        mkt = str(row.get("mrktCtg", "") or "")
+                    except Exception:
+                        mkt = ""
+                bas = ""
+                if "basDt" in work.columns:
+                    try:
+                        bas = str(row.get("basDt", "") or "")
+                    except Exception:
+                        bas = ""
+                conn.execute(
+                    """
+                    INSERT INTO listing_universe_state
+                        (code, state, name, market_id, last_official_bas_dt, updated_at, exited_at)
+                    VALUES (?, 'ACTIVE', ?, ?, ?, ?, NULL)
+                    ON CONFLICT(code) DO UPDATE SET
+                        state = 'ACTIVE',
+                        name = excluded.name,
+                        market_id = excluded.market_id,
+                        last_official_bas_dt = excluded.last_official_bas_dt,
+                        updated_at = excluded.updated_at,
+                        exited_at = NULL
+                    """,
+                    (code, name, mkt, bas, now_iso),
+                )
+            conn.commit()
+
+            n_active = conn.execute(
+                "SELECT COUNT(*) FROM listing_universe_state WHERE state = 'ACTIVE'"
+            ).fetchone()[0]
+
+        return {
+            "active_count": int(n_active),
+            "snapshot_rows": len(work),
+            "newly_exited_count": newly_exited,
+        }
+
+    def get_active_official_kospi_codes(self):
+        """listing_universe_state 에서 ACTIVE 인 종목코드 리스트 (정렬)."""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT code FROM listing_universe_state
+                    WHERE state = 'ACTIVE'
+                    ORDER BY code
+                    """
+                ).fetchall()
+            return [str(r[0]).zfill(6) for r in rows]
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] get_active_official_kospi_codes: {e}")
+            except Exception:
+                pass
+            return []
 
     def update_historical_data(self, code, logger=None):
         """[Legacy Support] 1분/15분봉 및 일봉(bars_1d) 데이터를 서버에서 가져와 업데이트"""
@@ -410,6 +537,30 @@ class DataManagerV2:
                 ORDER BY timestamp DESC
             """, (today_start,))
             return cursor.fetchall()
+
+    def get_orders_between(self, start_dt: str, end_dt: str):
+        """
+        날짜·시간 범위의 주문 이력을 시간순으로 반환합니다.
+        (일일 결산 리포트 등 분석용)
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT timestamp, code, side, qty, price, filled_price, filled_qty, result, name, reason, order_no, order_type
+                    FROM order_history
+                    WHERE timestamp >= ? AND timestamp <= ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (start_dt, end_dt),
+                )
+                return cursor.fetchall()
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] get_orders_between 실패: {e}")
+            except Exception:
+                pass
+            return []
 
     def get_latest_order_meta(self, code):
         with self._get_connection() as conn:
