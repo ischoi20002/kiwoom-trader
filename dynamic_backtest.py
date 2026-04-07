@@ -21,6 +21,7 @@ from backtest_engine import (
     flush_trade_csv_buffer,
 )
 from strategy.simulation_models import SimulatedRealtimeMetrics
+from strategy.market_regime import classify_market_regime_row
 from typing import Any, Callable, List, Optional
 
 
@@ -317,18 +318,9 @@ class DynamicBacktester:
                                     v_val = float(looked_up)
                             except Exception:
                                 pass
-                        if (
-                            msi < self.msi_down_thr
-                            or v_val > self.vix_down_thr
-                            or (msi < 0 and adx > self.adx_down_thr)
-                        ):
-                            m_trend = "DOWN"
-                        elif adx < self.adx_min_thr and msi <= self.msi_up_thr:
-                            m_trend = "NEUTRAL"
-                        elif msi > self.msi_up_thr and adx > self.adx_down_thr:
-                            m_trend = "AGGRESSIVE"
-                        else:
-                            m_trend = "UP"
+                        m_trend = classify_market_regime_row(
+                            float(msi), float(adx), float(v_val), self.settings
+                        )
                 except Exception:
                     pass
                 n_before = 0
@@ -513,21 +505,10 @@ class DynamicBacktester:
                         except Exception:
                             pass
                     
-                    # [Rule v4.7] 4단계 트렌드 판정
-                    # 1. DOWN      : MSI 명백한 역배열 OR VIX 패닉
-                    #                OR (MSI 음수 AND ADX 강함) → 방향+강도로 하락 조기감지
-                    # 2. NEUTRAL   : ADX 약함 AND MSI 정배열 불충분 → Type B/S2 차단
-                    # 3. AGGRESSIVE: MSI 충분 AND ADX 강함 → 강세 확인 (진입동작은 UP과 동일)
-                    # 4. UP        : 정배열이나 추세 보통 수준
-                    if msi < self.msi_down_thr or v_val > self.vix_down_thr or \
-                            (msi < 0 and adx > self.adx_down_thr):
-                        m_trend = 'DOWN'
-                    elif adx < self.adx_min_thr and msi <= self.msi_up_thr:
-                        m_trend = 'NEUTRAL'
-                    elif msi > self.msi_up_thr and adx > self.adx_down_thr:
-                        m_trend = 'AGGRESSIVE'
-                    else:
-                        m_trend = 'UP'
+                    # [Rule v4.7] 4단계 레짐 — strategy.market_regime.classify_market_regime_row 단일 정의
+                    m_trend = classify_market_regime_row(
+                        float(msi), float(adx), float(v_val), self.settings
+                    )
             except: pass
 
             # 2-3. 당일 데이터 및 지표 추출

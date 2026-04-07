@@ -22,6 +22,7 @@ import itertools
 import importlib.util
 import webbrowser
 import subprocess
+from typing import Any, Optional, Set, Tuple
 
 from backtest_engine import TradingStrategy
 from data_manager_v2 import DataManagerV2 as DataManager
@@ -180,7 +181,17 @@ class KiwoomApp:
         self.notebook = None
         self.status_label = None
         self.pending_tree_updates = {} # [v4.5.3] UI 지연 업데이트용 큐
-        
+        # REST 선체결 vs 웹소켓 CHE 중복 on_fill 방지 (주문번호 기준)
+        self._exchange_fill_order_ids: Set[str] = set()
+        # 계좌 REST 주기 동기화(웹소켓 미제공 구간 보완)
+        self._account_sync_job: Optional[Any] = None
+        self._account_sync_job_running: bool = False
+        self._virtual_tab_render_pending: bool = False
+        self._virtual_tab_render_last_ts: float = 0.0
+        # 웹소켓 틱 → 메인 스레드에서 배치 처리 (종목당 마지막 틱만 유지)
+        self._rt_tick_latest: dict = {}
+        self._tick_flush_after_id: Optional[Any] = None
+
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
         self.bars_data = self.config_handler.load_bars_cache()
@@ -249,7 +260,8 @@ class KiwoomApp:
         self.market_service = MarketDataService(
             self.data_manager,
             log_func=self.log,
-            gui_callback=self._on_market_data_update
+            gui_callback=self._on_market_data_update,
+            settings_provider=lambda: getattr(self, "settings", {}) or {},
         )
         self.remote_commander = RemoteCommander(
             self,
@@ -361,7 +373,13 @@ class KiwoomApp:
         self.backtest_tab = BacktestTab(self._tab_frames['backtest'], self)
         self.settings_tab = SettingsTab(self._tab_frames['settings'], self, DEFAULT_SETTINGS)
         self.virtual_tab = VirtualTab(self._tab_frames['virtual'], self)
-        
+        try:
+            self._last_vp_render_sig: Optional[Tuple[Any, ...]] = (
+                self._vp_structure_signature()
+            )
+        except Exception:
+            self._last_vp_render_sig = None
+
         # Compatibility links
         self.tree_monitor = self.monitor_tab.tree_monitor
         self.btn_monitor_toggle = self.monitor_tab.btn_monitor_toggle
@@ -384,11 +402,15 @@ class KiwoomApp:
         except: pass
 
     def _on_market_data_update(self, indices=None, trend=None, display_text=None):
-        if trend and self.market_trend != trend:
-            self.market_trend = trend
-            self.root.after(0, lambda: self._update_market_visuals(trend))
+        # after(0) 콜백은 기본인자로 값을 고정해 클로저 지연 바인딩으로 라벨이 꼬이지 않게 함
+        if trend is not None and str(trend).strip() != "":
+            tr = str(trend).strip().upper()
+            if self.market_trend != tr:
+                self.market_trend = tr
+                self.root.after(0, lambda t=tr: self._update_market_visuals(t))
         if display_text and self.lbl_market_indices:
-            self.root.after(0, lambda: self.lbl_market_indices.config(text=display_text))
+            dt = str(display_text)
+            self.root.after(0, lambda s=dt: self.lbl_market_indices.config(text=s))
 
     def _on_tab_changed(self, event):
         tab_text = self.notebook.tab(self.notebook.select(), "text")
@@ -405,7 +427,7 @@ class KiwoomApp:
             self.portfolio.load_all()
             self.market_service.start()
             self.remote_commander.start()
-            self.root.after(2000, lambda: self.portfolio.sync_with_actual_account(silent=True))
+            self.root.after(2000, lambda: self.portfolio.sync_with_actual_account(silent=True, force=True))
             threading.Thread(target=lambda: self.get_kospi_200(force=True), daemon=True).start()
 
     def get_kospi_200(self, force=False):
@@ -418,20 +440,148 @@ class KiwoomApp:
                 self.root.after(0, lambda: self.dashboard_tab.btn_select.config(state=tk.NORMAL))
 
     def _on_realtime_data_received(self, code, now_price, volume, trde_val, **kwargs):
-        # [v4.5.45] 모든 실시간 연산 및 UI 업데이트 권한을 SignalEngine으로 일원화
-        self.signal_engine.on_tick_received(code, now_price, volume, trde_val, **kwargs)
+        """
+        웹소켓 콜백은 비메인 스레드일 수 있음.
+        SignalEngine·monitor_info 갱신은 메인 루프에서만 수행하고, 동일 종목은 한 프레임당 마지막 틱만 반영.
+        """
+        try:
+            kw = dict(kwargs)
+            r = getattr(self, "root", None)
+            if r is None:
+                self.signal_engine.on_tick_received(code, now_price, volume, trde_val, **kw)
+                return
+            key = str(code).zfill(6)
+            self._rt_tick_latest[key] = (code, now_price, volume, trde_val, kw)
+            if self._tick_flush_after_id is None:
+                self._tick_flush_after_id = r.after(16, self._flush_realtime_tick_batch_on_main)
+        except Exception:
+            try:
+                self.signal_engine.on_tick_received(
+                    code, now_price, volume, trde_val, **dict(kwargs)
+                )
+            except Exception:
+                pass
+
+    def _flush_realtime_tick_batch_on_main(self) -> None:
+        """누적된 실시간 틱을 메인 스레드에서 일괄 처리."""
+        try:
+            batch = dict(self._rt_tick_latest)
+            self._rt_tick_latest.clear()
+            for _k, tup in batch.items():
+                try:
+                    c, np0, vol, tv, kw = tup
+                    self.signal_engine.on_tick_received(c, np0, vol, tv, **kw)
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ [Tick] 처리 예외: {e}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            try:
+                self._tick_flush_after_id = None
+                if self._rt_tick_latest:
+                    r2 = getattr(self, "root", None)
+                    if r2 is not None:
+                        self._tick_flush_after_id = r2.after(
+                            16, self._flush_realtime_tick_batch_on_main
+                        )
+            except Exception:
+                self._tick_flush_after_id = None
+
+    def reconcile_exchange_fill_after_order_accept(
+        self,
+        code: str,
+        order_no: str,
+        side: str,
+        qty: int,
+        fill_price: float,
+        name: str = "",
+        reason: str = "",
+    ) -> None:
+        """
+        REST 주문 접수 성공 직후 웹소켓 CHE가 오지 않을 때도 DB 체결가·가상포지션을 맞춥니다.
+        CHE가 나중에 오면 동일 주문번호로 on_fill은 생략하고 체결가만 보정합니다.
+        """
+        try:
+            oid = str(order_no or "").strip()
+            # CHE가 먼저 처리된 경우 참고가로 덮어쓰지 않음
+            if oid and oid in self._exchange_fill_order_ids:
+                return
+            if oid:
+                self._exchange_fill_order_ids.add(oid)
+            try:
+                self.data_manager.update_order_status(
+                    code, order_no, "FILLED", filled_price=int(fill_price), filled_qty=int(qty)
+                )
+            except Exception as ue:
+                self.log(f"⚠️ [체결 동기화] DB 갱신 실패: {ue}")
+            snapshot = self.portfolio.capture_snapshot(code, fill_price, reason=f"REST_{side.upper()}")
+            self.portfolio.on_fill(
+                code,
+                side,
+                fill_price,
+                qty,
+                name=name or None,
+                reason=reason or None,
+                snapshot=snapshot,
+                fill_channel="exchange",
+            )
+            self.log(
+                f"✅ [체결 동기화] REST 접수 직후 가상체결 {code} "
+                f"{'매수' if side == 'buy' else '매도'} {qty}주 ({int(fill_price):,}원)"
+            )
+            self._schedule_account_sync_after_fill()
+        except Exception as e:
+            self.log(f"⚠️ [체결 동기화] 실패: {e}")
+
+    def _schedule_account_sync_after_fill(self) -> None:
+        """체결 후 키움 계좌 REST(총자산·예수금)를 한 번 더 맞춥니다."""
+        try:
+            r = getattr(self, "root", None)
+            if r is not None:
+                r.after(2500, lambda: self.portfolio.sync_with_actual_account(silent=True, force=True))
+        except Exception:
+            pass
 
     def _on_execution_received(self, code, order_no, qty, price, side):
-        self.data_manager.update_order_status(code, order_no, "FILLED", filled_price=price, filled_qty=qty)
-        snapshot = self.portfolio.capture_snapshot(code, price, reason=f"EXEC_{side.upper()}")
-        self.portfolio.on_fill(
-            code, side, price, qty, snapshot=snapshot, fill_channel="exchange"
-        )
-        self.log(f"✅ [체결] {code} {'매수' if side=='buy' else '매도'} {qty}주 완료 ({price:,}원)")
+        try:
+            oid = str(order_no or "").strip()
+            if oid and oid in self._exchange_fill_order_ids:
+                try:
+                    self.data_manager.update_order_status(
+                        code, order_no, "FILLED", filled_price=price, filled_qty=qty
+                    )
+                except Exception as ue:
+                    self.log(f"⚠️ [체결 보정] DB 갱신 실패: {ue}")
+                self.log(f"ℹ️ [체결 보정] CHE 체결가 반영 {code} {price:,}원 (주문번호 {oid})")
+                self._schedule_account_sync_after_fill()
+                return
+            try:
+                self.data_manager.update_order_status(code, order_no, "FILLED", filled_price=price, filled_qty=qty)
+            except Exception as ue:
+                self.log(f"⚠️ [체결] DB 갱신 실패: {ue}")
+            snapshot = self.portfolio.capture_snapshot(code, price, reason=f"EXEC_{side.upper()}")
+            self.portfolio.on_fill(
+                code, side, price, qty, snapshot=snapshot, fill_channel="exchange"
+            )
+            self.log(f"✅ [체결] {code} {'매수' if side=='buy' else '매도'} {qty}주 완료 ({price:,}원)")
+            if oid:
+                self._exchange_fill_order_ids.add(oid)
+            self._schedule_account_sync_after_fill()
+        except Exception as e:
+            self.log(f"⚠️ [체결] 처리 실패: {e}")
 
     def _update_market_visuals(self, trend):
         c = self.nordic_style.colors
-        bg_col, fg_col = {"UP":(c['bg'], c['primary']), "NEUTRAL":("#3B4252","#E5E9F0"), "DOWN":("#3B2E2E","#BF616A")}.get(trend, (c['bg'], c['primary']))
+        theme = {
+            "UP": (c["bg"], c["primary"]),
+            "AGGRESSIVE": (c["bg"], "#A3BE8C"),
+            "NEUTRAL": ("#3B4252", "#E5E9F0"),
+            "DOWN": ("#3B2E2E", "#BF616A"),
+        }
+        bg_col, fg_col = theme.get(str(trend).strip().upper(), (c["bg"], c["primary"]))
         style = ttk.Style()
         style.configure("Header.TFrame", background=bg_col)
         if hasattr(self, 'header_frame'): self.header_frame.config(style="Header.TFrame")
@@ -439,8 +589,16 @@ class KiwoomApp:
         if hasattr(self, 'monitor_tab'): self.monitor_tab._update_visual_theme(trend)
 
     def _render_tree_updates(self):
-        if not self.monitor_tab or not self.is_monitoring: return
+        if not self.monitor_tab or not self.is_monitoring:
+            return
         self.monitor_tab.update_view(self.pending_tree_updates, self.portfolio.virtual_positions)
+        try:
+            self.monitor_tab.maybe_reconcile_monitor_trees(
+                getattr(self, "monitor_info", None) or {},
+                self.portfolio.virtual_positions,
+            )
+        except Exception:
+            pass
         self.root.after(200, self._render_tree_updates)
 
     def stream_subscription_codes(self):
@@ -461,6 +619,11 @@ class KiwoomApp:
         except Exception:
             wl = []
         base = [str(c).zfill(6) for c in list(mc) + list(wl)]
+        try:
+            for c in (getattr(self.portfolio, "virtual_positions", None) or {}).keys():
+                base.append(str(c).zfill(6))
+        except Exception:
+            pass
         seen = set()
         out = []
         for c in base:
@@ -468,6 +631,127 @@ class KiwoomApp:
                 seen.add(c)
                 out.append(c)
         return out
+
+    def _maybe_start_account_sync_timer(self) -> None:
+        """감시 중이거나 보유가 있으면 REST 계좌 주기 갱신을 시작합니다."""
+        try:
+            if self._account_sync_job_running:
+                return
+            if not (self.is_monitoring or len(self.portfolio.virtual_positions) > 0):
+                return
+            self._account_sync_job_running = True
+            self._periodic_account_refresh_loop()
+        except Exception:
+            pass
+
+    def _maybe_stop_account_sync_timer(self) -> None:
+        """감시 중단 후 보유도 없으면 주기 갱신을 중지합니다."""
+        try:
+            if self.is_monitoring or len(self.portfolio.virtual_positions) > 0:
+                return
+            if self._account_sync_job is not None:
+                try:
+                    self.root.after_cancel(self._account_sync_job)
+                except Exception:
+                    pass
+                self._account_sync_job = None
+            self._account_sync_job_running = False
+        except Exception:
+            pass
+
+    def _periodic_account_refresh_loop(self) -> None:
+        """약 30초마다 REST로 총자산·예수금·보유를 동기화합니다 (키움 계좌 WS 스트림 없음)."""
+        try:
+            if not self.root.winfo_exists():
+                return
+            if self.is_monitoring or len(self.portfolio.virtual_positions) > 0:
+                self.portfolio.sync_with_actual_account(silent=True, force=True)
+        except Exception:
+            pass
+        try:
+            if self.is_monitoring or len(self.portfolio.virtual_positions) > 0:
+                self._account_sync_job = self.root.after(30000, self._periodic_account_refresh_loop)
+            else:
+                self._account_sync_job = None
+                self._account_sync_job_running = False
+        except Exception:
+            self._account_sync_job_running = False
+
+    def request_virtual_tab_realtime_render(self) -> None:
+        """
+        보유 탭 실시간 수익·평가 요약을 스로틀하여 갱신합니다.
+        웹소켓(asyncio) 스레드에서 호출되므로 Treeview/StringVar는 메인 스레드로만 위임합니다.
+        """
+        try:
+            if not hasattr(self, "virtual_tab"):
+                return
+            r = getattr(self, "root", None)
+            if r is None:
+                return
+            r.after(0, self._virtual_tab_render_tick_on_main)
+        except Exception:
+            pass
+
+    def _virtual_tab_render_tick_on_main(self) -> None:
+        """메인 스레드 전용: 스로틀 후 _render_real_data 호출."""
+        import time
+        try:
+            if not hasattr(self, "virtual_tab"):
+                return
+            now = time.time()
+            if now - self._virtual_tab_render_last_ts < 0.12:
+                if not self._virtual_tab_render_pending:
+                    self._virtual_tab_render_pending = True
+                    self.root.after(120, self._flush_virtual_tab_realtime_render)
+                return
+            self._virtual_tab_render_last_ts = now
+            self.virtual_tab._render_real_data()
+        except Exception:
+            pass
+
+    def _flush_virtual_tab_realtime_render(self) -> None:
+        """스로틀 대기 후 한 번만 렌더합니다 (이미 메인 스레드에서 호출)."""
+        import time
+        try:
+            self._virtual_tab_render_pending = False
+            self._virtual_tab_render_last_ts = time.time()
+            if hasattr(self, "virtual_tab"):
+                self.virtual_tab._render_real_data()
+        except Exception:
+            pass
+
+    def _ensure_vp_monitor_stub(self, code: str) -> None:
+        """보유만 있고 감시에 없던 종목에 monitor_info 스텁을 넣고 스트림 재등록을 요청합니다."""
+        try:
+            nk = str(code).split("_")[0].zfill(6)
+            if nk in self.monitor_info:
+                return
+            vp = getattr(self.portfolio, "virtual_positions", None) or {}
+            pos = vp.get(nk) or vp.get(code)
+            if not pos:
+                return
+            nm = pos.get("name") or nk
+            ap = float(pos.get("avg_price", 0) or 0)
+            stub = {
+                "name": nm,
+                "ma20": 0.0,
+                "ma60": 0.0,
+                "prev_vol": 0.0,
+                "score": 0.0,
+                "ma_buffer_scale": 1.0,
+                "open": ap,
+                "last_price": ap,
+                "sel_track": "AB",
+            }
+            self.monitor_info[nk] = stub
+            try:
+                self.trading_controller.monitor_info[nk] = stub
+            except Exception:
+                pass
+            if hasattr(self, "monitor_tab"):
+                self.monitor_tab._pending_reg_refresh = True
+        except Exception:
+            pass
 
     def toggle_monitoring(self): return self.trading_controller.toggle()
 
@@ -512,14 +796,27 @@ class KiwoomApp:
                 self.monitor_tab.update_watchlist(self.monitor_info)
         elif status == "STARTED":
             self.is_monitoring = True
+            try:
+                self.monitor_info = dict(self.trading_controller.monitor_info or {})
+            except Exception:
+                pass
+            self._maybe_start_account_sync_timer()
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
             if self.lbl_monitor_status: self.lbl_monitor_status.config(text=f"상태: 감시 중 ({data}종목)", foreground=self.colors['success'])
+            if self.status_label:
+                self.status_label.config(
+                    text=f"상태: 감시 중 ({data}종목)",
+                    foreground=self.colors["success"],
+                )
             self._render_tree_updates()
         elif status == "STOPPED":
             self.is_monitoring = False
             self._active_stream_codes = []
+            self._maybe_stop_account_sync_timer()
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="▶️ 실시간 감시 시작", style="Accent.TButton")
             if self.lbl_monitor_status: self.lbl_monitor_status.config(text="상태: 대기 중", foreground=self.colors['primary'])
+            if self.status_label:
+                self.status_label.config(text="상태: 대기 중", foreground=self.colors["primary"])
 
     def _on_warmup_stock_prep(
         self, event: str, cur: int, total: int, name: str, code: str, reason: str = ""
@@ -682,13 +979,94 @@ class KiwoomApp:
     def _recalculate_all_indicators(self, code):
         return self.strategy_engine.recalculate_indicators(code, self.bars_data, self.settings)
 
-    def send_telegram_message(self, message): self.data_manager.send_telegram_message(message)
-    def _render_virtual_positions(self): 
-        if hasattr(self, 'virtual_tab'): self.virtual_tab._render_virtual_positions()
-    def sync_with_actual_account(self, silent=False): self.portfolio.sync_with_actual_account(silent=silent)
-    def _sync_account_deposit(self): 
-        # [v4.9.0] 단순 예수금이 아닌 전체 계좌 종목 및 자산 동기화(Full Sync)로 업그레이드
-        self.portfolio.sync_with_actual_account(silent=False)
+    def send_telegram_message(self, message: str, parse_mode: Optional[str] = "HTML") -> None:
+        try:
+            ok = self.data_manager.send_telegram_message(message, parse_mode=parse_mode)
+            if not ok:
+                self.log("⚠️ [Telegram] 전송 실패 또는 미설정 — config.py 의 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 를 확인하세요.")
+        except Exception as e:
+            self.log(f"⚠️ [Telegram] 예외: {e}")
+    def _vp_structure_signature(self) -> Tuple[Any, ...]:
+        """
+        virtual_positions 구조 + 종료 이력 건수.
+        동일하면 예수금·총자산만 바뀐 동기화로 보고 전체 트리 리빌드를 생략한다.
+        lock으로 스냅샷을 맞춰 동기화 중간 상태를 읽지 않는다.
+        """
+        try:
+            with self.portfolio.lock:
+                vp = dict(getattr(self.portfolio, "virtual_positions", None) or {})
+                hlen = len(getattr(self.portfolio, "virtual_history", None) or [])
+            parts: list = []
+            for k, p in vp.items():
+                nk = str(k).split("_")[0].zfill(6)
+                qty = int(p.get("qty", 0) or 0)
+                parts.append((nk, qty))
+            return (tuple(sorted(parts)), int(hlen))
+        except Exception:
+            return (tuple(), 0)
+
+    def _render_virtual_positions(self) -> None:
+        """
+        PortfolioManager gui_callback 진입점.
+        포지션 구조가 이전과 같으면 히스토리·주문 트리 전체 삭제 없이 보유 셀·요약만 갱신한다.
+        """
+        try:
+            self._maybe_start_account_sync_timer()
+            try:
+                self.trading_controller._ensure_virtual_positions_monitor_info()
+            except Exception:
+                pass
+            try:
+                self.monitor_info = dict(self.trading_controller.monitor_info or {})
+            except Exception:
+                pass
+        except Exception:
+            pass
+        if not hasattr(self, "virtual_tab"):
+            return
+        try:
+            sig = self._vp_structure_signature()
+            prev = getattr(self, "_last_vp_render_sig", None)
+            if prev is not None and sig == prev:
+                self.virtual_tab.refresh_portfolio_light()
+                return
+        except Exception:
+            pass
+        try:
+            self.virtual_tab._render_virtual_positions()
+            self._last_vp_render_sig = self._vp_structure_signature()
+        except Exception:
+            pass
+
+    def refresh_virtual_tab_full(self) -> None:
+        """주문 로그 반영 등 히스토리·주문 트리까지 전부 다시 그릴 때 사용."""
+        try:
+            self._maybe_start_account_sync_timer()
+            try:
+                self.trading_controller._ensure_virtual_positions_monitor_info()
+            except Exception:
+                pass
+            try:
+                self.monitor_info = dict(self.trading_controller.monitor_info or {})
+            except Exception:
+                pass
+        except Exception:
+            pass
+        if hasattr(self, "virtual_tab"):
+            try:
+                self.virtual_tab._render_virtual_positions()
+            except Exception:
+                pass
+        try:
+            self._last_vp_render_sig = self._vp_structure_signature()
+        except Exception:
+            pass
+    def sync_with_actual_account(self, silent: bool = False, force: bool = False) -> None:
+        self.portfolio.sync_with_actual_account(silent=silent, force=force)
+
+    def _sync_account_deposit(self) -> None:
+        # [v4.9.0] 전체 계좌 동기화 — 버튼 클릭 시 API 스로틀을 우회(force)
+        self.portfolio.sync_with_actual_account(silent=False, force=True)
     def _sell_all_virtual(self):
         if messagebox.askyesno("🚨 비상 청산", "모든 보유 종목을 즉시 시장가로 매도하시겠습니까?"):
             self.portfolio.sell_all()

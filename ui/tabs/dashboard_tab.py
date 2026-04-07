@@ -2,8 +2,37 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 import os
+import time
+from typing import List
+
 import pandas as pd
 import strategy_selector
+
+# 텔레그램 단일 메시지 최대 길이(HTML·여유)
+_TELEGRAM_MAX_CHARS = 4000
+
+
+def _selection_telegram_chunks(tag_stripped: str, total: int, lines: List[str], extra_note: str = "") -> List[str]:
+    """종목 선정 알림 본문을 텔레그램 길이 제한에 맞게 분할(일반 텍스트, HTML 미사용)."""
+    header = (
+        f"🎯 종목 선정 완료 ({tag_stripped})\n"
+        f"총 {total}개 감시 등록\n"
+    )
+    if extra_note.strip():
+        header += extra_note.strip() + "\n"
+    header += "\n"
+    chunks: List[str] = []
+    buf = header
+    for line in lines:
+        add = line + "\n"
+        if len(buf) + len(add) > _TELEGRAM_MAX_CHARS:
+            chunks.append(buf)
+            buf = f"<b>(목록 계속)</b>\n{add}"
+        else:
+            buf += add
+    if buf.strip():
+        chunks.append(buf)
+    return chunks
 
 
 class DashboardTab:
@@ -170,20 +199,40 @@ class DashboardTab:
                 self.app.monitor_info = self.app.trading_controller.monitor_info
                 if hasattr(self.app, "monitor_tab"):
                     self.app.monitor_tab.update_watchlist(self.app.monitor_info)
-                tag = "[원격] " if auto_confirm else ""
+                tag = "[원격] " if auto_confirm else "[GUI] "
                 self.app.log(
                     f"✅ {tag}{len(self.app.monitor_codes)}개 종목을 실시간 감시 대상으로 등록했습니다."
                 )
-                if auto_confirm:
-                    msg = "<b>🎯 [원격 종목 선정 완료]</b>\n"
-                    msg += f"총 {len(self.app.monitor_codes)}개 종목이 감시 대상으로 등록되었습니다.\n"
-                    for _, row in df_snap.head(5).iterrows():
-                        nm = row.get("Name", row.get("name", ""))
-                        cd = row.get("Code", row.get("code", ""))
-                        msg += f"- {nm} ({cd})\n"
-                    threading.Thread(
-                        target=self.app.send_telegram_message, args=(msg,), daemon=True
-                    ).start()
+                # 텔레그램: 실제 감시 등록된 monitor_codes 기준(선정 분석 행수와 다를 수 있음). HTML 미사용으로 특수문자 종목명도 안전.
+                n_reg = len(self.app.monitor_codes or [])
+                n_analyzed = len(df_snap)
+                extra_note = ""
+                if n_analyzed != n_reg:
+                    extra_note = f"※ 선정 분석 {n_analyzed}개 → 감시 상한 적용 후 {n_reg}개 등록"
+                lines: List[str] = []
+                for code in self.app.monitor_codes or []:
+                    info = (self.app.monitor_info or {}).get(code, {})
+                    nm = str(info.get("name", code)).strip()
+                    tr = str(info.get("sel_track", "")).strip().upper() or "-"
+                    lines.append(f"• {nm} ({code})  [{tr}]")
+
+                parts = _selection_telegram_chunks(
+                    tag.strip(), n_reg, lines, extra_note=extra_note
+                )
+
+                def _send_telegram_parts() -> None:
+                    try:
+                        for i, part in enumerate(parts):
+                            self.app.send_telegram_message(part, parse_mode=None)
+                            if i + 1 < len(parts):
+                                time.sleep(0.4)
+                    except Exception as te:
+                        try:
+                            self.app.log(f"⚠️ [Telegram] 분할 전송 중 오류: {te}")
+                        except Exception:
+                            pass
+
+                threading.Thread(target=_send_telegram_parts, daemon=True).start()
             except Exception as ex:
                 self.app.log(f"❌ [선정] 등록·로그 후처리 실패: {ex}")
 

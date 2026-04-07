@@ -33,6 +33,19 @@ DEFAULT_SETTINGS = {
     "use_intraday_api_backfill": True,
     # 실시간 감시: 모든 감시 종목이 15분봉 워밍업(API·DB) 검증 통과 시에만 WS·감시 시작
     "require_full_warmup_for_monitoring": True,
+    # 준비 완료 종목부터 웹소켓 구독(REG)·감시 시작(나머지는 이어서 합류).
+    # require_full_warmup=True 이고 일부만 스트림이 켜진 뒤 다른 종목이 실패하면 감시를 중단합니다.
+    "incremental_warmup_stream": True,
+    # 지정가(00) 주문 전: 참고가 vs 실시간 캐시·화면 시세 일관성 검증
+    "limit_order_price_guard_enabled": True,
+    # 주문 기준가와 신뢰 시세(캐시 우선) 허용 차이(호가 단위 개수)
+    "limit_order_max_tick_deviation": 3,
+    # 화면 현재가 vs monitor_info 캐시 불일치 허용(더 넓게 — UI 갱신 지연 허용)
+    "limit_order_cache_vs_tree_mismatch_ticks": 10,
+    # 계좌 동기화 시 잔고 API 지연으로 로컬 포지션을 제거하지 않는 유예(초)
+    "reconcile_remove_grace_seconds": 180,
+    # 서버 잔고 목록에 종목이 연속으로 없을 때만 로컬 제거(동기화 주기마다 1씩 증가)
+    "reconcile_remove_confirm_syncs": 2,
     "min_trde_val": 50.0,
     "vol_ratio": 1.2,
     "vol_lookback": 7.0,
@@ -205,6 +218,9 @@ DEFAULT_SETTINGS = {
     "macd_fast": 12,
     "macd_sig": 9,
     "macd_slow": 26,
+    # 일일결산: 장마감(15:30) + 버퍼(분) 이후 생성분을 '완료'로 판정, 배치 시작일 UI 기억용
+    "daily_report_session_buffer_minutes": 10,
+    "daily_settlement_batch_start_date": "",
     "min_ask_bid_ratio_entry": 1.5,
     "min_vol_power_entry": 120.0,
     "power_sustained_min": 2,
@@ -218,7 +234,9 @@ ALLOWED_EXTRA_KEYS = {
     'mock_account_id', 'backtest_initial_capital',
     'use_auto_virtual',
     'buy_fee_bt', 'sell_fee_bt',
-    'buy_fee_mock', 'sell_fee_mock'
+    'buy_fee_mock', 'sell_fee_mock',
+    'daily_report_session_buffer_minutes',
+    'daily_settlement_batch_start_date',
 }
 
 def get_allowed_keys(current_settings=None):

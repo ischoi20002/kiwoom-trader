@@ -78,13 +78,14 @@ def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bo
 
 
 def get_buy_signals_detailed(df, settings, market_trend='UP'):
-    """매수 신호 상세 분석 (Type A/B 통합)"""
-    # [v4.4 Rule] 1. 시장지수 필터링 (3단계 차등 적용)
+    """매수 신호 상세 분석 (Type A/B 통합). market_trend는 4단계 레짐 문자열(DOWN/NEUTRAL/UP/AGGRESSIVE)을 권장."""
+    # [v4.7] 시장 레짐: DOWN만 전면 차단, NEUTRAL에서 Type B 원천 차단(아래 signal_b·최종 마스크)
     if settings.get('use_market_filter', True) and market_trend == 'DOWN':
         # DOWN (역풍): 모든 신호 차단
         return pd.DataFrame({
-            'Signal': False, 'Sig_Type': 'NONE', 
+            'Signal': False, 'Sig_Type': 'NONE',
             'Met_Count': 0, 'Total_Count': 1, 'Met_Ratio': 0.0,
+            'Met_A': 0, 'Tot_A': 1, 'Met_B': 0, 'Tot_B': 1,
             'RSI_Range': False, 'RSI_Cross': False,
             'MACD_OK': False, 'MA60_Range': False, 'MA_GC': False, 'Vol_Surge': False
         }, index=df.index)
@@ -241,8 +242,17 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     same_bar_pri = _normalize_same_bar_priority(settings)
     sig_type_col = _compute_sig_type_column(signal_a, signal_b, ratio_a, ratio_b, same_bar_pri)
     is_type_b_row = sig_type_col == "TYPE_B"
-    final_met = np.where(is_type_b_row, met_b, met_a)
-    final_total = np.where(is_type_b_row, total_b, total_a)
+    # Series·ndarray 혼용 시 위치 기준 합치도가 어긋나지 않도록 ndarray로 고정
+    m_a = np.asarray(met_a, dtype=np.int32)
+    m_b = np.asarray(met_b, dtype=np.int32)
+    ta_i = max(1, int(total_a))
+    tb_i = max(1, int(total_b))
+    final_met = np.where(is_type_b_row, m_b, m_a)
+    final_total = np.where(is_type_b_row, tb_i, ta_i)
+
+    n_rows = len(df.index)
+    tot_a_col = np.full(n_rows, ta_i, dtype=np.int32)
+    tot_b_col = np.full(n_rows, tb_i, dtype=np.int32)
 
     return pd.DataFrame({
         'Signal': signal,
@@ -250,6 +260,11 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         'Met_Count': final_met,
         'Total_Count': final_total,
         'Met_Ratio': np.where(final_total > 0, final_met / final_total, 0),
+        # UI·로그: 종목별 눌림목(A)·추세돌파(B) 충족 수 (분모는 설정에 따른 조건 개수)
+        'Met_A': m_a,
+        'Tot_A': tot_a_col,
+        'Met_B': m_b,
+        'Tot_B': tot_b_col,
         'RSI_Range': cond_rsi_range,
         'MACD_OK': cond_macd_basic,
         'MA60_Range': cond_ma60,

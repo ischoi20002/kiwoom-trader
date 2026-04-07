@@ -1,0 +1,5 @@
+# K-Trader — pip 의존성 (일부는 프로젝트에 이미 포함됨)
+pandas>=1.5.0
+numpy>=1.23.0
+plotly>=5.0.0
+pandas-market-calendars>=4.3.0

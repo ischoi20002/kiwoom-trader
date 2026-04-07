@@ -1,7 +1,9 @@
 import threading
 import json
 import os
+import re
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 class PortfolioManager:
     """
@@ -31,8 +33,224 @@ class PortfolioManager:
         self.actual_deposit = 0
         self.last_sync_time = 0.0
         self.min_sync_interval = 30.0 # [v4.5.3] 30초 간격으로 완화
-        
+        # 서버 잔고 목록에 종목이 없을 때 연속 몇 번인지 (API 일시 누락·파싱 실패로 인한 UI 깜빡임 방지)
+        self._reconcile_server_missing_streak: Dict[str, int] = {}
+
         self.lock = threading.Lock()
+
+    def _schedule_gui_callback(self) -> None:
+        """
+        gui_callback(가상탭 전체 갱신 등)은 체결·WS·백그라운드 스레드에서 트리거될 수 있습니다.
+        Tkinter 위젯은 메인 스레드에서만 안전하므로 root.after(0)으로 넘깁니다.
+        """
+        if not self.gui_callback:
+            return
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None:
+                root.after(0, self._run_gui_callback_on_main)
+            else:
+                self.gui_callback()
+        except Exception:
+            try:
+                self.gui_callback()
+            except Exception as e:
+                self.log(f"⚠️ [Portfolio] GUI 콜백 실패: {e}")
+
+    def _run_gui_callback_on_main(self) -> None:
+        try:
+            if self.gui_callback:
+                self.gui_callback()
+        except Exception as e:
+            self.log(f"⚠️ [Portfolio] GUI 콜백 예외: {e}")
+
+    def _normalize_stock_code(self, raw_code: Any) -> str:
+        """키움 REST·내부 저장 간 종목코드 형식(6자리) 통일."""
+        try:
+            if raw_code is None:
+                return ""
+            s = str(raw_code).strip()
+            if not s:
+                return ""
+            if "_" in s:
+                s = s.split("_", 1)[0]
+            return s.zfill(6)
+        except Exception:
+            return ""
+
+    def _parse_ka10085_holding_row(self, item: Dict[str, Any]) -> Optional[Tuple[str, str, int, float]]:
+        """
+        ka10085 응답 행 파싱 (공식: stk_cd, stk_nm, rmnd_qty, pur_pric).
+        구 HTS/다른 TR 필드(pdno, hldg_qty 등)도 보조로 인식합니다.
+        """
+        try:
+            if not isinstance(item, dict):
+                return None
+            raw_code = item.get("stk_cd") or item.get("pdno") or item.get("code")
+            code = self._normalize_stock_code(raw_code)
+            if not code:
+                return None
+            name = (
+                item.get("stk_nm")
+                or item.get("prdt_name")
+                or item.get("name")
+                or "Unknown"
+            )
+            qty = self._to_i(
+                item.get("rmnd_qty")
+                or item.get("hldg_qty")
+                or item.get("qty")
+                or 0
+            )
+            avg_price = self._to_f(
+                item.get("pur_pric")
+                or item.get("pchs_avg_pric")
+                or item.get("avg_price")
+                or 0.0
+            )
+            if qty <= 0:
+                return None
+            return (code, str(name), int(qty), float(avg_price))
+        except Exception:
+            return None
+
+    def _find_vp_key_for_code(self, norm_code: str) -> Optional[str]:
+        """virtual_positions 키가 6자리 미일치일 때 동일 종목 키를 찾습니다."""
+        try:
+            for k in self.virtual_positions:
+                if self._normalize_stock_code(k) == norm_code:
+                    return str(k)
+        except Exception:
+            pass
+        return None
+
+    def _merge_vp_alias_to_canonical(self, canonical: str) -> None:
+        """
+        체결·주문 경로에서 종목코드가 3490 vs 003490 처럼 섞이면 dict 키가 둘로 나뉩니다.
+        6자리 canonical 키 하나로 병합합니다 (대한항공 등 앞자리 0 종목에서 보유 UI 깜빡임 방지).
+
+        주의: 예전 구현은 dict 순서상 \"003490\" 키가 먼저 오면 `k == nk` 에서 바로 return 해
+        나머지 별칭(3490 등)을 영원히 병합하지 못하는 버그가 있었습니다.
+        """
+        try:
+            nk = self._normalize_stock_code(canonical)
+            if not nk:
+                return
+            keys: List[Any] = [
+                k
+                for k in list(self.virtual_positions.keys())
+                if self._normalize_stock_code(k) == nk
+            ]
+            if len(keys) == 0:
+                return
+            if len(keys) == 1:
+                k = keys[0]
+                if k == nk:
+                    return
+                pos = self.virtual_positions.pop(k)
+                self.virtual_positions[nk] = pos
+                try:
+                    self.data_manager.delete_active_position(k)
+                except Exception:
+                    pass
+                try:
+                    self.data_manager.save_active_position(
+                        nk,
+                        pos.get("name", ""),
+                        float(pos.get("avg_price", 0)),
+                        int(pos.get("qty", 0)),
+                        int(pos.get("stage", 1)),
+                        float(pos.get("invested", 0)),
+                        str(pos.get("entry_time", "")),
+                        str(pos.get("reason", "")),
+                    )
+                except Exception:
+                    pass
+                self.log(f"[Portfolio] 포지션 키 정규화: {k} → {nk}")
+                return
+
+            best_pos: Optional[Dict[str, Any]] = None
+            for k in keys:
+                pos = self.virtual_positions.get(k)
+                if pos is None:
+                    continue
+                if best_pos is None:
+                    best_pos = pos
+                    continue
+                if int(pos.get("qty", 0) or 0) > int(best_pos.get("qty", 0) or 0):
+                    best_pos = pos
+            if best_pos is None:
+                return
+            for k in keys:
+                self.virtual_positions.pop(k, None)
+                try:
+                    self.data_manager.delete_active_position(k)
+                except Exception:
+                    pass
+            self.virtual_positions[nk] = best_pos
+            try:
+                self.data_manager.save_active_position(
+                    nk,
+                    best_pos.get("name", ""),
+                    float(best_pos.get("avg_price", 0)),
+                    int(best_pos.get("qty", 0)),
+                    int(best_pos.get("stage", 1)),
+                    float(best_pos.get("invested", 0)),
+                    str(best_pos.get("entry_time", "")),
+                    str(best_pos.get("reason", "")),
+                )
+            except Exception:
+                pass
+            self.log(f"[Portfolio] 포지션 키 정규화(중복 병합): {keys} → {nk}")
+        except Exception as e:
+            self.log(f"⚠️ [Portfolio] 포지션 키 병합 실패: {e}")
+
+    def _dedupe_all_vp_keys(self) -> None:
+        """로드·동기화 직후: 동일 종목이 서로 다른 키로 남아 있으면 6자리 키로 일괄 병합합니다."""
+        try:
+            nks = set()
+            for k in list(self.virtual_positions.keys()):
+                nc = self._normalize_stock_code(k)
+                if nc:
+                    nks.add(nc)
+            for nk in nks:
+                self._merge_vp_alias_to_canonical(nk)
+        except Exception as e:
+            self.log(f"⚠️ [Portfolio] VP 키 일괄 정규화 실패: {e}")
+
+    def _should_skip_reconcile_remove(self, pos: Dict[str, Any]) -> bool:
+        """
+        매수 직후 ka10085 잔고에 아직 안 잡히는 API 지연으로,
+        로컬만 보유로 오판해 포지션을 지웠다가(보유 UI 깜빡임) 다시 붙는 현상을 완화합니다.
+        SYNCED(서버에서만 유입된) 포지션은 유예 없이 정상 비교합니다.
+        """
+        try:
+            if str(pos.get("reason", "")).upper() == "SYNCED":
+                return False
+            et = pos.get("entry_time") or ""
+            if not et:
+                return False
+            try:
+                s = str(et).strip().replace("Z", "")
+                m = re.match(
+                    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})",
+                    s,
+                )
+                if not m:
+                    return False
+                dt = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")
+            except (TypeError, ValueError):
+                return False
+            try:
+                grace = float(self.settings.get("reconcile_remove_grace_seconds", 180))
+            except (TypeError, ValueError):
+                grace = 180.0
+            grace = max(30.0, min(grace, 3600.0))
+            if (datetime.now() - dt).total_seconds() < grace:
+                return True
+        except Exception:
+            pass
+        return False
         
     def load_all(self):
         """DB 및 파일에서 포지션 데이터를 로드합니다."""
@@ -65,6 +283,7 @@ class PortfolioManager:
                     else:
                         self.virtual_positions = active
                     self.log(f"[Portfolio] DB에서 {len(self.virtual_positions)}개의 활성 포지션 복구")
+                    self._dedupe_all_vp_keys()
             except Exception as e:
                 self.log(f"[Error] [Portfolio] DB 포지션 복구 실패: {e}")
 
@@ -76,12 +295,12 @@ class PortfolioManager:
         except Exception as e:
             self.log(f"[Error] [Portfolio] DB 저장 실패: {e}")
 
-    def sync_with_actual_account(self, silent=False):
+    def sync_with_actual_account(self, silent: bool = False, force: bool = False):
         """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 가상 포지션을 동기화 (Reconciliation)"""
-        # [v4.5.1 API Throttle] 무분별한 API 호출 방질를 위해 60초 쿨다운 적용
+        # [v4.5.1 API Throttle] 자동 동기화만 쿨다운; 동기화 버튼(force=True)은 즉시 실행
         import time
         now = time.time()
-        if now - self.last_sync_time < self.min_sync_interval:
+        if not force and (now - self.last_sync_time < self.min_sync_interval):
             wait_s = int(self.min_sync_interval - (now - self.last_sync_time))
             if not silent:
                 self.log(f"⏳ [Throttle] 계좌 조회가 너무 잦습니다. {wait_s}초 후에 업데이트가 가능합니다.")
@@ -102,8 +321,9 @@ class PortfolioManager:
             self.total_equity = total_equity
             self.d1_deposit = account_data.get('d1_deposit', 0)
             self.d2_deposit = account_data.get('d2_deposit', 0)
-            # [v4.5.3] D+2 예수금을 실제 가용 예수금으로 우선 간주
-            self.actual_deposit = account_data.get('d2_deposit', 0)
+            # 예수금상세(주문가능·출금가능) 우선 — 매수 직후에도 반영된 가용 현금
+            ca = float(account_data.get("cash_available") or 0)
+            self.actual_deposit = ca if ca > 0 else float(account_data.get("d2_deposit", 0) or 0)
         
         server_codes = set()
         updated_count = 0
@@ -112,25 +332,36 @@ class PortfolioManager:
         with self.lock:
             # 1. 서버 데이터 기준으로 로컬 데이터 업데이트
             for item in holdings:
-                code = item.get('pdno') or item.get('code')
-                if not code: continue
-                
-                name = item.get('prdt_name') or item.get('name', 'Unknown')
-                qty = self._to_i(item.get('hldg_qty') or item.get('qty', 0))
-                avg_price = self._to_f(item.get('pchs_avg_pric') or item.get('avg_price', 0.0))
+                parsed = self._parse_ka10085_holding_row(item)
+                if not parsed:
+                    continue
+                code, name, qty, avg_price = parsed
                 server_codes.add(code)
-                
+
+                vp_key = self._find_vp_key_for_code(code)
+                if vp_key is not None and vp_key != code:
+                    try:
+                        self.virtual_positions[code] = self.virtual_positions.pop(vp_key)
+                    except Exception as e:
+                        self.log(f"[Sync] 종목코드 키 정규화 실패 ({vp_key}→{code}): {e}")
+                        continue
+                    try:
+                        self.data_manager.delete_active_position(vp_key)
+                    except Exception:
+                        pass
+
                 if code in self.virtual_positions:
                     self.virtual_positions[code]['qty'] = qty
                     self.virtual_positions[code]['avg_price'] = avg_price
                     self.virtual_positions[code]['invested'] = float(qty) * float(avg_price)
+                    self.virtual_positions[code]['name'] = name
                     updated_count += 1
                 else:
                     self.virtual_positions[code] = {
                         "name": name, "avg_price": avg_price, "qty": qty,
                         "stage": 1, "invested": float(qty) * float(avg_price),
                         "entry_time": datetime.now().isoformat(),
-                        "reason": "SYNCED", "events": [], "max_now": avg_price
+                        "reason": "SYNCED", "sig_type": "TYPE_A", "events": [], "max_now": avg_price
                     }
                     self.data_manager.save_active_position(code, name, avg_price, qty, 1, float(qty) * float(avg_price), datetime.now().isoformat(), "SYNCED")
                     new_count += 1
@@ -138,9 +369,71 @@ class PortfolioManager:
             # 2. 로컬에만 있는 종목 제거 (매매 누락 보정)
             local_codes = list(self.virtual_positions.keys())
             removed_count = 0
+
+            # 보유 API가 0건인데 로컬만 있으면: 응답 누락/지연 가능성이 커서 자동 제거하지 않음
+            if len(holdings) == 0 and len(local_codes) > 0:
+                if not silent:
+                    self.log(
+                        "[Sync] 보유 API 응답 0건 — 로컬 포지션 자동 제거 생략 "
+                        "(전량 매도 후에는 수동 동기화 또는 다음 성공 응답을 확인하세요)"
+                    )
+            else:
+                try:
+                    confirm_n = int(
+                        float(self.settings.get("reconcile_remove_confirm_syncs", 2))
+                    )
+                except (TypeError, ValueError):
+                    confirm_n = 2
+                confirm_n = max(1, min(confirm_n, 10))
+
+                for code in local_codes:
+                    nc = self._normalize_stock_code(code)
+                    if nc in server_codes:
+                        self._reconcile_server_missing_streak[nc] = 0
+                    else:
+                        self._reconcile_server_missing_streak[nc] = (
+                            int(self._reconcile_server_missing_streak.get(nc, 0)) + 1
+                        )
+
             for code in local_codes:
-                if code not in server_codes:
+                if self._normalize_stock_code(code) not in server_codes:
+                    # 보유 0건 분기에서는 위에서 제거 루프를 돌지 않음 — 여기서도 스킵
+                    if len(holdings) == 0 and len(local_codes) > 0:
+                        continue
+                    nc = self._normalize_stock_code(code)
+                    try:
+                        confirm_n = int(
+                            float(self.settings.get("reconcile_remove_confirm_syncs", 2))
+                        )
+                    except (TypeError, ValueError):
+                        confirm_n = 2
+                    confirm_n = max(1, min(confirm_n, 10))
+                    if (
+                        int(self._reconcile_server_missing_streak.get(nc, 0))
+                        < confirm_n
+                    ):
+                        if not silent:
+                            try:
+                                self.log(
+                                    f"[Sync] {code} 서버 목록 미포함 "
+                                    f"({self._reconcile_server_missing_streak.get(nc, 0)}/{confirm_n}회) "
+                                    f"— 연속 확인 후에만 제거"
+                                )
+                            except Exception:
+                                pass
+                        continue
+
                     pos = self.virtual_positions[code]
+                    if self._should_skip_reconcile_remove(pos):
+                        if not silent:
+                            try:
+                                self.log(
+                                    f"[Sync] {pos.get('name', code)}({code}) "
+                                    f"잔고 API 미반영 가능 — 유예 중(재동기화 대기)"
+                                )
+                            except Exception:
+                                pass
+                        continue
                     curr_p = self._to_f(pos.get('current_price', pos.get('avg_price', 0)))
                     avg_p = self._to_f(pos.get('avg_price', 0))
                     
@@ -161,11 +454,17 @@ class PortfolioManager:
                     
                     self.virtual_positions.pop(code, None)
                     self.data_manager.delete_active_position(code)
+                    try:
+                        self._reconcile_server_missing_streak.pop(nc, None)
+                    except Exception:
+                        pass
                     removed_count += 1
                     self.log(f"[Sync] {pos['name']}({code}) 종목이 서버에서 사라져 이력으로 이동 (Reconciled)")
 
+            self._dedupe_all_vp_keys()
+
         self.save_db()
-        if self.gui_callback: self.gui_callback()
+        self._schedule_gui_callback()
         
         result_msg = f"✅ 계좌 동기화 완료: 총자산 {self.total_equity:,.0f}원 (D+2: {self.actual_deposit:,.0f}) | 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
         self.log(f"[Portfolio] {result_msg}")
@@ -175,7 +474,7 @@ class PortfolioManager:
         d = self.order_manager.get_deposit()
         if d is not None:
             self.actual_deposit = d
-            if self.gui_callback: self.gui_callback()
+            self._schedule_gui_callback()
             return d
         return None
 
@@ -241,13 +540,25 @@ class PortfolioManager:
             
         return snapshot
 
-    def _to_f(self, v):
-        try: return float(v) if not isinstance(v, list) else 0.0
-        except: return 0.0
-    
-    def _to_i(self, v):
-        try: return int(v) if not isinstance(v, list) else 0
-        except: return 0
+    def _to_f(self, v: Any) -> float:
+        try:
+            if isinstance(v, list):
+                return 0.0
+            if isinstance(v, str):
+                v = v.replace(",", "").replace("+", "").strip()
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _to_i(self, v: Any) -> int:
+        try:
+            if isinstance(v, list):
+                return 0
+            if isinstance(v, str):
+                v = v.replace(",", "").replace("+", "").strip()
+            return int(float(v))
+        except (ValueError, TypeError):
+            return 0
 
     def on_fill(
         self,
@@ -264,7 +575,12 @@ class PortfolioManager:
         fill_channel: \"virtual\" | \"exchange\" — 일별 세션 로그 구분용.
         """
         now_str = datetime.now().strftime('%H:%M:%S')
+        try:
+            code = self._normalize_stock_code(code)
+        except Exception:
+            code = str(code).split("_")[0].zfill(6)
         with self.lock:
+            self._merge_vp_alias_to_canonical(code)
             if side == "buy":
                 # 진입 혹은 추매
                 if code not in self.virtual_positions:
@@ -364,8 +680,7 @@ class PortfolioManager:
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
 
         self.save_db()
-        if self.gui_callback:
-            self.gui_callback()
+        self._schedule_gui_callback()
 
         try:
             sl = getattr(self.app, "session_logger", None)
@@ -393,7 +708,7 @@ class PortfolioManager:
                 self.data_manager.delete_active_position(code)
             self.virtual_positions = {}
         self.save_db()
-        if self.gui_callback: self.gui_callback()
+        self._schedule_gui_callback()
 
     def sell_all(self):
         """[v3.8/v4.5.4] 비상 상황: 모든 가상/실제 포지션 즉시 시장가 매도 청산"""
@@ -414,7 +729,16 @@ class PortfolioManager:
                 use_mock = getattr(config, 'USE_MOCK', False)
                 allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
                 if allow_order:
-                    self.order_api.place_order(code, qty, curr_p, order_type="03", side="sell")
+                    self.order_manager.place_order(
+                        code,
+                        qty,
+                        curr_p,
+                        order_type="00",
+                        side="sell",
+                        name=str(pos.get("name", "")),
+                        reason="EMERGENCY",
+                        skip_price_guard=True,
+                    )
                 
                 # 가상 상태 업데이트 (즉시 삭제 대신 '매도 대기' 상태로 전환하여 체결 대기)
                 pos['exit_pending'] = True
@@ -423,4 +747,4 @@ class PortfolioManager:
                 self.log(f"🚨 [Emergency] {pos.get('name')}({code}) 비상 청산 주문 발송")
                 
         self.save_db()
-        if self.gui_callback: self.gui_callback()
+        self._schedule_gui_callback()

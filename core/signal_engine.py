@@ -6,6 +6,8 @@ import traceback
 from backtest_engine import TradingStrategy
 from strategy.simulation_models import SimulatedRealtimeMetrics
 from ui.tabs.monitor_tab import format_strategy_type_label
+from utils.krx_session import is_krx_regular_session
+from typing import Optional
 
 class SignalEngine:
     """[v25.7] 실시간 체결 데이터 분석 및 시그널 포착 엔진 클래스"""
@@ -31,12 +33,87 @@ class SignalEngine:
             return self._to_scalar(val[0], default)
         return val
 
+    def _format_s1_confluence_status_line(self, last_sig: object) -> str:
+        """
+        S1 합치도 표시: 눌림목(A)과 추세돌파(B) 조건 충족 수를 각각 보여준다.
+        기존 '대기 (n/7)'만으로는 B 분모(보통 5~6)와 혼동되거나, NONE일 때 A 기준만 보이는 문제가 있다.
+        """
+        try:
+            st = str(self._to_scalar(last_sig.get("Sig_Type", "NONE"), "NONE"))
+            ma_c = int(self._to_scalar(last_sig.get("Met_A", 0), 0))
+            ta_t = max(1, int(self._to_scalar(last_sig.get("Tot_A", 1), 1)))
+            mb_c = int(self._to_scalar(last_sig.get("Met_B", 0), 0))
+            tb_t = max(1, int(self._to_scalar(last_sig.get("Tot_B", 1), 1)))
+            if st == "TYPE_B":
+                return f"대기 추세B {mb_c}/{tb_t} (눌림A {ma_c}/{ta_t})"
+            if st == "TYPE_A":
+                return f"대기 눌림A {ma_c}/{ta_t} (추세B {mb_c}/{tb_t})"
+            return f"대기 눌림A {ma_c}/{ta_t} · 추세B {mb_c}/{tb_t}"
+        except Exception:
+            try:
+                mc = int(self._to_scalar(last_sig["Met_Count"], 0))
+                tc = max(1, int(self._to_scalar(last_sig["Total_Count"], 1)))
+                return f"대기 ({mc}/{tc})"
+            except Exception:
+                return "대기"
+
+    def _format_monitor_vs_prev_cell(self, info: dict) -> str:
+        """감시 트리 '대비' 열: 전일 종가 대비 등락폭(원). 웹소켓에서 info['diff'] 유지."""
+        try:
+            raw = info.get("diff")
+            if raw is None:
+                return "—"
+            s = str(raw).strip().replace(",", "")
+            if s in ("", "-", "—"):
+                return "—"
+            iv = int(round(float(s)))
+            if iv == 0:
+                return "0"
+            return f"{iv:+,}"
+        except Exception:
+            return "—"
+
+    def _format_monitor_bid_ask_cell(self, info: dict) -> str:
+        """감시 트리 Bid/Ask 열: 매도잔량 / 매수잔량."""
+        try:
+            ta = int(float(self._to_scalar(info.get("total_ask", 0), 0)))
+            tb = int(float(self._to_scalar(info.get("total_bid", 0), 0)))
+            return f"{ta:,} / {tb:,}"
+        except Exception:
+            return "— / —"
+
+    def _code_in_virtual_positions(self, code: str) -> bool:
+        """가상·실제 보유(virtual_positions)에 해당 종목이 있는지 6자리 기준으로 확인합니다."""
+        try:
+            nk = str(code).split("_")[0].zfill(6)
+            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+            if nk in vp or code in vp:
+                return True
+            for k in vp:
+                if str(k).zfill(6) == nk:
+                    return True
+        except Exception:
+            pass
+        return False
+
     def on_tick_received(self, code, now_price, volume, trde_val, **kwargs):
         """실시간 체결 데이터(Tick) 처리 본체"""
         try:
             if now_price <= 0: return # [v2.2] 유효하지 않은 가격 데이터 로직 진입 차단
+            code = str(code).split("_")[0].zfill(6)
+            if self._code_in_virtual_positions(code) and code not in self.app.monitor_info:
+                try:
+                    self.app._ensure_vp_monitor_stub(code)
+                except Exception:
+                    pass
             if code not in self.app.monitor_info: return
             info = self.app.monitor_info[code]
+            # 지정가 주문 시세 검증용: 틱 단가로 캐시를 매 틱 동기화 (화면·주문 기준 불일치 방지)
+            try:
+                info["last_price"] = float(now_price)
+                info["price"] = float(now_price)
+            except (TypeError, ValueError):
+                pass
             try:
                 wl_all_set = self.app.watchlist_store.codes_set()
             except Exception:
@@ -44,7 +121,12 @@ class SignalEngine:
             is_in_watchlist = code in wl_all_set
             wl_only_set = self._watchlist_only_codes()
             is_wl_only = code in wl_only_set
-            
+            try:
+                _wl_ap = self.app.watchlist_store.get_avg_price(code)
+            except Exception:
+                _wl_ap = None
+            has_wl_avg = _wl_ap is not None and float(_wl_ap) > 0
+
             # Update additional fields from kwargs (vol_power, total_ask, total_bid 등)
             for k, v in kwargs.items():
                 info[k] = v
@@ -73,7 +155,11 @@ class SignalEngine:
             s_state = self.app.rsi_signals.get(code, {'last_rsi': 0.0, 'signal_time': None})
             last_rsi_f = float(s_state.get('last_rsi', 0.0))
             now_dt = datetime.now()
-            
+            try:
+                _session_ok = is_krx_regular_session(now_dt)
+            except Exception:
+                _session_ok = True
+
             if last_rsi_f > 0 and last_rsi_f < 50.0 and rsi_val >= 50.0:
                 s_state['signal_time'] = now_dt
             
@@ -166,9 +252,7 @@ class SignalEngine:
                 
                 # [v4.5.9] 전방위적 스칼라 쉴드 적용
                 is_buy = bool(self._to_scalar(last_sig['Signal'], False))
-                met_c = int(self._to_scalar(last_sig['Met_Count'], 0))
-                total_c = int(self._to_scalar(last_sig['Total_Count'], 1))
-                info['confluence'] = f"대기 ({met_c}/{total_c})"
+                info['confluence'] = self._format_s1_confluence_status_line(last_sig)
                 info['met_ratio'] = float(self._to_scalar(last_sig['Met_Ratio'], 0.0))
                 
                 last_row = info['last_row_cache']
@@ -202,7 +286,13 @@ class SignalEngine:
                     _st_wl = str(self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B"))
                     if "TYPE_B" not in _st_wl.upper():
                         is_buy = False
-                
+
+                # 정규장 외(장전·장후): 매수·알림 전에 차단 (합치도 문구만 통일)
+                if not _session_ok:
+                    info["confluence"] = "⏳ 정규장 외(실시간 체결 미진행) · 봉 준비"
+                    info["met_ratio"] = 0.0
+                    is_buy = False
+
                 # 쿨타임 및 중복 진입 방지
                 is_cool = True
                 if code in self.last_buy_sig_time:
@@ -230,12 +320,15 @@ class SignalEngine:
                         pass
                     self.app._on_buy_signal_received(code, now_price, rsi_sig, macd_val, osc_val, ma60_ratio)
 
-                # 관심목록(감시 제외 종목): 매수 신호 시 텔레그램만 (로그·주문·트리 없음)
-                if is_wl_only and is_buy and is_cool:
+                # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
+                if is_wl_only and is_buy and is_cool and not has_wl_avg:
                     _t_wb = self._wl_buy_last_tm.get(code)
                     if _t_wb is None or (datetime.now() - _t_wb).total_seconds() >= 180:
                         self._wl_buy_last_tm[code] = datetime.now()
-                        _nm = str(info.get("name", code))
+                        try:
+                            _nm = self.app.watchlist_store.get_display_name(code)
+                        except Exception:
+                            _nm = str(info.get("name", code))
                         _mr = float(self._to_scalar(info.get("met_ratio", 0.0), 0.0))
                         _msg = (
                             "<b>⭐ [텔레그램·관심목록 전용]</b>\n"
@@ -260,7 +353,7 @@ class SignalEngine:
             ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
             vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
 
-            if bars_ready and not is_wl_only:
+            if bars_ready and not is_wl_only and _session_ok:
                 res = self.app.strategy_engine.evaluate_position(
                     code,
                     now_price,
@@ -279,8 +372,14 @@ class SignalEngine:
                         profit_ratio=res.get("profit_ratio", 0),
                     )
 
-            # 관심목록 전용: 가상 Type B Stage2 보유 가정 → S2-B 청산 규칙만 평가, 텔레그램만
-            if bars_ready and is_wl_only and last_row is not None:
+            # 관심목록 전용: 평단(기준가) 등록 시에만 S2-B 매도 신호 텔레그램 (미등록 시 매수만)
+            if (
+                bars_ready
+                and is_wl_only
+                and last_row is not None
+                and _session_ok
+                and has_wl_avg
+            ):
                 self._tick_watchlist_synthetic_s2_exit(
                     code,
                     now_price,
@@ -290,6 +389,7 @@ class SignalEngine:
                     ask_bid_ratio=ask_bid_ratio,
                     vol_power=vol_power,
                     is_power_exhausted=is_power_exhausted,
+                    ref_avg=float(_wl_ap),
                 )
 
             # 8. 트리뷰 업데이트 큐잉 (관심목록에 등록된 종목은 감시 화면에 표시하지 않음, 감시목록과 별개)
@@ -301,18 +401,26 @@ class SignalEngine:
                 strat_label = format_strategy_type_label(
                     info.get("sel_track", info.get("SelTrack", "AB"))
                 )
+                _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
+                if not _session_ok:
+                    _vp_str = "—"
+                try:
+                    info["status_text"] = str(info.get("confluence", "대기"))
+                except Exception:
+                    pass
                 full_values = (
                     f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
                     code,
                     info["name"],
                     strat_label,
                     f"{int(now_price):,}",
+                    self._format_monitor_vs_prev_cell(info),
                     f"{sign} {abs_ratio:.2f}%" if sign else "0.00%",
                     str(info.get("confluence", "-")),
-                    f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%",
-                    f"{int(float(self._to_scalar(info.get('total_ask', 0), 0))):,}",
-                    f"{int(float(self._to_scalar(info.get('total_bid', 0), 0))):,}",
-                    f"{int(volume):,}", f"{trde_val:,}"
+                    _vp_str,
+                    self._format_monitor_bid_ask_cell(info),
+                    f"{int(volume):,}",
+                    f"{trde_val:,}",
                 )
                 
                 final_tags = []
@@ -335,6 +443,13 @@ class SignalEngine:
                 if not self.app._update_timer_active:
                     self.app._update_timer_active = True
                     self.app.root.after(100, self.app._render_tree_updates)
+
+            # 보유 종목이 있으면 가상 탭 실시간 평가·요약 갱신 (스로틀은 앱 쪽)
+            if self._code_in_virtual_positions(code):
+                try:
+                    self.app.request_virtual_tab_realtime_render()
+                except Exception:
+                    pass
 
         except Exception as e:
             if not self._last_realtime_err == str(e):
@@ -372,30 +487,39 @@ class SignalEngine:
         ask_bid_ratio: float,
         vol_power: float,
         is_power_exhausted: bool,
+        ref_avg: Optional[float] = None,
     ) -> None:
         """
         보유 여부와 무관하게 Type B · Stage2 청산 규칙만 적용한 합성 포지션 평가.
-        당일 시가(info['open'])를 평단으로 두고 고가 추적 후 EXIT 시 텔레그램만 발송.
+        ref_avg 가 있으면 사용자 등록 평단을 기준으로, 없으면 당일 시가(info['open'])를 평단으로 둠.
+        EXIT 시 텔레그램만 발송.
         """
         try:
             st_root = getattr(self.app, "watchlist_synth_state", None)
             if not isinstance(st_root, dict):
                 return
+            use_ref = ref_avg is not None and float(ref_avg) > 0
             day = datetime.now().date().isoformat()
             s = st_root.get(code)
             if not isinstance(s, dict):
                 s = {}
                 st_root[code] = s
-            open_p = float(self._to_scalar(info.get("open", 0), 0.0))
-            if open_p <= 0:
-                open_p = float(now_price)
+            if use_ref:
+                base_avg = float(ref_avg)
+            else:
+                open_p = float(self._to_scalar(info.get("open", 0), 0.0))
+                if open_p <= 0:
+                    open_p = float(now_price)
+                base_avg = open_p
             if s.get("session") != day:
                 s["session"] = day
-                s["avg_p"] = open_p
-                s["max_p"] = max(open_p, float(now_price))
+                s["avg_p"] = base_avg
+                s["max_p"] = max(base_avg, float(now_price))
             else:
+                if use_ref:
+                    s["avg_p"] = base_avg
                 s["max_p"] = max(float(s.get("max_p", now_price)), float(now_price))
-            avg_p = float(s.get("avg_p", open_p))
+            avg_p = float(s.get("avg_p", base_avg))
             pos = {
                 "stage": 2,
                 "entry_n": 2,
@@ -431,15 +555,23 @@ class SignalEngine:
             if t0 is not None and (datetime.now() - t0).total_seconds() < 180:
                 return
             self._wl_sell_last_tm[code] = datetime.now()
-            nm = str(info.get("name", code))
+            try:
+                nm = self.app.watchlist_store.get_display_name(code)
+            except Exception:
+                nm = str(info.get("name", code))
             pr = float(res.get("profit_ratio", 0) or 0)
             er = str(res.get("reason", ""))
+            anchor = (
+                f"등록 평단 {avg_p:,.0f}원 기준"
+                if use_ref
+                else "당일 시가 앵커"
+            )
             msg = (
                 "<b>⭐ [텔레그램·관심목록 전용]</b>\n"
                 "<i>감시 자동매매/주문과 별도 · 합성 S2-B 평가(보유 무관)</i>\n\n"
                 f"<b>TYPE B S2 매도 신호 — {er}</b>\n"
                 f"종목: {nm} ({code})\n"
-                f"합성 수익률: {pr:+.1f}% (당일 시가 앵커)\n"
+                f"합성 수익률: {pr:+.1f}% ({anchor})\n"
                 f"시간: {datetime.now().strftime('%H:%M:%S')}"
             )
             threading.Thread(
@@ -447,8 +579,12 @@ class SignalEngine:
                 args=(msg,),
                 daemon=True,
             ).start()
-            s["avg_p"] = float(now_price)
-            s["max_p"] = float(now_price)
+            if use_ref:
+                s["avg_p"] = float(ref_avg)
+                s["max_p"] = max(float(s.get("max_p", now_price)), float(now_price))
+            else:
+                s["avg_p"] = float(now_price)
+                s["max_p"] = float(now_price)
         except Exception:
             pass
 

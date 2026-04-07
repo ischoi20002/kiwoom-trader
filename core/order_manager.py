@@ -2,8 +2,11 @@ import requests
 import json
 import logging
 from datetime import datetime
+from typing import Any, Dict, Optional
+
 import config
 from utils.normalization import get_tick_size
+from core.price_guard import validate_limit_order_reference_price
 
 # [v4.0] Kiwoom REST API 공식 패키지 모듈 도입
 try:
@@ -42,9 +45,22 @@ class OrderManager:
         else:
             return int(price - tick)
 
-    def place_order(self, code, qty, price, order_type="00", side="buy", name="", reason=""):
+    def place_order(
+        self,
+        code,
+        qty,
+        price,
+        order_type="00",
+        side="buy",
+        name="",
+        reason="",
+        skip_price_guard: bool = False,
+    ):
         """
         주문 발송 (REST API 호출 - v4.0.0 Refactored)
+        - order_type \"00\"(지정가): 매수는 현재가(참고가)+1틱, 매도는 -1틱으로 ord_uv 설정.
+        - order_type \"03\"(시장가): 호가 0 — 시장가만 필요할 때만 사용.
+        - skip_price_guard: True 시 지정가 시세 일관성 검증 생략(비상 매도 등 한정 사용).
         """
         use_mock = getattr(config, 'USE_MOCK', False)
         mode_str = "모의투자" if use_mock else "실전투자"
@@ -76,6 +92,46 @@ class OrderManager:
             return None
 
         try:
+            if (
+                not skip_price_guard
+                and str(order_type).strip() == "00"
+            ):
+                tree_p: Optional[float] = None
+                try:
+                    mt = getattr(self.app, "monitor_tab", None)
+                    if mt is not None and hasattr(mt, "get_tree_display_price"):
+                        tree_p = mt.get_tree_display_price(code)
+                except Exception:
+                    tree_p = None
+                st = getattr(self.app, "settings", None) or {}
+                ok_pg, msg_pg = validate_limit_order_reference_price(
+                    code=str(code).zfill(6),
+                    ref_price=float(price),
+                    order_type=str(order_type),
+                    monitor_info=getattr(self.app, "monitor_info", None),
+                    tree_price=tree_p,
+                    settings=st if isinstance(st, dict) else {},
+                )
+                if not ok_pg:
+                    self.app.log(f"❌ [{mode_str}] 주문 차단(시세 검증): {msg_pg}")
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "order_blocked",
+                                {
+                                    "code": code,
+                                    "side": side,
+                                    "qty": int(qty),
+                                    "reason": "price_guard",
+                                    "detail": msg_pg,
+                                    "name": name,
+                                },
+                            )
+                    except Exception:
+                        pass
+                    return None
+
             # [v4.0] 가격 보정 적용 및 API 규격 매핑
             adj_price = self.get_adjusted_price(price, side) if order_type == "00" else price
             
@@ -113,6 +169,29 @@ class OrderManager:
                 self.app.log(f"✅ [{mode_str}] 주문 성공! 번호: {ord_no}")
                 # [v3.8] DB 로그 기록
                 self.app.data_manager.log_order(code, side, qty, adj_price, order_type, ord_no, "SUCCESS", name=name, reason=reason)
+
+                # 웹소켓 CHE가 없을 때도 가상포지션·체결가 연동 (메인 스레드에서 실행)
+                try:
+                    root = getattr(self.app, "root", None)
+                    if root is not None and hasattr(root, "after"):
+                        root.after(
+                            0,
+                            lambda c=code,
+                            o=ord_no,
+                            s=side,
+                            q=int(qty),
+                            ap=int(adj_price),
+                            nm=name,
+                            rs=reason: self.app.reconcile_exchange_fill_after_order_accept(
+                                c, o, s, q, float(ap), nm, rs
+                            ),
+                        )
+                    else:
+                        self.app.reconcile_exchange_fill_after_order_accept(
+                            code, ord_no, side, int(qty), float(adj_price), name, reason
+                        )
+                except Exception as sync_e:
+                    self.logger.warning("체결 동기화 스케줄 실패: %s", sync_e)
 
                 # 텔레그램 알림
                 side_kr = "매수" if side == "buy" else "매도"
@@ -154,6 +233,87 @@ class OrderManager:
                 pass
             return None
 
+    def _safe_float(self, val, default: float = 0.0) -> float:
+        """API 숫자 필드(콤마·부호 문자열)를 float로 변환합니다."""
+        try:
+            if val is None or val == "":
+                return default
+            return float(str(val).replace(",", "").replace("+", "").strip())
+        except Exception:
+            return default
+
+    def _sum_holdings_market_value(self, holdings: list) -> float:
+        """
+        ka10085 acnt_prft_rt 행별 주식 평가금액 합산.
+        평가 전용 필드가 없으면 현재가×보유수량으로 근사합니다.
+        """
+        s = 0.0
+        for row in holdings:
+            if not isinstance(row, dict):
+                continue
+            try:
+                ev = self._safe_float(
+                    row.get("evlu_amt") or row.get("stk_evlu_amt") or 0
+                )
+                if ev > 0:
+                    s += ev
+                    continue
+                cur = self._safe_float(row.get("cur_prc") or 0)
+                qty = self._safe_float(row.get("rmnd_qty") or 0)
+                if cur > 0 and qty > 0:
+                    s += cur * qty
+            except Exception:
+                continue
+        return s
+
+    def _resolve_total_equity(
+        self,
+        merged: dict,
+        holdings: list,
+        stocks_mv: float,
+        api_tot: float,
+        d1: float,
+        d2: float,
+    ) -> tuple[float, float, float]:
+        """
+        tot_evlu_amt 가 '예수+주식' 총자산이 아니라 주식평가만 담는 경우가 있어
+        D+2 예수금 + 주식평가 합과 비교해 총자산을 확정합니다.
+        """
+        try:
+            if d2 <= 0 and (len(holdings) > 0 or stocks_mv > 0):
+                dep = self.get_deposit()
+                if dep and float(dep) > 0:
+                    d2 = float(dep)
+                    if d1 <= 0:
+                        d1 = d2
+        except Exception:
+            pass
+
+        combined = float(d2) + float(stocks_mv)
+
+        try:
+            if len(holdings) == 0 and stocks_mv <= 0:
+                tot = api_tot if api_tot > 0 else combined
+                if tot <= 0 and d2 > 0:
+                    tot = float(d2)
+                return (tot, d1, d2)
+
+            if combined <= 0:
+                return (api_tot if api_tot > 0 else d2, d1, d2)
+
+            # API 총자산이 (예수+주식)과 거의 같으면 API 값 사용
+            if api_tot > 0 and abs(api_tot - combined) / max(combined, 1.0) < 0.02:
+                return (api_tot, d1, d2)
+
+            # 예수금 필드가 비어 합산이 실제보다 작은데 API 총자산이 더 크면 API 우선
+            if api_tot > 0 and api_tot > combined * 1.08:
+                return (api_tot, d1, d2)
+
+            # 그 외에는 합산(예수+주식평가)을 총자산으로 사용
+            return (combined, d1, d2)
+        except Exception:
+            return (combined if combined > 0 else api_tot, d1, d2)
+
     def get_holdings(self):
         """[v4.0.0] 실시간 계좌 잔고 동기화 (ka10085 규격)"""
         if not self.account_api:
@@ -167,29 +327,68 @@ class OrderManager:
             # ka10085: 계좌 수익률/잔고 요청
             # stex_tp "0": 통합거래소
             res = self.account_api.account_return_rate_request_ka10085(stex_tp="0")
+            if not isinstance(res, dict):
+                res = {}
+
+            # 응답이 output 래퍼 안에 있을 수 있어 상위와 병합
+            merged: dict = dict(res)
+            out = res.get("output")
+            if isinstance(out, dict):
+                merged = {**res, **out}
             
-            ret_code = res.get("return_code", -1)
+            ret_code = merged.get("return_code", res.get("return_code", -1))
             if ret_code == 0:
-                holdings = res.get("acnt_prft_rt", [])
-                # [v4.5 Asset Harden] 총 평가금액(Total Equity) 추출 (예수금 + 주식 평가액)
-                total_equity = float(res.get("tot_evlu_amt", 0))
-                d1_deposit = float(res.get("d1_samt", 0))
-                d2_deposit = float(res.get("d2_samt", 0))
-                
-                # [v4.8.5 Asset Fallback] 보유 종목이 없으면 총자산이 0으로 잡히는 API 특성 보정
-                if total_equity == 0:
+                holdings = merged.get("acnt_prft_rt") or res.get("acnt_prft_rt") or []
+                if not isinstance(holdings, list):
+                    holdings = []
+                api_tot = self._safe_float(merged.get("tot_evlu_amt", 0))
+                d1_deposit = self._safe_float(merged.get("d1_samt", 0))
+                d2_deposit = self._safe_float(merged.get("d2_samt", 0))
+                stocks_mv = self._sum_holdings_market_value(holdings)
+                total_equity, d1_deposit, d2_deposit = self._resolve_total_equity(
+                    merged, holdings, stocks_mv, api_tot, d1_deposit, d2_deposit
+                )
+
+                # [v4.8.5] 보유 없을 때 총자산·예수금 보정
+                if total_equity == 0 and len(holdings) == 0:
                     deposit = self.get_deposit()
                     if deposit:
                         total_equity = float(deposit)
                         d1_deposit = total_equity
                         d2_deposit = total_equity
-                
-                self.app.log(f"✅ 계좌 동기화 성공 (보유: {len(holdings)}개 | 총자산: {total_equity:,.0f}원)")
+
+                # ka10085의 d1_samt/d2_samt는 총자산과 혼동·누락되는 경우가 있어 예수금상세 TR로 보강
+                cash_available = 0.0
+                dep_detail = self.get_deposit_detail()
+                if dep_detail:
+                    d1d = float(dep_detail.get("d1") or 0)
+                    d2d = float(dep_detail.get("d2") or 0)
+                    if d1d > 0:
+                        d1_deposit = d1d
+                    if d2d > 0:
+                        d2_deposit = d2d
+                    cash_available = float(
+                        dep_detail.get("ord_alow")
+                        or dep_detail.get("pymn_alow")
+                        or dep_detail.get("entr")
+                        or 0
+                    )
+                    self.app.log(
+                        f"✅ 예수금상세 반영 (qry_tp={dep_detail.get('qry_tp_used')}) "
+                        f"D+1={d1_deposit:,.0f} D+2={d2_deposit:,.0f} "
+                        f"주문가능={cash_available:,.0f}원"
+                    )
+
+                self.app.log(
+                    f"✅ 계좌 동기화 성공 (보유: {len(holdings)}개 | 총자산: {total_equity:,.0f}원"
+                    f" | API tot_evlu_amt: {api_tot:,.0f}원)"
+                )
                 return {
                     "holdings": holdings,
                     "total_equity": total_equity,
                     "d1_deposit": d1_deposit,
-                    "d2_deposit": d2_deposit
+                    "d2_deposit": d2_deposit,
+                    "cash_available": cash_available,
                 }
             elif ret_code == 429 or "429" in str(res):
                 # [v4.5.1 API Throttle] 전용 서버 조회 건수 초과 대응
@@ -204,8 +403,78 @@ class OrderManager:
             self.app.log(f"💥 계좌 조회 중 네트워크/파싱 오류: {str(e)}")
             return None
 
-    def get_deposit(self):
-        """[v4.5.3] 전용 예수금 상세 조회 (ka10001/kt00001)"""
+    def get_deposit_detail(self) -> Optional[Dict[str, Any]]:
+        """
+        예수금상세(ka10001/kt00001). ka10085의 d1_samt/d2_samt와 달리
+        D+1/D+2 추정예수금(d1_entra/d2_entra)·주문가능금액(ord_alow_amt)이 분리되어 옵니다.
+        qry_tp: 3=추정조회(추정 예수 우선), 2=일반조회.
+        """
+        use_mock = getattr(config, "USE_MOCK", False)
+        api_id = "kt00001" if use_mock else "ka10001"
+        host = config.MOCK_URL if use_mock else config.URL
+        token = self.app.auth_manager.get_auth_token()
+        if not token:
+            return None
+        url = f"{host}/api/dostk/acnt"
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "authorization": f"Bearer {token}",
+            "api-id": api_id,
+        }
+        for qry_tp in ("3", "2"):
+            try:
+                res = requests.post(
+                    url, headers=headers, json={"qry_tp": qry_tp}, timeout=12
+                )
+                data = res.json()
+                out_body = data.get("output", data.get("data", data))
+                if not isinstance(out_body, dict):
+                    continue
+                rc = data.get("return_code", out_body.get("return_code", 0))
+                try:
+                    if rc is not None and int(str(rc).strip()) != 0:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+                def _pick(*keys: str) -> float:
+                    for k in keys:
+                        v = out_body.get(k)
+                        if v is not None and str(v).strip() not in ("", "-"):
+                            return self._safe_float(v)
+                    return 0.0
+
+                d1 = _pick("d1_entra", "d1_samt", "entr_d1")
+                d2 = _pick("d2_entra", "d2_samt", "entr_d2", "d2entra")
+                entr = _pick("entr")
+                ord_alow = _pick("ord_alow_amt", "nstd_re_ib_amt")
+                pymn = _pick("pymn_alow_amt")
+
+                if any(x > 0 for x in (d1, d2, entr, ord_alow, pymn)):
+                    return {
+                        "d1": d1,
+                        "d2": d2,
+                        "entr": entr,
+                        "ord_alow": ord_alow,
+                        "pymn_alow": pymn,
+                        "qry_tp_used": qry_tp,
+                    }
+            except Exception as e:
+                self.logger.debug("예수금상세 qry_tp=%s 실패: %s", qry_tp, e)
+                continue
+        return None
+
+    def get_deposit(self) -> Optional[int]:
+        """[v4.5.3] 가용 예수(주문가능 우선) 단일값 — 내부적으로 예수금상세 조회."""
+        try:
+            d = self.get_deposit_detail()
+            if d:
+                for k in ("ord_alow", "pymn_alow", "d2", "entr"):
+                    v = float(d.get(k) or 0)
+                    if v > 0:
+                        return int(v)
+        except Exception:
+            pass
         use_mock = getattr(config, 'USE_MOCK', False)
         api_id = 'kt00001' if use_mock else 'ka10001'
         host = config.MOCK_URL if use_mock else config.URL

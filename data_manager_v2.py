@@ -2,6 +2,7 @@ import sqlite3
 import pandas as pd
 import os
 from datetime import datetime, timedelta
+from typing import Any, Dict, Optional
 
 from utils.normalization import normalize_code
 import threading
@@ -828,51 +829,108 @@ class DataManagerV2:
                 return {c: pd.DataFrame(recs) for c, recs in cache.items()}
         except: return {}
 
-    def send_telegram_message(self, message):
-        token = getattr(config, "TELEGRAM_BOT_TOKEN", ""); cid = getattr(config, "TELEGRAM_CHAT_ID", "")
-        if token and cid and "발급" not in token:
-            try: requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": cid, "text": message, "parse_mode": "HTML"}, timeout=5)
-            except: pass
-
-    @staticmethod
-    @staticmethod
-    def judge_market_trend(msi, vix_val, adx, name="KOSPI"):
-        """[v4.5.10] Unified Market Trend Logic (DNA Standard)"""
-        # 0. Global Kill-Switch (VIX Panic)
-        if vix_val > 30: return "DOWN", f"시장 공포 확산 (VIX:{vix_val:.1f})"
-        
-        # 1. Sideways / Range-bound (ADX Low)
-        if adx < 15: return "NEUTRAL", f"횡보/박스권 장세 (ADX:{adx:.1f})"
-        
-        # 2. MSI Based Trend (Momentum)
-        if msi < -0.10: 
-            return "DOWN", f"지수 모멘텀 붕괴 (MSI:{msi:.2f})"
-        elif msi > 0.05:
-            # Additional safety for UP: VIX should be relatively stable
-            if vix_val < 30: return "UP", f"추세 상승장 (MSI:{msi:.2f})"
-            else: return "NEUTRAL", "상승 중 변동성 주의"
-        
-        return "NEUTRAL", f"추세 탐색 중 (MSI:{msi:.2f})"
-
-    def get_market_indices(self):
-        import FinanceDataReader as fdr; from strategy import indicators
-        indices = {"KS11": "KOSPI", "KQ11": "KOSDAQ"}
-        results = {}
-        vix_val = 0.0
+    def send_telegram_message(self, message: str, parse_mode: Optional[str] = "HTML") -> bool:
+        """
+        텔레그램 Bot API로 메시지 전송.
+        parse_mode 가 None 이면 HTML 파싱 없음(종목명 특수문자·긴 목록에 안전).
+        Returns
+        -------
+        bool
+            전송 성공 True, 스킵/실패 False
+        """
+        token = getattr(config, "TELEGRAM_BOT_TOKEN", "") or ""
+        cid = getattr(config, "TELEGRAM_CHAT_ID", "") or ""
+        if not token or not cid or "발급" in token:
+            try:
+                print("[Telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 를 config.py 에 설정하세요.")
+            except Exception:
+                pass
+            return False
         try:
-            vix_df = fdr.DataReader('VIX', (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'))
-            if not vix_df.empty: vix_val = float(vix_df.iloc[-1]['Close'])
-        except: pass
+            payload: Dict[str, Any] = {"chat_id": cid, "text": message}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            res = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json=payload,
+                timeout=10,
+            )
+            if res.status_code != 200:
+                try:
+                    print(f"[Telegram Error] HTTP {res.status_code}: {res.text[:500]}")
+                except Exception:
+                    pass
+                return False
+            return True
+        except Exception as e:
+            try:
+                print(f"[Telegram Exception] {e}")
+            except Exception:
+                pass
+            return False
+
+    def load_settings_dict_for_market(self) -> dict:
+        """실시간 지수 레짐에 사용할 settings.json (없으면 빈 dict → 모듈 기본 임계값)."""
+        path = os.path.join(self.ABS_DIR, "settings.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def get_market_indices(self, settings=None):
+        """
+        KOSPI/KOSDAQ 일봉 기반 MSI·ADX·VIX로 4단계 레짐 산출 (백테·다이나믹과 동일 분기).
+        settings: dict 미전달 시 프로젝트 루트 settings.json 로드 시도.
+        """
+        import FinanceDataReader as fdr
+        from strategy import indicators
+        from strategy.market_regime import classify_market_regime_row, regime_reason_korean
+
+        eff_settings = settings if isinstance(settings, dict) else self.load_settings_dict_for_market()
+        indices = {"KS11": "KOSPI", "KQ11": "KOSDAQ"}
+        results: dict = {}
+        # VIX: 당일(마지막 행)이 NaN이면 전일 등 직전 유효 종가 사용 — 동적 백테 VIX ffill과 동일 의도
+        vix_val = 15.0
+        try:
+            vix_df = fdr.DataReader("VIX", (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"))
+            if not vix_df.empty and "Close" in vix_df.columns:
+                last_valid = None
+                for x in pd.to_numeric(vix_df["Close"], errors="coerce").values:
+                    try:
+                        fx = float(x)
+                        if fx == fx and abs(fx) != float("inf"):
+                            last_valid = fx
+                    except (TypeError, ValueError):
+                        continue
+                if last_valid is not None:
+                    vix_val = float(last_valid)
+        except Exception:
+            pass
         for ticker, name in indices.items():
             try:
-                df = fdr.DataReader(ticker, (datetime.now() - timedelta(days=300)).strftime('%Y-%m-%d'))
+                df = fdr.DataReader(ticker, (datetime.now() - timedelta(days=300)).strftime("%Y-%m-%d"))
                 if df is not None and len(df) >= 120:
-                    df.columns = [c.capitalize() if c.lower() == 'close' else c for c in df.columns]
-                    df = indicators.calculate_all_indicators(df, {})
-                    last = df.iloc[-1]; msi = float(last.get('MSI', 0)); adx = float(last.get('ADX', 0))
-                    trend, reason = self.judge_market_trend(msi, vix_val, adx, name)
-                    results[name] = {"val": float(last['Close']), "ratio": float((last['Close']/df.iloc[-2]['Close']-1)*100), "trend": trend, "reason": reason, "msi": msi, "adx": adx, "vix": vix_val}
-            except: continue
+                    df.columns = [c.capitalize() if c.lower() == "close" else c for c in df.columns]
+                    df = indicators.calculate_all_indicators(df, eff_settings)
+                    last = df.iloc[-1]
+                    msi = float(last.get("MSI", 0))
+                    adx = float(last.get("ADX", 0))
+                    regime = classify_market_regime_row(msi, adx, vix_val, eff_settings)
+                    reason = regime_reason_korean(regime, msi, adx, vix_val, name)
+                    results[name] = {
+                        "val": float(last["Close"]),
+                        "ratio": float((last["Close"] / df.iloc[-2]["Close"] - 1) * 100),
+                        "trend": regime,
+                        "regime": regime,
+                        "reason": reason,
+                        "msi": msi,
+                        "adx": adx,
+                        "vix": vix_val,
+                    }
+            except Exception:
+                continue
         return results
 
     def get_realtime_indices(self):

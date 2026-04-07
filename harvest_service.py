@@ -154,7 +154,10 @@ class HarvestService:
         initial_last_sync = self.db.get_last_sync_time(code)
         last_sync = initial_last_sync  # For logging/legacy checks
         earliest_sync = self.db.get_earliest_sync_time(code)
-        self.log(f"[SYNC] {code} 시작 (DB 범위: {earliest_sync or '미상'} ~ {initial_last_sync or '없음'})")
+        self.log(
+            f"[SYNC] {code} 시작 — 키움 1분봉(ka10080) 수집 → bars_1m 저장, 이후 15분 리샘플로 bars_15m 갱신 "
+            f"(DB 1m 범위: {earliest_sync or '미상'} ~ {initial_last_sync or '없음'})"
+        )
         
         next_key = ""
         total_fetched = 0
@@ -191,7 +194,9 @@ class HarvestService:
                     self.log(f"   - {code}: 기존 데이터와 연결됨. 조기 종료 (Overlapped).")
                     break
             
-            self.log(f"   - {code}: {total_fetched}개 봉 누적 저장 중... ({current_bottom_time})")
+            self.log(
+                f"   - {code}: 1분봉 {total_fetched}개 누적 저장(bars_1m) … 최근 저장 시각 {current_bottom_time}"
+            )
             
             if not next_key:
                 # [v6.8] API 바닥에 도달함 (종목별 무결성 마크)
@@ -201,9 +206,11 @@ class HarvestService:
             time.sleep(0.3)
             
         if total_fetched > 0:
-            self.log(f"   - {code}: 15분봉 데이터 갱신 중...")
+            self.log(f"   - {code}: 1분봉 적재 완료 → bars_15m 리샘플(1m→15m) 갱신 중...")
             self.db.refresh_resampled_data(code)
-            self.log(f"[OK] {code} 처리 완료: 신규 봉 {total_fetched}개 저장됨")
+            self.log(
+                f"[OK] {code} 처리 완료: 신규 1분봉 {total_fetched}개(bars_1m) + 15분봉 테이블 리빌드(bars_15m)"
+            )
         else:
             # [v16.9.1] 개선된 원인별 로그 세분화 (지수/최신/미수집)
             is_idx = (len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11'])

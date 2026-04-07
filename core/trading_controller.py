@@ -113,13 +113,46 @@ class TradingController:
             }
 
     def _merged_warmup_codes(self):
-        """감시 종목 ∪ 관심목록 (순서 유지·중복 제거)."""
+        """감시 종목 ∪ 관심목록 ∪ 가상·실제 보유 (순서 유지·중복 제거)."""
         mc = [str(c).zfill(6) for c in (self.monitor_codes or [])]
         try:
             wl = [str(c).zfill(6) for c in self.app.watchlist_store.get_codes()]
         except Exception:
             wl = []
-        return list(dict.fromkeys(mc + wl))
+        vp: list = []
+        try:
+            vpd = getattr(self.app.portfolio, "virtual_positions", None) or {}
+            vp = [str(c).zfill(6) for c in vpd.keys()]
+        except Exception:
+            vp = []
+        return list(dict.fromkeys(mc + wl + vp))
+
+    def _ensure_virtual_positions_monitor_info(self) -> None:
+        """보유 중인 종목은 감시·웹소켓 스트림에 포함되도록 monitor_info 최소 항목을 채웁니다."""
+        try:
+            vpd = getattr(self.app.portfolio, "virtual_positions", None) or {}
+        except Exception:
+            vpd = {}
+        for c_raw, pos in list(vpd.items()):
+            try:
+                c = str(c_raw).zfill(6)
+                if c in self.monitor_info:
+                    continue
+                nm = pos.get("name") or c
+                ap = float(pos.get("avg_price", 0) or 0)
+                self.monitor_info[c] = {
+                    "name": nm,
+                    "ma20": 0.0,
+                    "ma60": 0.0,
+                    "prev_vol": 0.0,
+                    "score": 0.0,
+                    "ma_buffer_scale": 1.0,
+                    "open": ap,
+                    "last_price": ap,
+                    "sel_track": "AB",
+                }
+            except Exception:
+                continue
 
     def _ensure_watchlist_monitor_info(self) -> None:
         """관심목록 전용 종목은 monitor_info 최소 항목을 채웁니다 (감시 트리와 별도)."""
@@ -132,7 +165,7 @@ class TradingController:
             if c in self.monitor_info:
                 continue
             try:
-                name = self.app.watchlist_store.get_name(c)
+                name = self.app.watchlist_store.get_display_name(c)
             except Exception:
                 name = c
             self.monitor_info[c] = {
@@ -147,12 +180,76 @@ class TradingController:
                 "sel_track": "B",
             }
 
+    def _schedule_warmup_stock_ready(self, code: str) -> None:
+        """
+        워밍업 워커 스레드 → Tk 메인 스레드: 준비 완료 종목을 스트림 구독에 반영.
+        """
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None:
+                root.after(0, lambda c=code: self._apply_warmup_ready_stock(c))
+            else:
+                self._apply_warmup_ready_stock(code)
+        except Exception as e:
+            self.log(f"⚠️ [System] 준비 종목 메인 스레드 위임 실패: {e}")
+
+    def _apply_warmup_ready_stock(self, code: str) -> None:
+        """
+        메인 스레드에서만 호출: incremental_warmup_stream 경로에서
+        준비된 종목부터 웹소켓·주기 루프를 기동하고 REG 갱신을 요청합니다.
+        """
+        try:
+            code = str(code).zfill(6)
+            bd = getattr(self.app, "bars_data", None) or {}
+            if code not in bd or bd.get(code) is None:
+                return
+
+            if not isinstance(getattr(self.app, "_active_stream_codes", None), list):
+                self.app._active_stream_codes = []
+            ac = self.app._active_stream_codes
+            if code not in ac:
+                ac.append(code)
+            n_ready = len(ac)
+
+            self.is_monitoring = True
+            if self.status_cb:
+                self.status_cb("STARTED", n_ready)
+
+            if not getattr(self, "_incremental_stream_bootstrapped", False):
+                self._incremental_stream_bootstrapped = True
+                self._stop_event.clear()
+                self.monitor_thread = threading.Thread(
+                    target=self._ws_worker_loop, daemon=True
+                )
+                self.monitor_thread.start()
+
+            if not getattr(self, "_periodic_routines_started", False):
+                self._periodic_routines_started = True
+                self._start_periodic_routines()
+            else:
+                mt = getattr(self.app, "monitor_tab", None)
+                if mt is not None:
+                    mt._pending_reg_refresh = True
+        except Exception as e:
+            self.log(f"⚠️ [System] 준비 종목 스트림 반영 실패: {e}")
+
     def _run_start_sequence(self):
         """워밍업부터 웹소켓 연결까지 마스터 시퀀스"""
         try:
             self.app._active_stream_codes = []
+            self._incremental_stream_bootstrapped = False
+            self._periodic_routines_started = False
             merged = self._merged_warmup_codes()
             self._ensure_watchlist_monitor_info()
+            self._ensure_virtual_positions_monitor_info()
+
+            require_full = bool(
+                self.app.settings.get("require_full_warmup_for_monitoring", True)
+            )
+            # require_full 여부와 무관: 준비 완료 종목부터 스트림(실패 시 require_full 분기에서 감시 중단)
+            incremental_stream = bool(
+                self.app.settings.get("incremental_warmup_stream", True)
+            )
 
             # [Step 1] Warmup: 전 종목 15분봉·장중 구간 검증 통과 시에만 감시 진행
             if self.status_cb:
@@ -163,18 +260,24 @@ class TradingController:
             if self.status_cb:
                 self.status_cb("WARMUP_BEGIN", list(merged))
 
+            on_ready = (
+                self._schedule_warmup_stock_ready if incremental_stream else None
+            )
             results = self.app.warmup_service.run(
                 merged,
                 self.monitor_info,
                 self.app.bars_data,
-            )
-
-            require_full = bool(
-                self.app.settings.get("require_full_warmup_for_monitoring", True)
+                on_stock_ready=on_ready,
             )
             failed = [c for c in merged if not results.get(c, {}).get("ok")]
             if failed:
                 if require_full:
+                    # 점진 스트림으로 이미 WS가 켜진 경우: 전부 실패 처리 전 감시 중단
+                    if getattr(self, "_incremental_stream_bootstrapped", False):
+                        try:
+                            self.stop()
+                        except Exception as se:
+                            self.log(f"⚠️ [System] 워밍업 실패 시 감시 중단 처리 오류: {se}")
                     for c in merged:
                         try:
                             self.app.bars_data.pop(c, None)
@@ -238,6 +341,20 @@ class TradingController:
 
             successful = [c for c in merged if results.get(c, {}).get("ok")]
             self.app._active_stream_codes = successful
+
+            # 점진 스트림: 이미 준비 종목으로 WS·주기 루프를 띄운 경우 최종 목록만 동기화
+            if incremental_stream and getattr(
+                self, "_incremental_stream_bootstrapped", False
+            ):
+                self.log(
+                    "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 구독 목록을 최종 동기화합니다."
+                )
+                if self.status_cb:
+                    self.status_cb("STARTED", len(successful))
+                mt = getattr(self.app, "monitor_tab", None)
+                if mt is not None:
+                    mt._pending_reg_refresh = True
+                return
 
             self.log(
                 "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 모니터링을 시작합니다."
@@ -354,7 +471,7 @@ class TradingController:
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
         if allow_order:
             ord_no = self.app.order_manager.place_order(
-                code, qty, price, order_type="03", side="buy", name=name, reason=reason
+                code, qty, price, order_type="00", side="buy", name=name, reason=reason
             )
             try:
                 sl = getattr(self.app, "session_logger", None)
@@ -366,7 +483,7 @@ class TradingController:
                             "name": name,
                             "qty": int(qty),
                             "price": int(adj_price),
-                            "order_type": "03",
+                            "order_type": "00",
                             "result": "submitted" if ord_no else "failed",
                             "order_no": ord_no or "",
                             "reason": reason,
@@ -436,7 +553,7 @@ class TradingController:
                     code,
                     pos['qty'],
                     now_price,
-                    order_type="03",
+                    order_type="00",
                     side="sell",
                     name=pos['name'],
                     reason=f"EXIT_{reason}",
@@ -485,7 +602,7 @@ class TradingController:
                         code,
                         add_qty,
                         now_price,
-                        order_type="03",
+                        order_type="00",
                         side="buy",
                         name=pos['name'],
                         reason="Stage 2 Scaling",

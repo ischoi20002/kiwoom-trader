@@ -1,16 +1,28 @@
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any, Mapping, Optional
+
+from strategy.market_regime import regime_display_emoji, regime_display_tag
+
 
 class MarketDataService:
     """
     [v4.5.3] 시장 지수 모니터링 및 트렌드 분석 전문 서비스.
     Triple-Lock (MSI, ADX, VIX) 기반 정밀 장세 판정과 실시간 티커 포맷팅을 담당합니다.
     """
-    def __init__(self, data_manager, gui_callback=None, log_func=None):
+    def __init__(
+        self,
+        data_manager,
+        gui_callback=None,
+        log_func=None,
+        settings_provider: Optional[Callable[[], Mapping[str, Any]]] = None,
+    ):
         self.data_manager = data_manager
         self.gui_callback = gui_callback # (indices, trend, display_text) -> void
         self.log = log_func or print
+        self.settings_provider = settings_provider
         
         self.market_indices = {} # {'kospi': {...}, 'kosdaq': {...}}
         self.market_status = {}  # k_trader_gui.market_status 호환
@@ -55,20 +67,24 @@ class MarketDataService:
         """2분 주기로 MSI/ADX/VIX 포함 정밀 추세 분석 수행"""
         while self.is_running:
             try:
-                res = self.data_manager.get_market_indices()
+                try:
+                    _s = self.settings_provider() if callable(self.settings_provider) else None
+                except Exception:
+                    _s = None
+                res = self.data_manager.get_market_indices(settings=_s if isinstance(_s, dict) else None)
                 if res:
                     with self.lock:
                         for name, data in res.items():
                             self.market_status[name] = data
                         
-                        # Triple-Lock 기반 통합 추세 판단 (KOSPI 중심)
+                        # 4단계 레짐 (KOSPI 기준 → 앱 market_trend·신호 엔진과 동기)
                         kospi_data = self.market_status.get("KOSPI", {})
-                        self.market_trend = kospi_data.get("trend", "NEUTRAL")
+                        self.market_trend = kospi_data.get("trend", kospi_data.get("regime", "NEUTRAL"))
                         
-                        m_display = {"UP": "🟢순풍", "NEUTRAL": "⚪중립", "DOWN": "⚠️역풍"}[self.market_trend]
+                        m_display = regime_display_emoji(self.market_trend)
                         if self._last_m_trend != m_display:
                             self._last_m_trend = m_display
-                            self.log(f"📊 [Market] 시장 추세 감지: {m_display}")
+                            self.log(f"📊 [Market] 시장 레짐 감지: {m_display}")
                     
                     self._broadcast_update()
             except Exception as e:
@@ -98,11 +114,16 @@ class MarketDataService:
             vix = data.get('vix', vix)
             
             sign = "▲" if ratio > 0 else "▼" if ratio < 0 else ""
-            results.append(f"{name}: {price:,.2f}({sign}{abs(ratio):.2f}%, MSI:{msi:+.2f}, ADX:{adx:.1f})")
+            per_reg = str(data.get("regime") or data.get("trend") or "").strip().upper()
+            rtag = regime_display_tag(per_reg or trend)
+            results.append(
+                f"{name}: {price:,.2f}({sign}{abs(ratio):.2f}%, MSI:{msi:+.2f}, ADX:{adx:.1f}) {rtag}"
+            )
         
-        m_tag = {"UP": "[순풍]", "NEUTRAL": "[중립]", "DOWN": "[역풍]"}.get(trend, "[확인중]")
+        m_tag = regime_display_tag(trend)
         status_text = " | ".join(results)
-        return f"시장 지수: {m_tag} {status_text} | VIX: {vix:.1f}"
+        # 선행 태그는 KOSPI 기준 4단계 레짐(백테·다이나믹과 동일). 지수별 꼬리는 각 행의 [UP]/[강세] 등.
+        return f"시장 지수 · KOSPI 레짐 {m_tag} {status_text} | VIX: {vix:.1f}"
 
     def get_status(self):
         with self.lock:

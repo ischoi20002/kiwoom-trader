@@ -1,16 +1,26 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
-from datetime import datetime
-import config
+import threading
 import os
+from tkinter import ttk, messagebox
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+import config
 
 class VirtualTab:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
+        # 전체 렌더 시 계산된 금일 실현 손익 — 틱 요약 갱신에 재사용
+        self._cached_day_realized_pnl: float = 0.0
         self.vars = {}
         # [v4.5.3] 위젯 소유권 이전 (캡슐화)
+        # 실시간 보유는 Treeview 대신 Canvas+Frame+Label 그리드 (행 소실/깜빡임 방지)
         self.tree_active = None
+        self._active_grid_inner: Optional[tk.Frame] = None
+        self._active_hold_canvas: Optional[tk.Canvas] = None
+        self._active_grid_inner_win: Optional[int] = None
+        self._active_row_frames: Dict[str, tk.Frame] = {}
+        self._active_row_labels: Dict[str, List[tk.Label]] = {}
         self.tree_history = None
         self.tree_orders = None
         self.lbl_mode_badge = None
@@ -19,6 +29,15 @@ class VirtualTab:
         
         self._setup_ui()
         self._render_virtual_positions()
+        try:
+            self.app.trading_controller._ensure_virtual_positions_monitor_info()
+            self.app.monitor_info = dict(self.app.trading_controller.monitor_info or {})
+        except Exception:
+            pass
+        try:
+            self.app._maybe_start_account_sync_timer()
+        except Exception:
+            pass
 
     def _setup_ui(self):
         """[v3.9] 3-판넬 수직 레이아웃 (보유/종료/주문 통합)"""
@@ -93,7 +112,7 @@ class VirtualTab:
         # 1. 보유 현황
         active_f = ttk.LabelFrame(v_paned, text=" 💰 실시간 보유 현황 (Active) ", padding="5")
         v_paned.add(active_f, weight=4)
-        self.tree_active = self._build_active_tree(active_f)
+        self._build_active_holdings_grid(active_f)
 
         # 2. 매매 종료
         history_f = ttk.LabelFrame(v_paned, text=" ✅ 매매 종료 내역 (History) ", padding="5")
@@ -107,28 +126,79 @@ class VirtualTab:
 
         self._setup_styles()
 
-    def _build_active_tree(self, parent):
-        cols = ("Code", "Name", "Qty", "Avg", "Curr", "Eval", "PnL", "Profit", "Entry")
-        tree = ttk.Treeview(parent, columns=cols, show="headings", selectmode="browse")
-        heads = {
-            "Code": "코드", "Name": "종목명", "Qty": "수량", "Avg": "평단가", 
-            "Curr": "현재가", "Eval": "평가금", "PnL": "손익금", 
-            "Profit": "수익률", "Entry": "진입시간"
-        }
-        for col, text in heads.items():
-            tree.heading(col, text=text)
-            tree.column(col, width=80, anchor=tk.CENTER)
-        tree.column("Name", width=110, anchor=tk.W)
-        tree.column("Eval", width=90, anchor=tk.E)
-        tree.column("PnL", width=90, anchor=tk.E)
-        tree.column("Profit", width=80, anchor=tk.CENTER)
-        tree.column("Entry", width=70, anchor=tk.CENTER)
-        
-        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        return tree
+    def _build_active_holdings_grid(self, parent: ttk.Widget) -> None:
+        """실시간 보유: Treeview 대신 스크롤 가능한 라벨 그리드 (틱 갱신 시 행 단위 destroy 최소화)."""
+        try:
+            outer = ttk.Frame(parent)
+            outer.pack(fill=tk.BOTH, expand=True)
+            canvas = tk.Canvas(outer, highlightthickness=0, bg="#2E3440")
+            sb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+            inner = tk.Frame(canvas, bg="#2E3440")
+            inner_win = canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=sb.set)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+            def _on_inner_cfg(_evt: Any = None) -> None:
+                try:
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                except Exception:
+                    pass
+
+            def _on_canvas_cfg(evt: tk.Event) -> None:
+                try:
+                    canvas.itemconfig(inner_win, width=int(evt.width))
+                except Exception:
+                    pass
+
+            inner.bind("<Configure>", _on_inner_cfg)
+            canvas.bind("<Configure>", _on_canvas_cfg)
+
+            def _wheel(evt: tk.Event) -> None:
+                try:
+                    canvas.yview_scroll(int(-1 * (evt.delta / 120)), "units")
+                except Exception:
+                    pass
+
+            canvas.bind("<MouseWheel>", _wheel)
+            inner.bind("<MouseWheel>", _wheel)
+
+            hdr_bg = "#3B4252"
+            hf = tk.Frame(inner, bg=hdr_bg)
+            hf.pack(fill=tk.X)
+            headers = [
+                ("코드", 9),
+                ("종목명", 14),
+                ("수량", 6),
+                ("평단가", 10),
+                ("현재가", 10),
+                ("평가금", 12),
+                ("손익금", 12),
+                ("수익률", 8),
+                ("진입", 6),
+            ]
+            for i, (text, wch) in enumerate(headers):
+                tk.Label(
+                    hf,
+                    text=text,
+                    bg=hdr_bg,
+                    fg="#ECEFF4",
+                    font=("Malgun Gothic", 8, "bold"),
+                    width=wch,
+                    anchor="w",
+                ).grid(row=0, column=i, padx=2, pady=3, sticky="w")
+
+            self._active_grid_inner = inner
+            self._active_hold_canvas = canvas
+            self._active_grid_inner_win = inner_win
+        except Exception as e:
+            try:
+                print(f"[UI Error] _build_active_holdings_grid: {e}")
+            except Exception:
+                pass
+            self._active_grid_inner = None
+            self._active_hold_canvas = None
+            self._active_grid_inner_win = None
 
     def _build_history_tree(self, parent):
         cols = ("Time", "Code", "Name", "Qty", "BuyP", "SellP", "PnL", "Profit", "Reason")
@@ -193,6 +263,194 @@ class VirtualTab:
         except Exception:
             return set()
 
+    def _vp_items_by_normalized(self) -> Dict[str, Dict[str, Any]]:
+        """
+        virtual_positions 키를 6자리로 통일한 뷰 (3490 vs 003490 이중 키 시 첫 항목 유지).
+        계좌 동기화 중 잠깐 dict가 비어 보이는 레이스로 보유 행 전체가 삭제되는 것을 막기 위해
+        portfolio.lock으로 스냅샷을 복사한 뒤 처리합니다.
+        """
+        try:
+            portfolio = self.app.portfolio
+            try:
+                with portfolio.lock:
+                    raw = dict(getattr(portfolio, "virtual_positions", None) or {})
+            except Exception:
+                raw = dict(getattr(portfolio, "virtual_positions", None) or {})
+            out: Dict[str, Dict[str, Any]] = {}
+            for k, p in raw.items():
+                nk = str(k).split("_")[0].zfill(6)
+                if nk not in out:
+                    out[nk] = p
+            return out
+        except Exception:
+            return {}
+
+    def _sorted_active_holdings(self) -> List[Tuple[str, Dict[str, Any]]]:
+        """보유 행 표시 순서를 종목코드 기준으로 고정(줄무늬 태그·인덱스 흔들림 방지)."""
+        try:
+            merged = self._vp_items_by_normalized()
+            wl = self._watchlist_hide_codes()
+            rows = [(nk, p) for nk, p in merged.items() if nk not in wl]
+            return sorted(rows, key=lambda x: x[0])
+        except Exception:
+            return []
+
+    def _active_row_vals_and_tags(
+        self, row_idx: int, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
+    ) -> Tuple[tuple, Tuple[str, ...], float]:
+        """실시간 보유 한 행의 values·tags·수익률% (그리드/요약 공통)."""
+        try:
+            raw_p = info.get("price", pos.get("avg_price", 0))
+            curr_p = float(raw_p) if raw_p not in (None, "", 0) else float(pos.get("avg_price", 0) or 0)
+        except (TypeError, ValueError):
+            curr_p = float(pos.get("avg_price", 0) or 0)
+        try:
+            ap = float(pos.get("avg_price", 0) or 0)
+        except (TypeError, ValueError):
+            ap = 0.0
+        qty = int(pos.get("qty", 0) or 0)
+        if ap <= 0:
+            ap = curr_p
+        profit_pct = (curr_p / ap - 1) * 100 if ap else 0.0
+        eval_amt = curr_p * qty
+        unrealized = (curr_p - ap) * qty
+        p_str = f"{profit_pct:+.2f}%"
+        et = str(pos.get("entry_time", "") or "")
+        entry_tm = et.split("T")[-1][:5] if "T" in et else "-"
+        tag_base = "even" if row_idx % 2 == 0 else "odd"
+        p_tag = (
+            "price_up"
+            if profit_pct > 0
+            else ("price_down" if profit_pct < 0 else "")
+        )
+        nm = pos.get("name", nk)
+        vals = (
+            nk,
+            nm,
+            f"{qty:,}",
+            f"{ap:,.0f}",
+            f"{curr_p:,.0f}",
+            f"{int(eval_amt):+,}",
+            f"{int(unrealized):+,}",
+            p_str,
+            entry_tm,
+        )
+        # 전체 렌더와 동일하게 항상 (줄무늬, 방향) 2튜플
+        return vals, (tag_base, p_tag), float(profit_pct)
+
+    def _active_grid_ready(self) -> bool:
+        return self._active_grid_inner is not None
+
+    def _profit_label_fg(self, profit_pct: float) -> str:
+        if profit_pct > 0:
+            return "#E35F5F"
+        if profit_pct < 0:
+            return "#81A1C3"
+        return "#ECEFF4"
+
+    def _remove_active_grid_row(self, nk: str) -> None:
+        """보유 그리드에서 종목 행 제거."""
+        try:
+            fr = self._active_row_frames.pop(nk, None)
+            self._active_row_labels.pop(nk, None)
+            if fr is not None:
+                fr.destroy()
+        except Exception:
+            pass
+
+    def _upsert_active_grid_row(
+        self, nk: str, row_idx: int, vals: Tuple[Any, ...], profit_pct: float
+    ) -> None:
+        """종목별 행 프레임이 없으면 생성, 라벨 텍스트·색만 갱신."""
+        try:
+            inner = self._active_grid_inner
+            if inner is None or len(vals) < 9:
+                return
+            bg_even = "#242933"
+            bg_odd = "#3B4252"
+            row_bg = bg_even if row_idx % 2 == 0 else bg_odd
+            # 수익률 방향색: 코드~진입까지 동일 적용 (Treeview 태그와 동일한 행 단위 강조)
+            fg_row = self._profit_label_fg(profit_pct)
+            anchors = ("w", "w", "e", "e", "e", "e", "e", "e", "center")
+
+            labels = self._active_row_labels.get(nk)
+            row_fr = self._active_row_frames.get(nk)
+            if row_fr is None or labels is None or len(labels) != 9:
+                try:
+                    if row_fr is not None:
+                        row_fr.destroy()
+                except Exception:
+                    pass
+                row_fr = tk.Frame(inner, bg=row_bg)
+                row_fr.pack(fill=tk.X)
+                labels = []
+                for col in range(9):
+                    lb = tk.Label(
+                        row_fr,
+                        text="",
+                        bg=row_bg,
+                        fg=fg_row,
+                        font=("Malgun Gothic", 9),
+                        anchor=anchors[col],
+                    )
+                    wch = (9, 14, 6, 10, 10, 12, 12, 8, 6)[col]
+                    lb.grid(row=0, column=col, padx=2, pady=1, sticky="ew")
+                    try:
+                        lb.configure(width=wch)
+                    except Exception:
+                        pass
+                    labels.append(lb)
+                self._active_row_frames[nk] = row_fr
+                self._active_row_labels[nk] = labels
+
+            # 배경(줄무늬)·텍스트·손익 색 동기화
+            row_fr = self._active_row_frames[nk]
+            row_fr.configure(bg=row_bg)
+            texts = [str(vals[i]) for i in range(9)]
+            for col, lb in enumerate(self._active_row_labels[nk]):
+                try:
+                    lb.configure(text=texts[col], bg=row_bg, fg=fg_row)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                print(f"[UI Error] _upsert_active_grid_row: {e}")
+            except Exception:
+                pass
+
+    def refresh_portfolio_light(self) -> None:
+        """
+        포지션 구조(종목·수량·평단)는 그대로일 때만 사용.
+        히스토리·주문 트리 전체 delete/재삽입 없이 보유 행·상단 요약만 갱신합니다.
+        (실시간 감시 탭의 틱 단위 item 갱신과 같은 패턴으로 깜빡임을 줄입니다.)
+        """
+        try:
+            if not self._active_grid_ready():
+                return
+            merged = self._vp_items_by_normalized()
+            wl = self._watchlist_hide_codes()
+            for nk in merged:
+                if nk in wl:
+                    continue
+                if nk not in self._active_row_frames:
+                    self._render_virtual_positions()
+                    try:
+                        self.app._last_vp_render_sig = self.app._vp_structure_signature()
+                    except Exception:
+                        pass
+                    return
+            self._render_real_data()
+        except Exception as e:
+            try:
+                print(f"[UI Error] refresh_portfolio_light: {e}")
+            except Exception:
+                pass
+            try:
+                self._render_virtual_positions()
+                self.app._last_vp_render_sig = self.app._vp_structure_signature()
+            except Exception:
+                pass
+
     def _render_virtual_positions(self):
         """데이터(app.virtual_positions / history / today_orders) 동기화"""
         # 1. 보유 종목
@@ -200,46 +458,69 @@ class VirtualTab:
         total_invested = 0
         total_unrealized_pnl = 0
         
-        existing_active = set(self.tree_active.get_children())
-        wl_hide = self._watchlist_hide_codes()
-        active_list = [
-            (c, p)
-            for c, p in self.app.portfolio.virtual_positions.items()
-            if str(c).zfill(6) not in wl_hide
-        ]
-        
+        merged_vp = self._vp_items_by_normalized()
+        active_list = self._sorted_active_holdings()
+        skip_orphan_delete = False
+        updated_nks: set = set()
+        # 스냅샷이 잠깐 비어 보이면 보유 트리를 통째로 지우지 않음 (수초~십수 초 공백 방지)
+        if not merged_vp and existing_active:
+            nheld = 0
+            try:
+                with self.app.portfolio.lock:
+                    nheld = len(getattr(self.app.portfolio, "virtual_positions", None) or {})
+            except Exception:
+                nheld = 0
+            if nheld > 0:
+                merged_vp = self._vp_items_by_normalized()
+                active_list = self._sorted_active_holdings()
+                if not merged_vp:
+                    skip_orphan_delete = True
+
         mi = getattr(self.app, "monitor_info", None) or {}
-        for idx, (code, pos) in enumerate(active_list):
-            info = mi.get(code, {})
-            curr_p = info.get('price', pos['avg_price'])
-            profit_pct = (curr_p / pos['avg_price'] - 1) * 100
-            eval_amt = curr_p * pos['qty']
-            unrealized = (curr_p - pos['avg_price']) * pos['qty']
-            
-            total_eval += eval_amt
-            total_invested += pos.get('invested', 0)
-            total_unrealized_pnl += unrealized
-            
-            p_str = f"{profit_pct:+.2f}%"
-            entry_tm = pos.get('entry_time', '').split('T')[-1][:5] if 'T' in pos.get('entry_time', '') else '-'
-            tag_base = "even" if idx % 2 == 0 else "odd"
-            p_tag = "price_up" if profit_pct > 0 else "price_down" if profit_pct < 0 else ""
-            
-            vals = (
-                code, pos['name'], f"{pos['qty']:,}", f"{pos['avg_price']:,.0f}", f"{curr_p:,.0f}",
-                f"{int(eval_amt):+,}", f"{int(unrealized):+,}", p_str, entry_tm
-            )
-            
-            if self.tree_active.exists(code):
-                self.tree_active.item(code, values=vals, tags=(tag_base, p_tag))
-                if code in existing_active: existing_active.remove(code)
-            else:
-                self.tree_active.insert("", tk.END, iid=code, values=vals, tags=(tag_base, p_tag))
-        
-        for old_id in existing_active:
-            self.tree_active.delete(old_id)
+        for idx, (nk, pos) in enumerate(active_list):
+            info = mi.get(nk, {}) or {}
+            vals, _tags, profit_pct = self._active_row_vals_and_tags(idx, nk, pos, info)
+            try:
+                raw_cp = info.get("price", pos.get("avg_price", 0))
+                curr_p = (
+                    float(raw_cp)
+                    if raw_cp not in (None, "", 0)
+                    else float(pos.get("avg_price", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                curr_p = float(pos.get("avg_price", 0) or 0)
+            try:
+                ap = float(pos.get("avg_price", 0) or 0)
+            except (TypeError, ValueError):
+                ap = 0.0
+            qty = int(pos.get("qty", 0) or 0)
+            if ap <= 0:
+                ap = curr_p
+            total_eval += curr_p * qty
+            total_invested += float(pos.get("invested", 0) or 0)
+            total_unrealized_pnl += (curr_p - ap) * qty
+
+            updated_nks.add(nk)
+            if self._active_grid_ready():
+                self._upsert_active_grid_row(nk, idx, vals, profit_pct)
+
+        # 그리드에만 남은 행: VP 스냅샷에 종목이 없을 때만 제거
+        if not skip_orphan_delete and self._active_grid_ready():
+            for nk in list(self._active_row_frames.keys()):
+                if nk in updated_nks:
+                    continue
+                if nk not in merged_vp:
+                    self._remove_active_grid_row(nk)
+            try:
+                c = self._active_hold_canvas
+                if c is not None:
+                    c.update_idletasks()
+                    c.configure(scrollregion=c.bbox("all"))
+            except Exception:
+                pass
 
         # 2. 종료 종목
+        wl_hide = self._watchlist_hide_codes()
         total_realized_pnl = 0
         total_day_realized_pnl = 0
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -267,20 +548,17 @@ class VirtualTab:
                 pos.get('reason', 'SIGNAL')
             ), tags=(tag_base, p_tag))
 
+        self._cached_day_realized_pnl = float(total_day_realized_pnl)
+
         # 3. 주문 내역
         self._render_orders()
 
         # 4. 요약 정보 (Account Summary - REST API Synced)
-        # [v4.8.6 Asset Sync] 추정치가 아닌 실제 계좌 동기화 데이터를 우선 사용
         portfolio = self.app.portfolio
-        total_assets = getattr(portfolio, 'total_equity', 0)
-        current_cash = getattr(portfolio, 'actual_deposit', 0)
-        stock_eval = total_eval # 현재 트리뷰의 평가금액 합계
-        
-        # [v4.8.6] API에서 총자산이 0으로 잡히는 경우(종목미보유 등)를 대비한 최종 보정
-        if total_assets == 0:
-            total_assets = current_cash + stock_eval
-            
+        current_cash = getattr(portfolio, "actual_deposit", 0)
+        stock_eval = float(total_eval)  # 그리드 실시간 평가 합 (= '주식 평가금' 행)
+        total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
+
         day_pnl_total = total_day_realized_pnl + total_unrealized_pnl
         # 수익률 계산을 위한 기준 자산 (설정값 or 실제자산)
         start_cap = float(str(self.app.settings.get('backtest_initial_capital', 10000000)).replace(',', ''))
@@ -302,39 +580,123 @@ class VirtualTab:
         self.vars["cum"].set(f"{total_profit_pct:+.2f}%")
 
     def _render_real_data(self):
-        """[v4.5.3] 실시간 틱 수신 시 보유 종목 수익률만 부분 렌더링 (최적화)"""
-        if not self.tree_active: return
-        
-        wl_hide = self._watchlist_hide_codes()
-        mi = getattr(self.app, "monitor_info", None) or {}
-        for code in self.app.portfolio.virtual_positions:
-            if str(code).zfill(6) in wl_hide:
-                continue
-            if self.tree_active.exists(code):
-                pos = self.app.portfolio.virtual_positions[code]
-                info = mi.get(code, {})
-                curr_p = info.get('price', pos['avg_price'])
-                profit_pct = (curr_p / pos['avg_price'] - 1) * 100
-                eval_amt = curr_p * pos['qty']
-                unrealized = (curr_p - pos['avg_price']) * pos['qty']
-                
-                p_str = f"{profit_pct:+.2f}%"
-                p_tag = "price_up" if profit_pct > 0 else "price_down" if profit_pct < 0 else ""
-                
-                # 기존 값 가져와서 수익률/평가금만 교체
-                curr_vals = list(self.tree_active.item(code, 'values'))
-                curr_vals[4] = f"{curr_p:,.0f}"      # 현재가
-                curr_vals[5] = f"{int(eval_amt):+,}" # 평가금
-                curr_vals[6] = f"{int(unrealized):+,}" # 손익금
-                curr_vals[7] = p_str                # 수익률
-                
-                # 태그 유지하며 색상만 변경
-                tags = list(self.tree_active.item(code, 'tags'))
-                if "price_up" in tags: tags.remove("price_up")
-                if "price_down" in tags: tags.remove("price_down")
-                if p_tag: tags.append(p_tag)
-                
-                self.tree_active.item(code, values=tuple(curr_vals), tags=tuple(tags))
+        """실시간 틱·동기화 후 보유 그리드 라벨만 갱신 (Treeview 미사용)."""
+        if not self._active_grid_ready():
+            return
+        try:
+            mi = getattr(self.app, "monitor_info", None) or {}
+            for idx, (nk, pos) in enumerate(self._sorted_active_holdings()):
+                info = mi.get(nk, {}) or {}
+                vals, _tags, profit_pct = self._active_row_vals_and_tags(idx, nk, pos, info)
+                self._upsert_active_grid_row(nk, idx, vals, profit_pct)
+            try:
+                c = self._active_hold_canvas
+                if c is not None:
+                    c.configure(scrollregion=c.bbox("all"))
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                print(f"[UI Error] _render_real_data: {e}")
+            except Exception:
+                pass
+
+        self._update_summary_after_tick()
+
+    def _update_summary_after_tick(self) -> None:
+        """틱 직후 상단 요약(주식평가금·금일손익·총자산 등)만 재계산합니다."""
+        try:
+            def _set_if_diff(key: str, text: str) -> None:
+                try:
+                    v = self.vars.get(key)
+                    if v is None:
+                        return
+                    if v.get() != text:
+                        v.set(text)
+                except Exception:
+                    try:
+                        self.vars[key].set(text)
+                    except Exception:
+                        pass
+
+            wl_hide = self._watchlist_hide_codes()
+            mi = getattr(self.app, "monitor_info", None) or {}
+            total_eval = 0.0
+            total_unrealized_pnl = 0.0
+            for nk, pos in self._vp_items_by_normalized().items():
+                if nk in wl_hide:
+                    continue
+                info = mi.get(nk, {}) or {}
+                curr_p = float(info.get("price", pos.get("avg_price", 0)))
+                if curr_p <= 0:
+                    curr_p = float(pos.get("avg_price", 0))
+                q = int(pos.get("qty", 0))
+                ap = float(pos.get("avg_price", 0))
+                total_eval += curr_p * q
+                total_unrealized_pnl += (curr_p - ap) * q
+
+            portfolio = self.app.portfolio
+            current_cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
+            stock_eval = float(total_eval)
+            total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
+
+            day_pnl_total = float(self._cached_day_realized_pnl) + total_unrealized_pnl
+            start_cap = float(str(self.app.settings.get("backtest_initial_capital", 10000000)).replace(",", ""))
+            safe_cap = max(1, start_cap if total_assets == 0 else (total_assets - day_pnl_total))
+            day_pnl_pct = (day_pnl_total / safe_cap) * 100 if safe_cap > 0 else 0.0
+
+            _set_if_diff("total", f"{total_assets:,.0f}")
+            _set_if_diff("cash", f"{current_cash:,.0f}")
+            _set_if_diff("stock", f"{stock_eval:,.0f}")
+            _set_if_diff("d1_cash", f"{getattr(portfolio, 'd1_deposit', 0):,.0f}")
+            _set_if_diff("d2_cash", f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
+            _set_if_diff("day", f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
+            total_profit_pct = (total_assets / safe_cap - 1) * 100 if safe_cap > 0 else 0.0
+            _set_if_diff("cum", f"{total_profit_pct:+.2f}%")
+        except Exception:
+            pass
+
+    def _compute_virtual_tab_total_assets(self, portfolio: Any, stock_eval: float) -> float:
+        """
+        가상포지션 탭 '총 자산' 표시.
+        원칙: D+2 예수금(d2_deposit) + 주식 평가금(실시간 합) — 상단 두 숫자와 일치.
+        D+2가 아직 0(미동기화 등)이면 API 총자산·예수금+평가 보정(_normalize)로 폴백.
+        """
+        try:
+            d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)
+            se = float(stock_eval)
+            if d2 > 0:
+                return d2 + se
+            te = float(getattr(portfolio, "total_equity", 0) or 0)
+            cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
+            if te <= 0:
+                return max(0.0, cash + se)
+            return self._normalize_total_assets_display(te, cash, se)
+        except Exception:
+            try:
+                return float(getattr(portfolio, "total_equity", 0) or 0)
+            except Exception:
+                return 0.0
+
+    def _normalize_total_assets_display(
+        self, total_assets: float, current_cash: float, stock_eval: float
+    ) -> float:
+        """
+        tot_evlu_amt 가 주식 평가액만 담는 경우 총자산이 예수금보다 작게 보일 수 있어,
+        (예수금 + 주식평가) 합이 더 크면 그 값을 총자산 표시에 사용합니다.
+        """
+        try:
+            computed = float(current_cash) + float(stock_eval)
+            if computed <= 0:
+                return float(total_assets)
+            ta = float(total_assets)
+            if ta <= 0:
+                return computed
+            if ta < computed * 0.88:
+                return computed
+            return ta
+        except Exception:
+            return float(total_assets)
 
     def _render_orders(self):
         """DB 기반 실시간 주문 내역 동기화"""
@@ -420,8 +782,11 @@ class VirtualTab:
     def log_order(self, code, side, qty, price, order_type, result, reason=""):
         """[v4.5.3] DB 기록 및 신규 3판넬 UI 갱신 (캡슐화)"""
         self.app.data_manager.log_order(code, side, qty, price, order_type, "MOCK_ID", result, reason)
-        self._render_orders()
-        self._render_virtual_positions()
+        try:
+            self.app.refresh_virtual_tab_full()
+        except Exception:
+            self._render_orders()
+            self._render_virtual_positions()
 
     def generate_report(self):
         """[v4.5.3] 가상 매매 나러티브 리포트 생성 (UI 위임)"""
@@ -448,21 +813,94 @@ class VirtualTab:
             self.app.log(f"[Error] 리포트 생성 중 오류: {e}")
 
     def generate_daily_settlement(self):
-        """실시간 감시 일일 결산 HTML (요약 + 종목별 주문/체결 + JSONL 이벤트)."""
+        """거래일 배치(빈·미완료 일자 채움) 후 당일 리포트 HTML 열기. 시작일은 UI에서 지정·기억."""
         try:
-            import webbrowser
-            from pathlib import Path
+            top = tk.Toplevel(self.parent)
+            top.title("일일 결산")
+            top.resizable(False, False)
+            frm = ttk.Frame(top, padding=12)
+            frm.pack(fill=tk.BOTH, expand=True)
 
-            from reporting.daily_settlement_report import generate_daily_settlement_report
+            default_start = self.app.settings.get("daily_settlement_batch_start_date") or ""
+            if not default_start or len(str(default_start).strip()) < 10:
+                default_start = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-            path = generate_daily_settlement_report(self.app)
-            if os.path.isfile(path):
-                webbrowser.open(Path(path).as_uri())
-                self.app.log(f"[일일결산] 저장 및 열기: {path}")
-            else:
-                self.app.log("[Error] 일일 결산 파일 생성 실패")
+            ttk.Label(frm, text="배치 시작일 (YYYY-MM-DD)").grid(row=0, column=0, sticky=tk.W)
+            var = tk.StringVar(value=str(default_start)[:10])
+            ent = ttk.Entry(frm, textvariable=var, width=16)
+            ent.grid(row=0, column=1, padx=8)
+            ttk.Label(
+                frm,
+                text="시작일~오늘, 거래일만, 최대 31일 범위",
+                font=("Malgun Gothic", 8),
+            ).grid(row=1, column=0, columnspan=2, sticky=tk.W)
+
+            def on_ok() -> None:
+                try:
+                    s = var.get().strip()[:10]
+                    datetime.strptime(s, "%Y-%m-%d")
+                except Exception:
+                    messagebox.showerror("오류", "날짜 형식은 YYYY-MM-DD 입니다.")
+                    return
+                self.app.settings["daily_settlement_batch_start_date"] = s
+                try:
+                    self.app.config_handler.save_settings(self.app.settings)
+                except Exception as e:
+                    self.app.log(f"[Warn] 설정 저장 실패: {e}")
+                top.destroy()
+                self._run_daily_settlement_batch_worker(s)
+
+            ttk.Button(frm, text="실행", command=on_ok).grid(row=2, column=1, sticky=tk.E, pady=(10, 0))
+            ttk.Button(frm, text="취소", command=top.destroy).grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+            ent.focus_set()
         except Exception as e:
-            self.app.log(f"[Error] 일일 결산 생성 중 오류: {e}")
+            self.app.log(f"[Error] 일일 결산 UI 오류: {e}")
+
+    def _run_daily_settlement_batch_worker(self, start_s: str) -> None:
+        """백그라운드에서 일괄 생성 후 브라우저로 열기."""
+        def job() -> None:
+            try:
+                import webbrowser
+                from pathlib import Path
+
+                from reporting.daily_settlement_report import run_daily_settlement_batch
+
+                def log(msg: str) -> None:
+                    try:
+                        self.app.log(msg)
+                    except Exception:
+                        pass
+
+                res = run_daily_settlement_batch(self.app, start_s, log_callback=log)
+                if not res.get("ok"):
+                    err = res.get("error") or "알 수 없는 오류"
+                    self.app.log(f"[일일결산] {err}")
+
+                    def _show_err(msg: str) -> None:
+                        try:
+                            messagebox.showerror("일일 결산", msg)
+                        except Exception:
+                            pass
+
+                    try:
+                        self.parent.after(0, lambda m=err: _show_err(m))
+                    except Exception:
+                        _show_err(err)
+                    return
+                op = res.get("opened_path")
+                if op and os.path.isfile(op):
+                    webbrowser.open(Path(op).as_uri())
+                gen_n = len(res.get("generated", []) or [])
+                sk_n = len(res.get("skipped", []) or [])
+                self.app.log(f"[일일결산] 완료 — 생성 {gen_n}건, 스킵 {sk_n}건, 열기: {op or '없음'}")
+            except Exception as e:
+                self.app.log(f"[Error] 일일결산 배치: {e}")
+                try:
+                    self.parent.after(0, lambda: messagebox.showerror("일일 결산", str(e)))
+                except Exception:
+                    pass
+
+        threading.Thread(target=job, daemon=True).start()
 
     def open_report_folder(self):
         """리포트 저장 폴더 열기"""
@@ -480,7 +918,7 @@ class VirtualTab:
         up_col = "#E35F5F" # Nord Red variant
         dn_col = "#81A1C3" # Nord Blue variant
         
-        for t in [self.tree_active, self.tree_history, self.tree_orders]:
+        for t in [self.tree_history, self.tree_orders]:
             # [v4.8.4] TCheckbutton 스타일은 메인에서 관리하므로 태그에 집중
             t.tag_configure("even", background=bg_even)
             t.tag_configure("odd", background=bg_odd)

@@ -315,10 +315,14 @@ class WarmupService:
         monitor_codes,
         monitor_info,
         bars_data,
+        on_stock_ready: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         DB·API로 15분봉 워밍업 후 종목별 성공 여부 dict 반환.
         (1분 볼륨 프로파일·배경 API 동기화는 신호 경로와 무관하여 제거됨.)
+
+        on_stock_ready: 종목별 검증·지표 적재가 끝난 직후(bars_data 반영 후) 호출.
+            워밍업 워커 스레드에서 실행되므로 UI·스트림 갱신은 호출부에서 메인 스레드로 위임할 것.
         """
         results: Dict[str, Dict[str, Any]] = {}
         self.is_running = True
@@ -355,6 +359,11 @@ class WarmupService:
                 }
 
                 self._notify_stock_prep("prep_ok", i + 1, total, name, code, "")
+                if on_stock_ready is not None:
+                    try:
+                        on_stock_ready(code)
+                    except Exception as cb_e:
+                        self.log(f"⚠️ [Warmup] on_stock_ready 콜백 오류 ({code}): {cb_e}")
             except Exception as e:
                 bars_data.pop(code, None)
                 err = str(e)

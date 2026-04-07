@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 
+import html
 import threading
+import time
+
 import pandas as pd
 import strategy_selector
 
@@ -70,14 +73,38 @@ class SelectionService:
             # 로그 출력
             self.log(f"{i:3d} | {score:5.1f} | {c:6s} | {name:<16s} | {price:8,d} | {ratio:>6.1f}% | {trde_val:>4d}억 | {rsi:>5.1f}")
             
-            # 텔레그램 메시지 빌드 (상위 N개만 상세 요약)
-            if i <= 10:
-                msg += f"<b>{i}. {name}</b> ({c}) - <b>{score}점</b>\n📊 현재가: {price:,}원 ({ratio:+.2f}%)\n📈 RSI: {rsi:.1f} | 💰 대금: {trde_val}억\n\n"
-        
-        self.log("="*120 + "\n")
-        
-        # 텔레그램 발송 (별도 스레드)
-        threading.Thread(target=self.app.data_manager.send_telegram_message, args=(msg,), daemon=True).start()
+            # 텔레그램: 전체 행 요약(이전에는 상위 10개만 포함)
+            name_esc = html.escape(str(name))
+            msg += (
+                f"<b>{i}. {name_esc}</b> ({c}) - <b>{score}점</b>\n"
+                f"📊 현재가: {price:,}원 ({ratio:+.2f}%)\n"
+                f"📈 RSI: {rsi:.1f} | 💰 대금: {trde_val}억\n\n"
+            )
+
+        self.log("=" * 120 + "\n")
+
+        threading.Thread(target=self._send_telegram_chunks_selection, args=(msg,), daemon=True).start()
+
+    def _send_telegram_chunks_selection(self, msg: str) -> None:
+        """HTML 본문을 4000자 단위로 나눠 순차 전송."""
+        try:
+            parts: list = []
+            buf = ""
+            for line in msg.split("\n"):
+                add = line + "\n"
+                if len(buf) + len(add) > 4000:
+                    parts.append(buf)
+                    buf = add
+                else:
+                    buf += add
+            if buf.strip():
+                parts.append(buf)
+            for i, p in enumerate(parts):
+                self.app.data_manager.send_telegram_message(p, parse_mode="HTML")
+                if i + 1 < len(parts):
+                    time.sleep(0.4)
+        except Exception as e:
+            self.log(f"[Selection] 텔레그램 분할 전송 실패: {e}")
 
     def _get_criteria_summary(self, format_type="ui"):
         """현재 적용 중인 주요 필터 구성을 문자열로 요약"""

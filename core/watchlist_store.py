@@ -9,9 +9,22 @@ from __future__ import annotations
 import json
 import os
 import threading
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 _DEFAULT_FILE = "watchlist_favorites.json"
+
+
+def _parse_avg_price(raw: Any) -> Optional[float]:
+    """JSON/입력에서 평단(기준가) 파싱. 없음·0 이하·비정상은 None."""
+    if raw is None or raw == "":
+        return None
+    try:
+        v = float(raw)
+        if v <= 0 or v != v or abs(v) == float("inf"):
+            return None
+        return v
+    except (TypeError, ValueError):
+        return None
 
 
 class WatchlistStore:
@@ -44,6 +57,7 @@ class WatchlistStore:
                             {
                                 "code": c,
                                 "name": str(it.get("name", "") or "").strip() or c,
+                                "avg_price": _parse_avg_price(it.get("avg_price")),
                             }
                         )
                 self._items = out
@@ -97,17 +111,50 @@ class WatchlistStore:
                     return it.get("name", c)
         return c
 
-    def add(self, code: str, name: str = "") -> bool:
+    def get_avg_price(self, code: str) -> Optional[float]:
+        """매도 기준(평단)가. 없으면 None — 매수 신호만 감시."""
+        c = str(code).strip().zfill(6)
+        with self._lock:
+            for it in self._items:
+                if it["code"] == c:
+                    return _parse_avg_price(it.get("avg_price"))
+        return None
+
+    def _resolve_name_from_market(self, code: str) -> str:
+        """코드만 있을 때 시장 표지명 조회 (pykrx). 실패 시 코드 반환."""
+        try:
+            from pykrx import stock
+
+            n = stock.get_market_ticker_name(code)
+            if n and str(n).strip():
+                return str(n).strip()
+        except Exception:
+            pass
+        return code
+
+    def get_display_name(self, code: str) -> str:
+        """텔레그램/UI용: 저장된 이름이 없거나 코드와 같으면 시장명 조회."""
+        c = str(code).strip().zfill(6)
+        nm = self.get_name(c)
+        if nm and nm != c and len(str(nm).strip()) >= 1:
+            return str(nm).strip()
+        return self._resolve_name_from_market(c)
+
+    def add(self, code: str, name: str = "", avg_price: Optional[float] = None) -> bool:
         c = str(code).strip().zfill(6)
         if len(c) != 6 or not c.isdigit():
             return False
-        nm = (name or "").strip() or c
+        nm = (name or "").strip()
+        if not nm or nm == c:
+            nm = self._resolve_name_from_market(c)
+        ap = _parse_avg_price(avg_price)
         with self._lock:
             for it in self._items:
                 if it["code"] == c:
                     it["name"] = nm
+                    it["avg_price"] = ap
                     return True
-            self._items.append({"code": c, "name": nm})
+            self._items.append({"code": c, "name": nm, "avg_price": ap})
         return True
 
     def remove(self, code: str) -> bool:

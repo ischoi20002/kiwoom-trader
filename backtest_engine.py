@@ -41,6 +41,10 @@ from strategy.indicator_constants import (
     RSI_MAIN_PERIOD,
 )
 from strategy.simulation_models import SimulatedRealtimeMetrics
+from strategy.market_regime import (
+    classify_market_regime_series,
+    regime_to_trend_status,
+)
 
 csv_lock = threading.Lock()
 # [v15.3.7] Script-relative absolute paths for robust log management
@@ -1239,19 +1243,22 @@ class SimpleBacktester:
             # [Fix] Align VIX with market index to prevent shape mismatch (broadcast error)
             vix_s = vix_df['Close'].reindex(m_df.index).ffill().fillna(15.0) if vix_df is not None and 'Close' in vix_df.columns else pd.Series(15.0, index=m_df.index)
             
-            # [v4.5.10] Unified Triple-Lock Safety System (DNA Sync)
-            # Thresholds: DOWN (Stop All), NEUTRAL (Stop Type B), UP (Go All)
-            lock_down = (m_df['MSI'] < -0.10) | (vix_s > 30)
-            lock_neutral = (m_df['ADX'] < 15) | ((m_df['MSI'] >= -0.10) & (m_df['MSI'] <= 0.05))
-            
-            m_df['Trend'] = np.where(lock_down, 'DOWN', 
-                                     np.where(lock_neutral, 'NEUTRAL', 'UP'))
-            
-            # Status Mapping (v4.5.10 Hardened)
-            m_df['Status'] = 'WATCH'
-            m_df.loc[(m_df['Trend'] == 'UP') & (m_df['ADX'] >= 25) & (vix_s <= 20), 'Status'] = 'AGGRESSIVE'
-            m_df.loc[(m_df['Trend'] == 'UP') & (m_df['Status'] == 'WATCH'), 'Status'] = 'SAFE'
-            m_df.loc[m_df['Trend'] == 'DOWN', 'Status'] = 'RISK'
+            # [v4.7] 다이나믹 백테·실시간과 동일한 4단계 레짐 → (Trend, Status)로 전개 후 전일 기준 적용
+            try:
+                _reg_s = classify_market_regime_series(
+                    m_df["MSI"], m_df["ADX"], vix_s, self.settings
+                )
+                _trend_list: list[str] = []
+                _status_list: list[str] = []
+                for _r in _reg_s.astype(str):
+                    tr, st = regime_to_trend_status(_r)
+                    _trend_list.append(tr)
+                    _status_list.append(st)
+                m_df["Trend"] = _trend_list
+                m_df["Status"] = _status_list
+            except Exception:
+                m_df["Trend"] = "UP"
+                m_df["Status"] = "WATCH"
 
             # [Realism] Today's market trend is determined by yesterday's close data to avoid look-ahead bias
             m_df['Trend'] = m_df['Trend'].shift(1).fillna('UP')

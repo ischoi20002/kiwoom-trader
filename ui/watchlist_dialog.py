@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-from typing import Any
+from typing import Any, Optional
 
 
 def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
@@ -13,8 +13,8 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
     top.title("⭐ 관심목록 (텔레그램 알림 전용)")
     top.transient(parent)
     top.grab_set()
-    top.minsize(460, 480)
-    top.geometry("520x520")
+    top.minsize(520, 520)
+    top.geometry("580x560")
     try:
         top.configure(bg=getattr(app, "colors", {}).get("bg", "#2E3440"))
     except Exception:
@@ -30,9 +30,29 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
         try:
             listbox.delete(0, tk.END)
             for it in app.watchlist_store.get_items():
-                listbox.insert(tk.END, f"{it['code']}  |  {it.get('name', '')}")
+                ap = it.get("avg_price")
+                if ap is not None and float(ap) > 0:
+                    mode = f"매도 감시 (평단 {float(ap):,.0f})"
+                else:
+                    mode = "매수 신호만"
+                listbox.insert(
+                    tk.END,
+                    f"{it['code']}  |  {it.get('name', '')}  |  {mode}",
+                )
         except Exception as e:
             messagebox.showerror("오류", f"목록 로드 실패: {e}", parent=top)
+
+    def _parse_avg(raw: str) -> Optional[float]:
+        s = (raw or "").strip().replace(",", "")
+        if not s:
+            return None
+        try:
+            v = float(s)
+            if v <= 0:
+                return None
+            return v
+        except ValueError:
+            raise ValueError("평단은 숫자로 입력하세요.")
 
     def _on_add() -> None:
         try:
@@ -42,11 +62,17 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
                 return
             c = raw.zfill(6)
             nm = (var_name.get() or "").strip()
-            if not app.watchlist_store.add(c, nm):
+            try:
+                ap = _parse_avg(var_avg.get() or "")
+            except ValueError as ve:
+                messagebox.showwarning("입력", str(ve), parent=top)
+                return
+            if not app.watchlist_store.add(c, nm, ap):
                 messagebox.showwarning("입력", "코드를 확인하세요.", parent=top)
                 return
             var_code.set("")
             var_name.set("")
+            var_avg.set("")
             _refresh()
         except Exception as e:
             messagebox.showerror("오류", str(e), parent=top)
@@ -78,14 +104,14 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
         except Exception as e:
             messagebox.showerror("오류", str(e), parent=top)
 
-    # 위젯 생성 (pack 순서는 아래에서 처리)
     hint = ttk.Label(
         outer,
         text=(
             "감시목록과 별도 · 화면에는 숨김 · 텔레그램만. "
-            "코드 입력 후 [추가], 저장 시 [파일에 저장]. 감시 재시작 시 스트림 반영."
+            "평단을 비우면 TYPE B 매수 신호만 알림. 평단을 넣으면 그 가격 기준 S2 매도 신호만 알림. "
+            "종목명을 비우면 저장 시 시장명으로 채움. [파일에 저장] 후 감시 재시작 시 반영."
         ),
-        wraplength=480,
+        wraplength=540,
     )
 
     lb_frame = ttk.Frame(outer)
@@ -93,7 +119,7 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
     listbox = tk.Listbox(
         lb_frame,
         yscrollcommand=scroll.set,
-        height=10,
+        height=12,
         font=("Malgun Gothic", 10),
         selectmode=tk.BROWSE,
         bg="#3B4252",
@@ -104,22 +130,36 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
     scroll.config(command=listbox.yview)
 
     add_f = ttk.Frame(outer)
-    ttk.Label(add_f, text="코드").pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Label(add_f, text="코드").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
     var_code = tk.StringVar()
-    ent_code = ttk.Entry(add_f, textvariable=var_code, width=12)
-    ent_code.pack(side=tk.LEFT, padx=2)
-    ttk.Button(add_f, text="추가", width=8, command=_on_add).pack(side=tk.LEFT, padx=(4, 8))
-    ttk.Label(add_f, text="종목명(선택)").pack(side=tk.LEFT, padx=(0, 4))
+    ent_code = ttk.Entry(add_f, textvariable=var_code, width=10)
+    ent_code.grid(row=0, column=1, padx=2, sticky=tk.W)
+
+    ttk.Label(add_f, text="종목명(선택)").grid(row=0, column=2, sticky=tk.W, padx=(8, 4))
     var_name = tk.StringVar()
     ent_name = ttk.Entry(add_f, textvariable=var_name, width=22)
-    ent_name.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+    ent_name.grid(row=0, column=3, padx=2, sticky=tk.EW)
+
+    ttk.Label(add_f, text="평단·기준가(선택)").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+    var_avg = tk.StringVar()
+    ent_avg = ttk.Entry(add_f, textvariable=var_avg, width=14)
+    ent_avg.grid(row=1, column=1, padx=2, pady=(6, 0), sticky=tk.W)
+    ttk.Label(
+        add_f,
+        text="(원, 비우면 매수만 / 입력 시 매도만)",
+        font=("Malgun Gothic", 8),
+    ).grid(row=1, column=2, columnspan=2, sticky=tk.W, padx=(4, 0), pady=(6, 0))
+
+    add_f.columnconfigure(3, weight=1)
+    ttk.Button(add_f, text="추가", width=8, command=_on_add).grid(
+        row=0, column=4, rowspan=2, padx=(12, 0), sticky=tk.N
+    )
 
     btn_row = ttk.Frame(outer)
     ttk.Button(btn_row, text="삭제", width=10, command=_on_delete).pack(side=tk.LEFT, padx=2)
     ttk.Button(btn_row, text="파일에 저장", width=12, command=_on_save).pack(side=tk.LEFT, padx=2)
     ttk.Button(btn_row, text="닫기", width=8, command=top.destroy).pack(side=tk.RIGHT, padx=2)
 
-    # pack: BOTTOM은 먼저 넣은 쪽이 창 바닥에 붙음 → btn_row → add_f → 위는 리스트가 expand
     btn_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
     add_f.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 4))
     hint.pack(side=tk.TOP, anchor=tk.W, pady=(0, 6))
@@ -130,6 +170,7 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
     try:
         ent_code.bind("<Return>", lambda _e: _on_add())
         ent_name.bind("<Return>", lambda _e: _on_add())
+        ent_avg.bind("<Return>", lambda _e: _on_add())
     except Exception:
         pass
 

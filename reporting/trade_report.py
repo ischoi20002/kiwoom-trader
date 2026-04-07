@@ -15,6 +15,7 @@ if root_dir not in sys.path:
     sys.path.append(root_dir)
 
 from strategy.data_loader import BacktestDataLoader
+from strategy.market_regime import classify_market_regime_row as _classify_market_regime_row
 
 
 def _depth_exit_bucket(reason: str) -> str:
@@ -275,34 +276,6 @@ def _reason_matches_smart_buy(reason_series: pd.Series) -> pd.Series:
     """SmartBuy|, 1M_SmartBuy|, SmartBuy Rejected, smart_buy 등 변형 인식."""
     r = reason_series.fillna('').astype(str)
     return r.str.contains(r'SmartBuy|SMART_BUY|smart_buy', case=False, na=False, regex=True)
-
-
-def _classify_market_regime_row(
-    msi: float,
-    adx: float,
-    v_val: float,
-    settings: dict | None,
-) -> str:
-    """DynamicBacktester Triple-Lock과 동일 분기 (settings 임계값 사용)."""
-    s = settings or {}
-    try:
-        msi_down = float(s.get("msi_down_threshold", -0.10))
-        msi_up = float(s.get("msi_up_threshold", 0.10))
-        adx_min = float(s.get("adx_min_threshold", 15))
-        adx_down = float(s.get("adx_down_threshold", 20))
-        vix_down = float(s.get("vix_down_threshold", 30))
-    except (TypeError, ValueError):
-        msi_down, msi_up, adx_min, adx_down, vix_down = -0.10, 0.10, 15.0, 20.0, 30.0
-    try:
-        if msi < msi_down or v_val > vix_down or (msi < 0 and adx > adx_down):
-            return "DOWN"
-        if adx < adx_min and msi <= msi_up:
-            return "NEUTRAL"
-        if msi > msi_up and adx > adx_down:
-            return "AGGRESSIVE"
-        return "UP"
-    except Exception:
-        return "UP"
 
 
 def _build_regime_lookup_prev_day(
