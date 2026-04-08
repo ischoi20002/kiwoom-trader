@@ -5,12 +5,14 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from utils.normalization import normalize_code
+from utils.bar_resample import refresh_resampled_data_at_path
 import threading
 import requests
 import config
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 class DataManagerV2:
     _instance = None
@@ -478,24 +480,14 @@ class DataManagerV2:
             conn.commit()
 
     def refresh_resampled_data(self, code):
-        with self._get_connection() as conn:
-            df_1m = pd.read_sql_query("SELECT datetime, open, high, low, close, volume FROM bars_1m WHERE code = ?", conn, params=[code])
-            if df_1m.empty: return
-            
-            df_1m['datetime'] = pd.to_datetime(df_1m['datetime'])
-            df_1m.set_index('datetime', inplace=True)
-            
-            df_15m = df_1m.resample('15min').agg({
-                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-            }).dropna()
-            
-            df_15m.reset_index(inplace=True)
-            df_15m['datetime'] = df_15m['datetime'].dt.strftime('%Y-%m-%d %H:%M:%S')
-            df_15m['code'] = code
-            
-            conn.execute("DELETE FROM bars_15m WHERE code = ?", (code,))
-            df_15m.to_sql('bars_15m', conn, if_exists='append', index=False)
-            conn.commit()
+        """bars_1m 전체를 기준으로 해당 종목의 bars_15m을 재생성합니다."""
+        err = refresh_resampled_data_at_path(self.db_path, code)
+        if err:
+            try:
+                print(f"[DataManagerV2] refresh_resampled_data {code}: {err}")
+            except Exception:
+                pass
+
 
     def save_realtime_snapshot(self, code, dt, price, vol_power, total_ask, total_bid):
         code = normalize_code(code)
@@ -615,6 +607,53 @@ class DataManagerV2:
         with self._get_connection() as conn:
             row = conn.execute("SELECT status FROM sync_meta WHERE code = ?", (code,)).fetchone()
             return row[0] if row else None
+
+    def reconcile_sync_meta_from_bars_1m(self, code: Optional[str] = None) -> bool:
+        """
+        sync_meta 의 last_sync_dt / earliest_sync_dt 를 bars_1m 실제 MIN·MAX 와 일치시킵니다.
+        대신 DB 병합 등으로 bars_1m 만 갱신된 경우 메타가 옛날로 남는 문제를 보정합니다.
+        status 등 다른 컬럼은 유지합니다.
+        """
+        try:
+            with self._get_connection() as conn:
+                if code:
+                    ncode = normalize_code(code)
+                    row = conn.execute(
+                        "SELECT MIN(datetime), MAX(datetime) FROM bars_1m WHERE code = ?",
+                        (ncode,),
+                    ).fetchone()
+                    if not row or row[0] is None:
+                        return True
+                    conn.execute(
+                        """
+                        INSERT INTO sync_meta (code, last_sync_dt, earliest_sync_dt)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(code) DO UPDATE SET
+                            last_sync_dt = excluded.last_sync_dt,
+                            earliest_sync_dt = excluded.earliest_sync_dt
+                        """,
+                        (ncode, row[1], row[0]),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO sync_meta (code, last_sync_dt, earliest_sync_dt)
+                        SELECT code, MAX(datetime), MIN(datetime)
+                        FROM bars_1m
+                        GROUP BY code
+                        ON CONFLICT(code) DO UPDATE SET
+                            last_sync_dt = excluded.last_sync_dt,
+                            earliest_sync_dt = excluded.earliest_sync_dt
+                        """
+                    )
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] reconcile_sync_meta_from_bars_1m 실패: {e}")
+            except Exception:
+                pass
+            return False
 
     def update_daily_data(self, code, start_date="2020-01-01"):
         import FinanceDataReader as fdr

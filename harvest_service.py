@@ -185,13 +185,27 @@ class HarvestService:
             last_sync = self.db.get_last_sync_time(code) # DB에서 실시간으로 다시 읽어옴
             
             total_fetched += len(bars)
+            # API 청크는 보통 최신→과거 순; 마지막 행이 이번 청크 중 가장 과거 시각
             current_bottom_time = bars[-1]['time']
             
-            # [v16.9] [Fixed] 과거 데이터 수집 중 기존 데이터와 겹치더라도, 전체 수집(COMPLETE)이 목적이라면 계속 진행합니다.
-            if initial_last_sync and current_bottom_time <= initial_last_sync:
-                status = self.db.get_sync_status(code)
-                if status == "COMPLETE":
-                    self.log(f"   - {code}: 기존 데이터와 연결됨. 조기 종료 (Overlapped).")
+            # [v16.9.7] 조기 종료 기준 분기:
+            # - COMPLETE: 증분만 — 수집 시작 시점의 DB 최신(initial_last_sync) 이전까지 역행하면 이후 페이지는
+            #   대부분 이미 보유분(INSERT OR IGNORE)이라 API 낭비. last_sync 기준으로 멈춤.
+            # - 비COMPLETE: 과거 백필 — DB 맨 앞(earliest)까지 내려가야 하므로 earliest 와 비교.
+            status = self.db.get_sync_status(code)
+            if status == "COMPLETE":
+                if initial_last_sync and current_bottom_time <= initial_last_sync:
+                    self.log(
+                        f"   - {code}: 증분 완료 — 청크 하단 {current_bottom_time} ≤ 기존 최신 {initial_last_sync}. "
+                        f"조기 종료(중복 구간 이하 페이지 생략)."
+                    )
+                    break
+            else:
+                earliest_db = self.db.get_earliest_sync_time(code)
+                if earliest_db and current_bottom_time <= earliest_db:
+                    self.log(
+                        f"   - {code}: 백필 구간 연결 — {current_bottom_time} ≤ DB 최초 {earliest_db}. 조기 종료 (Overlapped)."
+                    )
                     break
             
             self.log(

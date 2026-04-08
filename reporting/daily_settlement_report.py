@@ -135,6 +135,49 @@ def _report_excluded_watchlist_codes_from_app(app: Any) -> set:
         return set()
 
 
+def _normalize_total_assets_display(
+    total_assets: float, current_cash: float, stock_eval: float
+) -> float:
+    """
+    API tot_evlu_amt 가 주식 평가만 담는 등으로 총자산이 예수+평가보다 작게 나올 때 보정.
+    (가상포지션 탭 _normalize_total_assets_display 와 동일)
+    """
+    try:
+        computed = float(current_cash) + float(stock_eval)
+        if computed <= 0:
+            return float(total_assets)
+        ta = float(total_assets)
+        if ta <= 0:
+            return computed
+        if ta < computed * 0.88:
+            return computed
+        return ta
+    except Exception:
+        return float(total_assets)
+
+
+def _compute_total_assets_for_daily_report(portfolio: Any, stock_eval: float) -> float:
+    """
+    일일 결산·가상포지션 탭과 동일한 총 자산 표기.
+    원칙: D+2 예수금 + 주식 평가금 합. D+2 미수신 시 API 총자산·예수+평가 보정.
+    """
+    try:
+        d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)
+        se = float(stock_eval)
+        if d2 > 0:
+            return d2 + se
+        te = float(getattr(portfolio, "total_equity", 0) or 0)
+        cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
+        if te <= 0:
+            return max(0.0, cash + se)
+        return _normalize_total_assets_display(te, cash, se)
+    except Exception:
+        try:
+            return float(getattr(portfolio, "total_equity", 0) or 0)
+        except Exception:
+            return 0.0
+
+
 def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
     """VirtualTab 요약과 유사. report_day 기준 금일 실현 필터."""
     portfolio = app.portfolio
@@ -164,11 +207,9 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
         if str(pos.get("entry_time", "")).startswith(today_str):
             total_day_realized += pnl_amt
 
-    total_assets = float(getattr(portfolio, "total_equity", 0) or 0)
     current_cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
     stock_eval = total_eval
-    if total_assets == 0:
-        total_assets = current_cash + stock_eval
+    total_assets = _compute_total_assets_for_daily_report(portfolio, stock_eval)
 
     day_pnl_total = total_day_realized + total_unrealized
     try:
@@ -430,34 +471,33 @@ def generate_daily_settlement_report_ex(
     generated_at = datetime.now()
     overall_status: str = "complete"
 
-    chart_sections = ""
+    # 종목별 15분봉 HTML 조각 (아래 종목 카드 안에서만 버튼으로 펼침)
+    chart_body_by_code: Dict[str, str] = {}
     for code in codes_for_charts:
+        code_str = str(code).strip().zfill(6)
         nm = by_code[code][0].get("name", "") if by_code[code] else ""
         ok_sync = _refresh_symbol_bars(app, code, _log)
         if not ok_sync:
-            chart_failures.append(code)
+            chart_failures.append(code_str)
             overall_status = "partial"
 
         df_15 = None
         try:
             df_15 = dm.get_bars(code, start_dt=start_dt, end_dt=end_dt, interval="15m")
         except Exception as e:
-            warnings.append(f"{code} 15분 조회 실패: {e}")
+            warnings.append(f"{code_str} 15분 조회 실패: {e}")
             overall_status = "partial"
 
         block = _build_plotly_15m_section(code, nm or code, day, df_15, by_code[code])
-        chart_sections += f"""
-        <div class="card" id="chart-{_esc(code)}">
-            <h3>{_esc(nm)} <span class="muted">({_esc(code)})</span> — 15분봉</h3>
-            {block}
-        </div>"""
+        chart_body_by_code[code_str] = block
 
     if chart_failures:
         warnings.append(f"분봉 갱신 실패(스킵): {', '.join(chart_failures)}")
 
-    # 종목별 주문 표
+    # 종목별 카드: 주문 표 + 해당 종목만 펼 수 있는 15분봉 차트
     code_sections = ""
     for code in sorted(by_code.keys()):
+        code_str = str(code).strip().zfill(6)
         rows = ""
         for o in by_code[code]:
             rows += f"""<tr>
@@ -472,9 +512,15 @@ def generate_daily_settlement_report_ex(
                 <td>{_esc(o['reason'])}</td>
             </tr>"""
         nm = by_code[code][0].get("name", "") if by_code[code] else ""
+        chart_inner = chart_body_by_code.get(
+            code_str, '<p class="muted">15분봉 차트를 생성하지 못했습니다.</p>'
+        )
+        disp = nm or code_str
+        btn_open_lbl = f"{disp} 15분봉 차트 접기"
+        btn_closed_lbl = f"{disp} 15분봉 차트 펼치기"
         code_sections += f"""
-        <div class="card">
-            <h3>{_esc(nm)} <span class="muted">({_esc(code)})</span></h3>
+        <div class="card stock-report-card" id="stock-report-{_esc(code_str)}">
+            <h3>{_esc(nm)} <span class="muted">({_esc(code_str)})</span></h3>
             <table>
                 <thead>
                     <tr>
@@ -484,6 +530,17 @@ def generate_daily_settlement_report_ex(
                 </thead>
                 <tbody>{rows}</tbody>
             </table>
+            <div class="stock-chart-toolbar">
+                <span class="muted stock-chart-toolbar-label">15분봉 · 주문 시각</span>
+                <button type="button" class="chart-toggle-btn"
+                    aria-expanded="false"
+                    aria-controls="chart-panel-{_esc(code_str)}"
+                    data-text-open="{_esc(btn_open_lbl)}"
+                    data-text-closed="{_esc(btn_closed_lbl)}">{_esc(btn_closed_lbl)}</button>
+            </div>
+            <div class="chart-panel-collapsible" id="chart-panel-{_esc(code_str)}" hidden>
+                <div class="chart-details-body">{chart_inner}</div>
+            </div>
         </div>"""
 
     ev_rows = ""
@@ -506,7 +563,7 @@ def generate_daily_settlement_report_ex(
         </tr>"""
 
     summary_rows = f"""
-        <tr><td>총 평가금액 (API)</td><td class="num">{summary['total_assets']:,.0f} 원</td></tr>
+        <tr><td>총 자산 (D+2+주식평가, 가상포지션 탭과 동일)</td><td class="num">{summary['total_assets']:,.0f} 원</td></tr>
         <tr><td>예수금 (가용)</td><td class="num">{summary['cash']:,.0f} 원</td></tr>
         <tr><td>예수금 D+1</td><td class="num">{summary['d1_cash']:,.0f} 원</td></tr>
         <tr><td>예수금 D+2</td><td class="num">{summary['d2_cash']:,.0f} 원</td></tr>
@@ -608,6 +665,36 @@ def generate_daily_settlement_report_ex(
             font-size: 11px; color: #D8DEE9;
         }}
         .chartwrap {{ overflow-x: auto; }}
+        /* 종목 카드 안: 이 종목 15분봉만 버튼으로 펼침 */
+        .stock-chart-toolbar {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 16px;
+            padding-top: 12px;
+            border-top: 1px solid var(--bd);
+        }}
+        .stock-chart-toolbar-label {{ font-size: 0.9rem; }}
+        .chart-toggle-btn {{
+            background: #88C0D0;
+            color: #2E3440;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            flex-shrink: 0;
+        }}
+        .chart-toggle-btn:hover {{ filter: brightness(1.08); }}
+        .chart-toggle-btn:focus-visible {{ outline: 2px solid #ECEFF4; outline-offset: 2px; }}
+        .chart-panel-collapsible {{ margin-top: 12px; }}
+        .chart-details-body {{
+            padding-top: 4px;
+            border-top: 1px solid var(--bd);
+        }}
         footer {{ margin-top: 32px; font-size: 12px; color: #81A1C1; text-align: center; }}
     </style>
 </head>
@@ -621,10 +708,8 @@ def generate_daily_settlement_report_ex(
     <h2>요약</h2>
     <table class="summary">{summary_rows}</table>
 
-    <h2>종목별 15분봉 (주문 시각 표시)</h2>
-    {chart_sections if chart_sections else '<p class="muted">해당 일자 주문 기록이 없어 차트를 생략했습니다.</p>'}
-
-    <h2>종목별 주문 · 체결 (DB order_history)</h2>
+    <h2>종목별 리포트 (주문 · 체결 · 15분봉 차트)</h2>
+    <p class="muted" style="margin-top:-8px;margin-bottom:16px;">각 종목 카드 하단의 버튼으로 <b>해당 종목</b> 15분봉 차트만 펼칠 수 있습니다.</p>
     {code_sections if code_sections else '<p class="muted">해당 일자 주문 기록이 없습니다.</p>'}
 
     <h2>세션 이벤트 로그 (JSONL 복사본)</h2>
@@ -638,6 +723,51 @@ def generate_daily_settlement_report_ex(
 
     <footer>K-Trader 실시간 감시 일일 결산</footer>
 </div>
+<script>
+(function () {{
+  function resizePlotlyInside(root) {{
+    if (!window.Plotly || !root) return;
+    try {{
+      var nodes = root.querySelectorAll(".plotly-graph-div");
+      if (!nodes.length) nodes = root.querySelectorAll(".js-plotly-plot");
+      for (var i = 0; i < nodes.length; i++) {{
+        var gd = nodes[i];
+        try {{
+          if (typeof Plotly.Plots !== "undefined" && Plotly.Plots.resize) {{
+            Plotly.Plots.resize(gd);
+          }} else if (typeof Plotly.resize === "function") {{
+            Plotly.resize(gd);
+          }}
+        }} catch (e) {{}}
+      }}
+    }} catch (e) {{}}
+  }}
+  document.addEventListener("DOMContentLoaded", function () {{
+    document.querySelectorAll(".chart-toggle-btn").forEach(function (btn) {{
+      btn.addEventListener("click", function () {{
+        var panelId = btn.getAttribute("aria-controls");
+        var panel = panelId ? document.getElementById(panelId) : null;
+        if (!panel) return;
+        var opening = panel.hasAttribute("hidden");
+        var openText = btn.getAttribute("data-text-open") || "접기";
+        var closedText = btn.getAttribute("data-text-closed") || "펼치기";
+        if (opening) {{
+          panel.removeAttribute("hidden");
+          btn.setAttribute("aria-expanded", "true");
+          btn.textContent = openText;
+          requestAnimationFrame(function () {{ resizePlotlyInside(panel); }});
+          setTimeout(function () {{ resizePlotlyInside(panel); }}, 120);
+          setTimeout(function () {{ resizePlotlyInside(panel); }}, 400);
+        }} else {{
+          panel.setAttribute("hidden", "");
+          btn.setAttribute("aria-expanded", "false");
+          btn.textContent = closedText;
+        }}
+      }});
+    }});
+  }});
+}})();
+</script>
 </body>
 </html>"""
 
