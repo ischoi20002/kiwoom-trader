@@ -1,0 +1,18 @@
+{"ts": "2026-04-07 11:16:02", "kind": "fill", "data": {"code": "034020", "side": "buy", "price": 109600.0, "qty": 1, "name": "두산에너빌리티", "reason": "TEST_1SHARE_MARKET", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 11:16:02", "kind": "strategy_action", "data": {"code": "034020", "action": "EXIT", "reason": "GAP_DOWN", "now_price": 94800.0, "profit_ratio": -13.503649635036496}}
+{"ts": "2026-04-07 11:16:04", "kind": "order_sell", "data": {"code": "034020", "name": "두산에너빌리티", "qty": 1, "price": 94800, "result": "submitted", "order_no": "0099745", "reason": "EXIT_GAP_DOWN"}}
+{"ts": "2026-04-07 11:16:04", "kind": "fill", "data": {"code": "034020", "side": "sell", "price": 94800.0, "qty": 1, "name": "두산에너빌리티", "reason": "EXIT_GAP_DOWN", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 11:36:44", "kind": "fill", "data": {"code": "003490", "side": "buy", "price": 23100.0, "qty": 1, "name": "대한항공", "reason": "TEST_1SHARE_MARKET", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 12:50:10", "kind": "fill", "data": {"code": "003490", "side": "sell", "price": 23050.0, "qty": 1, "name": "대한항공", "reason": "TEST_1SHARE_MARKET", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 12:50:43", "kind": "fill", "data": {"code": "003490", "side": "buy", "price": 23150.0, "qty": 1, "name": "대한항공", "reason": "TEST_1SHARE_MARKET", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 12:52:36", "kind": "fill", "data": {"code": "055550", "side": "buy", "price": 92600.0, "qty": 1, "name": "신한지주", "reason": "TEST_1SHARE_MARKET", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 12:53:22", "kind": "fill", "data": {"code": "307950", "side": "buy", "price": 367000.0, "qty": 1, "name": "현대오토에버", "reason": "TEST_1SHARE_MARKET", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 13:02:50", "kind": "strategy_action", "data": {"code": "161890", "action": "EXIT", "reason": "STOP_LOSS", "now_price": 75100.0, "profit_ratio": -2.08604954367666}}
+{"ts": "2026-04-07 13:02:51", "kind": "order_sell", "data": {"code": "161890", "name": "한국콜마", "qty": 1, "price": 75100, "result": "submitted", "order_no": "0135607", "reason": "EXIT_STOP_LOSS"}}
+{"ts": "2026-04-07 13:02:51", "kind": "fill", "data": {"code": "161890", "side": "sell", "price": 75000.0, "qty": 1, "name": "한국콜마", "reason": "EXIT_STOP_LOSS", "fill_channel": "exchange"}}
+{"ts": "2026-04-07 14:14:43", "kind": "signal_s1_raw", "data": {"code": "032640", "name": "LG유플러스", "price": 15880.0, "met_ratio": 1.0, "confluence": "대기 (6/6)"}}
+{"ts": "2026-04-07 14:14:43", "kind": "signal_buy_skipped", "data": {"code": "032640", "name": "LG유플러스", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-07 14:57:16", "kind": "signal_s1_raw", "data": {"code": "032640", "name": "LG유플러스", "price": 15880.0, "met_ratio": 0.8333333333333334, "confluence": "대기 (5/6)"}}
+{"ts": "2026-04-07 14:57:16", "kind": "signal_buy_skipped", "data": {"code": "032640", "name": "LG유플러스", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-07 15:30:14", "kind": "signal_s1_raw", "data": {"code": "030000", "name": "제일기획", "price": 19190.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 4/7)"}}
+{"ts": "2026-04-07 15:30:14", "kind": "signal_buy_skipped", "data": {"code": "030000", "name": "제일기획", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}

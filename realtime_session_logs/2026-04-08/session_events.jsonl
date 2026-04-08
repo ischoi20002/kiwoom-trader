@@ -1,0 +1,6 @@
+{"ts": "2026-04-08 09:06:37", "kind": "strategy_action", "data": {"code": "307950", "action": "EXIT", "reason": "TAKE_PROFIT", "now_price": 391000.0, "profit_ratio": 6.539509536784749}}
+{"ts": "2026-04-08 09:06:37", "kind": "order_blocked", "data": {"code": "307950", "side": "sell", "qty": 1, "reason": "price_guard", "detail": "화면 현재가(430,500원)와 내부 캐시(391,000원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.", "name": "현대오토에버"}}
+{"ts": "2026-04-08 09:06:37", "kind": "order_sell", "data": {"code": "307950", "name": "현대오토에버", "qty": 1, "price": 391000, "result": "failed", "order_no": "", "reason": "EXIT_TAKE_PROFIT"}}
+{"ts": "2026-04-08 09:08:50", "kind": "strategy_action", "data": {"code": "003490", "action": "EXIT", "reason": "TAKE_PROFIT", "now_price": 24450.0, "profit_ratio": 5.844155844155852}}
+{"ts": "2026-04-08 09:08:50", "kind": "order_blocked", "data": {"code": "003490", "side": "sell", "qty": 1, "reason": "price_guard", "detail": "화면 현재가(23,100원)와 내부 캐시(24,450원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.", "name": "대한항공"}}
+{"ts": "2026-04-08 09:08:50", "kind": "order_sell", "data": {"code": "003490", "name": "대한항공", "qty": 1, "price": 24450, "result": "failed", "order_no": "", "reason": "EXIT_TAKE_PROFIT"}}
