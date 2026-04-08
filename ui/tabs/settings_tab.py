@@ -459,6 +459,14 @@ class SettingsTab:
             'Type B 목표 = (100 − A)%. 예: 60이면 A 60%·B 40%에 가깝게 유지',
         )
         add_param_row(cap_f, '가상 매매 자동화', None, '', '로직 포착 시 자동 진입 시뮬레이션', toggle_key='use_auto_virtual')
+        add_param_row(
+            cap_f,
+            '선정 시 거래정지 종목 제외',
+            None,
+            '',
+            '네이버 실시간 tradeStopType=HALTED — 대시보드 종목 선정(실시간)에서만 적용',
+            toggle_key='exclude_trading_halt_on_selection',
+        )
 
         _univ_root = _sec_parent('univ')
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')

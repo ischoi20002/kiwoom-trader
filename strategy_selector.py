@@ -356,7 +356,35 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
         if df_top is None or df_top.empty:
             logger_callback("[Error] 구성 종목 리스트를 확보하지 못했습니다.")
             return pd.DataFrame()
-    
+
+    # [선정] 거래정지 제외 — 실시간 선정만(과거 일자 선정은 현재 정지 상태와 불일치할 수 있어 생략)
+    if bool(settings.get("exclude_trading_halt_on_selection", True)) and target_date is None:
+        try:
+            from utils.naver_stock_halt import fetch_naver_halted_codes
+
+            codes_all = df_top["Code"].astype(str).str.zfill(6).tolist()
+            halted = fetch_naver_halted_codes(codes_all)
+            if halted:
+                n_before = len(df_top)
+                df_top = df_top[
+                    ~df_top["Code"].astype(str).str.zfill(6).isin(halted)
+                ].copy()
+                samp = ", ".join(sorted(halted)[:20])
+                more = " …" if len(halted) > 20 else ""
+                logger_callback(
+                    f"[선정] 거래정지 {len(halted)}종 제외 (네이버 실시간 HALTED) — "
+                    f"유니버스 {n_before} → {len(df_top)}"
+                )
+                logger_callback(f"  제외 코드: {samp}{more}")
+            if df_top is None or df_top.empty:
+                logger_callback("[Error] 거래정지 제외 후 유니버스가 비었습니다.")
+                return pd.DataFrame()
+        except Exception as e:
+            try:
+                logger_callback(f"⚠️ [선정] 거래정지 필터 생략: {e}")
+            except Exception:
+                pass
+
     min_val_krw = float(settings.get('min_trde_val', 40.0)) * 100000000
     
     def process_code(row):

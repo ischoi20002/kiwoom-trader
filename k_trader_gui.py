@@ -532,6 +532,12 @@ class KiwoomApp:
                 f"✅ [체결 동기화] REST 접수 직후 가상체결 {code} "
                 f"{'매수' if side == 'buy' else '매도'} {qty}주 ({int(fill_price):,}원)"
             )
+            try:
+                tc = getattr(self, "trading_controller", None)
+                if tc and oid:
+                    tc.clear_limit_order_watch(oid)
+            except Exception:
+                pass
             self._schedule_account_sync_after_fill()
         except Exception as e:
             self.log(f"⚠️ [체결 동기화] 실패: {e}")
@@ -569,6 +575,12 @@ class KiwoomApp:
             self.log(f"✅ [체결] {code} {'매수' if side=='buy' else '매도'} {qty}주 완료 ({price:,}원)")
             if oid:
                 self._exchange_fill_order_ids.add(oid)
+            try:
+                tc = getattr(self, "trading_controller", None)
+                if tc and oid:
+                    tc.clear_limit_order_watch(oid)
+            except Exception:
+                pass
             self._schedule_account_sync_after_fill()
         except Exception as e:
             self.log(f"⚠️ [체결] 처리 실패: {e}")
@@ -755,6 +767,20 @@ class KiwoomApp:
 
     def toggle_monitoring(self): return self.trading_controller.toggle()
 
+    def stop_monitoring(self) -> None:
+        """
+        웹소켓 워커 종료(finally) 등에서 호출되는 감시 중단 훅.
+        (기존 monitor_tab → app.stop_monitoring 경로와 호환)
+        """
+        try:
+            if getattr(self.trading_controller, "is_monitoring", False):
+                self.trading_controller.stop()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [System] stop_monitoring: {e}")
+            except Exception:
+                pass
+
     def _on_trading_status_changed(self, status, data):
         if status == "SHOW_WARNING": messagebox.showwarning("경고", data)
         elif status == "STATUS_TEXT": 
@@ -862,11 +888,12 @@ class KiwoomApp:
         macd_val: float,
         osc_val: float,
         ma60_ratio: float,
-    ) -> None:
+    ) -> bool:
         """
         SignalEngine 1차 매수 포착 콜백.
         DynamicBacktester 와 동일하게: 확정 Sig_Type(동시신호·동점 B우선), TypeBalanceGate,
         (선택) 선정 트랙(sel_track) 교차 검증 후 주문.
+        True: 주문 접수·가상체결 성공 — SignalEngine 매수 쿨타임 갱신에만 사용.
         """
         try:
             code = str(code).zfill(6)
@@ -883,7 +910,7 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
-                return
+                return False
             last_sig = detailed.iloc[-1]
             row = last_sig.to_dict() if hasattr(last_sig, "to_dict") else dict(last_sig)
             sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
@@ -908,7 +935,7 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
-                return
+                return False
             if tr == "B" and sig_type == "TYPE_A":
                 self.log(f"⚠️ [Skip] {name}({code}) Track B 종목에 Type A 신호")
                 try:
@@ -924,7 +951,7 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
-                return
+                return False
             if not TradingStrategy.type_balance_allows_new_s1(
                 self.settings, sig_type, self.portfolio.virtual_positions
             ):
@@ -941,7 +968,7 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
-                return
+                return False
             try:
                 self.session_logger.log(
                     "signal_buy_accepted",
@@ -959,7 +986,9 @@ class KiwoomApp:
                 )
             except Exception:
                 pass
-            self.trading_controller.execute_buy_signal(code, name, now_price, reason=sig_type)
+            return self.trading_controller.execute_buy_signal(
+                code, name, now_price, reason=sig_type
+            )
         except Exception as e:
             self.log(f"❌ [BuySignal] {code} 처리 실패: {e}")
             try:
@@ -972,7 +1001,8 @@ class KiwoomApp:
                 traceback.print_exc()
             except Exception:
                 pass
-        
+            return False
+
     def _on_strategy_action_needed(self, code, action, reason, **kwargs):
         return self.trading_controller.handle_strategy_action(code, action, reason, **kwargs)
 

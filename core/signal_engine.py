@@ -300,7 +300,6 @@ class SignalEngine:
                         is_cool = False
                 
                 if is_buy and is_cool and (not is_wl_only) and code not in self.app.virtual_positions:
-                    self.last_buy_sig_time[code] = datetime.now()
                     try:
                         sl = getattr(self.app, "session_logger", None)
                         if sl:
@@ -318,7 +317,21 @@ class SignalEngine:
                             )
                     except Exception:
                         pass
-                    self.app._on_buy_signal_received(code, now_price, rsi_sig, macd_val, osc_val, ma60_ratio)
+                    try:
+                        buy_ok = bool(
+                            self.app._on_buy_signal_received(
+                                code,
+                                now_price,
+                                rsi_sig,
+                                macd_val,
+                                osc_val,
+                                ma60_ratio,
+                            )
+                        )
+                    except Exception:
+                        buy_ok = False
+                    if buy_ok:
+                        self.last_buy_sig_time[code] = datetime.now()
 
                 # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
                 if is_wl_only and is_buy and is_cool and not has_wl_avg:

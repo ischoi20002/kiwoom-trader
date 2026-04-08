@@ -31,8 +31,8 @@ DEFAULT_SETTINGS = {
     "use_api_warmup_backfill": True,
     # 장중: 하베스팅이 전일까지이므로 당일 09:00~현재 구간이 비었으면 봉 수와 무관 API 보충
     "use_intraday_api_backfill": True,
-    # 실시간 감시: 모든 감시 종목이 15분봉 워밍업(API·DB) 검증 통과 시에만 WS·감시 시작
-    "require_full_warmup_for_monitoring": True,
+    # True: 한 종목이라도 워밍업 실패 시 전체 감시 미시작. False: 실패 종목만 제외하고 나머지 감시(권장).
+    "require_full_warmup_for_monitoring": False,
     # 준비 완료 종목부터 웹소켓 구독(REG)·감시 시작(나머지는 이어서 합류).
     # require_full_warmup=True 이고 일부만 스트림이 켜진 뒤 다른 종목이 실패하면 감시를 중단합니다.
     "incremental_warmup_stream": True,
@@ -46,6 +46,8 @@ DEFAULT_SETTINGS = {
     "reconcile_remove_grace_seconds": 180,
     # 서버 잔고 목록에 종목이 연속으로 없을 때만 로컬 제거(동기화 주기마다 1씩 증가)
     "reconcile_remove_confirm_syncs": 2,
+    # 종목 선정 시 네이버 실시간 API로 거래정지(HALTED) 종목 제외 (실시간 선정만)
+    "exclude_trading_halt_on_selection": True,
     "min_trde_val": 50.0,
     "vol_ratio": 1.2,
     "vol_lookback": 7.0,

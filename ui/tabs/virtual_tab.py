@@ -463,18 +463,19 @@ class VirtualTab:
         skip_orphan_delete = False
         updated_nks: set = set()
         # 스냅샷이 잠깐 비어 보이면 보유 트리를 통째로 지우지 않음 (수초~십수 초 공백 방지)
+        existing_active = False
+        try:
+            with self.app.portfolio.lock:
+                existing_active = (
+                    len(getattr(self.app.portfolio, "virtual_positions", None) or {}) > 0
+                )
+        except Exception:
+            existing_active = False
         if not merged_vp and existing_active:
-            nheld = 0
-            try:
-                with self.app.portfolio.lock:
-                    nheld = len(getattr(self.app.portfolio, "virtual_positions", None) or {})
-            except Exception:
-                nheld = 0
-            if nheld > 0:
-                merged_vp = self._vp_items_by_normalized()
-                active_list = self._sorted_active_holdings()
-                if not merged_vp:
-                    skip_orphan_delete = True
+            merged_vp = self._vp_items_by_normalized()
+            active_list = self._sorted_active_holdings()
+            if not merged_vp:
+                skip_orphan_delete = True
 
         mi = getattr(self.app, "monitor_info", None) or {}
         for idx, (nk, pos) in enumerate(active_list):

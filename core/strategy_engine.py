@@ -66,6 +66,9 @@ class StrategyEngine:
         # ---------------------------------------------------------
         stage = pos.get('stage', 1)
         if stage == 1:
+            # S2 지정가 미체결 중이면 중복 추매 주문만 억제(EXIT는 위에서 이미 판정됨)
+            if pos.get("s2_limit_order_pending", False):
+                return {"action": "HOLD"}
             # 백테스트와 동일한 S2 승인(Type A: s2_* / Type B: s2_b_* 완전 분리)
             pos_s2 = dict(pos)
             try:

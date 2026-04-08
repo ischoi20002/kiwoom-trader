@@ -502,8 +502,75 @@ class OrderManager:
             self.app.log(f"❌ 예수금 상세 조회 실패: {e}")
             return None
 
-    def cancel_order(self, order_no):
-        """미체결 주문 취소"""
-        self.app.log(f"🚫 주문 취소 요청: {order_no}")
-        # API 호출 로직 구현 예정
-        return True
+    def cancel_order(
+        self,
+        order_no: str,
+        stk_cd: str,
+        cncl_qty: str = "0",
+    ) -> bool:
+        """
+        미체결 지정가 주문 취소 (kt10003).
+        cncl_qty: '0' 이면 잔량 전부 취소.
+        """
+        use_mock = getattr(config, "USE_MOCK", False)
+        mode_str = "모의투자" if use_mock else "실전투자"
+        oid = str(order_no or "").strip()
+        code = str(stk_cd or "").zfill(6)
+        if not oid or not code:
+            self.app.log(f"⚠️ [{mode_str}] 취소 실패: 주문번호/종목코드 누락")
+            return False
+        if not self.order_api:
+            self.app.log(f"❌ [{mode_str}] 주문 엔진 없음 — 취소 불가")
+            return False
+        allow_order = getattr(config, "ALLOW_MOCK_ORDER", False) if use_mock else getattr(
+            config, "ALLOW_REAL_ORDER", False
+        )
+        if not allow_order:
+            self.app.log(f"⚠️ [{mode_str}] 취소 생략 (Safety Switch: OFF)")
+            return False
+        try:
+            res = self.order_api.stock_cancel_order_request_kt10003(
+                dmst_stex_tp="KRX",
+                orig_ord_no=oid,
+                stk_cd=code,
+                cncl_qty=str(cncl_qty).strip() or "0",
+            )
+            ret_code = res.get("return_code", -1)
+            ret_msg = res.get("return_msg", "")
+            out_ord = str(res.get("ord_no", "") or "").strip()
+            if ret_code == 0 or out_ord:
+                self.app.log(
+                    f"✅ [{mode_str}] 주문 취소 접수: 원주문 {oid} / 응답 ord_no={out_ord or '-'}"
+                )
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "order_cancel",
+                            {
+                                "orig_ord_no": oid,
+                                "stk_cd": code,
+                                "return_code": ret_code,
+                                "return_msg": str(ret_msg),
+                                "cncl_ord_no": out_ord,
+                            },
+                        )
+                except Exception:
+                    pass
+                return True
+            self.app.log(
+                f"❌ [{mode_str}] 주문 취소 거부: {ret_msg} (code={ret_code})"
+            )
+            return False
+        except Exception as e:
+            self.app.log(f"💥 [{mode_str}] 주문 취소 예외: {e}")
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "order_cancel_exception",
+                        {"orig_ord_no": oid, "stk_cd": code, "error": str(e)},
+                    )
+            except Exception:
+                pass
+            return False

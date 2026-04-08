@@ -7,6 +7,8 @@ import pandas as pd
 import os
 import config
 from datetime import datetime
+from typing import Any, Dict, Optional, Set
+
 from strategy.simulation_models import SimulatedRealtimeMetrics
 
 class TradingController:
@@ -27,6 +29,10 @@ class TradingController:
         
         # Threads
         self._stop_event = threading.Event()
+        # 지정가 미체결 타임아웃: ord_no -> {after_id, code, kind, qty}
+        self._limit_order_meta: Dict[str, Dict[str, Any]] = {}
+        # S1 매수 접수 후 체결 전 — 동일 종목 중복 매수 방지
+        self._s1_buy_order_pending_codes: Set[str] = set()
 
     def toggle(self):
         """감시 상태를 토글합니다."""
@@ -244,7 +250,7 @@ class TradingController:
             self._ensure_virtual_positions_monitor_info()
 
             require_full = bool(
-                self.app.settings.get("require_full_warmup_for_monitoring", True)
+                self.app.settings.get("require_full_warmup_for_monitoring", False)
             )
             # require_full 여부와 무관: 준비 완료 종목부터 스트림(실패 시 require_full 분기에서 감시 중단)
             incremental_stream = bool(
@@ -408,8 +414,10 @@ class TradingController:
         self.app.root.after(300000, run_save)
         self.app.root.after(1800000, run_report)
 
-    def execute_buy_signal(self, code, name, price, reason="TYPE_A"):
-        """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합)"""
+    def execute_buy_signal(self, code, name, price, reason="TYPE_A") -> bool:
+        """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
+        Returns True iff 주문 접수(ord_no) 또는 가상 체결까지 성공 — SignalEngine 쿨타임 갱신용.
+        """
         try:
             sl = getattr(self.app, "session_logger", None)
             if sl:
@@ -430,7 +438,17 @@ class TradingController:
                     )
             except Exception:
                 pass
-            return
+            return False
+
+        try:
+            nc = str(code).zfill(6)
+            if nc in self._s1_buy_order_pending_codes:
+                self.log(
+                    f"⚠️ [Skip] {name}({code}) S1 매수 미체결 대기 중 — 중복 주문 방지"
+                )
+                return False
+        except Exception:
+            pass
 
         # 0. 자동 매매 마스터 스위치 확인 (UI 연동)
         if not self.app.settings.get('use_auto_virtual', False):
@@ -444,7 +462,7 @@ class TradingController:
                     )
             except Exception:
                 pass
-            return
+            return False
 
         # 1. 투자금액 산출 (Risk Management)
         use_mock = getattr(config, 'USE_MOCK', False)
@@ -462,13 +480,14 @@ class TradingController:
                     )
             except Exception:
                 pass
-            return
+            return False
             
         # 2. 주문 수량 및 가격 보정
         adj_price = self.app.order_manager.get_adjusted_price(price, "buy")
         qty = max(1, invest_amt // adj_price)
         
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
+        ord_no = None
         if allow_order:
             ord_no = self.app.order_manager.place_order(
                 code, qty, price, order_type="00", side="buy", name=name, reason=reason
@@ -495,12 +514,30 @@ class TradingController:
             snapshot = self.app.portfolio.capture_snapshot(code, price, reason=reason)
             self.app.portfolio.on_fill(code, "buy", price, qty, name=name, reason=reason, snapshot=snapshot)
 
+        if allow_order and not ord_no:
+            self.log(
+                f"⚠️ [Buy Signal] {name}({code}) 매수 주문 실패 — 다음 신호에서 재판정·재시도 가능"
+            )
+            return False
+
+        if allow_order and ord_no:
+            try:
+                self._register_limit_order_watch(
+                    str(ord_no).strip(),
+                    str(code).zfill(6),
+                    "s1_buy",
+                    qty=int(qty),
+                )
+            except Exception as e:
+                self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
+
         self.log(f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 ({price:,}원, {qty}주)")
-        
+
         # 4. 텔레그램 알림 (비동기)
         import threading
         msg = f"<b>💰 [매수발송/{reason}]</b>\n종목: {name}({code})\n가: {price:,}원 / 수: {qty}주\n시간: {datetime.now().strftime('%H:%M:%S')}"
         threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
+        return True
 
     def handle_strategy_action(self, code, action, reason, **kwargs):
         """[v4.5.3/v4.5.4] StrategyEngine에서 결정된 액션(EXIT/STAGE2)을 처리합니다."""
@@ -547,7 +584,7 @@ class TradingController:
             return
 
         if action == "EXIT":
-            # [Audit] Exit Execution
+            # [Audit] Exit Execution — 주문 실패 시 exit_pending 미설정(재평가·재시도 가능)
             if allow_order:
                 ord_no = self.app.order_manager.place_order(
                     code,
@@ -575,18 +612,67 @@ class TradingController:
                         )
                 except Exception:
                     pass
+                if ord_no:
+                    pos["exit_pending"] = True
+                    pos["exit_reason"] = reason
+                    pos["pending_exit_ord_no"] = str(ord_no).strip()
+                    try:
+                        self._register_limit_order_watch(
+                            str(ord_no).strip(),
+                            str(code).zfill(6),
+                            "exit_sell",
+                            qty=int(pos.get("qty", 0)),
+                        )
+                    except Exception as e:
+                        self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
+                    self.log(
+                        f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 매도 접수 ({profit_ratio:+.2f}%)"
+                    )
+                    import threading
+                    msg = (
+                        f"<b>🚀 [매도발송/{reason}]</b>\n종목: {pos['name']}({code})\n"
+                        f"수익률: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
+                    )
+                    threading.Thread(
+                        target=self.app.send_telegram_message, args=(msg,), daemon=True
+                    ).start()
+                else:
+                    self.log(
+                        f"⚠️ [Exit Signal/{reason}] {pos['name']}({code}) 매도 주문 실패 "
+                        f"— exit_pending 미설정, 재평가 가능 ({profit_ratio:+.2f}%)"
+                    )
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "order_exit_failed",
+                                {
+                                    "code": code,
+                                    "name": pos.get("name", ""),
+                                    "reason": f"EXIT_{reason}",
+                                    "profit_ratio": float(profit_ratio),
+                                },
+                            )
+                    except Exception:
+                        pass
             else:
-                snapshot = self.app.portfolio.capture_snapshot(code, now_price, reason=f"EXIT_{reason}")
-                self.app.portfolio.on_fill(code, "sell", now_price, pos['qty'], snapshot=snapshot)
-
-            self.log(f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 청산 ({profit_ratio:+.2f}%)")
-            pos['exit_pending'] = True
-            pos['exit_reason'] = reason
-            
-            # [v4.4] 텔레그램 알림
-            import threading
-            msg = f"<b>🚀 [매도발송/{reason}]</b>\n종목: {pos['name']}({code})\n수익률: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
-            threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
+                snapshot = self.app.portfolio.capture_snapshot(
+                    code, now_price, reason=f"EXIT_{reason}"
+                )
+                self.app.portfolio.on_fill(
+                    code, "sell", now_price, pos["qty"], snapshot=snapshot
+                )
+                self.log(
+                    f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 가상 청산 ({profit_ratio:+.2f}%)"
+                )
+                import threading
+                msg = (
+                    f"<b>🚀 [매도발송/{reason}]</b>\n종목: {pos['name']}({code})\n"
+                    f"수익률: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
+                )
+                threading.Thread(
+                    target=self.app.send_telegram_message, args=(msg,), daemon=True
+                ).start()
 
         elif action == "STAGE2":
             # [Audit] Stage 2 Scale-in Execution
@@ -624,13 +710,191 @@ class TradingController:
                             )
                     except Exception:
                         pass
+                    if ord_no:
+                        pos["s2_limit_order_pending"] = True
+                        pos["s2_pending_ord_no"] = str(ord_no).strip()
+                        try:
+                            self._register_limit_order_watch(
+                                str(ord_no).strip(),
+                                str(code).zfill(6),
+                                "s2_buy",
+                                qty=int(add_qty),
+                            )
+                        except Exception as e:
+                            self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
+                        self.log(
+                            f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 접수 ({now_price:,}원, {add_qty}주)"
+                        )
+                        import threading
+                        msg = (
+                            f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n"
+                            f"평단대비: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
+                        )
+                        threading.Thread(
+                            target=self.app.send_telegram_message, args=(msg,), daemon=True
+                        ).start()
+                    else:
+                        self.log(
+                            f"⚠️ [Scale-in] {pos['name']}({code}) 2차 매수 주문 실패 — 재조건 충족 시 재시도"
+                        )
                 else:
-                    snapshot = self.app.portfolio.capture_snapshot(code, now_price, reason="Stage 2 Scaling")
-                    self.app.portfolio.on_fill(code, "buy", now_price, add_qty, snapshot=snapshot)
-                
-                self.log(f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 ({now_price:,}원, {add_qty}주)")
-                
-                # [v4.4] 텔레그램 알림
-                import threading
-                msg = f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n평단대비: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
-                threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
+                    snapshot = self.app.portfolio.capture_snapshot(
+                        code, now_price, reason="Stage 2 Scaling"
+                    )
+                    self.app.portfolio.on_fill(
+                        code, "buy", now_price, add_qty, snapshot=snapshot
+                    )
+                    self.log(
+                        f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 가상체결 ({now_price:,}원, {add_qty}주)"
+                    )
+                    import threading
+                    msg = (
+                        f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n"
+                        f"평단대비: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
+                    )
+                    threading.Thread(
+                        target=self.app.send_telegram_message, args=(msg,), daemon=True
+                    ).start()
+
+    def _limit_order_timeout_ms(self) -> int:
+        """settings.json `limit_order_unfilled_timeout_sec` — 짧은 지정가 미체결 대기(초)."""
+        try:
+            sec = float(
+                (self.app.settings or {}).get("limit_order_unfilled_timeout_sec", 5.0)
+            )
+        except (TypeError, ValueError):
+            sec = 5.0
+        sec = max(2.0, min(sec, 120.0))
+        return int(sec * 1000)
+
+    def clear_limit_order_watch(self, order_no: Optional[str]) -> None:
+        """체결 등으로 주문이 종료되면 타이머·대기 플래그를 정리합니다."""
+        if not order_no:
+            return
+        oid = str(order_no).strip()
+        if not oid:
+            return
+        meta = self._limit_order_meta.pop(oid, None)
+        if meta is None:
+            return
+        root = getattr(self.app, "root", None)
+        aid = meta.get("after_id")
+        if root is not None and aid is not None:
+            try:
+                root.after_cancel(aid)
+            except Exception:
+                pass
+        kind = meta.get("kind")
+        code = meta.get("code")
+        try:
+            nc = str(code).zfill(6) if code else ""
+        except Exception:
+            nc = ""
+        if kind == "s1_buy" and nc:
+            self._s1_buy_order_pending_codes.discard(nc)
+        if kind == "s2_buy" and nc:
+            try:
+                with self.app.portfolio.lock:
+                    p2 = self.app.portfolio.virtual_positions.get(nc)
+                    if p2:
+                        p2.pop("s2_limit_order_pending", None)
+                        p2.pop("s2_pending_ord_no", None)
+            except Exception:
+                pass
+
+    def _register_limit_order_watch(
+        self,
+        order_no: str,
+        code: str,
+        kind: str,
+        qty: int = 0,
+    ) -> None:
+        """지정가 접수 후 미체결 타임아웃 시 취소 API 및 상태 정리(재판정 가능)."""
+        oid = str(order_no or "").strip()
+        nc = str(code).zfill(6)
+        if not oid or not nc:
+            return
+        self.clear_limit_order_watch(oid)
+        root = getattr(self.app, "root", None)
+        if root is None:
+            return
+        ms = self._limit_order_timeout_ms()
+
+        def _cb() -> None:
+            try:
+                self._handle_limit_order_timeout(oid)
+            except Exception as e:
+                self.log(f"⚠️ [미체결타임아웃] 처리 오류: {e}")
+
+        self.log(
+            f"⏱️ [지정가] 미체결 감시 등록 ({kind}) {nc} ord={oid} / {ms // 1000}초"
+        )
+        after_id = root.after(ms, _cb)
+        self._limit_order_meta[oid] = {
+            "code": nc,
+            "kind": kind,
+            "after_id": after_id,
+            "qty": int(qty),
+        }
+        if kind == "s1_buy":
+            self._s1_buy_order_pending_codes.add(nc)
+
+    def _handle_limit_order_timeout(self, order_no: str) -> None:
+        """미체결 타임아웃: 취소 API 호출 후 대기 플래그 해제(횟수 제한 없이 재신호 가능)."""
+        oid = str(order_no or "").strip()
+        meta = self._limit_order_meta.pop(oid, None)
+        if meta is None:
+            return
+        code = meta.get("code")
+        kind = meta.get("kind")
+        nc = str(code or "").zfill(6)
+        if not nc:
+            return
+        ok = False
+        try:
+            ok = bool(self.app.order_manager.cancel_order(oid, nc, "0"))
+        except Exception as e:
+            self.log(f"⚠️ [미체결타임아웃] 취소 API 예외: {e}")
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "limit_order_unfilled_timeout",
+                    {
+                        "ord_no": oid,
+                        "code": nc,
+                        "kind": kind,
+                        "cancel_ok": ok,
+                    },
+                )
+        except Exception:
+            pass
+        if kind == "exit_sell":
+            try:
+                with self.app.portfolio.lock:
+                    p = self.app.portfolio.virtual_positions.get(nc)
+                    if p:
+                        p["exit_pending"] = False
+                        p.pop("pending_exit_ord_no", None)
+            except Exception:
+                pass
+            self.log(
+                f"⏱️ [미체결타임아웃] 매도 취소 시도({ok}) — 종목 {nc} 전략 재평가 가능"
+            )
+        elif kind == "s1_buy":
+            self._s1_buy_order_pending_codes.discard(nc)
+            self.log(
+                f"⏱️ [미체결타임아웃] S1 매수 취소 시도({ok}) — 종목 {nc} 재신호 가능"
+            )
+        elif kind == "s2_buy":
+            try:
+                with self.app.portfolio.lock:
+                    p = self.app.portfolio.virtual_positions.get(nc)
+                    if p:
+                        p.pop("s2_limit_order_pending", None)
+                        p.pop("s2_pending_ord_no", None)
+            except Exception:
+                pass
+            self.log(
+                f"⏱️ [미체결타임아웃] S2 매수 취소 시도({ok}) — 종목 {nc} 재조건 시 재추매 가능"
+            )
