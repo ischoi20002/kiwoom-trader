@@ -22,3 +22,8 @@
 {"ts": "2026-04-08 14:24:50", "kind": "signal_buy_skipped", "data": {"code": "278470", "name": "에이피알", "reason": "track_mismatch", "detail": "track_B_vs_type_A", "sig_type": "TYPE_A"}}
 {"ts": "2026-04-08 14:28:20", "kind": "signal_s1_raw", "data": {"code": "278470", "name": "에이피알", "price": 333000.0, "met_ratio": 1.0, "confluence": "대기 눌림A 7/7 (추세B 5/6)"}}
 {"ts": "2026-04-08 14:28:20", "kind": "signal_buy_skipped", "data": {"code": "278470", "name": "에이피알", "reason": "track_mismatch", "detail": "track_B_vs_type_A", "sig_type": "TYPE_A"}}
+{"ts": "2026-04-08 14:31:42", "kind": "signal_s1_raw", "data": {"code": "161890", "name": "한국콜마", "price": 76400.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 4/7)"}}
+{"ts": "2026-04-08 14:31:42", "kind": "signal_buy_accepted", "data": {"code": "161890", "name": "한국콜마", "price": 76400.0, "sig_type": "TYPE_B", "sel_track": "AB", "rsi_sig": 46.16851836921522, "macd": -90.97050443942135, "osc": 17.79261984162021, "ma60_ratio": 100.46903081576295}}
+{"ts": "2026-04-08 14:31:42", "kind": "buy_execute_start", "data": {"code": "161890", "name": "한국콜마", "price": 76400.0, "reason": "TYPE_B"}}
+{"ts": "2026-04-08 14:31:44", "kind": "order_buy", "data": {"code": "161890", "name": "한국콜마", "qty": 26, "price": 76500, "order_type": "00", "result": "submitted", "order_no": "0165112", "reason": "TYPE_B"}}
+{"ts": "2026-04-08 14:31:44", "kind": "fill", "data": {"code": "161890", "side": "buy", "price": 76500.0, "qty": 26, "name": "한국콜마", "reason": "TYPE_B", "fill_channel": "exchange"}}
