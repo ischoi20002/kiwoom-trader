@@ -1,3 +1,43 @@
 {
-    "history": []
+    "history": [
+        {
+            "name": "신한지주",
+            "avg_price": 92600.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 92600.0,
+            "entry_time": "2026-04-08T12:03:35.474629",
+            "reason": "SYNCED",
+            "events": [
+                {
+                    "time": "13:13:53",
+                    "action": "SELL",
+                    "price": 97200.0,
+                    "qty": 1,
+                    "snapshot": {
+                        "time": "2026-04-08 13:13:53",
+                        "price": 97200.0,
+                        "market_trend": "UP",
+                        "vol_power": 87.63,
+                        "reason": "REST_SELL",
+                        "rsi": 60.5,
+                        "macd": 1065.9,
+                        "osc": -154.43,
+                        "adx": 45.1,
+                        "ma_alignment": "정배열(Bull)",
+                        "bid_ask_ratio": 0.25
+                    }
+                }
+            ],
+            "max_now": 92600.0,
+            "current_price": 96800,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "final_pnl_pct": 4.442764578833693,
+            "realized_pnl_amt": 4114.0,
+            "exit_price": 97200.0,
+            "exit_time": "13:13:53",
+            "code": "055550"
+        }
+    ]
 }
