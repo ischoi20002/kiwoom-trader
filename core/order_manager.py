@@ -332,6 +332,44 @@ class OrderManager:
         except Exception:
             return (combined if combined > 0 else api_tot, d1, d2)
 
+    def _summarize_holdings_qty_positive(self, holdings: list) -> tuple[int, str]:
+        """
+        ka10085 acnt_prft_rt 중 잔고수량>0인 행만 모아 (종목 수, 로그용 요약 문자열) 반환.
+        청산 완료(0주) 행은 API에 남아 있어도 제외합니다.
+        """
+        parts: list[str] = []
+        try:
+            for row in holdings:
+                if not isinstance(row, dict):
+                    continue
+                code = str(
+                    row.get("stk_cd") or row.get("pdno") or row.get("code") or "?"
+                ).strip()
+                name = str(
+                    row.get("stk_nm")
+                    or row.get("prdt_name")
+                    or row.get("name")
+                    or "?"
+                ).strip()
+                qty_raw = row.get("rmnd_qty") or row.get("hldg_qty") or row.get("qty") or 0
+                try:
+                    qty = int(
+                        float(
+                            str(qty_raw).replace(",", "").replace("+", "").strip() or 0
+                        )
+                    )
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty <= 0:
+                    continue
+                parts.append(f"{code} {name}×{qty}주")
+        except Exception:
+            pass
+        detail = " | ".join(parts) if parts else "(해당 없음)"
+        if len(detail) > 1500:
+            detail = detail[:1500] + " ...(생략)"
+        return (len(parts), detail)
+
     def get_holdings(self):
         """[v4.0.0] 실시간 계좌 잔고 동기화 (ka10085 규격)"""
         if not self.account_api:
@@ -341,7 +379,6 @@ class OrderManager:
         mode_str = "모의투자" if use_mock else "실전투자"
         
         try:
-            self.app.log(f"🔍 [{mode_str}] 실시간 계좌 데이터 동기화 시도...")
             # ka10085: 계좌 수익률/잔고 요청
             # stex_tp "0": 통합거래소
             res = self.account_api.account_return_rate_request_ka10085(stex_tp="0")
@@ -391,16 +428,41 @@ class OrderManager:
                         or dep_detail.get("entr")
                         or 0
                     )
-                    self.app.log(
-                        f"✅ 예수금상세 반영 (qry_tp={dep_detail.get('qry_tp_used')}) "
-                        f"D+1={d1_deposit:,.0f} D+2={d2_deposit:,.0f} "
-                        f"주문가능={cash_available:,.0f}원"
-                    )
 
-                self.app.log(
-                    f"✅ 계좌 동기화 성공 (보유: {len(holdings)}개 | 총자산: {total_equity:,.0f}원"
-                    f" | API tot_evlu_amt: {api_tot:,.0f}원)"
-                )
+                n_hold, hold_detail = self._summarize_holdings_qty_positive(holdings)
+                # 주문가능(ord_alow 등)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
+                try:
+                    ca = float(cash_available or 0)
+                    d2v = float(d2_deposit or 0)
+                    d1v = float(d1_deposit or 0)
+                    tol = max(1.0, d2v * 0.0001) if d2v > 0 else 1.0
+                    if ca > 0 and abs(ca - d2v) > tol:
+                        dep_seg = (
+                            f"주문가능금액 {ca:,.0f}원 | D+2 예수금 {d2v:,.0f}원 | "
+                            f"D+1 예수금 {d1v:,.0f}원"
+                        )
+                    else:
+                        show_amt = d2v if d2v > 0 else ca
+                        dep_seg = (
+                            f"주문가능금액(D+2예수) {show_amt:,.0f}원 | "
+                            f"D+1 예수금 {d1v:,.0f}원"
+                        )
+                except Exception:
+                    dep_seg = (
+                        f"주문가능금액(D+2예수) {d2_deposit:,.0f}원 | "
+                        f"D+1 예수금 {d1_deposit:,.0f}원"
+                    )
+                try:
+                    self.app.log(
+                        f"✅ [{mode_str}] 계좌 동기화 | 총자산 {total_equity:,.0f}원 | "
+                        f"{dep_seg} | 실질 보유 {n_hold}종목"
+                        f"\n   └ 보유: {hold_detail}"
+                    )
+                except Exception as le:
+                    try:
+                        self.app.log(f"⚠️ [계좌] 동기화 요약 로그 실패: {le}")
+                    except Exception:
+                        pass
                 return {
                     "holdings": holdings,
                     "total_equity": total_equity,

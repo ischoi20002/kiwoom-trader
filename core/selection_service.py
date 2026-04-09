@@ -27,7 +27,8 @@ class SelectionService:
                 self.log("🔍 [Selection] 시장 전 종목 스캔 및 전략 필터링 시작...")
                 df_result = strategy_selector.select_monitoring_targets(
                     settings=self.app.settings,
-                    logger_callback=self.log
+                    logger_callback=self.log,
+                    data_manager=getattr(self.app, "data_manager", None),
                 )
                 
                 if df_result is not None and not df_result.empty:
@@ -39,6 +40,9 @@ class SelectionService:
                     if on_complete_callback:
                         on_complete_callback(None)
                         
+            except strategy_selector.SelectionDbStaleError:
+                if on_complete_callback:
+                    on_complete_callback(None)
             except Exception as e:
                 self.log(f"❌ [Error] 종목 선정 시스템 오류: {e}")
                 if on_complete_callback:

@@ -46,40 +46,36 @@ class DashboardTab:
         db_main_frame = ttk.Frame(self.parent, padding="25")
         db_main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 중앙 핵심 컨트롤 센터 (Grid 레이아웃)
+        # 중앙 핵심 컨트롤 센터 (Grid: 두 타일 동일 너비·동일 높이 셀)
         tiles_frame = ttk.Frame(db_main_frame)
         tiles_frame.pack(fill=tk.X, pady=(0, 25))
-        
-        # [타일 1] 전략 종목 스캔 (Scanner) - 가장 왼쪽, 큰 비중
+        tiles_frame.columnconfigure(0, weight=1, uniform="dashboard_tile")
+        tiles_frame.columnconfigure(1, weight=1, uniform="dashboard_tile")
+        tiles_frame.rowconfigure(0, minsize=140, weight=0)
+
+        # [타일 1] 전략 종목 스캔 (Scanner)
         scan_tile = ttk.LabelFrame(tiles_frame, text=" 🎯 종목 스캐너 ", padding="15")
-        scan_tile.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        scan_tile.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         ttk.Label(
             scan_tile,
-            text="KOSPI 200 중 Type A·B 유니버스를 각각 선정합니다.\n"
+            text="KODEX200 편입종목 중 Type A·B 유니버스를 각각 선정합니다.\n"
             "결과는 로그창에 표시되며 감시 대상으로 바로 등록됩니다.",
-            foreground="#81A1C1",
+            foreground="#EBCB8B",
         ).pack(expand=True)
         self.btn_select = ttk.Button(scan_tile, text="종목 선정 실행", style="Action.TButton", 
                                         command=self.start_selection_thread, state=tk.DISABLED)
         self.btn_select.pack(side=tk.BOTTOM, fill=tk.X, pady=(15,0))
 
-        # [타일 2] 데이터 수집 (Harvest) - 중간, 큰 비중
+        # [타일 2] 데이터 수집 (Harvest)
         harvest_tile = ttk.LabelFrame(tiles_frame, text=" 🚜 데이터 수집 ", padding="15")
-        harvest_tile.grid(row=0, column=1, sticky="nsew", padx=12)
-        ttk.Label(harvest_tile, text="최신 시장 데이터를\n로컬 DB로 저장합니다.", foreground="#81A1C1").pack(expand=True)
+        harvest_tile.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        ttk.Label(
+            harvest_tile,
+            text="최신 시장 데이터를\n로컬 DB로 저장합니다.",
+            foreground="#EBCB8B",
+        ).pack(expand=True)
         self.btn_harvest = ttk.Button(harvest_tile, text="수집 시작", style="Action.TButton", command=self._on_btn_harvest)
         self.btn_harvest.pack(side=tk.BOTTOM, fill=tk.X, pady=(15,0))
-
-        # [타일 3] 인증 및 연결 (Auth) - 가장 오른쪽, 작은 비중
-        auth_tile = ttk.LabelFrame(tiles_frame, text=" 🔑 계정 연결 ", padding="15")
-        auth_tile.grid(row=0, column=2, sticky="nsew", padx=(12, 0))
-        self.btn_auth = ttk.Button(auth_tile, text="인증 재시도", style="Subtle.TButton", command=self.app.get_auth_token)
-        self.btn_auth.pack(side=tk.BOTTOM, fill=tk.X, pady=(15,0))
-
-        # 컬럼 가중치 설정 (2:2:1 비율)
-        tiles_frame.columnconfigure(0, weight=2)
-        tiles_frame.columnconfigure(1, weight=2)
-        tiles_frame.columnconfigure(2, weight=1)
 
         # 상태 요약 라인 (아이콘 추가)
         status_info_frame = ttk.Frame(db_main_frame)
@@ -174,6 +170,7 @@ class DashboardTab:
     def select_monitoring_targets(self, auto_confirm=False):
         """선정 스캔 후 로그 출력 + 감시 대상 즉시 등록 (확인 팝업 없음)."""
         df_snap = None
+        aborted_stale = False
         try:
             df_result = strategy_selector.select_monitoring_targets(
                 settings=self.app.settings,
@@ -182,11 +179,34 @@ class DashboardTab:
             )
             if df_result is not None and not df_result.empty:
                 df_snap = df_result.copy()
+        except strategy_selector.SelectionDbStaleError as stale:
+            msg = str(stale.args[0]) if stale.args else "일봉 DB가 최신이 아닙니다."
+
+            def _warn_stale() -> None:
+                try:
+                    messagebox.showwarning(
+                        "일봉 DB 미갱신",
+                        "DB가 최신 장마감 일봉까지 반영되지 않았습니다.\n\n"
+                        f"{msg}\n\n"
+                        "데이터 수집(하베스팅)을 먼저 완료한 뒤 종목 선정을 실행하세요.",
+                    )
+                finally:
+                    if self.btn_select:
+                        self.btn_select.config(state=tk.NORMAL)
+
+            try:
+                self.app.root.after(0, _warn_stale)
+            except Exception:
+                _warn_stale()
+            aborted_stale = True
         except Exception as e:
             import traceback
 
             self.app.log(f"❌ 종목 선정 중 예외 발생: {e}")
             self.app.log(f"DEBUG Traceback:\n{traceback.format_exc()}")
+
+        if aborted_stale:
+            return
 
         def finish_on_main() -> None:
             try:

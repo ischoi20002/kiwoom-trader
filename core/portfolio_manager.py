@@ -481,8 +481,11 @@ class PortfolioManager:
         self.save_db()
         self._schedule_gui_callback()
         
-        result_msg = f"✅ 계좌 동기화 완료: 총자산 {self.total_equity:,.0f}원 (D+2: {self.actual_deposit:,.0f}) | 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
-        self.log(f"[Portfolio] {result_msg}")
+        # 총자산·예수·보유 상세는 OrderManager 요약 1회에 포함됨. 자동 동기화(silent) 시 로그 중복 방지.
+        if not silent:
+            self.log(
+                f"[Portfolio] 로컬 포지션 반영: 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
+            )
         
     def sync_deposit(self):
         """[v4.5.3] 전용 예수금 상세 조회 및 가용금 업데이트"""

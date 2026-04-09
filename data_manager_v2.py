@@ -1,7 +1,7 @@
 import sqlite3
 import pandas as pd
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional
 
 from utils.normalization import normalize_code
@@ -854,6 +854,54 @@ class DataManagerV2:
         with self._get_connection() as conn:
             row = conn.execute("SELECT last_daily_sync FROM sync_meta WHERE code = ?", (code,)).fetchone()
             return row[0] if row and row[0] else None
+
+    def get_latest_daily_bar_date_in_db(self) -> Optional[date]:
+        """
+        bars_1d에 저장된 일봉 중 가장 최근 영업일.
+        코스피 지수(001) 우선, 없으면 전체 MAX(datetime).
+        """
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT MAX(datetime) FROM bars_1d WHERE code = ?",
+                    ("001",),
+                ).fetchone()
+                s = row[0] if row and row[0] else None
+                if not s:
+                    row2 = conn.execute("SELECT MAX(datetime) FROM bars_1d").fetchone()
+                    s = row2[0] if row2 and row2[0] else None
+            if not s:
+                return None
+            return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    def check_daily_bars_fresh_for_selection(self, now: Optional[datetime] = None) -> tuple[bool, str]:
+        """
+        종목 선정 전: 로컬 일봉이 '최신 장마감' 기준일까지 반영됐는지 검사.
+        (True, "") 이면 선정 진행 가능.
+        """
+        try:
+            from reporting.krx_trading_calendar import required_eod_bar_date_asof_local
+
+            req = required_eod_bar_date_asof_local(now)
+            latest = self.get_latest_daily_bar_date_in_db()
+            if latest is None:
+                return (
+                    False,
+                    "일봉(bars_1d) 데이터가 없습니다. 하베스팅으로 DB를 채운 뒤 다시 시도하세요.",
+                )
+            if latest < req:
+                return (
+                    False,
+                    f"DB 최신 일봉: {latest} / 필요(최신 장마감 반영): {req} 이상.",
+                )
+            return (True, "")
+        except Exception as e:
+            return (
+                False,
+                f"일봉 최신일 확인 중 오류: {e}",
+            )
 
     def get_trading_days(self, start_date, end_date):
         query = "SELECT DISTINCT datetime FROM bars_1d WHERE code = '001' AND datetime BETWEEN ? AND ? ORDER BY datetime ASC"

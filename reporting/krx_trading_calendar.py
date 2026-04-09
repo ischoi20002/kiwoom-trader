@@ -113,6 +113,29 @@ def next_trading_day(day: str | date, max_lookahead: int = 10) -> Optional[date]
     return None
 
 
+def required_eod_bar_date_asof_local(now: Optional[datetime] = None) -> date:
+    """
+    종목 선정용: 로컬 DB 일봉에 반드시 포함되어야 하는 '마지막 완결 일봉'의 영업일.
+    - 비거래일: 직전 거래일
+    - 거래일 장마감(15:30) 이후: 당일
+    - 거래일 장전·장중: 직전 거래일(당일 일봉은 미완)
+    """
+    t = now or datetime.now()
+    d = t.date()
+    try:
+        if not is_trading_day(d):
+            prev = previous_trading_day(d)
+            return prev if prev is not None else d
+        mins = t.hour * 60 + t.minute
+        close_end = 15 * 60 + 30
+        if mins > close_end:
+            return d
+        prev = previous_trading_day(d)
+        return prev if prev is not None else d
+    except Exception:
+        return d
+
+
 def is_krx_regular_session_local(now: Optional[datetime] = None) -> bool:
     """
     PC 로컬 시각을 한국장 기준으로 본다고 가정할 때, KRX 정규장(09:00~15:30) 구간 여부.

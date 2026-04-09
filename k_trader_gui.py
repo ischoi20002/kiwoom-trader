@@ -90,23 +90,53 @@ except:
     pass
 
 class AuthManager:
+    """
+    키움 REST 액세스 토큰 관리.
+    동일 프로세스 내 반복 호출 시 OAuth 재요청·로그 스팸을 막기 위해 TTL 캐시를 둡니다.
+    """
+
+    # 키움 토큰은 통상 24h 내외 — 만료 전 갱신 여유를 두고 23시간 캐시
+    _TOKEN_TTL_SEC: float = 23 * 3600
+
     def __init__(self, logger_callback=None):
-        self.access_token = None
+        self.access_token: Optional[str] = None
         self.log = logger_callback or print
-        
-    def get_auth_token(self):
+        self._token_lock = threading.Lock()
+        self._token_issued_monotonic: float = 0.0
+
+    def invalidate_cached_token(self) -> None:
+        """401 등으로 토큰이 무효일 때 캐시를 비웁니다."""
         try:
-            from config import APP_KEY, APP_SECRET
-            tm = TokenManager()
-            self.access_token = tm.get_token()
-            if self.access_token:
-                self.log("✅ [Auth] REST API 토큰 인증 성공")
-                return self.access_token
+            with self._token_lock:
+                self.access_token = None
+                self._token_issued_monotonic = 0.0
+        except Exception:
+            pass
+
+    def get_auth_token(self) -> Optional[str]:
+        try:
+            now_m = time.monotonic()
+            with self._token_lock:
+                if (
+                    self.access_token
+                    and (now_m - self._token_issued_monotonic) < self._TOKEN_TTL_SEC
+                ):
+                    return self.access_token
+
+                tm = TokenManager()
+                token = tm.get_token()
+                if token:
+                    self.access_token = token
+                    self._token_issued_monotonic = time.monotonic()
+                    self.log("✅ [Auth] REST API 토큰 인증 성공")
+                    return self.access_token
+                self.access_token = None
+                self._token_issued_monotonic = 0.0
         except Exception as e:
             self.log(f"❌ [Auth] 인증 실패: {e}")
         return None
 
-    def get_token(self):
+    def get_token(self) -> Optional[str]:
         """[v4.0.1] API Client 호환용 인터페이스"""
         return self.get_auth_token()
 
@@ -193,6 +223,9 @@ class KiwoomApp:
         # 웹소켓 틱 → 메인 스레드에서 배치 처리 (종목당 마지막 틱만 유지)
         self._rt_tick_latest: dict = {}
         self._tick_flush_after_id: Optional[Any] = None
+        # REST 인증 자동 재시도: 동시에 하나의 워커만 실행
+        self._auth_worker_lock = threading.Lock()
+        self._auth_worker_running = False
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
@@ -378,7 +411,8 @@ class KiwoomApp:
         self.log("[System] 화면 구성 및 GUI 모듈 초기화 완료")
         if not hasattr(self, '_initial_threads_started'):
             self._initial_threads_started = True
-            threading.Thread(target=self.get_auth_token, daemon=True).start()
+            # 인증은 내부에서 백그라운드 워커로 재시도하므로 여기서는 추가 스레드 불필요
+            self.get_auth_token()
 
     def _on_market_data_update(self, indices=None, trend=None, display_text=None):
         # after(0) 콜백은 기본인자로 값을 고정해 클로저 지연 바인딩으로 라벨이 꼬이지 않게 함
@@ -399,18 +433,137 @@ class KiwoomApp:
 
     def log(self, message): self.gui_utils.log(message)
 
-    def get_auth_token(self):
-        token = self.auth_manager.get_auth_token()
-        if token:
-            self.root.after(0, lambda: self.status_label.config(text="상태: 로그인 완료", foreground=self.colors['success']))
+    def get_auth_token(self) -> None:
+        """
+        REST 토큰 발급 및 초기 동기화(포트폴리오·시장·원격·계좌·유니버스).
+        실패 시 백그라운드에서 지수 백오프로 자동 재시도하며, UI 스레드는 막지 않습니다.
+        """
+        with self._auth_worker_lock:
+            if self._auth_worker_running:
+                try:
+                    self.log("ℹ️ [Auth] 인증·연결 갱신이 이미 진행 중입니다.")
+                except Exception:
+                    pass
+                return
+            self._auth_worker_running = True
+
+        def worker() -> None:
+            try:
+                self._run_auth_token_with_retries()
+            finally:
+                with self._auth_worker_lock:
+                    self._auth_worker_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_auth_token_with_retries(self) -> None:
+        """백그라운드 전용: 토큰 발급 재시도 후 성공 시에만 부가 초기화 수행."""
+        max_attempts = 12
+        delay_sec = 3.0
+        max_delay = 45.0
+        backoff_mult = 1.25
+        token: Optional[str] = None
+        try:
+            err_fg = self.colors.get("error", "#BF616A")
+            ok_fg = self.colors.get("success", "#A3BE8C")
+        except Exception:
+            err_fg, ok_fg = "#BF616A", "#A3BE8C"
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if attempt > 1:
+                    try:
+                        self.auth_manager.invalidate_cached_token()
+                    except Exception:
+                        pass
+                    try:
+                        self.log(
+                            f"🔁 [Auth] {attempt}/{max_attempts}차 인증 시도 "
+                            f"({delay_sec:.1f}초 대기 후)..."
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(delay_sec)
+                    delay_sec = min(delay_sec * backoff_mult, max_delay)
+
+                try:
+                    token = self.auth_manager.get_auth_token()
+                except Exception as ex:
+                    token = None
+                    try:
+                        self.log(f"⚠️ [Auth] {attempt}/{max_attempts}차 예외: {ex}")
+                    except Exception:
+                        pass
+
+                if token:
+                    if attempt > 1:
+                        try:
+                            self.log(f"✅ [Auth] {attempt}회차에서 인증 성공")
+                        except Exception:
+                            pass
+                    break
+            except Exception as loop_ex:
+                try:
+                    self.log(f"⚠️ [Auth] 재시도 루프 오류: {loop_ex}")
+                except Exception:
+                    pass
+
+        if not token:
+            try:
+                self.log(
+                    f"❌ [Auth] {max_attempts}회 시도 후에도 인증에 실패했습니다. "
+                    "네트워크·키움 API 상태를 확인하거나 잠시 뒤 앱을 다시 시작해 주세요."
+                )
+            except Exception:
+                pass
+            try:
+                self.root.after(
+                    0,
+                    lambda c=err_fg: (
+                        self.status_label.config(
+                            text="상태: 인증 실패 — 연결 확인", foreground=c
+                        )
+                        if self.status_label
+                        else None
+                    ),
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            self.root.after(
+                0,
+                lambda c=ok_fg: (
+                    self.status_label.config(
+                        text="상태: 로그인 완료", foreground=c
+                    )
+                    if self.status_label
+                    else None
+                ),
+            )
+        except Exception:
+            pass
+
+        try:
             self.portfolio.load_all()
             self.market_service.start()
             self.remote_commander.start()
-            self.root.after(2000, lambda: self.portfolio.sync_with_actual_account(silent=True, force=True))
-            threading.Thread(target=lambda: self.get_kospi_200(force=True), daemon=True).start()
+            self.root.after(
+                2000,
+                lambda: self.portfolio.sync_with_actual_account(silent=True, force=True),
+            )
+            threading.Thread(
+                target=lambda: self.get_kospi_200(force=True), daemon=True
+            ).start()
+        except Exception as post_ex:
+            try:
+                self.log(f"❌ [Auth] 인증 후 초기화 중 오류: {post_ex}")
+            except Exception:
+                pass
 
     def get_kospi_200(self, force=False):
-        self.log("[Data] KOSPI 종목 리스트 수집 중...")
+        self.log("[Data] KODEX200 편입종목 확인 중...")
         df_200 = self.data_manager.get_kospi_list(count=200, force=force)
         if df_200 is not None: 
             self.log(f"[Data] 감시 대상 {len(df_200)}개 종목 로드 완료")

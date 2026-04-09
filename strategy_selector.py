@@ -6,6 +6,11 @@ from datetime import datetime, timedelta
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
+
+class SelectionDbStaleError(Exception):
+    """로컬 일봉 DB가 최신 장마감까지 갱신되지 않아 실시간 종목 선정을 중단할 때."""
+
+
 def calculate_rsi(series, period=14):
     """
     RSI(Relative Strength Index)를 계산합니다.
@@ -284,6 +289,19 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
     logger_callback("\n" + "="*50)
     t_str = target_date.strftime('%Y-%m-%d') if target_date else "실시간"
     logger_callback(f"[Select] [전략 종목 선정] ({t_str}) 분석 시작...")
+
+    # [v4.10] 실시간 선정만: 하베스팅이 최신 장마감 일봉까지 반영됐는지 검사 (잘못된 일봉으로 조용히 선정되는 것 방지)
+    if target_date is None and data_manager is not None:
+        try:
+            ok, stale_msg = data_manager.check_daily_bars_fresh_for_selection()
+        except Exception as ex:
+            ok, stale_msg = False, f"일봉 신선도 검사 실패: {ex}"
+        if not ok:
+            logger_callback(f"⛔ [선정] {stale_msg}")
+            logger_callback(
+                "⛔ [선정] 데이터 수집(하베스팅)을 먼저 완료한 뒤 종목 선정을 실행하세요."
+            )
+            raise SelectionDbStaleError(stale_msg)
     
     # 1. 대상 유니버스 확보 (KOSPI 200)
     tickers = []
