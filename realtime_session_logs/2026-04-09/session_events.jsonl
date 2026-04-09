@@ -1,0 +1,358 @@
+{"ts": "2026-04-09 09:00:32", "kind": "strategy_action", "data": {"code": "307950", "action": "EXIT", "reason": "TAKE_PROFIT", "now_price": 418500.0, "profit_ratio": 14.032697547683926}}
+{"ts": "2026-04-09 09:00:32", "kind": "order_blocked", "data": {"code": "307950", "side": "sell", "qty": 1, "reason": "price_guard", "detail": "화면 현재가(367,000원)와 내부 캐시(418,500원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.", "name": "현대오토에버"}}
+{"ts": "2026-04-09 09:00:32", "kind": "order_sell", "data": {"code": "307950", "name": "현대오토에버", "qty": 1, "price": 418500, "result": "failed", "order_no": "", "reason": "EXIT_TAKE_PROFIT", "snap_vol_power": 7.9, "snap_vol_power_str": "7.9%", "snap_bid_ask": "839 / 414 (2.0)"}}
+{"ts": "2026-04-09 09:00:32", "kind": "order_exit_failed", "data": {"code": "307950", "name": "현대오토에버", "reason": "EXIT_TAKE_PROFIT", "profit_ratio": 14.032697547683926}}
+{"ts": "2026-04-09 09:00:32", "kind": "strategy_action", "data": {"code": "307950", "action": "EXIT", "reason": "TAKE_PROFIT", "now_price": 418500.0, "profit_ratio": 14.032697547683926}}
+{"ts": "2026-04-09 09:00:33", "kind": "order_sell", "data": {"code": "307950", "name": "현대오토에버", "qty": 1, "price": 418500, "result": "submitted", "order_no": "0005454", "reason": "EXIT_TAKE_PROFIT", "snap_vol_power": 7.8, "snap_vol_power_str": "7.8%", "snap_bid_ask": "790 / 449 (1.8)"}}
+{"ts": "2026-04-09 09:00:33", "kind": "strategy_action", "data": {"code": "003490", "action": "EXIT", "reason": "TAKE_PROFIT", "now_price": 24700.0, "profit_ratio": 6.926406926406936}}
+{"ts": "2026-04-09 09:00:33", "kind": "order_blocked", "data": {"code": "003490", "side": "sell", "qty": 1, "reason": "price_guard", "detail": "화면 현재가(23,100원)와 내부 캐시(24,700원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.", "name": "대한항공"}}
+{"ts": "2026-04-09 09:00:33", "kind": "order_sell", "data": {"code": "003490", "name": "대한항공", "qty": 1, "price": 24700, "result": "failed", "order_no": "", "reason": "EXIT_TAKE_PROFIT", "snap_vol_power": 239.36, "snap_vol_power_str": "239.4%", "snap_bid_ask": "30,452 / 36,899 (0.8)"}}
+{"ts": "2026-04-09 09:00:33", "kind": "order_exit_failed", "data": {"code": "003490", "name": "대한항공", "reason": "EXIT_TAKE_PROFIT", "profit_ratio": 6.926406926406936}}
+{"ts": "2026-04-09 09:00:33", "kind": "fill", "data": {"code": "307950", "side": "sell", "price": 418000.0, "qty": 1, "name": "현대오토에버", "reason": "EXIT_TAKE_PROFIT", "fill_channel": "exchange", "snap_vol_power": 8.25, "snap_vol_power_str": "8.2%", "snap_bid_ask": "790 / 449 (1.8)"}}
+{"ts": "2026-04-09 09:00:33", "kind": "strategy_action", "data": {"code": "003490", "action": "EXIT", "reason": "TAKE_PROFIT", "now_price": 24650.0, "profit_ratio": 6.70995670995671}}
+{"ts": "2026-04-09 09:00:35", "kind": "order_sell", "data": {"code": "003490", "name": "대한항공", "qty": 1, "price": 24650, "result": "submitted", "order_no": "0005497", "reason": "EXIT_TAKE_PROFIT", "snap_vol_power": 208.24, "snap_vol_power_str": "208.2%", "snap_bid_ask": "30,460 / 36,908 (0.8)"}}
+{"ts": "2026-04-09 09:00:35", "kind": "fill", "data": {"code": "003490", "side": "sell", "price": 24600.0, "qty": 1, "name": "대한항공", "reason": "EXIT_TAKE_PROFIT", "fill_channel": "exchange", "snap_vol_power": 208.24, "snap_vol_power_str": "208.2%", "snap_bid_ask": "30,460 / 36,908 (0.8)"}}
+{"ts": "2026-04-09 09:04:02", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:02", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:05", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:05", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:06", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:06", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:06", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:06", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:06", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:06", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:07", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:07", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:07", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:07", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:08", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:08", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:08", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:08", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:08", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:08", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:09", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:09", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:10", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:10", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:10", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:10", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:11", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:11", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:11", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:11", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 221000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:12", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:15", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:15", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:15", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:15", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:16", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:16", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:17", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:17", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:18", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:18", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:18", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:18", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:19", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:19", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:20", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:20", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:21", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:21", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 218500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:22", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:23", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:24", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:25", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:25", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:25", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:25", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:26", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:26", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:27", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:27", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:27", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:27", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:29", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:29", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:30", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:30", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:31", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:31", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:31", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:31", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:32", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:33", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:33", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:35", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:35", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:35", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:35", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:36", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:36", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:36", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:36", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:37", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:37", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:38", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:38", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:39", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:39", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:39", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:39", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:39", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:39", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:40", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:40", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:41", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:41", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:42", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219500.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:42", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:43", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:43", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:45", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:48", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:48", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:49", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:49", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:49", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:49", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:50", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:50", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:51", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:51", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:52", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:52", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:53", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:53", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:53", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 219000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:53", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:54", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:55", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:55", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:56", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:56", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:56", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:56", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:57", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:57", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:59", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:59", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:04:59", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:04:59", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:00", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:00", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:01", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:02", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:02", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:02", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:02", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:05:03", "kind": "signal_s1_raw", "data": {"code": "036570", "name": "엔씨소프트", "price": 220000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 5/7)"}}
+{"ts": "2026-04-09 09:05:03", "kind": "signal_buy_skipped", "data": {"code": "036570", "name": "엔씨소프트", "reason": "track_mismatch", "detail": "track_A_vs_type_B", "sig_type": "TYPE_B"}}
+{"ts": "2026-04-09 09:10:07", "kind": "strategy_action", "data": {"code": "161890", "action": "EXIT", "reason": "TAKE_PROFIT", "now_price": 80300.0, "profit_ratio": 5.104712041884807}}
+{"ts": "2026-04-09 09:10:08", "kind": "order_sell", "data": {"code": "161890", "name": "한국콜마", "qty": 26, "price": 80300, "result": "submitted", "order_no": "0020314", "reason": "EXIT_TAKE_PROFIT", "snap_vol_power": 294.17, "snap_vol_power_str": "294.2%", "snap_bid_ask": "8,150 / 1,424 (5.7)"}}
+{"ts": "2026-04-09 09:10:08", "kind": "fill", "data": {"code": "161890", "side": "sell", "price": 80200.0, "qty": 26, "name": "한국콜마", "reason": "EXIT_TAKE_PROFIT", "fill_channel": "exchange", "snap_vol_power": 294.17, "snap_vol_power_str": "294.2%", "snap_bid_ask": "8,150 / 1,384 (5.9)"}}
+{"ts": "2026-04-09 09:11:53", "kind": "signal_s1_raw", "data": {"code": "011170", "name": "롯데케미칼", "price": 93100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 추세B 5/6 (눌림A 6/7)"}}
+{"ts": "2026-04-09 09:11:53", "kind": "signal_buy_accepted", "data": {"code": "011170", "name": "롯데케미칼", "price": 93100.0, "sig_type": "TYPE_B", "sel_track": "B", "rsi_sig": 57.65352034881273, "macd": 501.5137164656189, "osc": 4.102664365184751, "ma60_ratio": 104.1115294293063}}
+{"ts": "2026-04-09 09:11:53", "kind": "buy_execute_start", "data": {"code": "011170", "name": "롯데케미칼", "price": 93100.0, "reason": "TYPE_B"}}
+{"ts": "2026-04-09 09:11:54", "kind": "order_buy", "data": {"code": "011170", "name": "롯데케미칼", "qty": 21, "price": 93200, "order_type": "00", "result": "submitted", "order_no": "0022731", "reason": "TYPE_B", "snap_vol_power": 145.66, "snap_vol_power_str": "145.7%", "snap_bid_ask": "1,721 / 683 (2.5)"}}
+{"ts": "2026-04-09 09:11:54", "kind": "fill", "data": {"code": "011170", "side": "buy", "price": 93200.0, "qty": 21, "name": "롯데케미칼", "reason": "TYPE_B", "fill_channel": "exchange", "snap_vol_power": 145.66, "snap_vol_power_str": "145.7%", "snap_bid_ask": "1,721 / 683 (2.5)"}}
+{"ts": "2026-04-09 09:24:37", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:38", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:38", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:38", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:39", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:39", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:39", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:39", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:39", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:39", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:40", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:40", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:40", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:40", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:40", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:41", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:41", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:42", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:43", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:43", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:43", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61300.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:44", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:44", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:44", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:44", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:45", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:45", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:45", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:45", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:45", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:45", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:46", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:46", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:46", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:47", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:48", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:48", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:49", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:49", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:50", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:51", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:51", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:51", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:51", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:52", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61000.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:52", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:52", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:52", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:53", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:54", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:54", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:54", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:54", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:55", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:55", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:55", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:56", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:56", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:57", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:57", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:58", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:58", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:59", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:59", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:24:59", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:00", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:00", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:00", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:00", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:00", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:01", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:01", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:02", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:03", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61200.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:07", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:08", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:10", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:10", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:10", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:11", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:11", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:11", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:12", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:12", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:12", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:13", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:13", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:13", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:14", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:14", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:14", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:14", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:15", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:15", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:15", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:16", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:17", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:17", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:17", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:25:18", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61100.0, "met_ratio": 0.8333333333333334, "confluence": "대기 눌림A 4/7"}}
+{"ts": "2026-04-09 09:52:34", "kind": "signal_s1_raw", "data": {"code": "023530", "name": "롯데쇼핑", "price": 110600.0, "met_ratio": 1.0, "confluence": "대기 추세B 6/6"}}
+{"ts": "2026-04-09 09:52:34", "kind": "signal_buy_accepted", "data": {"code": "023530", "name": "롯데쇼핑", "price": 110600.0, "sig_type": "TYPE_B", "sel_track": "B", "rsi_sig": 55.02684670340781, "macd": 623.8638466415287, "osc": 19.478106542854675, "ma60_ratio": 103.74585704458758}}
+{"ts": "2026-04-09 09:52:34", "kind": "buy_execute_start", "data": {"code": "023530", "name": "롯데쇼핑", "price": 110600.0, "reason": "TYPE_B"}}
+{"ts": "2026-04-09 09:52:35", "kind": "order_buy", "data": {"code": "023530", "name": "롯데쇼핑", "qty": 18, "price": 111100, "order_type": "00", "result": "submitted", "order_no": "0060586", "reason": "TYPE_B", "snap_vol_power": 113.29, "snap_vol_power_str": "113.3%", "snap_bid_ask": "250 / 476 (0.5)"}}
+{"ts": "2026-04-09 09:52:35", "kind": "fill", "data": {"code": "023530", "side": "buy", "price": 111100.0, "qty": 18, "name": "롯데쇼핑", "reason": "TYPE_B", "fill_channel": "exchange", "snap_vol_power": 113.29, "snap_vol_power_str": "113.3%", "snap_bid_ask": "250 / 476 (0.5)"}}
+{"ts": "2026-04-09 11:46:56", "kind": "strategy_action", "data": {"code": "023530", "action": "EXIT", "reason": "STOP_LOSS", "now_price": 108200.0, "profit_ratio": -2.017604230811021}}
+{"ts": "2026-04-09 11:46:57", "kind": "order_sell", "data": {"code": "023530", "name": "롯데쇼핑", "qty": 18, "price": 108200, "result": "submitted", "order_no": "0106181", "reason": "EXIT_STOP_LOSS", "snap_vol_power": 95.05, "snap_vol_power_str": "95.0%", "snap_bid_ask": "336 / 796 (0.4)"}}
+{"ts": "2026-04-09 11:47:00", "kind": "fill", "data": {"code": "023530", "side": "sell", "price": 107700.0, "qty": 18, "name": "롯데쇼핑", "reason": "EXIT_STOP_LOSS", "fill_channel": "exchange", "snap_vol_power": 95.05, "snap_vol_power_str": "95.0%", "snap_bid_ask": "455 / 483 (0.9)"}}
+{"ts": "2026-04-09 12:06:03", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "met_ratio": 1.0, "confluence": "대기 눌림A 7/7"}}
+{"ts": "2026-04-09 12:06:03", "kind": "signal_buy_accepted", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "sig_type": "TYPE_A", "sel_track": "A", "rsi_sig": 47.52693017197768, "macd": -18.532268516610202, "osc": 65.45498377736786, "ma60_ratio": 103.03199664663967}}
+{"ts": "2026-04-09 12:06:03", "kind": "buy_execute_start", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:05", "kind": "order_api_reject", "data": {"code": "064400", "side": "buy", "qty": 33, "ret_code": 20, "ret_msg": "[2000](RC4003:모의투자 호가단위 오류입니다.)", "name": "LG씨엔에스", "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:05", "kind": "order_buy", "data": {"code": "064400", "name": "LG씨엔에스", "qty": 33, "price": 61550, "order_type": "00", "result": "failed", "order_no": "", "reason": "TYPE_A", "snap_vol_power": 86.94, "snap_vol_power_str": "86.9%", "snap_bid_ask": "7,950 / 4,709 (1.7)"}}
+{"ts": "2026-04-09 12:06:05", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "met_ratio": 1.0, "confluence": "대기 눌림A 7/7"}}
+{"ts": "2026-04-09 12:06:05", "kind": "signal_buy_accepted", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "sig_type": "TYPE_A", "sel_track": "A", "rsi_sig": 47.52693017197768, "macd": -18.532268516610202, "osc": 65.45498377736786, "ma60_ratio": 103.03199664663967}}
+{"ts": "2026-04-09 12:06:05", "kind": "buy_execute_start", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:06", "kind": "order_api_reject", "data": {"code": "064400", "side": "buy", "qty": 33, "ret_code": 20, "ret_msg": "[2000](RC4003:모의투자 호가단위 오류입니다.)", "name": "LG씨엔에스", "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:06", "kind": "order_buy", "data": {"code": "064400", "name": "LG씨엔에스", "qty": 33, "price": 61550, "order_type": "00", "result": "failed", "order_no": "", "reason": "TYPE_A", "snap_vol_power": 86.94, "snap_vol_power_str": "86.9%", "snap_bid_ask": "7,950 / 4,728 (1.7)"}}
+{"ts": "2026-04-09 12:06:06", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "met_ratio": 1.0, "confluence": "대기 눌림A 7/7"}}
+{"ts": "2026-04-09 12:06:06", "kind": "signal_buy_accepted", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "sig_type": "TYPE_A", "sel_track": "A", "rsi_sig": 47.52693017197768, "macd": -18.532268516610202, "osc": 65.45498377736786, "ma60_ratio": 103.03199664663967}}
+{"ts": "2026-04-09 12:06:06", "kind": "buy_execute_start", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:07", "kind": "order_api_reject", "data": {"code": "064400", "side": "buy", "qty": 33, "ret_code": 20, "ret_msg": "[2000](RC4003:모의투자 호가단위 오류입니다.)", "name": "LG씨엔에스", "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:07", "kind": "order_buy", "data": {"code": "064400", "name": "LG씨엔에스", "qty": 33, "price": 61550, "order_type": "00", "result": "failed", "order_no": "", "reason": "TYPE_A", "snap_vol_power": 86.94, "snap_vol_power_str": "86.9%", "snap_bid_ask": "7,948 / 4,728 (1.7)"}}
+{"ts": "2026-04-09 12:06:07", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "met_ratio": 1.0, "confluence": "대기 눌림A 7/7"}}
+{"ts": "2026-04-09 12:06:07", "kind": "signal_buy_accepted", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "sig_type": "TYPE_A", "sel_track": "A", "rsi_sig": 47.52693017197768, "macd": -18.532268516610202, "osc": 65.45498377736786, "ma60_ratio": 103.03199664663967}}
+{"ts": "2026-04-09 12:06:07", "kind": "buy_execute_start", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61450.0, "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:08", "kind": "order_api_reject", "data": {"code": "064400", "side": "buy", "qty": 33, "ret_code": 20, "ret_msg": "[2000](RC4003:모의투자 호가단위 오류입니다.)", "name": "LG씨엔에스", "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:08", "kind": "order_buy", "data": {"code": "064400", "name": "LG씨엔에스", "qty": 33, "price": 61550, "order_type": "00", "result": "failed", "order_no": "", "reason": "TYPE_A", "snap_vol_power": 86.94, "snap_vol_power_str": "86.9%", "snap_bid_ask": "7,946 / 4,698 (1.7)"}}
+{"ts": "2026-04-09 12:06:08", "kind": "signal_s1_raw", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61500.0, "met_ratio": 1.0, "confluence": "대기 눌림A 7/7"}}
+{"ts": "2026-04-09 12:06:08", "kind": "signal_buy_accepted", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61500.0, "sig_type": "TYPE_A", "sel_track": "A", "rsi_sig": 47.52693017197768, "macd": -18.532268516610202, "osc": 65.45498377736786, "ma60_ratio": 103.1158306553025}}
+{"ts": "2026-04-09 12:06:08", "kind": "buy_execute_start", "data": {"code": "064400", "name": "LG씨엔에스", "price": 61500.0, "reason": "TYPE_A"}}
+{"ts": "2026-04-09 12:06:09", "kind": "order_buy", "data": {"code": "064400", "name": "LG씨엔에스", "qty": 33, "price": 61600, "order_type": "00", "result": "submitted", "order_no": "0112744", "reason": "TYPE_A", "snap_vol_power": 86.94, "snap_vol_power_str": "86.9%", "snap_bid_ask": "7,963 / 4,698 (1.7)"}}
+{"ts": "2026-04-09 12:06:09", "kind": "fill", "data": {"code": "064400", "side": "buy", "price": 61600.0, "qty": 33, "name": "LG씨엔에스", "reason": "TYPE_A", "fill_channel": "exchange", "snap_vol_power": 86.94, "snap_vol_power_str": "86.9%", "snap_bid_ask": "7,963 / 4,698 (1.7)"}}
+{"ts": "2026-04-09 14:21:26", "kind": "strategy_action", "data": {"code": "011170", "action": "EXIT", "reason": "ATR_TRAIL", "now_price": 96200.0, "profit_ratio": 3.22996029616911}}
+{"ts": "2026-04-09 14:21:27", "kind": "order_sell", "data": {"code": "011170", "name": "롯데케미칼", "qty": 21, "price": 96200, "result": "submitted", "order_no": "0164341", "reason": "EXIT_ATR_TRAIL", "snap_vol_power": 153.98, "snap_vol_power_str": "154.0%", "snap_bid_ask": "1,833 / 1,592 (1.2)"}}
+{"ts": "2026-04-09 14:21:27", "kind": "fill", "data": {"code": "011170", "side": "sell", "price": 96100.0, "qty": 21, "name": "롯데케미칼", "reason": "EXIT_ATR_TRAIL", "fill_channel": "exchange", "snap_vol_power": 153.98, "snap_vol_power_str": "154.0%", "snap_bid_ask": "1,833 / 1,592 (1.2)"}}

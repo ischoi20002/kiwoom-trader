@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>일일 결산 — 2026-04-08</title>
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+    <script type="application/json" id="daily-report-meta">{"report_date": "2026-04-08", "generated_at": "2026-04-09 07:54:08", "status": "complete", "session_buffer_minutes": 10, "generation_marked_complete": true, "chart_failed_codes": [], "warnings": [], "schema_version": 1}</script>
+    <style>
+        :root {
+            --bg: #2E3440;
+            --fg: #ECEFF4;
+            --muted: #88C0D0;
+            --bd: #4C566A;
+            --plus: #A3BE8C;
+            --minus: #BF616A;
+        }
+        body {
+            font-family: 'Malgun Gothic', 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            margin: 0;
+            padding: 24px;
+            line-height: 1.5;
+        }
+        .container { max-width: 1100px; margin: 0 auto; }
+        h1 { font-weight: 600; color: var(--muted); margin-top: 0; }
+        h2 { font-size: 1.1rem; color: var(--muted); border-bottom: 1px solid var(--bd); padding-bottom: 8px; }
+        .muted { color: #81A1C1; font-weight: normal; }
+        .navbtn { color: #88C0D0; text-decoration: none; margin: 0 8px; }
+        .navbtn:hover { text-decoration: underline; }
+        table.summary { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+        table.summary td { padding: 8px 12px; border-bottom: 1px solid var(--bd); }
+        table.summary td:first-child { color: #D8DEE9; width: 40%; }
+        .num { text-align: right; font-variant-numeric: tabular-nums; }
+        .card {
+            background: #3B4252;
+            border: 1px solid var(--bd);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .banner.warn {
+            background: #4C566A;
+            border: 1px solid #BF616A;
+            color: #ECEFF4;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+        p.warn { color: #BF616A; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 6px 8px; border-bottom: 1px solid #434C5E; text-align: left; }
+        th { color: var(--muted); }
+        .jsoncell pre {
+            margin: 0; white-space: pre-wrap; word-break: break-all;
+            font-size: 11px; color: #D8DEE9;
+        }
+        .chartwrap { overflow-x: auto; }
+        /* 종목 카드 안: 이 종목 15분봉만 버튼으로 펼침 */
+        .stock-chart-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 16px;
+            padding-top: 12px;
+            border-top: 1px solid var(--bd);
+        }
+        .stock-chart-toolbar-label { font-size: 0.9rem; }
+        .chart-toggle-btn {
+            background: #88C0D0;
+            color: #2E3440;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .chart-toggle-btn:hover { filter: brightness(1.08); }
+        .chart-toggle-btn:focus-visible { outline: 2px solid #ECEFF4; outline-offset: 2px; }
+        .chart-panel-collapsible { margin-top: 12px; }
+        .chart-details-body {
+            padding-top: 4px;
+            border-top: 1px solid var(--bd);
+        }
+        footer { margin-top: 32px; font-size: 12px; color: #81A1C1; text-align: center; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <nav style="margin-bottom:16px;"><a class="navbtn" href="../2026-04-07/daily_settlement.html">◀ 이전 거래일</a> <span class="muted">2026-04-08</span> <a class="navbtn" href="../2026-04-09/daily_settlement.html">다음 거래일 ▶</a></nav>
+    <h1>일일 결산 리포트 <span class="muted">2026-04-08</span></h1>
+    <p class="muted">생성 시각: 2026-04-09 07:54:08 — 상태: complete — 완료판정(장마감+버퍼): 예</p>
+    
+
+    <h2>요약</h2>
+    <table class="summary">
+        <tr><td>총 자산 (D+2+주식평가, 가상포지션 탭과 동일)</td><td class="num">9,992,513 원</td></tr>
+        <tr><td>예수금 (가용)</td><td class="num">7,616,013 원</td></tr>
+        <tr><td>예수금 D+1</td><td class="num">7,616,013 원</td></tr>
+        <tr><td>예수금 D+2</td><td class="num">7,616,013 원</td></tr>
+        <tr><td>주식 평가금 (보유 합)</td><td class="num">2,376,500 원</td></tr>
+        <tr><td>금일 실현(엔트리일 기준 합산)</td><td class="num">+4,114 원</td></tr>
+        <tr><td>미실현 손익 (보유분)</td><td class="num">+0 원</td></tr>
+        <tr><td>금일 손익 (실현+미실현)</td><td class="num">+4,114 원 (+0.04%)</td></tr>
+        <tr><td>누적 수익률 (참고)</td><td class="num">+0.04%</td></tr>
+    </table>
+
+    <h2>종목별 리포트 (주문 · 체결 · 15분봉 차트)</h2>
+    <p class="muted" style="margin-top:-8px;margin-bottom:16px;">각 종목 카드 하단의 버튼으로 <b>해당 종목</b> 15분봉 차트만 펼칠 수 있습니다.</p>
+    <p class="muted">해당 일자 주문 기록이 없습니다.</p>
+
+    <h2>세션 이벤트 로그 (JSONL 복사본)</h2>
+    <p class="muted">파일: realtime_session_logs/2026-04-08/session_events.jsonl</p>
+    <div class="card" style="padding:0; overflow:auto;">
+        <table>
+            <thead><tr><th>시각</th><th>종류</th><th>데이터</th></tr></thead>
+            <tbody><tr>
+            <td>2026-04-08 09:06:37</td>
+            <td>strategy_action</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;action&quot;: &quot;EXIT&quot;,
+  &quot;reason&quot;: &quot;TAKE_PROFIT&quot;,
+  &quot;now_price&quot;: 391000.0,
+  &quot;profit_ratio&quot;: 6.539509536784749
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 09:06:37</td>
+            <td>order_blocked</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;side&quot;: &quot;sell&quot;,
+  &quot;qty&quot;: 1,
+  &quot;reason&quot;: &quot;price_guard&quot;,
+  &quot;detail&quot;: &quot;화면 현재가(430,500원)와 내부 캐시(391,000원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.&quot;,
+  &quot;name&quot;: &quot;현대오토에버&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 09:06:37</td>
+            <td>order_sell</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;name&quot;: &quot;현대오토에버&quot;,
+  &quot;qty&quot;: 1,
+  &quot;price&quot;: 391000,
+  &quot;result&quot;: &quot;failed&quot;,
+  &quot;order_no&quot;: &quot;&quot;,
+  &quot;reason&quot;: &quot;EXIT_TAKE_PROFIT&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 09:08:50</td>
+            <td>strategy_action</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;action&quot;: &quot;EXIT&quot;,
+  &quot;reason&quot;: &quot;TAKE_PROFIT&quot;,
+  &quot;now_price&quot;: 24450.0,
+  &quot;profit_ratio&quot;: 5.844155844155852
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 09:08:50</td>
+            <td>order_blocked</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;side&quot;: &quot;sell&quot;,
+  &quot;qty&quot;: 1,
+  &quot;reason&quot;: &quot;price_guard&quot;,
+  &quot;detail&quot;: &quot;화면 현재가(23,100원)와 내부 캐시(24,450원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.&quot;,
+  &quot;name&quot;: &quot;대한항공&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 09:08:50</td>
+            <td>order_sell</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;name&quot;: &quot;대한항공&quot;,
+  &quot;qty&quot;: 1,
+  &quot;price&quot;: 24450,
+  &quot;result&quot;: &quot;failed&quot;,
+  &quot;order_no&quot;: &quot;&quot;,
+  &quot;reason&quot;: &quot;EXIT_TAKE_PROFIT&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 12:56:49</td>
+            <td>strategy_action</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;action&quot;: &quot;EXIT&quot;,
+  &quot;reason&quot;: &quot;TAKE_PROFIT&quot;,
+  &quot;now_price&quot;: 406500.0,
+  &quot;profit_ratio&quot;: 10.762942779291551
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 12:56:49</td>
+            <td>order_blocked</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;side&quot;: &quot;sell&quot;,
+  &quot;qty&quot;: 1,
+  &quot;reason&quot;: &quot;price_guard&quot;,
+  &quot;detail&quot;: &quot;화면 현재가(430,500원)와 내부 캐시(406,500원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.&quot;,
+  &quot;name&quot;: &quot;현대오토에버&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 12:56:49</td>
+            <td>order_sell</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;name&quot;: &quot;현대오토에버&quot;,
+  &quot;qty&quot;: 1,
+  &quot;price&quot;: 406500,
+  &quot;result&quot;: &quot;failed&quot;,
+  &quot;order_no&quot;: &quot;&quot;,
+  &quot;reason&quot;: &quot;EXIT_TAKE_PROFIT&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 12:56:51</td>
+            <td>strategy_action</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;action&quot;: &quot;EXIT&quot;,
+  &quot;reason&quot;: &quot;TAKE_PROFIT&quot;,
+  &quot;now_price&quot;: 24900.0,
+  &quot;profit_ratio&quot;: 7.792207792207795
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 12:56:51</td>
+            <td>order_blocked</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;side&quot;: &quot;sell&quot;,
+  &quot;qty&quot;: 1,
+  &quot;reason&quot;: &quot;price_guard&quot;,
+  &quot;detail&quot;: &quot;화면 현재가(26,350원)와 내부 캐시(24,900원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.&quot;,
+  &quot;name&quot;: &quot;대한항공&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 12:56:51</td>
+            <td>order_sell</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;name&quot;: &quot;대한항공&quot;,
+  &quot;qty&quot;: 1,
+  &quot;price&quot;: 24900,
+  &quot;result&quot;: &quot;failed&quot;,
+  &quot;order_no&quot;: &quot;&quot;,
+  &quot;reason&quot;: &quot;EXIT_TAKE_PROFIT&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:18</td>
+            <td>strategy_action</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;action&quot;: &quot;EXIT&quot;,
+  &quot;reason&quot;: &quot;TAKE_PROFIT&quot;,
+  &quot;now_price&quot;: 406000.0,
+  &quot;profit_ratio&quot;: 10.626702997275196
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:18</td>
+            <td>order_blocked</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;side&quot;: &quot;sell&quot;,
+  &quot;qty&quot;: 1,
+  &quot;reason&quot;: &quot;price_guard&quot;,
+  &quot;detail&quot;: &quot;화면 현재가(430,500원)와 내부 캐시(406,000원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.&quot;,
+  &quot;name&quot;: &quot;현대오토에버&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:18</td>
+            <td>order_sell</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;307950&quot;,
+  &quot;name&quot;: &quot;현대오토에버&quot;,
+  &quot;qty&quot;: 1,
+  &quot;price&quot;: 406000,
+  &quot;result&quot;: &quot;failed&quot;,
+  &quot;order_no&quot;: &quot;&quot;,
+  &quot;reason&quot;: &quot;EXIT_TAKE_PROFIT&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:22</td>
+            <td>strategy_action</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;action&quot;: &quot;EXIT&quot;,
+  &quot;reason&quot;: &quot;TAKE_PROFIT&quot;,
+  &quot;now_price&quot;: 24950.0,
+  &quot;profit_ratio&quot;: 8.008658008658
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:22</td>
+            <td>order_blocked</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;side&quot;: &quot;sell&quot;,
+  &quot;qty&quot;: 1,
+  &quot;reason&quot;: &quot;price_guard&quot;,
+  &quot;detail&quot;: &quot;화면 현재가(26,350원)와 내부 캐시(24,950원)가 허용 범위(10호가단위 초과)를 벗어났습니다. 시세 동기화 후 다시 시도하세요.&quot;,
+  &quot;name&quot;: &quot;대한항공&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:22</td>
+            <td>order_sell</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;003490&quot;,
+  &quot;name&quot;: &quot;대한항공&quot;,
+  &quot;qty&quot;: 1,
+  &quot;price&quot;: 24950,
+  &quot;result&quot;: &quot;failed&quot;,
+  &quot;order_no&quot;: &quot;&quot;,
+  &quot;reason&quot;: &quot;EXIT_TAKE_PROFIT&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:52</td>
+            <td>strategy_action</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;055550&quot;,
+  &quot;action&quot;: &quot;EXIT&quot;,
+  &quot;reason&quot;: &quot;TAKE_PROFIT&quot;,
+  &quot;now_price&quot;: 97300.0,
+  &quot;profit_ratio&quot;: 5.075593952483803
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 13:13:53</td>
+            <td>order_sell</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;055550&quot;,
+  &quot;name&quot;: &quot;신한지주&quot;,
+  &quot;qty&quot;: 1,
+  &quot;price&quot;: 97300,
+  &quot;result&quot;: &quot;submitted&quot;,
+  &quot;order_no&quot;: &quot;0137843&quot;,
+  &quot;reason&quot;: &quot;EXIT_TAKE_PROFIT&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:24:50</td>
+            <td>signal_buy_skipped</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;278470&quot;,
+  &quot;name&quot;: &quot;에이피알&quot;,
+  &quot;reason&quot;: &quot;track_mismatch&quot;,
+  &quot;detail&quot;: &quot;track_B_vs_type_A&quot;,
+  &quot;sig_type&quot;: &quot;TYPE_A&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:28:20</td>
+            <td>signal_s1_raw</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;278470&quot;,
+  &quot;name&quot;: &quot;에이피알&quot;,
+  &quot;price&quot;: 333000.0,
+  &quot;met_ratio&quot;: 1.0,
+  &quot;confluence&quot;: &quot;대기 눌림A 7/7 (추세B 5/6)&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:28:20</td>
+            <td>signal_buy_skipped</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;278470&quot;,
+  &quot;name&quot;: &quot;에이피알&quot;,
+  &quot;reason&quot;: &quot;track_mismatch&quot;,
+  &quot;detail&quot;: &quot;track_B_vs_type_A&quot;,
+  &quot;sig_type&quot;: &quot;TYPE_A&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:31:42</td>
+            <td>signal_s1_raw</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;161890&quot;,
+  &quot;name&quot;: &quot;한국콜마&quot;,
+  &quot;price&quot;: 76400.0,
+  &quot;met_ratio&quot;: 0.8333333333333334,
+  &quot;confluence&quot;: &quot;대기 추세B 5/6 (눌림A 4/7)&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:31:42</td>
+            <td>signal_buy_accepted</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;161890&quot;,
+  &quot;name&quot;: &quot;한국콜마&quot;,
+  &quot;price&quot;: 76400.0,
+  &quot;sig_type&quot;: &quot;TYPE_B&quot;,
+  &quot;sel_track&quot;: &quot;AB&quot;,
+  &quot;rsi_sig&quot;: 46.16851836921522,
+  &quot;macd&quot;: -90.97050443942135,
+  &quot;osc&quot;: 17.79261984162021,
+  &quot;ma60_ratio&quot;: 100.46903081576295
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:31:42</td>
+            <td>buy_execute_start</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;161890&quot;,
+  &quot;name&quot;: &quot;한국콜마&quot;,
+  &quot;price&quot;: 76400.0,
+  &quot;reason&quot;: &quot;TYPE_B&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:31:44</td>
+            <td>order_buy</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;161890&quot;,
+  &quot;name&quot;: &quot;한국콜마&quot;,
+  &quot;qty&quot;: 26,
+  &quot;price&quot;: 76500,
+  &quot;order_type&quot;: &quot;00&quot;,
+  &quot;result&quot;: &quot;submitted&quot;,
+  &quot;order_no&quot;: &quot;0165112&quot;,
+  &quot;reason&quot;: &quot;TYPE_B&quot;
+}</pre></td>
+        </tr><tr>
+            <td>2026-04-08 14:31:44</td>
+            <td>fill</td>
+            <td class="jsoncell"><pre>{
+  &quot;code&quot;: &quot;161890&quot;,
+  &quot;side&quot;: &quot;buy&quot;,
+  &quot;price&quot;: 76500.0,
+  &quot;qty&quot;: 26,
+  &quot;name&quot;: &quot;한국콜마&quot;,
+  &quot;reason&quot;: &quot;TYPE_B&quot;,
+  &quot;fill_channel&quot;: &quot;exchange&quot;
+}</pre></td>
+        </tr></tbody>
+        </table>
+    </div>
+
+    <footer>K-Trader 실시간 감시 일일 결산</footer>
+</div>
+<script>
+(function () {
+  function resizePlotlyInside(root) {
+    if (!window.Plotly || !root) return;
+    try {
+      var nodes = root.querySelectorAll(".plotly-graph-div");
+      if (!nodes.length) nodes = root.querySelectorAll(".js-plotly-plot");
+      for (var i = 0; i < nodes.length; i++) {
+        var gd = nodes[i];
+        try {
+          if (typeof Plotly.Plots !== "undefined" && Plotly.Plots.resize) {
+            Plotly.Plots.resize(gd);
+          } else if (typeof Plotly.resize === "function") {
+            Plotly.resize(gd);
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll(".chart-toggle-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var panelId = btn.getAttribute("aria-controls");
+        var panel = panelId ? document.getElementById(panelId) : null;
+        if (!panel) return;
+        var opening = panel.hasAttribute("hidden");
+        var openText = btn.getAttribute("data-text-open") || "접기";
+        var closedText = btn.getAttribute("data-text-closed") || "펼치기";
+        if (opening) {
+          panel.removeAttribute("hidden");
+          btn.setAttribute("aria-expanded", "true");
+          btn.textContent = openText;
+          requestAnimationFrame(function () { resizePlotlyInside(panel); });
+          setTimeout(function () { resizePlotlyInside(panel); }, 120);
+          setTimeout(function () { resizePlotlyInside(panel); }, 400);
+        } else {
+          panel.setAttribute("hidden", "");
+          btn.setAttribute("aria-expanded", "false");
+          btn.textContent = closedText;
+        }
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
