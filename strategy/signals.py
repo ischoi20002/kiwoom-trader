@@ -79,8 +79,8 @@ def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bo
 
 def get_buy_signals_detailed(df, settings, market_trend='UP'):
     """매수 신호 상세 분석 (Type A/B 통합). market_trend는 4단계 레짐 문자열(DOWN/NEUTRAL/UP/AGGRESSIVE)을 권장."""
-    # [v4.7] 시장 레짐: DOWN만 전면 차단, NEUTRAL에서 Type B 원천 차단(아래 signal_b·최종 마스크)
-    if settings.get('use_market_filter', True) and market_trend == 'DOWN':
+    # [v4.7] 시장 게이트 ON일 때만: DOWN 전면 차단, NEUTRAL에서 Type B 원천 차단(아래 use_b)
+    if _settings_bool(settings, "use_market_filter", True) and market_trend == "DOWN":
         # DOWN (역풍): 모든 신호 차단
         return pd.DataFrame({
             'Signal': False, 'Sig_Type': 'NONE',
@@ -178,9 +178,10 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     # 6. Type B: 추세 돌파 (RSI 제약 + 정배열 + MACD GC)
     # [v26.3] Default to False if missing for safety
     use_b = settings.get('use_type_b', False)
-    # [v27.3] 중립(NEUTRAL) 상태에서는 백테스팅 엔진과 동일하게 Type B 진입을 차단함
-    if market_trend == 'NEUTRAL': use_b = False
-    
+    # [v27.3] 중립(NEUTRAL)에서 Type B 차단은 시장 게이트(use_market_filter) ON일 때만 적용
+    if _settings_bool(settings, "use_market_filter", True) and market_trend == "NEUTRAL":
+        use_b = False
+
     cond_trend_aligned = (df['MA20'] > df['MA60']) & (df['Close'] > df['MA20'])
     cond_macd_gc = (df['MACD'] > df['MACD_Sig']) & (df['MACD'].shift(1) <= df['MACD_Sig'].shift(1))
     
@@ -188,11 +189,7 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if settings.get('use_macd_gc_b', True): signal_b &= cond_macd_gc
     if settings.get('use_trend_aligned_b', True): signal_b &= cond_trend_aligned
     if use_rsi_sig_filter: signal_b &= cond_rsi_sig
-    
-    # [v4.5 Rule] 시장지수 'NEUTRAL' 상태일 경우 Type B 진입 차단
-    if settings.get('use_market_filter', True) and market_trend == 'NEUTRAL':
-        signal_b[:] = False
-    
+
     # 7. 최종 신호 및 공통 필터
     signal = signal_a | signal_b
     

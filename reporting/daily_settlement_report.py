@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import base64
 import html
 import json
 import os
@@ -40,6 +41,44 @@ def _json_dumps_pretty(d: Any) -> str:
 
 def _esc(s: Any) -> str:
     return html.escape(str(s), quote=True)
+
+
+def _plotly_script_tag_for_daily_report() -> str:
+    """
+    file:// 또는 IDE 내장 미리보기(iframe)에서는 CDN·교차 출처 로드가 막히거나
+    콘솔에 'unique security origins' 경고가 날 수 있음.
+    Plotly 번들을 문서에 인라인하면 동일 출처로만 실행되어 안정적이다 (HTML 용량 ~5MB 증가).
+    """
+    if not _HAS_PLOTLY:
+        return (
+            '<script src="https://cdn.plot.ly/plotly-2.24.1.min.js" '
+            'crossorigin="anonymous"></script>'
+        )
+    try:
+        from plotly.offline.offline import get_plotlyjs
+
+        raw = get_plotlyjs()
+        js = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        # plotly.min.js 본문에 '</script>' 문자열이 있으면 HTML 파서가 스크립트를 조기 종료함
+        if "</script" in js.lower():
+            import re
+
+            js = re.sub(r"</script\s*>", r"<\\/script>", js, flags=re.IGNORECASE)
+        return f'<script type="text/javascript">\n{js}\n</script>'
+    except Exception:
+        try:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Plotly 인라인 번들 로드 실패, CDN으로 폴백합니다.",
+                exc_info=True,
+            )
+        except Exception:
+            pass
+        return (
+            '<script src="https://cdn.plot.ly/plotly-2.24.1.min.js" '
+            'crossorigin="anonymous"></script>'
+        )
 
 
 def _fmt_vp_report_cell(v: Any) -> str:
@@ -511,6 +550,109 @@ def _refresh_symbol_bars(app: Any, code: str, log: Optional[Callable[[str], None
         return False
 
 
+def _prepare_daily_report_15m_df(df: Any) -> Any:
+    """
+    get_bars 등에서 온 DataFrame을 차트용으로 통일: time 열, OHLCV 숫자, 시간순·중복 제거.
+    (HTML에 Plotly div id 중복 시 차트가 깨지는 문제는 별도로 div_id로 방지)
+    """
+    import pandas as pd
+
+    if df is None or getattr(df, "empty", True):
+        return None
+    w = df.copy()
+    cmap: Dict[str, str] = {}
+    for c in list(w.columns):
+        k = str(c).strip().lower()
+        if k in ("time", "datetime", "date"):
+            cmap[c] = "time"
+        elif k == "open":
+            cmap[c] = "Open"
+        elif k == "high":
+            cmap[c] = "High"
+        elif k == "low":
+            cmap[c] = "Low"
+        elif k == "close":
+            cmap[c] = "Close"
+        elif k == "volume":
+            cmap[c] = "Volume"
+    if cmap:
+        w.rename(columns=cmap, inplace=True)
+    if "time" not in w.columns:
+        if isinstance(w.index, pd.DatetimeIndex):
+            w = w.reset_index()
+            first = str(w.columns[0])
+            w.rename(columns={first: "time"}, inplace=True)
+        else:
+            return None
+    need = ("Open", "High", "Low", "Close", "Volume")
+    for col in need:
+        if col not in w.columns:
+            return None
+    w["time"] = pd.to_datetime(w["time"], errors="coerce")
+    w = w.dropna(subset=["time"])
+    if w.empty:
+        return None
+    for col in need:
+        w[col] = pd.to_numeric(w[col], errors="coerce")
+    w = w.dropna(subset=["Close"])
+    w = w.sort_values("time", kind="mergesort").drop_duplicates(subset=["time"], keep="last")
+    w = w.reset_index(drop=True)
+    if w.empty:
+        return None
+    return w
+
+
+def _order_timestamp_aligned_to_bars(ts_raw: Any, bar_times: Any) -> Optional[Any]:
+    """
+    주문/체결 시각을 15분봉 time 열과 동일한 스케일(datetime64, naive/tz)로 맞춘다.
+    add_vline은 서브플롯·캔들과 x축 해석이 어긋날 수 있어, 이후 Scatter 세로선에 사용한다.
+    """
+    import pandas as pd
+
+    t: Optional[pd.Timestamp]
+    try:
+        loose = _parse_ts_loose(ts_raw)
+        if loose is not None:
+            t = pd.Timestamp(loose)
+        else:
+            t = pd.to_datetime(ts_raw, errors="coerce")
+    except Exception:
+        t = pd.to_datetime(ts_raw, errors="coerce")
+    try:
+        if t is None or bool(pd.isna(t)):
+            return None
+    except Exception:
+        return None
+    try:
+        btz = getattr(getattr(bar_times, "dtype", None), "tz", None)
+        if btz is not None:
+            if t.tzinfo is None:
+                try:
+                    t = t.tz_localize(btz)
+                except Exception:
+                    try:
+                        t = t.tz_localize("Asia/Seoul", ambiguous="infer")
+                    except Exception:
+                        pass
+            try:
+                if t.tzinfo is not None:
+                    t = t.tz_convert(btz)
+            except Exception:
+                pass
+        elif t.tzinfo is not None:
+            try:
+                t = t.tz_convert("Asia/Seoul")
+            except Exception:
+                pass
+            try:
+                t = t.replace(tzinfo=None)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return t
+
+
 def _build_plotly_15m_section(
     code: str,
     name: str,
@@ -528,23 +670,19 @@ def _build_plotly_15m_section(
         if df is None or df.empty:
             return '<p class="muted">해당 일자 15분봉 데이터가 없습니다.</p>'
 
-        work = df.copy()
-        if "time" in work.columns:
-            work["time"] = pd.to_datetime(work["time"])
-            x = work["time"]
-        elif work.index.name == "time" or isinstance(work.index, pd.DatetimeIndex):
-            x = work.index
-        else:
-            return '<p class="muted">차트용 시간 열을 찾을 수 없습니다.</p>'
+        work = _prepare_daily_report_15m_df(df)
+        if work is None or work.empty:
+            return '<p class="muted">차트용 15분봉 정규화 실패(시간·OHLCV 열 확인).</p>'
 
+        x = work["time"]
         o = work["Open"].astype(float)
         h = work["High"].astype(float)
-        l = work["Low"].astype(float)
-        c = work["Close"].astype(float)
+        low_s = work["Low"].astype(float)
+        close_s = work["Close"].astype(float)
         v = work["Volume"].astype(float)
 
-        ma5 = c.rolling(5, min_periods=1).mean()
-        ma20 = c.rolling(20, min_periods=1).mean()
+        ma5 = close_s.rolling(5, min_periods=1).mean()
+        ma20 = close_s.rolling(20, min_periods=1).mean()
 
         fig = make_subplots(
             rows=2,
@@ -560,8 +698,8 @@ def _build_plotly_15m_section(
                 x=x,
                 open=o,
                 high=h,
-                low=l,
-                close=c,
+                low=low_s,
+                close=close_s,
                 name="15m",
                 increasing_line_color="#A3BE8C",
                 decreasing_line_color="#BF616A",
@@ -580,22 +718,88 @@ def _build_plotly_15m_section(
             col=1,
         )
 
-        colors_vol = ["#A3BE8C" if c.iloc[i] >= o.iloc[i] else "#BF616A" for i in range(len(work))]
+        colors_vol = [
+            "#A3BE8C" if close_s.iloc[i] >= o.iloc[i] else "#BF616A" for i in range(len(work))
+        ]
         fig.add_trace(
-            go.Bar(x=x, y=v, name="Volume", marker_color=colors_vol, opacity=0.7),
+            go.Bar(
+                x=x,
+                y=v,
+                name="Volume",
+                marker_color=colors_vol,
+                opacity=0.7,
+                orientation="v",
+            ),
             row=2,
             col=1,
         )
 
-        # 주문 시각 세로선
+        # 주문 시각 세로선: add_vline은 date 축+캔들스틱 서브플롯에서 x가 밀리는 경우가 있어
+        # 동일 subplot에 Scatter(x=[t,t], y=[...])로 그려 캔들과 정확히 같은 x 스케일을 쓴다.
+        try:
+            lo_px = float(low_s.min())
+            hi_px = float(h.max())
+            span = hi_px - lo_px
+            if span <= 0 or not (span == span):
+                span = max(abs(hi_px) * 0.01, 1.0)
+            pad = span * 0.03
+            y_price_lo = lo_px - pad
+            y_price_hi = hi_px + pad
+        except Exception:
+            y_price_lo, y_price_hi = 0.0, 1.0
+        try:
+            vmax = float(v.max()) if len(v) else 0.0
+            y_vol_hi = max(vmax * 1.12, vmax + 1.0, 1.0)
+        except Exception:
+            y_vol_hi = 1.0
+
         for orec in orders_for_code:
             ts = orec.get("ts", "")
             try:
-                tx = pd.to_datetime(ts)
+                tx = _order_timestamp_aligned_to_bars(ts, work["time"])
+                if tx is None:
+                    continue
                 side = str(orec.get("side", "")).upper()
                 color = "#BF616A" if "매도" in side or "SELL" in side else "#88C0D0"
-                fig.add_vline(x=tx, line_width=1, line_dash="dot", line_color=color, opacity=0.55, row=1, col=1)
-                fig.add_vline(x=tx, line_width=1, line_dash="dot", line_color=color, opacity=0.35, row=2, col=1)
+                side_lbl = str(orec.get("side", "") or "")
+                fig.add_trace(
+                    go.Scatter(
+                        x=[tx, tx],
+                        y=[y_price_lo, y_price_hi],
+                        mode="lines",
+                        line=dict(color=color, width=1, dash="dot"),
+                        opacity=0.65,
+                        name="주문",
+                        showlegend=False,
+                        customdata=[[side_lbl]],
+                        hovertemplate=(
+                            "<b>주문</b> %{customdata[0]}<br>"
+                            "%{x|%Y-%m-%d %H:%M:%S}<extra></extra>"
+                        ),
+                        legendgroup="order_vline",
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=[tx, tx],
+                        y=[0.0, y_vol_hi],
+                        mode="lines",
+                        line=dict(color=color, width=1, dash="dot"),
+                        opacity=0.45,
+                        name="주문",
+                        showlegend=False,
+                        customdata=[[side_lbl]],
+                        hovertemplate=(
+                            "<b>주문</b> %{customdata[0]}<br>"
+                            "%{x|%Y-%m-%d %H:%M:%S}<extra></extra>"
+                        ),
+                        legendgroup="order_vline",
+                    ),
+                    row=2,
+                    col=1,
+                )
             except Exception:
                 continue
 
@@ -610,13 +814,44 @@ def _build_plotly_15m_section(
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
             xaxis_rangeslider_visible=False,
         )
-        fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikedash="solid", row=1, col=1)
-        fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikedash="solid", row=2, col=1)
+        # 서브플롯에서 날짜 축 명시 + 레인지슬라이더 끔(캔들 왜곡 방지)
+        fig.update_xaxes(
+            type="date",
+            rangeslider_visible=False,
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikedash="solid",
+            row=1,
+            col=1,
+        )
+        fig.update_xaxes(
+            type="date",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikedash="solid",
+            row=2,
+            col=1,
+        )
 
         import plotly.io as pio
 
-        div = pio.to_html(fig, include_plotlyjs=False, full_html=False)
-        return f'<div class="chartwrap">{div}</div>'
+        # hidden 패널 안에서 pio.to_html이 즉시 Plotly.newPlot을 실행하면
+        # 컨테이너 너비·높이가 0이라 모든 종목 차트가 동일하게 깨짐(대각선·Y 0~N).
+        # → Figure JSON만 넣어 두고, 사용자가 '펼치기' 클릭 후에 newPlot 하도록 지연 렌더링.
+        safe_day = "".join(ch if ch.isalnum() else "_" for ch in str(report_day)[:16])
+        div_id = f"daily15m_{code}_{safe_day}"
+        fig_json_str = pio.to_json(fig)
+        b64 = base64.standard_b64encode(fig_json_str.encode("utf-8")).decode("ascii")
+        return (
+            f'<div class="chartwrap daily-chart-deferred">'
+            f'<script type="text/plain" class="daily-plotly-payload" '
+            f'data-target-id="{_esc(div_id)}">{b64}</script>'
+            f'<div id="{_esc(div_id)}" class="daily-plotly-div" '
+            f'style="width:100%;min-height:480px;"></div>'
+            f"</div>"
+        )
     except Exception as e:
         return f'<p class="warn">차트 생성 오류: {_esc(e)}</p>'
 
@@ -919,14 +1154,14 @@ def generate_daily_settlement_report_ex(
             일부 종목의 분봉 갱신 또는 차트 생성에 실패했습니다. 주문·체결 표는 유지됩니다. 네트워크·API 확인 후 다시 생성해 주세요.
         </div>"""
 
-    plotly_cdn = '<script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>'
+    plotly_head_script = _plotly_script_tag_for_daily_report()
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
     <title>일일 결산 — {_esc(day)}</title>
-    {plotly_cdn}
+    {plotly_head_script}
     <script type="application/json" id="daily-report-meta">{meta_json}</script>
     <style>
         :root {{
@@ -1017,6 +1252,7 @@ def generate_daily_settlement_report_ex(
     <nav style="margin-bottom:16px;">{nav_html}</nav>
     <h1>일일 결산 리포트 <span class="muted">{_esc(day)}</span></h1>
     <p class="muted">생성 시각: {_esc(gen_str)} — 상태: {_esc(overall_status)} — 완료판정(장마감+버퍼): {'예' if complete_flag else '아니오(장중·재생성 권장)'}</p>
+    <p class="muted" style="font-size:12px;margin-top:-6px;">브라우저를 <code>file://</code>로 연 경우(특히 IDE 미리보기) 콘솔에 보안 경고가 나거나 차트가 비정상일 수 있습니다. 그때는 프로젝트 루트에서 <code>python -m http.server 8765</code> 실행 후 <code>http://127.0.0.1:8765/realtime_session_logs/{_esc(day)}/daily_settlement.html</code> 로 여세요.</p>
     {warn_banner}
 
     <h2>요약</h2>
@@ -1039,6 +1275,57 @@ def generate_daily_settlement_report_ex(
 </div>
 <script>
 (function () {{
+  /** base64(utf-8 JSON) → Plotly figure 객체 (한글 레이아웃 대응) */
+  function dailyPayloadToFig(b64raw) {{
+    var s = (b64raw || "").trim().replace(/\\s+/g, "");
+    if (!s) return null;
+    var bin;
+    try {{ bin = atob(s); }} catch (e1) {{ return null; }}
+    var jsonStr;
+    try {{
+      if (typeof TextDecoder !== "undefined") {{
+        var u8 = new Uint8Array(bin.length);
+        for (var j = 0; j < bin.length; j++) u8[j] = bin.charCodeAt(j);
+        jsonStr = new TextDecoder("utf-8").decode(u8);
+      }} else {{
+        jsonStr = decodeURIComponent(escape(bin));
+      }}
+    }} catch (e2) {{ return null; }}
+    try {{ return JSON.parse(jsonStr); }} catch (e3) {{ return null; }}
+  }}
+
+  /** hidden 해제 후에만 실행: 보이지 않는 div에서 newPlot 하면 축·캔들이 전부 깨짐 */
+  function ensureDailyChartRendered(root) {{
+    if (!window.Plotly || !root) return;
+    try {{
+      root.querySelectorAll("script.daily-plotly-payload").forEach(function (sc) {{
+        var tid = sc.getAttribute("data-target-id");
+        if (!tid) return;
+        var el = document.getElementById(tid);
+        if (!el || el.getAttribute("data-daily-chart-done") === "1") return;
+        var fig = dailyPayloadToFig(sc.textContent || "");
+        if (!fig) return;
+        var data = fig.data || [];
+        var layout = fig.layout || {{}};
+        var cfg = {{ responsive: true, displayModeBar: true }};
+        var p = Plotly.newPlot(el, data, layout, cfg);
+        function markOk() {{ el.setAttribute("data-daily-chart-done", "1"); }}
+        function doResize() {{
+          try {{
+            if (Plotly.Plots && Plotly.Plots.resize) Plotly.Plots.resize(el);
+            else if (typeof Plotly.resize === "function") Plotly.resize(el);
+          }} catch (e4) {{}}
+        }}
+        if (p && typeof p.then === "function") {{
+          p.then(function () {{ markOk(); doResize(); }}).catch(function () {{}});
+        }} else {{
+          markOk();
+          requestAnimationFrame(doResize);
+        }}
+      }});
+    }} catch (e0) {{}}
+  }}
+
   function resizePlotlyInside(root) {{
     if (!window.Plotly || !root) return;
     try {{
@@ -1069,7 +1356,10 @@ def generate_daily_settlement_report_ex(
           panel.removeAttribute("hidden");
           btn.setAttribute("aria-expanded", "true");
           btn.textContent = openText;
-          requestAnimationFrame(function () {{ resizePlotlyInside(panel); }});
+          requestAnimationFrame(function () {{
+            ensureDailyChartRendered(panel);
+            requestAnimationFrame(function () {{ resizePlotlyInside(panel); }});
+          }});
           setTimeout(function () {{ resizePlotlyInside(panel); }}, 120);
           setTimeout(function () {{ resizePlotlyInside(panel); }}, 400);
         }} else {{

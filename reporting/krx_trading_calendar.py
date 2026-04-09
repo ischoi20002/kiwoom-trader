@@ -5,8 +5,9 @@ KRX(XKRX) 거래일 판정 — pandas_market_calendars 고정 사용.
 """
 from __future__ import annotations
 
+import warnings
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import Any, List, Optional
 
 try:
     import pandas_market_calendars as mcal
@@ -14,6 +15,9 @@ try:
     _HAS_MCAL = True
 except Exception:
     _HAS_MCAL = False
+
+# XKRX 캘린더는 생성 비용·경고가 있어 프로세스당 1회만 로드합니다.
+_xkrx_cal_cache: Optional[Any] = None
 
 
 def _parse_day(d: str | date) -> date:
@@ -23,11 +27,27 @@ def _parse_day(d: str | date) -> date:
 
 
 def get_xkrx_calendar():
-    """XKRX 캘린더 인스턴스. 미설치 시 None."""
+    """
+    XKRX 캘린더 인스턴스. 미설치 시 None.
+
+    pandas_market_calendars 최신판은 XKRX의 break_start/break_end 폐지로
+    MarketCalendar.__init__ 시 UserWarning을 냅니다. 하베스팅·거래일 판정 로직과
+    무관하므로, 캘린더 1회 생성 구간에서만 해당 경고를 숨깁니다.
+    """
+    global _xkrx_cal_cache
     if not _HAS_MCAL:
         return None
+    if _xkrx_cal_cache is not None:
+        return _xkrx_cal_cache
     try:
-        return mcal.get_calendar("XKRX")
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=UserWarning,
+                module=r"pandas_market_calendars\.market_calendar",
+            )
+            _xkrx_cal_cache = mcal.get_calendar("XKRX")
+        return _xkrx_cal_cache
     except Exception:
         return None
 

@@ -18,12 +18,22 @@ def _thresholds(settings: Mapping[str, Any] | None) -> tuple[float, float, float
     try:
         msi_down = float(s.get("msi_down_threshold", -0.10))
         msi_up = float(s.get("msi_up_threshold", 0.10))
+        # MSI는 통상 소수(예: -0.1 / +0.1). JSON·최적화 오염으로 -100 동복 등이 들어오면
+        # 레짐이 전 구간 DOWN으로 붕괴하고 차트 Y축도 -100까지 늘어나 수평선처럼 보임.
+        if msi_down >= msi_up or abs(msi_down) > 5.0 or abs(msi_up) > 5.0:
+            msi_down, msi_up = -0.10, 0.10
         adx_min = float(s.get("adx_min_threshold", 15))
         adx_down = float(s.get("adx_down_threshold", 20))
         vix_down = float(s.get("vix_down_threshold", 30))
         return msi_down, msi_up, adx_min, adx_down, vix_down
     except (TypeError, ValueError):
         return -0.10, 0.10, 15.0, 20.0, 30.0
+
+
+def msi_band_thresholds(settings: Mapping[str, Any] | None) -> tuple[float, float]:
+    """차트·설명용: 방어 처리된 (msi_down, msi_up)."""
+    lo, hi, _, _, _ = _thresholds(settings)
+    return lo, hi
 
 
 def classify_market_regime_row(
