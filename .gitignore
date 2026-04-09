@@ -6,8 +6,9 @@ trading_data.db
 # 주문·체결·활성포지션 등 소형 상태 DB — 집/회사 동기화 시 Git 포함 가능(용량 작음)
 !trading_state.db
 *.html
-# 실시간 일일 결산 리포트(HTML) — 집/회사 동일 점검용으로 Git 포함
+# 실시간 일일 결산 리포트(HTML)·세션 이벤트(jsonl) — GitHub 백업 시 항상 포함
 !realtime_session_logs/**/*.html
+!realtime_session_logs/**/*.jsonl
 *.log
 .idea/
 # 워크스페이스 launch/tasks 등 백업 포함 (.vscode)
@@ -36,4 +37,4 @@ hex_engine.txt
 # 머지 임시 로그 (저장소 백업 제외)
 merge_daishin_log.txt
 merge_run_full.txt
-# realtime_session_logs/ — 일일 결산 HTML·session_events.jsonl 동기화 (trading_data.db는 별도)
+# realtime_session_logs/ — 일일 결산 HTML·session_events.jsonl 동기화 (백업 스크립트가 항상 스테이징)
