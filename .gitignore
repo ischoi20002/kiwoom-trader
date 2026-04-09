@@ -1,6 +1,10 @@
 venv/
 __pycache__/
 *.db
+# 시세·대용량 DB — 별도 복사/동기화 (Git 제외)
+trading_data.db
+# 주문·체결·활성포지션 등 소형 상태 DB — 집/회사 동기화 시 Git 포함 가능(용량 작음)
+!trading_state.db
 *.html
 *.log
 .idea/
@@ -26,3 +30,8 @@ fix_tail.txt
 hex_engine.txt
 *.db-shm
 *.db-wal
+
+# 머지·세션 임시 로그 (저장소 백업 제외)
+merge_daishin_log.txt
+merge_run_full.txt
+realtime_session_logs/

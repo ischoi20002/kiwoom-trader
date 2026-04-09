@@ -794,7 +794,7 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "⑤ Smart Wall",
         "[5] 전술적 수급 (Smart Buy / Smart Exit)",
         "",
-        "Smart Exit 탈출 매수함정 비율",
+        "Smart Exit 탈출 매도벽 비율 (매도/매수, Smart Buy와 동일)",
         "smart_exit_ba_ratio",
     ),
     SettingUiRow(

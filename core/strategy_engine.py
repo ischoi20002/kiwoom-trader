@@ -38,12 +38,19 @@ class StrategyEngine:
         
         # [v35.8] 통합 매도 판단 함수 호출 (Modularized)
         from backtest_engine import TradingStrategy
+        merged_kw = dict(kwargs)
+        try:
+            _bd = (self.app.bars_data or {}).get(code)
+            if _bd is not None and not getattr(_bd, "empty", True):
+                merged_kw["bars_df"] = _bd
+        except Exception:
+            pass
         res = TradingStrategy.evaluate_position(
             code, now_price, pos, self.app.settings,
             indicator_row=kwargs.get('ind'),
             current_time=datetime.now(),
             is_realtime=True,
-            kwargs=kwargs
+            kwargs=merged_kw
         )
         
         if res['action'] == 'EXIT':

@@ -9,7 +9,6 @@ import config
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
-from strategy.simulation_models import SimulatedRealtimeMetrics
 
 class TradingController:
     """
@@ -33,6 +32,10 @@ class TradingController:
         self._limit_order_meta: Dict[str, Dict[str, Any]] = {}
         # S1 매수 접수 후 체결 전 — 동일 종목 중복 매수 방지
         self._s1_buy_order_pending_codes: Set[str] = set()
+        # _run_start_sequence 가 백그라운드에서 도는 동안 중복 start() 방지
+        self._run_start_sequence_active: bool = False
+        # stop() 호출 시 워밍업 직후 단계(WS 기동 등)를 건너뛰기 위함
+        self._abort_monitor_start: bool = False
 
     def toggle(self):
         """감시 상태를 토글합니다."""
@@ -43,7 +46,17 @@ class TradingController:
 
     def start(self):
         """실시간 감시 엔진을 시작합니다."""
-        if self.monitor_thread and self.monitor_thread.is_alive(): 
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            return False
+        if getattr(self, "_run_start_sequence_active", False):
+            self.log(
+                "⚠️ [Check] 감시 시작 절차가 이미 진행 중입니다. 워밍업·접속이 끝날 때까지 기다려 주세요."
+            )
+            if self.status_cb:
+                self.status_cb(
+                    "SHOW_WARNING",
+                    "감시 시작이 이미 진행 중입니다. 잠시 후 다시 시도하세요.",
+                )
             return False
 
         # 1. 선정 종목 유효성 확인
@@ -61,7 +74,10 @@ class TradingController:
             if self.status_cb: self.status_cb("TARGETS_LOADED", df_targets)
             
             # 2. 시작 시퀀스 (별도 스레드에서 수행 - UI 프리징 방지)
-            threading.Thread(target=self._run_start_sequence, daemon=True).start()
+            self._run_start_sequence_active = True
+            threading.Thread(
+                target=self._run_start_sequence_guarded, daemon=True
+            ).start()
             return True
         except Exception as e:
             self.log(f"❌ [Error] 감시 엔진 시작 실패: {e}")
@@ -70,14 +86,34 @@ class TradingController:
     def stop(self):
         """실시간 감시 엔진을 중단합니다."""
         self.is_monitoring = False
+        self._abort_monitor_start = True
+        try:
+            ws = getattr(self.app, "warmup_service", None)
+            if ws is not None and getattr(ws, "is_running", False):
+                ws.stop()
+        except Exception:
+            pass
         self._stop_event.set()
         
         # 지표 데이터 캐시 저장 (ConfigHandler 위임)
         self.app.config_handler.save_bars_cache(self.app.bars_data or {})
         
         if self.status_cb: self.status_cb("STOPPED", None)
+        self._run_start_sequence_active = False
         self.log("⏹️ [System] 실시간 감시가 중단되었습니다. 모든 자원 정리 완료.")
         return True
+
+    def _run_start_sequence_guarded(self) -> None:
+        """_run_start_sequence 예외·정상 종료 후 중복 시작 플래그를 반드시 해제합니다."""
+        try:
+            self._run_start_sequence()
+        except Exception as e:
+            try:
+                self.log(f"❌ [Error] 시작 시퀀스(보호 래퍼) 실패: {e}")
+            except Exception:
+                pass
+        finally:
+            self._run_start_sequence_active = False
 
     def set_monitor_targets(self, df):
         """[v4.5.6] 선정된 종목 리스트를 실시간 감시 대상으로 등록"""
@@ -186,6 +222,28 @@ class TradingController:
                 "sel_track": "B",
             }
 
+    def _status_cb_on_main(self, status: str, data: Any) -> None:
+        """
+        워밍업 워커 등 비-Tk 스레드에서 status_cb 호출 시 메인 루프로 위임합니다.
+        (Tk 위젯 갱신·플래그 동기화를 안전하게 하기 위함)
+        """
+        def _call() -> None:
+            try:
+                if self.status_cb:
+                    self.status_cb(status, data)
+            except Exception as e:
+                self.log(f"⚠️ [System] status_cb({status!r}) 실행 실패: {e}")
+
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None:
+                root.after(0, _call)
+            else:
+                _call()
+        except Exception as e:
+            self.log(f"⚠️ [System] status_cb 메인 스레드 위임 실패: {e}")
+            _call()
+
     def _schedule_warmup_stock_ready(self, code: str) -> None:
         """
         워밍업 워커 스레드 → Tk 메인 스레드: 준비 완료 종목을 스트림 구독에 반영.
@@ -206,8 +264,14 @@ class TradingController:
         """
         try:
             code = str(code).zfill(6)
-            bd = getattr(self.app, "bars_data", None) or {}
+            bd = getattr(self.app, "bars_data", None)
+            if not isinstance(bd, dict):
+                bd = {}
             if code not in bd or bd.get(code) is None:
+                self.log(
+                    f"⚠️ [System] 준비 종목 스트림 반영 건너뜀: bars_data 에 {code} 없음 "
+                    f"(Tk 지연·캐시 키 불일치 가능 — 워밍업 완료 후 재시도)"
+                )
                 return
 
             if not isinstance(getattr(self.app, "_active_stream_codes", None), list):
@@ -221,30 +285,30 @@ class TradingController:
             if self.status_cb:
                 self.status_cb("STARTED", n_ready)
 
+            # 워밍업 워커가 _run_start_sequence 에서 먼저 웹소켓을 띄운 경우 중복 기동 방지
             if not getattr(self, "_incremental_stream_bootstrapped", False):
                 self._incremental_stream_bootstrapped = True
-                self._stop_event.clear()
-                self.monitor_thread = threading.Thread(
-                    target=self._ws_worker_loop, daemon=True
-                )
-                self.monitor_thread.start()
+                if not (
+                    self.monitor_thread is not None and self.monitor_thread.is_alive()
+                ):
+                    self._stop_event.clear()
+                    self.monitor_thread = threading.Thread(
+                        target=self._ws_worker_loop, daemon=True
+                    )
+                    self.monitor_thread.start()
 
-            if not getattr(self, "_periodic_routines_started", False):
-                self._periodic_routines_started = True
-                self._start_periodic_routines()
-            else:
-                mt = getattr(self.app, "monitor_tab", None)
-                if mt is not None:
-                    mt._pending_reg_refresh = True
+            mt = getattr(self.app, "monitor_tab", None)
+            if mt is not None:
+                mt._pending_reg_refresh = True
         except Exception as e:
             self.log(f"⚠️ [System] 준비 종목 스트림 반영 실패: {e}")
 
     def _run_start_sequence(self):
         """워밍업부터 웹소켓 연결까지 마스터 시퀀스"""
         try:
+            self._abort_monitor_start = False
             self.app._active_stream_codes = []
             self._incremental_stream_bootstrapped = False
-            self._periodic_routines_started = False
             merged = self._merged_warmup_codes()
             self._ensure_watchlist_monitor_info()
             self._ensure_virtual_positions_monitor_info()
@@ -275,6 +339,11 @@ class TradingController:
                 self.app.bars_data,
                 on_stock_ready=on_ready,
             )
+            if self._abort_monitor_start:
+                self.log(
+                    "ℹ️ [System] 감시 중단 요청으로 워밍업 이후(접속·등록) 단계를 생략합니다."
+                )
+                return
             failed = [c for c in merged if not results.get(c, {}).get("ok")]
             if failed:
                 if require_full:
@@ -348,18 +417,31 @@ class TradingController:
             successful = [c for c in merged if results.get(c, {}).get("ok")]
             self.app._active_stream_codes = successful
 
-            # 점진 스트림: 이미 준비 종목으로 WS·주기 루프를 띄운 경우 최종 목록만 동기화
-            if incremental_stream and getattr(
-                self, "_incremental_stream_bootstrapped", False
-            ):
-                self.log(
-                    "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 구독 목록을 최종 동기화합니다."
-                )
-                if self.status_cb:
-                    self.status_cb("STARTED", len(successful))
+            def _notify_started_and_reg_refresh() -> None:
+                self._status_cb_on_main("STARTED", len(successful))
                 mt = getattr(self.app, "monitor_tab", None)
                 if mt is not None:
                     mt._pending_reg_refresh = True
+
+            # 메인 스레드의 _apply 가 WS를 띄우기 전에 워커가 여기까지 도달할 수 있음 → 중복 소켓 방지
+            ws_already_running = (
+                self.monitor_thread is not None and self.monitor_thread.is_alive()
+            )
+            # bootstrapped 만 True이고 WS 스레드는 이미 죽은 경우(빈 구독·연결 실패 등) 재기동하지 않고
+            # return 하면 UI 만 '감시 중'이 되어 틱이 영원히 안 옴 → 살아 있는 스레드만 '준비 완료'로 본다.
+            incremental_ws_ready = incremental_stream and ws_already_running
+
+            if incremental_ws_ready:
+                self.log(
+                    "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 구독 목록을 최종 동기화합니다."
+                )
+                # _ws_client_loop 가 while self.app.is_monitoring 이므로, after(0) STARTED 보다 먼저 동기 반영
+                self.is_monitoring = True
+                try:
+                    self.app.is_monitoring = True
+                except Exception:
+                    pass
+                _notify_started_and_reg_refresh()
                 return
 
             self.log(
@@ -367,18 +449,24 @@ class TradingController:
             )
 
             self.is_monitoring = True
-            if self.status_cb:
-                self.status_cb("STARTED", len(successful))
+            try:
+                self.app.is_monitoring = True
+            except Exception:
+                pass
+            _notify_started_and_reg_refresh()
 
-            # [Step 2] 가상 실천 엔진(WS Worker) 구동
+            # [Step 2] 가상 실천 엔진(WS Worker) 구동 (이미 살아 있으면 재시작하지 않음)
+            if ws_already_running:
+                self.log(
+                    "ℹ️ [System] 웹소켓 워커가 이미 동작 중이어서 추가 기동을 건너뜁니다."
+                )
+                return
+
             self._stop_event.clear()
             self.monitor_thread = threading.Thread(
                 target=self._ws_worker_loop, daemon=True
             )
             self.monitor_thread.start()
-
-            # [Step 3] 주기적 관리 루프 시작
-            self._start_periodic_routines()
 
         except Exception as e:
             self.log(f"❌ [Error] 시작 시퀀스 실패: {e}")
@@ -394,25 +482,27 @@ class TradingController:
         except Exception as e:
             self.log(f"⚠️ [System] 웹소켓 워커 종료: {e}")
 
-    def _start_periodic_routines(self):
-        """자가 학습 모델 저장 및 보고 루프 (재귀적 스케줄링)"""
-        def run_save():
-            if not self.is_monitoring: return
-            SimulatedRealtimeMetrics.save_params()
-            self.app.root.after(300000, run_save) # 5분
+    def _supply_log_fields(self, code: object) -> Dict[str, Any]:
+        """일일 JSONL(order/fill)용: 감시 화면과 동일한 체결강도·호가 스냅샷."""
+        try:
+            from core.supply_display import (
+                capture_supply_snapshot,
+                format_vol_power_column,
+            )
 
-        def run_report():
-            if not self.is_monitoring: return
-            p = SimulatedRealtimeMetrics.params
-            if p.get('total_calibrations', 0) > 100:
-                msg = f"📈 [Model Report] 합성 모델 자가 학습 진행 중... (학습 횟수: {p['total_calibrations']})\n"
-                msg += f"   - 체결강도 평균 오차: {p['avg_error_vp']:.2f} | 호가잔량 평균 오차: {p['avg_error_ba']:.2f}"
-                self.log(msg)
-            self.app.root.after(1800000, run_report) # 30분
-
-        # 초기 트리거
-        self.app.root.after(300000, run_save)
-        self.app.root.after(1800000, run_report)
+            nc = str(code).split("_")[0].strip().zfill(6)
+            s = capture_supply_snapshot(self.app, nc)
+            return {
+                "snap_vol_power": s.get("vol_power"),
+                "snap_vol_power_str": format_vol_power_column(s.get("vol_power")),
+                "snap_bid_ask": s.get("bid_ask_text"),
+            }
+        except Exception:
+            return {
+                "snap_vol_power": None,
+                "snap_vol_power_str": "—",
+                "snap_bid_ask": "— / — (—)",
+            }
 
     def execute_buy_signal(self, code, name, price, reason="TYPE_A") -> bool:
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
@@ -495,19 +585,18 @@ class TradingController:
             try:
                 sl = getattr(self.app, "session_logger", None)
                 if sl:
-                    sl.log(
-                        "order_buy",
-                        {
-                            "code": code,
-                            "name": name,
-                            "qty": int(qty),
-                            "price": int(adj_price),
-                            "order_type": "00",
-                            "result": "submitted" if ord_no else "failed",
-                            "order_no": ord_no or "",
-                            "reason": reason,
-                        },
-                    )
+                    _ob = {
+                        "code": code,
+                        "name": name,
+                        "qty": int(qty),
+                        "price": int(adj_price),
+                        "order_type": "00",
+                        "result": "submitted" if ord_no else "failed",
+                        "order_no": ord_no or "",
+                        "reason": reason,
+                    }
+                    _ob.update(self._supply_log_fields(code))
+                    sl.log("order_buy", _ob)
             except Exception:
                 pass
         else:
@@ -598,18 +687,17 @@ class TradingController:
                 try:
                     sl = getattr(self.app, "session_logger", None)
                     if sl:
-                        sl.log(
-                            "order_sell",
-                            {
-                                "code": code,
-                                "name": pos.get("name", ""),
-                                "qty": int(pos.get("qty", 0)),
-                                "price": int(now_price),
-                                "result": "submitted" if ord_no else "failed",
-                                "order_no": ord_no or "",
-                                "reason": f"EXIT_{reason}",
-                            },
-                        )
+                        _os = {
+                            "code": code,
+                            "name": pos.get("name", ""),
+                            "qty": int(pos.get("qty", 0)),
+                            "price": int(now_price),
+                            "result": "submitted" if ord_no else "failed",
+                            "order_no": ord_no or "",
+                            "reason": f"EXIT_{reason}",
+                        }
+                        _os.update(self._supply_log_fields(code))
+                        sl.log("order_sell", _os)
                 except Exception:
                     pass
                 if ord_no:
@@ -696,18 +784,17 @@ class TradingController:
                     try:
                         sl = getattr(self.app, "session_logger", None)
                         if sl:
-                            sl.log(
-                                "order_buy_s2",
-                                {
-                                    "code": code,
-                                    "name": pos.get("name", ""),
-                                    "qty": int(add_qty),
-                                    "price": int(adj_price),
-                                    "result": "submitted" if ord_no else "failed",
-                                    "order_no": ord_no or "",
-                                    "reason": "Stage 2 Scaling",
-                                },
-                            )
+                            _os2 = {
+                                "code": code,
+                                "name": pos.get("name", ""),
+                                "qty": int(add_qty),
+                                "price": int(adj_price),
+                                "result": "submitted" if ord_no else "failed",
+                                "order_no": ord_no or "",
+                                "reason": "Stage 2 Scaling",
+                            }
+                            _os2.update(self._supply_log_fields(code))
+                            sl.log("order_buy_s2", _os2)
                     except Exception:
                         pass
                     if ord_no:

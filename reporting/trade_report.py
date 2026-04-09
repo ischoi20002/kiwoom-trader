@@ -662,7 +662,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         {
             "name": "🛡️ [7] Smart Exit (A/B 공통)",
             "items": [
-                {"label": "Smart Exit (조기탈출)", "toggle": "use_smart_exit", "keys": ["smart_exit_vp", "smart_exit_ba_ratio"], "sep": "VP / Ratio: "},
+                {"label": "Smart Exit (VP / 매도벽=매도÷매수)", "toggle": "use_smart_exit", "keys": ["smart_exit_vp", "smart_exit_ba_ratio"], "sep": " / "},
                 {"label": "ㄴ 가격 하락 임계", "key": "smart_exit_price_threshold", "unit": "%"},
             ]
         },

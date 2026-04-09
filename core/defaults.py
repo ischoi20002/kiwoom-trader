@@ -11,6 +11,13 @@
 # 주력 전략 기본 파라미터 (마지막 동기화: settings.json 기준, 키 순서는 기존 defaults 유지)
 DEFAULT_SETTINGS = {
     "backtest_initial_capital": 10000000,
+    # 수수료 요율(%): 체결금액 대비. 실전/모의는 config.USE_MOCK 과 짝을 이룸.
+    "buy_fee_live": 0.015,
+    "sell_fee_live": 0.215,
+    "buy_fee_mock": 0.35,
+    "sell_fee_mock": 0.5,
+    "buy_fee_bt": 0.015,
+    "sell_fee_bt": 0.215,
     "max_slots": 30,
     "stage1_amt": 20.0,
     "s1_equity_pct": 20.0,
@@ -235,6 +242,7 @@ ALLOWED_EXTRA_KEYS = {
     's1_sizing_unit', 's2_sizing_unit', 
     'mock_account_id', 'backtest_initial_capital',
     'use_auto_virtual',
+    'buy_fee_live', 'sell_fee_live',
     'buy_fee_bt', 'sell_fee_bt',
     'buy_fee_mock', 'sell_fee_mock',
     'daily_report_session_buffer_minutes',

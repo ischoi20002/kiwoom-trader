@@ -24,6 +24,8 @@ def main() -> None:
     skip |= {
         "bt_start_date",
         "bt_end_date",
+        "buy_fee_live",
+        "sell_fee_live",
         "buy_fee_bt",
         "sell_fee_bt",
         "buy_fee_mock",

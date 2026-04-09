@@ -19,8 +19,13 @@ from backtest_engine import (
     append_trade_csv_line,
     clear_trade_csv_buffer,
     flush_trade_csv_buffer,
+    settings_for_backtest,
 )
-from strategy.simulation_models import SimulatedRealtimeMetrics
+from utils.fee_rates import fee_decimal_rates_backtest
+from strategy.synthetic_realtime_fill import (
+    synthesize_bid_ask_ratio_vectorized,
+    synthesize_vol_power_vectorized,
+)
 from strategy.market_regime import classify_market_regime_row
 from typing import Any, Callable, List, Optional
 
@@ -86,16 +91,17 @@ def _interleave_track_codes(codes_a: List[str], codes_b: List[str]) -> List[str]
 class DynamicBacktester:
     """[v16.0] 동적 포트폴리오 백테스터: 매일 종목을 새로 선정하고 1,000만원 예산을 공유하여 운용"""
     def __init__(self, settings, total_budget=None):
-        self.settings = settings
+        self.settings = settings_for_backtest(settings)
         self.db = DataManagerV2("trading_data.db")
         # [v16.7] 설정에서 예산 가져오기 (기본값 1000만)
-        budget = total_budget if total_budget is not None else float(settings.get('backtest_initial_capital', 10_000_000))
+        budget = total_budget if total_budget is not None else float(
+            self.settings.get("backtest_initial_capital", 10_000_000)
+        )
         self.initial_cash = budget
         self.cash = budget
         # [v17.4] 매매 비용 설정 (기본값: 매수 0.015%, 매도 0.195%)
         # [v17.5] 수수료/세금 설정 (기본값 방어)
-        self.buy_f_rate = settings.get('buy_fee_bt', settings.get('buy_fee_rate', 0.015)) / 100.0 if settings else 0.00015
-        self.sell_f_rate = settings.get('sell_fee_bt', settings.get('sell_fee_rate', 0.215)) / 100.0 if settings else 0.00215
+        self.buy_f_rate, self.sell_f_rate = fee_decimal_rates_backtest(self.settings)
         self.holdings = {} # {code: {'qty': Q, 'avg_p': P, 'entry_n': N, 'max_p': H, 'min_p': L}}
         self.trades_history = []
         self.daily_equity = []
@@ -972,12 +978,10 @@ class DynamicBacktester:
         all_codes = list(u_codes)
         pad_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=21)).strftime("%Y-%m-%d")
         placeholders = ",".join(["?"] * len(all_codes))
-        # [v31.5] Updated query to join with realtime_snapshots
         query = f"""
             SELECT b.code, b.datetime as time, b.open, b.high, b.low, b.close, b.volume,
-                   r.vol_power, r.total_ask, r.total_bid
+                   NULL AS vol_power, NULL AS total_ask, NULL AS total_bid
             FROM bars_15m b
-            LEFT JOIN realtime_snapshots r ON b.code = r.code AND b.datetime = r.datetime
             WHERE b.code IN ({placeholders}) AND b.datetime BETWEEN ? AND ?
             ORDER BY b.code, b.datetime
         """
@@ -1005,11 +1009,11 @@ class DynamicBacktester:
                 
                 nan_vp = np.isnan(vps)
                 if np.any(nan_vp):
-                    vps[nan_vp] = SimulatedRealtimeMetrics.simulate_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
+                    vps[nan_vp] = synthesize_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
                 
                 nan_ba = (np.isnan(tasks)) | (np.any(np.isnan(tbids)))
                 if np.any(nan_ba):
-                    r_vector = SimulatedRealtimeMetrics.simulate_bid_ask_ratio_vectorized(p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba])
+                    r_vector = synthesize_bid_ask_ratio_vectorized(p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba])
                     tasks[nan_ba] = 100000
                     tbids[nan_ba] = (100000 * r_vector).astype(int)
                 
@@ -1091,12 +1095,10 @@ class DynamicBacktester:
         """[v23.0] 필요한 시점에만 1분봉 데이터를 DB에서 가져와 캐싱 (성능 핵심)"""
         cache_key = (code, date_str)
         if cache_key not in self.cached_1m_data:
-            # [v31.5] Join with realtime_snapshots for high-precision smart metrics
             query = """
                 SELECT b.datetime as time, b.open, b.high, b.low, b.close, b.volume,
-                       r.vol_power, r.total_ask, r.total_bid
+                       NULL AS vol_power, NULL AS total_ask, NULL AS total_bid
                 FROM bars_1m b
-                LEFT JOIN realtime_snapshots r ON b.code = r.code AND b.datetime = r.datetime
                 WHERE b.code = ? AND b.datetime BETWEEN ? AND ?
                 ORDER BY b.datetime
             """
@@ -1123,9 +1125,9 @@ class DynamicBacktester:
                     vps = df['Vol_power'].values
                     nan_vp = np.isnan(vps)
                     if np.any(nan_vp):
-                        vps[nan_vp] = SimulatedRealtimeMetrics.simulate_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
+                        vps[nan_vp] = synthesize_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
                     
-                    ratios = SimulatedRealtimeMetrics.simulate_bid_ask_ratio_vectorized(p_changes, vol_ratios, vps)
+                    ratios = synthesize_bid_ask_ratio_vectorized(p_changes, vol_ratios, vps)
                     
                     df = df.copy()
                     df['Vol_power'] = vps

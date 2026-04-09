@@ -1,3 +1,4 @@
+import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
@@ -12,6 +13,7 @@ import FinanceDataReader as fdr
 
 # Custom modules
 import config
+from backtest_engine import TradingStrategy
 from kiwoom_rest_api.auth.token import TokenManager
 
 
@@ -33,13 +35,47 @@ def _monitor_fmt_vs_prev(info: Dict[str, Any]) -> str:
 
 
 def _monitor_fmt_bid_ask(info: Dict[str, Any]) -> str:
-    """매도잔량 / 매수잔량 (호가)."""
+    """매도잔량 / 매수잔량 및 매도÷매수 비율(소수 1자리). SignalEngine·주문 로그와 동일."""
     try:
-        ta = int(float(info.get("total_ask") or 0))
-        tb = int(float(info.get("total_bid") or 0))
-        return f"{ta:,} / {tb:,}"
+        from core.supply_display import format_bid_ask_monitor_display
+
+        return format_bid_ask_monitor_display(info.get("total_ask"), info.get("total_bid"))
     except Exception:
-        return "— / —"
+        return "— / — (—)"
+
+
+# 감시 트리 컬럼 기본 폭(px). 사용자가 조절한 값은 monitor_column_widths.json 에 저장됩니다.
+_DEFAULT_MONITOR_COL_WIDTHS: Dict[str, int] = {
+    "Score": 40,
+    "Code": 56,
+    "Name": 88,
+    "StratType": 52,
+    "Price": 64,
+    "AtrExit": 138,
+    "VsPrev": 50,
+    "Ratio": 62,
+    "Status": 188,
+    "VolPower": 52,
+    "BidAsk": 118,
+    "Volume": 72,
+    "TrdeVal": 64,
+}
+# 열을 너무 좁게 못 쓰게 하는 하한(px)
+_MONITOR_COL_MIN_WIDTH: Dict[str, int] = {
+    "Score": 32,
+    "Code": 48,
+    "Name": 52,
+    "StratType": 44,
+    "Price": 52,
+    "AtrExit": 72,
+    "VsPrev": 40,
+    "Ratio": 52,
+    "Status": 80,
+    "VolPower": 44,
+    "BidAsk": 72,
+    "Volume": 56,
+    "TrdeVal": 48,
+}
 
 
 def format_strategy_type_label(sel_track: object) -> str:
@@ -67,11 +103,132 @@ class MonitorTab:
         # 보유 종목 추가 시 웹소켓 REG 재전송 요청(과도 호출 방지는 루프에서 스로틀)
         self._pending_reg_refresh: bool = False
         self._last_stream_reg_ts: float = 0.0
+        # 감시 트리 열 폭 저장(구분선 드래그 후 디바운스)
+        self._monitor_col_width_save_job: Optional[Any] = None
+        self._monitor_width_source_tree: Optional[ttk.Treeview] = None
+        self._monitor_tree_columns: Tuple[str, ...] = tuple()
         # 실시간 틱 경로: 계좌 동기화 1프레임 등으로 VP에만 없으면 보유→감시 트리로 잘못 옮기는 깜빡임 방지
         self._vp_ui_inactive_streak: Dict[str, int] = {}
+        # 실제로 VP에 들어간 적 있을 때만 비보유 2틱 디바운스 적용(미보유 종목 첫 틱이 보유 트리로 가는 버그 방지)
+        self._vp_ever_in_holdings: Dict[str, bool] = {}
         # 틱이 끊긴 종목도 monitor_info 기준으로 트리에 유지 (봉 마감·무거래 구간)
         self._last_monitor_tree_reconcile_ts: float = 0.0
         self._setup_ui()
+
+    def _monitor_col_widths_json_path(self) -> str:
+        """settings.json 과 같은 폴더에 열 폭을 둡니다."""
+        try:
+            ch = getattr(self.app, "config_handler", None)
+            sf = getattr(ch, "settings_file", None) if ch else None
+            if sf:
+                base = os.path.dirname(os.path.abspath(sf))
+                if base:
+                    return os.path.join(base, "monitor_column_widths.json")
+        except Exception:
+            pass
+        return os.path.join(os.getcwd(), "monitor_column_widths.json")
+
+    def _load_saved_monitor_col_widths(self, cols: Tuple[str, ...]) -> Dict[str, int]:
+        """저장된 폭이 있으면 병합(없는 열·잘못된 값은 기본값)."""
+        out: Dict[str, int] = {}
+        for c in cols:
+            out[c] = int(_DEFAULT_MONITOR_COL_WIDTHS.get(c, 64))
+        try:
+            path = self._monitor_col_widths_json_path()
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if k not in out:
+                            continue
+                        try:
+                            iw = int(v)
+                            if 24 <= iw <= 4000:
+                                out[k] = iw
+                        except (TypeError, ValueError):
+                            pass
+        except Exception as e:
+            try:
+                print(f"[MonitorTab] 컬럼 폭 로드 실패: {e}")
+            except Exception:
+                pass
+        return out
+
+    def _on_monitor_tree_column_drag_end(self, event: tk.Event) -> None:
+        """헤더 열 구분선 드래그 후 다른 트리와 폭을 맞추고 저장을 예약합니다."""
+        try:
+            w = event.widget
+            if not isinstance(w, ttk.Treeview):
+                return
+            reg = str(w.identify_region(event.x, event.y)).lower()
+            if reg != "separator":
+                return
+        except tk.TclError:
+            return
+        except Exception:
+            return
+        try:
+            cols = self._monitor_tree_columns
+            if not cols or not hasattr(self, "tree_monitor"):
+                return
+            t_act, t_wl = self.tree_active_monitor, self.tree_monitor
+            src = w
+            other = t_wl if src is t_act else t_act
+            for c in cols:
+                try:
+                    tw = int(src.column(c, "width"))
+                    mw = _MONITOR_COL_MIN_WIDTH.get(c, 32)
+                    other.column(c, width=max(mw, tw))
+                except Exception:
+                    pass
+            self._monitor_width_source_tree = src
+        except Exception:
+            pass
+        try:
+            r = getattr(self.app, "root", None)
+            if r is None:
+                return
+            jid = self._monitor_col_width_save_job
+            if jid is not None:
+                try:
+                    r.after_cancel(jid)
+                except Exception:
+                    pass
+            self._monitor_col_width_save_job = r.after(
+                350, self._flush_monitor_col_widths_to_disk
+            )
+        except Exception:
+            pass
+
+    def _flush_monitor_col_widths_to_disk(self) -> None:
+        """현재 트리 열 폭을 monitor_column_widths.json 에 저장합니다."""
+        self._monitor_col_width_save_job = None
+        try:
+            cols = self._monitor_tree_columns
+            if not cols or not hasattr(self, "tree_monitor"):
+                return
+            src = self._monitor_width_source_tree
+            if src is None:
+                src = self.tree_monitor
+            data: Dict[str, int] = {}
+            for c in cols:
+                try:
+                    mw = _MONITOR_COL_MIN_WIDTH.get(c, 32)
+                    data[c] = max(mw, int(src.column(c, "width")))
+                except Exception:
+                    data[c] = int(_DEFAULT_MONITOR_COL_WIDTHS.get(c, 64))
+            path = self._monitor_col_widths_json_path()
+            dname = os.path.dirname(path)
+            if dname:
+                os.makedirs(dname, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            try:
+                print(f"[MonitorTab] 컬럼 폭 저장 실패: {e}")
+            except Exception:
+                pass
 
     def _setup_ui(self):
         """실시간 감시 탭 레이아웃 설정"""
@@ -133,6 +290,7 @@ class MonitorTab:
             "Name",
             "StratType",
             "Price",
+            "AtrExit",
             "VsPrev",
             "Ratio",
             "Status",
@@ -141,12 +299,15 @@ class MonitorTab:
             "Volume",
             "TrdeVal",
         )
+        # 워밍업 등에서 '신호상태' 열 값 패치 시 인덱스 오류 방지
+        self._monitor_status_value_index = columns.index("Status")
         headings = {
             "Score": "가점",
             "Code": "코드",
             "Name": "종목명",
             "StratType": "전략유형",
             "Price": "현재가",
+            "AtrExit": "ATR기준가",
             "VsPrev": "대비",
             "Ratio": "등락률",
             "Status": "신호상태",
@@ -155,51 +316,76 @@ class MonitorTab:
             "Volume": "거래량",
             "TrdeVal": "대금(억)",
         }
-        col_widths = {
-            "Score": 50,
-            "Code": 75,
-            "Name": 120,
-            "StratType": 88,
-            "Price": 100,
-            "VsPrev": 88,
-            "Ratio": 95,
-            "Status": 320,
-            "VolPower": 85,
-            "BidAsk": 130,
-            "Volume": 110,
-            "TrdeVal": 75,
-        }
+        self._monitor_tree_columns = tuple(columns)
+        col_widths = self._load_saved_monitor_col_widths(self._monitor_tree_columns)
+
+        def _pack_tree_grid_scroll(inner: ttk.Frame, tree: ttk.Treeview) -> None:
+            """트리·세로·가로 스크롤을 inner에 배치(tree는 inner의 자식이어야 함)."""
+            ysb = ttk.Scrollbar(inner, orient=tk.VERTICAL, command=tree.yview)
+            xsb = ttk.Scrollbar(inner, orient=tk.HORIZONTAL, command=tree.xview)
+            tree.configure(yscroll=ysb.set, xscroll=xsb.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            ysb.grid(row=0, column=1, sticky="ns")
+            xsb.grid(row=1, column=0, sticky="ew")
+            inner.rowconfigure(0, weight=1)
+            inner.columnconfigure(0, weight=1)
 
         # 1. 상단 트리뷰 (Active) - 높이 축소
-        self.tree_active_monitor = ttk.Treeview(active_frame, columns=columns, show="headings", selectmode="browse", height=3)
+        active_inner = ttk.Frame(active_frame)
+        active_inner.pack(fill=tk.BOTH, expand=True)
+        self.tree_active_monitor = ttk.Treeview(
+            active_inner, columns=columns, show="headings", selectmode="browse", height=3
+        )
         for col in columns:
             self.tree_active_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
             if col in ("Name", "StratType"):
                 anchor = tk.W
-            elif col in ("VsPrev", "BidAsk"):
+            elif col in ("VsPrev", "BidAsk", "AtrExit"):
                 anchor = tk.E
             else:
                 anchor = tk.CENTER
-            self.tree_active_monitor.column(col, width=col_widths[col], anchor=anchor)
-        self.tree_active_monitor.pack(fill=tk.BOTH, expand=True)
+            mw = _MONITOR_COL_MIN_WIDTH.get(col, 32)
+            cw = max(mw, int(col_widths[col]))
+            self.tree_active_monitor.column(
+                col,
+                width=cw,
+                minwidth=mw,
+                anchor=anchor,
+                stretch=False,
+            )
+        _pack_tree_grid_scroll(active_inner, self.tree_active_monitor)
 
         # 2. 하단 트리뷰 (Watchlist)
-        self.tree_monitor = ttk.Treeview(watchlist_frame, columns=columns, show="headings", selectmode="browse")
+        wl_inner = ttk.Frame(watchlist_frame)
+        wl_inner.pack(fill=tk.BOTH, expand=True)
+        self.tree_monitor = ttk.Treeview(
+            wl_inner, columns=columns, show="headings", selectmode="browse"
+        )
         for col in columns:
             self.tree_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
             if col in ("Name", "StratType"):
                 anchor = tk.W
-            elif col in ("VsPrev", "BidAsk"):
+            elif col in ("VsPrev", "BidAsk", "AtrExit"):
                 anchor = tk.E
             else:
                 anchor = tk.CENTER
-            self.tree_monitor.column(col, width=col_widths[col], anchor=anchor)
-        
-        yscrollbar = ttk.Scrollbar(watchlist_frame, orient=tk.VERTICAL, command=self.tree_monitor.yview)
-        self.tree_monitor.configure(yscroll=yscrollbar.set)
-        yscrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree_monitor.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-        
+            mw = _MONITOR_COL_MIN_WIDTH.get(col, 32)
+            cw = max(mw, int(col_widths[col]))
+            self.tree_monitor.column(
+                col,
+                width=cw,
+                minwidth=mw,
+                anchor=anchor,
+                stretch=False,
+            )
+        _pack_tree_grid_scroll(wl_inner, self.tree_monitor)
+        self.tree_active_monitor.bind(
+            "<ButtonRelease-1>", self._on_monitor_tree_column_drag_end, add="+"
+        )
+        self.tree_monitor.bind(
+            "<ButtonRelease-1>", self._on_monitor_tree_column_drag_end, add="+"
+        )
+
         # [v4.7.5] 'HD Crisp UI' 도입: 굵지 않고 날렵한 Malgun Gothic 및 차분한 프로 컬러 사용
         row_font = ("Malgun Gothic", 9, "normal")
         up_col = "#E35F5F" # 채도가 너무 높아 번져 보이는 #FF0000 대신 차분한 레드
@@ -714,12 +900,48 @@ class MonitorTab:
             tv = float(info.get("trde_val", 0) or 0)
         except (TypeError, ValueError):
             tv = 0.0
+        atr_cell = "—"
+        try:
+            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+            pos = vp.get(nk)
+            if pos is None:
+                for k, v in vp.items():
+                    if str(k).split("_")[0].zfill(6) == nk:
+                        pos = v
+                        break
+            if pos is not None:
+                bd = (getattr(self.app, "bars_data", None) or {}).get(nk)
+                if bd is not None and not getattr(bd, "empty", True):
+                    # 실시간 StreamProcessor 는 ATR_A/B 를 봉에 붙이지 않음 → 전체 지표 재계산 후 마지막 행 사용
+                    try:
+                        df_i = TradingStrategy.calculate_indicators(
+                            bd, self.app.settings
+                        )
+                        ir = df_i.iloc[-1].to_dict()
+                    except Exception:
+                        try:
+                            lr = bd.iloc[-1]
+                            ir = (
+                                lr.to_dict()
+                                if hasattr(lr, "to_dict")
+                                else dict(lr)
+                            )
+                        except Exception:
+                            ir = {}
+                    np_atr = float(now_p) if now_p > 0 else float(ir.get("Close", 0) or 0)
+                    if np_atr > 0:
+                        atr_cell = TradingStrategy.compute_atr_exit_display_text(
+                            pos, self.app.settings, ir, np_atr, bars_df=bd
+                        )
+        except Exception:
+            atr_cell = "—"
         return (
             f"{sc:.1f}",
             nk,
             nm,
             strat,
             f"{now_p:,.0f}",
+            atr_cell,
             _monitor_fmt_vs_prev(info),
             str(ratio_disp),
             info.get("status_text", "대기"),
@@ -805,6 +1027,9 @@ class MonitorTab:
                     target.insert("", tk.END, iid=nk, values=values, tags=(tag,))
                 except Exception:
                     pass
+
+            # VP 에 없는데 보유 트리에만 남은 행 (감시 유니버스 밖이면 제거만)
+            self._purge_stale_active_monitor_rows(vp, mi, codes_allowed_for_watch=expected)
         except Exception as e:
             try:
                 print(f"[UI Error] maybe_reconcile_monitor_trees: {e}")
@@ -830,6 +1055,74 @@ class MonitorTab:
         except Exception:
             return False
 
+    def _purge_stale_active_monitor_rows(
+        self,
+        virtual_positions: Any,
+        monitor_info: Optional[Dict[str, Any]] = None,
+        codes_allowed_for_watch: Optional[set] = None,
+    ) -> None:
+        """
+        virtual_positions 에 없는데 보유 트리에만 남은 행을 제거한다.
+        청산 직후 틱이 끊기면 update_view 디바운스(streak<2)로 영구히 '보유'로 남는 문제를 막는다.
+        monitor_info 에 있으면 감시 트리로 복구한다.
+        """
+        try:
+            if not self.tree_active_monitor:
+                return
+            mi = monitor_info
+            if mi is None:
+                mi = getattr(self.app, "monitor_info", None) or {}
+            vp = virtual_positions or {}
+            wl = self._watchlist_codes_set()
+            for iid in list(self.tree_active_monitor.get_children()):
+                nk = str(iid).split("_")[0].zfill(6)
+                if nk in wl:
+                    continue
+                if self._virtual_position_is_active(iid, vp):
+                    continue
+                try:
+                    self.tree_active_monitor.delete(iid)
+                except Exception:
+                    pass
+                # 다음 틱에서 '잠깐 비보유' 디바운스로 다시 보유 트리로 끌려가지 않도록
+                self._vp_ui_inactive_streak[nk] = 3
+                try:
+                    self._vp_ever_in_holdings.pop(nk, None)
+                except Exception:
+                    pass
+                may_watch = False
+                if codes_allowed_for_watch is not None:
+                    may_watch = nk in codes_allowed_for_watch
+                else:
+                    ent = self._monitor_info_entry(mi, nk)
+                    may_watch = bool(ent)
+                if not may_watch:
+                    continue
+                if not self.tree_monitor:
+                    continue
+                if self.tree_monitor.exists(nk):
+                    continue
+                info = self._monitor_info_entry(mi, nk)
+                if not info:
+                    info = {"name": nk, "sel_track": "AB"}
+                values = self._compose_monitor_row_values(nk, info)
+                direction = self._monitor_ratio_direction(info.get("ratio", "0"))
+                try:
+                    idx = len(self.tree_monitor.get_children())
+                except Exception:
+                    idx = 0
+                row_type = "even" if (idx % 2 == 0) else "odd"
+                tag = f"{direction}_{row_type}"
+                try:
+                    self.tree_monitor.insert("", tk.END, iid=nk, values=values, tags=(tag,))
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                print(f"[UI Error] _purge_stale_active_monitor_rows: {e}")
+            except Exception:
+                pass
+
     def update_view(self, updates, virtual_positions):
         """[v4.5.3] App으로부터 전달받은 실시간 틱 데이터를 화면에 렌더링 (캡슐화)"""
         if not self.tree_monitor: return
@@ -850,6 +1143,7 @@ class MonitorTab:
                                 tree.delete(iid)
                         try:
                             self._vp_ui_inactive_streak.pop(iid, None)
+                            self._vp_ever_in_holdings.pop(iid, None)
                         except Exception:
                             pass
                         continue
@@ -857,17 +1151,22 @@ class MonitorTab:
                     is_active_raw = self._virtual_position_is_active(
                         iid, virtual_positions
                     )
-                    # 동기화·API 지연으로 VP에서 한 번만 빠지면 보유 트리↔감시 트리가 매 틱 번갈아 깜빡임.
-                    # "보유 아님"이 연속 2회 이상일 때만 비보유(감시) 쪽 배치로 확정한다.
+                    # 동기화·API 지연으로 VP에서 한 번만 빠지면 보유↔감시가 깜빡일 수 있어,
+                    # '실제 보유 경험이 있는 종목'에 한해 비보유 2틱 연속일 때만 감시 트리로 내린다.
+                    # (streak<2 만으로는 미보유 종목 첫 틱이 보유 트리로 잡혀 워밍업 중 유령 행이 뜸)
                     try:
                         if is_active_raw:
                             self._vp_ui_inactive_streak[iid] = 0
+                            self._vp_ever_in_holdings[iid] = True
                         else:
                             self._vp_ui_inactive_streak[iid] = int(
                                 self._vp_ui_inactive_streak.get(iid, 0)
                             ) + 1
+                            if self._vp_ui_inactive_streak[iid] >= 2:
+                                self._vp_ever_in_holdings.pop(iid, None)
                         is_active = is_active_raw or (
-                            self._vp_ui_inactive_streak.get(iid, 0) < 2
+                            bool(self._vp_ever_in_holdings.get(iid, False))
+                            and self._vp_ui_inactive_streak.get(iid, 0) < 2
                         )
                     except Exception:
                         is_active = is_active_raw
@@ -909,8 +1208,10 @@ class MonitorTab:
         """[v4.5.3] 감시 종목 리스트 초기화 렌더링"""
         try:
             self._vp_ui_inactive_streak.clear()
+            self._vp_ever_in_holdings.clear()
         except Exception:
             self._vp_ui_inactive_streak = {}
+            self._vp_ever_in_holdings = {}
         self.tree_monitor.delete(*self.tree_monitor.get_children())
         self.tree_active_monitor.delete(*self.tree_active_monitor.get_children())
         
@@ -963,8 +1264,9 @@ class MonitorTab:
                 for tree in (self.tree_monitor, self.tree_active_monitor):
                     if tree and tree.exists(code):
                         vals = list(tree.item(code, "values"))
-                        if len(vals) >= 7:
-                            vals[6] = "⏳ 워밍업 대기…"
+                        si = getattr(self, "_monitor_status_value_index", 8)
+                        if len(vals) > si:
+                            vals[si] = "⏳ 워밍업 대기…"
                         tree.item(code, values=tuple(vals), tags=("warmup_pending",))
         except Exception as e:
             print(f"[UI Error] reset_warmup_row_states: {e}")
@@ -997,8 +1299,9 @@ class MonitorTab:
                 if not tree or not tree.exists(code):
                     continue
                 vals = list(tree.item(code, "values"))
-                if len(vals) >= 7:
-                    vals[6] = st
+                si = getattr(self, "_monitor_status_value_index", 8)
+                if len(vals) > si:
+                    vals[si] = st
                 tree.item(code, values=tuple(vals), tags=(tag,))
         except Exception as e:
             print(f"[UI Error] update_warmup_stock_prep: {e}")

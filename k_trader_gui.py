@@ -50,6 +50,7 @@ from core.trading_controller import TradingController
 from core.strategy_engine import StrategyEngine
 from core.selection_service import SelectionService
 from core.defaults import DEFAULT_SETTINGS, get_allowed_keys
+from core.supply_display import capture_supply_snapshot
 
 from kiwoom_rest_api.auth.token import TokenManager
 
@@ -331,18 +332,6 @@ class KiwoomApp:
             status_frame = ttk.Frame(self.root)
             status_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
             
-            self.learn_status_frame = ttk.Frame(status_frame)
-            self.learn_status_frame.pack(side=tk.LEFT, padx=30)
-            
-            self.lbl_iq_status = ttk.Label(self.learn_status_frame, text="🧠 IQ: 0 steps", font=("Malgun Gothic", 8), foreground="#8FBCBB")
-            self.lbl_iq_status.pack(side=tk.LEFT, padx=10)
-            
-            self.lbl_vp_calib = ttk.Label(self.learn_status_frame, text="⚡ VP: -", font=("Malgun Gothic", 8), foreground="#88C0D0")
-            self.lbl_vp_calib.pack(side=tk.LEFT, padx=10)
-            
-            self.lbl_ba_calib = ttk.Label(self.learn_status_frame, text="⚖️ BA: -", font=("Malgun Gothic", 8), foreground="#81A1C1")
-            self.lbl_ba_calib.pack(side=tk.LEFT, padx=10)
-            
             self.status_label = ttk.Label(status_frame, text="상태: 대기 중", font=("Malgun Gothic", 9), foreground=self.colors['primary'])
             self.status_label.pack(side=tk.RIGHT, padx=5)
             
@@ -389,17 +378,6 @@ class KiwoomApp:
         if not hasattr(self, '_initial_threads_started'):
             self._initial_threads_started = True
             threading.Thread(target=self.get_auth_token, daemon=True).start()
-        self._update_learning_status()
-
-    def _update_learning_status(self):
-        try:
-            from strategy.simulation_models import SimulatedRealtimeMetrics
-            if not getattr(SimulatedRealtimeMetrics, '_initialized', False): SimulatedRealtimeMetrics.load_params()
-            p = SimulatedRealtimeMetrics.params
-            self.lbl_iq_status.config(text=f"🧠 IQ: {p['total_calibrations']:,} steps")
-            self.lbl_vp_calib.config(text=f"⚡ VP: x{p['vp_multiplier']:.1f}")
-            self.lbl_ba_calib.config(text=f"⚖️ BA: x{p['ba_multiplier']:.1f}")
-        except: pass
 
     def _on_market_data_update(self, indices=None, trend=None, display_text=None):
         # after(0) 콜백은 기본인자로 값을 고정해 클로저 지연 바인딩으로 라벨이 꼬이지 않게 함
@@ -512,8 +490,18 @@ class KiwoomApp:
             if oid:
                 self._exchange_fill_order_ids.add(oid)
             try:
+                try:
+                    _fs = capture_supply_snapshot(self, code)
+                except Exception:
+                    _fs = {"vol_power": None, "bid_ask_text": ""}
                 self.data_manager.update_order_status(
-                    code, order_no, "FILLED", filled_price=int(fill_price), filled_qty=int(qty)
+                    code,
+                    order_no,
+                    "FILLED",
+                    filled_price=int(fill_price),
+                    filled_qty=int(qty),
+                    fill_snap_vol_power=_fs.get("vol_power"),
+                    fill_snap_bid_ask=_fs.get("bid_ask_text") or "— / — (—)",
                 )
             except Exception as ue:
                 self.log(f"⚠️ [체결 동기화] DB 갱신 실패: {ue}")
@@ -556,8 +544,18 @@ class KiwoomApp:
             oid = str(order_no or "").strip()
             if oid and oid in self._exchange_fill_order_ids:
                 try:
+                    try:
+                        _fs = capture_supply_snapshot(self, code)
+                    except Exception:
+                        _fs = {"vol_power": None, "bid_ask_text": ""}
                     self.data_manager.update_order_status(
-                        code, order_no, "FILLED", filled_price=price, filled_qty=qty
+                        code,
+                        order_no,
+                        "FILLED",
+                        filled_price=price,
+                        filled_qty=qty,
+                        fill_snap_vol_power=_fs.get("vol_power"),
+                        fill_snap_bid_ask=_fs.get("bid_ask_text") or "— / — (—)",
                     )
                 except Exception as ue:
                     self.log(f"⚠️ [체결 보정] DB 갱신 실패: {ue}")
@@ -565,7 +563,19 @@ class KiwoomApp:
                 self._schedule_account_sync_after_fill()
                 return
             try:
-                self.data_manager.update_order_status(code, order_no, "FILLED", filled_price=price, filled_qty=qty)
+                try:
+                    _fs = capture_supply_snapshot(self, code)
+                except Exception:
+                    _fs = {"vol_power": None, "bid_ask_text": ""}
+                self.data_manager.update_order_status(
+                    code,
+                    order_no,
+                    "FILLED",
+                    filled_price=price,
+                    filled_qty=qty,
+                    fill_snap_vol_power=_fs.get("vol_power"),
+                    fill_snap_bid_ask=_fs.get("bid_ask_text") or "— / — (—)",
+                )
             except Exception as ue:
                 self.log(f"⚠️ [체결] DB 갱신 실패: {ue}")
             snapshot = self.portfolio.capture_snapshot(code, price, reason=f"EXEC_{side.upper()}")
@@ -600,18 +610,49 @@ class KiwoomApp:
         if hasattr(self, 'lbl_market_indices'): self.lbl_market_indices.config(background=bg_col, foreground=fg_col)
         if hasattr(self, 'monitor_tab'): self.monitor_tab._update_visual_theme(trend)
 
-    def _render_tree_updates(self):
-        if not self.monitor_tab or not self.is_monitoring:
-            return
-        self.monitor_tab.update_view(self.pending_tree_updates, self.portfolio.virtual_positions)
+    def _render_tree_updates(self) -> None:
+        """
+        감시 트리 실시간 갱신. 틱이 STARTED 콜백보다 먼저 올 수 있어
+        trading_controller.is_monitoring 과 app.is_monitoring 둘 다 본다.
+        감시 중이 아니면 타이머 체인을 멈추고 _update_timer_active 를 풀어 재무장 가능하게 한다.
+        """
         try:
-            self.monitor_tab.maybe_reconcile_monitor_trees(
-                getattr(self, "monitor_info", None) or {},
-                self.portfolio.virtual_positions,
+            if not self.monitor_tab:
+                self._update_timer_active = False
+                return
+            try:
+                if not self.root.winfo_exists():
+                    self._update_timer_active = False
+                    return
+            except Exception:
+                self._update_timer_active = False
+                return
+            monitoring = bool(self.is_monitoring) or bool(
+                getattr(self.trading_controller, "is_monitoring", False)
             )
-        except Exception:
-            pass
-        self.root.after(200, self._render_tree_updates)
+            if not monitoring:
+                self._update_timer_active = False
+                return
+            self.monitor_tab.update_view(
+                self.pending_tree_updates, self.portfolio.virtual_positions
+            )
+            try:
+                self.monitor_tab.maybe_reconcile_monitor_trees(
+                    getattr(self, "monitor_info", None) or {},
+                    self.portfolio.virtual_positions,
+                )
+            except Exception:
+                pass
+            self.root.after(200, self._render_tree_updates)
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [UI] _render_tree_updates: {e}")
+            except Exception:
+                pass
+            try:
+                self._update_timer_active = False
+            except Exception:
+                pass
 
     def stream_subscription_codes(self):
         """웹소켓 등록 후보: 감시 종목 ∪ 관심목록(중복 제거). 워밍업 직후에는 _active_stream_codes 우선."""
@@ -920,37 +961,10 @@ class KiwoomApp:
             tr = str(
                 info.get("sel_track", info.get("SelTrack", info.get("seltrack", "AB")))
             ).strip().upper()
+            # 선정 트랙과 확정 신호 타입 불일치: 의도적 무시 (백테와 동일). 로그·세션 기록 생략.
             if tr == "A" and sig_type == "TYPE_B":
-                self.log(f"⚠️ [Skip] {name}({code}) Track A 종목에 Type B 신호")
-                try:
-                    self.session_logger.log(
-                        "signal_buy_skipped",
-                        {
-                            "code": code,
-                            "name": name,
-                            "reason": "track_mismatch",
-                            "detail": "track_A_vs_type_B",
-                            "sig_type": sig_type,
-                        },
-                    )
-                except Exception:
-                    pass
                 return False
             if tr == "B" and sig_type == "TYPE_A":
-                self.log(f"⚠️ [Skip] {name}({code}) Track B 종목에 Type A 신호")
-                try:
-                    self.session_logger.log(
-                        "signal_buy_skipped",
-                        {
-                            "code": code,
-                            "name": name,
-                            "reason": "track_mismatch",
-                            "detail": "track_B_vs_type_A",
-                            "sig_type": sig_type,
-                        },
-                    )
-                except Exception:
-                    pass
                 return False
             if not TradingStrategy.type_balance_allows_new_s1(
                 self.settings, sig_type, self.portfolio.virtual_positions
@@ -1059,12 +1073,30 @@ class KiwoomApp:
             prev = getattr(self, "_last_vp_render_sig", None)
             if prev is not None and sig == prev:
                 self.virtual_tab.refresh_portfolio_light()
+                try:
+                    mt = getattr(self, "monitor_tab", None)
+                    if mt is not None:
+                        mt._purge_stale_active_monitor_rows(
+                            self.portfolio.virtual_positions,
+                            getattr(self, "monitor_info", None) or {},
+                        )
+                except Exception:
+                    pass
                 return
         except Exception:
             pass
         try:
             self.virtual_tab._render_virtual_positions()
             self._last_vp_render_sig = self._vp_structure_signature()
+        except Exception:
+            pass
+        try:
+            mt = getattr(self, "monitor_tab", None)
+            if mt is not None:
+                mt._purge_stale_active_monitor_rows(
+                    self.portfolio.virtual_positions,
+                    getattr(self, "monitor_info", None) or {},
+                )
         except Exception:
             pass
 
@@ -1087,10 +1119,25 @@ class KiwoomApp:
                 self.virtual_tab._render_virtual_positions()
             except Exception:
                 pass
+            # 가상 탭 실시간 주문 로그(VP·호가 열)는 VP 렌더 중에도 갱신되나, 예외 시에도 한 번 더 맞춤
+            try:
+                self.virtual_tab._render_orders()
+            except Exception:
+                pass
         try:
             self._last_vp_render_sig = self._vp_structure_signature()
         except Exception:
             pass
+        try:
+            mt = getattr(self, "monitor_tab", None)
+            if mt is not None:
+                mt._purge_stale_active_monitor_rows(
+                    self.portfolio.virtual_positions,
+                    getattr(self, "monitor_info", None) or {},
+                )
+        except Exception:
+            pass
+
     def sync_with_actual_account(self, silent: bool = False, force: bool = False) -> None:
         self.portfolio.sync_with_actual_account(silent=silent, force=force)
 

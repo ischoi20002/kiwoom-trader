@@ -443,6 +443,31 @@ class SettingsTab:
         add_header(cap_f, '포지션 사이징 (배분 방식)')
         add_sizing_row(cap_f, '1단계(정찰) 비중', 'stage1_amt', 's1_equity_pct', 's1_sizing_unit')
         add_sizing_row(cap_f, '2단계(본대) 비중', 'stage2_amt', 's2_equity_pct', 's2_sizing_unit')
+        add_header(cap_f, '거래 수수료 요율 (체결금액 대비 %)')
+        add_param_row(
+            cap_f,
+            '실전 — 매수',
+            'buy_fee_live',
+            '%',
+            '키움 실전(USE_MOCK=False) 가상 체결·손익·일일 리포트',
+        )
+        add_param_row(cap_f, '실전 — 매도', 'sell_fee_live', '%', '')
+        add_param_row(
+            cap_f,
+            '모의 — 매수',
+            'buy_fee_mock',
+            '%',
+            '키움 모의(USE_MOCK=True) 가상 체결·손익·일일 리포트',
+        )
+        add_param_row(cap_f, '모의 — 매도', 'sell_fee_mock', '%', '')
+        add_param_row(
+            cap_f,
+            '백테 — 매수',
+            'buy_fee_bt',
+            '%',
+            'SimpleBacktester·DynamicBacktester·파라미터 최적화',
+        )
+        add_param_row(cap_f, '백테 — 매도', 'sell_fee_bt', '%', '')
         add_param_row(
             cap_f,
             '동적백테 A/B 수 균형(신규 S1)',
@@ -901,10 +926,10 @@ class SettingsTab:
         rt_f = ttk.LabelFrame(_sec_parent('smart'), text=' 🔫 [5] 전술적 수급 (Smart Buy / Smart Exit) ', padding='15')
         rt_f.pack(fill=tk.X, pady=10)
         add_param_row(rt_f, 'Smart Buy 최소 체결강도 (VP)', 'smart_buy_vp', '%', 'S1 + S2 Type A/B Smart Buy 공통 임계')
-        add_param_row(rt_f, 'Smart Buy 매도벽 비율 (BA)', 'smart_buy_ba_ratio', '배', 'S1 + S2 Type A/B Smart Buy 공통 임계')
+        add_param_row(rt_f, 'Smart Buy 매도벽 비율 (BA)', 'smart_buy_ba_ratio', '배', '매도잔량/매수잔량 — S1·S2 Smart Buy 공통 임계')
         add_param_row(rt_f, 'Smart Exit 탈출용 체결강도 (VP)', 'smart_exit_vp', '%', '에너지 소멸 확인', toggle_key='use_smart_exit')
-        add_param_row(rt_f, 'Smart Exit 탈출용 매수함정 비율', 'smart_exit_ba_ratio', '배', '허수매수세/지루함 포착', toggle_key='use_smart_exit')
-        add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락폭 제한', toggle_key='use_smart_exit')
+        add_param_row(rt_f, 'Smart Exit 탈출용 매도벽 비율', 'smart_exit_ba_ratio', '배', '매도잔량/매수잔량(Smart Buy BA와 동일). 임계 이상이면 탈출 후보', toggle_key='use_smart_exit')
+        add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락 시에만 위 매도벽 조건을 적용', toggle_key='use_smart_exit')
 
         mkt_f = ttk.LabelFrame(
             _sec_parent('mkt'),

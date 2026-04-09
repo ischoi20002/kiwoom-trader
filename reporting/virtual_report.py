@@ -30,7 +30,7 @@ def generate_virtual_narrative_report(history, output_path="virtual_trade_report
                 {"label": "Smart Buy S2(B)", "toggle": "use_smart_buy_s2_b"},
             ]},
             {"name": "🛡️ [7] Smart Exit (공통)", "items": [
-                {"label": "Smart Exit", "toggle": "use_smart_exit", "key": "smart_exit_ba_ratio"},
+                {"label": "Smart Exit (매도벽=매도/매수)", "toggle": "use_smart_exit", "key": "smart_exit_ba_ratio"},
             ]},
             {"name": "🛡️ [7-A] Type A 청산", "items": [
                 {"label": "갭하락", "toggle": "use_gap_down_exit_a", "key": "gap_down_limit_a", "unit": "%"},

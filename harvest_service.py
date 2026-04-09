@@ -161,16 +161,34 @@ class HarvestService:
         
         next_key = ""
         total_fetched = 0
-        
+        last_raw_top: str = ""
+        last_raw_bottom: str = ""
+
         while self.running:
             raw_data, next_key = self._fetch_minute_data(code, token, next_key)
-            if not raw_data: break
-            
+            if not raw_data:
+                break
+
             bars = self._parse_to_bars(raw_data)
-            if not bars: break
-            
+            if not bars:
+                break
+
+            try:
+                from reporting.krx_trading_calendar import minute_harvest_datetime_cap_iso
+
+                cap_dt = minute_harvest_datetime_cap_iso()
+            except Exception:
+                cap_dt = None
+
+            raw_top = bars[0]["time"]
+            raw_bottom = bars[-1]["time"]
+            last_raw_top = raw_top
+            last_raw_bottom = raw_bottom
+
+            filtered = [b for b in bars if not cap_dt or b["time"] <= cap_dt] if cap_dt else bars
+
             # [v16.9] [Fixed] 이미 최신 데이터가 있더라도, 과거 데이터가 부족(COMPLETE 아님)하면 중단하지 않고 과거로 계속 내려갑니다.
-            if total_fetched == 0 and initial_last_sync and bars[0]['time'] <= initial_last_sync:
+            if total_fetched == 0 and initial_last_sync and raw_top <= initial_last_sync:
                 status = self.db.get_sync_status(code)
                 if status == "COMPLETE":
                     self.log(f"   >> {code}: 이미 최신이며 과거 데이터(COMPLETE)까지 충분합니다.")
@@ -179,14 +197,15 @@ class HarvestService:
                 else:
                     self.log(f"   - {code}: 최신 데이터는 중복되지만, 과거 데이터(Backfill)를 위해 더 깊이 탐색합니다.")
 
-            # [v16.9] 즉시 DB 저장 후 마지막 동기화 시간 갱신 (Incremental Sync 정확도 향상)
-            df_chunk = pd.DataFrame(bars)
-            self.db.save_bars(code, df_chunk)
-            last_sync = self.db.get_last_sync_time(code) # DB에서 실시간으로 다시 읽어옴
-            
-            total_fetched += len(bars)
-            # API 청크는 보통 최신→과거 순; 마지막 행이 이번 청크 중 가장 과거 시각
-            current_bottom_time = bars[-1]['time']
+            if filtered:
+                # [v16.9] 즉시 DB 저장 후 마지막 동기화 시간 갱신 (Incremental Sync 정확도 향상)
+                df_chunk = pd.DataFrame(filtered)
+                self.db.save_bars(code, df_chunk)
+                last_sync = self.db.get_last_sync_time(code)  # DB에서 실시간으로 다시 읽어옴
+                total_fetched += len(filtered)
+
+            # 페이지 경계·조기 종료 판단은 원본 청크 하단(키움 역행 진행도)
+            current_bottom_time = raw_bottom
             
             # [v16.9.7] 조기 종료 기준 분기:
             # - COMPLETE: 증분만 — 수집 시작 시점의 DB 최신(initial_last_sync) 이전까지 역행하면 이후 페이지는
@@ -213,8 +232,9 @@ class HarvestService:
             )
             
             if not next_key:
-                # [v6.8] API 바닥에 도달함 (종목별 무결성 마크)
-                self.db.set_sync_status(code, "COMPLETE")
+                # [v6.8] API 바닥 — 장중 필터로 마지막 청크가 전부 스킵된 경우 COMPLETE 오표 방지
+                if cap_dt is None or filtered:
+                    self.db.set_sync_status(code, "COMPLETE")
                 break
             
             time.sleep(0.3)
@@ -229,7 +249,7 @@ class HarvestService:
             # [v16.9.1] 개선된 원인별 로그 세분화 (지수/최신/미수집)
             is_idx = (len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11'])
             
-            if last_sync and 'bars' in locals() and bars and bars[0]['time'] <= last_sync:
+            if last_sync and last_raw_top and last_raw_top <= last_sync:
                 self.log(f"[OK] {code} 처리 완료: 이미 최신 상태입니다.")
             elif is_idx:
                 self.log(f"[OK] {code} 처리 완료: 지수 데이터(Daily Sync) 유효성 확인됨")
@@ -246,16 +266,27 @@ class HarvestService:
             
             if not last_sync:
                 return False
+
+            now = datetime.now()
             
             # [v16.9] 'COMPLETE' 상태이면 역사적으로 완료된 것으로 간주
             is_historically_complete = (status == "COMPLETE")
             
             if not is_historically_complete:
                 return False # 과거 데이터가 더 필요함 (바닥까지 가야함)
+
+            # [v16.9.8] 장중(1분 상한 모드): 직전 거래일 장마감(cap)까지 이미 있고 당일 분봉은 아직 안 넣어도 되는 경우 → API 호출 생략
+            try:
+                from reporting.krx_trading_calendar import minute_harvest_datetime_cap_iso
+
+                cap = minute_harvest_datetime_cap_iso(now)
+                if cap and last_sync >= cap and last_sync[:10] < now.strftime("%Y-%m-%d"):
+                    return True
+            except Exception:
+                pass
             
             # [Smart Check 2] 보충(Daily Sync) 확인: 오늘 날짜의 데이터가 있는지 확인
             last_dt = datetime.strptime(last_sync, "%Y-%m-%d %H:%M:%S")
-            now = datetime.now()
             
             # [Fix] 오늘 장 개시 전(09:00 이전)이라면, 어제 장마감 데이터까지만 있어도 완료로 간주
             if now.hour < 9:
@@ -380,6 +411,18 @@ class HarvestService:
         if not token:
             self.log("[ERROR] 토큰을 가져올 수 없습니다. 종료합니다.")
             return
+
+        try:
+            from reporting.krx_trading_calendar import minute_harvest_datetime_cap_iso
+
+            _cap0 = minute_harvest_datetime_cap_iso()
+            if _cap0:
+                self.log(
+                    f"⏸ [장중] 1분봉은 '{_cap0}' 이하만 DB 저장합니다(당일 장중 봉 제외). "
+                    f"장 마감 후 실행 시 당일 분봉까지 반영됩니다."
+                )
+        except Exception:
+            pass
 
         for idx, code in enumerate(all_codes):
             if not self.running: break

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Optional
+
 import FinanceDataReader as fdr
 import os
 import pandas as pd
@@ -40,7 +42,11 @@ from strategy.indicator_constants import (
     MACD_ENTRY_SIGNAL,
     RSI_MAIN_PERIOD,
 )
-from strategy.simulation_models import SimulatedRealtimeMetrics
+from strategy.synthetic_realtime_fill import (
+    synthesize_bid_ask_ratio_vectorized,
+    synthesize_vol_power_vectorized,
+)
+from utils.fee_rates import fee_decimal_rates_backtest
 from strategy.market_regime import (
     classify_market_regime_series,
     regime_to_trend_status,
@@ -49,6 +55,23 @@ from strategy.market_regime import (
 csv_lock = threading.Lock()
 # [v15.3.7] Script-relative absolute paths for robust log management
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def settings_for_backtest(base_settings):
+    """
+    백테스트 전용 설정: Smart Buy / Smart Exit 는 실시간 감시에만 적용.
+    UI·settings.json 값은 그대로 두고 엔진에 넘길 때만 비활성화한다.
+    """
+    try:
+        s = dict(base_settings or {})
+    except Exception:
+        s = {}
+    s["use_smart_buy_a"] = False
+    s["use_smart_buy_b"] = False
+    s["use_smart_buy_s2"] = False
+    s["use_smart_buy_s2_b"] = False
+    s["use_smart_exit"] = False
+    return s
 SIGNAL_CSV = os.path.join(BASE_DIR, "backtest_signals.csv")
 TRADE_CSV = os.path.join(BASE_DIR, "backtest_trades.csv")
 # print(f"DEBUG [backtest_engine]: BASE_DIR={BASE_DIR}")
@@ -304,7 +327,15 @@ class TradingStrategy:
             combined['MACD_Sig'] = combined['_macd_sig']
             combined['OSC'] = combined['MACD'] - combined['MACD_Sig']
 
-        if 'bid_ask_ratio' in m1_row: combined['bid_ask_ratio'] = m1_row['bid_ask_ratio']
+        if 'bid_ask_ratio' in m1_row:
+            combined['bid_ask_ratio'] = m1_row['bid_ask_ratio']
+            try:
+                _ba_m1 = float(m1_row['bid_ask_ratio'])
+                combined['ask_bid_ratio'] = 1.0 / (_ba_m1 + 1e-10)
+            except (TypeError, ValueError):
+                pass
+        elif 'ask_bid_ratio' in m1_row:
+            combined['ask_bid_ratio'] = m1_row['ask_bid_ratio']
         if 'vol_power' in m1_row: combined['vol_power'] = m1_row['vol_power']
         
         return combined
@@ -665,6 +696,222 @@ class TradingStrategy:
         return "ATR_B" if is_type_b else "ATR_A"
 
     @staticmethod
+    def _peak_high_from_bars_df(bars_df: Any) -> Optional[float]:
+        """
+        재시작 직후 pos[max_p] 가 비어 있을 때, 당일 15분(등) 봉 High 로
+        '이미 목표 익절%를 넘긴 고점'을 복원해 ATR 트레일 무장 표시·판정을 맞춘다.
+        """
+        try:
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return None
+            if "High" not in bars_df.columns:
+                return None
+            hi = pd.to_numeric(bars_df["High"], errors="coerce")
+            if hi.isna().all():
+                return None
+            idx = bars_df.index
+            if isinstance(idx, pd.DatetimeIndex) and len(idx) == len(bars_df):
+                try:
+                    from zoneinfo import ZoneInfo
+
+                    seoul = ZoneInfo("Asia/Seoul")
+                    today = pd.Timestamp.now(tz=seoul).date()
+                    sel = []
+                    for ts in idx:
+                        try:
+                            t = pd.Timestamp(ts)
+                            if t.tzinfo is None:
+                                t = t.tz_localize(
+                                    seoul, ambiguous="NaT", nonexistent="shift_forward"
+                                )
+                            else:
+                                t = t.tz_convert(seoul)
+                            sel.append(t.date() == today)
+                        except Exception:
+                            sel.append(True)
+                    if any(sel):
+                        arr = hi.to_numpy(dtype=float, copy=False)
+                        m = np.array(sel, dtype=bool)
+                        picked = arr[m & ~np.isnan(arr)]
+                        if picked.size > 0:
+                            return float(np.max(picked))
+                except Exception:
+                    pass
+            tail = hi.dropna().tail(96)
+            if tail.empty:
+                return None
+            return float(tail.max())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _peak_price_from_position(
+        pos: dict,
+        now_price: float,
+        bars_peak_high: Optional[float] = None,
+    ) -> float:
+        """
+        Flash·ATR 트레일 무장(목표% 대비 고점) 등에 쓰는 누적 최고가.
+        계좌/DB 동기화 포지션은 max_p·max_price 키가 없을 수 있음 — 이 경우에도
+        evaluate_position 매 틱 pos 에 써 넣지 않으면 고가가 유지되지 않아
+        'TRL 무장전'이 잘못 표시된다. max_now(구 스키마)는 동일 의미로 병합.
+        bars_peak_high: 로컬 15m 등에서 복원한 당일(또는 최근) 봉 고가 상한.
+        """
+        try:
+            nw = float(now_price)
+        except (TypeError, ValueError):
+            nw = 0.0
+        if nw < 0:
+            nw = 0.0
+        bests: list = [nw] if nw > 0 else []
+        if bars_peak_high is not None:
+            try:
+                bh = float(bars_peak_high)
+                if bh > 0:
+                    bests.append(bh)
+            except (TypeError, ValueError):
+                pass
+        for k in ("max_p", "max_price", "max_now"):
+            try:
+                v = (pos or {}).get(k)
+                if v is None:
+                    continue
+                try:
+                    if pd.isna(v):
+                        continue
+                except Exception:
+                    pass
+                fv = float(v)
+                if fv > 0:
+                    bests.append(fv)
+            except (TypeError, ValueError):
+                continue
+        if not bests:
+            return nw
+        return float(max(bests))
+
+    @staticmethod
+    def compute_atr_exit_display_text(
+        pos: dict,
+        settings: dict,
+        indicator_row: object,
+        now_price: float,
+        bars_df: Any = None,
+    ) -> str:
+        """
+        감시 화면·일일 리포트용 ATR 손절·트레일 기준가 문자열.
+        evaluate_position 의 ATR 구간과 동일 분기(표시만, pos/지표 비변경).
+        bars_df: 있으면 당일 봉 High 로 재시작 후 고가 복원.
+        """
+        try:
+            if not pos or float(now_price) <= 0:
+                return "—"
+            s = settings or {}
+            stage = pos.get("entry_n", pos.get("stage", 1))
+            is_type_b = TradingStrategy._holding_sig_is_type_b(pos)
+            if not is_type_b:
+                try:
+                    is_type_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+                except Exception:
+                    is_type_b = False
+            avg_p = float(pos.get("avg_p", pos.get("avg_price", now_price)) or now_price)
+            if avg_p <= 0:
+                avg_p = float(now_price)
+            bh = TradingStrategy._peak_high_from_bars_df(bars_df)
+            max_p = float(
+                TradingStrategy._peak_price_from_position(
+                    pos, float(now_price), bars_peak_high=bh
+                )
+            )
+
+            def _ir_get(key: str, default: float = 0.0) -> float:
+                if indicator_row is None:
+                    return default
+                try:
+                    if hasattr(indicator_row, "get"):
+                        v = indicator_row.get(key, default)
+                        return float(v) if v is not None else default
+                except Exception:
+                    pass
+                return default
+
+            _rx = TradingStrategy._exit_track_risk_bundle(s, is_type_b)
+            _atr_col = TradingStrategy._atr_column_for_holdings(is_type_b)
+
+            def _curr_atr() -> float:
+                try:
+                    v = float(_ir_get(_atr_col, 0.0) or 0.0)
+                    if v > 0:
+                        return v
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    return float(_ir_get("ATR", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            def _exit_key(a_key: str, b_key: str, s2_a_key: str, s2_b_key: str) -> str:
+                if stage == 2:
+                    return s2_b_key if is_type_b else s2_a_key
+                return b_key if is_type_b else a_key
+
+            def _atr_track_suff() -> str:
+                if stage == 2:
+                    return "_s2_b" if is_type_b else "_s2"
+                return "_b" if is_type_b else "_a"
+
+            curr_atr = float(_curr_atr())
+            suff = _atr_track_suff()
+            use_sl_atr = bool(s.get(f"use_atr_stop_loss{suff}", True))
+            use_trail_atr = bool(s.get(f"use_atr_trailing_stop{suff}", True))
+            run_atr_exit = bool(_rx["use_atr_exit"]) or (
+                curr_atr > 0 and (use_sl_atr or use_trail_atr)
+            )
+            if not run_atr_exit or curr_atr <= 0:
+                return "ATR미사용"
+
+            entry_atr = float(TradingStrategy._entry_atr_for_atr_sl(pos, curr_atr))
+            sl_mult = float(s.get(f"atr_multiplier_sl{suff}", 2.5))
+            trail_mult = float(s.get(f"atr_multiplier_trail{suff}", 4.0))
+
+            _trail_only_after_tp = TradingStrategy._use_atr_trail_only_after_tp_for_stage(
+                s, is_type_b, stage
+            )
+            trail_armed = True
+            if _trail_only_after_tp and use_trail_atr:
+                tp_arm_pct = float(
+                    s.get(
+                        _exit_key(
+                            "s1_a_take_profit",
+                            "s1_b_take_profit",
+                            "s2_take_profit",
+                            "s2_b_take_profit",
+                        ),
+                        5.0,
+                    )
+                )
+                try:
+                    peak_pct = (max_p / avg_p - 1.0) * 100.0 if avg_p > 0 else 0.0
+                except Exception:
+                    peak_pct = 0.0
+                trail_armed = peak_pct >= tp_arm_pct
+
+            parts = []
+            if use_sl_atr:
+                sl_px = avg_p - (sl_mult * entry_atr)
+                parts.append(f"SL {sl_px:,.0f}")
+            if use_trail_atr:
+                if trail_armed:
+                    tr_px = max_p - (trail_mult * curr_atr)
+                    parts.append(f"TRL {tr_px:,.0f}")
+                else:
+                    parts.append("TRL 무장전")
+
+            return " · ".join(parts) if parts else "—"
+        except Exception:
+            return "—"
+
+    @staticmethod
     def evaluate_position(code, now_price, pos, settings, indicator_row=None, current_time=None, is_realtime=False, kwargs=None, indicators_dict=None, i=None):
         """
         [v35.0] 실시간 감시와 모든 백테스팅(포트폴리오 포함)이 공유하는 통합 포지션 평가(매도 결정) 함수.
@@ -682,10 +929,23 @@ class TradingStrategy:
         avg_p = pos.get('avg_p', pos.get('avg_price', now_price))
         profit_ratio = (now_price / avg_p - 1) * 100
         
-        # 2. 최고가 갱신 (max_p / max_price)
-        max_p = max(pos.get('max_p', now_price), pos.get('max_price', now_price), now_price)
-        if 'max_p' in pos: pos['max_p'] = max_p
-        if 'max_price' in pos: pos['max_price'] = max_p
+        # 2. 최고가 갱신 — 키가 없던 포지션도 매 틱 누적해야 트레일 무장·Flash 가 맞음
+        bars_peak = None
+        if kwargs:
+            try:
+                bars_peak = TradingStrategy._peak_high_from_bars_df(
+                    kwargs.get("bars_df")
+                )
+            except Exception:
+                bars_peak = None
+        max_p = TradingStrategy._peak_price_from_position(
+            pos, now_price, bars_peak_high=bars_peak
+        )
+        try:
+            pos["max_p"] = max_p
+            pos["max_price"] = max_p
+        except Exception:
+            pass
         
         # 3. 지표 데이터 확보
         is_power_exhausted = False
@@ -696,6 +956,23 @@ class TradingStrategy:
             bid_ask_ratio = kwargs.get('bid_ask_ratio', 0)
         else:
             bid_ask_ratio = _get_val('bid_ask_ratio', _get_val('Bid_Ask_Ratio', 0))
+
+        # Smart Exit 호가비: Smart Buy '매도벽 비율'과 동일하게 매도잔량/매수잔량(Ask/Bid).
+        # kwargs에 ask_bid_ratio가 있으면(실시간 틱) 우선 사용, 없으면 bid_ask(매수/매도)의 역수로 산출.
+        sell_buy_wall_ratio = 0.0
+        try:
+            if kwargs is not None and kwargs.get("ask_bid_ratio") is not None:
+                sell_buy_wall_ratio = float(kwargs["ask_bid_ratio"])
+            else:
+                ba = float(bid_ask_ratio or 0)
+                if ba > 1e-12:
+                    sell_buy_wall_ratio = 1.0 / ba
+                else:
+                    sell_buy_wall_ratio = float(
+                        _get_val("ask_bid_ratio", _get_val("Ask_Bid_Ratio", 0)) or 0
+                    )
+        except (TypeError, ValueError):
+            sell_buy_wall_ratio = 0.0
 
         is_exit = False
         exit_reason = ""
@@ -818,7 +1095,7 @@ class TradingStrategy:
             threshold = float(s.get('smart_exit_price_threshold', 0.0))
             if threshold == 0 or now_price <= max_p * (1 + threshold / 100.0):
                 min_trap = float(s.get('smart_exit_ba_ratio', 1.3))
-                if bid_ask_ratio >= min_trap or (is_realtime and is_power_exhausted):
+                if sell_buy_wall_ratio >= min_trap or (is_realtime and is_power_exhausted):
                     is_exit, exit_reason = True, "SMART_EXIT"
 
         # 5. ATR 기반 손절 및 트레일링 스톱
@@ -887,7 +1164,7 @@ class TradingStrategy:
 class SimpleBacktester:
     """고정밀 15분봉/일봉 백테스터 (v5.1)"""
     def __init__(self, settings):
-        self.settings = settings
+        self.settings = settings_for_backtest(settings)
         self.trades = []
         self.s1_amt = 0
         self.s2_amt = 0
@@ -967,11 +1244,11 @@ class SimpleBacktester:
                 # Vectorized Fill
                 nan_vp = np.isnan(vps)
                 if np.any(nan_vp):
-                    vps[nan_vp] = SimulatedRealtimeMetrics.simulate_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
+                    vps[nan_vp] = synthesize_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
                 
                 nan_ba = np.isnan(ratios)
                 if np.any(nan_ba):
-                    r_new = SimulatedRealtimeMetrics.simulate_bid_ask_ratio_vectorized(p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba])
+                    r_new = synthesize_bid_ask_ratio_vectorized(p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba])
                     ratios[nan_ba] = r_new
                     tasks[nan_ba] = 100000
                     tbids[nan_ba] = (100000 * r_new).astype(int)
@@ -1146,8 +1423,7 @@ class SimpleBacktester:
             s2_b_pct = float(self.settings.get('s2_b_equity_pct', s2_pct))
             self.s2_b_amt = total_capital_val * (s2_b_pct / 100.0)
 
-        self.buy_f_rate = self.settings.get('buy_fee_bt', self.settings.get('buy_fee_rate', 0.015)) / 100.0
-        self.sell_f_rate = self.settings.get('sell_fee_bt', self.settings.get('sell_fee_rate', 0.215)) / 100.0
+        self.buy_f_rate, self.sell_f_rate = fee_decimal_rates_backtest(self.settings)
         
         stock_name_map = TradingStrategy.get_stock_name_map()
         stock_name = stock_name_map.get(code, code)

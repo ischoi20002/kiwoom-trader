@@ -10,6 +10,7 @@ import html
 import json
 import os
 from datetime import date, datetime, timedelta
+from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from reporting.realtime_session_logger import RealtimeSessionLogger
@@ -27,6 +28,7 @@ from reporting.krx_trading_calendar import (
     previous_trading_day,
     trading_days_inclusive,
 )
+from utils.fee_rates import fee_decimal_rates_live_trading
 
 
 def _json_dumps_pretty(d: Any) -> str:
@@ -38,6 +40,258 @@ def _json_dumps_pretty(d: Any) -> str:
 
 def _esc(s: Any) -> str:
     return html.escape(str(s), quote=True)
+
+
+def _fmt_vp_report_cell(v: Any) -> str:
+    """리포트 표용 체결강도(소수 1자리 %)."""
+    if v is None:
+        return "-"
+    try:
+        return f"{float(v):.1f}%"
+    except Exception:
+        return "-"
+
+
+def _is_buy_side(side: Any) -> bool:
+    s = str(side or "").strip().lower()
+    return s in ("buy", "b") or "매수" in str(side or "")
+
+
+def _parse_ts_loose(s: Any) -> Optional[datetime]:
+    """주문/청산 시각 문자열을 datetime으로 (초 단위 비교용)."""
+    if s is None:
+        return None
+    t = str(s).strip()
+    if len(t) >= 19:
+        t = t[:19]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(t, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(t)
+    except ValueError:
+        return None
+
+
+def _fill_qty_price(o: Dict[str, Any]) -> Tuple[int, float]:
+    """체결 수량·가격 (미체결 시 주문 수량·주문가 폴백)."""
+    try:
+        fq = int(o.get("filled_qty") or 0)
+    except (TypeError, ValueError):
+        fq = 0
+    if fq <= 0:
+        try:
+            fq = int(o.get("qty") or 0)
+        except (TypeError, ValueError):
+            fq = 0
+    try:
+        fp = float(o.get("filled_price") or 0)
+    except (TypeError, ValueError):
+        fp = 0.0
+    if fp <= 0:
+        try:
+            fp = float(o.get("price") or 0)
+        except (TypeError, ValueError):
+            fp = 0.0
+    return fq, fp
+
+
+def _fmt_krw_cell(v: Optional[float]) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{int(round(float(v))):,}"
+    except Exception:
+        return "—"
+
+
+def _fmt_pct_net_cell(v: Optional[float]) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):+.2f}%"
+    except Exception:
+        return "—"
+
+
+def _virtual_history_sells_for_day(
+    portfolio: Any, report_day: str, excl: set
+) -> Dict[str, List[Dict[str, Any]]]:
+    """해당 영업일 청산된 가상 이력(코드별). 수익은 포트폴리오 on_fill과 동일하게 수수료 반영됨."""
+    out: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    day_key = str(report_day)[:10]
+    for h in getattr(portfolio, "virtual_history", None) or []:
+        try:
+            c = str(h.get("code", "")).strip().zfill(6)
+        except Exception:
+            continue
+        if c in excl:
+            continue
+        exd = str(h.get("exit_date", "") or "")[:10]
+        if exd != day_key:
+            continue
+        exdt = h.get("exit_datetime")
+        if not exdt:
+            exdt = f"{exd} {h.get('exit_time', '12:00:00')}"
+        try:
+            rp = float(h.get("realized_pnl_amt", 0) or 0)
+            pp = float(h.get("final_pnl_pct", 0) or 0)
+        except (TypeError, ValueError):
+            rp, pp = 0.0, 0.0
+        out[c].append(
+            {
+                "exit_datetime": exdt,
+                "realized_pnl_amt": rp,
+                "final_pnl_pct": pp,
+                "_used": False,
+            }
+        )
+    for c in out:
+        out[c].sort(key=lambda x: str(x.get("exit_datetime", "")))
+    return dict(out)
+
+
+def _pop_matched_exit_history(
+    pool: List[Dict[str, Any]], order_ts: str, max_seconds: float = 600.0
+) -> Optional[Dict[str, Any]]:
+    """주문 시각과 가장 가까운 미사용 청산 이력 1건 (수익률·실현손익 신뢰 소스)."""
+    ts = _parse_ts_loose(order_ts)
+    if ts is None:
+        return None
+    best_i = -1
+    best_diff = 1e18
+    for i, h in enumerate(pool):
+        if h.get("_used"):
+            continue
+        ht = _parse_ts_loose(h.get("exit_datetime"))
+        if ht is None:
+            continue
+        try:
+            diff = abs((ht - ts).total_seconds())
+        except Exception:
+            continue
+        if diff < best_diff:
+            best_diff = diff
+            best_i = i
+    if best_i < 0 or best_diff > max_seconds:
+        return None
+    chosen = pool[best_i]
+    chosen["_used"] = True
+    return chosen
+
+
+def _build_enriched_order_rows(
+    by_code: Dict[str, List[Dict[str, Any]]],
+    settings: dict,
+    portfolio: Any,
+    excl: set,
+    report_day: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    일일 결산 표용: 수수료, 매수/매도 금액, 순수익률·순누적실현.
+    순손익은 가상 이력 매칭 우선, 없으면 당일 주문만으로 평단 복원 시 계산.
+    """
+    buy_r, sell_r = fee_decimal_rates_live_trading(settings)
+    hist_by_code = _virtual_history_sells_for_day(portfolio, report_day, excl)
+    enriched: Dict[str, List[Dict[str, Any]]] = {}
+
+    for code, orders in by_code.items():
+        ckey = str(code).strip().zfill(6)
+        pool = [dict(x) for x in hist_by_code.get(ckey, [])]
+        sorted_o = sorted(orders, key=lambda x: str(x.get("ts", "")))
+        state_q = 0
+        state_cost = 0.0
+        cum_realized = 0.0
+        rows_out: List[Dict[str, Any]] = []
+
+        for o in sorted_o:
+            fq, fp = _fill_qty_price(o)
+            gross = float(fq) * float(fp)
+            is_buy = _is_buy_side(o.get("side"))
+
+            fee_amt: Optional[float] = None
+            buy_amt: Optional[float] = None
+            sell_amt: Optional[float] = None
+            pnl_pct: Optional[float] = None
+            pnl_net: Optional[float] = None
+            disp_cum: Optional[float] = None
+
+            if fq <= 0 or fp <= 0:
+                rows_out.append(
+                    {
+                        **o,
+                        "_fee_amt": None,
+                        "_buy_amt": None,
+                        "_sell_amt": None,
+                        "_pnl_pct": None,
+                        "_disp_cum": None,
+                    }
+                )
+                continue
+
+            if is_buy:
+                fee_amt = gross * buy_r
+                buy_amt = gross
+                state_q += fq
+                state_cost += gross + fee_amt
+            else:
+                fee_amt = gross * sell_r
+                sell_amt = gross
+                net_proceeds = gross - fee_amt
+
+                intra_pnl: Optional[float] = None
+                intra_pct: Optional[float] = None
+                try:
+                    if state_q >= fq and fq > 0 and state_cost > 0:
+                        alloc = state_cost * (float(fq) / float(state_q))
+                        intra_pnl = net_proceeds - alloc
+                        intra_pct = (intra_pnl / alloc * 100.0) if alloc > 0 else None
+                except Exception:
+                    intra_pnl, intra_pct = None, None
+
+                matched = _pop_matched_exit_history(pool, str(o.get("ts", "")))
+                if matched is not None:
+                    try:
+                        pnl_net = float(matched.get("realized_pnl_amt", 0) or 0)
+                        pnl_pct = float(matched.get("final_pnl_pct", 0) or 0)
+                    except (TypeError, ValueError):
+                        pnl_net, pnl_pct = None, None
+                if pnl_net is None:
+                    pnl_net = intra_pnl
+                    pnl_pct = intra_pct
+
+                if pnl_net is not None:
+                    cum_realized += pnl_net
+                    disp_cum = cum_realized
+                elif cum_realized > 0:
+                    disp_cum = cum_realized
+
+                try:
+                    if state_q >= fq and fq > 0 and state_cost > 0:
+                        alloc_u = state_cost * (float(fq) / float(state_q))
+                        state_cost -= alloc_u
+                    state_q = max(0, state_q - fq)
+                    if state_q == 0:
+                        state_cost = 0.0
+                except Exception:
+                    state_q = max(0, state_q - fq)
+
+            rows_out.append(
+                {
+                    **o,
+                    "_fee_amt": fee_amt,
+                    "_buy_amt": buy_amt,
+                    "_sell_amt": sell_amt,
+                    "_pnl_pct": pnl_pct,
+                    "_disp_cum": disp_cum,
+                }
+            )
+
+        enriched[code] = rows_out
+
+    return enriched
 
 
 def report_dir_for_date(day: str) -> str:
@@ -367,6 +621,40 @@ def _build_plotly_15m_section(
         return f'<p class="warn">차트 생성 오류: {_esc(e)}</p>'
 
 
+def _daily_report_atr_exit_line(app: Any, code_str: str, df_15: Any) -> str:
+    """
+    일일 결산 카드용: 리포트 생성 시점 가상 보유 + 해당일 15분봉(지표 포함)으로
+    ATR 손절·트레일 기준가 문자열.
+    """
+    try:
+        from backtest_engine import TradingStrategy
+
+        vp = getattr(app.portfolio, "virtual_positions", None) or {}
+        pos = None
+        for k, v in vp.items():
+            if str(k).split("_")[0].zfill(6) == code_str:
+                pos = v
+                break
+        if pos is None:
+            return "리포트 시점 비보유"
+        if df_15 is None or getattr(df_15, "empty", True):
+            return "당일 15분봉 없음"
+        df_i = TradingStrategy.calculate_indicators(df_15.copy(), app.settings)
+        last = df_i.iloc[-1]
+        try:
+            ir = last.to_dict()
+        except Exception:
+            ir = dict(last) if hasattr(last, "keys") else {}
+        np_ = float(ir.get("Close", 0) or 0)
+        if np_ <= 0:
+            return "종가 없음"
+        return TradingStrategy.compute_atr_exit_display_text(
+            pos, app.settings, ir, np_, bars_df=df_15
+        )
+    except Exception:
+        return "—"
+
+
 def generate_daily_settlement_report(
     app: Any,
     report_date: Optional[str] = None,
@@ -441,6 +729,10 @@ def generate_daily_settlement_report_ex(
                 reason,
                 order_no,
                 order_type,
+                snap_vp,
+                snap_ba,
+                _fill_snap_vp,  # DB 컬럼 유지, 리포트 표에는 미표시
+                _fill_snap_ba,
             ) = row
         except Exception:
             continue
@@ -462,6 +754,9 @@ def generate_daily_settlement_report_ex(
                 "reason": reason or "",
                 "order_no": order_no or "",
                 "order_type": order_type or "",
+                "snap_vol_power": snap_vp,
+                "snap_bid_ask": snap_ba or "",
+                # 체결 시각 스냅샷(체결강도·호가)은 일일 리포트 표에 포함하지 않음
             }
         )
 
@@ -473,6 +768,7 @@ def generate_daily_settlement_report_ex(
 
     # 종목별 15분봉 HTML 조각 (아래 종목 카드 안에서만 버튼으로 펼침)
     chart_body_by_code: Dict[str, str] = {}
+    atr_display_by_code: Dict[str, str] = {}
     for code in codes_for_charts:
         code_str = str(code).strip().zfill(6)
         nm = by_code[code][0].get("name", "") if by_code[code] else ""
@@ -488,18 +784,22 @@ def generate_daily_settlement_report_ex(
             warnings.append(f"{code_str} 15분 조회 실패: {e}")
             overall_status = "partial"
 
+        atr_display_by_code[code_str] = _daily_report_atr_exit_line(app, code_str, df_15)
         block = _build_plotly_15m_section(code, nm or code, day, df_15, by_code[code])
         chart_body_by_code[code_str] = block
 
     if chart_failures:
         warnings.append(f"분봉 갱신 실패(스킵): {', '.join(chart_failures)}")
 
+    enriched_by_code = _build_enriched_order_rows(by_code, app.settings, app.portfolio, excl, day)
+
     # 종목별 카드: 주문 표 + 해당 종목만 펼 수 있는 15분봉 차트
     code_sections = ""
     for code in sorted(by_code.keys()):
         code_str = str(code).strip().zfill(6)
         rows = ""
-        for o in by_code[code]:
+        for o in enriched_by_code.get(code, []):
+            _sba = (o.get("snap_bid_ask") or "").strip() or "-"
             rows += f"""<tr>
                 <td>{_esc(o['ts'])}</td>
                 <td>{_esc(o['side'])}</td>
@@ -507,6 +807,13 @@ def generate_daily_settlement_report_ex(
                 <td class="num">{o['price']:,}</td>
                 <td class="num">{o['filled_price'] if o['filled_price'] else '-'}</td>
                 <td class="num">{o['filled_qty'] if o['filled_qty'] else '-'}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get('_fee_amt')))}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get('_buy_amt')))}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get('_sell_amt')))}</td>
+                <td class="num">{_esc(_fmt_pct_net_cell(o.get('_pnl_pct')))}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get('_disp_cum')))}</td>
+                <td class="num">{_esc(_fmt_vp_report_cell(o.get('snap_vol_power')))}</td>
+                <td>{_esc(_sba)}</td>
                 <td>{_esc(o['result'])}</td>
                 <td>{_esc(o['order_no'])}</td>
                 <td>{_esc(o['reason'])}</td>
@@ -518,13 +825,20 @@ def generate_daily_settlement_report_ex(
         disp = nm or code_str
         btn_open_lbl = f"{disp} 15분봉 차트 접기"
         btn_closed_lbl = f"{disp} 15분봉 차트 펼치기"
+        atr_note = atr_display_by_code.get(
+            code_str, _daily_report_atr_exit_line(app, code_str, None)
+        )
         code_sections += f"""
         <div class="card stock-report-card" id="stock-report-{_esc(code_str)}">
             <h3>{_esc(nm)} <span class="muted">({_esc(code_str)})</span></h3>
+            <p class="muted" style="margin:4px 0 12px 0;">ATR 청산 기준가 (리포트일 15분 종가·보유 시): {_esc(atr_note)}</p>
             <table>
                 <thead>
                     <tr>
                         <th>시각</th><th>구분</th><th>수량</th><th>주문가</th><th>체결가</th><th>체결수량</th>
+                        <th>수수료</th><th>매수금액</th><th>매도금액</th>
+                        <th>수익률(순)</th><th>누적실현(순)</th>
+                        <th>체결강(주문)</th><th>호가(주문)</th>
                         <th>상태</th><th>주문번호</th><th>사유</th>
                     </tr>
                 </thead>

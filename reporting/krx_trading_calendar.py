@@ -93,6 +93,39 @@ def next_trading_day(day: str | date, max_lookahead: int = 10) -> Optional[date]
     return None
 
 
+def is_krx_regular_session_local(now: Optional[datetime] = None) -> bool:
+    """
+    PC 로컬 시각을 한국장 기준으로 본다고 가정할 때, KRX 정규장(09:00~15:30) 구간 여부.
+    (해외 타임존이면 설정 맞춤 필요)
+    """
+    try:
+        t = now or datetime.now()
+        mins = t.hour * 60 + t.minute
+        return (9 * 60) <= mins <= (15 * 60 + 30)
+    except Exception:
+        return False
+
+
+def minute_harvest_datetime_cap_iso(now: Optional[datetime] = None) -> Optional[str]:
+    """
+    하베스팅용: 장중(정규장)이고 오늘이 거래일이면, DB에 넣을 수 있는 1분봉의 최대 시각(포함).
+    직전 거래일 15:30:00 — 당일 장중 봉은 저장하지 않기 위함. 그 외 None(제한 없음).
+    """
+    try:
+        t = now or datetime.now()
+        today_d = t.date()
+        if not is_trading_day(today_d):
+            return None
+        if not is_krx_regular_session_local(t):
+            return None
+        prev = previous_trading_day(today_d)
+        if prev is None:
+            return None
+        return f"{prev.strftime('%Y-%m-%d')} 15:30:00"
+    except Exception:
+        return None
+
+
 def clamp_batch_range(start: str | date, end: str | date, max_days: int = 31) -> tuple[date, date, Optional[str]]:
     """
     일괄 생성 허용 구간을 [start, end]로 제한. 최대 max_days 일.

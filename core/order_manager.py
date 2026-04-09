@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 import config
 from utils.normalization import get_tick_size
 from core.price_guard import validate_limit_order_reference_price
+from core.supply_display import capture_supply_snapshot
 
 # [v4.0] Kiwoom REST API 공식 패키지 모듈 도입
 try:
@@ -167,8 +168,25 @@ class OrderManager:
 
             if ret_code == 0 or ord_no:
                 self.app.log(f"✅ [{mode_str}] 주문 성공! 번호: {ord_no}")
+                # [v3.8] DB 로그 + 감시 화면과 동일한 체결강도·호가 스냅샷
+                try:
+                    _sn = capture_supply_snapshot(self.app, code)
+                except Exception:
+                    _sn = {"vol_power": None, "bid_ask_text": ""}
                 # [v3.8] DB 로그 기록
-                self.app.data_manager.log_order(code, side, qty, adj_price, order_type, ord_no, "SUCCESS", name=name, reason=reason)
+                self.app.data_manager.log_order(
+                    code,
+                    side,
+                    qty,
+                    adj_price,
+                    order_type,
+                    ord_no,
+                    "SUCCESS",
+                    name=name,
+                    reason=reason,
+                    snap_vol_power=_sn.get("vol_power"),
+                    snap_bid_ask=_sn.get("bid_ask_text") or "",
+                )
 
                 # 웹소켓 CHE가 없을 때도 가상포지션·체결가 연동 (메인 스레드에서 실행)
                 try:

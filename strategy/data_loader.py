@@ -31,18 +31,9 @@ class BacktestDataLoader:
         try:
             conn = sqlite3.connect(self.db_path)
             # [v15.3.8] Robust Table Name mapping
-            # [v31.3] Join with realtime_snapshots to get VolPower and Bid/Ask metrics
+            # 1m·15m 모두 bars_* 만 사용 (구 realtime_snapshots 는 미적재 레거시로 제거됨).
             table_name = f"bars_{interval}"
-            if interval == '1m':
-                query = f"""
-                    SELECT b.*, r.vol_power, r.total_ask, r.total_bid
-                    FROM {table_name} b
-                    LEFT JOIN realtime_snapshots r ON b.code = r.code AND b.datetime = r.datetime
-                    WHERE b.code = ? AND b.datetime BETWEEN ? AND ?
-                """
-            else:
-                # 15m or others: standard query (simulated metrics will be added in Engine if missing)
-                query = f"SELECT * FROM {table_name} WHERE code = ? AND datetime BETWEEN ? AND ?"
+            query = f"SELECT * FROM {table_name} WHERE code = ? AND datetime BETWEEN ? AND ?"
                 
             df = pd.read_sql(query, conn, params=(code, f"{start_date} 00:00:00", f"{end_date} 23:59:59"))
             conn.close()

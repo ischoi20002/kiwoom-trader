@@ -4,10 +4,9 @@ import threading
 from datetime import datetime
 import traceback
 from backtest_engine import TradingStrategy
-from strategy.simulation_models import SimulatedRealtimeMetrics
 from ui.tabs.monitor_tab import format_strategy_type_label
 from utils.krx_session import is_krx_regular_session
-from typing import Optional
+from typing import Any, Optional, Tuple
 
 class SignalEngine:
     """[v25.7] 실시간 체결 데이터 분석 및 시그널 포착 엔진 클래스"""
@@ -33,17 +32,25 @@ class SignalEngine:
             return self._to_scalar(val[0], default)
         return val
 
-    def _format_s1_confluence_status_line(self, last_sig: object) -> str:
+    def _format_s1_confluence_status_line(
+        self, last_sig: Any, sel_track: str = "AB"
+    ) -> str:
         """
-        S1 합치도 표시: 눌림목(A)과 추세돌파(B) 조건 충족 수를 각각 보여준다.
-        기존 '대기 (n/7)'만으로는 B 분모(보통 5~6)와 혼동되거나, NONE일 때 A 기준만 보이는 문제가 있다.
+        S1 합치도 표시: 눌림목(A)과 추세돌파(B) 조건 충족 수를 보여준다.
+        선정 트랙이 A/B 단일이면 해당 트랙 지표만 표시(교차 트랙 문구 생략).
         """
         try:
-            st = str(self._to_scalar(last_sig.get("Sig_Type", "NONE"), "NONE"))
+            tr_raw = str(sel_track or "AB").strip().upper()
+            tr = tr_raw if tr_raw in ("A", "B", "AB") else "AB"
             ma_c = int(self._to_scalar(last_sig.get("Met_A", 0), 0))
             ta_t = max(1, int(self._to_scalar(last_sig.get("Tot_A", 1), 1)))
             mb_c = int(self._to_scalar(last_sig.get("Met_B", 0), 0))
             tb_t = max(1, int(self._to_scalar(last_sig.get("Tot_B", 1), 1)))
+            if tr == "A":
+                return f"대기 눌림A {ma_c}/{ta_t}"
+            if tr == "B":
+                return f"대기 추세B {mb_c}/{tb_t}"
+            st = str(self._to_scalar(last_sig.get("Sig_Type", "NONE"), "NONE"))
             if st == "TYPE_B":
                 return f"대기 추세B {mb_c}/{tb_t} (눌림A {ma_c}/{ta_t})"
             if st == "TYPE_A":
@@ -73,14 +80,87 @@ class SignalEngine:
         except Exception:
             return "—"
 
-    def _format_monitor_bid_ask_cell(self, info: dict) -> str:
-        """감시 트리 Bid/Ask 열: 매도잔량 / 매수잔량."""
+    def _parse_ws_vs_prev_close(self, info: dict) -> Tuple[Optional[float], Optional[float]]:
+        """
+        실시간 0B 패킷 fid 11·12: 전일 종가 대비 (원), 등락률 (% 수치, 부호 포함).
+        파싱 실패·미수신 시 (None, None).
+        """
         try:
-            ta = int(float(self._to_scalar(info.get("total_ask", 0), 0)))
-            tb = int(float(self._to_scalar(info.get("total_bid", 0), 0)))
-            return f"{ta:,} / {tb:,}"
+            d_raw = info.get("diff")
+            r_raw = info.get("ratio")
+            d_f: Optional[float] = None
+            r_f: Optional[float] = None
+            if d_raw is not None:
+                ds = str(d_raw).strip().replace(",", "")
+                if ds not in ("", "-", "—"):
+                    d_f = float(ds)
+            if r_raw is not None:
+                rs = (
+                    str(r_raw)
+                    .strip()
+                    .replace("%", "")
+                    .replace(",", "")
+                )
+                if rs not in ("", "-", "—"):
+                    r_f = float(rs)
+            return (d_f, r_f)
+        except (TypeError, ValueError):
+            return (None, None)
+
+    def _monitor_tree_ratio_and_direction(
+        self,
+        info: dict,
+        now_price: float,
+        intraday_diff: float,
+        open_price: float,
+    ) -> Tuple[str, float]:
+        """
+        등락율 열 문자열과 행 방향(양수/음수/0).
+        전일 종가 기준 fid 12·11을 우선하고, 없을 때만 시가 대비로 폴백한다.
+        (시가 대비 %는 전일대비 '대비' 열과 불일치하는 원인이 됨)
+        """
+        try:
+            d_ws, r_ws = self._parse_ws_vs_prev_close(info)
+            # 전일대비(원)을 먼저 쓰면 '대비' 열( fid 11 )과 등락율이 항상 같은 기준이다.
+            if d_ws is not None:
+                if abs(d_ws) < 1e-12:
+                    return ("0.00%", 0.0)
+                prev_c = float(now_price) - float(d_ws)
+                if prev_c > 1e-9:
+                    pct = (float(d_ws) / prev_c) * 100.0
+                    sg = "▲" if d_ws > 0 else "▼"
+                    return (f"{sg} {abs(pct):.2f}%", float(d_ws))
+                return ("0.00%", 0.0)
+            if r_ws is not None:
+                if abs(r_ws) < 1e-12:
+                    return ("0.00%", 0.0)
+                sg = "▲" if r_ws > 0 else "▼"
+                return (f"{sg} {abs(r_ws):.2f}%", float(r_ws))
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        try:
+            op = float(open_price)
+            if op > 1e-12:
+                pct = (float(intraday_diff) / op) * 100.0
+                if abs(pct) < 1e-12:
+                    return ("0.00%", 0.0)
+                sg = "▲" if intraday_diff > 0 else "▼"
+                return (f"{sg} {abs(pct):.2f}%", float(pct))
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        return ("0.00%", 0.0)
+
+    def _format_monitor_bid_ask_cell(self, info: dict) -> str:
+        """감시 트리 Bid/Ask 열: 매도잔량 / 매수잔량 및 매도÷매수 비율(소수 1자리)."""
+        try:
+            from core.supply_display import format_bid_ask_monitor_display
+
+            return format_bid_ask_monitor_display(
+                self._to_scalar(info.get("total_ask", 0), 0),
+                self._to_scalar(info.get("total_bid", 0), 0),
+            )
         except Exception:
-            return "— / —"
+            return "— / — (—)"
 
     def _code_in_virtual_positions(self, code: str) -> bool:
         """가상·실제 보유(virtual_positions)에 해당 종목이 있는지 6자리 기준으로 확인합니다."""
@@ -139,12 +219,11 @@ class SignalEngine:
             
             # 3. 데이터 추출
             open_price = info.get('open', 0)
-            if open_price == 0: 
+            if open_price == 0:
                 open_price = now_price
                 info['open'] = open_price
-            
-            diff_val = now_price - open_price
-            ratio_val = f"{(diff_val / open_price * 100):+.2f}" if open_price else "0.00"
+            # 시가 대비(내부용). 감시 트리 '등락율'은 전일종가 fid 12 우선(_monitor_tree_ratio_and_direction).
+            intraday_diff = float(now_price) - float(open_price)
             
             # 4. 시그널 상태 제어
             tag = ""
@@ -252,7 +331,12 @@ class SignalEngine:
                 
                 # [v4.5.9] 전방위적 스칼라 쉴드 적용
                 is_buy = bool(self._to_scalar(last_sig['Signal'], False))
-                info['confluence'] = self._format_s1_confluence_status_line(last_sig)
+                _sel_tr = str(
+                    info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                ).strip().upper()
+                info['confluence'] = self._format_s1_confluence_status_line(
+                    last_sig, _sel_tr
+                )
                 info['met_ratio'] = float(self._to_scalar(last_sig['Met_Ratio'], 0.0))
                 
                 last_row = info['last_row_cache']
@@ -407,10 +491,23 @@ class SignalEngine:
 
             # 8. 트리뷰 업데이트 큐잉 (관심목록에 등록된 종목은 감시 화면에 표시하지 않음, 감시목록과 별개)
             if not is_in_watchlist:
-                p_tag = "price_up" if diff_val > 0 else ("price_down" if diff_val < 0 else "price_stable")
-                sign = "▲" if diff_val > 0 else ("▼" if diff_val < 0 else "")
-                abs_ratio = abs(diff_val / open_price * 100) if open_price != 0 else 0
-                
+                try:
+                    np_f = float(now_price)
+                except (TypeError, ValueError):
+                    np_f = 0.0
+                try:
+                    op_f = float(open_price)
+                except (TypeError, ValueError):
+                    op_f = 0.0
+                ratio_cell, dir_rn = self._monitor_tree_ratio_and_direction(
+                    info, np_f, intraday_diff, op_f
+                )
+                p_tag = (
+                    "price_up"
+                    if dir_rn > 0
+                    else ("price_down" if dir_rn < 0 else "price_stable")
+                )
+
                 strat_label = format_strategy_type_label(
                     info.get("sel_track", info.get("SelTrack", "AB"))
                 )
@@ -421,14 +518,57 @@ class SignalEngine:
                     info["status_text"] = str(info.get("confluence", "대기"))
                 except Exception:
                     pass
+                atr_cell = "—"
+                try:
+                    # ATR 기준가 열: 가상·실제 보유 종목만 (감시만 하는 종목은 '—')
+                    nk = str(code).zfill(6)
+                    vp = self.app.virtual_positions
+                    pos = vp.get(nk)
+                    if pos is None:
+                        for k, v in vp.items():
+                            if str(k).split("_")[0].zfill(6) == nk:
+                                pos = v
+                                break
+                    if pos is not None and np_f > 0:
+                        # 신호·매매용 last_row 는 bars_ready 일 때만 채워짐.
+                        # 표시는 봉 수와 무관하게 마지막 봉+지표로 ATR 열을 채운다.
+                        _bd_atr = (self.app.bars_data or {}).get(code)
+                        row_for_atr: Optional[dict] = None
+                        if last_row is not None:
+                            if isinstance(last_row, dict):
+                                row_for_atr = last_row
+                            elif hasattr(last_row, "to_dict"):
+                                row_for_atr = last_row.to_dict()
+                            else:
+                                row_for_atr = dict(last_row)
+                        else:
+                            if (
+                                _bd_atr is not None
+                                and not getattr(_bd_atr, "empty", True)
+                            ):
+                                df_i = TradingStrategy.calculate_indicators(
+                                    _bd_atr, self.app.settings
+                                )
+                                row_for_atr = df_i.iloc[-1].to_dict()
+                        if row_for_atr is not None:
+                            atr_cell = TradingStrategy.compute_atr_exit_display_text(
+                                pos,
+                                self.app.settings,
+                                row_for_atr,
+                                float(np_f),
+                                bars_df=_bd_atr,
+                            )
+                except Exception:
+                    atr_cell = "—"
                 full_values = (
                     f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
                     code,
                     info["name"],
                     strat_label,
                     f"{int(now_price):,}",
+                    atr_cell,
                     self._format_monitor_vs_prev_cell(info),
-                    f"{sign} {abs_ratio:.2f}%" if sign else "0.00%",
+                    ratio_cell,
                     str(info.get("confluence", "-")),
                     _vp_str,
                     self._format_monitor_bid_ask_cell(info),

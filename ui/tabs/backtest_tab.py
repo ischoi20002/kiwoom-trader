@@ -75,7 +75,7 @@ class BacktestTab:
             'smart_buy_vp': ('SB_Min_VP', '전술적 수급', 'Smart Buy 최소 체결강도 (%)'),
             'smart_buy_ba_ratio': ('SB_BA_Ratio', '전술적 수급', 'Smart Buy 매도벽 비율 (배)'),
             'smart_exit_vp': ('SX_Min_VP', '전술적 수급', 'Smart Exit 체결강도 하한 (%)'),
-            'smart_exit_ba_ratio': ('SX_BA_Ratio', '전술적 수급', 'Smart Exit 매수함정 비율 (배)'),
+            'smart_exit_ba_ratio': ('SX_BA_Ratio', '전술적 수급', 'Smart Exit 매도벽 비율 (배, 매도/매수)'),
             'smart_exit_price_threshold': ('SX_Price_Thr', '전술적 수급', 'Smart Exit 가격 하락 임계 (%)'),
             'msi_down_threshold': ('MSI_Down', '시장 트렌드 필터', 'DOWN 판정 MSI 하한선'),
             'msi_up_threshold': ('MSI_Up', '시장 트렌드 필터', 'UP 판정 MSI 최소값'),

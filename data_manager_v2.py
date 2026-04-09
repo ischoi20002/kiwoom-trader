@@ -2,7 +2,7 @@ import sqlite3
 import pandas as pd
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from utils.normalization import normalize_code
 from utils.bar_resample import refresh_resampled_data_at_path
@@ -21,6 +21,8 @@ class DataManagerV2:
     # [v10.2] Absolute path for the database to ensure consistency across process CWD
     ABS_DIR = os.path.dirname(os.path.abspath(__file__))
     DEFAULT_DB_PATH = os.path.join(ABS_DIR, "trading_data.db")
+    # [v4.12] 주문·체결·활성포지션 등 PC 간 백업·Git 동기화용 소형 DB (캔들·sync_meta 는 trading_data.db)
+    DEFAULT_STATE_DB_BASENAME = "trading_state.db"
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -28,11 +30,19 @@ class DataManagerV2:
                 cls._instance = super(DataManagerV2, cls).__new__(cls)
             return cls._instance
 
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None, state_db_path=None):
         if DataManagerV2._initialized:
             return
-        self.db_path = db_path if db_path else self.DEFAULT_DB_PATH
-        print(f"DEBUG [DataManagerV2]: Using DB at {self.db_path}")
+        mp = db_path if db_path else self.DEFAULT_DB_PATH
+        self.db_path = os.path.abspath(mp)
+        if state_db_path:
+            self.state_db_path = os.path.abspath(state_db_path)
+        else:
+            self.state_db_path = os.path.join(
+                os.path.dirname(self.db_path), self.DEFAULT_STATE_DB_BASENAME
+            )
+        print(f"DEBUG [DataManagerV2]: Main DB at {self.db_path}")
+        print(f"DEBUG [DataManagerV2]: State DB at {self.state_db_path}")
         self._init_db()
         DataManagerV2._initialized = True
 
@@ -52,6 +62,19 @@ class DataManagerV2:
                 return conn
             else:
                 raise e
+
+    def _get_state_connection(self):
+        """주문·포지션·원격명령 등 소형 상태 DB 연결 (백업·Git 동기화 대상)."""
+        try:
+            conn = sqlite3.connect(self.state_db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            return conn
+        except sqlite3.DatabaseError as e:
+            if "malformed" in str(e).lower():
+                print(
+                    f"CRITICAL [DataManagerV2]: State DB malformed at {self.state_db_path}: {e}"
+                )
+            raise e
 
     def run_analyze(self) -> bool:
         """
@@ -91,10 +114,15 @@ class DataManagerV2:
             # If rename fails, we might need manual intervention or just try to delete if permitted
             raise e
 
-    def _init_db(self):
-        """데이터베이스 테이블 초기화"""
+    def _init_db(self) -> None:
+        """메인(캔들·하베스팅) DB + 상태(주문·포지션) DB 초기화 및 구버전 단일 DB 이전."""
+        self._init_main_data_tables()
+        self._init_state_tables()
+        self._migrate_legacy_state_tables_from_main_db()
+
+    def _init_main_data_tables(self) -> None:
+        """대용량 trading_data.db: 봉·sync_meta·실시간스냅샷·상장유니버스 (하베스팅 전용)."""
         with self._get_connection() as conn:
-            # 1. 1분봉 마스터 테이블
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bars_1m (
                     code TEXT,
@@ -107,10 +135,6 @@ class DataManagerV2:
                     PRIMARY KEY (code, datetime)
                 )
             """)
-            
-            # 2. 15분봉 테이블 (조회 성능을 위해 별도 관리)
-            # PK(code, datetime)로 (code, 구간) 조회가 이미 최적화됨. 아래 idx_bars_15m_code_dt는
-            # 구 스키마/마이그레이션 호환 및 EXPLAIN 일관성용 CREATE INDEX IF NOT EXISTS.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bars_15m (
                     code TEXT,
@@ -123,8 +147,6 @@ class DataManagerV2:
                     PRIMARY KEY (code, datetime)
                 )
             """)
-
-            # 3. 일봉 테이블 (전략 종목 선정 가속화용)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bars_1d (
                     code TEXT,
@@ -137,8 +159,6 @@ class DataManagerV2:
                     PRIMARY KEY (code, datetime)
                 )
             """)
-
-            # 4. 동기화 메타 정보 테이블
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS sync_meta (
                     code TEXT PRIMARY KEY,
@@ -148,21 +168,35 @@ class DataManagerV2:
                     status TEXT
                 )
             """)
-
-            # 5. 실시간 데이터 스냅샷 테이블 (체결강도, 호가잔량 로깅용)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1m_code_dt ON bars_1m (code, datetime)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_15m_code_dt ON bars_15m (code, datetime)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1d_code_dt ON bars_1d (code, datetime)")
+            # [v4.12] 예전 실시간 스냅샷 테이블 — 적재 경로 없음, 백테는 합성 지표로 처리. 잔여 파일 정리.
+            try:
+                conn.execute("DROP INDEX IF EXISTS idx_realtime_snap_code_dt")
+                conn.execute("DROP TABLE IF EXISTS realtime_snapshots")
+            except sqlite3.Error:
+                pass
+            try:
+                conn.execute("ALTER TABLE sync_meta ADD COLUMN last_daily_sync TEXT")
+            except sqlite3.OperationalError:
+                pass
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS realtime_snapshots (
-                    code TEXT,
-                    datetime TEXT,
-                    price INTEGER,
-                    vol_power REAL,
-                    total_ask INTEGER,
-                    total_bid INTEGER,
-                    PRIMARY KEY (code, datetime)
+                CREATE TABLE IF NOT EXISTS listing_universe_state (
+                    code TEXT PRIMARY KEY,
+                    state TEXT NOT NULL DEFAULT 'ACTIVE',
+                    name TEXT,
+                    market_id TEXT,
+                    last_official_bas_dt TEXT,
+                    updated_at TEXT,
+                    exited_at TEXT
                 )
             """)
+            conn.commit()
 
-            # 6. 활성 포지션 테이블 (실전/모의 매매 상태 유지용) [v3.7.8]
+    def _init_state_tables(self) -> None:
+        """소형 trading_state.db: 주문·활성포지션·원격명령·헤더 시장추세 (Git/백업 동기화 권장)."""
+        with self._get_state_connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS active_positions (
                     code TEXT PRIMARY KEY,
@@ -176,8 +210,6 @@ class DataManagerV2:
                     status TEXT DEFAULT 'OPEN'
                 )
             """)
-
-            # 7. 주문 이력 테이블 [v3.7.8]
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS order_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,8 +223,6 @@ class DataManagerV2:
                     result TEXT
                 )
             """)
-
-            # 8. 원격 명령 테이블 [v3.8]
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS remote_commands (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -201,27 +231,12 @@ class DataManagerV2:
                     status TEXT DEFAULT 'PENDING'
                 )
             """)
-
-            # 9. 시스템 설정/상태 테이블 [v3.8] 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS system_config (
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
             """)
-
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1m_code_dt ON bars_1m (code, datetime)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_15m_code_dt ON bars_15m (code, datetime)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1d_code_dt ON bars_1d (code, datetime)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_realtime_snap_code_dt ON realtime_snapshots (code, datetime)")
-
-            # [Migration] sync_meta 테이블에 last_daily_sync 컬럼이 없는 경우 추가
-            try:
-                conn.execute("ALTER TABLE sync_meta ADD COLUMN last_daily_sync TEXT")
-            except sqlite3.OperationalError:
-                pass
-            
-            # [Migration] order_history 테이블에 체결 정보 및 신호 메타데이터 컬럼 추가 [v3.8]
             try:
                 conn.execute("ALTER TABLE order_history ADD COLUMN filled_price INTEGER DEFAULT 0")
                 conn.execute("ALTER TABLE order_history ADD COLUMN filled_qty INTEGER DEFAULT 0")
@@ -229,22 +244,103 @@ class DataManagerV2:
                 conn.execute("ALTER TABLE order_history ADD COLUMN reason TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
-
-            # [v4.10] 공공데이터 KRX 상장 스냅샷 반영용 (하베스팅 유니버스·탈락 추적)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS listing_universe_state (
-                    code TEXT PRIMARY KEY,
-                    state TEXT NOT NULL DEFAULT 'ACTIVE',
-                    name TEXT,
-                    market_id TEXT,
-                    last_official_bas_dt TEXT,
-                    updated_at TEXT,
-                    exited_at TEXT
-                )
-            """)
-            
+            for _oh_mig in (
+                "ALTER TABLE order_history ADD COLUMN snap_vol_power REAL",
+                "ALTER TABLE order_history ADD COLUMN snap_bid_ask TEXT DEFAULT ''",
+                "ALTER TABLE order_history ADD COLUMN fill_snap_vol_power REAL",
+                "ALTER TABLE order_history ADD COLUMN fill_snap_bid_ask TEXT DEFAULT ''",
+            ):
+                try:
+                    conn.execute(_oh_mig)
+                except sqlite3.OperationalError:
+                    pass
             conn.commit()
 
+    def _migrate_legacy_state_tables_from_main_db(self) -> None:
+        """
+        예전 단일 trading_data.db 에 있던 주문·포지션 테이블을 trading_state.db 로 한 번만 이전하고
+        메인 DB 에서는 제거합니다. 다른 PC 의 trading_state.db 를 복사해 온 경우에도 메인 쪽 유령 테이블을 정리합니다.
+        """
+        state_tables = (
+            "order_history",
+            "active_positions",
+            "remote_commands",
+            "system_config",
+        )
+        try:
+            if not os.path.exists(self.db_path):
+                return
+
+            with self._get_connection() as main:
+                main_has_leg = bool(
+                    main.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='order_history'"
+                    ).fetchone()
+                )
+
+            with self._get_state_connection() as st:
+                n_state_orders = st.execute("SELECT COUNT(*) FROM order_history").fetchone()[0]
+
+            # state 에 이미 이력이 있고 메인에 구 테이블만 남은 경우 → 복사 없이 메인에서만 DROP
+            if main_has_leg and n_state_orders > 0:
+                with self._get_connection() as main:
+                    for tbl in state_tables:
+                        try:
+                            main.execute(f"DROP TABLE IF EXISTS {tbl}")
+                        except sqlite3.Error:
+                            pass
+                    main.commit()
+                return
+
+            if n_state_orders > 0:
+                return
+
+            if not main_has_leg:
+                return
+
+            with self._get_state_connection() as st:
+                st.execute("ATTACH DATABASE ? AS leg", (self.db_path,))
+                try:
+                    for tbl in state_tables:
+                        try:
+                            exists = st.execute(
+                                "SELECT 1 FROM leg.sqlite_master WHERE type='table' AND name=?",
+                                (tbl,),
+                            ).fetchone()
+                            if not exists:
+                                continue
+                            st.execute(f"INSERT INTO {tbl} SELECT * FROM leg.{tbl}")
+                        except sqlite3.Error as ex:
+                            try:
+                                print(
+                                    f"[DataManagerV2] 상태 테이블 이전 건너뜀 ({tbl}): {ex}"
+                                )
+                            except Exception:
+                                pass
+                    st.commit()
+                finally:
+                    try:
+                        st.execute("DETACH DATABASE leg")
+                    except sqlite3.Error:
+                        pass
+            with self._get_connection() as main:
+                for tbl in state_tables:
+                    try:
+                        main.execute(f"DROP TABLE IF EXISTS {tbl}")
+                    except sqlite3.Error:
+                        pass
+                main.commit()
+            try:
+                print(
+                    "[DataManagerV2] 구버전 주문·포지션 데이터를 trading_state.db 로 이전했습니다."
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] 상태 DB 이전 경고(무시 가능): {e}")
+            except Exception:
+                pass
 
     def merge_official_krx_listing(self, df) -> dict:
         """
@@ -489,17 +585,8 @@ class DataManagerV2:
                 pass
 
 
-    def save_realtime_snapshot(self, code, dt, price, vol_power, total_ask, total_bid):
-        code = normalize_code(code)
-        with self._lock, self._get_connection() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO realtime_snapshots (code, datetime, price, vol_power, total_ask, total_bid)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (code, dt, price, vol_power, total_ask, total_bid))
-            conn.commit()
-
     def save_active_position(self, code, name, avg_price, qty, stage, invested, entry_time, reason):
-        with self._get_connection() as conn:
+        with self._lock, self._get_state_connection() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO active_positions (code, name, avg_price, qty, stage, invested, entry_time, reason)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -507,24 +594,58 @@ class DataManagerV2:
             conn.commit()
 
     def delete_active_position(self, code):
-        with self._get_connection() as conn:
+        with self._lock, self._get_state_connection() as conn:
             conn.execute("DELETE FROM active_positions WHERE code = ?", (code,))
             conn.commit()
 
-    def log_order(self, code, side, qty, price, order_type, order_no, result, name="", reason=""):
+    def log_order(
+        self,
+        code,
+        side,
+        qty,
+        price,
+        order_type,
+        order_no,
+        result,
+        name="",
+        reason="",
+        snap_vol_power=None,
+        snap_bid_ask=None,
+    ):
+        """주문 접수 DB 기록. snap_* 는 감시 화면과 동일한 체결강도·호가 문자열 스냅샷."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self._get_connection() as conn:
-            conn.execute("""
-                INSERT INTO order_history (code, side, qty, price, order_type, order_no, timestamp, result, name, reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (code, side, qty, price, order_type, order_no, now, result, name, reason))
+        with self._lock, self._get_state_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO order_history (
+                    code, side, qty, price, order_type, order_no, timestamp, result, name, reason,
+                    snap_vol_power, snap_bid_ask
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    code,
+                    side,
+                    qty,
+                    price,
+                    order_type,
+                    order_no,
+                    now,
+                    result,
+                    name,
+                    reason,
+                    snap_vol_power,
+                    (snap_bid_ask if snap_bid_ask is not None else ""),
+                ),
+            )
             conn.commit()
 
     def get_today_orders(self):
         today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
-        with self._get_connection() as conn:
+        with self._get_state_connection() as conn:
             cursor = conn.execute("""
-                SELECT timestamp, code, side, qty, price, filled_price, filled_qty, result, name, reason
+                SELECT timestamp, code, side, qty, price, filled_price, filled_qty, result, name, reason,
+                       snap_vol_power, snap_bid_ask, fill_snap_vol_power, fill_snap_bid_ask
                 FROM order_history 
                 WHERE timestamp >= ? 
                 ORDER BY timestamp DESC
@@ -537,10 +658,11 @@ class DataManagerV2:
         (일일 결산 리포트 등 분석용)
         """
         try:
-            with self._get_connection() as conn:
+            with self._get_state_connection() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT timestamp, code, side, qty, price, filled_price, filled_qty, result, name, reason, order_no, order_type
+                    SELECT timestamp, code, side, qty, price, filled_price, filled_qty, result, name, reason, order_no, order_type,
+                           snap_vol_power, snap_bid_ask, fill_snap_vol_power, fill_snap_bid_ask
                     FROM order_history
                     WHERE timestamp >= ? AND timestamp <= ?
                     ORDER BY timestamp ASC
@@ -556,7 +678,7 @@ class DataManagerV2:
             return []
 
     def get_latest_order_meta(self, code):
-        with self._get_connection() as conn:
+        with self._get_state_connection() as conn:
             cursor = conn.execute("""
                 SELECT name, reason 
                 FROM order_history 
@@ -566,14 +688,40 @@ class DataManagerV2:
             res = cursor.fetchone()
             return res if res else (None, None)
 
-    def update_order_status(self, code, order_no, new_status, filled_price=0, filled_qty=0):
-        with self._get_connection() as conn:
-            conn.execute("""
+    def update_order_status(
+        self,
+        code,
+        order_no,
+        new_status,
+        filled_price=0,
+        filled_qty=0,
+        fill_snap_vol_power=None,
+        fill_snap_bid_ask=None,
+    ):
+        """체결 반영 시 fill_snap_* 로 체결 시점 수급 스냅샷을 함께 저장할 수 있습니다."""
+        sets = ["result = ?", "filled_price = ?", "filled_qty = ?"]
+        params: List[Any] = [new_status, filled_price, filled_qty]
+        if fill_snap_vol_power is not None:
+            sets.append("fill_snap_vol_power = ?")
+            params.append(fill_snap_vol_power)
+        if fill_snap_bid_ask is not None:
+            sets.append("fill_snap_bid_ask = ?")
+            params.append(fill_snap_bid_ask)
+        params.extend(
+            [
+                code,
+                order_no,
+                datetime.now().strftime("%Y-%m-%d 00:00:00"),
+            ]
+        )
+        sql = f"""
                 UPDATE order_history 
-                SET result = ?, filled_price = ?, filled_qty = ?
+                SET {", ".join(sets)}
                 WHERE code = ? AND (order_no = ? OR order_no = 'MOCK_ID')
                 AND timestamp >= ?
-            """, (new_status, filled_price, filled_qty, code, order_no, datetime.now().strftime("%Y-%m-%d 00:00:00")))
+            """
+        with self._lock, self._get_state_connection() as conn:
+            conn.execute(sql, tuple(params))
             conn.commit()
 
     def get_bars(self, code, start_dt=None, end_dt=None, interval='1m', limit=None):
@@ -981,15 +1129,24 @@ class DataManagerV2:
         return {}
 
     def get_active_positions(self):
-        with self._get_connection() as conn: cursor = conn.execute("SELECT code, name, avg_price, qty, stage, invested, entry_time, reason FROM active_positions WHERE status='OPEN'"); return cursor.fetchall()
+        with self._get_state_connection() as conn:
+            cursor = conn.execute(
+                "SELECT code, name, avg_price, qty, stage, invested, entry_time, reason FROM active_positions WHERE status='OPEN'"
+            )
+            return cursor.fetchall()
 
     def get_market_trend_label(self):
-        with self._get_connection() as conn:
+        with self._get_state_connection() as conn:
             row = conn.execute("SELECT value FROM system_config WHERE key='market_trend'").fetchone()
             return row[0] if row else "NEUTRAL"
 
     def set_market_trend_label(self, label):
-        with self._get_connection() as conn: conn.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('market_trend', ?)", (label,)); conn.commit()
+        with self._lock, self._get_state_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('market_trend', ?)",
+                (label,),
+            )
+            conn.commit()
 
     def get_kospi_list(self, count=200, force=False):
         """
@@ -1062,7 +1219,8 @@ class DataManagerV2:
         import sqlite3
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.state_db_path, timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL;")
             cursor = conn.cursor()
             
             # 1. 테이블 존재 여부 확인 (Defensive)

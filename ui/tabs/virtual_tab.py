@@ -59,7 +59,7 @@ class VirtualTab:
             "d1_cash": tk.StringVar(value="0"),
             "d2_cash": tk.StringVar(value="0"),
             "day": tk.StringVar(value="0 (0.00%)"),
-            "cum": tk.StringVar(value="0.00%")
+            "cum": tk.StringVar(value="0 (+0.00%)")
         })
 
         for label, var, color in [
@@ -69,7 +69,7 @@ class VirtualTab:
             ("D+2 예상", "d2_cash", self.app.colors['primary']),
             ("주식 평가금", "stock", None),
             ("금일 손익", "day", "#BF616A"),
-            ("누적 수익률", "cum", "#A3BE8C")
+            ("누적 수익", "cum", "#A3BE8C")
         ]:
             f = ttk.Frame(summary_f)
             f.pack(side=tk.LEFT, padx=(0, 15))
@@ -171,11 +171,12 @@ class VirtualTab:
                 ("종목명", 14),
                 ("수량", 6),
                 ("평단가", 10),
+                ("매입가", 12),
                 ("현재가", 10),
                 ("평가금", 12),
                 ("손익금", 12),
                 ("수익률", 8),
-                ("진입", 6),
+                ("진입일시", 16),
             ]
             for i, (text, wch) in enumerate(headers):
                 tk.Label(
@@ -203,10 +204,11 @@ class VirtualTab:
     def _build_history_tree(self, parent):
         cols = ("Time", "Code", "Name", "Qty", "BuyP", "SellP", "PnL", "Profit", "Reason")
         tree = ttk.Treeview(parent, columns=cols, show="headings", selectmode="browse")
-        heads = ["종료시간", "코드", "종목명", "수량", "매수가", "매도가", "손익금", "수익률", "사유"]
+        heads = ["종료일시", "코드", "종목명", "수량", "매수가", "매도가", "손익금", "수익률", "사유"]
         for col, text in zip(cols, heads):
             tree.heading(col, text=text)
             tree.column(col, width=85, anchor=tk.CENTER)
+        tree.column("Time", width=152, anchor=tk.CENTER)
         tree.column("Name", width=110, anchor=tk.W)
         tree.column("PnL", width=90, anchor=tk.E)
         tree.column("Reason", width=120, anchor=tk.W)
@@ -218,19 +220,62 @@ class VirtualTab:
         return tree
 
     def _build_order_tree(self, parent):
-        cols = ("Time", "Code", "Name", "Side", "Qty", "OrderP", "FilledP", "Status", "Reason")
-        tree = ttk.Treeview(parent, columns=cols, show="headings")
-        display_names = ["시간", "코드", "종목명", "구분", "수량", "주문가", "체결가", "상태", "사유"]
+        cols = (
+            "Time",
+            "Code",
+            "Name",
+            "Side",
+            "Qty",
+            "OrderP",
+            "FilledP",
+            "VPOrd",
+            "BAOrd",
+            "Status",
+            "Reason",
+        )
+        # LabelFrame 등 상위는 pack — 트리+스크롤은 내부 전용 프레임에서만 grid (pack/grid 혼용 금지)
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill=tk.BOTH, expand=True)
+        wrap.grid_rowconfigure(0, weight=1)
+        wrap.grid_columnconfigure(0, weight=1)
+
+        tree = ttk.Treeview(wrap, columns=cols, show="headings")
+        display_names = [
+            "일시",
+            "코드",
+            "종목명",
+            "구분",
+            "수량",
+            "주문가",
+            "체결가",
+            "VP",
+            "호가",
+            "상태",
+            "사유",
+        ]
         for col, text in zip(cols, display_names):
             tree.heading(col, text=text)
-            tree.column(col, width=85, anchor=tk.CENTER)
-        tree.column("Name", width=110, anchor=tk.W)
-        tree.column("Reason", width=150, anchor=tk.W)
-        
-        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            w = 88
+            if col == "Time":
+                w = 138
+            elif col == "BAOrd":
+                w = 200
+            elif col == "VPOrd":
+                w = 72
+            elif col == "Reason":
+                w = 120
+            tree.column(col, width=w, anchor=tk.CENTER)
+        tree.column("Name", width=100, anchor=tk.W)
+        tree.column("Reason", width=120, anchor=tk.W)
+        tree.column("BAOrd", anchor=tk.E)
+
+        # 호가(매도/매수/비율) 열이 넓어 가로 스크롤 제공
+        scroll_y = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=tree.yview)
+        scroll_x = ttk.Scrollbar(wrap, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
         return tree
 
     def _open_watchlist_dialog(self) -> None:
@@ -285,6 +330,88 @@ class VirtualTab:
         except Exception:
             return {}
 
+    @staticmethod
+    def _format_entry_datetime(entry_raw: object) -> str:
+        """진입 시각 ISO 등 → 'YYYY-MM-DD HH:MM' 형태로 표시."""
+        try:
+            et = str(entry_raw or "").strip()
+            if not et:
+                return "-"
+            if "T" in et:
+                d, tpart = et.split("T", 1)
+                return f"{d} {tpart[:5]}"
+            if len(et) >= 16 and et[4] == "-" and et[7] == "-":
+                return et[:16].replace("T", " ")
+        except Exception:
+            pass
+        return (str(entry_raw)[:16] if entry_raw else "-") or "-"
+
+    @staticmethod
+    def _format_history_exit_display(pos: Dict[str, Any], last_event: Dict[str, Any]) -> str:
+        """
+        매매 종료일시 표시.
+        exit_datetime(신규 저장) → exit_date+exit_time → 구버전(시각만)은 entry_time 날짜와 결합 시도.
+        """
+        try:
+            ex_dt = str(pos.get("exit_datetime") or "").strip()
+            if ex_dt:
+                return ex_dt[:19] if len(ex_dt) >= 19 else ex_dt
+            ed = str(pos.get("exit_date") or "").strip()
+            et = str(pos.get("exit_time") or "").strip()
+            le_t = str(last_event.get("time") or "").strip()
+            if not et:
+                et = le_t
+            if ed and et and " " not in et:
+                return f"{ed} {et}"
+            if et and len(et) >= 10 and et[4] == "-" and " " in et:
+                return et[:19] if len(et) >= 19 else et
+            if ed and le_t and " " not in le_t:
+                return f"{ed} {le_t}"
+            if et:
+                entry_iso = str(pos.get("entry_time") or "").strip()
+                if "T" in entry_iso:
+                    d0 = entry_iso.split("T", 1)[0]
+                    if len(d0) == 10 and d0[4] == "-":
+                        return f"{d0} {et}"
+                return et
+            return le_t or "-"
+        except Exception:
+            return "-"
+
+    @staticmethod
+    def _history_exit_sort_ts(pos: Dict[str, Any]) -> float:
+        """매매 종료 내역 정렬 키: 종료 시각(epoch). 클수록 최신."""
+        try:
+            s = str(pos.get("exit_datetime") or "").strip()
+            if len(s) >= 19:
+                return float(
+                    datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").timestamp()
+                )
+            ed = str(pos.get("exit_date") or "").strip()
+            et = str(pos.get("exit_time") or "").strip()
+            if ed and et:
+                if " " in et and len(et) >= 16 and et[4] == "-":
+                    frag = et[:19].replace("T", " ")
+                    return float(
+                        datetime.strptime(frag[:19], "%Y-%m-%d %H:%M:%S").timestamp()
+                    )
+                frag2 = f"{ed} {et.strip()[:8]}"
+                return float(
+                    datetime.strptime(frag2, "%Y-%m-%d %H:%M:%S").timestamp()
+                )
+            if et and len(et) <= 10 and ":" in et:
+                entry_iso = str(pos.get("entry_time") or "").strip()
+                if "T" in entry_iso:
+                    d0 = entry_iso.split("T", 1)[0]
+                    if len(d0) == 10 and d0[4] == "-":
+                        frag3 = f"{d0} {et.strip()[:8]}"
+                        return float(
+                            datetime.strptime(frag3, "%Y-%m-%d %H:%M:%S").timestamp()
+                        )
+        except (TypeError, ValueError, OSError):
+            pass
+        return 0.0
+
     def _sorted_active_holdings(self) -> List[Tuple[str, Dict[str, Any]]]:
         """보유 행 표시 순서를 종목코드 기준으로 고정(줄무늬 태그·인덱스 흔들림 방지)."""
         try:
@@ -314,9 +441,9 @@ class VirtualTab:
         profit_pct = (curr_p / ap - 1) * 100 if ap else 0.0
         eval_amt = curr_p * qty
         unrealized = (curr_p - ap) * qty
+        buy_in_amt = int(round(float(ap) * float(qty)))
         p_str = f"{profit_pct:+.2f}%"
-        et = str(pos.get("entry_time", "") or "")
-        entry_tm = et.split("T")[-1][:5] if "T" in et else "-"
+        entry_disp = self._format_entry_datetime(pos.get("entry_time", ""))
         tag_base = "even" if row_idx % 2 == 0 else "odd"
         p_tag = (
             "price_up"
@@ -329,11 +456,12 @@ class VirtualTab:
             nm,
             f"{qty:,}",
             f"{ap:,.0f}",
+            f"{buy_in_amt:,}",
             f"{curr_p:,.0f}",
             f"{int(eval_amt):+,}",
             f"{int(unrealized):+,}",
             p_str,
-            entry_tm,
+            entry_disp,
         )
         # 전체 렌더와 동일하게 항상 (줄무늬, 방향) 2튜플
         return vals, (tag_base, p_tag), float(profit_pct)
@@ -364,18 +492,18 @@ class VirtualTab:
         """종목별 행 프레임이 없으면 생성, 라벨 텍스트·색만 갱신."""
         try:
             inner = self._active_grid_inner
-            if inner is None or len(vals) < 9:
+            if inner is None or len(vals) < 10:
                 return
             bg_even = "#242933"
             bg_odd = "#3B4252"
             row_bg = bg_even if row_idx % 2 == 0 else bg_odd
             # 수익률 방향색: 코드~진입까지 동일 적용 (Treeview 태그와 동일한 행 단위 강조)
             fg_row = self._profit_label_fg(profit_pct)
-            anchors = ("w", "w", "e", "e", "e", "e", "e", "e", "center")
+            anchors = ("w", "w", "e", "e", "e", "e", "e", "e", "e", "w")
 
             labels = self._active_row_labels.get(nk)
             row_fr = self._active_row_frames.get(nk)
-            if row_fr is None or labels is None or len(labels) != 9:
+            if row_fr is None or labels is None or len(labels) != 10:
                 try:
                     if row_fr is not None:
                         row_fr.destroy()
@@ -384,7 +512,7 @@ class VirtualTab:
                 row_fr = tk.Frame(inner, bg=row_bg)
                 row_fr.pack(fill=tk.X)
                 labels = []
-                for col in range(9):
+                for col in range(10):
                     lb = tk.Label(
                         row_fr,
                         text="",
@@ -393,7 +521,7 @@ class VirtualTab:
                         font=("Malgun Gothic", 9),
                         anchor=anchors[col],
                     )
-                    wch = (9, 14, 6, 10, 10, 12, 12, 8, 6)[col]
+                    wch = (9, 14, 6, 10, 12, 10, 12, 12, 8, 16)[col]
                     lb.grid(row=0, column=col, padx=2, pady=1, sticky="ew")
                     try:
                         lb.configure(width=wch)
@@ -406,7 +534,7 @@ class VirtualTab:
             # 배경(줄무늬)·텍스트·손익 색 동기화
             row_fr = self._active_row_frames[nk]
             row_fr.configure(bg=row_bg)
-            texts = [str(vals[i]) for i in range(9)]
+            texts = [str(vals[i]) for i in range(10)]
             for col, lb in enumerate(self._active_row_labels[nk]):
                 try:
                     lb.configure(text=texts[col], bg=row_bg, fg=fg_row)
@@ -453,6 +581,11 @@ class VirtualTab:
 
     def _render_virtual_positions(self):
         """데이터(app.virtual_positions / history / today_orders) 동기화"""
+        # 0. 실시간 주문 로그 — 보유/히스토리 처리 전에 먼저 갱신(체결강도·호가 열 포함)
+        try:
+            self._render_orders()
+        except Exception:
+            pass
         # 1. 보유 종목
         total_eval = 0
         total_invested = 0
@@ -527,46 +660,66 @@ class VirtualTab:
         today_str = datetime.now().strftime("%Y-%m-%d")
         
         self.tree_history.delete(*self.tree_history.get_children())
-        hist_row = 0
+        hist_visible: List[Dict[str, Any]] = []
         for pos in self.app.portfolio.virtual_history:
             if str(pos.get("code", "")).zfill(6) in wl_hide:
                 continue
-            last_event = pos['events'][-1] if pos.get('events') else {}
-            pnl_amt = pos.get('realized_pnl_amt', 0)
+            hist_visible.append(pos)
+            pnl_amt = pos.get("realized_pnl_amt", 0)
             total_realized_pnl += pnl_amt
-            
-            if pos.get('entry_time', '').startswith(today_str):
+            if str(pos.get("entry_time", "")).startswith(today_str):
                 total_day_realized_pnl += pnl_amt
-            
+
+        hist_visible.sort(key=self._history_exit_sort_ts, reverse=True)
+
+        hist_row = 0
+        for pos in hist_visible:
+            last_event = pos["events"][-1] if pos.get("events") else {}
+            pnl_amt = pos.get("realized_pnl_amt", 0)
             tag_base = "even" if hist_row % 2 == 0 else "odd"
             hist_row += 1
-            p_tag = "price_up" if pos.get('final_pnl_pct', 0) > 0 else "price_down"
-            self.tree_history.insert("", tk.END, values=(
-                pos.get('exit_time', last_event.get('time', '-')), 
-                pos.get('code'), pos['name'], f"{pos.get('qty', 0):,}",
-                f"{pos.get('avg_price', 0):,.0f}", f"{pos.get('exit_price', 0):,.0f}",
-                f"{int(pnl_amt):+,}", f"{pos.get('final_pnl_pct', 0):+.2f}%", 
-                pos.get('reason', 'SIGNAL')
-            ), tags=(tag_base, p_tag))
+            p_tag = "price_up" if pos.get("final_pnl_pct", 0) > 0 else "price_down"
+            self.tree_history.insert(
+                "",
+                tk.END,
+                values=(
+                    self._format_history_exit_display(pos, last_event),
+                    pos.get("code"),
+                    pos["name"],
+                    f"{pos.get('qty', 0):,}",
+                    f"{pos.get('avg_price', 0):,.0f}",
+                    f"{pos.get('exit_price', 0):,.0f}",
+                    f"{int(pnl_amt):+,}",
+                    f"{pos.get('final_pnl_pct', 0):+.2f}%",
+                    pos.get("reason", "SIGNAL"),
+                ),
+                tags=(tag_base, p_tag),
+            )
 
         self._cached_day_realized_pnl = float(total_day_realized_pnl)
 
-        # 3. 주문 내역
-        self._render_orders()
-
-        # 4. 요약 정보 (Account Summary - REST API Synced)
+        # 3. 요약 정보 (Account Summary - REST API Synced) — 주문 로그는 위 0단계에서 이미 반영
         portfolio = self.app.portfolio
         current_cash = getattr(portfolio, "actual_deposit", 0)
         stock_eval = float(total_eval)  # 그리드 실시간 평가 합 (= '주식 평가금' 행)
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
         day_pnl_total = total_day_realized_pnl + total_unrealized_pnl
-        # 수익률 계산을 위한 기준 자산 (설정값 or 실제자산)
-        start_cap = float(str(self.app.settings.get('backtest_initial_capital', 10000000)).replace(',', ''))
-        safe_cap = max(1, start_cap if total_assets == 0 else (total_assets - day_pnl_total))
-        
-        day_pnl_pct = (day_pnl_total / safe_cap) * 100
-        
+        start_cap = float(
+            str(self.app.settings.get("backtest_initial_capital", 10000000)).replace(",", "")
+        )
+        try:
+            ta = float(total_assets)
+        except (TypeError, ValueError):
+            ta = 0.0
+        # 금일 %: 장중 기준으로 '금일 손익 반영 전' 총자산 근사치 대비 (누적%와 분리)
+        opening_eq = max(1.0, ta - float(day_pnl_total))
+        day_pnl_pct = (float(day_pnl_total) / opening_eq) * 100.0
+
+        # 누적 수익: 설정 초기자본 대비 (금액 + 초기자본 대비 %)
+        cum_pnl_amt = ta - start_cap
+        cum_pnl_pct = (cum_pnl_amt / start_cap) * 100.0 if start_cap > 1e-9 else 0.0
+
         self.vars["total"].set(f"{total_assets:,.0f}")
         self.vars["cash"].set(f"{current_cash:,.0f}")
         self.vars["stock"].set(f"{stock_eval:,.0f}")
@@ -576,9 +729,7 @@ class VirtualTab:
         self.vars["d2_cash"].set(f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
             
         self.vars["day"].set(f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
-        
-        total_profit_pct = (total_assets / safe_cap - 1) * 100
-        self.vars["cum"].set(f"{total_profit_pct:+.2f}%")
+        self.vars["cum"].set(f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
 
     def _render_real_data(self):
         """실시간 틱·동기화 후 보유 그리드 라벨만 갱신 (Treeview 미사용)."""
@@ -642,9 +793,18 @@ class VirtualTab:
             total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
             day_pnl_total = float(self._cached_day_realized_pnl) + total_unrealized_pnl
-            start_cap = float(str(self.app.settings.get("backtest_initial_capital", 10000000)).replace(",", ""))
-            safe_cap = max(1, start_cap if total_assets == 0 else (total_assets - day_pnl_total))
-            day_pnl_pct = (day_pnl_total / safe_cap) * 100 if safe_cap > 0 else 0.0
+            start_cap = float(
+                str(self.app.settings.get("backtest_initial_capital", 10000000)).replace(",", "")
+            )
+            try:
+                ta = float(total_assets)
+            except (TypeError, ValueError):
+                ta = 0.0
+            opening_eq = max(1.0, ta - float(day_pnl_total))
+            day_pnl_pct = (float(day_pnl_total) / opening_eq) * 100.0 if opening_eq > 0 else 0.0
+
+            cum_pnl_amt = ta - start_cap
+            cum_pnl_pct = (cum_pnl_amt / start_cap) * 100.0 if start_cap > 1e-9 else 0.0
 
             _set_if_diff("total", f"{total_assets:,.0f}")
             _set_if_diff("cash", f"{current_cash:,.0f}")
@@ -652,8 +812,7 @@ class VirtualTab:
             _set_if_diff("d1_cash", f"{getattr(portfolio, 'd1_deposit', 0):,.0f}")
             _set_if_diff("d2_cash", f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
             _set_if_diff("day", f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
-            total_profit_pct = (total_assets / safe_cap - 1) * 100 if safe_cap > 0 else 0.0
-            _set_if_diff("cum", f"{total_profit_pct:+.2f}%")
+            _set_if_diff("cum", f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
         except Exception:
             pass
 
@@ -699,30 +858,85 @@ class VirtualTab:
         except Exception:
             return float(total_assets)
 
-    def _render_orders(self):
-        """DB 기반 실시간 주문 내역 동기화"""
+    def _order_log_vp_cell(self, v: object) -> str:
+        """주문 로그용 체결강도 셀(소수 1자리 %)."""
+        try:
+            if v is None:
+                return "-"
+            return f"{float(v):.1f}%"
+        except Exception:
+            return "-"
+
+    def _render_orders(self) -> None:
+        """DB 기반 실시간 주문 내역 동기화 (주문 시점 VP·호가만 표시)."""
+        if not getattr(self, "tree_orders", None):
+            return
         self.tree_orders.delete(*self.tree_orders.get_children())
         try:
             orders = self.app.data_manager.get_today_orders()
             wl_hide = self._watchlist_hide_codes()
             row_i = 0
             for ord_data in orders:
-                # ts, code, side, qty, price, f_price, f_qty, result, name, reason
-                ts, code, side, qty, price, f_price, f_qty, result, name, reason = ord_data
+                # snap_* = 주문 시점, fill_snap_* = 체결 시점 (감시 Bid/Ask 열과 동일 호가 문자열)
+                try:
+                    od = list(ord_data)
+                    while len(od) < 14:
+                        od.append(None)
+                    (
+                        ts,
+                        code,
+                        side,
+                        qty,
+                        price,
+                        f_price,
+                        f_qty,
+                        result,
+                        name,
+                        reason,
+                        snap_vp,
+                        snap_ba,
+                        _fill_vp,
+                        _fill_ba,
+                    ) = od[:14]
+                except Exception:
+                    continue
                 if str(code).zfill(6) in wl_hide:
                     continue
-                tm = ts.split(" ")[1] if " " in ts else ts
+                try:
+                    tm_raw = str(ts or "").strip()
+                    tm = tm_raw if tm_raw else "-"
+                except Exception:
+                    tm = "-"
                 side_kr = "매수" if side == "buy" else "매도"
                 f_p_str = f"{f_price:,}" if f_price > 0 else "-"
-                
+                ba_o = (snap_ba or "").strip() or "-"
                 tag_base = "even" if row_i % 2 == 0 else "odd"
                 row_i += 1
                 side_tag = "price_up" if side == "buy" else "price_down"
-                
-                self.tree_orders.insert("", tk.END, values=(
-                    tm, code, name, side_kr, f"{qty:,}", f"{price:,}", f_p_str, result, reason
-                ), tags=(tag_base, side_tag))
-        except: pass
+
+                self.tree_orders.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        tm,
+                        code,
+                        name,
+                        side_kr,
+                        f"{qty:,}",
+                        f"{price:,}",
+                        f_p_str,
+                        self._order_log_vp_cell(snap_vp),
+                        ba_o,
+                        result,
+                        reason,
+                    ),
+                    tags=(tag_base, side_tag),
+                )
+        except Exception as e:
+            try:
+                print(f"[UI Error] _render_orders: {e}")
+            except Exception:
+                pass
 
     def _toggle_environment(self):
         """[v3.9.6] 실전/모의 서버 설정(config.py)을 토글하고 재시작 안내를 강화합니다.
@@ -782,12 +996,37 @@ class VirtualTab:
 
     def log_order(self, code, side, qty, price, order_type, result, reason=""):
         """[v4.5.3] DB 기록 및 신규 3판넬 UI 갱신 (캡슐화)"""
-        self.app.data_manager.log_order(code, side, qty, price, order_type, "MOCK_ID", result, reason)
+        try:
+            from core.supply_display import capture_supply_snapshot
+
+            _sn = capture_supply_snapshot(self.app, code)
+        except Exception:
+            _sn = {"vol_power": None, "bid_ask_text": ""}
+        # 기존 호환: positional 8번째 인자가 name 컬럼으로 전달되던 패턴 유지
+        self.app.data_manager.log_order(
+            code,
+            side,
+            qty,
+            price,
+            order_type,
+            "MOCK_ID",
+            result,
+            name=reason,
+            reason="",
+            snap_vol_power=_sn.get("vol_power"),
+            snap_bid_ask=_sn.get("bid_ask_text") or "",
+        )
         try:
             self.app.refresh_virtual_tab_full()
         except Exception:
-            self._render_orders()
-            self._render_virtual_positions()
+            try:
+                self._render_orders()
+            except Exception:
+                pass
+            try:
+                self._render_virtual_positions()
+            except Exception:
+                pass
 
     def generate_report(self):
         """[v4.5.3] 가상 매매 나러티브 리포트 생성 (UI 위임)"""

@@ -38,6 +38,235 @@
             "exit_price": 97200.0,
             "exit_time": "13:13:53",
             "code": "055550"
+        },
+        {
+            "name": "신한지주",
+            "avg_price": 92600.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 92924.1,
+            "entry_time": "2026-04-07T12:52:36.164391",
+            "reason": "TEST_1SHARE_MARKET",
+            "events": [
+                {
+                    "time": "07:03:17",
+                    "action": "SYNC_EXIT",
+                    "price": 92600.0,
+                    "qty": 1,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 92600.0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 92600.0,
+            "exit_time": "07:03:17",
+            "code": "055550"
+        },
+        {
+            "name": "현대오토에버",
+            "avg_price": 367000.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 367000.0,
+            "entry_time": "2026-04-07T12:53:22.760350",
+            "reason": "TEST_1SHARE_MARKET",
+            "events": [
+                {
+                    "time": "09:00:33",
+                    "action": "SELL",
+                    "price": 418000.0,
+                    "qty": 1,
+                    "snapshot": {
+                        "time": "2026-04-09 09:00:33",
+                        "price": 418000.0,
+                        "market_trend": "UP",
+                        "vol_power": 7.8,
+                        "reason": "REST_SELL",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.57
+                    }
+                }
+            ],
+            "max_now": 367000.0,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "pending_exit_ord_no": "0005454",
+            "final_pnl_pct": 13.326975476839237,
+            "realized_pnl_amt": 48910.0,
+            "exit_price": 418000.0,
+            "exit_time": "09:00:33",
+            "code": "307950"
+        },
+        {
+            "name": "대한항공",
+            "avg_price": 23100.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 23100.0,
+            "entry_time": "2026-04-07T12:50:43.633563",
+            "reason": "TEST_1SHARE_MARKET",
+            "events": [
+                {
+                    "time": "09:00:35",
+                    "action": "SELL",
+                    "price": 24600.0,
+                    "qty": 1,
+                    "snapshot": {
+                        "time": "2026-04-09 09:00:35",
+                        "price": 24600.0,
+                        "market_trend": "UP",
+                        "vol_power": 208.24,
+                        "reason": "REST_SELL",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.21
+                    }
+                }
+            ],
+            "max_now": 23150.0,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "pending_exit_ord_no": "0005497",
+            "final_pnl_pct": 5.961038961038962,
+            "realized_pnl_amt": 1377.0,
+            "exit_price": 24600.0,
+            "exit_time": "09:00:35",
+            "code": "003490"
+        },
+        {
+            "name": "한국콜마",
+            "avg_price": 76400.0,
+            "qty": 26,
+            "stage": 1,
+            "invested": 1986400.0,
+            "entry_time": "2026-04-09T06:58:36.879741",
+            "reason": "SYNCED",
+            "events": [
+                {
+                    "time": "09:10:08",
+                    "action": "SELL",
+                    "price": 80200.0,
+                    "qty": 26,
+                    "snapshot": {
+                        "time": "2026-04-09 09:10:08",
+                        "price": 80200.0,
+                        "market_trend": "UP",
+                        "vol_power": 294.17,
+                        "reason": "REST_SELL",
+                        "rsi": 59.3,
+                        "macd": 320.33,
+                        "osc": 75.28,
+                        "adx": 22.6,
+                        "ma_alignment": "정배열(Bull)",
+                        "bid_ask_ratio": 0.17
+                    }
+                }
+            ],
+            "max_now": 76400.0,
+            "current_price": 80200.0,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "pending_exit_ord_no": "0020314",
+            "final_pnl_pct": 4.448952879581152,
+            "realized_pnl_amt": 88374.0,
+            "exit_price": 80200.0,
+            "exit_time": "09:10:08",
+            "code": "161890"
+        },
+        {
+            "name": "롯데쇼핑",
+            "avg_price": 110428.0,
+            "qty": 17,
+            "stage": 1,
+            "invested": 1877276.0,
+            "entry_time": "2026-04-09T09:52:35.627872",
+            "reason": "TYPE_B",
+            "events": [
+                {
+                    "time": "11:47:00",
+                    "action": "SELL",
+                    "price": 107700.0,
+                    "qty": 17,
+                    "snapshot": {
+                        "time": "2026-04-09 11:47:00",
+                        "price": 107700.0,
+                        "market_trend": "UP",
+                        "vol_power": 95.05,
+                        "reason": "REST_SELL",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.06
+                    }
+                }
+            ],
+            "max_now": 111100.0,
+            "current_price": 108500.0,
+            "exit_pending": true,
+            "exit_reason": "STOP_LOSS",
+            "pending_exit_ord_no": "0106181",
+            "final_pnl_pct": -2.958036005360959,
+            "realized_pnl_amt": -55530.5,
+            "exit_price": 107700.0,
+            "exit_date": "2026-04-09",
+            "exit_time": "11:47:00",
+            "exit_datetime": "2026-04-09 11:47:00",
+            "code": "023530"
+        },
+        {
+            "name": "롯데케미칼",
+            "avg_price": 93190.0,
+            "qty": 21,
+            "stage": 1,
+            "invested": 1956990.0,
+            "entry_time": "2026-04-09T09:11:54.821479",
+            "reason": "TYPE_B",
+            "events": [
+                {
+                    "time": "14:21:27",
+                    "action": "SELL",
+                    "price": 96100.0,
+                    "qty": 21,
+                    "snapshot": {
+                        "time": "2026-04-09 14:21:27",
+                        "price": 96100.0,
+                        "market_trend": "UP",
+                        "vol_power": 153.98,
+                        "reason": "REST_SELL",
+                        "rsi": 53.4,
+                        "macd": 568.59,
+                        "osc": -440.35,
+                        "adx": 22.9,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.87
+                    }
+                }
+            ],
+            "max_now": 93200.0,
+            "max_p": 100400.0,
+            "max_price": 100400.0,
+            "current_price": 96400.0,
+            "exit_pending": true,
+            "exit_reason": "ATR_TRAIL",
+            "pending_exit_ord_no": "0164341",
+            "final_pnl_pct": 2.60703938190793,
+            "realized_pnl_amt": 51019.5,
+            "exit_price": 96100.0,
+            "exit_date": "2026-04-09",
+            "exit_time": "14:21:27",
+            "exit_datetime": "2026-04-09 14:21:27",
+            "code": "011170"
         }
     ]
 }

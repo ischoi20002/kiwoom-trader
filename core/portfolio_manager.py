@@ -5,6 +5,9 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from utils.fee_rates import fee_decimal_rates_live_trading
+
+
 class PortfolioManager:
     """
     [v3.8] 가상 포지션 관리, 계좌 동기화(Reconciliation), DB 연동을 전담하는 모듈.
@@ -18,10 +21,8 @@ class PortfolioManager:
         self.gui_callback = gui_callback
         self.telegram_callback = telegram_callback
         
-        # [v3.9] Fees for virtual/mock trading
-        self.buy_f_rate = self.settings.get('buy_fee_mock', 0.0) / 100.0
-        self.sell_f_rate = self.settings.get('sell_fee_mock', 0.0) / 100.0
-        
+        # 수수료: 모의/실전은 on_fill 시점 settings + config.USE_MOCK 로 조회 (fee_decimal_rates_live_trading)
+
         self.virtual_positions = {}
         self.virtual_history = []
         self.virtual_db_file = "virtual_db.json"
@@ -261,6 +262,17 @@ class PortfolioManager:
                     with open(self.virtual_db_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         self.virtual_history = data.get('history', [])
+                        # 구버전 이력: exit_date+exit_time 만 있으면 exit_datetime 보강(종료일시 UI 일관)
+                        for h in self.virtual_history:
+                            try:
+                                if not isinstance(h, dict) or h.get("exit_datetime"):
+                                    continue
+                                ed = str(h.get("exit_date") or "").strip()
+                                et = str(h.get("exit_time") or "").strip()
+                                if ed and et and " " not in et:
+                                    h["exit_datetime"] = f"{ed} {et}"
+                            except Exception:
+                                pass
                 except Exception as e:
                     self.log(f"[Error] [Portfolio] 히스토리 로드 실패: {e}")
 
@@ -448,7 +460,10 @@ class PortfolioManager:
                     pos['final_pnl_pct'] = pnl_pct
                     pos['realized_pnl_amt'] = pnl_amt
                     pos['exit_price'] = curr_p
-                    pos['exit_time'] = datetime.now().strftime("%H:%M:%S")
+                    _ex = datetime.now()
+                    pos["exit_date"] = _ex.strftime("%Y-%m-%d")
+                    pos["exit_time"] = _ex.strftime("%H:%M:%S")
+                    pos["exit_datetime"] = _ex.strftime("%Y-%m-%d %H:%M:%S")
                     pos['code'] = code
                     self.virtual_history.append(pos)
                     
@@ -576,6 +591,10 @@ class PortfolioManager:
         """
         now_str = datetime.now().strftime('%H:%M:%S')
         try:
+            buy_r, sell_r = fee_decimal_rates_live_trading(self.settings)
+        except Exception:
+            buy_r, sell_r = 0.00015, 0.00215
+        try:
             code = self._normalize_stock_code(code)
         except Exception:
             code = str(code).split("_")[0].zfill(6)
@@ -599,7 +618,7 @@ class PortfolioManager:
                     fp = self._to_f(price)
                     iq = self._to_i(qty)
                     
-                    fee_amt = fp * iq * self.buy_f_rate
+                    fee_amt = fp * iq * buy_r
                     total_invested = fp * iq + fee_amt
                     
                     self.virtual_positions[code] = {
@@ -654,7 +673,7 @@ class PortfolioManager:
                     p_val = self._to_f(price)
                     
                     # [v3.9] Apply Sell Fee
-                    sell_fee = p_val * qty_val * self.sell_f_rate
+                    sell_fee = p_val * qty_val * sell_r
                     net_proceeds = p_val * qty_val - sell_fee
                     cost_basis = pos.get('invested', avg_p * qty_val)
                     
@@ -664,7 +683,10 @@ class PortfolioManager:
                     pos['final_pnl_pct'] = pnl_pct
                     pos['realized_pnl_amt'] = pnl_amt
                     pos['exit_price'] = p_val
-                    pos['exit_time'] = now_str
+                    _ex = datetime.now()
+                    pos["exit_date"] = _ex.strftime("%Y-%m-%d")
+                    pos["exit_time"] = _ex.strftime("%H:%M:%S")
+                    pos["exit_datetime"] = _ex.strftime("%Y-%m-%d %H:%M:%S")
                     pos['code'] = code
                     if snapshot:
                         pos['events'].append({
@@ -676,7 +698,11 @@ class PortfolioManager:
                     self.data_manager.delete_active_position(code)
                     self.log(f"[Portfolio] {pos['name']}({code}) 최종 청산 완료 ({pnl_pct:+.2f}%)")
                     if self.telegram_callback:
-                        msg = f"<b>🚨 [매도완료/{exit_reason}]</b>\n종목: {pos['name']}({code})\n최종수익: {pnl_pct:+.1f}%\n수익금: {int(pnl_amt):,}원\n시간: {now_str}"
+                        msg = (
+                            f"<b>🚨 [매도완료/{exit_reason}]</b>\n종목: {pos['name']}({code})\n"
+                            f"최종수익: {pnl_pct:+.1f}%\n수익금: {int(pnl_amt):,}원\n"
+                            f"시간: {pos.get('exit_datetime', _ex.strftime('%Y-%m-%d %H:%M:%S'))}"
+                        )
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
 
         self.save_db()
@@ -685,18 +711,32 @@ class PortfolioManager:
         try:
             sl = getattr(self.app, "session_logger", None)
             if sl:
-                sl.log(
-                    "fill",
-                    {
-                        "code": code,
-                        "side": side,
-                        "price": self._to_f(price),
-                        "qty": self._to_i(qty),
-                        "name": name or "",
-                        "reason": reason or "",
-                        "fill_channel": fill_channel,
-                    },
-                )
+                _fd: Dict[str, Any] = {
+                    "code": code,
+                    "side": side,
+                    "price": self._to_f(price),
+                    "qty": self._to_i(qty),
+                    "name": name or "",
+                    "reason": reason or "",
+                    "fill_channel": fill_channel,
+                }
+                try:
+                    from core.supply_display import (
+                        capture_supply_snapshot,
+                        format_vol_power_column,
+                    )
+
+                    _sn = capture_supply_snapshot(self.app, code)
+                    _fd["snap_vol_power"] = _sn.get("vol_power")
+                    _fd["snap_vol_power_str"] = format_vol_power_column(
+                        _sn.get("vol_power")
+                    )
+                    _fd["snap_bid_ask"] = _sn.get("bid_ask_text")
+                except Exception:
+                    _fd["snap_vol_power"] = None
+                    _fd["snap_vol_power_str"] = "—"
+                    _fd["snap_bid_ask"] = "— / — (—)"
+                sl.log("fill", _fd)
         except Exception:
             pass
 
