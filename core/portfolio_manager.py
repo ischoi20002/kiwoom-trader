@@ -452,15 +452,16 @@ class PortfolioManager:
                     pnl_pct = (curr_p / avg_p - 1) * 100 if avg_p != 0 else 0
                     pnl_amt = (curr_p - avg_p) * self._to_i(pos.get('qty', 0))
                     
+                    _sync_ex = datetime.now()
                     pos['events'].append({
-                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "time": _sync_ex.strftime("%Y-%m-%d %H:%M:%S"),
                         "action": "SYNC_EXIT", "price": curr_p, "qty": pos.get('qty', 0),
                         "pnl": f"{pnl_pct:+.2f}%", "reason": "RECONCILIATION"
                     })
                     pos['final_pnl_pct'] = pnl_pct
                     pos['realized_pnl_amt'] = pnl_amt
                     pos['exit_price'] = curr_p
-                    _ex = datetime.now()
+                    _ex = _sync_ex
                     pos["exit_date"] = _ex.strftime("%Y-%m-%d")
                     pos["exit_time"] = _ex.strftime("%H:%M:%S")
                     pos["exit_datetime"] = _ex.strftime("%Y-%m-%d %H:%M:%S")
@@ -558,6 +559,25 @@ class PortfolioManager:
             
         return snapshot
 
+    def _ensure_fill_snapshot(
+        self,
+        code: str,
+        price: float,
+        snapshot: Optional[Dict[str, Any]],
+        reason_fallback: str,
+    ) -> Dict[str, Any]:
+        """체결 이벤트에 항상 스냅샷 dict를 붙입니다. 없으면 즉시 캡처(실패 시 빈 dict)."""
+        try:
+            if isinstance(snapshot, dict) and snapshot:
+                return snapshot
+        except Exception:
+            pass
+        try:
+            sn = self.capture_snapshot(code, float(price), str(reason_fallback or "CHE"))
+            return sn if isinstance(sn, dict) else {}
+        except Exception:
+            return {}
+
     def _to_f(self, v: Any) -> float:
         try:
             if isinstance(v, list):
@@ -592,7 +612,7 @@ class PortfolioManager:
         """[v18.0] 체결(CHE) 데이터를 처리하여 포지션을 업데이트하며, 시점 스냅샷을 함께 기록합니다.
         fill_channel: \"virtual\" | \"exchange\" — 일별 세션 로그 구분용.
         """
-        now_str = datetime.now().strftime('%H:%M:%S')
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             buy_r, sell_r = fee_decimal_rates_live_trading(self.settings)
         except Exception:
@@ -632,10 +652,16 @@ class PortfolioManager:
                         "sig_type": _sig_type,
                         "events": [], "max_now": fp
                     }
-                    if snapshot:
-                        self.virtual_positions[code]['events'].append({
-                            "time": now_str, "action": "BUY_S1", "price": fp, "qty": iq, "snapshot": snapshot
-                        })
+                    _snap_s1 = self._ensure_fill_snapshot(code, fp, snapshot, str(reg_reason))
+                    self.virtual_positions[code]["events"].append(
+                        {
+                            "time": now_str,
+                            "action": "BUY_S1",
+                            "price": fp,
+                            "qty": iq,
+                            "snapshot": _snap_s1,
+                        }
+                    )
                     self.data_manager.save_active_position(code, reg_name, fp, iq, 1, total_invested, datetime.now().isoformat(), reg_reason)
                     self.log(f"[Portfolio] {reg_name}({code}) 신규 진입 등록 ({price:,}원)")
                     if self.telegram_callback:
@@ -653,10 +679,20 @@ class PortfolioManager:
                     pos['avg_price'] = new_avg_price
                     pos['invested'] = float(new_avg_price) * float(new_total_qty)
                     pos['stage'] = 2
-                    if snapshot:
-                        pos['events'].append({
-                            "time": now_str, "action": "BUY_S2", "price": self._to_f(price), "qty": self._to_i(qty), "snapshot": snapshot
-                        })
+                    _p2 = self._to_f(price)
+                    _q2 = self._to_i(qty)
+                    _snap_s2 = self._ensure_fill_snapshot(
+                        code, _p2, snapshot, str(reason or pos.get("reason") or "S2")
+                    )
+                    pos["events"].append(
+                        {
+                            "time": now_str,
+                            "action": "BUY_S2",
+                            "price": _p2,
+                            "qty": _q2,
+                            "snapshot": _snap_s2,
+                        }
+                    )
                     
                     # DB 동기화
                     self.data_manager.save_active_position(code, pos['name'], new_avg_price, new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
@@ -691,10 +727,27 @@ class PortfolioManager:
                     pos["exit_time"] = _ex.strftime("%H:%M:%S")
                     pos["exit_datetime"] = _ex.strftime("%Y-%m-%d %H:%M:%S")
                     pos['code'] = code
-                    if snapshot:
-                        pos['events'].append({
-                            "time": now_str, "action": "SELL", "price": p_val, "qty": qty_val, "snapshot": snapshot
-                        })
+                    _snap_ex = self._ensure_fill_snapshot(
+                        code, p_val, snapshot, str(exit_reason)
+                    )
+                    # REST/CHE 체결 경로에서 스냅샷 사유가 REST_SELL·EXEC_SELL로만 남는 경우 청산 사유로 교체
+                    try:
+                        rsnap = str((_snap_ex or {}).get("reason", "") or "")
+                        if rsnap.upper().startswith("REST_") or rsnap.upper().startswith(
+                            "EXEC_"
+                        ):
+                            _snap_ex["reason"] = str(exit_reason)
+                    except Exception:
+                        pass
+                    pos["events"].append(
+                        {
+                            "time": now_str,
+                            "action": "SELL",
+                            "price": p_val,
+                            "qty": qty_val,
+                            "snapshot": _snap_ex,
+                        }
+                    )
                     self.virtual_history.append(pos)
                     
                     self.virtual_positions.pop(code, None)

@@ -1,6 +1,7 @@
 import tkinter as tk
 import threading
 import os
+import importlib
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -97,7 +98,7 @@ class VirtualTab:
         btn_group.pack(side=tk.RIGHT)
         
         ttk.Button(btn_group, text="🔄 동기화", width=8, command=self.app._sync_account_deposit).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_group, text="📊 리포트", width=8, command=self.generate_report).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_group, text="종합리포트", width=10, command=self.generate_report).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_group, text="📋 일일결산", width=10, command=self.generate_daily_settlement).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_group, text="⭐ 관심목록", width=10, command=self._open_watchlist_dialog).pack(side=tk.LEFT, padx=2)
         
@@ -1031,9 +1032,24 @@ class VirtualTab:
     def generate_report(self):
         """[v4.5.3] 가상 매매 나러티브 리포트 생성 (UI 위임)"""
         try:
-            from reporting.virtual_report import generate_virtual_narrative_report
             import webbrowser
-            
+
+            # 디스크에서 virtual_report.py를 수정해도 프로세스 재시작 없이 반영되도록 reload
+            try:
+                import reporting.virtual_report as _vr_mod
+
+                importlib.reload(_vr_mod)
+                generate_virtual_narrative_report = _vr_mod.generate_virtual_narrative_report
+            except Exception as _e_reload:
+                from reporting.virtual_report import generate_virtual_narrative_report
+
+                try:
+                    self.app.log(
+                        f"[Warn] virtual_report reload 실패, 기존 모듈 사용: {_e_reload}"
+                    )
+                except Exception:
+                    pass
+
             output_file = "virtual_trade_report.html"
             excl = self._watchlist_report_exclude_codes()
             hist_vis = [
@@ -1041,12 +1057,31 @@ class VirtualTab:
                 for h in self.app.portfolio.virtual_history
                 if str(h.get("code", "")).zfill(6) not in excl
             ]
-            generate_virtual_narrative_report(hist_vis, output_file, self.app.settings)
+            open_vis: list = []
+            try:
+                vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+                for c_key, p in vp.items():
+                    if not isinstance(p, dict):
+                        continue
+                    try:
+                        nc = str(p.get("code") or c_key).zfill(6)
+                    except Exception:
+                        nc = str(c_key).zfill(6)
+                    if nc in excl:
+                        continue
+                    row = dict(p)
+                    row.setdefault("code", nc)
+                    open_vis.append(row)
+            except Exception as _e_open:
+                self.app.log(f"[Warn] 리포트용 보유 포지션 수집 실패: {_e_open}")
+            generate_virtual_narrative_report(
+                hist_vis, output_file, self.app.settings, open_positions=open_vis
+            )
             
             abs_path = os.path.abspath(output_file)
             if os.path.exists(abs_path):
                 webbrowser.open(f"file://{abs_path}")
-                self.app.log(f"[Sync] 가상 매매 나러티브 리포트 생성 완료: {output_file}")
+                self.app.log(f"[Sync] 가상 매매 종합 리포트 생성 완료: {output_file}")
             else:
                 self.app.log("[Error] 리포트 파일 생성 실패")
         except Exception as e:

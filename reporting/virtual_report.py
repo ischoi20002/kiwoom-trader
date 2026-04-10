@@ -1,176 +1,627 @@
 import os
 import json
+import importlib
 from datetime import datetime
-import pandas as pd
-import numpy as np
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-def generate_virtual_narrative_report(history, output_path="virtual_trade_report.html", settings=None):
+
+def _resolve_virtual_analysis_helpers() -> Tuple[
+    Optional[Callable[..., Any]],
+    Optional[Callable[..., Any]],
+    Optional[str],
+]:
     """
-    [v18.0] 가상 매매 전용 나러티브 리포트 생성.
-    매수/매도 시점의 스냅샷 데이터를 활용하여 의사결정 근거를 시각화합니다.
+    trade_report는 모듈 로드 순서·구버전 파일 등으로 최상단 import가 실패할 수 있어
+    리포트 생성 시점에 importlib로 다시 로드합니다.
+    """
+    try:
+        tr = importlib.import_module("reporting.trade_report")
+        f_df = getattr(tr, "virtual_executions_to_trades_df", None)
+        f_html = getattr(tr, "build_virtual_portfolio_analysis_html", None)
+        if not callable(f_df) or not callable(f_html):
+            return (
+                None,
+                None,
+                "reporting/trade_report.py에 virtual_executions_to_trades_df 또는 "
+                "build_virtual_portfolio_analysis_html 정의가 없습니다. 프로젝트를 최신으로 맞춰 주세요.",
+            )
+        return f_df, f_html, None
+    except Exception as e:
+        try:
+            msg = f"{type(e).__name__}: {e}"
+        except Exception:
+            msg = "알 수 없는 오류"
+        return None, None, msg
+
+
+def _pos_date_hint_for_event(pos: Dict[str, Any]) -> str:
+    """이벤트 time이 시각만(HH:MM:SS)일 때 앞에 붙일 날짜(YYYY-MM-DD)."""
+    try:
+        exd = str(pos.get("exit_date") or "").strip()
+        if len(exd) >= 10 and exd[4] == "-":
+            return exd[:10]
+        exdt = str(pos.get("exit_datetime") or "").strip()
+        if len(exdt) >= 10 and exdt[4] == "-":
+            return exdt[:10]
+        et = pos.get("entry_time")
+        if isinstance(et, str):
+            if "T" in et:
+                return et[:10]
+            if len(et) >= 10 and et[4] == "-":
+                return et[:10]
+    except Exception:
+        pass
+    try:
+        return datetime.now().strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _event_display_time(ev: Dict[str, Any], pos: Dict[str, Any]) -> str:
+    """리포트용: 스냅샷 시각 우선, 없으면 time에 날짜 보강."""
+    try:
+        hp = ev.get("_report_hint_pos")
+        if isinstance(hp, dict):
+            pos = hp
+        sn = ev.get("snapshot")
+        if isinstance(sn, dict):
+            st = sn.get("time")
+            if isinstance(st, str) and (rs := st.strip()):
+                rs = rs.replace("T", " ")
+                if len(rs) >= 16 and rs[4] == "-":
+                    return rs[:19]
+                _segs = rs.split(":")
+                if len(_segs) == 3 and len(rs) <= 8:
+                    d0 = _pos_date_hint_for_event(pos)
+                    return f"{d0} {rs}" if d0 else rs
+                return rs[:19] if len(rs) > 8 else rs
+        raw = str(ev.get("time") or "").strip()
+        if not raw or raw == "-":
+            return "-"
+        if len(raw) >= 16 and raw[4] == "-" and (" " in raw or "T" in raw):
+            return raw.replace("T", " ")[:19]
+        segs = raw.split(":")
+        if len(segs) == 3 and len(raw) <= 8:
+            d = _pos_date_hint_for_event(pos)
+            return f"{d} {raw}" if d else raw
+        return raw
+    except Exception:
+        return str(ev.get("time", "-"))
+
+
+def _position_events_contain_buy(evs: List[Any]) -> bool:
+    for ev in evs:
+        if isinstance(ev, dict) and "BUY" in str(ev.get("action", "")).upper():
+            return True
+    return False
+
+
+def _entry_timestamp_str(pos: Dict[str, Any]) -> str:
+    et = pos.get("entry_time")
+    if not isinstance(et, str) or not et.strip():
+        return ""
+    s = et.strip().replace("T", " ")
+    if len(s) >= 19 and s[4] == "-":
+        return s[:19]
+    return s
+
+
+def _synthetic_buy_s1_event(pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """과거 데이터 등으로 events에 매수가 없을 때 진입 요약 행을 한 줄 보강합니다."""
+    raw_evs = pos.get("events") or []
+    if _position_events_contain_buy(raw_evs):
+        return None
+    ts = _entry_timestamp_str(pos)
+    if not ts:
+        return None
+    try:
+        ap = float(pos.get("avg_price") or 0.0)
+    except (TypeError, ValueError):
+        ap = 0.0
+    try:
+        q = int(pos.get("qty") or 0)
+    except (TypeError, ValueError):
+        q = 0
+    if q <= 0:
+        for ev in reversed(raw_evs):
+            if not isinstance(ev, dict):
+                continue
+            if "SELL" in str(ev.get("action", "")).upper():
+                try:
+                    q = int(ev.get("qty") or 0)
+                except (TypeError, ValueError):
+                    q = 0
+                break
+    hint = str(pos.get("reason") or pos.get("sig_type") or "").strip()
+    reason_txt = (
+        "리포트 보강: 저장 데이터에 매수 체결 이벤트가 없어 "
+        "진입 시각(entry_time)·평단·수량으로 요약합니다."
+    )
+    if hint:
+        reason_txt += f" (신호/유형: {hint})"
+    return {
+        "time": ts,
+        "action": "BUY_S1",
+        "price": ap,
+        "qty": q,
+        "snapshot": {
+            "time": ts,
+            "market_trend": "NEUTRAL",
+            "vol_power": 100.0,
+            "bid_ask_ratio": "-",
+            "ma_alignment": "N/A",
+            "adx": 0.0,
+            "rsi": 0.0,
+            "reason": reason_txt,
+        },
+    }
+
+
+def _history_bucket_key(h: Dict[str, Any]) -> str:
+    """동일 종목(6자리)을 한 카드로 묶기 위한 키. 코드 없으면 행 단위로 분리."""
+    try:
+        c = str(h.get("code") or "").strip().zfill(6)
+        if not c or c == "000000":
+            return f"__nocode_{id(h)}"
+        return c
+    except Exception:
+        return f"__nocode_{id(h)}"
+
+
+def _parse_entry_dt_sort(h: Dict[str, Any]) -> datetime:
+    et = h.get("entry_time")
+    if isinstance(et, str) and len(et) >= 10:
+        s = et.replace("T", " ")[:19]
+        try:
+            return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return datetime.min
+
+
+def _parse_exit_dt_sort(h: Dict[str, Any]) -> datetime:
+    ex = h.get("exit_datetime")
+    if isinstance(ex, str) and len(ex) >= 10:
+        try:
+            return datetime.strptime(ex.replace("T", " ")[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    ed, etx = h.get("exit_date"), h.get("exit_time")
+    if ed and etx:
+        try:
+            return datetime.strptime(f"{str(ed)[:10]} {str(etx)[:8]}", "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return datetime.min
+
+
+def _exit_display_str(h: Dict[str, Any]) -> str:
+    ex = str(h.get("exit_datetime") or "").strip()
+    if ex:
+        return ex.replace("T", " ")[:19]
+    if h.get("exit_date") and h.get("exit_time"):
+        return f'{h.get("exit_date")} {h.get("exit_time")}'
+    return ""
+
+
+def _round_invested(h: Dict[str, Any]) -> float:
+    try:
+        v = float(h.get("invested") or 0)
+        if v > 0:
+            return v
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(h.get("avg_price") or 0) * int(h.get("qty") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _merge_history_group_one_card(code: str, grp: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """동일 종목코드의 청산 이력 여러 건을 한 카드·한 타임라인으로 합칩니다."""
+    rounds = sorted([h for h in grp if isinstance(h, dict)], key=_parse_entry_dt_sort)
+    flat: List[Dict[str, Any]] = []
+    for h in rounds:
+        for ev in _normalize_position_events_for_report(h):
+            e2 = dict(ev)
+            e2["_report_hint_pos"] = h
+            flat.append(e2)
+    try:
+        flat.sort(key=lambda e: _parse_event_sort_dt(e, {}))
+    except Exception:
+        pass
+    total_realized = 0
+    for h in rounds:
+        try:
+            total_realized += int(h.get("realized_pnl_amt") or 0)
+        except (TypeError, ValueError):
+            pass
+    total_invested = sum(_round_invested(h) for h in rounds)
+    blended_pct = (total_realized / total_invested * 100.0) if total_invested > 1e-9 else 0.0
+    last_h = max(rounds, key=_parse_exit_dt_sort)
+    first_h = rounds[0]
+    name = str(last_h.get("name") or first_h.get("name") or "Unknown")
+    exit_disp = _exit_display_str(last_h)
+    return {
+        "code": code,
+        "name": name,
+        "entry_time": first_h.get("entry_time"),
+        "exit_datetime": exit_disp or last_h.get("exit_datetime"),
+        "exit_date": last_h.get("exit_date"),
+        "exit_time": last_h.get("exit_time"),
+        "final_pnl_pct": blended_pct,
+        "realized_pnl_amt": total_realized,
+        "_merged_rounds": len(rounds),
+        "_report_flat_events": flat,
+        "avg_price": float(last_h.get("avg_price") or 0),
+        "qty": int(last_h.get("qty") or 0),
+    }
+
+
+def _merge_and_order_closed_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    종목코드별로 청산 이력을 병합한 뒤, 원본 리스트 역순으로 처음 등장하는 종목 순서를 유지합니다.
+    (기존 reversed(closed_cards)와 동일하게 '리스트 뒤쪽에 가까운 종목'이 먼저 나오게 함)
     """
     if not history:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("<html><body style='background:#1a1b26; color:#a9b1d6; padding:50px; text-align:center; font-family:sans-serif;'>")
-            f.write("<h1>기록된 매매 내역이 없습니다.</h1><p>첫 가상 매매가 종료된 후 리포트가 활성화됩니다.</p></body></html>")
-        return
+        return []
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for h in history:
+        if not isinstance(h, dict):
+            continue
+        key = _history_bucket_key(h)
+        buckets.setdefault(key, []).append(h)
+    merged_map: Dict[str, Dict[str, Any]] = {}
+    for key, grp in buckets.items():
+        if len(grp) == 1:
+            merged_map[key] = grp[0]
+        else:
+            c6 = str(grp[0].get("code") or "").strip().zfill(6)
+            if not c6 or c6 == "000000":
+                c6 = key
+            merged_map[key] = _merge_history_group_one_card(c6, grp)
+    seen: set = set()
+    ordered: List[Dict[str, Any]] = []
+    for h in reversed(history):
+        if not isinstance(h, dict):
+            continue
+        key = _history_bucket_key(h)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(merged_map[key])
+    return ordered
 
-    # [1] 파라미터 보드 생성 (v18.1)
-    param_html = ""
-    if settings:
-        PARAM_STRUCTURE = [
-            {"name": "💰 [1] 자금관리", "items": [{"label": "초기자금", "key": "backtest_initial_capital", "unit": "원"}, {"label": "비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"}]},
-            {"name": "🔍 [2] 종목선정", "items": [{"label": "RSI 범위", "keys": ["sel_rsi_min", "sel_rsi_max"], "sep": "~"}, {"label": "거래대금", "key": "min_trde_val", "unit": "억"}]},
-            {"name": "🚀 [4] S1 전략", "items": [{"label": "Type A", "toggle": "use_type_a", "key": "buy_rsi_max_a"}, {"label": "Type B", "toggle": "use_type_b", "key": "buy_rsi_max_b"}, {"label": "Smart Buy", "keys": ["smart_buy_vp", "smart_buy_ba_ratio"], "sep": "/"}]},
-            {"name": "📈 [5] S2 전략", "items": [
-                {"label": "S2(A) 추매 전체", "toggle": "use_s2_master_a"},
-                {"label": "S2(B) 추매 전체", "toggle": "use_s2_master_b"},
-                {"label": "S2(A) 수익 필터", "toggle": "use_s2_profit", "key": "s2_profit_limit", "unit": "%"},
-                {"label": "Smart Buy S2(A)", "toggle": "use_smart_buy_s2"},
-                {"label": "Smart Buy S2(B)", "toggle": "use_smart_buy_s2_b"},
-            ]},
-            {"name": "🛡️ [7] Smart Exit (공통)", "items": [
-                {"label": "Smart Exit (매도벽=매도/매수)", "toggle": "use_smart_exit", "key": "smart_exit_ba_ratio"},
-            ]},
-            {"name": "🛡️ [7-A] Type A 청산", "items": [
-                {"label": "갭하락", "toggle": "use_gap_down_exit_a", "key": "gap_down_limit_a", "unit": "%"},
-                {"label": "매도유예(분)", "toggle": "use_gap_grace_a", "key": "gap_grace_mins_a"},
-                {"label": "ATR 주기", "toggle": "use_atr_exit_a", "key": "atr_period_a"},
-                {"label": "S1 익절/손절", "toggle": "use_s1_a_tp", "keys": ["s1_a_take_profit", "s1_a_stop_loss"], "sep": "/"},
-                {"label": "S1 Flash", "toggle": "use_s1_a_flash_exit", "key": "s1_a_flash_exit_pct"},
-                {"label": "S1 ATR 손절", "toggle": "use_atr_stop_loss_a", "key": "atr_multiplier_sl_a"},
-                {"label": "S1 ATR 트레일", "toggle": "use_atr_trailing_stop_a", "key": "atr_multiplier_trail_a"},
-                {"label": "ATR 트레일 익절%후(A-S1)", "toggle": "use_atr_trail_only_after_tp_s1_a"},
-                {"label": "S2 익절/손절/Flash", "toggle": "use_s2_tp", "keys": ["s2_take_profit", "s2_stop_loss", "s2_flash_exit_pct"], "sep": "/"},
-                {"label": "S2 ATR SL/Trl", "toggle": "use_atr_stop_loss_s2", "keys": ["atr_multiplier_sl_s2", "atr_multiplier_trail_s2"], "sep": "/"},
-                {"label": "ATR 트레일 익절%후(A-S2)", "toggle": "use_atr_trail_only_after_tp_s2_a"},
-            ]},
-            {"name": "🛡️ [7-B] Type B 청산", "items": [
-                {"label": "갭하락", "toggle": "use_gap_down_exit_b", "key": "gap_down_limit_b", "unit": "%"},
-                {"label": "매도유예(분)", "toggle": "use_gap_grace_b", "key": "gap_grace_mins_b"},
-                {"label": "ATR 주기", "toggle": "use_atr_exit_b", "key": "atr_period_b"},
-                {"label": "S1 익절/손절", "toggle": "use_s1_b_tp", "keys": ["s1_b_take_profit", "s1_b_stop_loss"], "sep": "/"},
-                {"label": "S1 Flash", "toggle": "use_s1_b_flash_exit", "key": "s1_b_flash_exit_pct"},
-                {"label": "S1 ATR 손절", "toggle": "use_atr_stop_loss_b", "key": "atr_multiplier_sl_b"},
-                {"label": "S1 ATR 트레일", "toggle": "use_atr_trailing_stop_b", "key": "atr_multiplier_trail_b"},
-                {"label": "ATR 트레일 익절%후(B-S1)", "toggle": "use_atr_trail_only_after_tp_s1_b"},
-                {"label": "S2 익절/손절/Flash", "toggle": "use_s2_b_tp", "keys": ["s2_b_take_profit", "s2_b_stop_loss", "s2_b_flash_exit_pct"], "sep": "/"},
-                {"label": "S2 ATR SL/Trl", "toggle": "use_atr_stop_loss_s2_b", "keys": ["atr_multiplier_sl_s2_b", "atr_multiplier_trail_s2_b"], "sep": "/"},
-                {"label": "ATR 트레일 익절%후(B-S2)", "toggle": "use_atr_trail_only_after_tp_s2_b"},
-            ]}
-        ]
-        
-        def format_val(v):
-            if isinstance(v, (int, float, np.integer, np.floating)): 
-                if float(v) > 1000000: return f"{int(v):,}"
-                if float(v).is_integer(): return str(int(v))
-                return f"{float(v):.1f}"
-            return str(v)
 
-        group_htmls = []
-        for group in PARAM_STRUCTURE:
-            items_html = []
-            for item in group["items"]:
-                label = item["label"]; toggle_key = item.get("toggle"); val_key = item.get("key"); val_keys = item.get("keys")
-                unit = item.get("unit", ""); sep = item.get("sep", ", "); is_on = True; status_html = ""; v_list = []
-                
-                if toggle_key:
-                    val = settings.get(toggle_key, False)
-                    is_on = val
-                    st_cls = "val-on" if val else "val-off"; st_txt = "ON" if val else "OFF"
-                    status_html = f'<span class="p-val {st_cls}">{st_txt}</span>'
-                
-                ukey = item.get("unit_key")
-                if ukey and ukey in settings:
-                    curr_u = settings[ukey]; target_key = val_keys[0] if curr_u == "원" else val_keys[1]
-                    v_list.append(format_val(settings.get(target_key, 0))); unit = curr_u
-                elif val_key: v_list.append(format_val(settings.get(val_key, 0)))
-                elif val_keys:
-                    for k in val_keys: v_list.append(format_val(settings.get(k, 0)))
-                
-                value_html = f'<span class="p-val-sub">({sep.join(v_list)}{unit})</span>' if (v_list and is_on) else ""
-                if toggle_key or v_list:
-                    items_html.append(f'<div class="p-item"><span class="p-key">{label}</span><div class="p-val-group">{status_html}{value_html}</div></div>')
-            
-            if items_html:
-                group_htmls.append(f'<details class="p-group"><summary class="p-group-title">{group["name"]}</summary><div class="p-grid">{"".join(items_html)}</div></details>')
-        param_html = f'<div class="p-container">{"".join(group_htmls)}</div>'
+def _parse_event_sort_dt(ev: Dict[str, Any], pos: Dict[str, Any]) -> datetime:
+    disp = _event_display_time(ev, pos)
+    try:
+        return datetime.strptime(disp[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime(1970, 1, 1, 0, 0, 0)
 
-    # [2] 데이터 정리
-    trades = []
-    for pos in history:
-        # 단일 종목의 진입-청산 라이프사이클 추출
-        ticker = pos.get('code', '000000')
-        name = pos.get('name', 'Unknown')
-        entry_time = pos.get('entry_time', '-')
-        exit_time = pos.get('exit_time', '-')
-        profit_pct = pos.get('final_pnl_pct', 0.0)
-        profit_amt = pos.get('realized_pnl_amt', 0)
-        
-        events_html = ""
-        for ev in pos.get('events', []):
-            ev_time = ev.get('time', '-')
-            action = ev.get('action', 'N/A')
-            price = ev.get('price', 0)
-            qty = ev.get('qty', 0)
-            sn = ev.get('snapshot', {})
-            
-            # 스냅샷 기반 근거 카드 생성
-            sn_html = ""
-            if sn:
-                m_trend = sn.get('market_trend', 'NEUTRAL')
-                m_color = "#f7768e" if m_trend == "DOWN" else "#9ece6a" if m_trend == "UP" else "#7aa2f7"
-                sn_html = f"""
+
+def _normalize_position_events_for_report(pos: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """매수 누락 보강 후 시간순 정렬 — 종합 리포트에서 진입·청산 흐름을 한눈에 보이게 합니다."""
+    pre = pos.get("_report_flat_events")
+    if isinstance(pre, list) and len(pre) > 0:
+        return list(pre)
+    raw = [e for e in (pos.get("events") or []) if isinstance(e, dict)]
+    syn = _synthetic_buy_s1_event(pos)
+    merged: List[Dict[str, Any]] = ([syn] if syn else []) + list(raw)
+    try:
+        merged.sort(key=lambda e: _parse_event_sort_dt(e, pos))
+    except Exception:
+        pass
+    return merged
+
+
+def _narrative_reason_for_event(
+    ev: Dict[str, Any], sn: Dict[str, Any], pos: Dict[str, Any]
+) -> str:
+    """
+    리포트 스냅샷 '사유' 표시: 매도는 exit_reason(익절/손절 등) 우선.
+    과거 데이터에 REST_SELL만 있으면 포지션의 exit_reason으로 보강합니다.
+    """
+    try:
+        base = str((sn or {}).get("reason", "") or "").strip()
+    except Exception:
+        base = ""
+    try:
+        actu = str(ev.get("action", "") or "").upper()
+    except Exception:
+        actu = ""
+    if "SELL" not in actu and "SYNC_EXIT" not in actu:
+        return base or "N/A"
+    hint = ev.get("_report_hint_pos")
+    src: Dict[str, Any]
+    src = hint if isinstance(hint, dict) else pos
+    try:
+        er = str((src or {}).get("exit_reason", "") or "").strip()
+    except Exception:
+        er = ""
+    if not er:
+        return base or "N/A"
+    bup = base.upper()
+    if not base or base == "N/A" or bup.startswith("REST_") or bup.startswith("EXEC_"):
+        return er
+    if er.upper() in bup or bup in er.upper():
+        return base
+    return f"{er} ({base})"
+
+
+def _format_vol_power_snip(sn: Dict[str, Any]) -> str:
+    try:
+        vp_raw = sn.get("vol_power", 100)
+        vp_f = float(vp_raw)
+        return f"{vp_f:.1f}%"
+    except (TypeError, ValueError):
+        return str(sn.get("vol_power", "-"))
+
+
+def _build_events_html(pos: Dict[str, Any]) -> str:
+    events_html = ""
+    for ev in _normalize_position_events_for_report(pos):
+        ev_time = _event_display_time(ev, pos)
+        action = ev.get("action", "N/A")
+        price = ev.get("price", 0)
+        qty = ev.get("qty", 0)
+        sn = ev.get("snapshot", {}) if isinstance(ev.get("snapshot"), dict) else {}
+
+        sn_html = ""
+        if sn:
+            m_trend = sn.get("market_trend", "NEUTRAL")
+            m_color = "#f7768e" if m_trend == "DOWN" else "#9ece6a" if m_trend == "UP" else "#7aa2f7"
+            vp_show = _format_vol_power_snip(sn)
+            sn_html = f"""
                 <div class="snapshot-card">
                     <div class="sn-item"><span>시장:</span> <b style="color:{m_color}">{m_trend}</b></div>
                     <div class="sn-item"><span>RSI:</span> <b>{sn.get('rsi', '-')}</b></div>
-                    <div class="sn-item"><span>체결강도:</span> <b>{sn.get('vol_power', 100):.1f}%</b></div>
+                    <div class="sn-item"><span>체결강도:</span> <b>{vp_show}</b></div>
                     <div class="sn-item"><span>매도벽(B/A):</span> <b>{sn.get('bid_ask_ratio', '-')}</b></div>
                     <div class="sn-item"><span>이평:</span> <b>{sn.get('ma_alignment', '-')}</b></div>
                     <div class="sn-item"><span>ADX:</span> <b>{sn.get('adx', '-')}</b></div>
-                    <div class="sn-reason">사유: {sn.get('reason', 'N/A')}</div>
+                    <div class="sn-reason">사유: {_narrative_reason_for_event(ev, sn, pos)}</div>
                 </div>
                 """
-            
-            action_cls = "act-buy" if "BUY" in action else "act-sell"
-            events_html += f"""
+        else:
+            sn_html = """
+                <div class="snapshot-card snapshot-missing">
+                    이 체결 시점에는 시장 스냅샷이 비어 있습니다. (체결 가격·수량·시각 위주로 참고하세요.)
+                </div>
+                """
+
+        action_cls = "act-buy" if "BUY" in str(action) else "act-sell"
+        try:
+            p_show = float(price)
+        except (TypeError, ValueError):
+            p_show = 0.0
+        try:
+            q_show = int(qty)
+        except (TypeError, ValueError):
+            q_show = 0
+        events_html += f"""
             <div class="event-row">
                 <div class="event-meta">
                     <span class="ev-time">{ev_time}</span>
                     <span class="ev-action {action_cls}">{action}</span>
-                    <span class="ev-price">{price:,.0f}원 ({qty}주)</span>
+                    <span class="ev-price">{p_show:,.0f}원 ({q_show}주)</span>
                 </div>
                 {sn_html}
             </div>
             """
+    return events_html
 
+
+def _build_trade_card(
+    pos: Dict[str, Any],
+    *,
+    is_open: bool = False,
+    section_id: str = "",
+) -> str:
+    ticker = str(pos.get("code", "000000")).zfill(6)
+    name = pos.get("name", "Unknown")
+    events_html = _build_events_html(pos)
+
+    if is_open:
+        try:
+            qty = int(pos.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        try:
+            ap = float(pos.get("avg_price") or 0)
+        except (TypeError, ValueError):
+            ap = 0.0
+        try:
+            stg = int(pos.get("stage") or 1)
+        except (TypeError, ValueError):
+            stg = 1
+        unreal = ""
+        cpp = pos.get("current_price")
+        if cpp is not None and ap > 0:
+            try:
+                cpf = float(cpp)
+                u_pct = (cpf / ap - 1.0) * 100.0
+                unreal = f" · 현재가 기준 {u_pct:+.2f}%"
+            except Exception:
+                pass
+        et_raw = pos.get("entry_time")
+        if isinstance(et_raw, str) and et_raw.strip():
+            ers = et_raw.strip().replace("T", " ")
+            if len(ers) >= 16 and ers[4] == "-":
+                et_lbl = ers[:19]
+            else:
+                et_lbl = _event_display_time({"time": ers}, pos)
+        else:
+            et_lbl = "-"
+        sub = f'<div class="t-sub">진입 시각: {et_lbl}</div>'
+        header_right = f'<div class="t-result t-open">보유 중 (S{stg}) · {qty}주 @ {int(ap):,}원{unreal}</div>'
+    else:
+        try:
+            profit_pct = float(pos.get("final_pnl_pct", 0.0))
+        except (TypeError, ValueError):
+            profit_pct = 0.0
+        try:
+            profit_amt = int(pos.get("realized_pnl_amt", 0))
+        except (TypeError, ValueError):
+            profit_amt = 0
         status_cls = "p-plus" if profit_pct > 0 else "p-minus"
-        trades.append(f"""
-        <div class="trade-card">
+        header_right = f'<div class="t-result {status_cls}">{profit_pct:+.2f}% ({profit_amt:+,}원)</div>'
+        ex_dt = str(pos.get("exit_datetime") or "").strip()
+        en_dt = str(pos.get("entry_time") or "").strip().replace("T", " ")[:19]
+        if not ex_dt and pos.get("exit_date") and pos.get("exit_time"):
+            ex_dt = f'{pos.get("exit_date")} {pos.get("exit_time")}'
+        try:
+            n_merge = int(pos.get("_merged_rounds") or 1)
+        except (TypeError, ValueError):
+            n_merge = 1
+        if n_merge > 1:
+            sub = (
+                f'<div class="t-sub">동일 종목 청산 <b>{n_merge}</b>회 합산 · '
+                f"최초 진입: {en_dt or '-'} · 최종 청산: {ex_dt or '-'}</div>"
+            )
+        else:
+            sub = f'<div class="t-sub">진입: {en_dt or "-"} · 청산: {ex_dt or "-"}</div>'
+
+    sid = section_id.strip().replace('"', "").replace("'", "") if section_id else ""
+    id_attr = f' id="{sid}"' if sid else ""
+    return f"""
+        <div class="trade-card"{id_attr}>
             <div class="trade-header">
-                <div class="t-name"><b>{name}</b> <small>{ticker}</small></div>
-                <div class="t-result {status_cls}">{profit_pct:+.2f}% ({int(profit_amt):+,}원)</div>
+                <div class="t-name-wrap">
+                    <div class="t-name"><b>{name}</b> <small>{ticker}</small></div>
+                    {sub}
+                </div>
+                {header_right}
             </div>
             <div class="trade-body">
-                <div class="t-timeline-label">Transaction Narrative:</div>
+                <div class="t-timeline-label">매수·매도 타임라인 (시간순)</div>
                 {events_html}
             </div>
         </div>
-        """)
+        """
 
-    # [2] 통계 계산
-    win_cnt = sum(1 for p in history if p.get('final_pnl_pct', 0) > 0)
-    win_rate = (win_cnt / len(history)) * 100 if history else 0
-    total_pnl = sum(p.get('realized_pnl_amt', 0) for p in history)
-    avg_pnl_pct = sum(p.get('final_pnl_pct', 0) for p in history) / len(history) if history else 0
 
-    # [3] HTML 템플릿
+def generate_virtual_narrative_report(
+    history: Optional[List[Dict[str, Any]]] = None,
+    output_path: str = "virtual_trade_report.html",
+    settings: Optional[dict] = None,
+    open_positions: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """
+    가상 매매 종합 리포트: 나러티브 타임라인 + 포트폴리오 백테스트 리포트와 동일한 통계 블록.
+    동일 종목코드 청산 이력은 한 카드로 병합. settings 인자는 하위 호환만 유지(내용 미사용).
+    open_positions: 미청산 virtual_positions.
+    """
+    history_raw = list(history or [])
+    open_positions = list(open_positions or [])
+    if not history_raw and not open_positions:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("<html><body style='background:#1a1b26; color:#a9b1d6; padding:50px; text-align:center; font-family:sans-serif;'>")
+            f.write(
+                "<h1>표시할 가상 매매 내역이 없습니다.</h1>"
+                "<p>보유 포지션이 없고, 청산 완료된 이력(virtual_history)도 없습니다.</p></body></html>"
+            )
+        return
+
+    # [1] 포트폴리오 백테스트 리포트와 같은 「백테스트 분석 통계」 (실시간 설정 파라미터는 제외)
+    portfolio_analysis_html = ""
+    try:
+        _fn_df, _fn_html, _imp_err = _resolve_virtual_analysis_helpers()
+        if _fn_df is not None and _fn_html is not None:
+            _adf = _fn_df(history_raw, open_positions)
+            portfolio_analysis_html = _fn_html(
+                _adf, open_holdings_count=len(open_positions)
+            )
+        else:
+            _esc = (
+                str(_imp_err or "알 수 없음")
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            portfolio_analysis_html = (
+                '<div class="vr-analysis-wrap"><p class="depth-subnote" style="color:#bf616a;">'
+                "<b>통계 모듈 로드 실패</b> — 백테스트형 통계를 건너뜁니다.</p>"
+                f'<p class="depth-subnote" style="font-size:0.8rem;opacity:0.9;">{_esc}</p>'
+                '<p class="depth-subnote">힌트: GUI를 저장소 루트 폴더에서 실행하고, '
+                "<code>reporting/trade_report.py</code>에 가상 통계 함수가 포함된 최신 버전인지 확인하세요.</p></div>"
+            )
+            try:
+                print(f"[virtual_report] 통계 헬퍼 로드 실패: {_imp_err}")
+            except Exception:
+                pass
+    except Exception as _e_stats:
+        portfolio_analysis_html = (
+            f'<div class="vr-analysis-wrap"><p class="depth-subnote" style="color:#bf616a;">'
+            f"통계 생성 오류: {_e_stats}</p></div>"
+        )
+
+    # [2] 동일 종목 청산 병합 + 좌측 바로가기용 앵커
+    history_display = _merge_and_order_closed_history(
+        [h for h in history_raw if isinstance(h, dict)]
+    )
+
+    nav_items: List[Tuple[str, str, str]] = [("v-top", "↑ 맨 위", "")]
+    open_parts: List[str] = []
+    for i, p in enumerate(open_positions):
+        if not isinstance(p, dict):
+            continue
+        code = str(p.get("code", "")).zfill(6)
+        nid = f"v-open-{code}-{i}"
+        nav_items.append((nid, str(p.get("name", "Unknown")), code))
+        open_parts.append(_build_trade_card(p, is_open=True, section_id=nid))
+    open_cards_html = "".join(open_parts)
+
+    closed_parts: List[str] = []
+    for i, p in enumerate(history_display):
+        if not isinstance(p, dict):
+            continue
+        code = str(p.get("code", "")).zfill(6)
+        nid = f"v-closed-{code}-{i}"
+        nav_items.append((nid, str(p.get("name", "Unknown")), code))
+        closed_parts.append(_build_trade_card(p, is_open=False, section_id=nid))
+    closed_trades_html = "".join(closed_parts)
+
+    sidebar_links: List[str] = []
+    for nid, nm, cd in nav_items:
+        if nid == "v-top":
+            sidebar_links.append(
+                f'<li class="vr-nav-item vr-nav-top"><a href="#{nid}">{nm}</a></li>'
+            )
+        else:
+            badge = f'<span class="vr-code-badge">{cd}</span>' if cd else ""
+            esc_nm = (
+                str(nm).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            sidebar_links.append(
+                f'<li class="vr-nav-item"><a href="#{nid}">'
+                f'<span class="vr-nav-name">{esc_nm}</span>{badge}</a></li>'
+            )
+    sidebar_html = "\n            ".join(sidebar_links)
+
+    # [2] 통계 계산 (건수·손익은 병합 전 원본 청산 건수 기준)
+    win_cnt = sum(1 for p in history_raw if isinstance(p, dict) and p.get("final_pnl_pct", 0) > 0)
+    win_rate = (win_cnt / len(history_raw)) * 100 if history_raw else 0
+    total_pnl = sum(
+        int(p.get("realized_pnl_amt") or 0) for p in history_raw if isinstance(p, dict)
+    )
+    avg_pnl_pct = (
+        sum(float(p.get("final_pnl_pct", 0) or 0) for p in history_raw if isinstance(p, dict))
+        / len(history_raw)
+        if history_raw
+        else 0
+    )
+
+    _ = settings  # 하위 호환용 (실시간 설정은 리포트에 반영하지 않음)
+
+    # [3] HTML 템플릿 (좌측 종목 바로가기 + 본문)
     html = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="ko">
     <head>
         <meta charset="UTF-8">
-        <title>가상 매매 나러티브 리포트</title>
+        <title>가상 매매 종합 리포트</title>
         <style>
             :root {{
                 --bg: #1a1b26;
@@ -182,76 +633,177 @@ def generate_virtual_narrative_report(history, output_path="virtual_trade_report
                 --minus: #f7768e;
                 --accent: #bb9af7;
                 --border: #414868;
+                --sidebar-w: 268px;
             }}
+            html {{ scroll-behavior: smooth; }}
             body {{
                 background: var(--bg);
                 color: var(--text-bright);
                 font-family: 'Pretendard', 'Malgun Gothic', sans-serif;
-                margin: 0; padding: 30px;
+                margin: 0;
                 line-height: 1.6;
             }}
-            .container {{ max-width: 1000px; margin: 0 auto; }}
-            header {{ margin-bottom: 40px; border-bottom: 1px solid var(--border); padding-bottom: 20px; }}
-            h1 {{ margin: 0; font-weight: 300; color: var(--primary); letter-spacing: -1px; }}
-            .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 40px; }}
+            .vr-sidebar {{
+                position: fixed;
+                left: 0;
+                top: 0;
+                bottom: 0;
+                width: var(--sidebar-w);
+                background: #16171f;
+                border-right: 1px solid var(--border);
+                z-index: 1000;
+                display: flex;
+                flex-direction: column;
+                overflow-y: auto;
+            }}
+            .vr-sidebar-header {{
+                padding: 18px 16px;
+                border-bottom: 1px solid var(--border);
+                font-size: 0.95rem;
+                font-weight: 800;
+                color: var(--primary);
+            }}
+            .vr-nav-list {{
+                list-style: none;
+                margin: 0;
+                padding: 10px 8px 24px;
+            }}
+            .vr-nav-item a {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                padding: 10px 12px;
+                margin-bottom: 4px;
+                border-radius: 10px;
+                color: var(--text-bright);
+                text-decoration: none;
+                font-size: 0.88rem;
+                border: 1px solid transparent;
+            }}
+            .vr-nav-item a:hover {{
+                background: var(--card);
+                border-color: var(--border);
+                color: #eceff4;
+            }}
+            .vr-nav-top a {{ color: var(--accent); font-weight: 700; }}
+            .vr-nav-name {{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+            .vr-code-badge {{
+                font-family: monospace;
+                font-size: 0.68rem;
+                background: #3b4252;
+                color: #d8dee9;
+                padding: 2px 6px;
+                border-radius: 4px;
+                flex-shrink: 0;
+            }}
+            .vr-main {{
+                margin-left: var(--sidebar-w);
+                padding: 28px 32px 48px;
+                min-height: 100vh;
+            }}
+            .container {{ max-width: 1040px; margin: 0 auto; }}
+            header#v-top {{ margin-bottom: 36px; border-bottom: 1px solid var(--border); padding-bottom: 20px; }}
+            h1 {{ margin: 0; font-weight: 600; color: var(--primary); letter-spacing: -0.5px; font-size: 1.75rem; }}
+            .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 28px; }}
             .stat-box {{ background: var(--card); padding: 20px; border-radius: 12px; text-align: center; border: 1px solid var(--border); }}
             .stat-val {{ display: block; font-size: 24px; font-weight: 700; color: #fff; }}
             .stat-label {{ font-size: 13px; color: var(--text); }}
-            
             .trade-section {{ display: flex; flex-direction: column; gap: 20px; }}
-            .trade-card {{ background: var(--card); border-radius: 16px; overflow: hidden; border: 1px solid var(--border); transition: transform 0.2s; }}
-            .trade-card:hover {{ transform: translateY(-3px); border-color: var(--primary); }}
-            .trade-header {{ background: rgba(0,0,0,0.2); padding: 15px 25px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }}
+            .trade-card {{
+                background: var(--card);
+                border-radius: 16px;
+                overflow: hidden;
+                border: 1px solid var(--border);
+                transition: transform 0.2s, border-color 0.2s;
+                scroll-margin-top: 88px;
+            }}
+            .trade-card:hover {{ transform: translateY(-2px); border-color: var(--primary); }}
+            .trade-header {{ background: rgba(0,0,0,0.2); padding: 15px 25px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 1px solid var(--border); }}
+            .t-name-wrap {{ flex: 1; min-width: 0; }}
             .t-name {{ font-size: 18px; }}
             .t-name small {{ color: var(--text); margin-left: 8px; font-family: monospace; }}
-            .t-result {{ font-size: 20px; font-weight: 800; }}
-            
+            .t-sub {{ font-size: 12px; color: var(--text); margin-top: 6px; line-height: 1.4; }}
+            .t-result {{ font-size: 20px; font-weight: 800; white-space: nowrap; }}
+            .t-open {{ color: var(--primary); }}
             .trade-body {{ padding: 20px 25px; }}
             .t-timeline-label {{ font-size: 12px; text-transform: uppercase; color: var(--text); margin-bottom: 15px; letter-spacing: 1px; }}
-            
             .event-row {{ margin-bottom: 25px; position: relative; padding-left: 20px; border-left: 2px solid var(--border); }}
             .event-row::before {{ content: ''; position: absolute; left: -7px; top: 5px; width: 12px; height: 12px; background: var(--card); border: 2px solid var(--primary); border-radius: 50%; }}
-            .event-meta {{ margin-bottom: 10px; display: flex; align-items: center; gap: 12px; }}
+            .event-meta {{ margin-bottom: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }}
             .ev-time {{ color: var(--accent); font-family: monospace; font-size: 14px; }}
             .ev-action {{ padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 800; }}
             .act-buy {{ background: rgba(158, 206, 106, 0.15); color: var(--plus); border: 1px solid var(--plus); }}
             .act-sell {{ background: rgba(247, 118, 142, 0.15); color: var(--minus); border: 1px solid var(--minus); }}
             .ev-price {{ font-weight: 500; font-size: 15px; }}
-            
             .snapshot-card {{ background: rgba(0,0,0,0.15); padding: 12px 18px; border-radius: 8px; display: flex; flex-wrap: wrap; gap: 15px; font-size: 13px; }}
+            .snapshot-missing {{ border: 1px dashed var(--border); color: var(--text); font-size: 12px; font-style: italic; }}
             .sn-item span {{ color: var(--text); margin-right: 5px; }}
             .sn-reason {{ width: 100%; border-top: 1px solid var(--border); margin-top: 5px; padding-top: 5px; color: var(--accent); font-style: italic; }}
-            
             .p-plus {{ color: var(--plus); }}
             .p-minus {{ color: var(--minus); }}
-            
-            /* [v18.1] 파라미터 컨테이너 스타일 (trade_report.py와 통일) */
-            .p-container {{ margin-bottom: 40px; display: flex; flex-direction: column; gap: 10px; }}
-            .p-group {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 18px; }}
-            .p-group-title {{ font-size: 0.9rem; font-weight: 700; color: var(--primary); cursor: pointer; outline: none; list-style: none; }}
-            .p-group-title::-webkit-details-marker {{ display: none; }}
-            .p-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; padding-top: 12px; margin-top: 8px; border-top: 1px solid var(--border); }}
-            .p-item {{ display: flex; justify-content: space-between; align-items: center; font-size: 13px; }}
-            .p-key {{ color: var(--text); }}
-            .p-val-group {{ display: flex; gap: 8px; align-items: center; }}
-            .val-on {{ color: var(--plus); background: rgba(158, 206, 106, 0.1); padding: 1px 6px; border-radius: 4px; font-size: 11px; }}
-            .val-off {{ color: var(--text); background: rgba(120, 124, 153, 0.1); padding: 1px 6px; border-radius: 4px; font-size: 11px; }}
-            .p-val-sub {{ color: var(--primary); font-family: monospace; font-weight: 600; }}
-
-            footer {{ margin-top: 50px; text-align: center; color: var(--text); font-size: 12px; }}
+            .vr-analysis-wrap {{
+                --dim: #787c99;
+                --buy: #7aa2f7;
+                --gain: #9ece6a;
+                --loss: #bf616a;
+                margin-bottom: 8px;
+            }}
+            .depth-section, .analysis-report-section {{
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 16px;
+                padding: 22px 24px;
+                margin-bottom: 24px;
+            }}
+            .depth-table {{ width: 100%; border-collapse: collapse; font-size: 0.84rem; }}
+            .depth-table th, .depth-table td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }}
+            .depth-table th {{ color: var(--text); font-weight: 600; font-size: 0.78rem; }}
+            .depth-table td.num {{ text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }}
+            .analysis-main-title {{ margin: 0 0 8px 0; font-size: 1.35rem; font-weight: 800; color: var(--primary); }}
+            .analysis-main-lead {{ color: var(--text); font-size: 0.88rem; line-height: 1.6; margin: 0 0 12px 0; }}
+            .analysis-h3 {{ font-size: 1.02rem; font-weight: 700; color: #eceff4; margin: 24px 0 12px 0; padding-bottom: 8px; border-bottom: 1px solid var(--border); }}
+            .analysis-h3:first-of-type {{ margin-top: 4px; }}
+            .analysis-type-card {{ background: rgba(0,0,0,0.12); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }}
+            .analysis-type-card.type-a {{ border-left: 4px solid #9ece6a; }}
+            .analysis-type-card.type-b {{ border-left: 4px solid #88c0d0; }}
+            .depth-subtitle {{ font-size: 0.92rem; font-weight: 700; margin-bottom: 8px; color: #eceff4; }}
+            .depth-lead {{ color: var(--text); font-size: 0.86rem; line-height: 1.55; }}
+            .depth-subnote {{ font-size: 0.82rem; color: var(--text); line-height: 1.5; }}
+            .depth-open-box {{ background: rgba(180,142,173,0.1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; margin-bottom: 18px; font-size: 0.88rem; }}
+            .depth-verdict {{ margin-top: 14px; padding: 12px 14px; background: rgba(94,129,172,0.1); border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem; color: var(--text-bright); }}
+            .depth-err {{ color: #bf616a; }}
+            .analysis-stack-spaced > .analysis-subblock + .analysis-subblock {{ margin-top: 18px; }}
+            td.gain, span.gain {{ color: var(--plus); font-weight: 600; }}
+            td.loss, span.loss {{ color: var(--minus); font-weight: 600; }}
+            .depth-bucket-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+            @media (max-width: 900px) {{
+                .vr-sidebar {{ position: relative; width: 100%; border-right: none; border-bottom: 1px solid var(--border); }}
+                .vr-main {{ margin-left: 0; padding: 16px; }}
+                .stats-grid {{ grid-template-columns: repeat(2, 1fr); }}
+                .depth-bucket-grid {{ grid-template-columns: 1fr; }}
+            }}
+            footer {{ margin-top: 48px; text-align: center; color: var(--text); font-size: 12px; }}
         </style>
     </head>
     <body>
+        <aside class="vr-sidebar" aria-label="종목 바로가기">
+            <div class="vr-sidebar-header">종목 바로가기</div>
+            <ul class="vr-nav-list">
+            {sidebar_html}
+            </ul>
+        </aside>
+        <div class="vr-main">
         <div class="container">
-            <header>
-                <h1>Virtual Trade Narrative Report</h1>
-                <p style="color:var(--text); margin:5px 0 0 0;">가상 매매 의사결정 시점의 시장 데이터 분석 및 복기 리포트</p>
+            <header id="v-top">
+                <h1>가상 매매 종합 리포트</h1>
+                <p style="color:var(--text); margin:8px 0 0 0;">의사결정 시점 스냅샷·나러티브와 포트폴리오 백테스트형 통계를 함께 봅니다.</p>
             </header>
-            
+
             <div class="stats-grid">
                 <div class="stat-box">
-                    <span class="stat-val">{len(history)}</span>
-                    <span class="stat-label">Total Trades</span>
+                    <span class="stat-val">{len(history_raw)}</span>
+                    <span class="stat-label">청산 완료</span>
                 </div>
                 <div class="stat-box">
                     <span class="stat-val { 'p-plus' if win_rate >= 50 else 'p-minus' }">{win_rate:.1f}%</span>
@@ -259,25 +811,27 @@ def generate_virtual_narrative_report(history, output_path="virtual_trade_report
                 </div>
                 <div class="stat-box">
                     <span class="stat-val { 'p-plus' if total_pnl > 0 else 'p-minus' }">{int(total_pnl):+,}</span>
-                    <span class="stat-label">Total P&L (KRW)</span>
+                    <span class="stat-label">Total P&amp;L (KRW)</span>
                 </div>
                 <div class="stat-box">
                     <span class="stat-val { 'p-plus' if avg_pnl_pct > 0 else 'p-minus' }">{avg_pnl_pct:+.2f}%</span>
                     <span class="stat-label">Avg Return</span>
                 </div>
             </div>
+            {f'<p style="color:var(--text);font-size:13px;margin:-12px 0 24px 0;">미청산 보유: <b style="color:var(--primary);">{len(open_positions)}</b> 종목</p>' if open_positions else ""}
 
-            {f'<div style="color:var(--text); font-size:12px; margin-bottom:10px;">Execution Strategy Parameters:</div>' if settings else ""}
-            {param_html}
-            
-            <div style="color:var(--text); font-size:12px; margin-bottom:10px; margin-top:30px;">Trade Timeline & Narratives:</div>
+            {portfolio_analysis_html}
+
+            {f'<div style="color:var(--text); font-size:12px; margin-bottom:10px; margin-top:8px;">보유 중 (미청산)</div><div class="trade-section">{open_cards_html}</div>' if open_cards_html else ""}
+            <div style="color:var(--text); font-size:12px; margin-bottom:10px; margin-top:28px;">청산 완료</div>
             <div class="trade-section">
-                {"".join(trades[::-1])}
+                {closed_trades_html if closed_trades_html else '<p style="color:var(--text);padding:12px 0;">청산 완료된 가상 매매 이력이 없습니다.</p>'}
             </div>
-            
+
             <footer>
-                © 2026 Antigravity Trading System | Report Generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                © 2026 Antigravity Trading System | 생성 시각 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             </footer>
+        </div>
         </div>
     </body>
     </html>
@@ -285,4 +839,4 @@ def generate_virtual_narrative_report(history, output_path="virtual_trade_report
     
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"✅ Narrative Report generated: {output_path}")
+    print(f"✅ 종합 리포트 생성: {output_path}")

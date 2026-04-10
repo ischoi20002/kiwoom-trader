@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import numpy as np
@@ -524,6 +525,404 @@ def _html_stock_row_regime_badge(
                             <span style="font-size:0.65rem; color:var(--dim); font-family:monospace; line-height:1;">{sub}</span>
                         </div>
                         """
+
+
+def virtual_executions_to_trades_df(
+    history: List[Dict[str, Any]],
+    open_positions: Optional[List[Dict[str, Any]]] = None,
+) -> pd.DataFrame:
+    """
+    가상 포지션 이력·보유를 포트폴리오 백테스트 리포트와 동일한 집계(`build_virtual_portfolio_analysis_html`)에
+    넘길 수 있도록 체결 로그 형태 DataFrame으로 변환합니다.
+    """
+    rows: List[Dict[str, Any]] = []
+    open_positions = open_positions or []
+
+    def _parse_dt(v: Any) -> Optional[pd.Timestamp]:
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return None
+        try:
+            s = str(v).strip().replace("T", " ")
+            if len(s) >= 19:
+                return pd.to_datetime(s[:19])
+            return pd.to_datetime(s)
+        except Exception:
+            try:
+                return pd.to_datetime(v)
+            except Exception:
+                return None
+
+    try:
+        for h in history or []:
+            if not isinstance(h, dict):
+                continue
+            code = str(h.get("code", "")).zfill(6)
+            if code == "000000":
+                continue
+            sig_type = str(h.get("sig_type") or "TYPE_A").upper()
+            if "TYPE_B" in str(h.get("reason", "")).upper():
+                sig_type = "TYPE_B"
+            entry_reason = str(h.get("reason", "") or "")
+            exit_reason = str(h.get("exit_reason", "") or "")
+            evs = h.get("events") or []
+            buy_specs: List[tuple] = []
+            for ev in evs:
+                if not isinstance(ev, dict):
+                    continue
+                a = str(ev.get("action", "")).upper()
+                if a == "BUY_S1":
+                    buy_specs.append(
+                        ("BUY", float(ev.get("price") or 0), int(ev.get("qty") or 0))
+                    )
+                elif a == "BUY_S2":
+                    buy_specs.append(
+                        ("BUY2", float(ev.get("price") or 0), int(ev.get("qty") or 0))
+                    )
+            ap = float(h.get("avg_price") or 0)
+            iq = int(h.get("qty") or 0)
+            if not buy_specs:
+                buy_specs.append(("BUY", ap, iq))
+                if int(h.get("stage") or 1) >= 2:
+                    buy_specs.append(("BUY2", ap, 0))
+            elif int(h.get("stage") or 1) >= 2 and not any(
+                x[0] == "BUY2" for x in buy_specs
+            ):
+                buy_specs.append(("BUY2", ap, 0))
+
+            d_entry = _parse_dt(h.get("entry_time")) or pd.Timestamp.now()
+            for act, px, qy in buy_specs:
+                rows.append(
+                    {
+                        "Code": code,
+                        "Action": act,
+                        "Price": px,
+                        "Qty": qy,
+                        "Fee": 0.0,
+                        "Sig_Type": sig_type,
+                        "Reason": entry_reason,
+                        "Return": 0.0,
+                        "Date": d_entry,
+                    }
+                )
+            d_exit = _parse_dt(h.get("exit_datetime")) or _parse_dt(
+                f'{h.get("exit_date") or ""} {h.get("exit_time") or ""}'.strip()
+            )
+            if d_exit is None:
+                d_exit = d_entry
+            rows.append(
+                {
+                    "Code": code,
+                    "Action": "SELL",
+                    "Price": float(h.get("exit_price") or ap),
+                    "Qty": iq,
+                    "Fee": 0.0,
+                    "Sig_Type": sig_type,
+                    "Reason": exit_reason,
+                    "Return": float(h.get("final_pnl_pct") or 0),
+                    "Date": d_exit,
+                }
+            )
+
+        for p in open_positions:
+            if not isinstance(p, dict):
+                continue
+            code = str(p.get("code", "")).zfill(6)
+            if code == "000000":
+                continue
+            sig_type = str(p.get("sig_type") or "TYPE_A").upper()
+            if "TYPE_B" in str(p.get("reason", "")).upper():
+                sig_type = "TYPE_B"
+            ap = float(p.get("avg_price") or 0)
+            iq = int(p.get("qty") or 0)
+            d_entry = _parse_dt(p.get("entry_time")) or pd.Timestamp.now()
+            rows.append(
+                {
+                    "Code": code,
+                    "Action": "BUY",
+                    "Price": ap,
+                    "Qty": iq,
+                    "Fee": 0.0,
+                    "Sig_Type": sig_type,
+                    "Reason": str(p.get("reason", "") or ""),
+                    "Return": 0.0,
+                    "Date": d_entry,
+                }
+            )
+            if int(p.get("stage") or 1) >= 2:
+                rows.append(
+                    {
+                        "Code": code,
+                        "Action": "BUY2",
+                        "Price": ap,
+                        "Qty": 0,
+                        "Fee": 0.0,
+                        "Sig_Type": sig_type,
+                        "Reason": str(p.get("reason", "") or ""),
+                        "Return": 0.0,
+                        "Date": d_entry,
+                    }
+                )
+    except Exception:
+        return pd.DataFrame()
+
+    if not rows:
+        return pd.DataFrame()
+    try:
+        out = pd.DataFrame(rows)
+        out["Date"] = pd.to_datetime(out["Date"])
+        out.sort_values(["Code", "Date"], inplace=True)
+        out.reset_index(drop=True, inplace=True)
+        return out
+    except Exception:
+        return pd.DataFrame()
+
+
+def build_virtual_portfolio_analysis_html(
+    df: pd.DataFrame,
+    *,
+    open_holdings_count: int = 0,
+) -> str:
+    """
+    `dynamic_trade_report.html`의 「백테스트 분석 통계」와 동일한 구조의 HTML을
+    가상 체결 DataFrame(`virtual_executions_to_trades_df`) 기준으로 생성합니다.
+    신호 거절·시장 레짐 행은 실시간 로그에 없으므로 해당 행은 0 또는 안내 문구로 둡니다.
+    """
+    if df is None or df.empty:
+        return (
+            '<div class="vr-analysis-wrap"><p class="depth-subnote" style="color:#94a3b8;">'
+            "체결 로그가 없어 포트폴리오 백테스트형 통계를 계산할 수 없습니다."
+            "</p></div>"
+        )
+
+    try:
+        df = df.copy()
+        df["Date"] = pd.to_datetime(df["Date"])
+    except Exception:
+        return (
+            '<div class="vr-analysis-wrap"><p class="depth-subnote" style="color:#94a3b8;">'
+            "날짜 파싱 실패로 통계를 생략합니다."
+            "</p></div>"
+        )
+
+    try:
+        count_a = len(
+            df[
+                (df["Action"].astype(str).str.startswith("BUY", na=False))
+                & (df["Reason"].astype(str).str.contains("TYPE_A", case=False, na=False))
+            ]
+        )
+        count_b = len(
+            df[
+                (df["Action"].astype(str).str.startswith("BUY", na=False))
+                & (df["Reason"].astype(str).str.contains("TYPE_B", case=False, na=False))
+            ]
+        )
+        count_s2 = len(
+            df[
+                (df["Action"].astype(str).str.contains("BUY2", na=False))
+                | (df["Action"].astype(str) == "ADDON")
+                | (
+                    df["Reason"]
+                    .astype(str)
+                    .str.contains("Stage 2|ADDON", case=False, na=False)
+                )
+            ]
+        )
+        _sb_on_buy = _reason_matches_smart_buy(df["Reason"])
+        count_smart_buy = int(
+            ((df["Action"].astype(str).str.startswith("BUY", na=False)) & _sb_on_buy).sum()
+        )
+        _sx_on_sell = _reason_matches_smart_exit(df["Reason"])
+        count_smart_exit = int(
+            (
+                (df["Action"].astype(str).str.startswith("SELL", na=False)) & _sx_on_sell
+            ).sum()
+        )
+        count_rejected = 0
+        count_smart_buy_rejected = 0
+        total_signals = count_smart_buy + count_rejected
+        total_smart_buy_events = count_smart_buy + count_smart_buy_rejected
+        pass_rate = (
+            (count_smart_buy / max(1, total_smart_buy_events)) * 100
+            if total_smart_buy_events > 0
+            else 0.0
+        )
+        hold_count = max(
+            int(open_holdings_count or 0),
+            len(df[df["Action"].astype(str) == "HOLD"]["Code"].unique()),
+        )
+    except Exception:
+        count_a = count_b = count_s2 = 0
+        count_smart_buy = count_smart_exit = 0
+        count_rejected = count_smart_buy_rejected = 0
+        total_signals = total_smart_buy_events = 0
+        pass_rate = 0.0
+        hold_count = int(open_holdings_count or 0)
+
+    a_s1_p, a_s1_i = [], []
+    a_s2_p, a_s2_i = [], []
+    b_s1_p, b_s1_i = [], []
+    b_s2_p, b_s2_i = [], []
+    total_s1_p, total_s1_i = [], []
+    total_s2_p, total_s2_i = [], []
+
+    try:
+        for c in df["Code"].unique():
+            s_df = df[df["Code"] == c]
+            temp_inv = 0.0
+            temp_has_s2 = False
+            temp_sig = "NONE"
+
+            for _, r in s_df.iterrows():
+                action = str(r["Action"])
+                price = float(r["Price"])
+                qty = float(r["Qty"])
+                fee = (
+                    float(r.get("Fee", 0))
+                    if not pd.isna(r.get("Fee", 0))
+                    else 0.0
+                )
+
+                if "BUY" in action:
+                    if any(x in action for x in ["BUY2", "BUY_2ND", "ADDON", "S2"]):
+                        temp_has_s2 = True
+                    else:
+                        temp_sig = str(r.get("Sig_Type", "NONE"))
+                    temp_inv += (price * qty) + fee
+
+                elif action in ["SELL", "HOLD"]:
+                    profit = (price * qty) - fee - temp_inv
+
+                    if temp_has_s2:
+                        if "TYPE_A" in temp_sig:
+                            a_s2_p.append(profit)
+                            a_s2_i.append(temp_inv)
+                        elif "TYPE_B" in temp_sig:
+                            b_s2_p.append(profit)
+                            b_s2_i.append(temp_inv)
+                        total_s2_p.append(profit)
+                        total_s2_i.append(temp_inv)
+                    else:
+                        if "TYPE_A" in temp_sig:
+                            a_s1_p.append(profit)
+                            a_s1_i.append(temp_inv)
+                        elif "TYPE_B" in temp_sig:
+                            b_s1_p.append(profit)
+                            b_s1_i.append(temp_inv)
+                        total_s1_p.append(profit)
+                        total_s1_i.append(temp_inv)
+
+                    temp_inv = 0.0
+                    temp_has_s2 = False
+                    temp_sig = "NONE"
+    except Exception:
+        pass
+
+    def calc_yield(profits: list, invested: list) -> float:
+        if not invested or sum(invested) == 0:
+            return 0.0
+        return (sum(profits) / sum(invested)) * 100
+
+    y_a1, s_a1 = calc_yield(a_s1_p, a_s1_i), sum(a_s1_p)
+    y_a2, s_a2 = calc_yield(a_s2_p, a_s2_i), sum(a_s2_p)
+    y_b1, s_b1 = calc_yield(b_s1_p, b_s1_i), sum(b_s1_p)
+    y_b2, s_b2 = calc_yield(b_s2_p, b_s2_i), sum(b_s2_p)
+    y_s1, s_s1 = calc_yield(total_s1_p, total_s1_i), sum(total_s1_p)
+    y_s2, s_s2 = calc_yield(total_s2_p, total_s2_i), sum(total_s2_p)
+
+    count_fills = len(df[df["Action"].isin(["SELL", "HOLD"])])
+    completed_rounds = len(total_s1_p) + len(total_s2_p)
+
+    try:
+        depth_fragment = _build_depth_analytics_html(df)
+    except Exception:
+        depth_fragment = ""
+
+    regime_fragment = (
+        '<p class="depth-subnote" style="margin-top:8px;">실시간 가상 매매 리포트입니다. '
+        "시장 레짐별 실현 통계는 포트폴리오 백테스트 리포트 "
+        "(<code>dynamic_trade_report.html</code>)를 참고하세요.</p>"
+    )
+
+    ca1, ca2 = len(a_s1_p), len(a_s2_p)
+    cb1, cb2 = len(b_s1_p), len(b_s2_p)
+    c_all_s1, c_all_s2 = len(total_s1_p), len(total_s2_p)
+
+    analysis_stats_html = f"""
+    <div id="analysis-stats" class="analysis-report-section depth-section">
+        <h2 class="analysis-main-title">📋 백테스트 분석 통계 (가상 체결 기준)</h2>
+        <p class="analysis-main-lead">
+            포트폴리오 백테스트 리포트와 동일한 표·집계 구조입니다. 다만 실시간 세션에는 REJECTED_SIG·시장 레짐
+            입력이 없어 해당 항목은 0 또는 안내로 표시됩니다.
+        </p>
+
+        <h3 class="analysis-h3">1. 실행·신호 요약</h3>
+        <table class="depth-table">
+            <thead><tr><th>항목</th><th class="num">값</th><th>비고</th></tr></thead>
+            <tbody>
+                <tr><td>청산 행 (SELL/HOLD)</td><td class="num">{count_fills}건</td><td style="color:var(--dim);font-size:0.82rem;">로그 상 청산·평가 행 수</td></tr>
+                <tr><td>완료 라운드트립</td><td class="num">{completed_rounds}건</td><td style="color:var(--dim);font-size:0.82rem;">종목별 매수체인→매도 단위</td></tr>
+                <tr><td>미청산 보유 종목 수</td><td class="num">{hold_count}종목</td><td style="color:var(--dim);font-size:0.82rem;">리포트 생성 시점 기준</td></tr>
+                <tr><td>스마트 진입 통과 / 시도</td><td class="num">{count_smart_buy} / {total_smart_buy_events}건</td><td style="color:var(--dim);font-size:0.82rem;">통과율 {pass_rate:.1f}%</td></tr>
+                <tr><td>스마트 진입 거절 (수급)</td><td class="num">{count_smart_buy_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">실시간 로그 미포함</td></tr>
+                <tr><td>신호 거절 전체 (REJECTED_SIG)</td><td class="num">{count_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">실시간 로그 미포함</td></tr>
+                <tr><td>스마트 청산 (SELL·스마트 패턴)</td><td class="num">{count_smart_exit}건</td><td style="color:var(--dim);font-size:0.82rem;">Smart Exit 변형 포함</td></tr>
+                <tr><td>신호 후보 대비 완료 라운드 비중</td><td class="num">{100.0 * completed_rounds / max(1, total_signals):.1f}%</td><td style="color:var(--dim);font-size:0.82rem;">분모 {total_signals}건</td></tr>
+                <tr><td>매수 행·Reason 기준 TYPE_A / TYPE_B</td><td class="num">{count_a} / {count_b}건</td><td style="color:var(--dim);font-size:0.82rem;">참고용</td></tr>
+                <tr><td>추매 관련 매수 행</td><td class="num">{count_s2}건</td><td style="color:var(--dim);font-size:0.82rem;">BUY2·ADDON·Reason 키워드</td></tr>
+            </tbody>
+        </table>
+
+        <h3 class="analysis-h3">2. 전략·스테이지별 실현 (Type A/B)</h3>
+        <div class="analysis-type-card type-a">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <span style="color:#4ade80;font-weight:800;font-size:1.05rem;">Type A (눌림목)</span>
+                <span style="color:var(--dim);font-size:0.88rem;">완료 라운드 <b style="color:#fff;">{ca1 + ca2}</b>건</span>
+            </div>
+            <table class="depth-table">
+                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
+                <tbody>
+                    <tr><td>Stage 1만</td><td class="num">{ca1}</td><td class="num {'gain' if s_a1 >= 0 else 'loss'}">{y_a1:+.2f}%</td><td class="num {'gain' if s_a1 >= 0 else 'loss'}">{int(s_a1):,}원</td></tr>
+                    <tr><td>S2 포함</td><td class="num">{ca2}</td><td class="num {'gain' if s_a2 >= 0 else 'loss'}">{y_a2:+.2f}%</td><td class="num {'gain' if s_a2 >= 0 else 'loss'}">{int(s_a2):,}원</td></tr>
+                </tbody>
+            </table>
+            <div style="text-align:right;margin-top:8px;color:var(--dim);font-size:0.85rem;">Type A 합계 <span class="{'gain' if (s_a1+s_a2) >= 0 else 'loss'}" style="font-weight:800;font-size:1.05rem;">{int(s_a1+s_a2):,}원</span></div>
+        </div>
+        <div class="analysis-type-card type-b">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <span style="color:#38bdf8;font-weight:800;font-size:1.05rem;">Type B (추세돌파)</span>
+                <span style="color:var(--dim);font-size:0.88rem;">완료 라운드 <b style="color:#fff;">{cb1 + cb2}</b>건</span>
+            </div>
+            <table class="depth-table">
+                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
+                <tbody>
+                    <tr><td>Stage 1만</td><td class="num">{cb1}</td><td class="num {'gain' if s_b1 >= 0 else 'loss'}">{y_b1:+.2f}%</td><td class="num {'gain' if s_b1 >= 0 else 'loss'}">{int(s_b1):,}원</td></tr>
+                    <tr><td>S2 포함</td><td class="num">{cb2}</td><td class="num {'gain' if s_b2 >= 0 else 'loss'}">{y_b2:+.2f}%</td><td class="num {'gain' if s_b2 >= 0 else 'loss'}">{int(s_b2):,}원</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="analysis-subblock">
+            <div class="depth-subtitle">전체 합산 (타입 무관)</div>
+            <table class="depth-table">
+                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
+                <tbody>
+                    <tr><td>S1만 (전 타입)</td><td class="num">{c_all_s1}</td><td class="num {'gain' if s_s1 >= 0 else 'loss'}">{y_s1:.2f}%</td><td class="num {'gain' if s_s1 >= 0 else 'loss'}">{int(s_s1):,}원</td></tr>
+                    <tr><td>S2 포함 (전 타입)</td><td class="num">{c_all_s2}</td><td class="num {'gain' if s_s2 >= 0 else 'loss'}">{y_s2:.2f}%</td><td class="num {'gain' if s_s2 >= 0 else 'loss'}">{int(s_s2):,}원</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3 class="analysis-h3">3. 시장 레짐별 실현</h3>
+        <div class="analysis-subblock">{regime_fragment}</div>
+
+        <h3 class="analysis-h3">4. 완료 라운드트립 심층</h3>
+        <p class="depth-lead" style="margin-bottom:16px;">
+            매수 체인(BUY*) 이후 <b>SELL 또는 HOLD</b>로 닫힌 거래만 집계합니다.
+        </p>
+        <div class="analysis-subblock">{depth_fragment if depth_fragment else '<p class="depth-subnote">완료 라운드가 없거나 심층 분석을 생성할 수 없습니다.</p>'}</div>
+    </div>
+    """
+    return f'<div class="vr-analysis-wrap">{analysis_stats_html}</div>'
 
 
 def generate_trade_report(df, interval, output_path="trade_report.html", total_trades=0, win_rate=0, avg_ret=0, best_settings=None, market_df=None, vix_df=None, callback=None, target_codes=None, start_date=None, end_date=None, daily_equity=None, high_precision=False):

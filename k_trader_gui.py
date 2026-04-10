@@ -622,6 +622,50 @@ class KiwoomApp:
             except Exception:
                 self._tick_flush_after_id = None
 
+    def _resolve_fill_snapshot_reason(
+        self,
+        code: str,
+        side: str,
+        order_reason: Optional[str] = None,
+        channel: str = "REST",
+    ) -> str:
+        """
+        capture_snapshot에 넣을 사유 문자열.
+        주문 시 전달된 reason(EXIT_*) 우선, 매도는 포지션 exit_reason, 마지막에 채널 토큰(REST_SELL 등).
+        """
+        try:
+            o = str(order_reason or "").strip()
+            if o:
+                return o
+        except Exception:
+            pass
+        if str(side).lower() != "sell":
+            try:
+                return f"{channel}_{str(side).upper()}"
+            except Exception:
+                return f"{channel}_BUY"
+        try:
+            pm = self.portfolio
+            try:
+                nc = pm._normalize_stock_code(str(code))
+            except Exception:
+                nc = str(code).zfill(6)
+            with pm.lock:
+                for k, pos in pm.virtual_positions.items():
+                    try:
+                        if pm._normalize_stock_code(str(k)) == nc:
+                            er = pos.get("exit_reason")
+                            if er:
+                                return str(er)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        try:
+            return f"{channel}_{str(side).upper()}"
+        except Exception:
+            return "MANUAL"
+
     def reconcile_exchange_fill_after_order_accept(
         self,
         code: str,
@@ -659,7 +703,10 @@ class KiwoomApp:
                 )
             except Exception as ue:
                 self.log(f"⚠️ [체결 동기화] DB 갱신 실패: {ue}")
-            snapshot = self.portfolio.capture_snapshot(code, fill_price, reason=f"REST_{side.upper()}")
+            snap_reason = self._resolve_fill_snapshot_reason(
+                code, side, reason, channel="REST"
+            )
+            snapshot = self.portfolio.capture_snapshot(code, fill_price, reason=snap_reason)
             self.portfolio.on_fill(
                 code,
                 side,
@@ -732,7 +779,10 @@ class KiwoomApp:
                 )
             except Exception as ue:
                 self.log(f"⚠️ [체결] DB 갱신 실패: {ue}")
-            snapshot = self.portfolio.capture_snapshot(code, price, reason=f"EXEC_{side.upper()}")
+            snap_reason = self._resolve_fill_snapshot_reason(
+                code, side, None, channel="EXEC"
+            )
+            snapshot = self.portfolio.capture_snapshot(code, price, reason=snap_reason)
             self.portfolio.on_fill(
                 code, side, price, qty, snapshot=snapshot, fill_channel="exchange"
             )
