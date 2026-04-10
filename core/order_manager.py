@@ -263,23 +263,44 @@ class OrderManager:
     def _sum_holdings_market_value(self, holdings: list) -> float:
         """
         ka10085 acnt_prft_rt 행별 주식 평가금액 합산.
-        평가 전용 필드가 없으면 현재가×보유수량으로 근사합니다.
+        모의/실전 API에 따라 evlu·시세 필드가 비는 응답이 섞이면 총자산이 예수금만으로 떨어지므로
+        매입가(평단)×수량까지 폴백합니다.
         """
         s = 0.0
         for row in holdings:
             if not isinstance(row, dict):
                 continue
             try:
+                qty = self._safe_float(
+                    row.get("rmnd_qty") or row.get("hldg_qty") or row.get("qty") or 0
+                )
+                if qty <= 0:
+                    continue
                 ev = self._safe_float(
                     row.get("evlu_amt") or row.get("stk_evlu_amt") or 0
                 )
                 if ev > 0:
                     s += ev
                     continue
-                cur = self._safe_float(row.get("cur_prc") or 0)
-                qty = self._safe_float(row.get("rmnd_qty") or 0)
-                if cur > 0 and qty > 0:
+                cur = self._safe_float(
+                    row.get("cur_prc")
+                    or row.get("prpr")
+                    or row.get("stck_prpr")
+                    or row.get("now_prc")
+                    or 0
+                )
+                if cur > 0:
                     s += cur * qty
+                    continue
+                avg = self._safe_float(
+                    row.get("pchs_avg_pric")
+                    or row.get("pur_pric")
+                    or row.get("avg_price")
+                    or row.get("bpsp_avg_pric")
+                    or 0
+                )
+                if avg > 0:
+                    s += avg * qty
             except Exception:
                 continue
         return s
@@ -429,7 +450,16 @@ class OrderManager:
                         or 0
                     )
 
+                # 예수금상세로 d2 보강 후 주식평가 재합산 — 응답 편차로 total만 예수금으로 붕괴하는 현상 완화
+                stocks_mv = self._sum_holdings_market_value(holdings)
                 n_hold, hold_detail = self._summarize_holdings_qty_positive(holdings)
+                try:
+                    if n_hold > 0:
+                        floor_tot = float(d2_deposit) + float(stocks_mv)
+                        if floor_tot > 0:
+                            total_equity = max(float(total_equity), floor_tot)
+                except Exception:
+                    pass
                 # 주문가능(ord_alow 등)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
                 try:
                     ca = float(cash_available or 0)
