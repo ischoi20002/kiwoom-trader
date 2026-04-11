@@ -5,6 +5,7 @@ from pykrx import stock  # [v16.0] 과거 지수 구성 종목 조회용
 from datetime import datetime, timedelta
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Literal, Optional
 
 
 class SelectionDbStaleError(Exception):
@@ -280,28 +281,63 @@ def _merge_dual_track_picks(
     return final
 
 
-def select_monitoring_targets(settings, logger_callback, target_date=None, data_manager=None):
+def select_monitoring_targets(
+    settings: dict[str, Any],
+    logger_callback: Callable[..., None],
+    target_date: Optional[datetime] = None,
+    data_manager: Any = None,
+    *,
+    selection_ohlcv_source: Literal["db_then_api", "api_only"] = "api_only",
+) -> pd.DataFrame:
     """
     KOSPI 200을 스캔해 Track A(눌림)·Track B(추세) 유니버스를 **분리** 선정합니다.
     prepare_dynamic_universe 와 동일 필터(거래량 분출 A/B, RSI·대금 기준 분리 등)를 사용하며,
     상위 max_slots_a + max_slots_b 를 합산해 CSV/GUI에 반환합니다.
+
+    selection_ohlcv_source:
+        - api_only (기본): 실시간 선정 시 trading_data.db 일봉 미사용(FDR). 배포본 무DB 대응.
+        - db_then_api: 실시간 선정 시 DB 일봉 우선 + 미갱신이면 SelectionDbStaleError.
+          단, bars_1d 가 완전히 비어 있으면 신선도 검사만 생략하고 종목별로 DB→FDR 순으로 채움.
+          (target_date 가 지정된 과거 선정은 data_manager 일봉 우선 유지)
     """
     logger_callback("\n" + "="*50)
     t_str = target_date.strftime('%Y-%m-%d') if target_date else "실시간"
     logger_callback(f"[Select] [전략 종목 선정] ({t_str}) 분석 시작...")
 
-    # [v4.10] 실시간 선정만: 하베스팅이 최신 장마감 일봉까지 반영됐는지 검사 (잘못된 일봉으로 조용히 선정되는 것 방지)
-    if target_date is None and data_manager is not None:
+    try:
+        _src = str(selection_ohlcv_source or "api_only").strip().lower()
+    except Exception:
+        _src = "api_only"
+    api_only_live = _src in ("api_only", "api", "fdr_only", "fdr")
+
+    if target_date is None and api_only_live:
+        logger_callback(
+            "[Select] 실시간 일봉: API 전용 모드(trading_data.db 미사용, FDR 일봉 기준)"
+        )
+
+    # [v4.10] 실시간 + db_then_api: 일봉 신선도 검사 (api_only 는 스킵)
+    # bars_1d 가 비어 있으면 검사 생략 — 미배포·빈 DB에서도 선정 가능(FDR 폴백)
+    if target_date is None and data_manager is not None and not api_only_live:
         try:
-            ok, stale_msg = data_manager.check_daily_bars_fresh_for_selection()
-        except Exception as ex:
-            ok, stale_msg = False, f"일봉 신선도 검사 실패: {ex}"
-        if not ok:
-            logger_callback(f"⛔ [선정] {stale_msg}")
+            latest_1d = data_manager.get_latest_daily_bar_date_in_db()
+        except Exception:
+            latest_1d = None
+        if latest_1d is None:
             logger_callback(
-                "⛔ [선정] 데이터 수집(하베스팅)을 먼저 완료한 뒤 종목 선정을 실행하세요."
+                "ℹ️ [선정] 로컬 bars_1d 가 비어 일봉 신선도 검사를 생략합니다. "
+                "(하베스팅 전 DB만 있는 배포 환경에서도 FDR 폴백으로 진행)"
             )
-            raise SelectionDbStaleError(stale_msg)
+        else:
+            try:
+                ok, stale_msg = data_manager.check_daily_bars_fresh_for_selection()
+            except Exception as ex:
+                ok, stale_msg = False, f"일봉 신선도 검사 실패: {ex}"
+            if not ok:
+                logger_callback(f"⛔ [선정] {stale_msg}")
+                logger_callback(
+                    "⛔ [선정] 데이터 수집(하베스팅)을 먼저 완료한 뒤 종목 선정을 실행하세요."
+                )
+                raise SelectionDbStaleError(stale_msg)
     
     # 1. 대상 유니버스 확보 (KOSPI 200)
     tickers = []
@@ -404,26 +440,44 @@ def select_monitoring_targets(settings, logger_callback, target_date=None, data_
                 pass
 
     min_val_krw = float(settings.get('min_trde_val', 40.0)) * 100000000
-    
+
+    # 실시간(api_only)은 DB 일봉 미사용. 과거일(target_date) 선정은 백테스트 DB 유지.
+    use_dm_daily = bool(
+        data_manager is not None and (target_date is not None or not api_only_live)
+    )
+
     def process_code(row):
         code, name = str(row['Code']).zfill(6), row['Name']
         status = {"total": 1, "data": 0, "value": 0, "trend": 0, "rsi": 0, "vol": 0}
         try:
-            # 2. 데이터 확보 (DB 우선 -> Live Fallback)
+            # 2. 데이터 확보 (DB 우선 -> FDR 폴백) — 실시간 api_only 는 FDR만
             df = None
-            if data_manager:
-                # [v19.0] 로컬 DB 활용 (고속) - target_date가 없으면 오늘 기준
-                end_dt = target_date if target_date else datetime.now()
-                end_s = end_dt.strftime('%Y-%m-%d')
-                start_s = (end_dt - timedelta(days=300)).strftime('%Y-%m-%d')
-                df = data_manager.get_daily_bars(code, start_s, end_s)
-            
+            if use_dm_daily:
+                try:
+                    end_dt = target_date if target_date else datetime.now()
+                    end_s = end_dt.strftime('%Y-%m-%d')
+                    start_s = (end_dt - timedelta(days=300)).strftime('%Y-%m-%d')
+                    df = data_manager.get_daily_bars(code, start_s, end_s)
+                except Exception as _dm_e:
+                    try:
+                        logger_callback(f"  [Warn] {code} DB 일봉 조회 실패 → FDR 폴백: {_dm_e}")
+                    except Exception:
+                        pass
+                    df = None
+
             if df is None or len(df) < 50:
-                # [v19.1] 실시간 FDR 활용 (데이터 매니저가 없거나 DB 데이터 부족 시)
-                start_s = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
+                # FDR 일봉 (실시간 api_only / DB 부족 시)
+                try:
+                    end_anchor = target_date if target_date else datetime.now()
+                except Exception:
+                    end_anchor = datetime.now()
+                try:
+                    start_s = (end_anchor - timedelta(days=250)).strftime('%Y-%m-%d')
+                except Exception:
+                    start_s = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
                 try:
                     df = fdr.DataReader(code, start_s)
-                except:
+                except Exception:
                     return None, status
             
             if df is None or len(df) < 50: return None, status

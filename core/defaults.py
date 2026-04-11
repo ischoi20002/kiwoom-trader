@@ -30,12 +30,25 @@ DEFAULT_SETTINGS = {
     "use_auto_virtual": True,
     # 실시간: 15분봉 DF 행 수(진행 중 가상 1봉 포함)가 이 값 이상일 때만 S1 신호 판별
     "min_15m_bars_for_signal": 60,
-    # 워밍업: DB에서 가져올 최대 15분봉 개수(bars_15m 부족 시 1m→15m 리샘플)
+    # 워밍업 OHLCV 출처:
+    # - "api_only": DB(bars_15m/1m)를 쓰지 않고 ka10080 연속조회만으로 15분봉 구성(신호용 데이터를 DB 미검증에 섞지 않음)
+    # - "db_then_api": DB 우선 — 단, trading_data.db 에 분봉이 없으면 자동으로 api_only 로 전환(무DB 배포본)
+    # 전략 종목 선정(select_monitoring_targets) 기본값은 api_only (strategy_selector)
+    "realtime_warmup_ohlcv_source": "api_only",
+    # 워밍업: DB에서 가져올 최대 15분봉 개수(bars_15m 부족 시 1m→15m 리샘플, db_then_api 일 때만 사용)
     "realtime_warmup_15m_query_limit": 2500,
     # 실시간 bars_data 메모리 상한(StreamProcessor.tail 과 맞춤)
     "realtime_bars_max_keep": 300,
     # DB·리샘플만으로 봉이 부족할 때 키움 분봉 API로 15분봉 메모리 보충
     "use_api_warmup_backfill": True,
+    # 워밍업 분봉 API(ka10080) 연속조회 최대 페이지 수(종목당 상한 — 무한 루프 방지)
+    "realtime_warmup_ka10080_max_pages": 40,
+    # 연속조회 페이지 사이 대기(초) — 429 완화
+    "realtime_warmup_ka10080_page_delay_min": 0.2,
+    "realtime_warmup_ka10080_page_delay_max": 0.55,
+    # 워밍업 검증/API 실패 시 동일 종목 재시도(최초 1회 + 아래 횟수만큼)
+    "realtime_warmup_retry_max": 3,
+    "realtime_warmup_retry_delay_sec": 30.0,
     # 장중: 하베스팅이 전일까지이므로 당일 09:00~현재 구간이 비었으면 봉 수와 무관 API 보충
     "use_intraday_api_backfill": True,
     # True: 한 종목이라도 워밍업 실패 시 전체 감시 미시작. False: 실패 종목만 제외하고 나머지 감시(권장).

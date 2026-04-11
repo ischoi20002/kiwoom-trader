@@ -642,6 +642,17 @@ class TradingStrategy:
             return c
 
     @staticmethod
+    def _default_use_atr_stop_loss(sfx: str) -> bool:
+        """
+        use_atr_stop_loss{접미사} 키가 없을 때 기본값.
+        S2(_s2, _s2_b)는 True, S1 A/B(_a, _b)는 False — core/defaults.py와 동일.
+        """
+        try:
+            return str(sfx) in ("_s2", "_s2_b")
+        except Exception:
+            return False
+
+    @staticmethod
     def _exit_track_risk_bundle(settings: dict | None, is_type_b: bool) -> dict:
         """
         갭하락·개장유예·ATR(전역) — Type A/B 완전 분리.
@@ -862,7 +873,9 @@ class TradingStrategy:
 
             curr_atr = float(_curr_atr())
             suff = _atr_track_suff()
-            use_sl_atr = bool(s.get(f"use_atr_stop_loss{suff}", True))
+            use_sl_atr = bool(
+                s.get(f"use_atr_stop_loss{suff}", TradingStrategy._default_use_atr_stop_loss(suff))
+            )
             use_trail_atr = bool(s.get(f"use_atr_trailing_stop{suff}", True))
             run_atr_exit = bool(_rx["use_atr_exit"]) or (
                 curr_atr > 0 and (use_sl_atr or use_trail_atr)
@@ -1072,7 +1085,10 @@ class TradingStrategy:
             try:
                 _ca = float(_curr_atr())
                 _sfx = _atr_track_suff()
-                if _ca > 0 and s.get(f"use_atr_stop_loss{_sfx}", True):
+                if _ca > 0 and s.get(
+                    f"use_atr_stop_loss{_sfx}",
+                    TradingStrategy._default_use_atr_stop_loss(_sfx),
+                ):
                     skip_pct_sl = True
             except Exception:
                 pass
@@ -1080,7 +1096,8 @@ class TradingStrategy:
             if use_sl and not skip_pct_sl:
                 sl_pct = float(s.get(_exit_key('s1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 's2_b_stop_loss'), 3.0))
                 if profit_ratio <= -sl_pct:
-                    is_exit, exit_reason = True, "STOP_LOSS"
+                    # 리포트·CSV에서 설정 반영 여부 확인용(STOP_LOSS 문자열은 유지 → SL 버킷 집계 동일)
+                    is_exit, exit_reason = True, f"STOP_LOSS|SL%={sl_pct:g}"
 
         # 3. Flash Exit (Trailing from High)
         if not is_exit:
@@ -1104,7 +1121,10 @@ class TradingStrategy:
             try:
                 curr_atr = float(_curr_atr())
                 suff = _atr_track_suff()
-                use_sl_atr = s.get(f"use_atr_stop_loss{suff}", True)
+                use_sl_atr = s.get(
+                    f"use_atr_stop_loss{suff}",
+                    TradingStrategy._default_use_atr_stop_loss(suff),
+                )
                 use_trail_atr = s.get(f"use_atr_trailing_stop{suff}", True)
                 run_atr_exit = _rx["use_atr_exit"] or (
                     curr_atr > 0 and (use_sl_atr or use_trail_atr)
@@ -1464,9 +1484,9 @@ class SimpleBacktester:
             or s.get("use_atr_exit_b", s.get("use_atr_exit", False))
         )
         
-        self.use_atr_sl_a = s.get('use_atr_stop_loss_a', True)
-        self.use_atr_sl_b = s.get('use_atr_stop_loss_b', True)
-        self.use_atr_sl_s2 = s.get('use_atr_stop_loss_s2', True)
+        self.use_atr_sl_a = s.get("use_atr_stop_loss_a", False)
+        self.use_atr_sl_b = s.get("use_atr_stop_loss_b", False)
+        self.use_atr_sl_s2 = s.get("use_atr_stop_loss_s2", True)
         
         self.use_atr_trail_a = s.get('use_atr_trailing_stop_a', True)
         self.use_atr_trail_b = s.get('use_atr_trailing_stop_b', True)

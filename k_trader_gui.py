@@ -51,6 +51,7 @@ from core.trading_controller import TradingController
 from core.strategy_engine import StrategyEngine
 from core.selection_service import SelectionService
 from core.defaults import DEFAULT_SETTINGS, get_allowed_keys
+from core.version import APP_VERSION
 from core.supply_display import capture_supply_snapshot
 
 from kiwoom_rest_api.auth.token import TokenManager
@@ -194,7 +195,7 @@ class KiwoomApp:
     def __init__(self, root, auto_start=False):
         self.root = root
         self.auto_start = auto_start
-        self.root.title("K-Trader v4.0.0 [Remote Monitoring]")
+        self.root.title(f"K-Trader v{APP_VERSION} [Remote Monitoring]")
         self.root.geometry("1400x900")
         
         self.gui_utils = GuiUtils(root=self.root)

@@ -59,6 +59,7 @@ class DashboardTab:
         ttk.Label(
             scan_tile,
             text="KODEX200 편입종목 중 Type A·B 유니버스를 각각 선정합니다.\n"
+            "일봉은 API(FDR) 기준이며 trading_data.db(백테스트용)는 사용하지 않습니다.\n"
             "결과는 로그창에 표시되며 감시 대상으로 바로 등록됩니다.",
             foreground="#EBCB8B",
         ).pack(expand=True)
@@ -176,6 +177,7 @@ class DashboardTab:
                 settings=self.app.settings,
                 logger_callback=self.app.log,
                 data_manager=self.app.data_manager,
+                selection_ohlcv_source="api_only",
             )
             if df_result is not None and not df_result.empty:
                 df_snap = df_result.copy()

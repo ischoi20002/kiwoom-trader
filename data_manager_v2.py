@@ -2,7 +2,7 @@ import sqlite3
 import pandas as pd
 import os
 from datetime import datetime, timedelta, date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils.normalization import normalize_code
 from utils.bar_resample import refresh_resampled_data_at_path
@@ -20,6 +20,7 @@ class DataManagerV2:
     _lock = threading.Lock()
     # [v10.2] Absolute path for the database to ensure consistency across process CWD
     ABS_DIR = os.path.dirname(os.path.abspath(__file__))
+    # trading_data.db: 백테스트·동적백테·최적화용 캔들/메타 저장(실시간 대시보드 종목 선정은 API 일봉 권장)
     DEFAULT_DB_PATH = os.path.join(ABS_DIR, "trading_data.db")
     # [v4.12] 주문·체결·활성포지션 등 PC 간 백업·Git 동기화용 소형 DB (캔들·sync_meta 는 trading_data.db)
     DEFAULT_STATE_DB_BASENAME = "trading_state.db"
@@ -876,6 +877,25 @@ class DataManagerV2:
         except Exception:
             return None
 
+    def main_db_has_any_intraday_rows(self) -> bool:
+        """
+        trading_data.db 에 분봉·15분봉이 한 건이라도 있는지.
+        배포본처럼 빈 DB(또는 미하베스팅)일 때 실시간 워밍업이 DB 경로에 의존하지 않도록 판별에 사용.
+        """
+        try:
+            with self._get_connection() as conn:
+                if conn.execute("SELECT 1 FROM bars_15m LIMIT 1").fetchone():
+                    return True
+                if conn.execute("SELECT 1 FROM bars_1m LIMIT 1").fetchone():
+                    return True
+            return False
+        except Exception:
+            try:
+                print("[DataManagerV2] main_db_has_any_intraday_rows 조회 실패 → False 처리")
+            except Exception:
+                pass
+            return False
+
     def check_daily_bars_fresh_for_selection(self, now: Optional[datetime] = None) -> tuple[bool, str]:
         """
         종목 선정 전: 로컬 일봉이 '최신 장마감' 기준일까지 반영됐는지 검사.
@@ -930,6 +950,62 @@ class DataManagerV2:
                 if attempt < max_retries: time.sleep(1); continue
                 print(f"  [Error] API Fetch Exception ({code}): {e}"); return None
         return None
+
+    def fetch_kiwoom_minute_chart_page(
+        self, code: str, token: str, next_key: str = ""
+    ) -> Tuple[Optional[List[Any]], str]:
+        """
+        키움 ka10080 주식분봉 1페이지 조회.
+        next_key 가 비어 있으면 최초 조회, 있으면 연속조회(cont-yn=Y).
+        반환: (분봉 레코드 리스트 또는 오류 시 None, 다음 페이지용 next_key)
+        """
+        url = f"{config.URL}/api/dostk/chart"
+        body: Dict[str, Any] = {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1"}
+        nk_in = (next_key or "").strip()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                headers = {
+                    "Content-Type": "application/json;charset=UTF-8",
+                    "authorization": f"Bearer {token}",
+                    "cont-yn": "Y" if nk_in else "N",
+                    "next-key": nk_in,
+                    "api-id": "ka10080",
+                }
+                res = requests.post(url, headers=headers, json=body, timeout=15)
+                if res.status_code == 200:
+                    try:
+                        data = res.json() if res.content else {}
+                    except Exception:
+                        data = {}
+                    raw_list = data.get(
+                        "stk_min_pole_chart_qry",
+                        data.get("output", data.get("data", [])),
+                    )
+                    if raw_list is None:
+                        raw_list = []
+                    nk_out = (res.headers.get("next-key") or "").strip()
+                    if not nk_out:
+                        try:
+                            nk_out = str(data.get("next-key") or "").strip()
+                        except Exception:
+                            nk_out = ""
+                    return raw_list, nk_out
+                if res.status_code == 429:
+                    if attempt + 1 < max_retries:
+                        time.sleep((attempt + 1) * 2.0)
+                        continue
+                    print(f"  [Error] ka10080 429 ({code})")
+                    return None, ""
+                print(f"  [Error] ka10080 Status {res.status_code} ({code})")
+                return None, ""
+            except Exception as e:
+                if attempt + 1 < max_retries:
+                    time.sleep(1.0)
+                    continue
+                print(f"  [Error] ka10080 예외 ({code}): {e}")
+                return None, ""
+        return None, ""
 
     def fetch_and_parse_15m_bars(self, code, token):
         n_code = normalize_code(code); query = "SELECT datetime, open, high, low, close, volume FROM bars_1m WHERE code = ? ORDER BY datetime DESC LIMIT 5000"
@@ -1008,7 +1084,10 @@ class DataManagerV2:
         return False
 
     def prepare_volume_profiles(self, monitor_codes, token, bars_data, volume_profiles, min_volume_profiles):
-        """[v4.5.91] DB-First Smart Warmup (API 부하 최소화 및 속도 향상)"""
+        """
+        [v4.5.91] 감시 종목별 시간대 누적·분봉 거래량 프로필 구축.
+        sync_meta·bars_data 가 비어 있으면 키움 분봉 API만 사용(trading_data.db 캔들 미필수).
+        """
         if not token: return
         total = len(monitor_codes)
         

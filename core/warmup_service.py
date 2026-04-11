@@ -4,7 +4,7 @@ import random
 import time
 import pandas as pd
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backtest_engine import TradingStrategy
 
@@ -64,6 +64,71 @@ class WarmupService:
         except (TypeError, ValueError):
             return 60
 
+    def _warmup_ohlcv_source(self) -> str:
+        """
+        워밍업 시 가격 봉의 출처.
+        api_only — DB 미사용(검증되지 않은 로컬 캔들을 신호 경로에 섞지 않음).
+        db_then_api — DB 우선 후 API 보충(기존).
+        메인 trading_data.db 에 분봉/15분 데이터가 없으면 db_then_api 라도 api_only 로 강등(무DB 배포본).
+        """
+        try:
+            s = str(
+                self.app.settings.get("realtime_warmup_ohlcv_source", "api_only")
+            ).strip().lower()
+        except Exception:
+            s = "api_only"
+        if s in ("api_only", "api", "rest_only"):
+            return "api_only"
+        try:
+            dm = self.data_manager
+            if dm is not None and hasattr(dm, "main_db_has_any_intraday_rows"):
+                if not dm.main_db_has_any_intraday_rows():
+                    if not getattr(self, "_logged_intraday_db_empty_fallback", False):
+                        self._logged_intraday_db_empty_fallback = True
+                        self.log(
+                            "ℹ️ [Warmup] bars_15m/bars_1m 이 비어 있어 "
+                            "realtime_warmup_ohlcv_source 를 api_only 로 전환합니다. "
+                            "(trading_data.db 미포함 배포·미하베스팅)"
+                        )
+                    return "api_only"
+        except Exception:
+            if not getattr(self, "_logged_intraday_db_empty_fallback", False):
+                self._logged_intraday_db_empty_fallback = True
+                try:
+                    self.log("ℹ️ [Warmup] DB 분봉 유무 확인 실패 → api_only 로 진행합니다.")
+                except Exception:
+                    pass
+            return "api_only"
+        return "db_then_api"
+
+    def _warmup_retry_max(self) -> int:
+        """실패 시 추가 재시도 횟수(최초 시도 1회 + 이 값 = 총 시도 상한)."""
+        try:
+            return max(0, int(float(self.app.settings.get("realtime_warmup_retry_max", 3))))
+        except (TypeError, ValueError):
+            return 3
+
+    def _warmup_retry_delay_sec(self) -> float:
+        try:
+            return max(0.0, float(self.app.settings.get("realtime_warmup_retry_delay_sec", 30.0)))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _interruptible_sleep(self, total_sec: float) -> None:
+        """
+        재시도 대기 중에도 stop() 으로 워밍업이 중단되면 잠자기를 끊습니다.
+        """
+        try:
+            remain = float(total_sec)
+        except (TypeError, ValueError):
+            return
+        while remain > 1e-6:
+            if not self.is_running:
+                return
+            step = min(1.0, remain)
+            time.sleep(step)
+            remain -= step
+
     def _notify_stock_prep(
         self,
         event: str,
@@ -99,6 +164,104 @@ class WarmupService:
             return True, ""
         except Exception as e:
             return False, f"워밍업 검증 오류: {e}"
+
+    @staticmethod
+    def _api_minute_row_key(item: Any) -> str:
+        """ka10080 분봉 레코드에서 시각 키(중복 제거용)."""
+        try:
+            tm = str(
+                item.get("cntr_tm")
+                or item.get("cntg_tm")
+                or item.get("stck_cntg_hour", "")
+            ).strip()
+            return tm if len(tm) >= 12 else ""
+        except Exception:
+            return ""
+
+    def _fetch_warmup_minute_bars_paginated(
+        self,
+        code: str,
+        name: str,
+        token: str,
+        base: pd.DataFrame,
+        need: int,
+    ) -> List[Any]:
+        """
+        워밍업 전용: ka10080 연속조회로 분봉을 모은 뒤 15m 병합 기준을 만족할 때까지 페이지를 이어 받음.
+        (봉 수·장중 당일 갭이 해소되면 조기 종료 — 불필요한 API 호출 감소)
+        """
+        try:
+            max_pages = max(
+                1, int(float(self.app.settings.get("realtime_warmup_ka10080_max_pages", 40)))
+            )
+        except (TypeError, ValueError):
+            max_pages = 40
+        try:
+            dmin = float(
+                self.app.settings.get("realtime_warmup_ka10080_page_delay_min", 0.2)
+            )
+            dmax = float(
+                self.app.settings.get("realtime_warmup_ka10080_page_delay_max", 0.55)
+            )
+        except (TypeError, ValueError):
+            dmin, dmax = 0.2, 0.55
+        if dmax < dmin:
+            dmin, dmax = dmax, dmin
+
+        by_tm: Dict[str, Any] = {}
+        nk: str = ""
+        pages = 0
+        early_stop = False
+
+        for _ in range(max_pages):
+            try:
+                raw_list, nk = self.data_manager.fetch_kiwoom_minute_chart_page(
+                    code, token, nk
+                )
+            except Exception as e:
+                self.log(f"⚠️ [Warmup-API] {name}({code}) 페이지 조회 예외: {e}")
+                break
+
+            pages += 1
+            if raw_list is None:
+                self.log(
+                    f"⚠️ [Warmup-API] {name}({code}) 페이지 {pages} 응답 없음(오류)"
+                )
+                break
+            if not raw_list:
+                if not nk:
+                    break
+                continue
+
+            for item in raw_list:
+                k = self._api_minute_row_key(item)
+                if k:
+                    by_tm[k] = item
+
+            try:
+                api15 = self._minute_api_list_to_15m_ohlcv(list(by_tm.values()))
+                merged = self._merge_15m_ohlcv(base, api15)
+                n_merged = (
+                    len(merged) if merged is not None and not merged.empty else 0
+                )
+                if n_merged >= need and not self._needs_intraday_api_backfill(merged):
+                    early_stop = True
+                    break
+            except Exception as e:
+                self.log(f"⚠️ [Warmup-API] {name}({code}) 중간 병합 검사 오류: {e}")
+
+            nk = (nk or "").strip()
+            if not nk:
+                break
+            time.sleep(random.uniform(dmin, dmax))
+
+        if by_tm:
+            self.log(
+                f"📡 [Warmup-API] {name}({code}) ka10080 {pages}페이지, "
+                f"유일 분봉 {len(by_tm)}건"
+                + (" (조기 종료)" if early_stop else "")
+            )
+        return list(by_tm.values())
 
     def _merge_15m_ohlcv(self, a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
         """동일 종목 DB/API 15분 OHLCV 병합(인덱스 중복 시 최신 우선)."""
@@ -198,6 +361,13 @@ class WarmupService:
         → 키움 분봉 API 로 보충 후 병합.
         """
         try:
+            if self._warmup_ohlcv_source() == "api_only":
+                if not bool(self.app.settings.get("use_api_warmup_backfill", True)):
+                    self.log(
+                        f"❌ [Warmup] {name}({code}) realtime_warmup_ohlcv_source=api_only 인데 "
+                        f"use_api_warmup_backfill=OFF — 워밍업 불가"
+                    )
+                    return base
             if not bool(self.app.settings.get("use_api_warmup_backfill", True)):
                 return base
             if not token:
@@ -212,7 +382,9 @@ class WarmupService:
                 reason.append(f"봉수<{need}")
             if gap:
                 reason.append("장중당일갭")
-            raw_api = self.data_manager.fetch_kiwoom_minute_data(code, token)
+            raw_api = self._fetch_warmup_minute_bars_paginated(
+                code, name, token, base, need
+            )
             api15 = self._minute_api_list_to_15m_ohlcv(raw_api)
             if api15.empty:
                 if gap or short:
@@ -232,9 +404,13 @@ class WarmupService:
 
     def _load_15m_ohlcv_frame(self, code: str) -> pd.DataFrame:
         """
-        DB bars_15m 우선. 비어 있으면 bars_1m 을 15분봉으로 리샘플(동적 백테와 동일 규칙).
+        db_then_api: DB bars_15m 우선. 비어 있으면 bars_1m 을 15분봉으로 리샘플.
+        api_only: 빈 프레임 반환 — 이후 _maybe_api_backfill_15m 가 API 전량으로 채움.
         반환: DatetimeIndex, 열 Open/High/Low/Close/Volume
         """
+        if self._warmup_ohlcv_source() == "api_only":
+            return pd.DataFrame()
+
         lim = self._warmup_query_limit()
         try:
             raw = self.data_manager.get_bars(code, interval="15m", limit=lim)
@@ -293,6 +469,49 @@ class WarmupService:
             self.log(f"⚠️ [Warmup] {code} 1m→15m 리샘플 실패: {e}")
             return pd.DataFrame()
 
+    def _execute_warmup_one_code(
+        self,
+        code: str,
+        name: str,
+        token: Optional[str],
+        bars_data: Dict[str, Any],
+        on_stock_ready: Optional[Callable[[str], None]],
+    ) -> Tuple[bool, str, int]:
+        """
+        한 종목 워밍업 1회 시도.
+        성공 시 bars_data 반영 및 on_stock_ready 호출.
+        반환: (성공 여부, 실패 사유 또는 빈 문자열, 검증 시점 15m 봉 수 또는 성공 시 스트림 봉 수)
+        """
+        try:
+            base = self._load_15m_ohlcv_frame(code)
+            base = self._maybe_api_backfill_15m(code, name, base, token)
+            time.sleep(random.uniform(0.25, 0.75))
+
+            ok, reason = self._validate_warmup_base(base)
+            nbar = len(base) if base is not None and not base.empty else 0
+            if not ok:
+                try:
+                    bars_data.pop(code, None)
+                except Exception:
+                    pass
+                return False, reason, nbar
+
+            df_ind = TradingStrategy.calculate_indicators(base, self.app.settings)
+            bars_data[code] = self._finalize_bars_for_stream(df_ind)
+            n_ok = len(bars_data[code]) if bars_data.get(code) is not None else 0
+            if on_stock_ready is not None:
+                try:
+                    on_stock_ready(code)
+                except Exception as cb_e:
+                    self.log(f"⚠️ [Warmup] on_stock_ready 콜백 오류 ({code}): {cb_e}")
+            return True, "", n_ok
+        except Exception as e:
+            try:
+                bars_data.pop(code, None)
+            except Exception:
+                pass
+            return False, str(e), 0
+
     def _finalize_bars_for_stream(self, df_ind: pd.DataFrame) -> pd.DataFrame:
         """StreamProcessor 가 기대하는 time(HHMM)·cum_v_start 를 붙이고 길이를 제한."""
         try:
@@ -323,53 +542,80 @@ class WarmupService:
 
         on_stock_ready: 종목별 검증·지표 적재가 끝난 직후(bars_data 반영 후) 호출.
             워밍업 워커 스레드에서 실행되므로 UI·스트림 갱신은 호출부에서 메인 스레드로 위임할 것.
+
+        실패 시 realtime_warmup_retry_max·realtime_warmup_retry_delay_sec 설정에 따라
+        동일 종목을 자동 재시도합니다(일시적 API·토큰 오류 대응).
         """
         results: Dict[str, Dict[str, Any]] = {}
         self.is_running = True
         total = len(monitor_codes)
-        token = self.auth_manager.get_auth_token()
+        retry_max = self._warmup_retry_max()
+        retry_delay = self._warmup_retry_delay_sec()
+        max_attempts = max(1, 1 + retry_max)
 
-        self.log(f"📦 [Warmup] {total}개 종목 15분봉 기준 검증·적재 중...")
+        _src = self._warmup_ohlcv_source()
+        self.log(
+            f"📦 [Warmup] {total}개 종목 15분봉 기준 검증·적재 중… "
+            f"(OHLCV출처={_src}, 실패 시 최대 {retry_max}회 재시도, 간격 {retry_delay:.0f}초)"
+        )
+        if _src == "api_only":
+            self.log(
+                "ℹ️ [Warmup] OHLCV 는 DB(bars_15m/1m)를 사용하지 않습니다 — "
+                "ka10080 연속조회만 신호용 워밍업에 사용합니다."
+            )
         for i, code in enumerate(monitor_codes):
             if not self.is_running:
                 break
             name = monitor_info.get(code, {}).get("name", "Unknown")
             self._notify_stock_prep("prep_start", i + 1, total, name, code, "")
 
-            try:
-                base = self._load_15m_ohlcv_frame(code)
-                base = self._maybe_api_backfill_15m(code, name, base, token)
-                time.sleep(random.uniform(0.25, 0.75))
+            final_reason = ""
+            final_nbar = 0
 
-                ok, reason = self._validate_warmup_base(base)
-                nbar = len(base) if base is not None and not base.empty else 0
-                if not ok:
-                    bars_data.pop(code, None)
-                    results[code] = {"ok": False, "reason": reason, "bars": nbar}
-                    self.log(f"❌ [Warmup] {name}({code}) 검증 실패: {reason}")
-                    self._notify_stock_prep("prep_fail", i + 1, total, name, code, reason)
-                    continue
+            for attempt in range(max_attempts):
+                if not self.is_running:
+                    break
+                token = self.auth_manager.get_auth_token()
+                ok, reason, nbar = self._execute_warmup_one_code(
+                    code, name, token, bars_data, on_stock_ready
+                )
+                if ok:
+                    results[code] = {
+                        "ok": True,
+                        "reason": "",
+                        "bars": nbar,
+                    }
+                    if attempt > 0:
+                        self.log(
+                            f"✅ [Warmup] {name}({code}) "
+                            f"{attempt + 1}번째 시도에서 성공 (bars={nbar})"
+                        )
+                    else:
+                        self.log(f"✅ [Warmup] {name}({code}) 준비 완료 (bars={nbar})")
+                    self._notify_stock_prep("prep_ok", i + 1, total, name, code, "")
+                    break
 
-                df_ind = TradingStrategy.calculate_indicators(base, self.app.settings)
-                bars_data[code] = self._finalize_bars_for_stream(df_ind)
-                results[code] = {
-                    "ok": True,
-                    "reason": "",
-                    "bars": len(bars_data[code]),
-                }
-
-                self._notify_stock_prep("prep_ok", i + 1, total, name, code, "")
-                if on_stock_ready is not None:
-                    try:
-                        on_stock_ready(code)
-                    except Exception as cb_e:
-                        self.log(f"⚠️ [Warmup] on_stock_ready 콜백 오류 ({code}): {cb_e}")
-            except Exception as e:
-                bars_data.pop(code, None)
-                err = str(e)
-                results[code] = {"ok": False, "reason": err, "bars": 0}
-                self.log(f"⚠️ [Warmup] {name}({code}) 처리 실패: {e}")
-                self._notify_stock_prep("prep_fail", i + 1, total, name, code, err)
+                final_reason, final_nbar = reason, nbar
+                last_try = attempt >= max_attempts - 1
+                if not last_try and self.is_running:
+                    self.log(
+                        f"⏳ [Warmup] {name}({code}) 실패 "
+                        f"(시도 {attempt + 1}/{max_attempts}): {reason} — "
+                        f"{retry_delay:.0f}초 후 재시도…"
+                    )
+                    self._interruptible_sleep(retry_delay)
+                elif last_try:
+                    results[code] = {
+                        "ok": False,
+                        "reason": final_reason,
+                        "bars": final_nbar,
+                    }
+                    self.log(
+                        f"❌ [Warmup] {name}({code}) {max_attempts}회 시도 후 최종 실패: {final_reason}"
+                    )
+                    self._notify_stock_prep(
+                        "prep_fail", i + 1, total, name, code, final_reason
+                    )
 
         for code in monitor_codes:
             if code not in results:

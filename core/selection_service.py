@@ -29,6 +29,7 @@ class SelectionService:
                     settings=self.app.settings,
                     logger_callback=self.log,
                     data_manager=getattr(self.app, "data_manager", None),
+                    selection_ohlcv_source="api_only",
                 )
                 
                 if df_result is not None and not df_result.empty:
