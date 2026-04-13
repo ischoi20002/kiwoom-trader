@@ -17,6 +17,7 @@ if root_dir not in sys.path:
 
 from strategy.data_loader import BacktestDataLoader
 from strategy.market_regime import classify_market_regime_row as _classify_market_regime_row
+from utils.plotly_cdn import plotly_cdn_script_tag
 
 
 def _depth_exit_bucket(reason: str) -> str:
@@ -662,6 +663,31 @@ def virtual_executions_to_trades_df(
                         "Date": d_entry,
                     }
                 )
+            # 미청산: 리포트 생성 시점 현재가(또는 평단)로 가상 청산 행을 넣어 통계·라운드트립 집계에 반영
+            try:
+                mark_px = float(p.get("current_price") or 0)
+            except (TypeError, ValueError):
+                mark_px = 0.0
+            if mark_px <= 0:
+                mark_px = ap
+            try:
+                ret_pct = ((mark_px / ap) - 1.0) * 100.0 if ap > 0 else 0.0
+            except Exception:
+                ret_pct = 0.0
+            d_mtm = pd.Timestamp.now()
+            rows.append(
+                {
+                    "Code": code,
+                    "Action": "SELL",
+                    "Price": mark_px,
+                    "Qty": iq,
+                    "Fee": 0.0,
+                    "Sig_Type": sig_type,
+                    "Reason": "MTM_REPORT",
+                    "Return": float(ret_pct),
+                    "Date": d_mtm,
+                }
+            )
     except Exception:
         return pd.DataFrame()
 
@@ -1214,7 +1240,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     <head>
         <meta charset="UTF-8"><title>Backtest Analysis Report</title>
         <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;600;700&display=swap" rel="stylesheet">
-        <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+        {plotly_script}
         <style>
             :root {{ 
                 --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --dim: #94a3b8; 
@@ -1963,5 +1989,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             equity_chart_html=equity_chart_html,
             analysis_stats_html=analysis_stats_html,
             avg_cash_ratio=avg_cash_ratio,
+            plotly_script=plotly_cdn_script_tag(),
         ))
     print(f"  [Report] Execution log saved: {output_path}")

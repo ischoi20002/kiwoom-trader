@@ -35,9 +35,19 @@ def sync():
             src_file = os.path.join(SOURCE, f)
             dst_file = os.path.join(TARGET, f)
             
-            # Exclusion Logic
-            if f.lower() == "trading_data.db": continue
-            if f.lower() == "virtual_db.json" and os.path.exists(dst_file): continue
+            # Exclusion Logic — 사용자 로컬 데이터 덮어쓰기 방지
+            if f.lower() == "trading_data.db":
+                continue
+            _preserve_if_dst = (
+                "virtual_db.json",
+                "virtual_db_mock.json",
+                "virtual_db_live.json",
+                "trading_state.db",
+                "trading_state_mock.db",
+                "trading_state_live.db",
+            )
+            if f.lower() in _preserve_if_dst and os.path.exists(dst_file):
+                continue
             
             shutil.copy2(src_file, dst_file)
             print(f"Synced file: {f}")

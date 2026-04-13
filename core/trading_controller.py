@@ -190,8 +190,9 @@ class TradingController:
                     "score": 0.0,
                     "ma_buffer_scale": 1.0,
                     "open": ap,
-                    "last_price": ap,
+                    "last_price": 0.0,
                     "sel_track": "AB",
+                    "vp_price_stub": True,
                 }
             except Exception:
                 continue

@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 실시간 감시 '일일 결산' HTML 리포트.
-- 거래일별 갭 채우기, 메타데이터(완료/부분), Plotly 15분봉+주문 오버레이
-- 리포트 생성 시 종목별 DB 분봉 갱신 시도(실패 시 부분 리포트)
+- 거래일별 갭 채우기, 메타데이터(완료/부분), Plotly 15분봉(캔들)+주문 오버레이
+- 15분 차트는 trading_data.db 없이 키움 ka10080(1분) REST만 사용 (실패 시 부분 리포트)
 """
 from __future__ import annotations
 
-import base64
 import html
 import json
 import os
@@ -29,6 +28,7 @@ from reporting.krx_trading_calendar import (
     previous_trading_day,
     trading_days_inclusive,
 )
+from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
 from utils.fee_rates import fee_decimal_rates_live_trading
 
 
@@ -41,44 +41,6 @@ def _json_dumps_pretty(d: Any) -> str:
 
 def _esc(s: Any) -> str:
     return html.escape(str(s), quote=True)
-
-
-def _plotly_script_tag_for_daily_report() -> str:
-    """
-    file:// 또는 IDE 내장 미리보기(iframe)에서는 CDN·교차 출처 로드가 막히거나
-    콘솔에 'unique security origins' 경고가 날 수 있음.
-    Plotly 번들을 문서에 인라인하면 동일 출처로만 실행되어 안정적이다 (HTML 용량 ~5MB 증가).
-    """
-    if not _HAS_PLOTLY:
-        return (
-            '<script src="https://cdn.plot.ly/plotly-2.24.1.min.js" '
-            'crossorigin="anonymous"></script>'
-        )
-    try:
-        from plotly.offline.offline import get_plotlyjs
-
-        raw = get_plotlyjs()
-        js = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-        # plotly.min.js 본문에 '</script>' 문자열이 있으면 HTML 파서가 스크립트를 조기 종료함
-        if "</script" in js.lower():
-            import re
-
-            js = re.sub(r"</script\s*>", r"<\\/script>", js, flags=re.IGNORECASE)
-        return f'<script type="text/javascript">\n{js}\n</script>'
-    except Exception:
-        try:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "Plotly 인라인 번들 로드 실패, CDN으로 폴백합니다.",
-                exc_info=True,
-            )
-        except Exception:
-            pass
-        return (
-            '<script src="https://cdn.plot.ly/plotly-2.24.1.min.js" '
-            'crossorigin="anonymous"></script>'
-        )
 
 
 def _fmt_vp_report_cell(v: Any) -> str:
@@ -221,6 +183,151 @@ def _pop_matched_exit_history(
     return chosen
 
 
+def _enrich_single_code_orders(
+    sorted_orders: List[Dict[str, Any]],
+    pool: List[Dict[str, Any]],
+    settings: dict,
+) -> List[Dict[str, Any]]:
+    """
+    한 종목의 주문 행(시간순)에 수수료·매수/매도액·손익 열을 붙입니다.
+    pool: 청산 이력(가상 매칭용) — _pop_matched_exit_history 가 소비합니다.
+    """
+    buy_r, sell_r = fee_decimal_rates_live_trading(settings)
+    state_q = 0
+    state_cost = 0.0
+    cum_realized = 0.0
+    rows_out: List[Dict[str, Any]] = []
+
+    for o in sorted_orders:
+        fq, fp = _fill_qty_price(o)
+        gross = float(fq) * float(fp)
+        is_buy = _is_buy_side(o.get("side"))
+
+        fee_amt: Optional[float] = None
+        buy_amt: Optional[float] = None
+        sell_amt: Optional[float] = None
+        pnl_pct: Optional[float] = None
+        pnl_net: Optional[float] = None
+        disp_cum: Optional[float] = None
+
+        if fq <= 0 or fp <= 0:
+            rows_out.append(
+                {
+                    **o,
+                    "_fee_amt": None,
+                    "_buy_amt": None,
+                    "_sell_amt": None,
+                    "_pnl_pct": None,
+                    "_disp_cum": None,
+                }
+            )
+            continue
+
+        if is_buy:
+            fee_amt = gross * buy_r
+            buy_amt = gross
+            state_q += fq
+            state_cost += gross + fee_amt
+        else:
+            fee_amt = gross * sell_r
+            sell_amt = gross
+            net_proceeds = gross - fee_amt
+
+            intra_pnl: Optional[float] = None
+            intra_pct: Optional[float] = None
+            try:
+                if state_q >= fq and fq > 0 and state_cost > 0:
+                    alloc = state_cost * (float(fq) / float(state_q))
+                    intra_pnl = net_proceeds - alloc
+                    intra_pct = (intra_pnl / alloc * 100.0) if alloc > 0 else None
+            except Exception:
+                intra_pnl, intra_pct = None, None
+
+            matched = _pop_matched_exit_history(pool, str(o.get("ts", "")))
+            if matched is not None:
+                try:
+                    pnl_net = float(matched.get("realized_pnl_amt", 0) or 0)
+                    pnl_pct = float(matched.get("final_pnl_pct", 0) or 0)
+                except (TypeError, ValueError):
+                    pnl_net, pnl_pct = None, None
+            if pnl_net is None:
+                pnl_net = intra_pnl
+                pnl_pct = intra_pct
+
+            if pnl_net is not None:
+                cum_realized += pnl_net
+                disp_cum = cum_realized
+            elif cum_realized > 0:
+                disp_cum = cum_realized
+
+            try:
+                if state_q >= fq and fq > 0 and state_cost > 0:
+                    alloc_u = state_cost * (float(fq) / float(state_q))
+                    state_cost -= alloc_u
+                state_q = max(0, state_q - fq)
+                if state_q == 0:
+                    state_cost = 0.0
+            except Exception:
+                state_q = max(0, state_q - fq)
+
+        rows_out.append(
+            {
+                **o,
+                "_fee_amt": fee_amt,
+                "_buy_amt": buy_amt,
+                "_sell_amt": sell_amt,
+                "_pnl_pct": pnl_pct,
+                "_disp_cum": disp_cum,
+            }
+        )
+
+    return rows_out
+
+
+def enrich_order_rows_for_virtual_trade(
+    orders: List[Dict[str, Any]],
+    settings: dict,
+    exit_snap: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    종합 리포트용: 한 종목·한 라운드(진입~청산 또는 보유 중) 주문 행에
+    일일 결산과 동일한 수수료·손익 열을 보강합니다.
+
+    exit_snap: 청산된 라운드 1건의 가상 이력( exit_datetime, realized_pnl_amt, final_pnl_pct ).
+    보유 중이면 None — 매도 행은 주문 시퀀스 기준 추정 손익만 표시됩니다.
+    """
+    pool: List[Dict[str, Any]] = []
+    if exit_snap is not None:
+        exdt = str(exit_snap.get("exit_datetime") or "").strip()
+        if not exdt:
+            ed = str(exit_snap.get("exit_date") or "")[:10]
+            etx = str(exit_snap.get("exit_time") or "")
+            if ed and etx:
+                etx_s = str(etx).strip()
+                if len(etx_s) >= 8 and ":" in etx_s:
+                    exdt = f"{ed} {etx_s[:8]}"
+                else:
+                    exdt = f"{ed} {etx_s}"
+        if exdt:
+            try:
+                rp = float(exit_snap.get("realized_pnl_amt", 0) or 0)
+                pp = float(exit_snap.get("final_pnl_pct", 0) or 0)
+            except (TypeError, ValueError):
+                rp, pp = 0.0, 0.0
+            pool = [
+                {
+                    "exit_datetime": exdt.replace("T", " ")[:19]
+                    if len(exdt) >= 19
+                    else exdt,
+                    "realized_pnl_amt": rp,
+                    "final_pnl_pct": pp,
+                    "_used": False,
+                }
+            ]
+    sorted_o = sorted(list(orders), key=lambda x: str(x.get("ts", "")))
+    return _enrich_single_code_orders(sorted_o, pool, settings)
+
+
 def _build_enriched_order_rows(
     by_code: Dict[str, List[Dict[str, Any]]],
     settings: dict,
@@ -232,7 +339,6 @@ def _build_enriched_order_rows(
     일일 결산 표용: 수수료, 매수/매도 금액, 순수익률·순누적실현.
     순손익은 가상 이력 매칭 우선, 없으면 당일 주문만으로 평단 복원 시 계산.
     """
-    buy_r, sell_r = fee_decimal_rates_live_trading(settings)
     hist_by_code = _virtual_history_sells_for_day(portfolio, report_day, excl)
     enriched: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -240,95 +346,7 @@ def _build_enriched_order_rows(
         ckey = str(code).strip().zfill(6)
         pool = [dict(x) for x in hist_by_code.get(ckey, [])]
         sorted_o = sorted(orders, key=lambda x: str(x.get("ts", "")))
-        state_q = 0
-        state_cost = 0.0
-        cum_realized = 0.0
-        rows_out: List[Dict[str, Any]] = []
-
-        for o in sorted_o:
-            fq, fp = _fill_qty_price(o)
-            gross = float(fq) * float(fp)
-            is_buy = _is_buy_side(o.get("side"))
-
-            fee_amt: Optional[float] = None
-            buy_amt: Optional[float] = None
-            sell_amt: Optional[float] = None
-            pnl_pct: Optional[float] = None
-            pnl_net: Optional[float] = None
-            disp_cum: Optional[float] = None
-
-            if fq <= 0 or fp <= 0:
-                rows_out.append(
-                    {
-                        **o,
-                        "_fee_amt": None,
-                        "_buy_amt": None,
-                        "_sell_amt": None,
-                        "_pnl_pct": None,
-                        "_disp_cum": None,
-                    }
-                )
-                continue
-
-            if is_buy:
-                fee_amt = gross * buy_r
-                buy_amt = gross
-                state_q += fq
-                state_cost += gross + fee_amt
-            else:
-                fee_amt = gross * sell_r
-                sell_amt = gross
-                net_proceeds = gross - fee_amt
-
-                intra_pnl: Optional[float] = None
-                intra_pct: Optional[float] = None
-                try:
-                    if state_q >= fq and fq > 0 and state_cost > 0:
-                        alloc = state_cost * (float(fq) / float(state_q))
-                        intra_pnl = net_proceeds - alloc
-                        intra_pct = (intra_pnl / alloc * 100.0) if alloc > 0 else None
-                except Exception:
-                    intra_pnl, intra_pct = None, None
-
-                matched = _pop_matched_exit_history(pool, str(o.get("ts", "")))
-                if matched is not None:
-                    try:
-                        pnl_net = float(matched.get("realized_pnl_amt", 0) or 0)
-                        pnl_pct = float(matched.get("final_pnl_pct", 0) or 0)
-                    except (TypeError, ValueError):
-                        pnl_net, pnl_pct = None, None
-                if pnl_net is None:
-                    pnl_net = intra_pnl
-                    pnl_pct = intra_pct
-
-                if pnl_net is not None:
-                    cum_realized += pnl_net
-                    disp_cum = cum_realized
-                elif cum_realized > 0:
-                    disp_cum = cum_realized
-
-                try:
-                    if state_q >= fq and fq > 0 and state_cost > 0:
-                        alloc_u = state_cost * (float(fq) / float(state_q))
-                        state_cost -= alloc_u
-                    state_q = max(0, state_q - fq)
-                    if state_q == 0:
-                        state_cost = 0.0
-                except Exception:
-                    state_q = max(0, state_q - fq)
-
-            rows_out.append(
-                {
-                    **o,
-                    "_fee_amt": fee_amt,
-                    "_buy_amt": buy_amt,
-                    "_sell_amt": sell_amt,
-                    "_pnl_pct": pnl_pct,
-                    "_disp_cum": disp_cum,
-                }
-            )
-
-        enriched[code] = rows_out
+        enriched[code] = _enrich_single_code_orders(sorted_o, pool, settings)
 
     return enriched
 
@@ -433,7 +451,7 @@ def _normalize_total_assets_display(
 ) -> float:
     """
     API tot_evlu_amt 가 주식 평가만 담는 등으로 총자산이 예수+평가보다 작게 나올 때 보정.
-    (가상포지션 탭 _normalize_total_assets_display 와 동일)
+    (포지션 관리 탭 _normalize_total_assets_display 와 동일)
     """
     try:
         computed = float(current_cash) + float(stock_eval)
@@ -451,19 +469,32 @@ def _normalize_total_assets_display(
 
 def _compute_total_assets_for_daily_report(portfolio: Any, stock_eval: float) -> float:
     """
-    일일 결산·가상포지션 탭과 동일한 총 자산 표기.
-    원칙: D+2 예수금 + 주식 평가금 합. D+2 미수신 시 API 총자산·예수+평가 보정.
+    일일 결산·포지션 관리 탭과 동일: D+2 예수 + 주식평가(stock_eval).
+    tot_evlu_amt는 합계와 ±2.5% 이내면 증권사 단일값으로 정합.
     """
     try:
         d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)
-        se = float(stock_eval)
-        if d2 > 0:
-            return d2 + se
-        te = float(getattr(portfolio, "total_equity", 0) or 0)
+        api_mv = float(getattr(portfolio, "holdings_stocks_mv_api", 0) or 0)
+        se = float(stock_eval) if float(stock_eval or 0) > 0 else api_mv
+        combined = d2 + se
+        raw_te = float(getattr(portfolio, "last_tot_evlu_amt", 0) or 0)
+        pte = float(getattr(portfolio, "total_equity", 0) or 0)
+        if abs(combined) > 1e-6 or se > 0 or d2 != 0:
+            if raw_te > 0:
+                den = max(abs(raw_te), abs(combined), 1.0)
+                if abs(raw_te - combined) / den <= 0.025:
+                    return float(raw_te)
+            return float(combined)
+        if raw_te > 0:
+            return float(raw_te)
+        if pte > 0:
+            return float(pte)
         cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
-        if te <= 0:
-            return max(0.0, cash + se)
-        return _normalize_total_assets_display(te, cash, se)
+        if cash > 0:
+            return float(cash)
+        if api_mv > 0:
+            return float(api_mv)
+        return 0.0
     except Exception:
         try:
             return float(getattr(portfolio, "total_equity", 0) or 0)
@@ -501,7 +532,8 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
             total_day_realized += pnl_amt
 
     current_cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
-    stock_eval = total_eval
+    api_mv = float(getattr(portfolio, "holdings_stocks_mv_api", 0) or 0)
+    stock_eval = api_mv if api_mv > 0 else total_eval
     total_assets = _compute_total_assets_for_daily_report(portfolio, stock_eval)
 
     day_pnl_total = total_day_realized + total_unrealized
@@ -530,29 +562,9 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
     }
 
 
-def _refresh_symbol_bars(app: Any, code: str, log: Optional[Callable[[str], None]]) -> bool:
-    """키움 분봉 동기화 후 15분 리샘플. 실패 시 False."""
-    try:
-        dm = app.data_manager
-
-        def _logger(msg: str) -> None:
-            if log:
-                log(msg)
-
-        ok = dm.update_historical_data(code, logger=_logger)
-        return bool(ok)
-    except Exception as e:
-        if log:
-            try:
-                log(f"[일일결산] {code} 분봉 갱신 예외: {e}")
-            except Exception:
-                pass
-        return False
-
-
 def _prepare_daily_report_15m_df(df: Any) -> Any:
     """
-    get_bars 등에서 온 DataFrame을 차트용으로 통일: time 열, OHLCV 숫자, 시간순·중복 제거.
+    15분 OHLCV DataFrame을 차트용으로 통일: time 열, OHLCV 숫자, 시간순·중복 제거.
     (HTML에 Plotly div id 중복 시 차트가 깨지는 문제는 별도로 div_id로 방지)
     """
     import pandas as pd
@@ -605,7 +617,7 @@ def _prepare_daily_report_15m_df(df: Any) -> Any:
 def _order_timestamp_aligned_to_bars(ts_raw: Any, bar_times: Any) -> Optional[Any]:
     """
     주문/체결 시각을 15분봉 time 열과 동일한 스케일(datetime64, naive/tz)로 맞춘다.
-    add_vline은 서브플롯·캔들과 x축 해석이 어긋날 수 있어, 이후 Scatter 세로선에 사용한다.
+    (SVG 세로선·x 보간에 사용)
     """
     import pandas as pd
 
@@ -653,6 +665,33 @@ def _order_timestamp_aligned_to_bars(ts_raw: Any, bar_times: Any) -> Optional[An
     return t
 
 
+def _plotly_fig_to_deferred_embed(fig: Any) -> str:
+    """
+    figure JSON을 HTML에 인라인(`<script type="application/json">`).
+    `file://` 로 열 때도 브라우저가 **fetch로 로컬 JSON을 읽지 않아도** 동작한다.
+    (별도 `chart_payloads/*.json` + fetch 는 `file:` origin 에서 CORS 로 막힘)
+    """
+    import uuid
+
+    try:
+        import plotly.io as pio
+
+        raw = pio.to_json(fig)
+    except Exception as e:
+        return f'<p class="warn">차트 JSON 인코딩 오류: {_esc(e)}</p>'
+    # HTML 파서가 script 블록을 닫는 것으로 오인하지 않게
+    safe = raw.replace("</script>", "<\\/script>")
+    div_id = "plotly-" + uuid.uuid4().hex
+    return (
+        '<div class="chartwrap"><div class="plotly-deferred-wrap" data-plotly-rendered="0">'
+        f'<div id="{_esc(div_id)}" class="plotly-graph-div" '
+        'style="height:480px;width:100%;"></div>'
+        f'<script type="application/json" class="plotly-fig-json" '
+        f'data-plotly-target="{_esc(div_id)}">{safe}</script>'
+        "</div></div>"
+    )
+
+
 def _build_plotly_15m_section(
     code: str,
     name: str,
@@ -660,7 +699,12 @@ def _build_plotly_15m_section(
     df: Any,
     orders_for_code: List[Dict[str, Any]],
 ) -> str:
-    """15분 OHLC + 거래량 + MA + 주문 시각 마커. df는 get_bars 결과(DataFrame)."""
+    """
+    15분 OHLC + 거래량 + MA + 주문 시각 (Plotly).
+    주문선은 trace가 아니라 shape(세로선).
+    렌더는 **펼치기 시점**에 `Plotly.newPlot` (데이터는 HTML 내 JSON 인라인) — 숨김 패널 즉시 newPlot
+    및 plotly.js/py 버전 불일치로 인한 `bdata` 깨짐을 피한다.
+    """
     if not _HAS_PLOTLY:
         return '<p class="warn">Plotly 미설치로 차트를 생략했습니다.</p>'
 
@@ -673,6 +717,13 @@ def _build_plotly_15m_section(
         work = _prepare_daily_report_15m_df(df)
         if work is None or work.empty:
             return '<p class="muted">차트용 15분봉 정규화 실패(시간·OHLCV 열 확인).</p>'
+
+        try:
+            max_rows = 500
+            if len(work) > max_rows:
+                work = work.tail(max_rows).reset_index(drop=True)
+        except Exception:
+            pass
 
         x = work["time"]
         o = work["Open"].astype(float)
@@ -690,9 +741,13 @@ def _build_plotly_15m_section(
             shared_xaxes=True,
             vertical_spacing=0.06,
             row_heights=[0.68, 0.32],
-            subplot_titles=(f"{name} ({code}) 15분", "거래량"),
+            subplot_titles=(
+                f"{name} ({code}) 15분",
+                "거래량",
+            ),
         )
 
+        # 예전 리포트와 동일: Nord 캔들(실제 고·저), MA는 Scatter, 거래량 단색 막대
         fig.add_trace(
             go.Candlestick(
                 x=x,
@@ -708,12 +763,24 @@ def _build_plotly_15m_section(
             col=1,
         )
         fig.add_trace(
-            go.Scatter(x=x, y=ma5, name="MA5", line=dict(color="#EBCB8B", width=1)),
+            go.Scatter(
+                x=x,
+                y=ma5,
+                name="MA5",
+                line=dict(color="#EBCB8B", width=1),
+                hoverinfo="skip",
+            ),
             row=1,
             col=1,
         )
         fig.add_trace(
-            go.Scatter(x=x, y=ma20, name="MA20", line=dict(color="#88C0D0", width=1)),
+            go.Scatter(
+                x=x,
+                y=ma20,
+                name="MA20",
+                line=dict(color="#88C0D0", width=1),
+                hoverinfo="skip",
+            ),
             row=1,
             col=1,
         )
@@ -734,25 +801,7 @@ def _build_plotly_15m_section(
             col=1,
         )
 
-        # 주문 시각 세로선: add_vline은 date 축+캔들스틱 서브플롯에서 x가 밀리는 경우가 있어
-        # 동일 subplot에 Scatter(x=[t,t], y=[...])로 그려 캔들과 정확히 같은 x 스케일을 쓴다.
-        try:
-            lo_px = float(low_s.min())
-            hi_px = float(h.max())
-            span = hi_px - lo_px
-            if span <= 0 or not (span == span):
-                span = max(abs(hi_px) * 0.01, 1.0)
-            pad = span * 0.03
-            y_price_lo = lo_px - pad
-            y_price_hi = hi_px + pad
-        except Exception:
-            y_price_lo, y_price_hi = 0.0, 1.0
-        try:
-            vmax = float(v.max()) if len(v) else 0.0
-            y_vol_hi = max(vmax * 1.12, vmax + 1.0, 1.0)
-        except Exception:
-            y_vol_hi = 1.0
-
+        # 주문 시각: Scatter 트레이스 대신 layout shape(예전 HTML과 동일) — 트레이스 수·베이스64 지연 없음
         for orec in orders_for_code:
             ts = orec.get("ts", "")
             try:
@@ -760,43 +809,31 @@ def _build_plotly_15m_section(
                 if tx is None:
                     continue
                 side = str(orec.get("side", "")).upper()
-                color = "#BF616A" if "매도" in side or "SELL" in side else "#88C0D0"
-                side_lbl = str(orec.get("side", "") or "")
-                fig.add_trace(
-                    go.Scatter(
-                        x=[tx, tx],
-                        y=[y_price_lo, y_price_hi],
-                        mode="lines",
-                        line=dict(color=color, width=1, dash="dot"),
-                        opacity=0.65,
-                        name="주문",
-                        showlegend=False,
-                        customdata=[[side_lbl]],
-                        hovertemplate=(
-                            "<b>주문</b> %{customdata[0]}<br>"
-                            "%{x|%Y-%m-%d %H:%M:%S}<extra></extra>"
-                        ),
-                        legendgroup="order_vline",
-                    ),
+                is_sell = "매도" in side or "SELL" in side
+                col = "#BF616A" if is_sell else "#88C0D0"
+                fig.add_shape(
+                    type="line",
+                    x0=tx,
+                    x1=tx,
+                    y0=0,
+                    y1=1,
+                    xref="x",
+                    yref="y domain",
+                    line=dict(color=col, width=1, dash="dot"),
+                    opacity=0.55,
                     row=1,
                     col=1,
                 )
-                fig.add_trace(
-                    go.Scatter(
-                        x=[tx, tx],
-                        y=[0.0, y_vol_hi],
-                        mode="lines",
-                        line=dict(color=color, width=1, dash="dot"),
-                        opacity=0.45,
-                        name="주문",
-                        showlegend=False,
-                        customdata=[[side_lbl]],
-                        hovertemplate=(
-                            "<b>주문</b> %{customdata[0]}<br>"
-                            "%{x|%Y-%m-%d %H:%M:%S}<extra></extra>"
-                        ),
-                        legendgroup="order_vline",
-                    ),
+                fig.add_shape(
+                    type="line",
+                    x0=tx,
+                    x1=tx,
+                    y0=0,
+                    y1=1,
+                    xref="x2",
+                    yref="y2 domain",
+                    line=dict(color=col, width=1, dash="dot"),
+                    opacity=0.35,
                     row=2,
                     col=1,
                 )
@@ -810,11 +847,11 @@ def _build_plotly_15m_section(
             height=480,
             margin=dict(l=48, r=24, t=48, b=40),
             hovermode="x unified",
+            dragmode=False,
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
             xaxis_rangeslider_visible=False,
         )
-        # 서브플롯에서 날짜 축 명시 + 레인지슬라이더 끔(캔들 왜곡 방지)
         fig.update_xaxes(
             type="date",
             rangeslider_visible=False,
@@ -835,23 +872,7 @@ def _build_plotly_15m_section(
             col=1,
         )
 
-        import plotly.io as pio
-
-        # hidden 패널 안에서 pio.to_html이 즉시 Plotly.newPlot을 실행하면
-        # 컨테이너 너비·높이가 0이라 모든 종목 차트가 동일하게 깨짐(대각선·Y 0~N).
-        # → Figure JSON만 넣어 두고, 사용자가 '펼치기' 클릭 후에 newPlot 하도록 지연 렌더링.
-        safe_day = "".join(ch if ch.isalnum() else "_" for ch in str(report_day)[:16])
-        div_id = f"daily15m_{code}_{safe_day}"
-        fig_json_str = pio.to_json(fig)
-        b64 = base64.standard_b64encode(fig_json_str.encode("utf-8")).decode("ascii")
-        return (
-            f'<div class="chartwrap daily-chart-deferred">'
-            f'<script type="text/plain" class="daily-plotly-payload" '
-            f'data-target-id="{_esc(div_id)}">{b64}</script>'
-            f'<div id="{_esc(div_id)}" class="daily-plotly-div" '
-            f'style="width:100%;min-height:480px;"></div>'
-            f"</div>"
-        )
+        return _plotly_fig_to_deferred_embed(fig)
     except Exception as e:
         return f'<p class="warn">차트 생성 오류: {_esc(e)}</p>'
 
@@ -1007,16 +1028,21 @@ def generate_daily_settlement_report_ex(
     for code in codes_for_charts:
         code_str = str(code).strip().zfill(6)
         nm = by_code[code][0].get("name", "") if by_code[code] else ""
-        ok_sync = _refresh_symbol_bars(app, code, _log)
-        if not ok_sync:
-            chart_failures.append(code_str)
-            overall_status = "partial"
-
         df_15 = None
         try:
-            df_15 = dm.get_bars(code, start_dt=start_dt, end_dt=end_dt, interval="15m")
+            fetch_fn = getattr(dm, "fetch_15m_bars_for_trading_day_rest_only", None)
+            if callable(fetch_fn):
+                df_15 = fetch_fn(code, day, logger=_log)
+            else:
+                warnings.append(
+                    f"{code_str} DataManager.fetch_15m_bars_for_trading_day_rest_only 없음"
+                )
         except Exception as e:
-            warnings.append(f"{code_str} 15분 조회 실패: {e}")
+            warnings.append(f"{code_str} REST 15분봉 조회 실패: {e}")
+            overall_status = "partial"
+            df_15 = None
+        if df_15 is None or getattr(df_15, "empty", True):
+            chart_failures.append(code_str)
             overall_status = "partial"
 
         atr_display_by_code[code_str] = _daily_report_atr_exit_line(app, code_str, df_15)
@@ -1024,7 +1050,9 @@ def generate_daily_settlement_report_ex(
         chart_body_by_code[code_str] = block
 
     if chart_failures:
-        warnings.append(f"분봉 갱신 실패(스킵): {', '.join(chart_failures)}")
+        warnings.append(
+            f"15분 차트(REST 분봉) 없음·실패(스킵): {', '.join(chart_failures)}"
+        )
 
     enriched_by_code = _build_enriched_order_rows(by_code, app.settings, app.portfolio, excl, day)
 
@@ -1112,7 +1140,7 @@ def generate_daily_settlement_report_ex(
         </tr>"""
 
     summary_rows = f"""
-        <tr><td>총 자산 (D+2+주식평가, 가상포지션 탭과 동일)</td><td class="num">{summary['total_assets']:,.0f} 원</td></tr>
+        <tr><td>총 자산 (D+2+주식평가, 포지션 관리 탭과 동일)</td><td class="num">{summary['total_assets']:,.0f} 원</td></tr>
         <tr><td>예수금 (가용)</td><td class="num">{summary['cash']:,.0f} 원</td></tr>
         <tr><td>예수금 D+1</td><td class="num">{summary['d1_cash']:,.0f} 원</td></tr>
         <tr><td>예수금 D+2</td><td class="num">{summary['d2_cash']:,.0f} 원</td></tr>
@@ -1136,6 +1164,18 @@ def generate_daily_settlement_report_ex(
         "warnings": warnings,
         "schema_version": 1,
     }
+    try:
+        import plotly
+
+        meta_obj["plotly_py_version"] = str(getattr(plotly, "__version__", ""))
+    except Exception:
+        meta_obj["plotly_py_version"] = ""
+    try:
+        from plotly.io._html import plotly_cdn_url
+
+        meta_obj["plotly_js_cdn"] = plotly_cdn_url()
+    except Exception:
+        meta_obj["plotly_js_cdn"] = ""
     meta_json = json.dumps(meta_obj, ensure_ascii=False)
 
     prev_d = previous_trading_day(day)
@@ -1154,9 +1194,13 @@ def generate_daily_settlement_report_ex(
             일부 종목의 분봉 갱신 또는 차트 생성에 실패했습니다. 주문·체결 표는 유지됩니다. 네트워크·API 확인 후 다시 생성해 주세요.
         </div>"""
 
-    plotly_head_script = _plotly_script_tag_for_daily_report()
+    _plotly_cdn_js = json.dumps(meta_obj.get("plotly_js_cdn") or "")
+    plotly_head_script = (
+        f"<script>window.__DAILY_REPORT_PLOTLY_CDN__ = {_plotly_cdn_js};</script>"
+    )
 
-    html_doc = f"""<!DOCTYPE html>
+    html_doc = (
+        f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -1252,7 +1296,7 @@ def generate_daily_settlement_report_ex(
     <nav style="margin-bottom:16px;">{nav_html}</nav>
     <h1>일일 결산 리포트 <span class="muted">{_esc(day)}</span></h1>
     <p class="muted">생성 시각: {_esc(gen_str)} — 상태: {_esc(overall_status)} — 완료판정(장마감+버퍼): {'예' if complete_flag else '아니오(장중·재생성 권장)'}</p>
-    <p class="muted" style="font-size:12px;margin-top:-6px;">브라우저를 <code>file://</code>로 연 경우(특히 IDE 미리보기) 콘솔에 보안 경고가 나거나 차트가 비정상일 수 있습니다. 그때는 프로젝트 루트에서 <code>python -m http.server 8765</code> 실행 후 <code>http://127.0.0.1:8765/realtime_session_logs/{_esc(day)}/daily_settlement.html</code> 로 여세요.</p>
+    <p class="muted" style="font-size:12px;margin-top:-6px;">차트 데이터는 HTML에 포함되어 <code>file://</code> 로 열어도 동작합니다. 펼칠 때만 Plotly로 그립니다(초기 로드 시 plotly.js CDN은 첫 펼침 때만 로드).</p>
     {warn_banner}
 
     <h2>요약</h2>
@@ -1274,106 +1318,13 @@ def generate_daily_settlement_report_ex(
     <footer>K-Trader 실시간 감시 일일 결산</footer>
 </div>
 <script>
-(function () {{
-  /** base64(utf-8 JSON) → Plotly figure 객체 (한글 레이아웃 대응) */
-  function dailyPayloadToFig(b64raw) {{
-    var s = (b64raw || "").trim().replace(/\\s+/g, "");
-    if (!s) return null;
-    var bin;
-    try {{ bin = atob(s); }} catch (e1) {{ return null; }}
-    var jsonStr;
-    try {{
-      if (typeof TextDecoder !== "undefined") {{
-        var u8 = new Uint8Array(bin.length);
-        for (var j = 0; j < bin.length; j++) u8[j] = bin.charCodeAt(j);
-        jsonStr = new TextDecoder("utf-8").decode(u8);
-      }} else {{
-        jsonStr = decodeURIComponent(escape(bin));
-      }}
-    }} catch (e2) {{ return null; }}
-    try {{ return JSON.parse(jsonStr); }} catch (e3) {{ return null; }}
-  }}
-
-  /** hidden 해제 후에만 실행: 보이지 않는 div에서 newPlot 하면 축·캔들이 전부 깨짐 */
-  function ensureDailyChartRendered(root) {{
-    if (!window.Plotly || !root) return;
-    try {{
-      root.querySelectorAll("script.daily-plotly-payload").forEach(function (sc) {{
-        var tid = sc.getAttribute("data-target-id");
-        if (!tid) return;
-        var el = document.getElementById(tid);
-        if (!el || el.getAttribute("data-daily-chart-done") === "1") return;
-        var fig = dailyPayloadToFig(sc.textContent || "");
-        if (!fig) return;
-        var data = fig.data || [];
-        var layout = fig.layout || {{}};
-        var cfg = {{ responsive: true, displayModeBar: true }};
-        var p = Plotly.newPlot(el, data, layout, cfg);
-        function markOk() {{ el.setAttribute("data-daily-chart-done", "1"); }}
-        function doResize() {{
-          try {{
-            if (Plotly.Plots && Plotly.Plots.resize) Plotly.Plots.resize(el);
-            else if (typeof Plotly.resize === "function") Plotly.resize(el);
-          }} catch (e4) {{}}
-        }}
-        if (p && typeof p.then === "function") {{
-          p.then(function () {{ markOk(); doResize(); }}).catch(function () {{}});
-        }} else {{
-          markOk();
-          requestAnimationFrame(doResize);
-        }}
-      }});
-    }} catch (e0) {{}}
-  }}
-
-  function resizePlotlyInside(root) {{
-    if (!window.Plotly || !root) return;
-    try {{
-      var nodes = root.querySelectorAll(".plotly-graph-div");
-      if (!nodes.length) nodes = root.querySelectorAll(".js-plotly-plot");
-      for (var i = 0; i < nodes.length; i++) {{
-        var gd = nodes[i];
-        try {{
-          if (typeof Plotly.Plots !== "undefined" && Plotly.Plots.resize) {{
-            Plotly.Plots.resize(gd);
-          }} else if (typeof Plotly.resize === "function") {{
-            Plotly.resize(gd);
-          }}
-        }} catch (e) {{}}
-      }}
-    }} catch (e) {{}}
-  }}
-  document.addEventListener("DOMContentLoaded", function () {{
-    document.querySelectorAll(".chart-toggle-btn").forEach(function (btn) {{
-      btn.addEventListener("click", function () {{
-        var panelId = btn.getAttribute("aria-controls");
-        var panel = panelId ? document.getElementById(panelId) : null;
-        if (!panel) return;
-        var opening = panel.hasAttribute("hidden");
-        var openText = btn.getAttribute("data-text-open") || "접기";
-        var closedText = btn.getAttribute("data-text-closed") || "펼치기";
-        if (opening) {{
-          panel.removeAttribute("hidden");
-          btn.setAttribute("aria-expanded", "true");
-          btn.textContent = openText;
-          requestAnimationFrame(function () {{
-            ensureDailyChartRendered(panel);
-            requestAnimationFrame(function () {{ resizePlotlyInside(panel); }});
-          }});
-          setTimeout(function () {{ resizePlotlyInside(panel); }}, 120);
-          setTimeout(function () {{ resizePlotlyInside(panel); }}, 400);
-        }} else {{
-          panel.setAttribute("hidden", "");
-          btn.setAttribute("aria-expanded", "false");
-          btn.textContent = closedText;
-        }}
-      }});
-    }});
-  }});
-}})();
+"""
+        + PLOTLY_DEFERRED_CHART_IIFE
+        + """
 </script>
 </body>
 </html>"""
+    )
 
     try:
         with open(output_path, "w", encoding="utf-8") as f:

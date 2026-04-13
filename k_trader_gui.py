@@ -386,7 +386,7 @@ class KiwoomApp:
         
         self.notebook.add(self._tab_frames['dashboard'], text=" 대시보드 ")
         self.notebook.add(self._tab_frames['monitor'], text=" 실시간 감시 ")
-        self.notebook.add(self._tab_frames['virtual'], text=" 가상 포지션 ") 
+        self.notebook.add(self._tab_frames['virtual'], text=" 포지션 관리 ") 
         self.notebook.add(self._tab_frames['backtest'], text=" 백테스팅 ")
         self.notebook.add(self._tab_frames['settings'], text=" 전략 설정 ")
 
@@ -678,7 +678,7 @@ class KiwoomApp:
         reason: str = "",
     ) -> None:
         """
-        REST 주문 접수 성공 직후 웹소켓 CHE가 오지 않을 때도 DB 체결가·가상포지션을 맞춥니다.
+        REST 주문 접수 성공 직후 웹소켓 CHE가 오지 않을 때도 DB 체결가·포지션을 맞춥니다.
         CHE가 나중에 오면 동일 주문번호로 on_fill은 생략하고 체결가만 보정합니다.
         """
         try:
@@ -1012,8 +1012,10 @@ class KiwoomApp:
                 "score": 0.0,
                 "ma_buffer_scale": 1.0,
                 "open": ap,
-                "last_price": ap,
+                # 평단을 last_price에 넣으면 미실현이 항상 0%로 보임 — 틱 전까지 0 + 스텁 플래그
+                "last_price": 0.0,
                 "sel_track": "AB",
+                "vp_price_stub": True,
             }
             self.monitor_info[nk] = stub
             try:
@@ -1338,7 +1340,7 @@ class KiwoomApp:
                 self.virtual_tab._render_virtual_positions()
             except Exception:
                 pass
-            # 가상 탭 실시간 주문 로그(VP·호가 열)는 VP 렌더 중에도 갱신되나, 예외 시에도 한 번 더 맞춤
+            # 포지션 관리 탭 실시간 주문 로그(VP·호가 열)는 VP 렌더 중에도 갱신되나, 예외 시에도 한 번 더 맞춤
             try:
                 self.virtual_tab._render_orders()
             except Exception:

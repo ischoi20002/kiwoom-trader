@@ -1,0 +1,783 @@
+{
+    "history": [
+        {
+            "name": "신한지주",
+            "avg_price": 92600.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 92924.1,
+            "entry_time": "2026-04-08T12:03:35.474629",
+            "reason": "SYNCED",
+            "events": [
+                {
+                    "time": "13:13:53",
+                    "action": "SELL",
+                    "price": 97200.0,
+                    "qty": 1,
+                    "snapshot": {
+                        "time": "2026-04-08 13:13:53",
+                        "price": 97200.0,
+                        "market_trend": "UP",
+                        "vol_power": 87.63,
+                        "reason": "REST_SELL",
+                        "rsi": 60.5,
+                        "macd": 1065.9,
+                        "osc": -154.43,
+                        "adx": 45.1,
+                        "ma_alignment": "정배열(Bull)",
+                        "bid_ask_ratio": 0.25
+                    }
+                }
+            ],
+            "max_now": 92600.0,
+            "current_price": 96800,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "final_pnl_pct": 4.078489864308606,
+            "realized_pnl_amt": 3789.899999999994,
+            "exit_price": 97200.0,
+            "exit_time": "13:13:53",
+            "code": "055550"
+        },
+        {
+            "name": "신한지주",
+            "avg_price": 92600.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 92924.1,
+            "entry_time": "2026-04-07T12:52:36.164391",
+            "reason": "TEST_1SHARE_MARKET",
+            "events": [
+                {
+                    "time": "07:03:17",
+                    "action": "SYNC_EXIT",
+                    "price": 92600.0,
+                    "qty": 1,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 92600.0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 92600.0,
+            "exit_time": "07:03:17",
+            "code": "055550"
+        },
+        {
+            "name": "현대오토에버",
+            "avg_price": 367000.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 368284.5,
+            "entry_time": "2026-04-07T12:53:22.760350",
+            "reason": "TEST_1SHARE_MARKET",
+            "events": [
+                {
+                    "time": "09:00:33",
+                    "action": "SELL",
+                    "price": 418000.0,
+                    "qty": 1,
+                    "snapshot": {
+                        "time": "2026-04-09 09:00:33",
+                        "price": 418000.0,
+                        "market_trend": "UP",
+                        "vol_power": 7.8,
+                        "reason": "REST_SELL",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.57
+                    }
+                }
+            ],
+            "max_now": 367000.0,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "pending_exit_ord_no": "0005454",
+            "final_pnl_pct": 12.931714476172631,
+            "realized_pnl_amt": 47625.5,
+            "exit_price": 418000.0,
+            "exit_time": "09:00:33",
+            "code": "307950"
+        },
+        {
+            "name": "대한항공",
+            "avg_price": 23100.0,
+            "qty": 1,
+            "stage": 1,
+            "invested": 23180.85,
+            "entry_time": "2026-04-07T12:50:43.633563",
+            "reason": "TEST_1SHARE_MARKET",
+            "events": [
+                {
+                    "time": "09:00:35",
+                    "action": "SELL",
+                    "price": 24600.0,
+                    "qty": 1,
+                    "snapshot": {
+                        "time": "2026-04-09 09:00:35",
+                        "price": 24600.0,
+                        "market_trend": "UP",
+                        "vol_power": 208.24,
+                        "reason": "REST_SELL",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.21
+                    }
+                }
+            ],
+            "max_now": 23150.0,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "pending_exit_ord_no": "0005497",
+            "final_pnl_pct": 5.591468820168378,
+            "realized_pnl_amt": 1296.1500000000015,
+            "exit_price": 24600.0,
+            "exit_time": "09:00:35",
+            "code": "003490"
+        },
+        {
+            "name": "한국콜마",
+            "avg_price": 76400.0,
+            "qty": 26,
+            "stage": 1,
+            "invested": 1993352.4,
+            "entry_time": "2026-04-09T06:58:36.879741",
+            "reason": "SYNCED",
+            "events": [
+                {
+                    "time": "09:10:08",
+                    "action": "SELL",
+                    "price": 80200.0,
+                    "qty": 26,
+                    "snapshot": {
+                        "time": "2026-04-09 09:10:08",
+                        "price": 80200.0,
+                        "market_trend": "UP",
+                        "vol_power": 294.17,
+                        "reason": "REST_SELL",
+                        "rsi": 59.3,
+                        "macd": 320.33,
+                        "osc": 75.28,
+                        "adx": 22.6,
+                        "ma_alignment": "정배열(Bull)",
+                        "bid_ask_ratio": 0.17
+                    }
+                }
+            ],
+            "max_now": 76400.0,
+            "current_price": 80200.0,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "pending_exit_ord_no": "0020314",
+            "final_pnl_pct": 4.0846565815457465,
+            "realized_pnl_amt": 81421.6000000001,
+            "exit_price": 80200.0,
+            "exit_time": "09:10:08",
+            "code": "161890"
+        },
+        {
+            "name": "롯데쇼핑",
+            "avg_price": 110428.0,
+            "qty": 17,
+            "stage": 1,
+            "invested": 1883846.466,
+            "entry_time": "2026-04-09T09:52:35.627872",
+            "reason": "TYPE_B",
+            "events": [
+                {
+                    "time": "11:47:00",
+                    "action": "SELL",
+                    "price": 107700.0,
+                    "qty": 17,
+                    "snapshot": {
+                        "time": "2026-04-09 11:47:00",
+                        "price": 107700.0,
+                        "market_trend": "UP",
+                        "vol_power": 95.05,
+                        "reason": "REST_SELL",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.06
+                    }
+                }
+            ],
+            "max_now": 111100.0,
+            "current_price": 108500.0,
+            "exit_pending": true,
+            "exit_reason": "STOP_LOSS",
+            "pending_exit_ord_no": "0106181",
+            "final_pnl_pct": -3.2964982614458993,
+            "realized_pnl_amt": -62100.966000000015,
+            "exit_price": 107700.0,
+            "exit_date": "2026-04-09",
+            "exit_time": "11:47:00",
+            "exit_datetime": "2026-04-09 11:47:00",
+            "code": "023530"
+        },
+        {
+            "name": "롯데케미칼",
+            "avg_price": 93190.0,
+            "qty": 21,
+            "stage": 1,
+            "invested": 1963839.465,
+            "entry_time": "2026-04-09T09:11:54.821479",
+            "reason": "TYPE_B",
+            "events": [
+                {
+                    "time": "14:21:27",
+                    "action": "SELL",
+                    "price": 96100.0,
+                    "qty": 21,
+                    "snapshot": {
+                        "time": "2026-04-09 14:21:27",
+                        "price": 96100.0,
+                        "market_trend": "UP",
+                        "vol_power": 153.98,
+                        "reason": "REST_SELL",
+                        "rsi": 53.4,
+                        "macd": 568.59,
+                        "osc": -440.35,
+                        "adx": 22.9,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.87
+                    }
+                }
+            ],
+            "max_now": 93200.0,
+            "max_p": 100400.0,
+            "max_price": 100400.0,
+            "current_price": 96400.0,
+            "exit_pending": true,
+            "exit_reason": "ATR_TRAIL",
+            "pending_exit_ord_no": "0164341",
+            "final_pnl_pct": 2.2491672963706284,
+            "realized_pnl_amt": 44170.034999999916,
+            "exit_price": 96100.0,
+            "exit_date": "2026-04-09",
+            "exit_time": "14:21:27",
+            "exit_datetime": "2026-04-09 14:21:27",
+            "code": "011170"
+        },
+        {
+            "name": "한국금융지주",
+            "avg_price": 245500.0,
+            "qty": 8,
+            "stage": 1,
+            "invested": 1970874.0,
+            "entry_time": "2026-04-13T09:08:40.579519",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-04-13 09:08:40",
+                    "action": "BUY_S1",
+                    "price": 245500.0,
+                    "qty": 8,
+                    "snapshot": {
+                        "time": "2026-04-13 09:08:40",
+                        "price": 245500.0,
+                        "market_trend": "UP",
+                        "vol_power": 82.86,
+                        "reason": "TYPE_B",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.22
+                    }
+                },
+                {
+                    "time": "2026-04-13 09:39:01",
+                    "action": "SELL",
+                    "price": 244500.0,
+                    "qty": 8,
+                    "snapshot": {
+                        "time": "2026-04-13 09:39:01",
+                        "price": 244500.0,
+                        "market_trend": "UP",
+                        "vol_power": 87.85,
+                        "reason": "EXIT_FLASH_EXIT",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.22
+                    }
+                }
+            ],
+            "max_now": 245500.0,
+            "max_p": 250500.0,
+            "max_price": 250500.0,
+            "current_price": 245500.0,
+            "exit_pending": true,
+            "exit_reason": "FLASH_EXIT",
+            "pending_exit_ord_no": "0046713",
+            "final_pnl_pct": -1.2509171058119393,
+            "realized_pnl_amt": -24654.0,
+            "exit_price": 244500.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "09:39:01",
+            "exit_datetime": "2026-04-13 09:39:01",
+            "code": "071050"
+        },
+        {
+            "name": "LIG넥스원",
+            "avg_price": 944000.0,
+            "qty": 2,
+            "stage": 1,
+            "invested": 1894608.0,
+            "entry_time": "2026-04-13T10:02:20.060025",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-04-13 10:02:20",
+                    "action": "BUY_S1",
+                    "price": 944000.0,
+                    "qty": 2,
+                    "snapshot": {
+                        "time": "2026-04-13 10:02:20",
+                        "price": 944000.0,
+                        "market_trend": "UP",
+                        "vol_power": 62.56,
+                        "reason": "TYPE_B",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.28
+                    }
+                },
+                {
+                    "time": "2026-04-13 10:02:21",
+                    "action": "SELL",
+                    "price": 943000.0,
+                    "qty": 2,
+                    "snapshot": {
+                        "time": "2026-04-13 10:02:21",
+                        "price": 943000.0,
+                        "market_trend": "UP",
+                        "vol_power": 62.57,
+                        "reason": "EXIT_FLASH_EXIT",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.33
+                    }
+                }
+            ],
+            "max_now": 944000.0,
+            "max_p": 979000.0,
+            "max_price": 979000.0,
+            "exit_pending": true,
+            "exit_reason": "FLASH_EXIT",
+            "pending_exit_ord_no": "0061608",
+            "final_pnl_pct": -0.9520702963357063,
+            "realized_pnl_amt": -18038.0,
+            "exit_price": 943000.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "10:02:21",
+            "exit_datetime": "2026-04-13 10:02:21",
+            "code": "079550"
+        },
+        {
+            "name": "LIG넥스원",
+            "avg_price": 943000.0,
+            "qty": 2,
+            "stage": 1,
+            "invested": 1892601.0,
+            "entry_time": "2026-04-13T10:05:34.758423",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-04-13 10:05:34",
+                    "action": "BUY_S1",
+                    "price": 943000.0,
+                    "qty": 2,
+                    "snapshot": {
+                        "time": "2026-04-13 10:05:34",
+                        "price": 943000.0,
+                        "market_trend": "UP",
+                        "vol_power": 64.01,
+                        "reason": "TYPE_B",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.47
+                    }
+                },
+                {
+                    "time": "2026-04-13 10:05:41",
+                    "action": "SELL",
+                    "price": 941000.0,
+                    "qty": 2,
+                    "snapshot": {
+                        "time": "2026-04-13 10:05:41",
+                        "price": 941000.0,
+                        "market_trend": "UP",
+                        "vol_power": 64.16,
+                        "reason": "EXIT_FLASH_EXIT",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.21
+                    }
+                }
+            ],
+            "max_now": 943000.0,
+            "max_p": 979000.0,
+            "max_price": 979000.0,
+            "current_price": 942000.0,
+            "exit_pending": true,
+            "exit_reason": "FLASH_EXIT",
+            "pending_exit_ord_no": "0063226",
+            "final_pnl_pct": -1.0573279840811667,
+            "realized_pnl_amt": -20011.0,
+            "exit_price": 941000.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "10:05:41",
+            "exit_datetime": "2026-04-13 10:05:41",
+            "code": "079550"
+        },
+        {
+            "name": "LIG넥스원",
+            "avg_price": 944000.0,
+            "qty": 2,
+            "stage": 1,
+            "invested": 1894608.0,
+            "entry_time": "2026-04-13T10:14:31.362568",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-04-13 10:14:31",
+                    "action": "BUY_S1",
+                    "price": 944000.0,
+                    "qty": 2,
+                    "snapshot": {
+                        "time": "2026-04-13 10:14:31",
+                        "price": 944000.0,
+                        "market_trend": "UP",
+                        "vol_power": 65.1,
+                        "reason": "TYPE_B",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.62
+                    }
+                },
+                {
+                    "time": "2026-04-13 10:14:38",
+                    "action": "SELL",
+                    "price": 941000.0,
+                    "qty": 2,
+                    "snapshot": {
+                        "time": "2026-04-13 10:14:38",
+                        "price": 941000.0,
+                        "market_trend": "UP",
+                        "vol_power": 65.11,
+                        "reason": "EXIT_FLASH_EXIT",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.46
+                    }
+                }
+            ],
+            "max_now": 944000.0,
+            "max_p": 979000.0,
+            "max_price": 979000.0,
+            "current_price": 941000.0,
+            "exit_pending": true,
+            "exit_reason": "FLASH_EXIT",
+            "pending_exit_ord_no": "0068112",
+            "final_pnl_pct": -1.1621401366404027,
+            "realized_pnl_amt": -22018.0,
+            "exit_price": 941000.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "10:14:38",
+            "exit_datetime": "2026-04-13 10:14:38",
+            "code": "079550"
+        },
+        {
+            "name": "대우건설",
+            "avg_price": 25050.0,
+            "qty": 79,
+            "stage": 1,
+            "invested": 1985876.325,
+            "entry_time": "2026-04-13T10:30:58.752073",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-04-13 10:30:58",
+                    "action": "BUY_S1",
+                    "price": 25050.0,
+                    "qty": 79,
+                    "snapshot": {
+                        "time": "2026-04-13 10:30:58",
+                        "price": 25050.0,
+                        "market_trend": "UP",
+                        "vol_power": 106.17,
+                        "reason": "TYPE_B",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.19
+                    }
+                },
+                {
+                    "time": "2026-04-13 10:33:10",
+                    "action": "SELL",
+                    "price": 24450.0,
+                    "qty": 79,
+                    "snapshot": {
+                        "time": "2026-04-13 10:33:10",
+                        "price": 24450.0,
+                        "market_trend": "UP",
+                        "vol_power": 106.48,
+                        "reason": "EXIT_STOP_LOSS|SL%=2",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.82
+                    }
+                }
+            ],
+            "max_now": 25050.0,
+            "max_p": 25050.0,
+            "max_price": 25050.0,
+            "current_price": 24550,
+            "exit_pending": true,
+            "exit_reason": "STOP_LOSS|SL%=2",
+            "pending_exit_ord_no": "0077861",
+            "final_pnl_pct": -3.2219566845382457,
+            "realized_pnl_amt": -63984.07499999995,
+            "exit_price": 24450.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "10:33:10",
+            "exit_datetime": "2026-04-13 10:33:10",
+            "code": "047040"
+        },
+        {
+            "name": "삼성전기",
+            "avg_price": 575000.0,
+            "qty": 3,
+            "stage": 1,
+            "invested": 1731037.5,
+            "entry_time": "2026-04-13T10:00:01.690702",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-04-13 10:00:01",
+                    "action": "BUY_S1",
+                    "price": 575000.0,
+                    "qty": 3,
+                    "snapshot": {
+                        "time": "2026-04-13 10:00:01",
+                        "price": 575000.0,
+                        "market_trend": "UP",
+                        "vol_power": 105.58,
+                        "reason": "TYPE_B",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.67
+                    }
+                },
+                {
+                    "time": "2026-04-13 11:04:01",
+                    "action": "SELL",
+                    "price": 561000.0,
+                    "qty": 3,
+                    "snapshot": {
+                        "time": "2026-04-13 11:04:01",
+                        "price": 561000.0,
+                        "market_trend": "UP",
+                        "vol_power": 95.97,
+                        "reason": "EXIT_STOP_LOSS|SL%=2",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 3.19
+                    }
+                }
+            ],
+            "max_now": 575000.0,
+            "max_p": 579000.0,
+            "max_price": 579000.0,
+            "current_price": 563000,
+            "exit_pending": true,
+            "exit_reason": "STOP_LOSS|SL%=2",
+            "pending_exit_ord_no": "0089736",
+            "final_pnl_pct": -3.2611945148501986,
+            "realized_pnl_amt": -56452.5,
+            "exit_price": 561000.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "11:04:01",
+            "exit_datetime": "2026-04-13 11:04:01",
+            "code": "009150"
+        },
+        {
+            "name": "대우건설",
+            "avg_price": 24850.0,
+            "qty": 126,
+            "stage": 1,
+            "invested": 3142058.85,
+            "entry_time": "2026-04-13T10:50:35.203609",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-04-13 10:50:35",
+                    "action": "BUY_S1",
+                    "price": 24850.0,
+                    "qty": 126,
+                    "snapshot": {
+                        "time": "2026-04-13 10:50:35",
+                        "price": 24850.0,
+                        "market_trend": "UP",
+                        "vol_power": 105.11,
+                        "reason": "TYPE_B",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.53
+                    }
+                },
+                {
+                    "time": "2026-04-13 11:06:09",
+                    "action": "SELL",
+                    "price": 24250.0,
+                    "qty": 126,
+                    "snapshot": {
+                        "time": "2026-04-13 11:06:09",
+                        "price": 24250.0,
+                        "market_trend": "UP",
+                        "vol_power": 100.07,
+                        "reason": "EXIT_STOP_LOSS|SL%=2",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 5.34
+                    }
+                }
+            ],
+            "max_now": 24850.0,
+            "max_p": 25000.0,
+            "max_price": 25000.0,
+            "current_price": 24350,
+            "exit_pending": true,
+            "exit_reason": "STOP_LOSS|SL%=2",
+            "pending_exit_ord_no": "0090463",
+            "final_pnl_pct": -3.2410707393338636,
+            "realized_pnl_amt": -101836.3500000001,
+            "exit_price": 24250.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "11:06:09",
+            "exit_datetime": "2026-04-13 11:06:09",
+            "code": "047040"
+        },
+        {
+            "name": "LS",
+            "avg_price": 299500.0,
+            "qty": 6,
+            "stage": 1,
+            "invested": 1803289.5,
+            "entry_time": "2026-04-13T10:42:26.129553",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-04-13 10:42:26",
+                    "action": "BUY_S1",
+                    "price": 299500.0,
+                    "qty": 6,
+                    "snapshot": {
+                        "time": "2026-04-13 10:42:26",
+                        "price": 299500.0,
+                        "market_trend": "UP",
+                        "vol_power": 165.33,
+                        "reason": "TYPE_A",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.56
+                    }
+                },
+                {
+                    "time": "2026-04-13 13:43:38",
+                    "action": "SELL",
+                    "price": 292000.0,
+                    "qty": 6,
+                    "snapshot": {
+                        "time": "2026-04-13 13:43:38",
+                        "price": 292000.0,
+                        "market_trend": "UP",
+                        "vol_power": 134.62,
+                        "reason": "EXIT_STOP_LOSS|SL%=2",
+                        "rsi": null,
+                        "macd": null,
+                        "osc": null,
+                        "adx": null,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.84
+                    }
+                }
+            ],
+            "max_now": 299500.0,
+            "max_p": 301500.0,
+            "max_price": 301500.0,
+            "current_price": 293000.0,
+            "exit_pending": true,
+            "exit_reason": "STOP_LOSS|SL%=2",
+            "pending_exit_ord_no": "0142688",
+            "final_pnl_pct": -3.329997762422506,
+            "realized_pnl_amt": -60049.5,
+            "exit_price": 292000.0,
+            "exit_date": "2026-04-13",
+            "exit_time": "13:43:38",
+            "exit_datetime": "2026-04-13 13:43:38",
+            "code": "006260"
+        }
+    ]
+}

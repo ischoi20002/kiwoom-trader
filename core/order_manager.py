@@ -2,7 +2,7 @@ import requests
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import config
 from utils.normalization import get_tick_size
@@ -188,7 +188,7 @@ class OrderManager:
                     snap_bid_ask=_sn.get("bid_ask_text") or "",
                 )
 
-                # 웹소켓 CHE가 없을 때도 가상포지션·체결가 연동 (메인 스레드에서 실행)
+                # 웹소켓 CHE가 없을 때도 포지션·체결가 연동 (메인 스레드에서 실행)
                 try:
                     root = getattr(self.app, "root", None)
                     if root is not None and hasattr(root, "after"):
@@ -260,6 +260,117 @@ class OrderManager:
         except Exception:
             return default
 
+    def _merged_tot_evlu_amt(self, merged: dict) -> float:
+        """
+        ka10085 응답에서 총평가(총자산) 금액 필드를 찾습니다.
+        키 이름이 버전·래퍼(output)별로 달라질 수 있어 후보를 순차 시도합니다.
+        """
+        try:
+            bags: List[Dict[str, Any]] = []
+            if isinstance(merged, dict):
+                bags.append(merged)
+                out = merged.get("output")
+                if isinstance(out, dict):
+                    bags.append(out)
+            for bag in bags:
+                for key in (
+                    "tot_evlu_amt",
+                    "tot_evlu_amt_smtl",
+                    "tot_asst_amt",
+                    "tot_asst_evlu_amt",
+                    "evlu_tot_amt",
+                    "tot_evlu_amt1",
+                ):
+                    v = bag.get(key)
+                    if v is None or str(v).strip() in ("", "-"):
+                        continue
+                    x = self._safe_float(v, 0.0)
+                    if x > 0:
+                        return x
+        except Exception:
+            pass
+        return 0.0
+
+    def fetch_stock_cur_prc_rest(self, stk_cd: str) -> Optional[float]:
+        """
+        키움 REST `ka10004`(주식호가)로 단일 종목 현재가(cur_prc)를 조회합니다.
+        로컬 trading_data.db 캔들에 의존하지 않으며, 웹소켓 틱이 없을 때 폴백용입니다.
+        """
+        try:
+            code = str(stk_cd or "").strip().zfill(6)
+        except Exception:
+            return None
+        if not code or code == "000000":
+            return None
+        try:
+            use_mock = getattr(config, "USE_MOCK", False)
+            host = config.MOCK_URL if use_mock else config.URL
+            token = self.app.auth_manager.get_auth_token()
+            if not token:
+                return None
+            url = f"{host}/api/dostk/mrkcond"
+            headers = {
+                "Content-Type": "application/json;charset=UTF-8",
+                "authorization": f"Bearer {token}",
+                "api-id": "ka10004",
+            }
+            res = requests.post(
+                url, headers=headers, json={"stk_cd": code}, timeout=8
+            )
+            if res.status_code != 200:
+                return None
+            try:
+                data = res.json()
+            except Exception:
+                return None
+            if not isinstance(data, dict):
+                return None
+
+            def _pick_cur(obj: Any) -> Optional[float]:
+                if obj is None:
+                    return None
+                if isinstance(obj, list):
+                    for it in obj:
+                        p = _pick_cur(it)
+                        if p is not None and p > 0:
+                            return p
+                    return None
+                if not isinstance(obj, dict):
+                    return None
+                for k in (
+                    "cur_prc",
+                    "stck_prpr",
+                    "prpr",
+                    "now_prc",
+                    "base_pric",
+                    "stck_prpr_nxt",
+                ):
+                    if k not in obj:
+                        continue
+                    pv = self._safe_float(obj.get(k), 0.0)
+                    if pv > 0:
+                        return float(pv)
+                return None
+
+            for key in ("output", "output1", "data", "stk_hpga_qry"):
+                p = _pick_cur(data.get(key))
+                if p is not None and p > 0:
+                    return float(p)
+            p2 = _pick_cur(data)
+            if p2 is not None and p2 > 0:
+                return float(p2)
+        except requests.RequestException as e:
+            try:
+                self.logger.debug("fetch_stock_cur_prc_rest 요청 실패: %s", e)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.logger.debug("fetch_stock_cur_prc_rest 예외: %s", e)
+            except Exception:
+                pass
+        return None
+
     def _sum_holdings_market_value(self, holdings: list) -> float:
         """
         ka10085 acnt_prft_rt 행별 주식 평가금액 합산.
@@ -319,7 +430,8 @@ class OrderManager:
         D+2 예수금 + 주식평가 합과 비교해 총자산을 확정합니다.
         """
         try:
-            if d2 <= 0 and (len(holdings) > 0 or stocks_mv > 0):
+            # d2<0 은 미수·결제부족 등으로 유효할 수 있음 — d2<=0 이면 양수 주문가능으로 덮어쓰면 D+2가 왜곡됨
+            if d2 == 0 and (len(holdings) > 0 or stocks_mv > 0):
                 dep = self.get_deposit()
                 if dep and float(dep) > 0:
                     d2 = float(dep)
@@ -346,6 +458,10 @@ class OrderManager:
 
             # 예수금 필드가 비어 합산이 실제보다 작은데 API 총자산이 더 크면 API 우선
             if api_tot > 0 and api_tot > combined * 1.08:
+                return (api_tot, d1, d2)
+
+            # 합산이 증권사 총평가(tot_evlu_amt)보다 크게 튀면 — D+2·평가 필드 오인식 등 — 총평가 우선
+            if api_tot > 0 and combined > api_tot * 1.03:
                 return (api_tot, d1, d2)
 
             # 그 외에는 합산(예수+주식평가)을 총자산으로 사용
@@ -417,7 +533,7 @@ class OrderManager:
                 holdings = merged.get("acnt_prft_rt") or res.get("acnt_prft_rt") or []
                 if not isinstance(holdings, list):
                     holdings = []
-                api_tot = self._safe_float(merged.get("tot_evlu_amt", 0))
+                api_tot = self._merged_tot_evlu_amt(merged)
                 d1_deposit = self._safe_float(merged.get("d1_samt", 0))
                 d2_deposit = self._safe_float(merged.get("d2_samt", 0))
                 stocks_mv = self._sum_holdings_market_value(holdings)
@@ -439,10 +555,9 @@ class OrderManager:
                 if dep_detail:
                     d1d = float(dep_detail.get("d1") or 0)
                     d2d = float(dep_detail.get("d2") or 0)
-                    if d1d > 0:
-                        d1_deposit = d1d
-                    if d2d > 0:
-                        d2_deposit = d2d
+                    # 예수금상세(ka10001/kt00001)가 D+1/D+2 권위 — d2d>0 만 쓰면 음수(D+2 부족)가 무시되어 동기화 표시가 틀어짐
+                    d1_deposit = d1d
+                    d2_deposit = d2d
                     cash_available = float(
                         dep_detail.get("ord_alow")
                         or dep_detail.get("pymn_alow")
@@ -450,14 +565,11 @@ class OrderManager:
                         or 0
                     )
 
-                # 예수금상세로 d2 보강 후 주식평가 재합산 — 응답 편차로 total만 예수금으로 붕괴하는 현상 완화
+                # 예수금상세로 d2 보강 후: 총자산 = D+2 예수 + 보유 평가 합 (tot_evlu_amt는 이전 d2/예수 기준으로 남을 수 있음)
                 stocks_mv = self._sum_holdings_market_value(holdings)
                 n_hold, hold_detail = self._summarize_holdings_qty_positive(holdings)
                 try:
-                    if n_hold > 0:
-                        floor_tot = float(d2_deposit) + float(stocks_mv)
-                        if floor_tot > 0:
-                            total_equity = max(float(total_equity), floor_tot)
+                    total_equity = float(d2_deposit) + float(stocks_mv)
                 except Exception:
                     pass
                 # 주문가능(ord_alow 등)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
@@ -499,6 +611,10 @@ class OrderManager:
                     "d1_deposit": d1_deposit,
                     "d2_deposit": d2_deposit,
                     "cash_available": cash_available,
+                    # ka10085 보유 행 합산 평가액(evlu_amt 등) — 가상탭·총자산 표시용
+                    "stocks_market_value": float(stocks_mv),
+                    # 응답 원본 총평가금액(증권사 기준 총자산) — UI 최우선 표시
+                    "tot_evlu_amt": float(api_tot),
                 }
             elif ret_code == 429 or "429" in str(res):
                 # [v4.5.1 API Throttle] 전용 서버 조회 건수 초과 대응
@@ -560,15 +676,15 @@ class OrderManager:
                 ord_alow = _pick("ord_alow_amt", "nstd_re_ib_amt")
                 pymn = _pick("pymn_alow_amt")
 
-                if any(x > 0 for x in (d1, d2, entr, ord_alow, pymn)):
-                    return {
-                        "d1": d1,
-                        "d2": d2,
-                        "entr": entr,
-                        "ord_alow": ord_alow,
-                        "pymn_alow": pymn,
-                        "qry_tp_used": qry_tp,
-                    }
+                # return_code 정상이면 반환 (D+2 추정예수가 음수인 경우도 있음 — any(x>0)로 두면 조회 실패로 떨어져 ka10085 잔여값이 남음)
+                return {
+                    "d1": d1,
+                    "d2": d2,
+                    "entr": entr,
+                    "ord_alow": ord_alow,
+                    "pymn_alow": pymn,
+                    "qry_tp_used": qry_tp,
+                }
             except Exception as e:
                 self.logger.debug("예수금상세 qry_tp=%s 실패: %s", qry_tp, e)
                 continue

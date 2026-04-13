@@ -2,15 +2,16 @@ import threading
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.fee_rates import fee_decimal_rates_live_trading
+from utils.server_mode_paths import migrate_legacy_virtual_db_files, virtual_db_path
 
 
 class PortfolioManager:
     """
-    [v3.8] 가상 포지션 관리, 계좌 동기화(Reconciliation), DB 연동을 전담하는 모듈.
+    [v3.8] 포지션 관리(모의/실전별 저장), 계좌 동기화(Reconciliation), DB 연동을 전담하는 모듈.
     """
     def __init__(self, app, data_manager, order_manager, settings=None, log_func=None, gui_callback=None, telegram_callback=None):
         self.app = app
@@ -20,18 +21,21 @@ class PortfolioManager:
         self.log = log_func or print
         self.gui_callback = gui_callback
         self.telegram_callback = telegram_callback
-        
+
         # 수수료: 모의/실전은 on_fill 시점 settings + config.USE_MOCK 로 조회 (fee_decimal_rates_live_trading)
 
         self.virtual_positions = {}
         self.virtual_history = []
-        self.virtual_db_file = "virtual_db.json"
-        
+
         # [v4.5 Asset Harden] 실시간 자산 현황 및 스로틀링(Throttling) 트래킹
         self.total_equity = 0
         self.d1_deposit = 0
         self.d2_deposit = 0
         self.actual_deposit = 0
+        # ka10085 보유 평가 합산(잔고 API). 포지션 관리 탭 주식평가금·총자산과 동기화.
+        self.holdings_stocks_mv_api: float = 0.0
+        # ka10085 tot_evlu_amt 원본 — 총자산 표시 최우선
+        self.last_tot_evlu_amt: float = 0.0
         self.last_sync_time = 0.0
         self.min_sync_interval = 30.0 # [v4.5.3] 30초 간격으로 완화
         # 서버 잔고 목록에 종목이 없을 때 연속 몇 번인지 (API 일시 누락·파싱 실패로 인한 UI 깜빡임 방지)
@@ -39,9 +43,17 @@ class PortfolioManager:
 
         self.lock = threading.Lock()
 
+    def _virtual_db_path(self) -> str:
+        """종료내역 JSON — config.USE_MOCK 에 따라 virtual_db_mock.json / virtual_db_live.json."""
+        try:
+            return virtual_db_path()
+        except Exception:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            return os.path.join(root, "virtual_db_mock.json")
+
     def _schedule_gui_callback(self) -> None:
         """
-        gui_callback(가상탭 전체 갱신 등)은 체결·WS·백그라운드 스레드에서 트리거될 수 있습니다.
+        gui_callback(포지션 관리 탭 전체 갱신 등)은 체결·WS·백그라운드 스레드에서 트리거될 수 있습니다.
         Tkinter 위젯은 메인 스레드에서만 안전하므로 root.after(0)으로 넘깁니다.
         """
         if not self.gui_callback:
@@ -114,6 +126,69 @@ class PortfolioManager:
             return (code, str(name), int(qty), float(avg_price))
         except Exception:
             return None
+
+    def _parse_ka10085_row_pnl(self, item: Dict[str, Any]) -> Dict[str, float]:
+        """
+        ka10085 `acnt_prft_rt` 한 행에서 손익·평가·현재가 등 표시용 수치를 추출합니다.
+        REST/모의 응답에서 필드명이 조금씩 달라도 동작하도록 복수 키를 시도합니다.
+        """
+        out: Dict[str, float] = {}
+        try:
+            if not isinstance(item, dict):
+                return out
+
+            def _nf(*keys: str) -> float:
+                for k in keys:
+                    v = item.get(k)
+                    if v is None or v == "":
+                        continue
+                    try:
+                        s = str(v).replace(",", "").replace("+", "").strip()
+                        if s in ("", "-", "—"):
+                            continue
+                        return float(s)
+                    except (TypeError, ValueError):
+                        continue
+                return 0.0
+
+            cur = _nf("cur_prc", "prpr", "stck_prpr", "now_prc")
+            qty_row = _nf("rmnd_qty", "hldg_qty", "qty")
+            evlu = _nf(
+                "evlu_amt",
+                "stk_evlu_amt",
+                "stk_evlu_amt_smtl",
+                "evlu_amt_smtl",
+            )
+            pur_amt = _nf("pur_amt", "pchs_amt", "buy_amt", "byng_amt")
+            pur_pric = _nf("pur_pric", "pchs_avg_pric", "avg_price", "bpsp_avg_pric")
+            # 일부 REST 응답은 평가금액 필드만 비고 현재가·수량은 오는 경우가 있음 → 근사 복원
+            if evlu <= 0 and cur > 0 and qty_row > 0:
+                evlu = cur * qty_row
+            if pur_amt <= 0 and pur_pric > 0 and qty_row > 0:
+                pur_amt = pur_pric * qty_row
+            pfls = _nf(
+                "evlu_pfls_amt",
+                "evlu_pfls",
+                "stck_evlu_pfls_amt",
+                "pfls_amt",
+                "evlu_pl_amt",
+                "pl_amt",
+            )
+            if abs(pfls) < 1e-9 and evlu > 0 and pur_amt > 0:
+                pfls = evlu - pur_amt
+            rt_api = _nf("prft_rt", "pl_rt", "evlu_pfls_rt", "evlu_erng_rt")
+            if pur_amt > 1e-6:
+                rt = (pfls / pur_amt) * 100.0
+            else:
+                rt = rt_api
+            out["ka_cur_prc"] = float(cur)
+            out["ka_evlu_amt"] = float(evlu)
+            out["ka_evlu_pfls_amt"] = float(pfls)
+            out["ka_prft_rt"] = float(rt)
+            out["ka_pur_amt"] = float(pur_amt)
+        except Exception:
+            return {}
+        return out
 
     def _find_vp_key_for_code(self, norm_code: str) -> Optional[str]:
         """virtual_positions 키가 6자리 미일치일 때 동일 종목 키를 찾습니다."""
@@ -252,14 +327,135 @@ class PortfolioManager:
         except Exception:
             pass
         return False
+
+    def _parse_history_exit_datetime(self, pos: Dict[str, Any]) -> Optional[datetime]:
+        """종료 이력 dict에서 종료 시각을 datetime으로 복원합니다."""
+        try:
+            ex = str(pos.get("exit_datetime") or "").strip()
+            if ex and " " in ex:
+                return datetime.strptime(ex[:19], "%Y-%m-%d %H:%M:%S")
+            ed = str(pos.get("exit_date") or "").strip()
+            et = str(pos.get("exit_time") or "").strip()
+            if ed and et:
+                etp = et if ":" in et else f"{et}:00"
+                return datetime.strptime(f"{ed} {etp}"[:19], "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            pass
+        return None
+
+    def _recent_sell_exit_exists_for_code(
+        self, code: str, *, within_hours: Optional[float] = None
+    ) -> bool:
+        """
+        최근(설정 시간 이내) 동일 종목에 SELL 이벤트가 있는 종료 이력이 있으면 True.
+        within_hours가 None이면 sync_ghost_suppress_hours(기본 12h)를 사용합니다.
+        실매도 직후 잔고 API가 잘못된 잔여 수량으로 SYNCED 유령·SYNC_EXIT 허위 종료가 쌓이는 것을 막습니다.
+        """
+        try:
+            nc = self._normalize_stock_code(code)
+            if not nc:
+                return False
+            try:
+                if within_hours is None:
+                    hrs = float(self.settings.get("sync_ghost_suppress_hours", 12.0))
+                else:
+                    hrs = float(within_hours)
+            except (TypeError, ValueError):
+                hrs = 12.0
+            hrs = max(0.25, min(hrs, 168.0))
+            cutoff = datetime.now() - timedelta(hours=hrs)
+            for pos in reversed(self.virtual_history):
+                try:
+                    pc = self._normalize_stock_code(str(pos.get("code", "")))
+                except Exception:
+                    continue
+                if pc != nc:
+                    continue
+                evs = pos.get("events") or []
+                has_sell = any(
+                    str(e.get("action", "")).upper() == "SELL" for e in evs
+                )
+                if not has_sell:
+                    continue
+                ex_dt = self._parse_history_exit_datetime(pos)
+                if ex_dt is None:
+                    continue
+                if ex_dt >= cutoff:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _cost_basis_from_buy_events(
+        self, pos: Dict[str, Any]
+    ) -> Optional[Tuple[float, float, int]]:
+        """
+        events의 BUY_S1/BUY_S2 체결만으로 가중 평균 체결단가·매입원(매수수수료 포함)·총 매수 주수를 계산합니다.
+        실계좌 동기화(ka10085)의 pur_pric은 체결 호가와 다를 수 있어, 로컬 체결 이력이 있으면 이 값을 우선합니다.
+        """
+        try:
+            evs = pos.get("events") or []
+            if not isinstance(evs, list):
+                return None
+            legs: List[Tuple[float, int]] = []
+            for e in evs:
+                if not isinstance(e, dict):
+                    continue
+                act = str(e.get("action", "") or "").upper()
+                if act not in ("BUY_S1", "BUY_S2"):
+                    continue
+                p = self._to_f(e.get("price", 0))
+                q = self._to_i(e.get("qty", 0))
+                if p > 0.0 and q > 0:
+                    legs.append((p, q))
+            if not legs:
+                return None
+            total_q = sum(x[1] for x in legs)
+            if total_q <= 0:
+                return None
+            gross = sum(x[0] * float(x[1]) for x in legs)
+            w_avg = gross / float(total_q)
+            try:
+                buy_r, _ = fee_decimal_rates_live_trading(self.settings)
+            except Exception:
+                try:
+                    buy_r, _ = fee_decimal_rates_live_trading({})
+                except Exception:
+                    buy_r = 0.0035
+            invested = gross + gross * float(buy_r)
+            return (float(w_avg), float(invested), int(total_q))
+        except Exception:
+            return None
+
+    def _try_apply_local_buy_events_cost(
+        self, pos: Dict[str, Any], broker_qty: int
+    ) -> bool:
+        """체결 이벤트 합산 수량이 서버 잔고와 같으면 평단·invested를 체결 기준으로 유지합니다."""
+        try:
+            tup = self._cost_basis_from_buy_events(pos)
+            if tup is None:
+                return False
+            w_avg, invested, ev_q = tup
+            if ev_q != int(broker_qty):
+                return False
+            pos["avg_price"] = w_avg
+            pos["invested"] = invested
+            return True
+        except Exception:
+            return False
         
     def load_all(self):
         """DB 및 파일에서 포지션 데이터를 로드합니다."""
         with self.lock:
+            try:
+                migrate_legacy_virtual_db_files()
+            except Exception:
+                pass
+            vpath = self._virtual_db_path()
             # 1. 파일에서 히스토리 로드
-            if os.path.exists(self.virtual_db_file):
+            if os.path.exists(vpath):
                 try:
-                    with open(self.virtual_db_file, 'r', encoding='utf-8') as f:
+                    with open(vpath, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         self.virtual_history = data.get('history', [])
                         # 구버전 이력: exit_date+exit_time 만 있으면 exit_datetime 보강(종료일시 UI 일관)
@@ -302,13 +498,13 @@ class PortfolioManager:
     def save_db(self):
         """현재 상태를 파일에 저장합니다 (히스토리 위주)."""
         try:
-            with open(self.virtual_db_file, 'w', encoding='utf-8') as f:
+            with open(self._virtual_db_path(), 'w', encoding='utf-8') as f:
                 json.dump({'history': self.virtual_history}, f, ensure_ascii=False, indent=4)
         except Exception as e:
             self.log(f"[Error] [Portfolio] DB 저장 실패: {e}")
 
     def sync_with_actual_account(self, silent: bool = False, force: bool = False):
-        """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 가상 포지션을 동기화 (Reconciliation)"""
+        """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 포지션을 동기화 (Reconciliation)"""
         # [v4.5.1 API Throttle] 자동 동기화만 쿨다운; 동기화 버튼(force=True)은 즉시 실행
         import time
         now = time.time()
@@ -327,12 +523,42 @@ class PortfolioManager:
         self.last_sync_time = now # 성공 시점 업데이트
         
         holdings = account_data.get('holdings', [])
-        total_equity = account_data.get('total_equity', 0)
+        te_resolved = float(account_data.get('total_equity', 0) or 0)
         
         with self.lock:
-            self.total_equity = total_equity
             self.d1_deposit = account_data.get('d1_deposit', 0)
             self.d2_deposit = account_data.get('d2_deposit', 0)
+            try:
+                self.holdings_stocks_mv_api = float(
+                    account_data.get("stocks_market_value", 0) or 0
+                )
+            except (TypeError, ValueError):
+                self.holdings_stocks_mv_api = 0.0
+            try:
+                self.last_tot_evlu_amt = float(
+                    account_data.get("tot_evlu_amt", 0) or 0
+                )
+            except (TypeError, ValueError):
+                self.last_tot_evlu_amt = 0.0
+            # 총자산: D+2(예수금상세 반영) + 보유평가 합이 기본. tot_evlu_amt는 이전 예수 기준이거나 음수 D+2와 불일치할 수 있음.
+            try:
+                te_parts = float(self.d2_deposit or 0) + float(self.holdings_stocks_mv_api or 0)
+            except (TypeError, ValueError):
+                te_parts = 0.0
+            raw_tot = float(self.last_tot_evlu_amt or 0)
+            if abs(te_parts) > 1e-6 or self.holdings_stocks_mv_api > 0 or self.d2_deposit != 0:
+                if raw_tot > 0:
+                    den = max(abs(raw_tot), abs(te_parts), 1.0)
+                    if abs(raw_tot - te_parts) / den <= 0.025:
+                        self.total_equity = raw_tot
+                    else:
+                        self.total_equity = float(te_parts)
+                else:
+                    self.total_equity = float(te_parts)
+            elif raw_tot > 0:
+                self.total_equity = raw_tot
+            else:
+                self.total_equity = float(te_resolved)
             # 예수금상세(주문가능·출금가능) 우선 — 매수 직후에도 반영된 가용 현금
             ca = float(account_data.get("cash_available") or 0)
             self.actual_deposit = ca if ca > 0 else float(account_data.get("d2_deposit", 0) or 0)
@@ -363,12 +589,34 @@ class PortfolioManager:
                         pass
 
                 if code in self.virtual_positions:
-                    self.virtual_positions[code]['qty'] = qty
-                    self.virtual_positions[code]['avg_price'] = avg_price
-                    self.virtual_positions[code]['invested'] = float(qty) * float(avg_price)
-                    self.virtual_positions[code]['name'] = name
+                    pos_ref = self.virtual_positions[code]
+                    pos_ref["qty"] = qty
+                    pos_ref["name"] = name
+                    # ka10085 매입평균(pur_pric)은 체결 호가·내부 반올림과 다를 수 있음 — BUY 이벤트가 있으면 체결가 기준 유지
+                    if not self._try_apply_local_buy_events_cost(pos_ref, qty):
+                        pos_ref["avg_price"] = avg_price
+                        pos_ref["invested"] = float(qty) * float(avg_price)
                     updated_count += 1
                 else:
+                    try:
+                        nh = float(
+                            self.settings.get("sync_ghost_new_synced_hours", 1.0)
+                        )
+                    except (TypeError, ValueError):
+                        nh = 1.0
+                    nh = max(0.1, min(nh, 48.0))
+                    if self._recent_sell_exit_exists_for_code(
+                        code, within_hours=nh
+                    ):
+                        if not silent:
+                            try:
+                                self.log(
+                                    f"[Sync] {code}({name}) SYNCED 자동등록 생략 — "
+                                    f"최근 {nh:.1f}h 이내 실매도 종료 이력 있음(잔고 유령 방지)"
+                                )
+                            except Exception:
+                                pass
+                        continue
                     self.virtual_positions[code] = {
                         "name": name, "avg_price": avg_price, "qty": qty,
                         "stage": 1, "invested": float(qty) * float(avg_price),
@@ -377,6 +625,27 @@ class PortfolioManager:
                     }
                     self.data_manager.save_active_position(code, name, avg_price, qty, 1, float(qty) * float(avg_price), datetime.now().isoformat(), "SYNCED")
                     new_count += 1
+                try:
+                    pnl_snap = self._parse_ka10085_row_pnl(item)
+                    if pnl_snap:
+                        self.virtual_positions[code].update(pnl_snap)
+                    self.virtual_positions[code]["ka_sync_iso"] = datetime.now().isoformat()
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ [Sync] ka10085 손익 스냅샷 저장 실패 ({code}): {e}")
+                    except Exception:
+                        pass
+                try:
+                    # 동기화 후 VP에 반영된 평단으로 주문 이력 보정(체결 우선 시 실제 체결가 유지)
+                    _patch_p = float(
+                        self.virtual_positions[code].get("avg_price", avg_price)
+                        or avg_price
+                    )
+                    self.data_manager.patch_buy_filled_price_after_reconcile(
+                        str(code), _patch_p, int(qty)
+                    )
+                except Exception:
+                    pass
                     
             # 2. 로컬에만 있는 종목 제거 (매매 누락 보정)
             local_codes = list(self.virtual_positions.keys())
@@ -446,6 +715,31 @@ class PortfolioManager:
                             except Exception:
                                 pass
                         continue
+                    # SYNCED 유령: 직전 실매도로 이미 종료됐는데 잔고에 잠깐 남아 생긴 포지션 — 종료 이력 미추가·로컬만 제거
+                    try:
+                        if (
+                            str(pos.get("reason", "")).upper() == "SYNCED"
+                            and self._recent_sell_exit_exists_for_code(code)
+                        ):
+                            if not silent:
+                                try:
+                                    self.log(
+                                        f"[Sync] {pos.get('name', code)}({code}) "
+                                        f"SYNCED 유령 포지션 제거 — 최근 실매도 종료 이력 있음, "
+                                        f"매매종료내역(SYNC_EXIT) 미추가"
+                                    )
+                                except Exception:
+                                    pass
+                            self.virtual_positions.pop(code, None)
+                            self.data_manager.delete_active_position(code)
+                            try:
+                                self._reconcile_server_missing_streak.pop(nc, None)
+                            except Exception:
+                                pass
+                            removed_count += 1
+                            continue
+                    except Exception:
+                        pass
                     curr_p = self._to_f(pos.get('current_price', pos.get('avg_price', 0)))
                     avg_p = self._to_f(pos.get('avg_price', 0))
                     
@@ -497,6 +791,43 @@ class PortfolioManager:
             return d
         return None
 
+    def _effective_sizing_capital(self) -> float:
+        """
+        % 비중 계산에 쓰이는 기준 자산.
+        ka10085 tot_evlu_amt(증권사 총평가) → total_equity → 주문가능 순.
+        """
+        try:
+            raw = float(getattr(self, "last_tot_evlu_amt", 0) or 0)
+            if raw > 0:
+                return raw
+            te = float(self.total_equity or 0)
+            if te > 0:
+                return te
+            dep = float(self.actual_deposit or 0)
+            if dep > 0:
+                return dep
+        except Exception:
+            pass
+        return 0.0
+
+    def _max_buy_principal_cash_d2_limit(self) -> int:
+        """
+        현금매수 전용 상한(원): D+2 예수금 범위에서만 매수(신용·주문가능 별도 한도 미사용).
+        체결금액 P·수수료율 r일 때 총지출 = P*(1+r) ≤ D+2 → P ≤ D+2/(1+r).
+        D+2 ≤ 0 이면 추가 매수 불가(0).
+        """
+        try:
+            d2 = float(getattr(self, "d2_deposit", 0) or 0)
+            if d2 <= 0:
+                return 0
+            buy_r, _ = fee_decimal_rates_live_trading(self.settings)
+            den = 1.0 + float(buy_r)
+            if den <= 1e-12:
+                return 0
+            return int(max(0.0, d2 / den))
+        except Exception:
+            return 0
+
     def calculate_order_quantity(self, stage=1, is_simulation=False):
         """[v2.2] 설정창의 비중 설정(원/%)에 따른 실제 투자금액 산출 (실전/시뮬레이션 로직 분리)"""
         s = self.settings
@@ -511,15 +842,42 @@ class PortfolioManager:
                 # 백테스팅/가상매매는 설정창의 기반 자산을 사용
                 total_cap = float(str(s.get('backtest_initial_capital', 10000000)).replace(',', ''))
             else:
-                # [v4.5 Asset Harden] 실전/모의투자는 총 자산(Total Equity)을 우선 사용
-                if self.total_equity > 0:
-                    total_cap = self.total_equity
-                elif self.actual_deposit > 0:
-                    total_cap = self.actual_deposit
-                else:
-                    self.log("❌ [Risk] 실제 계좌 자산 정보를 가져오지 못해 주문을 발송할 수 없습니다. (계좌 조회를 확인하세요)")
+                # 실전/모의: 잔고 API(총평가) 기준으로 동기화된 self.total_equity / last_tot_evlu_amt
+                total_cap = self._effective_sizing_capital()
+                if total_cap <= 0:
+                    self.log(
+                        "❌ [Risk] 실제 계좌 자산 정보를 가져오지 못해 주문을 발송할 수 없습니다. "
+                        "(동기화·계좌 조회를 확인하세요)"
+                    )
                     return 0
             invest_amt = int(total_cap * pct / 100.0)
+        # 실전/모의 실주문: D+2 예수 한도 내에서만 매수액+매수수수료 지불(증권사 주문가능·신용 한도는 사용하지 않음)
+        if not is_simulation:
+            try:
+                cap = self._max_buy_principal_cash_d2_limit()
+                if cap <= 0:
+                    try:
+                        d2v = float(getattr(self, "d2_deposit", 0) or 0)
+                        if invest_amt > 0:
+                            self.log(
+                                "❌ [Risk] D+2 예수금 한도 내 현금 매수 불가 "
+                                f"(D+2={d2v:,.0f}원). 계좌 동기화·입금을 확인하세요."
+                            )
+                    except Exception:
+                        if invest_amt > 0:
+                            self.log(
+                                "❌ [Risk] D+2 예수금 한도 내 현금 매수 불가. 계좌 동기화를 확인하세요."
+                            )
+                    return 0
+                before_amt = int(invest_amt)
+                invest_amt = min(int(invest_amt), cap)
+                if before_amt > invest_amt > 0:
+                    self.log(
+                        f"ℹ️ [Risk] 투자금액을 D+2 현금 한도로 축소합니다: "
+                        f"{before_amt:,} → {invest_amt:,}원 (매수대금+매수수수료 ≤ D+2)"
+                    )
+            except Exception:
+                pass
         return invest_amt
 
     def capture_snapshot(self, code, price, reason="N/A"):
@@ -616,11 +974,17 @@ class PortfolioManager:
         try:
             buy_r, sell_r = fee_decimal_rates_live_trading(self.settings)
         except Exception:
-            buy_r, sell_r = 0.00015, 0.00215
+            try:
+                buy_r, sell_r = fee_decimal_rates_live_trading({})
+            except Exception:
+                buy_r, sell_r = 0.0035, 0.005
         try:
             code = self._normalize_stock_code(code)
         except Exception:
             code = str(code).split("_")[0].zfill(6)
+        # 매도 체결이 REST(선체결)·웹소켓 CHE에서 각각 오거나 주문번호가 비어 중복 방지에 실패한 경우,
+        # 두 번째 매도는 이미 포지션이 없어 매매종료내역에 동일 라운드가 2번 찍힐 수 있음 → 스킵.
+        skipped_sell_no_position: bool = False
         with self.lock:
             self._merge_vp_alias_to_canonical(code)
             if side == "buy":
@@ -703,7 +1067,9 @@ class PortfolioManager:
             
             elif side == "sell":
                 # 청산
-                if code in self.virtual_positions:
+                if code not in self.virtual_positions:
+                    skipped_sell_no_position = True
+                else:
                     pos = self.virtual_positions[code]
                     exit_reason = pos.get('exit_reason', 'MANUAL')
                     
@@ -761,6 +1127,16 @@ class PortfolioManager:
                         )
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
 
+        if skipped_sell_no_position:
+            try:
+                self.log(
+                    f"⚠️ [Portfolio] 매도 체결 무시({code}) — 보유 포지션 없음 "
+                    "(이미 청산·동기화됨, REST/CHE 이중 체결 가능성)."
+                )
+            except Exception:
+                pass
+            return
+
         self.save_db()
         self._schedule_gui_callback()
 
@@ -797,7 +1173,7 @@ class PortfolioManager:
             pass
 
     def clear_all(self):
-        """모든 가상 포지션을 초기화합니다."""
+        """모든 로컬 포지션을 초기화합니다."""
         with self.lock:
             codes = list(self.virtual_positions.keys())
             for code in codes:

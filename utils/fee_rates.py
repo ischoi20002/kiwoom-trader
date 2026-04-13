@@ -8,12 +8,21 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Tuple
 
+# settings 키 누락 시 폴백(% 값). core/defaults.py DEFAULT_SETTINGS 와 동기화.
+_FALLBACK_MOCK_BUY_PCT = 0.35
+_FALLBACK_MOCK_SELL_PCT = 0.5
+_FALLBACK_LIVE_BUY_PCT = 0.015
+_FALLBACK_LIVE_SELL_PCT = 0.215
+
 
 def fee_decimal_rates_live_trading(settings: Mapping[str, Any]) -> Tuple[float, float]:
     """
-    실시간 가상 체결(PortfolioManager)·일일 결산 리포트 표용.
-    - 모의 서버(USE_MOCK=True): buy_fee_mock, sell_fee_mock
-    - 실전 서버(USE_MOCK=False): buy_fee_live, sell_fee_live (미설정 시 buy_fee_bt/sell_fee_bt 폴백)
+    실시간 가상 체결(PortfolioManager)·종료내역 수수료 컬럼·일일 결산 표용.
+
+    - config.USE_MOCK=True: **buy_fee_mock** / **sell_fee_mock** (모의 비율이 실전보다 큼 — 별도 키)
+    - USE_MOCK=False: **buy_fee_live** / **sell_fee_live** (없으면 buy_fee_bt / sell_fee_bt)
+
+    반환값은 체결금액에 곱하는 소수(예: 0.35% → 0.0035).
     """
     try:
         import config as _cfg
@@ -23,17 +32,31 @@ def fee_decimal_rates_live_trading(settings: Mapping[str, Any]) -> Tuple[float, 
         use_mock = True
     try:
         if use_mock:
-            bp = float(settings.get("buy_fee_mock", 0.0))
-            sp = float(settings.get("sell_fee_mock", 0.0))
-        else:
             bp = float(
-                settings.get("buy_fee_live", settings.get("buy_fee_bt", 0.015))
+                settings.get("buy_fee_mock", _FALLBACK_MOCK_BUY_PCT)
             )
             sp = float(
-                settings.get("sell_fee_live", settings.get("sell_fee_bt", 0.215))
+                settings.get("sell_fee_mock", _FALLBACK_MOCK_SELL_PCT)
+            )
+        else:
+            bp = float(
+                settings.get(
+                    "buy_fee_live",
+                    settings.get("buy_fee_bt", _FALLBACK_LIVE_BUY_PCT),
+                )
+            )
+            sp = float(
+                settings.get(
+                    "sell_fee_live",
+                    settings.get("sell_fee_bt", _FALLBACK_LIVE_SELL_PCT),
+                )
             )
     except (TypeError, ValueError):
-        bp, sp = 0.015, 0.215
+        bp, sp = (
+            (_FALLBACK_MOCK_BUY_PCT, _FALLBACK_MOCK_SELL_PCT)
+            if use_mock
+            else (_FALLBACK_LIVE_BUY_PCT, _FALLBACK_LIVE_SELL_PCT)
+        )
     return bp / 100.0, sp / 100.0
 
 

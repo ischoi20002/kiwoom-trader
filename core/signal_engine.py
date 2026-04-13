@@ -4,7 +4,7 @@ import threading
 from datetime import datetime
 import traceback
 from backtest_engine import TradingStrategy
-from ui.tabs.monitor_tab import format_strategy_type_label
+from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
 from typing import Any, Optional, Tuple
 
@@ -193,6 +193,11 @@ class SignalEngine:
                 info["last_price"] = float(now_price)
                 info["price"] = float(now_price)
             except (TypeError, ValueError):
+                pass
+            try:
+                if info.get("vp_price_stub"):
+                    info.pop("vp_price_stub", None)
+            except Exception:
                 pass
             try:
                 wl_all_set = self.app.watchlist_store.codes_set()
@@ -445,7 +450,7 @@ class SignalEngine:
                 info['confluence'] = f"봉 충전 {current_bar_count}/{_min_sig_bars} (신호·매매 대기)"
                 info['met_ratio'] = 0.0
 
-            # 7. 실시간 가상 포지션: 봉 기준 충족 시에만 청산·S2 판단 (충전 중에는 매매 없음)
+            # 7. 실시간 보유 포지션: 봉 기준 충족 시에만 청산·S2 판단 (충전 중에는 매매 없음)
             bid_ask_ratio = float(self._to_scalar(info.get('bid_ask_ratio', 1.0), 1.0))
             ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
             vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
@@ -508,17 +513,9 @@ class SignalEngine:
                     else ("price_down" if dir_rn < 0 else "price_stable")
                 )
 
-                strat_label = format_strategy_type_label(
-                    info.get("sel_track", info.get("SelTrack", "AB"))
-                )
-                _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
-                if not _session_ok:
-                    _vp_str = "—"
-                try:
-                    info["status_text"] = str(info.get("confluence", "대기"))
-                except Exception:
-                    pass
+                strat_label = "—"
                 atr_cell = "—"
+                pos = None
                 try:
                     # ATR 기준가 열: 가상·실제 보유 종목만 (감시만 하는 종목은 '—')
                     nk = str(code).zfill(6)
@@ -529,6 +526,23 @@ class SignalEngine:
                             if str(k).split("_")[0].zfill(6) == nk:
                                 pos = v
                                 break
+                    strat_label = format_entry_signal_type_label(
+                        pos if isinstance(pos, dict) else None,
+                        info.get("sel_track", info.get("SelTrack", "AB")),
+                    )
+                except Exception:
+                    strat_label = format_entry_signal_type_label(
+                        None,
+                        info.get("sel_track", info.get("SelTrack", "AB")),
+                    )
+                _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
+                if not _session_ok:
+                    _vp_str = "—"
+                try:
+                    info["status_text"] = str(info.get("confluence", "대기"))
+                except Exception:
+                    pass
+                try:
                     if pos is not None and np_f > 0:
                         # 신호·매매용 last_row 는 bars_ready 일 때만 채워짐.
                         # 표시는 봉 수와 무관하게 마지막 봉+지표로 ATR 열을 채운다.
@@ -597,7 +611,7 @@ class SignalEngine:
                     self.app._update_timer_active = True
                     self.app.root.after(100, self.app._render_tree_updates)
 
-            # 보유 종목이 있으면 가상 탭 실시간 평가·요약 갱신 (스로틀은 앱 쪽)
+            # 보유 종목이 있으면 포지션 관리 탭 실시간 평가·요약 갱신 (스로틀은 앱 쪽)
             if self._code_in_virtual_positions(code):
                 try:
                     self.app.request_virtual_tab_realtime_render()

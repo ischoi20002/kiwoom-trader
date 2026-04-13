@@ -2,7 +2,7 @@
 """
 텔레그램 알림 전용 관심목록.
 감시목록과 독립(등록해도 감시목록에서 제거하지 않음).
-UI·가상포지션에서는 관심 종목 숨김. 리포트는 '관심만·비감시' 종목만 제외(감시와 겹치면 리포트 포함).
+UI·포지션 관리 탭에서는 관심 종목 숨김. 리포트는 '관심만·비감시' 종목만 제외(감시와 겹치면 리포트 포함).
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ class WatchlistStore:
             return [x["code"] for x in self._items]
 
     def codes_set(self) -> set:
-        """정규화된 6자리 코드 집합 (감시 화면·가상포지션 탭에서 숨길 때 사용)."""
+        """정규화된 6자리 코드 집합 (감시 화면·포지션 관리 탭에서 숨길 때 사용)."""
         with self._lock:
             return {str(x["code"]).zfill(6) for x in self._items}
 

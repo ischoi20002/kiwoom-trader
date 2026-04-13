@@ -1,8 +1,19 @@
 import os
 import json
 import importlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from reporting.daily_settlement_report import (
+    enrich_order_rows_for_virtual_trade,
+    _build_plotly_15m_section,
+    _esc,
+    _fmt_krw_cell,
+    _fmt_pct_net_cell,
+    _fmt_vp_report_cell,
+)
+from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
+from utils.fee_rates import fee_decimal_rates_live_trading
 
 
 def _resolve_virtual_analysis_helpers() -> Tuple[
@@ -155,6 +166,52 @@ def _synthetic_buy_s1_event(pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "reason": reason_txt,
         },
     }
+
+
+def _open_mtm_pct_and_krw(pos: Dict[str, Any]) -> Tuple[Optional[float], float]:
+    """
+    보유 건의 현재가 기준 수익률(%) 및 평가손익(원).
+    current_price 가 유효하지 않으면 (None, 0.0).
+    """
+    try:
+        ap = float(pos.get("avg_price") or 0)
+        q = int(pos.get("qty") or 0)
+    except (TypeError, ValueError):
+        return None, 0.0
+    if ap <= 0 or q <= 0:
+        return None, 0.0
+    try:
+        cpf = float(pos.get("current_price"))
+    except (TypeError, ValueError):
+        return None, 0.0
+    if cpf <= 0:
+        return None, 0.0
+    pct = (cpf / ap - 1.0) * 100.0
+    krw = (cpf - ap) * float(q)
+    return float(pct), float(krw)
+
+
+def _open_net_gross_sell_fee(
+    pos: Dict[str, Any], sell_fee_decimal: float
+) -> Tuple[float, float, float]:
+    """
+    현재가 기준 '매도 시' 추정: 액면 평가액(cp×qty), 매도 수수료, 순입금(액면−수수료).
+    settings 기반 sell_fee_decimal 은 fee_decimal_rates_live_trading 과 동일.
+    """
+    try:
+        q = int(pos.get("qty") or 0)
+        cpf = float(pos.get("current_price") or 0)
+    except (TypeError, ValueError):
+        return 0.0, 0.0, 0.0
+    if q <= 0 or cpf <= 0:
+        return 0.0, 0.0, 0.0
+    try:
+        gross = float(cpf) * float(q)
+        fee = gross * float(max(0.0, sell_fee_decimal))
+        net = gross - fee
+        return net, gross, fee
+    except Exception:
+        return 0.0, 0.0, 0.0
 
 
 def _history_bucket_key(h: Dict[str, Any]) -> str:
@@ -413,15 +470,303 @@ def _build_events_html(pos: Dict[str, Any]) -> str:
     return events_html
 
 
+def _order_tuple_to_dict(row: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
+    """get_orders_between 한 행을 일일 결산과 동일한 dict로 변환합니다."""
+    try:
+        (
+            ts,
+            code,
+            side,
+            qty,
+            price,
+            f_price,
+            f_qty,
+            result,
+            name,
+            reason,
+            order_no,
+            order_type,
+            snap_vp,
+            snap_ba,
+            _fill_snap_vp,
+            _fill_snap_ba,
+        ) = row
+    except (TypeError, ValueError):
+        return None
+    return {
+        "ts": ts,
+        "code": str(code).zfill(6),
+        "side": side,
+        "qty": qty,
+        "price": price,
+        "filled_price": f_price,
+        "filled_qty": f_qty,
+        "result": result,
+        "name": name or "",
+        "reason": reason or "",
+        "order_no": order_no or "",
+        "order_type": order_type or "",
+        "snap_vol_power": snap_vp,
+        "snap_bid_ask": snap_ba or "",
+    }
+
+
+def _order_query_window_bounds(pos: Dict[str, Any], is_open: bool) -> Tuple[str, str]:
+    """order_history 조회 구간 [시작, 끝] (문자열, get_orders_between 용)."""
+    try:
+        et = pos.get("entry_time")
+        if isinstance(et, str) and len(et) >= 10:
+            d0 = et.replace("T", " ")[:10]
+            start = f"{d0} 00:00:00"
+        else:
+            start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+    except Exception:
+        start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+    try:
+        if is_open:
+            end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            ex = str(pos.get("exit_datetime") or "").strip().replace("T", " ")
+            if len(ex) >= 19:
+                edt = datetime.strptime(ex[:19], "%Y-%m-%d %H:%M:%S")
+                end = (edt + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            elif pos.get("exit_date"):
+                ed = str(pos.get("exit_date"))[:10]
+                etx = str(pos.get("exit_time") or "23:59:59")
+                if len(etx) >= 8 and ":" in etx:
+                    end = f"{ed} {etx[:8]}"
+                else:
+                    end = f"{ed} 23:59:59"
+            else:
+                end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return start, end
+
+
+def _exit_snap_from_closed_position(pos: Dict[str, Any]) -> Dict[str, Any]:
+    """청산 카드 1건 → enrich 매칭용 exit 스냅."""
+    ex = str(pos.get("exit_datetime") or "").strip()
+    if not ex and pos.get("exit_date") and pos.get("exit_time"):
+        ex = f'{pos.get("exit_date")} {pos.get("exit_time")}'
+    ex = ex.replace("T", " ")
+    if len(ex) >= 19:
+        ex = ex[:19]
+    try:
+        rp = float(pos.get("realized_pnl_amt") or 0)
+    except (TypeError, ValueError):
+        rp = 0.0
+    try:
+        pp = float(pos.get("final_pnl_pct") or 0)
+    except (TypeError, ValueError):
+        pp = 0.0
+    return {
+        "exit_datetime": ex,
+        "realized_pnl_amt": rp,
+        "final_pnl_pct": pp,
+        "exit_date": pos.get("exit_date"),
+        "exit_time": pos.get("exit_time"),
+    }
+
+
+def _build_orders_table_html_from_rows(
+    rows: List[Dict[str, Any]], *, is_open: bool
+) -> str:
+    """일일 결산과 동일 열 구성의 주문·체결 표 HTML."""
+    if not rows:
+        return ""
+    tr_parts: List[str] = []
+    for o in rows:
+        try:
+            qv = int(o.get("qty") or 0)
+        except (TypeError, ValueError):
+            qv = 0
+        try:
+            pv = float(o.get("price") or 0)
+        except (TypeError, ValueError):
+            pv = 0.0
+        fp = o.get("filled_price")
+        fq = o.get("filled_qty")
+        _sba = (o.get("snap_bid_ask") or "").strip() or "-"
+        tr_parts.append(
+            f"""<tr>
+                <td>{_esc(o.get("ts"))}</td>
+                <td>{_esc(o.get("side"))}</td>
+                <td class="num">{qv:,}</td>
+                <td class="num">{pv:,.0f}</td>
+                <td class="num">{_esc(fp if fp else "-")}</td>
+                <td class="num">{_esc(fq if fq else "-")}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get("_fee_amt")))}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get("_buy_amt")))}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get("_sell_amt")))}</td>
+                <td class="num">{_esc(_fmt_pct_net_cell(o.get("_pnl_pct")))}</td>
+                <td class="num">{_esc(_fmt_krw_cell(o.get("_disp_cum")))}</td>
+                <td class="num">{_esc(_fmt_vp_report_cell(o.get("snap_vol_power")))}</td>
+                <td>{_esc(_sba)}</td>
+                <td>{_esc(o.get("result"))}</td>
+                <td>{_esc(o.get("order_no"))}</td>
+                <td>{_esc(o.get("reason"))}</td>
+            </tr>"""
+        )
+    tbody = "".join(tr_parts)
+    hint = (
+        "진입일 00:00 ~ 현재 시각"
+        if is_open
+        else "진입일 00:00 ~ 청산 시각+1h (해당 라운드 주문 수집)"
+    )
+    return f"""
+            <div class="vr-order-block">
+                <div class="vr-order-hint">주문·체결 원장 (<code>trading_state.db</code> order_history) · {hint}</div>
+                <div class="vr-order-wrap">
+                    <table class="vr-order-table">
+                        <thead>
+                            <tr>
+                                <th>시각</th><th>구분</th><th>수량</th><th>주문가</th><th>체결가</th><th>체결수량</th>
+                                <th>수수료</th><th>매수금액</th><th>매도금액</th>
+                                <th>수익률(순)</th><th>누적실현(순)</th>
+                                <th>체결강(주문)</th><th>호가(주문)</th>
+                                <th>상태</th><th>주문번호</th><th>사유</th>
+                            </tr>
+                        </thead>
+                        <tbody>{tbody}</tbody>
+                    </table>
+                </div>
+            </div>
+            """
+
+
+def _fetch_orders_table_html_for_position(
+    data_manager: Any,
+    settings: Optional[dict],
+    pos: Dict[str, Any],
+    is_open: bool,
+) -> str:
+    """DataManager로 주문을 조회해 일일 결산 수준 표 HTML을 반환합니다."""
+    if data_manager is None or not isinstance(settings, dict):
+        return ""
+    try:
+        start_s, end_s = _order_query_window_bounds(pos, is_open)
+        if start_s > end_s:
+            start_s, end_s = end_s, start_s
+        raw_rows = data_manager.get_orders_between(start_s, end_s)
+    except Exception:
+        return (
+            '<div class="vr-order-block"><p class="vr-order-hint" style="color:#bf616a;">'
+            "주문 이력 조회에 실패했습니다.</p></div>"
+        )
+    try:
+        code = str(pos.get("code", "")).zfill(6)
+    except Exception:
+        code = "000000"
+    ods: List[Dict[str, Any]] = []
+    for row in raw_rows or []:
+        d = _order_tuple_to_dict(row)
+        if d and str(d.get("code", "")).zfill(6) == code:
+            ods.append(d)
+    if not ods:
+        return (
+            '<div class="vr-order-block"><p class="vr-order-hint">해당 기간 '
+            "<code>order_history</code> 에 기록이 없습니다. "
+            "(미주문·체결 전·모의 미기록·다른 PC DB 등)</p></div>"
+        )
+    try:
+        exit_snap = None if is_open else _exit_snap_from_closed_position(pos)
+        enriched = enrich_order_rows_for_virtual_trade(ods, settings, exit_snap)
+    except Exception:
+        enriched = ods
+    return _build_orders_table_html_from_rows(enriched, is_open=is_open)
+
+
+def _chart_report_day_for_position(pos: Dict[str, Any], is_open: bool) -> str:
+    """15분 차트 기준 거래일: 미청산=오늘, 청산=청산일(또는 exit_datetime 날짜)."""
+    try:
+        if is_open:
+            return datetime.now().strftime("%Y-%m-%d")
+        exd = str(pos.get("exit_date") or "").strip()
+        if len(exd) >= 10 and exd[4] == "-":
+            return exd[:10]
+        exdt = str(pos.get("exit_datetime") or "").strip().replace("T", " ")
+        if len(exdt) >= 10 and exdt[4] == "-":
+            return exdt[:10]
+    except Exception:
+        pass
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _build_virtual_chart_section_html(
+    pos: Dict[str, Any],
+    is_open: bool,
+    data_manager: Any,
+    settings: Optional[dict],
+    section_id: str,
+    display_name: str,
+    code_str: str,
+) -> str:
+    """
+    일일 결산과 동일한 15분 Plotly(캔들+거래량+MA+당일 주문 세로선).
+    `file://` 호환 인라인 JSON + 펼침 시 렌더(공통 `plotly_deferred_chart_js`).
+    """
+    day = _chart_report_day_for_position(pos, is_open)
+    df_15 = None
+    if data_manager is not None:
+        try:
+            fn = getattr(data_manager, "fetch_15m_bars_for_trading_day_rest_only", None)
+            if callable(fn):
+                df_15 = fn(code_str, day, logger=None)
+        except Exception:
+            df_15 = None
+    orders_list: List[Dict[str, Any]] = []
+    if data_manager is not None:
+        try:
+            start_dt = f"{day} 00:00:00"
+            end_dt = f"{day} 23:59:59"
+            for row in data_manager.get_orders_between(start_dt, end_dt) or []:
+                d = _order_tuple_to_dict(row)
+                if d and str(d.get("code", "")).zfill(6) == code_str:
+                    orders_list.append(d)
+        except Exception:
+            pass
+    try:
+        inner = _build_plotly_15m_section(
+            code_str,
+            display_name or code_str,
+            day,
+            df_15,
+            orders_list,
+        )
+    except Exception as e:
+        inner = f'<p class="warn" style="color:#f7768e;">차트 생성 오류: {_esc(str(e))}</p>'
+    panel_id = f"vr-chart-panel-{section_id}"
+    btn_open = f"{display_name} 15분봉 차트 접기"
+    btn_closed = f"{display_name} 15분봉 차트 펼치기"
+    return f"""
+        <div class="vr-stock-chart-toolbar">
+            <span class="muted vr-stock-chart-toolbar-label">15분봉 · 주문 시각 (기준일 {_esc(day)})</span>
+            <button type="button" class="chart-toggle-btn"
+                aria-expanded="false"
+                aria-controls="{_esc(panel_id)}"
+                data-text-open="{_esc(btn_open)}"
+                data-text-closed="{_esc(btn_closed)}">{_esc(btn_closed)}</button>
+        </div>
+        <div class="chart-panel-collapsible" id="{_esc(panel_id)}" hidden>
+            <div class="chart-details-body">{inner}</div>
+        </div>
+        """
+
+
 def _build_trade_card(
     pos: Dict[str, Any],
     *,
     is_open: bool = False,
     section_id: str = "",
+    orders_table_html: str = "",
+    chart_section_html: str = "",
+    settings: Optional[dict] = None,
 ) -> str:
     ticker = str(pos.get("code", "000000")).zfill(6)
     name = pos.get("name", "Unknown")
     events_html = _build_events_html(pos)
+    eval_lines = ""
 
     if is_open:
         try:
@@ -437,14 +782,14 @@ def _build_trade_card(
         except (TypeError, ValueError):
             stg = 1
         unreal = ""
-        cpp = pos.get("current_price")
-        if cpp is not None and ap > 0:
+        if ap > 0:
             try:
-                cpf = float(cpp)
+                cpf = float(pos.get("current_price") or 0)
+            except (TypeError, ValueError):
+                cpf = 0.0
+            if cpf > 0:
                 u_pct = (cpf / ap - 1.0) * 100.0
                 unreal = f" · 현재가 기준 {u_pct:+.2f}%"
-            except Exception:
-                pass
         et_raw = pos.get("entry_time")
         if isinstance(et_raw, str) and et_raw.strip():
             ers = et_raw.strip().replace("T", " ")
@@ -455,6 +800,19 @@ def _build_trade_card(
         else:
             et_lbl = "-"
         sub = f'<div class="t-sub">진입 시각: {et_lbl}</div>'
+        if isinstance(settings, dict):
+            try:
+                _, sell_d = fee_decimal_rates_live_trading(settings)
+                net_v, gross_v, fee_v = _open_net_gross_sell_fee(pos, sell_d)
+                if gross_v > 0:
+                    eval_lines = (
+                        f'<div class="t-sub t-eval">평가 액면: {gross_v:,.0f}원 · '
+                        f"매도수수료(추정): {fee_v:,.0f}원 · "
+                        f'<b style="color:var(--text-bright);">순입금 추정: {net_v:,.0f}원</b>'
+                        f' <span style="color:var(--text);font-size:11px;">(설정 매도율 반영)</span></div>'
+                    )
+            except Exception:
+                eval_lines = ""
         header_right = f'<div class="t-result t-open">보유 중 (S{stg}) · {qty}주 @ {int(ap):,}원{unreal}</div>'
     else:
         try:
@@ -491,12 +849,15 @@ def _build_trade_card(
                 <div class="t-name-wrap">
                     <div class="t-name"><b>{name}</b> <small>{ticker}</small></div>
                     {sub}
+                    {eval_lines}
                 </div>
                 {header_right}
             </div>
             <div class="trade-body">
-                <div class="t-timeline-label">매수·매도 타임라인 (시간순)</div>
+                {orders_table_html}
+                <div class="t-timeline-label">매수·매도 타임라인 (가상 체결·스냅샷, 시간순)</div>
                 {events_html}
+                {chart_section_html}
             </div>
         </div>
         """
@@ -507,14 +868,31 @@ def generate_virtual_narrative_report(
     output_path: str = "virtual_trade_report.html",
     settings: Optional[dict] = None,
     open_positions: Optional[List[Dict[str, Any]]] = None,
+    data_manager: Any = None,
 ) -> None:
     """
     가상 매매 종합 리포트: 나러티브 타임라인 + 포트폴리오 백테스트 리포트와 동일한 통계 블록.
-    동일 종목코드 청산 이력은 한 카드로 병합. settings 인자는 하위 호환만 유지(내용 미사용).
+    동일 종목코드 청산 이력은 한 카드로 병합.
     open_positions: 미청산 virtual_positions.
+    data_manager: 있으면 trading_state.db 주문·체결 원장을 종목별로 표시(일일 결산과 동일 열).
     """
     history_raw = list(history or [])
     open_positions = list(open_positions or [])
+    # 보유 건에 current_price가 없으면 평단으로 채워 0% MTM으로라도 집계·카드 표시를 일관화
+    for _op in open_positions:
+        if not isinstance(_op, dict):
+            continue
+        try:
+            ap0 = float(_op.get("avg_price") or 0)
+        except (TypeError, ValueError):
+            ap0 = 0.0
+        try:
+            cp0 = float(_op.get("current_price"))
+        except (TypeError, ValueError):
+            cp0 = 0.0
+        if cp0 <= 0 and ap0 > 0:
+            _op["current_price"] = ap0
+
     if not history_raw and not open_positions:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("<html><body style='background:#1a1b26; color:#a9b1d6; padding:50px; text-align:center; font-family:sans-serif;'>")
@@ -534,7 +912,7 @@ def generate_virtual_narrative_report(
                 _adf, open_holdings_count=len(open_positions)
             )
         else:
-            _esc = (
+            _stat_err_html = (
                 str(_imp_err or "알 수 없음")
                 .replace("&", "&amp;")
                 .replace("<", "&lt;")
@@ -543,7 +921,7 @@ def generate_virtual_narrative_report(
             portfolio_analysis_html = (
                 '<div class="vr-analysis-wrap"><p class="depth-subnote" style="color:#bf616a;">'
                 "<b>통계 모듈 로드 실패</b> — 백테스트형 통계를 건너뜁니다.</p>"
-                f'<p class="depth-subnote" style="font-size:0.8rem;opacity:0.9;">{_esc}</p>'
+                f'<p class="depth-subnote" style="font-size:0.8rem;opacity:0.9;">{_stat_err_html}</p>'
                 '<p class="depth-subnote">힌트: GUI를 저장소 루트 폴더에서 실행하고, '
                 "<code>reporting/trade_report.py</code>에 가상 통계 함수가 포함된 최신 버전인지 확인하세요.</p></div>"
             )
@@ -563,6 +941,7 @@ def generate_virtual_narrative_report(
     )
 
     nav_items: List[Tuple[str, str, str]] = [("v-top", "↑ 맨 위", "")]
+    _s = settings if isinstance(settings, dict) else {}
     open_parts: List[str] = []
     for i, p in enumerate(open_positions):
         if not isinstance(p, dict):
@@ -570,7 +949,34 @@ def generate_virtual_narrative_report(
         code = str(p.get("code", "")).zfill(6)
         nid = f"v-open-{code}-{i}"
         nav_items.append((nid, str(p.get("name", "Unknown")), code))
-        open_parts.append(_build_trade_card(p, is_open=True, section_id=nid))
+        try:
+            _ot = _fetch_orders_table_html_for_position(
+                data_manager, _s, p, is_open=True
+            )
+        except Exception:
+            _ot = ""
+        try:
+            _ch = _build_virtual_chart_section_html(
+                p,
+                True,
+                data_manager,
+                _s,
+                nid,
+                str(p.get("name", "Unknown")),
+                code,
+            )
+        except Exception as _e_ch:
+            _ch = f'<p class="warn" style="color:#f7768e;">15분 차트: {_esc(str(_e_ch))}</p>'
+        open_parts.append(
+            _build_trade_card(
+                p,
+                is_open=True,
+                section_id=nid,
+                orders_table_html=_ot,
+                chart_section_html=_ch,
+                settings=_s,
+            )
+        )
     open_cards_html = "".join(open_parts)
 
     closed_parts: List[str] = []
@@ -580,7 +986,34 @@ def generate_virtual_narrative_report(
         code = str(p.get("code", "")).zfill(6)
         nid = f"v-closed-{code}-{i}"
         nav_items.append((nid, str(p.get("name", "Unknown")), code))
-        closed_parts.append(_build_trade_card(p, is_open=False, section_id=nid))
+        try:
+            _ot = _fetch_orders_table_html_for_position(
+                data_manager, _s, p, is_open=False
+            )
+        except Exception:
+            _ot = ""
+        try:
+            _ch = _build_virtual_chart_section_html(
+                p,
+                False,
+                data_manager,
+                _s,
+                nid,
+                str(p.get("name", "Unknown")),
+                code,
+            )
+        except Exception as _e_ch2:
+            _ch = f'<p class="warn" style="color:#f7768e;">15분 차트: {_esc(str(_e_ch2))}</p>'
+        closed_parts.append(
+            _build_trade_card(
+                p,
+                is_open=False,
+                section_id=nid,
+                orders_table_html=_ot,
+                chart_section_html=_ch,
+                settings=_s,
+            )
+        )
     closed_trades_html = "".join(closed_parts)
 
     sidebar_links: List[str] = []
@@ -600,28 +1033,81 @@ def generate_virtual_narrative_report(
             )
     sidebar_html = "\n            ".join(sidebar_links)
 
-    # [2] 통계 계산 (건수·손익은 병합 전 원본 청산 건수 기준)
+    try:
+        _, _sell_fee_dec = fee_decimal_rates_live_trading(_s)
+    except Exception:
+        _sell_fee_dec = 0.0
+    total_open_net = 0.0
+    total_open_gross = 0.0
+    total_open_sell_fee = 0.0
+    for _op in open_positions:
+        if not isinstance(_op, dict):
+            continue
+        try:
+            n, g, f = _open_net_gross_sell_fee(_op, _sell_fee_dec)
+            total_open_net += n
+            total_open_gross += g
+            total_open_sell_fee += f
+        except Exception:
+            pass
+
+    # [2] 통계 계산 — 청산 완료 + 미청산(현재가 MTM)을 함께 반영
     win_cnt = sum(1 for p in history_raw if isinstance(p, dict) and p.get("final_pnl_pct", 0) > 0)
-    win_rate = (win_cnt / len(history_raw)) * 100 if history_raw else 0
+    for _op in open_positions:
+        if not isinstance(_op, dict):
+            continue
+        m_pct, _ = _open_mtm_pct_and_krw(_op)
+        if m_pct is not None and m_pct > 0:
+            win_cnt += 1
+    n_stats = len(history_raw) + len(open_positions)
+    win_rate = (win_cnt / n_stats) * 100 if n_stats else 0.0
     total_pnl = sum(
         int(p.get("realized_pnl_amt") or 0) for p in history_raw if isinstance(p, dict)
     )
-    avg_pnl_pct = (
-        sum(float(p.get("final_pnl_pct", 0) or 0) for p in history_raw if isinstance(p, dict))
-        / len(history_raw)
-        if history_raw
-        else 0
-    )
+    for _op in open_positions:
+        if not isinstance(_op, dict):
+            continue
+        _pct_u, krw_u = _open_mtm_pct_and_krw(_op)
+        if _pct_u is not None:
+            try:
+                total_pnl += int(round(float(krw_u)))
+            except (TypeError, ValueError):
+                pass
+    pct_parts: List[float] = [
+        float(p.get("final_pnl_pct", 0) or 0) for p in history_raw if isinstance(p, dict)
+    ]
+    for _op in open_positions:
+        if not isinstance(_op, dict):
+            continue
+        m_pct, _ = _open_mtm_pct_and_krw(_op)
+        if m_pct is not None:
+            pct_parts.append(float(m_pct))
+    avg_pnl_pct = (sum(pct_parts) / len(pct_parts)) if pct_parts else 0.0
 
-    _ = settings  # 하위 호환용 (실시간 설정은 리포트에 반영하지 않음)
+    _db_line = ""
+    if data_manager is not None:
+        _db_line = (
+            '<p style="color:var(--text); font-size:12px; margin-top:10px; line-height:1.5;">'
+            "각 종목 카드 상단에 <b>주문·체결 원장</b>(<code>trading_state.db</code> "
+            "<code>order_history</code>)을 표시합니다. 일일 결산 리포트와 동일한 열 구성입니다.</p>"
+        )
 
     # [3] HTML 템플릿 (좌측 종목 바로가기 + 본문)
-    html = f"""
+    try:
+        from plotly.io._html import plotly_cdn_url
+
+        _vr_cdn_js = json.dumps(plotly_cdn_url())
+    except Exception:
+        _vr_cdn_js = json.dumps("")
+
+    html = (
+        f"""
     <!DOCTYPE html>
     <html lang="ko">
     <head>
         <meta charset="UTF-8">
         <title>가상 매매 종합 리포트</title>
+        <script>window.__DAILY_REPORT_PLOTLY_CDN__ = {_vr_cdn_js};</script>
         <style>
             :root {{
                 --bg: #1a1b26;
@@ -705,7 +1191,7 @@ def generate_virtual_narrative_report(
             .container {{ max-width: 1040px; margin: 0 auto; }}
             header#v-top {{ margin-bottom: 36px; border-bottom: 1px solid var(--border); padding-bottom: 20px; }}
             h1 {{ margin: 0; font-weight: 600; color: var(--primary); letter-spacing: -0.5px; font-size: 1.75rem; }}
-            .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 28px; }}
+            .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 15px; margin-bottom: 28px; }}
             .stat-box {{ background: var(--card); padding: 20px; border-radius: 12px; text-align: center; border: 1px solid var(--border); }}
             .stat-val {{ display: block; font-size: 24px; font-weight: 700; color: #fff; }}
             .stat-label {{ font-size: 13px; color: var(--text); }}
@@ -740,6 +1226,41 @@ def generate_virtual_narrative_report(
             .snapshot-missing {{ border: 1px dashed var(--border); color: var(--text); font-size: 12px; font-style: italic; }}
             .sn-item span {{ color: var(--text); margin-right: 5px; }}
             .sn-reason {{ width: 100%; border-top: 1px solid var(--border); margin-top: 5px; padding-top: 5px; color: var(--accent); font-style: italic; }}
+            .vr-order-block {{ margin-bottom: 18px; }}
+            .vr-order-hint {{
+                font-size: 0.75rem;
+                color: var(--text);
+                margin-bottom: 8px;
+                line-height: 1.45;
+            }}
+            .vr-order-wrap {{
+                overflow-x: auto;
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                background: rgba(0,0,0,0.12);
+            }}
+            .vr-order-table {{
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 0.78rem;
+                min-width: 1100px;
+            }}
+            .vr-order-table th, .vr-order-table td {{
+                padding: 8px 10px;
+                border-bottom: 1px solid var(--border);
+                text-align: left;
+                white-space: nowrap;
+            }}
+            .vr-order-table th {{
+                color: var(--text);
+                font-weight: 600;
+                font-size: 0.72rem;
+            }}
+            .vr-order-table td.num {{
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+                font-family: ui-monospace, monospace;
+            }}
             .p-plus {{ color: var(--plus); }}
             .p-minus {{ color: var(--minus); }}
             .vr-analysis-wrap {{
@@ -780,10 +1301,37 @@ def generate_virtual_narrative_report(
             @media (max-width: 900px) {{
                 .vr-sidebar {{ position: relative; width: 100%; border-right: none; border-bottom: 1px solid var(--border); }}
                 .vr-main {{ margin-left: 0; padding: 16px; }}
-                .stats-grid {{ grid-template-columns: repeat(2, 1fr); }}
+                .stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
                 .depth-bucket-grid {{ grid-template-columns: 1fr; }}
             }}
             footer {{ margin-top: 48px; text-align: center; color: var(--text); font-size: 12px; }}
+            /* 일일 결산과 동일 15분 차트: 펼침 + Plotly (plotly_deferred_chart_js) */
+            .vr-stock-chart-toolbar {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-top: 20px;
+                padding-top: 12px;
+                border-top: 1px solid var(--border);
+            }}
+            .vr-stock-chart-toolbar-label {{ font-size: 0.85rem; }}
+            .chart-toggle-btn {{
+                background: #7aa2f7;
+                color: #1a1b26;
+                border: none;
+                padding: 8px 14px;
+                border-radius: 6px;
+                font-size: 0.88rem;
+                font-weight: 600;
+                cursor: pointer;
+                flex-shrink: 0;
+            }}
+            .chart-toggle-btn:hover {{ filter: brightness(1.08); }}
+            .chart-panel-collapsible {{ margin-top: 12px; }}
+            .chart-details-body {{ padding-top: 4px; border-top: 1px solid var(--border); }}
+            .chartwrap {{ overflow-x: auto; }}
         </style>
     </head>
     <body>
@@ -798,6 +1346,8 @@ def generate_virtual_narrative_report(
             <header id="v-top">
                 <h1>가상 매매 종합 리포트</h1>
                 <p style="color:var(--text); margin:8px 0 0 0;">의사결정 시점 스냅샷·나러티브와 포트폴리오 백테스트형 통계를 함께 봅니다.</p>
+                <p style="color:var(--text); font-size:12px; margin-top:8px; line-height:1.5;">각 종목 카드 하단에 <b>15분봉 차트</b>(일일 결산 리포트와 동일: 캔들·거래량·MA·당일 주문 시각)를 펼쳐 볼 수 있습니다. <code>file://</code> 로 열어도 동작합니다.</p>
+                {_db_line}
             </header>
 
             <div class="stats-grid">
@@ -817,8 +1367,18 @@ def generate_virtual_narrative_report(
                     <span class="stat-val { 'p-plus' if avg_pnl_pct > 0 else 'p-minus' }">{avg_pnl_pct:+.2f}%</span>
                     <span class="stat-label">Avg Return</span>
                 </div>
+                <div class="stat-box">
+                    <span class="stat-val" style="color:var(--primary);">{int(round(total_open_net)):,}</span>
+                    <span class="stat-label">미청산 평가(순·매도비)</span>
+                </div>
             </div>
-            {f'<p style="color:var(--text);font-size:13px;margin:-12px 0 24px 0;">미청산 보유: <b style="color:var(--primary);">{len(open_positions)}</b> 종목</p>' if open_positions else ""}
+            {(
+                f'<p style="color:var(--text);font-size:13px;margin:-12px 0 8px 0;">'
+                f'미청산 보유: <b style="color:var(--primary);">{len(open_positions)}</b> 종목 · '
+                f'평가 액면 합 <b>{total_open_gross:,.0f}</b>원 · 매도수수료(추정) <b>{total_open_sell_fee:,.0f}</b>원 · '
+                f'<b style="color:var(--text-bright);">순입금 추정 합 {int(round(total_open_net)):,}원</b>'
+                f' <span style="font-size:11px;opacity:0.85;">(현재가×수량, settings 매도 수수료율)</span></p>'
+            ) if open_positions else ""}
 
             {portfolio_analysis_html}
 
@@ -833,10 +1393,16 @@ def generate_virtual_narrative_report(
             </footer>
         </div>
         </div>
+    <script>
+"""
+        + PLOTLY_DEFERRED_CHART_IIFE
+        + """
+    </script>
     </body>
     </html>
     """
-    
+    )
+
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"✅ 종합 리포트 생성: {output_path}")

@@ -6,6 +6,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from utils.normalization import normalize_code
 from utils.bar_resample import refresh_resampled_data_at_path
+from utils.server_mode_paths import (
+    migrate_legacy_trading_state_db_files,
+    state_db_path,
+    state_db_path_for_live,
+    state_db_path_for_mock,
+)
 import threading
 import requests
 import config
@@ -36,14 +42,25 @@ class DataManagerV2:
             return
         mp = db_path if db_path else self.DEFAULT_DB_PATH
         self.db_path = os.path.abspath(mp)
+        # 구 trading_state.db → trading_state_mock.db 1회 이관 후, 모의/실전은 별도 파일
+        try:
+            migrate_legacy_trading_state_db_files(self.db_path)
+        except Exception:
+            pass
         if state_db_path:
             self.state_db_path = os.path.abspath(state_db_path)
         else:
+            # 호환: 예전 단일 경로를 쓰던 코드용(실제 연결은 state_db_path() 동적)
             self.state_db_path = os.path.join(
                 os.path.dirname(self.db_path), self.DEFAULT_STATE_DB_BASENAME
             )
         print(f"DEBUG [DataManagerV2]: Main DB at {self.db_path}")
-        print(f"DEBUG [DataManagerV2]: State DB at {self.state_db_path}")
+        try:
+            print(
+                f"DEBUG [DataManagerV2]: State DB (현재 모드) at {state_db_path()}"
+            )
+        except Exception:
+            print(f"DEBUG [DataManagerV2]: State DB (레거시) at {self.state_db_path}")
         self._init_db()
         DataManagerV2._initialized = True
 
@@ -65,15 +82,23 @@ class DataManagerV2:
                 raise e
 
     def _get_state_connection(self):
-        """주문·포지션·원격명령 등 소형 상태 DB 연결 (백업·Git 동기화 대상)."""
+        """주문·포지션·원격명령 — config.USE_MOCK 에 따라 mock/live DB 분리."""
         try:
-            conn = sqlite3.connect(self.state_db_path, timeout=30)
+            p = state_db_path()
+        except Exception:
+            p = self.state_db_path
+        return self._get_state_connection_for_path(p)
+
+    def _get_state_connection_for_path(self, abs_path: str):
+        """지정 경로의 상태 DB 연결 (스키마 부트스트랩·구버전 이전용)."""
+        try:
+            conn = sqlite3.connect(abs_path, timeout=30)
             conn.execute("PRAGMA journal_mode=WAL;")
             return conn
         except sqlite3.DatabaseError as e:
             if "malformed" in str(e).lower():
                 print(
-                    f"CRITICAL [DataManagerV2]: State DB malformed at {self.state_db_path}: {e}"
+                    f"CRITICAL [DataManagerV2]: State DB malformed at {abs_path}: {e}"
                 )
             raise e
 
@@ -195,9 +220,9 @@ class DataManagerV2:
             """)
             conn.commit()
 
-    def _init_state_tables(self) -> None:
-        """소형 trading_state.db: 주문·활성포지션·원격명령·헤더 시장추세 (Git/백업 동기화 권장)."""
-        with self._get_state_connection() as conn:
+    def _ensure_state_schema_at_path(self, abs_path: str) -> None:
+        """주문·활성포지션 등 상태 테이블 스키마를 지정 파일에 생성."""
+        with self._get_state_connection_for_path(abs_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS active_positions (
                     code TEXT PRIMARY KEY,
@@ -257,10 +282,21 @@ class DataManagerV2:
                     pass
             conn.commit()
 
+    def _init_state_tables(self) -> None:
+        """모의·실전 state DB 각각에 스키마 생성(파일 분리)."""
+        try:
+            self._ensure_state_schema_at_path(state_db_path_for_mock())
+            self._ensure_state_schema_at_path(state_db_path_for_live())
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] 상태 DB 스키마 초기화 경고: {e}")
+            except Exception:
+                pass
+
     def _migrate_legacy_state_tables_from_main_db(self) -> None:
         """
-        예전 단일 trading_data.db 에 있던 주문·포지션 테이블을 trading_state.db 로 한 번만 이전하고
-        메인 DB 에서는 제거합니다. 다른 PC 의 trading_state.db 를 복사해 온 경우에도 메인 쪽 유령 테이블을 정리합니다.
+        예전 단일 trading_data.db 에 있던 주문·포지션 테이블을
+        trading_state_mock.db 로 한 번만 이전하고 메인 DB 에서는 제거합니다.
         """
         state_tables = (
             "order_history",
@@ -279,7 +315,9 @@ class DataManagerV2:
                     ).fetchone()
                 )
 
-            with self._get_state_connection() as st:
+            with self._get_state_connection_for_path(
+                state_db_path_for_mock()
+            ) as st:
                 n_state_orders = st.execute("SELECT COUNT(*) FROM order_history").fetchone()[0]
 
             # state 에 이미 이력이 있고 메인에 구 테이블만 남은 경우 → 복사 없이 메인에서만 DROP
@@ -299,7 +337,9 @@ class DataManagerV2:
             if not main_has_leg:
                 return
 
-            with self._get_state_connection() as st:
+            with self._get_state_connection_for_path(
+                state_db_path_for_mock()
+            ) as st:
                 st.execute("ATTACH DATABASE ? AS leg", (self.db_path,))
                 try:
                     for tbl in state_tables:
@@ -333,7 +373,7 @@ class DataManagerV2:
                 main.commit()
             try:
                 print(
-                    "[DataManagerV2] 구버전 주문·포지션 데이터를 trading_state.db 로 이전했습니다."
+                    "[DataManagerV2] 구버전 주문·포지션 데이터를 trading_state_mock.db 로 이전했습니다."
                 )
             except Exception:
                 pass
@@ -653,6 +693,41 @@ class DataManagerV2:
             """, (today_start,))
             return cursor.fetchall()
 
+    def get_orders_for_calendar_date(self, day: date) -> List[Tuple[Any, ...]]:
+        """
+        캘린더 하루치 주문 이력. 오늘은 get_today_orders()와 동일(당일 0시~현재 시각).
+        과거 날짜는 해당일 00:00:00 ~ 23:59:59 (표시는 최신순).
+        """
+        try:
+            if day == date.today():
+                return self.get_today_orders()
+            start_dt = day.strftime("%Y-%m-%d 00:00:00")
+            end_dt = day.strftime("%Y-%m-%d 23:59:59")
+            with self._get_state_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT timestamp, code, side, qty, price, filled_price, filled_qty, result, name, reason,
+                           snap_vol_power, snap_bid_ask, fill_snap_vol_power, fill_snap_bid_ask
+                    FROM order_history
+                    WHERE timestamp >= ? AND timestamp <= ?
+                    ORDER BY timestamp DESC
+                    """,
+                    (start_dt, end_dt),
+                )
+                return list(cursor.fetchall())
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] get_orders_for_calendar_date 실패: {e}")
+            except Exception:
+                pass
+            return []
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] get_orders_for_calendar_date 오류: {e}")
+            except Exception:
+                pass
+            return []
+
     def get_orders_between(self, start_dt: str, end_dt: str):
         """
         날짜·시간 범위의 주문 이력을 시간순으로 반환합니다.
@@ -724,6 +799,76 @@ class DataManagerV2:
         with self._lock, self._get_state_connection() as conn:
             conn.execute(sql, tuple(params))
             conn.commit()
+
+    def patch_buy_filled_price_after_reconcile(
+        self,
+        code: str,
+        broker_avg_price: float,
+        broker_qty: int,
+    ) -> None:
+        """
+        계좌 동기화(ka10085) 직후 증권사 매입평균과 order_history.filled_price 를 맞춥니다.
+        동일 종목 매수 행이 DB에 1건일 때만 갱신합니다(추매 등 복수 건은 혼합 평단이므로 생략).
+        """
+        try:
+            if broker_qty <= 0 or broker_avg_price <= 0:
+                return
+            raw = str(code or "").strip()
+            if not raw:
+                return
+            nc = normalize_code(raw)
+            if nc.isdigit() and len(nc) < 6:
+                nc = nc.zfill(6)
+            fp_int = int(round(float(broker_avg_price)))
+            candidates: List[str] = []
+            for c in (nc, raw.zfill(6) if raw.isdigit() else "", raw):
+                if c and c not in candidates:
+                    candidates.append(c)
+            with self._lock, self._get_state_connection() as conn:
+                rows: List[Tuple[Any, ...]] = []
+                for cand in candidates:
+                    try:
+                        cur = conn.execute(
+                            """
+                            SELECT id, COALESCE(filled_qty, 0), COALESCE(qty, 0), COALESCE(filled_price, 0)
+                            FROM order_history
+                            WHERE code = ?
+                              AND LOWER(TRIM(COALESCE(side, ''))) = 'buy'
+                              AND (
+                                UPPER(COALESCE(result, '')) IN ('FILLED', 'SUCCESS', 'MOCK')
+                                OR COALESCE(filled_qty, 0) > 0
+                              )
+                              AND UPPER(COALESCE(result, '')) NOT IN ('CANCELLED', 'REJECTED', 'FAILED')
+                            ORDER BY timestamp DESC, id DESC
+                            """,
+                            (cand,),
+                        )
+                        rows = cur.fetchall()
+                        if rows:
+                            break
+                    except sqlite3.Error:
+                        continue
+                if len(rows) != 1:
+                    return
+                rid, fq, oq, old_fp = rows[0]
+                eff_q = int(fq) if fq else int(oq) if oq else 0
+                if eff_q > 0 and eff_q != int(broker_qty):
+                    return
+                try:
+                    if int(old_fp) == fp_int:
+                        return
+                except (TypeError, ValueError):
+                    pass
+                conn.execute(
+                    "UPDATE order_history SET filled_price = ? WHERE id = ?",
+                    (fp_int, int(rid)),
+                )
+                conn.commit()
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] patch_buy_filled_price_after_reconcile: {e}")
+            except Exception:
+                pass
 
     def get_bars(self, code, start_dt=None, end_dt=None, interval='1m', limit=None):
         code = normalize_code(code)
@@ -959,7 +1104,8 @@ class DataManagerV2:
         next_key 가 비어 있으면 최초 조회, 있으면 연속조회(cont-yn=Y).
         반환: (분봉 레코드 리스트 또는 오류 시 None, 다음 페이지용 next_key)
         """
-        url = f"{config.URL}/api/dostk/chart"
+        base = config.MOCK_URL if getattr(config, "USE_MOCK", False) else config.URL
+        url = f"{base}/api/dostk/chart"
         body: Dict[str, Any] = {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1"}
         nk_in = (next_key or "").strip()
         max_retries = 3
@@ -1006,6 +1152,166 @@ class DataManagerV2:
                 print(f"  [Error] ka10080 예외 ({code}): {e}")
                 return None, ""
         return None, ""
+
+    def fetch_15m_bars_for_trading_day_rest_only(
+        self,
+        code: str,
+        day_yyyy_mm_dd: str,
+        *,
+        logger: Optional[Any] = None,
+        max_pages: int = 80,
+    ) -> Any:
+        """
+        일일결산 리포트 전용: trading_data.db 를 읽거나 쓰지 않고,
+        키움 ka10080(1분) 연속조회만으로 해당 일자(00:00~23:59) 1분봉을 모은 뒤 15분봉으로 리샘플합니다.
+        반환 형식은 get_bars(..., interval='15m') 와 유사(time, Open, High, Low, Close, Volume).
+        """
+        import pandas as pd
+        from kiwoom_rest_api.auth.token import TokenManager
+
+        def _log(msg: str) -> None:
+            if logger is not None:
+                try:
+                    logger(msg)
+                except Exception:
+                    pass
+
+        try:
+            n_code = normalize_code(str(code).strip())
+        except Exception:
+            n_code = str(code).strip().zfill(6)
+        day = str(day_yyyy_mm_dd).strip()[:10]
+        day_start = f"{day} 00:00:00"
+        day_end = f"{day} 23:59:59"
+
+        try:
+            token = TokenManager().get_token()
+        except Exception:
+            token = None
+        if not token:
+            _log(f"[일일결산] {n_code} 토큰 없음 — 분봉 REST 생략")
+            return pd.DataFrame()
+
+        def _clean_px(v: Any) -> int:
+            try:
+                return int(
+                    float(
+                        str(v)
+                        .replace("+", "")
+                        .replace("-", "")
+                        .replace(",", "")
+                        .strip()
+                        or 0
+                    )
+                )
+            except Exception:
+                return 0
+
+        next_key_in = ""
+        rows_acc: List[Dict[str, Any]] = []
+        seen_dt: set = set()
+        for page in range(max(1, int(max_pages))):
+            raw_list, next_key_out = self.fetch_kiwoom_minute_chart_page(
+                n_code, token, next_key_in
+            )
+            if not raw_list:
+                break
+            page_has_in_day = False
+            for b in raw_list:
+                if not isinstance(b, dict):
+                    continue
+                tm = b.get("cntr_tm") or b.get("date_time") or b.get("datetime")
+                if not tm:
+                    continue
+                s = str(tm).strip()
+                if len(s) < 14:
+                    continue
+                try:
+                    dt_fmt = f"{s[:4]}-{s[4:6]}-{s[6:8]} {s[8:10]}:{s[10:12]}:{s[12:14]}"
+                except Exception:
+                    continue
+                if dt_fmt < day_start or dt_fmt > day_end:
+                    continue
+                page_has_in_day = True
+                if dt_fmt in seen_dt:
+                    continue
+                seen_dt.add(dt_fmt)
+                rows_acc.append(
+                    {
+                        "datetime": dt_fmt,
+                        "open": _clean_px(
+                            b.get("open_pric", b.get("open", 0))
+                        ),
+                        "high": _clean_px(
+                            b.get("high_pric", b.get("high", 0))
+                        ),
+                        "low": _clean_px(b.get("low_pric", b.get("low", 0))),
+                        "close": _clean_px(
+                            b.get("cur_prc", b.get("close", b.get("stck_prpr", 0)))
+                        ),
+                        "volume": _clean_px(
+                            b.get("trde_qty", b.get("volume", b.get("cntg_vol", 0)))
+                        ),
+                    }
+                )
+            next_key_in = (next_key_out or "").strip()
+            if not next_key_in:
+                break
+            try:
+                time.sleep(0.22)
+            except Exception:
+                pass
+            if not page_has_in_day:
+                try:
+                    first_tm = str(
+                        raw_list[0].get("cntr_tm") or raw_list[0].get("date_time") or ""
+                    )
+                    if len(first_tm) >= 8 and first_tm[:8] < day.replace("-", ""):
+                        break
+                except Exception:
+                    pass
+
+        if not rows_acc:
+            _log(f"[일일결산] {n_code} {day} ka10080 구간 분봉 없음(REST 연속조회 종료)")
+            return pd.DataFrame()
+
+        try:
+            df1 = pd.DataFrame(rows_acc)
+            df1["datetime"] = pd.to_datetime(df1["datetime"], errors="coerce")
+            df1 = df1.dropna(subset=["datetime"])
+            df1 = df1.sort_values("datetime").drop_duplicates(
+                subset=["datetime"], keep="last"
+            )
+            df1 = df1.set_index("datetime")
+            df15 = (
+                df1.resample("15min", closed="right", label="right")
+                .agg(
+                    {
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum",
+                    }
+                )
+                .dropna(subset=["open", "high", "low", "close"], how="any")
+            )
+            df15 = df15.reset_index()
+            df15.rename(
+                columns={
+                    "datetime": "time",
+                    "open": "Open",
+                    "high": "High",
+                    "low": "Low",
+                    "close": "Close",
+                    "volume": "Volume",
+                },
+                inplace=True,
+            )
+            return df15
+        except Exception as e:
+            _log(f"[일일결산] {n_code} 15분 가공 실패: {e}")
+            return pd.DataFrame()
 
     def fetch_and_parse_15m_bars(self, code, token):
         n_code = normalize_code(code); query = "SELECT datetime, open, high, low, close, volume FROM bars_1m WHERE code = ? ORDER BY datetime DESC LIMIT 5000"
@@ -1346,7 +1652,11 @@ class DataManagerV2:
         import sqlite3
         conn = None
         try:
-            conn = sqlite3.connect(self.state_db_path, timeout=10)
+            try:
+                _sp = state_db_path()
+            except Exception:
+                _sp = self.state_db_path
+            conn = sqlite3.connect(_sp, timeout=10)
             conn.execute("PRAGMA journal_mode=WAL;")
             cursor = conn.cursor()
             

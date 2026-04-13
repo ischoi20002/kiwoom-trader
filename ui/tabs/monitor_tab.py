@@ -96,6 +96,30 @@ def format_strategy_type_label(sel_track: object) -> str:
         return "전략 A+B"
 
 
+def format_entry_signal_type_label(
+    pos: Optional[Dict[str, Any]], sel_track: object
+) -> str:
+    """
+    보유 종목: 실제 매수 체결에 쓰인 신호 구분(sig_type TYPE_A/B)을 표시.
+    비보유(감시만)·pos 없음: 선정 트랙(sel_track) 기존 문구(전략 A/B/A+B).
+    """
+    try:
+        if isinstance(pos, dict):
+            st = str(pos.get("sig_type") or "").strip().upper()
+            if st == "TYPE_B" or "TYPE_B" in st:
+                return "매수 신호 · Type B"
+            if st == "TYPE_A" or "TYPE_A" in st:
+                return "매수 신호 · Type A"
+            rsn = str(pos.get("reason") or "").upper()
+            if "TYPE_B" in rsn:
+                return "매수 신호 · Type B"
+            if "TYPE_A" in rsn and "TYPE_B" not in rsn:
+                return "매수 신호 · Type A"
+    except Exception:
+        pass
+    return format_strategy_type_label(sel_track)
+
+
 class MonitorTab:
     def __init__(self, parent, app):
         self.parent = parent
@@ -879,9 +903,19 @@ class MonitorTab:
             )
         except (TypeError, ValueError):
             now_p = 0.0
-        strat = format_strategy_type_label(
-            info.get("sel_track", info.get("SelTrack", "AB"))
-        )
+        sel_tr = info.get("sel_track", info.get("SelTrack", "AB"))
+        pos_for_strat: Optional[Dict[str, Any]] = None
+        try:
+            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+            pos_for_strat = vp.get(nk)
+            if pos_for_strat is None:
+                for k, v in vp.items():
+                    if str(k).split("_")[0].zfill(6) == nk:
+                        pos_for_strat = v if isinstance(v, dict) else None
+                        break
+        except Exception:
+            pos_for_strat = None
+        strat = format_entry_signal_type_label(pos_for_strat, sel_tr)
         ratio_disp = info.get("ratio", "0")
         nm = str(info.get("name", nk) or nk)
         try:
@@ -902,13 +936,7 @@ class MonitorTab:
             tv = 0.0
         atr_cell = "—"
         try:
-            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
-            pos = vp.get(nk)
-            if pos is None:
-                for k, v in vp.items():
-                    if str(k).split("_")[0].zfill(6) == nk:
-                        pos = v
-                        break
+            pos = pos_for_strat
             if pos is not None:
                 bd = (getattr(self.app, "bars_data", None) or {}).get(nk)
                 if bd is not None and not getattr(bd, "empty", True):
