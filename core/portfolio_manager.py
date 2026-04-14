@@ -799,13 +799,64 @@ class PortfolioManager:
 
         self.save_db()
         self._schedule_gui_callback()
-        
+
+        # 증권사 체결내역 REST(kt00007) → 주문 로그 DB 보강 (백그라운드 — API 다건·연속조회 지연 방지)
+        try:
+            app_ref = getattr(self, "app", None)
+            if app_ref is not None:
+                om = getattr(app_ref, "order_manager", None)
+                dm = getattr(app_ref, "data_manager", None)
+                if om is not None and dm is not None:
+                    st = self.settings or {}
+
+                    def _bg_exchange_fills() -> None:
+                        try:
+                            try:
+                                lb = int(
+                                    float(st.get("exchange_fill_sync_lookback_days", 7))
+                                )
+                            except (TypeError, ValueError):
+                                lb = 7
+                            lb = max(1, min(lb, 60))
+                            n = om.sync_exchange_fills_into_database(
+                                dm,
+                                lookback_days=lb,
+                                silent=silent,
+                                logger=self.log,
+                            )
+                            if n and not silent:
+                                self.log(
+                                    f"ℹ️ [동기화] 증권사 체결 {n}건을 주문 로그에 반영했습니다."
+                                )
+                        except Exception as e:
+                            if not silent:
+                                try:
+                                    self.log(f"⚠️ [동기화] 체결내역 API 보강 실패: {e}")
+                                except Exception:
+                                    pass
+                        try:
+                            root = getattr(app_ref, "root", None)
+                            if root is not None and hasattr(
+                                app_ref, "refresh_virtual_tab_orders_only"
+                            ):
+                                root.after(0, app_ref.refresh_virtual_tab_orders_only)
+                        except Exception:
+                            pass
+
+                    threading.Thread(target=_bg_exchange_fills, daemon=True).start()
+        except Exception as e:
+            if not silent:
+                try:
+                    self.log(f"⚠️ [동기화] 체결내역 스케줄 실패: {e}")
+                except Exception:
+                    pass
+
         # 총자산·예수·보유 상세는 OrderManager 요약 1회에 포함됨. 자동 동기화(silent) 시 로그 중복 방지.
         if not silent:
             self.log(
                 f"[Portfolio] 로컬 포지션 반영: 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
             )
-        
+
     def sync_deposit(self):
         """[v4.5.3] 예수금상세에서 출금가능금액만 조회해 actual_deposit 갱신(주문가능 아님)."""
         try:

@@ -147,7 +147,8 @@ class DynamicBacktester:
         self.use_sx = s.get('use_smart_exit', False)
         self.sx_ba = float(s.get('smart_exit_ba_ratio', 0.8))
         self.sx_vp = float(s.get('smart_exit_vp', 90.0))
-        self.sx_p_thr = float(s.get('smart_exit_price_threshold', 0.0))
+        # Smart Exit 가격 게이트: 설정은 '하락 %(양수)' 의도, 음수는 abs 로 동일 처리(evaluate_position 과 정합).
+        self.sx_p_thr = abs(float(s.get("smart_exit_price_threshold", 0.0)))
         self.use_s1a_tp = s.get('use_s1_a_tp', True)
         self.use_s1b_tp = s.get('use_s1_b_tp', True)
         self.use_s1a_sl = s.get('use_s1_a_stop_loss', True)

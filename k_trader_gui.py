@@ -1321,6 +1321,15 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def refresh_virtual_tab_orders_only(self) -> None:
+        """포지션 관리 탭 — 주문 로그 트리만 갱신(증권사 체결 API 병합 후 경량 호출)."""
+        try:
+            vt = getattr(self, "virtual_tab", None)
+            if vt is not None:
+                vt._render_orders()
+        except Exception:
+            pass
+
     def refresh_virtual_tab_full(self) -> None:
         """주문 로그 반영 등 히스토리·주문 트리까지 전부 다시 그릴 때 사용."""
         try:

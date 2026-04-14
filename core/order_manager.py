@@ -1,11 +1,11 @@
 import requests
 import json
 import logging
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
 import config
-from utils.normalization import get_tick_size
+from utils.normalization import get_tick_size, normalize_code
 from core.price_guard import validate_limit_order_reference_price
 from core.supply_display import capture_supply_snapshot
 
@@ -850,3 +850,250 @@ class OrderManager:
             except Exception:
                 pass
             return False
+
+    # ------------------------------------------------------------------ #
+    # 증권사 REST 체결내역 (kt00007) → 포지션관리 주문 로그 DB 보강
+    # ------------------------------------------------------------------ #
+
+    def _normalize_kt00007_stk_cd(self, raw: Any) -> str:
+        """kt00007 stk_cd → 6자리 종목코드."""
+        try:
+            c = normalize_code(raw)
+            s = str(c or "").strip().split("_", 1)[0].zfill(6)
+            return s if len(s) == 6 and s.isdigit() else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _kiwoom_time_to_hms(clock: Any) -> str:
+        """확인시간·주문시간(숫자만) → HH:MM:SS."""
+        try:
+            d = "".join(ch for ch in str(clock or "") if ch.isdigit())
+            if len(d) >= 6:
+                return f"{d[0:2]}:{d[2:4]}:{d[4:6]}"
+        except Exception:
+            pass
+        return "00:00:00"
+
+    @staticmethod
+    def _side_from_kt00007_row(row: Dict[str, Any]) -> str:
+        """매수/매도 → order_history side."""
+        try:
+            blob = f"{row.get('io_tp_nm', '')} {row.get('trde_tp', '')}"
+        except Exception:
+            blob = ""
+        if "매도" in blob:
+            return "sell"
+        return "buy"
+
+    def _extract_kt00007_rows(self, data: Any) -> List[Dict[str, Any]]:
+        """응답 JSON에서 체결 행 리스트 추출."""
+        if not isinstance(data, dict):
+            return []
+        try:
+            lst = data.get("acnt_ord_cntr_prps_dtl")
+            if isinstance(lst, list):
+                return [x for x in lst if isinstance(x, dict)]
+        except Exception:
+            pass
+        try:
+            out = data.get("output")
+            if isinstance(out, dict):
+                lst2 = out.get("acnt_ord_cntr_prps_dtl")
+                if isinstance(lst2, list):
+                    return [x for x in lst2 if isinstance(x, dict)]
+            if isinstance(out, list):
+                return [x for x in out if isinstance(x, dict)]
+        except Exception:
+            pass
+        return []
+
+    def _post_kt00007_page(
+        self,
+        ord_dt_yyyymmdd: str,
+        *,
+        cont_yn: str = "N",
+        next_key: str = "",
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[requests.Response]]:
+        """
+        계좌별주문체결내역상세요청(kt00007) 1페이지.
+        qry_tp=4: 체결내역만.
+        """
+        use_mock = getattr(config, "USE_MOCK", False)
+        host = config.MOCK_URL if use_mock else config.URL
+        token = self.app.auth_manager.get_auth_token()
+        if not token:
+            return [], {}, None
+
+        url = f"{host}/api/dostk/acnt"
+        headers: Dict[str, str] = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "authorization": f"Bearer {token}",
+            "api-id": "kt00007",
+            "cont-yn": str(cont_yn or "N").strip()[:1] or "N",
+            "next-key": str(next_key or "")[:50],
+        }
+        body: Dict[str, str] = {
+            "ord_dt": str(ord_dt_yyyymmdd or "").strip()[:8],
+            "qry_tp": "4",
+            "stk_bond_tp": "1",
+            "sell_tp": "0",
+            "stk_cd": "",
+            "fr_ord_no": "",
+            "dmst_stex_tp": "KRX",
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=20)
+        except requests.RequestException as e:
+            try:
+                self.logger.debug("kt00007 요청 실패: %s", e)
+            except Exception:
+                pass
+            return [], {}, None
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        rows = self._extract_kt00007_rows(data)
+        return rows, data if isinstance(data, dict) else {}, resp
+
+    def fetch_exchange_fills_for_date(self, day: date) -> List[Dict[str, Any]]:
+        """
+        특정 캘린더일의 체결내역만 수집. 연속조회(cont-yn) 전부 펼침.
+        반환: merge_exchange_fill_order_rows 에 넘길 dict 목록.
+        """
+        out: List[Dict[str, Any]] = []
+        ord_dt = day.strftime("%Y%m%d")
+        cont = "N"
+        nk = ""
+        for _ in range(80):
+            rows, data, resp = self._post_kt00007_page(
+                ord_dt, cont_yn=cont, next_key=nk
+            )
+            try:
+                rc = data.get("return_code", 0)
+                if rc is not None and int(str(rc).strip()) != 0:
+                    break
+            except Exception:
+                if not rows:
+                    break
+            for raw in rows:
+                try:
+                    code = self._normalize_kt00007_stk_cd(
+                        raw.get("stk_cd") or raw.get("pdno")
+                    )
+                    if not code:
+                        continue
+                    fq = int(
+                        float(
+                            str(raw.get("cntr_qty") or "0")
+                            .replace(",", "")
+                            .replace("+", "")
+                            or 0
+                        )
+                    )
+                    fp = int(
+                        float(
+                            str(raw.get("cntr_uv") or "0")
+                            .replace(",", "")
+                            .replace("+", "")
+                            or 0
+                        )
+                    )
+                    if fq <= 0 or fp <= 0:
+                        continue
+                    ord_no = str(raw.get("ord_no") or "").strip()
+                    cnfm = raw.get("cnfm_tm") or raw.get("ord_tm") or ""
+                    hms = self._kiwoom_time_to_hms(cnfm)
+                    ts = f"{ord_dt[:4]}-{ord_dt[4:6]}-{ord_dt[6:8]} {hms}"
+                    side = self._side_from_kt00007_row(raw)
+                    nm = str(raw.get("stk_nm") or "").strip() or code
+                    hint = str(raw.get("io_tp_nm") or raw.get("trde_tp") or "").strip()
+                    fill_key = f"{ord_dt}|{ord_no}|{hms}|{code}|{fq}|{fp}|{side}"
+                    out.append(
+                        {
+                            "fill_row_key": fill_key,
+                            "code": code,
+                            "name": nm,
+                            "side": side,
+                            "qty": fq,
+                            "price": fp,
+                            "filled_price": fp,
+                            "filled_qty": fq,
+                            "order_no": ord_no or "EXCH",
+                            "order_type": "00",
+                            "timestamp": ts,
+                            "result": "FILLED",
+                            "reason": f"API:{hint}" if hint else "API:체결",
+                            "snap_vol_power": None,
+                            "snap_bid_ask": "",
+                        }
+                    )
+                except Exception:
+                    continue
+
+            if resp is None:
+                break
+            try:
+                c_yn = (
+                    resp.headers.get("cont-yn")
+                    or resp.headers.get("Cont-Yn")
+                    or "N"
+                )
+                n_key = resp.headers.get("next-key") or resp.headers.get("Next-Key") or ""
+            except Exception:
+                c_yn, n_key = "N", ""
+            if str(c_yn).upper() == "Y" and str(n_key).strip():
+                cont, nk = "Y", str(n_key).strip()
+                continue
+            break
+        return out
+
+    def sync_exchange_fills_into_database(
+        self,
+        data_manager: Any,
+        *,
+        lookback_days: int = 7,
+        dates: Optional[List[date]] = None,
+        silent: bool = False,
+        logger: Optional[Any] = None,
+    ) -> int:
+        """
+        kt00007 체결을 `order_history`에 병합(중복 fill_row_key 제외).
+        실전/모의는 config.USE_MOCK 에 따라 각각의 state DB에 기록됩니다.
+        """
+        log_fn = logger or getattr(self.app, "log", print)
+        total_added = 0
+        try:
+            if dates is not None:
+                day_list = list(dates)
+            else:
+                try:
+                    n = max(1, min(int(lookback_days), 60))
+                except (TypeError, ValueError):
+                    n = 7
+                today = date.today()
+                day_list = [today - timedelta(days=i) for i in range(n)]
+            for d in day_list:
+                try:
+                    rows = self.fetch_exchange_fills_for_date(d)
+                    if not rows:
+                        continue
+                    added = int(
+                        data_manager.merge_exchange_fill_order_rows(rows) or 0
+                    )
+                    total_added += added
+                except Exception as e:
+                    if not silent:
+                        try:
+                            log_fn(f"⚠️ [kt00007] {d} 체결 병합 실패: {e}")
+                        except Exception:
+                            pass
+        except Exception as e:
+            if not silent:
+                try:
+                    log_fn(f"⚠️ [kt00007] 체결내역 동기화 실패: {e}")
+                except Exception:
+                    pass
+        return total_added

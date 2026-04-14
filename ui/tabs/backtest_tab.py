@@ -413,7 +413,7 @@ class BacktestTab:
             'smart_buy_ba_ratio': range_for(s.get('smart_buy_ba_ratio', 1.5), 0.3),
             'smart_exit_vp': range_for(s.get('smart_exit_vp', 100.0), 10.0),
             'smart_exit_ba_ratio': range_for(s.get('smart_exit_ba_ratio', 1.5), 0.3),
-            'smart_exit_price_threshold': range_for(s.get('smart_exit_price_threshold', -2.0), 1.0),
+            'smart_exit_price_threshold': range_for(s.get('smart_exit_price_threshold', 1.0), 0.5),
             'gap_down_limit_a': range_for(s.get('gap_down_limit_a', s.get('gap_down_limit', -3.0)), 1.0),
             'gap_down_limit_b': range_for(s.get('gap_down_limit_b', s.get('gap_down_limit', -3.0)), 1.0),
             'gap_grace_mins_a': range_for(s.get('gap_grace_mins_a', s.get('gap_grace_mins', 15)), 5),

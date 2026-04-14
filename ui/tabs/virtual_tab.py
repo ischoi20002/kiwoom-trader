@@ -416,6 +416,39 @@ class VirtualTab:
         except Exception:
             pass
 
+    def _kick_order_log_exchange_sync_for_view_date(self) -> None:
+        """주문 로그에 보이는 일자의 증권사 체결(kt00007)을 백그라운드로 보강 후 트리만 재그리기."""
+        try:
+            app = self.app
+            d = self._order_log_view_date
+
+            def _job() -> None:
+                try:
+                    om = getattr(app, "order_manager", None)
+                    dm = getattr(app, "data_manager", None)
+                    if om is None or dm is None:
+                        return
+                    om.sync_exchange_fills_into_database(
+                        dm,
+                        dates=[d],
+                        silent=True,
+                        logger=getattr(app, "log", print),
+                    )
+                except Exception:
+                    pass
+                try:
+                    root = getattr(app, "root", None)
+                    if root is not None and hasattr(
+                        app, "refresh_virtual_tab_orders_only"
+                    ):
+                        root.after(0, app.refresh_virtual_tab_orders_only)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_job, daemon=True).start()
+        except Exception:
+            pass
+
     def _order_log_prev_day(self) -> None:
         """주문 로그: 이전(주문 내역이 있는 가장 가까운 과거 일자)."""
         try:
@@ -424,6 +457,7 @@ class VirtualTab:
                 return
             self._order_log_view_date = nd
             self._sync_order_log_date_label()
+            self._kick_order_log_exchange_sync_for_view_date()
             self._render_orders()
         except Exception as e:
             try:
@@ -439,6 +473,7 @@ class VirtualTab:
                 return
             self._order_log_view_date = nd
             self._sync_order_log_date_label()
+            self._kick_order_log_exchange_sync_for_view_date()
             self._render_orders()
         except Exception as e:
             try:
@@ -451,6 +486,7 @@ class VirtualTab:
         try:
             self._order_log_view_date = date.today()
             self._sync_order_log_date_label()
+            self._kick_order_log_exchange_sync_for_view_date()
             self._render_orders()
         except Exception as e:
             try:
@@ -557,6 +593,58 @@ class VirtualTab:
             return le_t or "-"
         except Exception:
             return "-"
+
+    @staticmethod
+    def _history_closed_reason_display(pos: Dict[str, Any]) -> str:
+        """
+        매매 종료 내역 '사유': 매도·정리 사유(주문 로그 사유와 동일 계열).
+        `reason` 필드는 진입(TYPE A/B 등)용이므로 표시에 쓰지 않는다.
+        """
+        try:
+            er = str(pos.get("exit_reason") or "").strip()
+        except Exception:
+            er = ""
+        if er:
+            return er
+        try:
+            for ev in reversed(list(pos.get("events") or [])):
+                if not isinstance(ev, dict):
+                    continue
+                act = str(ev.get("action") or "").upper()
+                if "SELL" not in act and act != "SYNC_EXIT":
+                    continue
+                r_ev = str(ev.get("reason") or "").strip()
+                snap = ev.get("snapshot")
+                r_snap = ""
+                if isinstance(snap, dict):
+                    try:
+                        r_snap = str(snap.get("reason") or "").strip()
+                    except Exception:
+                        r_snap = ""
+                for cand in (r_snap, r_ev):
+                    if cand:
+                        return cand
+                break
+        except Exception:
+            pass
+        try:
+            r0 = str(pos.get("reason") or "").strip()
+            if r0.upper() in ("RECONCILIATION", "SYNCED"):
+                return r0
+        except Exception:
+            pass
+        return "MANUAL"
+
+    @staticmethod
+    def _order_log_status_display(result: object) -> str:
+        """주문 로그 '상태': 체결 완료는 사용자 표기 '성공'."""
+        try:
+            s = str(result or "").strip()
+        except Exception:
+            return "-"
+        if s.upper() == "FILLED":
+            return "성공"
+        return s
 
     @staticmethod
     def _history_exit_sort_ts(pos: Dict[str, Any]) -> float:
@@ -1140,7 +1228,7 @@ class VirtualTab:
                     f"{int(round(fee_sum)):,}",
                     f"{int(round(pnl_amt)):+,}",
                     f"{pos.get('final_pnl_pct', 0):+.2f}%",
-                    pos.get("reason", "SIGNAL"),
+                    self._history_closed_reason_display(pos),
                 ),
                 tags=(tag_base, p_tag),
             )
@@ -1418,7 +1506,7 @@ class VirtualTab:
                         f_p_str,
                         self._order_log_vp_cell(snap_vp),
                         ba_o,
-                        result,
+                        self._order_log_status_display(result),
                         reason,
                     ),
                     tags=(tag_base, side_tag),

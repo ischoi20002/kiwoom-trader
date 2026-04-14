@@ -1401,9 +1401,15 @@ class TradingStrategy:
                     is_exit, exit_reason = True, "FLASH_EXIT"
 
         # 4. Smart Exit (Supply/Demand Trap)
+        # smart_exit_price_threshold: 고점 대비 '하락 폭(%)'을 양수로 적는 것이 의도.
+        # 과거 호환을 위해 음수 입력은 절댓값으로 동일 해석(예: -1 과 1 동일 → 1% 하락 후 매도벽 조건 평가).
         if not is_exit and s.get('use_smart_exit', True):
-            threshold = float(s.get('smart_exit_price_threshold', 0.0))
-            if threshold == 0 or now_price <= max_p * (1 + threshold / 100.0):
+            try:
+                raw_thr = float(s.get("smart_exit_price_threshold", 0.0))
+            except (TypeError, ValueError):
+                raw_thr = 0.0
+            drop_pct = abs(raw_thr)
+            if drop_pct == 0.0 or now_price <= max_p * (1.0 - drop_pct / 100.0):
                 min_trap = float(s.get('smart_exit_ba_ratio', 1.3))
                 if sell_buy_wall_ratio >= min_trap or (is_realtime and is_power_exhausted):
                     is_exit, exit_reason = True, "SMART_EXIT"
@@ -1753,7 +1759,8 @@ class SimpleBacktester:
         self.use_sx = s.get('use_smart_exit', True) # [v4.5 Sync] Default True
         self.sx_ba = float(s.get('smart_exit_ba_ratio', 1.3)) # [v4.5 Sync] UI/SignalEngine Default 1.3
         self.sx_vp = float(s.get('smart_exit_vp', 90.0))
-        self.sx_p_thr = float(s.get('smart_exit_price_threshold', -0.5)) # [v4.5 Sync] Default -0.5
+        # 고점 대비 하락 %(양수). evaluate_position 과 동일하게 절댓값만 캐시(미사용·진단용).
+        self.sx_p_thr = abs(float(s.get("smart_exit_price_threshold", 1.0)))
         
         # [Perf] Cache TP/SL parameters (v33.6)
         self.use_s1a_tp_active = s.get('use_s1_a_tp', True)

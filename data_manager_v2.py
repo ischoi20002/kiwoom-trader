@@ -275,11 +275,20 @@ class DataManagerV2:
                 "ALTER TABLE order_history ADD COLUMN snap_bid_ask TEXT DEFAULT ''",
                 "ALTER TABLE order_history ADD COLUMN fill_snap_vol_power REAL",
                 "ALTER TABLE order_history ADD COLUMN fill_snap_bid_ask TEXT DEFAULT ''",
+                "ALTER TABLE order_history ADD COLUMN order_source TEXT DEFAULT ''",
+                "ALTER TABLE order_history ADD COLUMN fill_row_key TEXT DEFAULT ''",
             ):
                 try:
                     conn.execute(_oh_mig)
                 except sqlite3.OperationalError:
                     pass
+            try:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_order_history_fillkey "
+                    "ON order_history(order_source, fill_row_key)"
+                )
+            except sqlite3.Error:
+                pass
             conn.commit()
 
     def _init_state_tables(self) -> None:
@@ -680,6 +689,100 @@ class DataManagerV2:
                 ),
             )
             conn.commit()
+
+    def _ensure_order_history_exchange_columns_current(self) -> None:
+        """기존 state DB 에 order_source / fill_row_key 컬럼이 없을 때 보강."""
+        try:
+            with self._get_state_connection() as conn:
+                for stmt in (
+                    "ALTER TABLE order_history ADD COLUMN order_source TEXT DEFAULT ''",
+                    "ALTER TABLE order_history ADD COLUMN fill_row_key TEXT DEFAULT ''",
+                ):
+                    try:
+                        conn.execute(stmt)
+                    except sqlite3.OperationalError:
+                        pass
+                try:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_order_history_fillkey "
+                        "ON order_history(order_source, fill_row_key)"
+                    )
+                except sqlite3.Error:
+                    pass
+                conn.commit()
+        except Exception:
+            pass
+
+    def merge_exchange_fill_order_rows(self, rows: List[Dict[str, Any]]) -> int:
+        """
+        키움 kt00007 등에서 가져온 체결 행을 order_history 에 삽입합니다.
+        (order_source, fill_row_key) 동일 건은 스킵 — 실전/모의 state DB 각각에 반영됩니다.
+        """
+        if not rows:
+            return 0
+        self._ensure_order_history_exchange_columns_current()
+        added = 0
+        try:
+            with self._lock, self._get_state_connection() as conn:
+                for r in rows:
+                    try:
+                        fk = str((r or {}).get("fill_row_key") or "").strip()
+                        if not fk:
+                            continue
+                        dup = conn.execute(
+                            "SELECT 1 FROM order_history WHERE order_source = ? AND fill_row_key = ? LIMIT 1",
+                            ("KT00007", fk),
+                        ).fetchone()
+                        if dup:
+                            continue
+                        conn.execute(
+                            """
+                            INSERT INTO order_history (
+                                code, side, qty, price, order_type, order_no, timestamp, result,
+                                name, reason, filled_price, filled_qty,
+                                snap_vol_power, snap_bid_ask,
+                                order_source, fill_row_key
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                str(r.get("code") or "").zfill(6),
+                                str(r.get("side") or "buy"),
+                                int(r.get("qty") or 0),
+                                int(r.get("price") or 0),
+                                str(r.get("order_type") or "00"),
+                                str(r.get("order_no") or ""),
+                                str(r.get("timestamp") or ""),
+                                str(r.get("result") or "FILLED"),
+                                str(r.get("name") or ""),
+                                str(r.get("reason") or ""),
+                                int(r.get("filled_price") or 0),
+                                int(r.get("filled_qty") or 0),
+                                r.get("snap_vol_power"),
+                                str(r.get("snap_bid_ask") or ""),
+                                "KT00007",
+                                fk,
+                            ),
+                        )
+                        added += 1
+                    except Exception as e:
+                        try:
+                            print(f"[DataManagerV2] merge_exchange_fill_order_rows 행 스킵: {e}")
+                        except Exception:
+                            pass
+                conn.commit()
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] merge_exchange_fill_order_rows 실패: {e}")
+            except Exception:
+                pass
+            return added
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] merge_exchange_fill_order_rows 오류: {e}")
+            except Exception:
+                pass
+            return added
+        return added
 
     def get_today_orders(self):
         today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")

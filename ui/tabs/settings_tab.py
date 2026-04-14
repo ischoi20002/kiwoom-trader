@@ -929,7 +929,7 @@ class SettingsTab:
         add_param_row(rt_f, 'Smart Buy 매도벽 비율 (BA)', 'smart_buy_ba_ratio', '배', '매도잔량/매수잔량 — S1·S2 Smart Buy 공통 임계')
         add_param_row(rt_f, 'Smart Exit 탈출용 체결강도 (VP)', 'smart_exit_vp', '%', '에너지 소멸 확인', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 탈출용 매도벽 비율', 'smart_exit_ba_ratio', '배', '매도잔량/매수잔량(Smart Buy BA와 동일). 임계 이상이면 탈출 후보', toggle_key='use_smart_exit')
-        add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락 시에만 위 매도벽 조건을 적용', toggle_key='use_smart_exit')
+        add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락 폭(%) — 양수 권장. 음수 입력 시에도 절댓값으로 동일 적용', toggle_key='use_smart_exit')
 
         mkt_f = ttk.LabelFrame(
             _sec_parent('mkt'),

@@ -255,6 +255,8 @@ DEFAULT_SETTINGS = {
     "bt_start_date": "2024-04-01",
     "bt_end_date": "2024-12-31",
     "mock_account_id": "81220142",
+    # 계좌 동기화 시 kt00007 체결내역을 주문 로그에 몇 일치 병합할지(1~60)
+    "exchange_fill_sync_lookback_days": 7,
 }
 
 # [Zombie Parameter Prevention] 유효 키 목록
@@ -268,6 +270,7 @@ ALLOWED_EXTRA_KEYS = {
     'buy_fee_mock', 'sell_fee_mock',
     'daily_report_session_buffer_minutes',
     'daily_settlement_batch_start_date',
+    'exchange_fill_sync_lookback_days',
 }
 
 def get_allowed_keys(current_settings=None):
