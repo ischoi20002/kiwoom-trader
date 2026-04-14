@@ -13,8 +13,6 @@ class VirtualTab:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        # 전체 렌더 시 계산된 금일 실현 손익 — 틱 요약 갱신에 재사용
-        self._cached_day_realized_pnl: float = 0.0
         self.vars = {}
         # [v4.5.3] 실시간 보유: ttk.Treeview (행 iid=6자리 코드, 종료/주문과 동일 패턴)
         self.tree_active: Optional[ttk.Treeview] = None
@@ -74,8 +72,8 @@ class VirtualTab:
             ("D+1 예상", "d1_cash", self.app.colors['primary']),
             ("D+2 예상", "d2_cash", self.app.colors['primary']),
             ("주식 평가금", "stock", None),
-            ("보유주식 손익", "day", "#BF616A"),
-            ("누적 수익", "cum", "#A3BE8C")
+            ("보유주식 손익(미청산)", "day", "#BF616A"),
+            ("누적 수익(종료+보유)", "cum", "#A3BE8C")
         ]:
             f = ttk.Frame(summary_f)
             f.pack(side=tk.LEFT, padx=(0, 15))
@@ -178,7 +176,8 @@ class VirtualTab:
                 "진입일시",
             ]
             widths = (72, 120, 56, 88, 96, 88, 100, 100, 72, 140)
-            anchors = (tk.W, tk.W, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.W)
+            # 진입일시(Entry)는 중앙 정렬
+            anchors = (tk.W, tk.W, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.CENTER)
             for col, text, w, an in zip(cols, heads, widths, anchors):
                 tree.heading(col, text=text)
                 tree.column(col, width=w, anchor=an)
@@ -226,9 +225,12 @@ class VirtualTab:
             tree.column(col, width=85, anchor=tk.CENTER)
         tree.column("Time", width=152, anchor=tk.CENTER)
         tree.column("Name", width=110, anchor=tk.W)
+        tree.column("BuyP", anchor=tk.E)
+        tree.column("SellP", anchor=tk.E)
         tree.column("Fees", width=78, anchor=tk.E)
         tree.column("PnL", width=90, anchor=tk.E)
-        tree.column("Reason", width=120, anchor=tk.W)
+        tree.column("Profit", anchor=tk.E)
+        tree.column("Reason", width=120, anchor=tk.CENTER)
         
         scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
@@ -283,7 +285,10 @@ class VirtualTab:
                 w = 120
             tree.column(col, width=w, anchor=tk.CENTER)
         tree.column("Name", width=100, anchor=tk.W)
-        tree.column("Reason", width=120, anchor=tk.W)
+        tree.column("OrderP", anchor=tk.E)
+        tree.column("FilledP", anchor=tk.E)
+        tree.column("VPOrd", anchor=tk.E)
+        tree.column("Reason", width=120, anchor=tk.CENTER)
         tree.column("BAOrd", anchor=tk.E)
 
         # 호가(매도/매수/비율) 열이 넓어 가로 스크롤 제공
@@ -700,6 +705,54 @@ class VirtualTab:
             pass
         return False
 
+    def _unrealized_at_price_net_of_sell_fee(
+        self,
+        pos: Dict[str, Any],
+        curr_p: float,
+        qty: int,
+        avg_price: float,
+    ) -> float:
+        """
+        현재가(전량 매도 가정 단가)로 청산한다고 할 때 **매도 수수료를 차감한** 미실현 손익(원).
+        원가는 청산 실현과 동일하게 `invested`(매수 수수료 포함)를 우선 사용합니다.
+        """
+        try:
+            q = int(qty or 0)
+        except (TypeError, ValueError):
+            q = 0
+        try:
+            px = float(curr_p)
+        except (TypeError, ValueError):
+            px = 0.0
+        if q <= 0 or px <= 0:
+            return 0.0
+        try:
+            _, sell_r = fee_decimal_rates_live_trading(self.app.settings)
+            sr = float(sell_r)
+        except Exception:
+            try:
+                _, sell_r = fee_decimal_rates_live_trading({})
+                sr = float(sell_r)
+            except Exception:
+                sr = 0.005
+        try:
+            sr = max(0.0, min(float(sr), 0.5))
+        except Exception:
+            sr = 0.005
+        try:
+            inv = float(pos.get("invested", 0) or 0)
+        except (TypeError, ValueError):
+            inv = 0.0
+        if inv <= 1e-9:
+            try:
+                ap = float(avg_price or 0)
+            except (TypeError, ValueError):
+                ap = 0.0
+            inv = max(0.0, ap * float(q))
+        gross = px * float(q)
+        net_proceeds = gross * (1.0 - sr)
+        return float(net_proceeds - inv)
+
     def _history_realized_pnl_amt(self, pos: Dict[str, Any]) -> float:
         """종료 포지션 실현손익(원). `realized_pnl_amt` 누락·null 시 수익률·투입금으로 근사."""
         try:
@@ -716,6 +769,35 @@ class VirtualTab:
         except (TypeError, ValueError):
             pass
         return 0.0
+
+    def _sum_visible_history_realized_pnl(self) -> float:
+        """
+        매매 종료 내역과 동일 필터: `virtual_history` 중 관심종목 제외 코드의
+        손익금(`_history_realized_pnl_amt`) 합계. 누적 수익의 청산분에 사용합니다.
+        """
+        try:
+            wl = self._watchlist_hide_codes()
+        except Exception:
+            wl = set()
+        out = 0.0
+        try:
+            hist = list(getattr(self.app.portfolio, "virtual_history", None) or [])
+        except Exception:
+            hist = []
+        for pos in hist:
+            if not isinstance(pos, dict):
+                continue
+            try:
+                cd = str(pos.get("code", "") or "").zfill(6)
+            except Exception:
+                continue
+            if cd in wl:
+                continue
+            try:
+                out += float(self._history_realized_pnl_amt(pos))
+            except Exception:
+                pass
+        return float(out)
 
     def _history_total_fees_amt(self, pos: Dict[str, Any]) -> float:
         """
@@ -779,8 +861,12 @@ class VirtualTab:
 
     def _active_row_vals_and_tags(
         self, row_idx: int, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
-    ) -> Tuple[tuple, Tuple[str, ...], float]:
-        """실시간 보유 한 행의 values·tags·수익률% (트리/요약 공통)."""
+    ) -> Tuple[tuple, Tuple[str, ...], float, float, float]:
+        """
+        실시간 보유 한 행의 values·tags·수익률% (트리/요약 공통).
+        반환 (vals, tags, profit_pct, unrealized_raw, eval_amt_raw):
+        상단 요약 합계는 **트리와 동일**한 unrealized·eval을 쓰려면 이 값을 그대로 더하면 됩니다.
+        """
         try:
             live_p = float(self._monitor_live_price(nk, pos))
         except (TypeError, ValueError):
@@ -798,19 +884,15 @@ class VirtualTab:
 
         if use_tick and live_p > 0:
             curr_p = live_p
-            profit_pct = (curr_p / ap - 1) * 100 if ap else 0.0
             eval_amt = curr_p * qty
-            unrealized = (curr_p - ap) * qty
             buy_in_amt = int(round(float(ap) * float(qty)))
         elif use_ka:
             try:
                 ka_cur = float(pos.get("ka_cur_prc") or 0)
                 ka_ev = float(pos.get("ka_evlu_amt") or 0)
-                ka_pf = float(pos.get("ka_evlu_pfls_amt") or 0)
-                ka_rt = float(pos.get("ka_prft_rt") or 0)
                 ka_pur = float(pos.get("ka_pur_amt") or 0)
             except (TypeError, ValueError):
-                ka_cur = ka_ev = ka_pf = ka_rt = ka_pur = 0.0
+                ka_cur = ka_ev = ka_pur = 0.0
             if ka_cur > 0:
                 curr_p = ka_cur
             elif ka_ev > 0 and qty > 0:
@@ -821,16 +903,6 @@ class VirtualTab:
                 eval_amt = ka_ev
             else:
                 eval_amt = curr_p * float(qty)
-            if abs(ka_pf) < 1e-9 and ka_ev > 0 and ka_pur > 0:
-                unrealized = ka_ev - ka_pur
-            else:
-                unrealized = ka_pf
-            if abs(ka_rt) > 1e-9:
-                profit_pct = ka_rt
-            elif ap > 0 and qty > 0 and abs(unrealized) > 1e-9:
-                profit_pct = (unrealized / (ap * float(qty))) * 100.0
-            else:
-                profit_pct = (curr_p / ap - 1) * 100 if ap else 0.0
             if ka_pur > 0:
                 buy_in_amt = int(round(ka_pur))
             else:
@@ -839,20 +911,22 @@ class VirtualTab:
             curr_p = live_p
             if ap <= 0:
                 ap = curr_p
-            profit_pct = (curr_p / ap - 1) * 100 if ap else 0.0
             eval_amt = curr_p * qty
-            unrealized = (curr_p - ap) * qty
             buy_in_amt = int(round(float(ap) * float(qty)))
-        # ka10085 평가손익 필드 누락·필드명 불일치 시 API는 0으로만 오는 경우가 있어 평단·현재가로 재확인
+
+        unrealized = self._unrealized_at_price_net_of_sell_fee(pos, float(curr_p), qty, ap)
         try:
-            if qty > 0 and ap > 0 and float(curr_p) > 0:
-                approx_ur = (float(curr_p) - float(ap)) * float(qty)
-                if abs(float(unrealized)) < 1e-6 and abs(approx_ur) > 1.0:
-                    unrealized = approx_ur
-                    if abs(float(profit_pct)) < 1e-6:
-                        profit_pct = (unrealized / (ap * float(qty))) * 100.0
-        except (TypeError, ValueError, ZeroDivisionError):
-            pass
+            inv_pf = float(pos.get("invested", 0) or 0)
+        except (TypeError, ValueError):
+            inv_pf = 0.0
+        if inv_pf <= 1e-9 and ap > 0 and qty > 0:
+            inv_pf = float(ap) * float(qty)
+        if inv_pf > 1e-9:
+            profit_pct = (unrealized / inv_pf) * 100.0
+        elif ap > 0 and float(curr_p) > 0:
+            profit_pct = (float(curr_p) / ap - 1.0) * 100.0
+        else:
+            profit_pct = 0.0
         p_str = f"{profit_pct:+.2f}%"
         entry_disp = self._format_entry_datetime(pos.get("entry_time", ""))
         tag_base = "even" if row_idx % 2 == 0 else "odd"
@@ -874,8 +948,14 @@ class VirtualTab:
             p_str,
             entry_disp,
         )
-        # 전체 렌더와 동일하게 항상 (줄무늬, 방향) 2튜플
-        return vals, (tag_base, p_tag), float(profit_pct)
+        # 전체 렌더와 동일하게 항상 (줄무늬, 방향) 2튜플 + 요약 합산용 원시 금액
+        return (
+            vals,
+            (tag_base, p_tag),
+            float(profit_pct),
+            float(unrealized),
+            float(eval_amt),
+        )
 
     def _active_tree_ready(self) -> bool:
         return self.tree_active is not None
@@ -1000,23 +1080,12 @@ class VirtualTab:
         mi = getattr(self.app, "monitor_info", None) or {}
         for idx, (nk, pos) in enumerate(active_list):
             info = mi.get(nk, {}) or {}
-            vals, row_tags, profit_pct = self._active_row_vals_and_tags(
+            vals, row_tags, profit_pct, ur_row, ev_row = self._active_row_vals_and_tags(
                 idx, nk, pos, info
             )
-            try:
-                curr_p = float(self._monitor_live_price(nk, pos))
-            except (TypeError, ValueError):
-                curr_p = float(pos.get("avg_price", 0) or 0)
-            try:
-                ap = float(pos.get("avg_price", 0) or 0)
-            except (TypeError, ValueError):
-                ap = 0.0
-            qty = int(pos.get("qty", 0) or 0)
-            if ap <= 0:
-                ap = curr_p
-            total_eval += curr_p * qty
+            total_eval += ev_row
             total_invested += float(pos.get("invested", 0) or 0)
-            total_unrealized_pnl += (curr_p - ap) * qty
+            total_unrealized_pnl += ur_row
 
             updated_nks.add(nk)
             if self._active_tree_ready():
@@ -1036,22 +1105,16 @@ class VirtualTab:
 
         # 2. 종료 종목
         wl_hide = self._watchlist_hide_codes()
-        total_realized_pnl = 0
-        total_day_realized_pnl = 0
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        
+
         self.tree_history.delete(*self.tree_history.get_children())
         hist_visible: List[Dict[str, Any]] = []
         for pos in self.app.portfolio.virtual_history:
             if str(pos.get("code", "")).zfill(6) in wl_hide:
                 continue
             hist_visible.append(pos)
-            pnl_amt = self._history_realized_pnl_amt(pos)
-            total_realized_pnl += pnl_amt
-            if str(pos.get("entry_time", "")).startswith(today_str):
-                total_day_realized_pnl += pnl_amt
 
         hist_visible.sort(key=self._history_exit_sort_ts, reverse=True)
+        total_closed_pnl = self._sum_visible_history_realized_pnl()
 
         hist_row = 0
         for pos in hist_visible:
@@ -1082,8 +1145,6 @@ class VirtualTab:
                 tags=(tag_base, p_tag),
             )
 
-        self._cached_day_realized_pnl = float(total_day_realized_pnl)
-
         # 3. 요약 정보 (Account Summary - REST API Synced) — 주문 로그는 위 0단계에서 이미 반영
         portfolio = self.app.portfolio
         current_cash = getattr(portfolio, "actual_deposit", 0)
@@ -1091,21 +1152,29 @@ class VirtualTab:
         stock_eval = self._stock_eval_for_summary(portfolio, float(total_eval))
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
-        day_pnl_total = total_day_realized_pnl + total_unrealized_pnl
-        start_cap = float(
-            str(self.app.settings.get("backtest_initial_capital", 10000000)).replace(",", "")
-        )
+        # 보유주식 손익(미청산): 금일 청산 실현은 제외, 현재 보유 종목 손익금(미실현) 합만.
+        # %는 보유 매입금(invested, 매수수수료 포함) 합 대비.
+        day_pnl_total = float(total_unrealized_pnl)
+        try:
+            inv_den = float(total_invested)
+        except (TypeError, ValueError):
+            inv_den = 0.0
+        if inv_den > 1e-6:
+            day_pnl_pct = (day_pnl_total / inv_den) * 100.0
+        else:
+            day_pnl_pct = 0.0
         try:
             ta = float(total_assets)
         except (TypeError, ValueError):
             ta = 0.0
-        # 보유주식 손익 %: (금일 실현 + 보유 미실현) 합을 총자산에서 역산한 반영 전 기준 대비 (누적%와 분리)
-        opening_eq = max(1.0, ta - float(day_pnl_total))
-        day_pnl_pct = (float(day_pnl_total) / opening_eq) * 100.0
 
-        # 누적 수익: 설정 초기자본 대비 (금액 + 초기자본 대비 %)
-        cum_pnl_amt = ta - start_cap
-        cum_pnl_pct = (cum_pnl_amt / start_cap) * 100.0 if start_cap > 1e-9 else 0.0
+        # 누적 수익(종료+보유): 매매종료 손익금 합 + 실시간 보유 손익금(미실현) 합.
+        # % 분모는 총자산(백테스트 초기자본은 실시간 요약에 사용하지 않음).
+        cum_pnl_amt = float(total_closed_pnl) + float(total_unrealized_pnl)
+        if ta > 1e-6:
+            cum_pnl_pct = (cum_pnl_amt / ta) * 100.0
+        else:
+            cum_pnl_pct = 0.0
 
         self.vars["total"].set(f"{total_assets:,.0f}")
         self.vars["cash"].set(f"{current_cash:,.0f}")
@@ -1126,7 +1195,7 @@ class VirtualTab:
             mi = getattr(self.app, "monitor_info", None) or {}
             for idx, (nk, pos) in enumerate(self._sorted_active_holdings()):
                 info = mi.get(nk, {}) or {}
-                vals, row_tags, profit_pct = self._active_row_vals_and_tags(
+                vals, row_tags, profit_pct, _, _ = self._active_row_vals_and_tags(
                     idx, nk, pos, info
                 )
                 self._upsert_active_tree_row(nk, vals, row_tags)
@@ -1155,43 +1224,43 @@ class VirtualTab:
                     except Exception:
                         pass
 
-            wl_hide = self._watchlist_hide_codes()
             mi = getattr(self.app, "monitor_info", None) or {}
             total_eval = 0.0
             total_unrealized_pnl = 0.0
-            for nk, pos in self._vp_items_by_normalized().items():
-                if nk in wl_hide:
-                    continue
+            total_invested_open = 0.0
+            for idx, (nk, pos) in enumerate(self._sorted_active_holdings()):
                 info = mi.get(nk, {}) or {}
+                _v, _t, _p, ur_row, ev_row = self._active_row_vals_and_tags(
+                    idx, nk, pos, info
+                )
+                total_eval += ev_row
+                total_unrealized_pnl += ur_row
                 try:
-                    curr_p = float(self._monitor_live_price(nk, pos))
+                    total_invested_open += float(pos.get("invested", 0) or 0)
                 except (TypeError, ValueError):
-                    curr_p = float(pos.get("avg_price", 0) or 0)
-                if curr_p <= 0:
-                    curr_p = float(pos.get("avg_price", 0))
-                q = int(pos.get("qty", 0))
-                ap = float(pos.get("avg_price", 0))
-                total_eval += curr_p * q
-                total_unrealized_pnl += (curr_p - ap) * q
+                    pass
 
             portfolio = self.app.portfolio
             current_cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
             stock_eval = self._stock_eval_for_summary(portfolio, float(total_eval))
             total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
-            day_pnl_total = float(self._cached_day_realized_pnl) + total_unrealized_pnl
-            start_cap = float(
-                str(self.app.settings.get("backtest_initial_capital", 10000000)).replace(",", "")
-            )
+            day_pnl_total = float(total_unrealized_pnl)
+            if total_invested_open > 1e-6:
+                day_pnl_pct = (day_pnl_total / total_invested_open) * 100.0
+            else:
+                day_pnl_pct = 0.0
             try:
                 ta = float(total_assets)
             except (TypeError, ValueError):
                 ta = 0.0
-            opening_eq = max(1.0, ta - float(day_pnl_total))
-            day_pnl_pct = (float(day_pnl_total) / opening_eq) * 100.0 if opening_eq > 0 else 0.0
 
-            cum_pnl_amt = ta - start_cap
-            cum_pnl_pct = (cum_pnl_amt / start_cap) * 100.0 if start_cap > 1e-9 else 0.0
+            closed_h = self._sum_visible_history_realized_pnl()
+            cum_pnl_amt = float(closed_h) + float(total_unrealized_pnl)
+            if ta > 1e-6:
+                cum_pnl_pct = (cum_pnl_amt / ta) * 100.0
+            else:
+                cum_pnl_pct = 0.0
 
             _set_if_diff("total", f"{total_assets:,.0f}")
             _set_if_diff("cash", f"{current_cash:,.0f}")
