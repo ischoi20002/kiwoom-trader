@@ -216,9 +216,12 @@ def calculate_all_indicators(df, settings):
     if 'MA120' in df.columns:
         df['MSI'] = (df['MA20'] / (df['MA60'] + 1e-10) - 1) + (df['MA60'] / (df['MA120'] + 1e-10) - 1)
     
-    # 6. ADX & ATR
-    if 'High' in df.columns and 'Low' in df.columns:
-        _, _, df['ADX'] = calculate_adx(df, 14)
+    # 6. ADX & ATR (분리: ADX 예외가 나도 ATR은 이어서 계산 — 실시간 감시 TRL/SL·백테스트 청산)
+    if "High" in df.columns and "Low" in df.columns:
+        try:
+            _, _, df["ADX"] = calculate_adx(df, 14)
+        except Exception:
+            df["ADX"] = np.nan
         # Type A/B 청산용 ATR 주기 분리 (구버전 atr_period → A 트랙 폴백)
         atr_pa = int(settings.get("atr_period_a", settings.get("atr_period", 14)))
         atr_pb = int(settings.get("atr_period_b", settings.get("atr_period", 14)))

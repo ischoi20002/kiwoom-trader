@@ -707,6 +707,67 @@ class TradingStrategy:
         return "ATR_B" if is_type_b else "ATR_A"
 
     @staticmethod
+    def _approx_atr_from_true_range(bars_df: Any) -> float:
+        """
+        ATR_A/B가 비어 있거나 전부 NaN일 때 마지막 True Range로 표시용 근사.
+        (워밍업으로 봉은 충분한데 마지막 행만 NaN인 경우·지표 재계산 예외 폴백 등)
+        """
+        try:
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return 0.0
+            if "High" not in bars_df.columns or "Low" not in bars_df.columns:
+                return 0.0
+            df = bars_df
+            h = pd.to_numeric(df["High"], errors="coerce")
+            lo = pd.to_numeric(df["Low"], errors="coerce")
+            c = pd.to_numeric(df["Close"], errors="coerce")
+            tr1 = (h - lo).abs()
+            tr2 = (h - c.shift(1)).abs()
+            tr3 = (lo - c.shift(1)).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            last = tr.dropna()
+            if last.empty:
+                return 0.0
+            v = float(last.iloc[-1])
+            return v if np.isfinite(v) and v > 0 else 0.0
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _last_finite_atr_from_bars_df(
+        bars_df: Any, settings: dict, atr_col: str
+    ) -> float:
+        """
+        마지막 행이 NaN이어도 직전 봉들에서 마지막 유효 ATR을 사용.
+        실시간 스트림으로 막 닫힌 봉은 ATR이 아직 NaN인 경우가 많음.
+        지표 ATR 열이 비었으면 True Range 근사로 폴백.
+        """
+        try:
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return 0.0
+            df_i = TradingStrategy.calculate_indicators(bars_df, settings or {})
+
+            def _try_col(col: str) -> float:
+                if col not in df_i.columns:
+                    return 0.0
+                ser = pd.to_numeric(df_i[col], errors="coerce").dropna()
+                if ser.empty:
+                    return 0.0
+                v = float(ser.iloc[-1])
+                return v if np.isfinite(v) and v > 0 else 0.0
+
+            v = _try_col(atr_col)
+            if v > 0:
+                return v
+            alt = "ATR_A" if atr_col == "ATR_B" else "ATR_B"
+            v = _try_col(alt)
+            if v > 0:
+                return v
+        except Exception:
+            pass
+        return TradingStrategy._approx_atr_from_true_range(bars_df)
+
+    @staticmethod
     def _peak_high_from_bars_df(bars_df: Any) -> Optional[float]:
         """
         재시작 직후 pos[max_p] 가 비어 있을 때, 당일 15분(등) 봉 High 로
@@ -808,11 +869,13 @@ class TradingStrategy:
         indicator_row: object,
         now_price: float,
         bars_df: Any = None,
+        sel_track_hint: Optional[str] = None,
     ) -> str:
         """
         감시 화면·일일 리포트용 ATR 손절·트레일 기준가 문자열.
         evaluate_position 의 ATR 구간과 동일 분기(표시만, pos/지표 비변경).
         bars_df: 있으면 당일 봉 High 로 재시작 후 고가 복원.
+        sel_track_hint: 감시 트리 sel_track 이 \"B\"일 때만 Type B ATR/TP 키로 표시 보정(계좌 동기화만 한 포지션 등).
         """
         try:
             if not pos or float(now_price) <= 0:
@@ -825,6 +888,12 @@ class TradingStrategy:
                     is_type_b = "TYPE_B" in str(pos.get("reason", "")).upper()
                 except Exception:
                     is_type_b = False
+            if not is_type_b and sel_track_hint:
+                try:
+                    if str(sel_track_hint).strip().upper() == "B":
+                        is_type_b = True
+                except Exception:
+                    pass
             avg_p = float(pos.get("avg_p", pos.get("avg_price", now_price)) or now_price)
             if avg_p <= 0:
                 avg_p = float(now_price)
@@ -850,16 +919,27 @@ class TradingStrategy:
             _atr_col = TradingStrategy._atr_column_for_holdings(is_type_b)
 
             def _curr_atr() -> float:
-                try:
-                    v = float(_ir_get(_atr_col, 0.0) or 0.0)
-                    if v > 0:
-                        return v
-                except (TypeError, ValueError):
-                    pass
-                try:
-                    return float(_ir_get("ATR", 0.0) or 0.0)
-                except (TypeError, ValueError):
-                    return 0.0
+                """
+                마지막 봉 ATR. 주의: float('nan') or 0.0 은 NaN이 truthy라 그대로 NaN이 되어
+                TRL 표시가 'TRL nan'으로 깨질 수 있음 — 유한·양수만 반환.
+                """
+                def _finite_pos(x: object) -> float:
+                    try:
+                        v = float(x)
+                    except (TypeError, ValueError):
+                        return 0.0
+                    try:
+                        if pd.isna(v) or not np.isfinite(v):
+                            return 0.0
+                    except Exception:
+                        if not np.isfinite(v):
+                            return 0.0
+                    return v if v > 0 else 0.0
+
+                a = _finite_pos(_ir_get(_atr_col, 0.0))
+                if a > 0:
+                    return a
+                return _finite_pos(_ir_get("ATR", 0.0))
 
             def _exit_key(a_key: str, b_key: str, s2_a_key: str, s2_b_key: str) -> str:
                 if stage == 2:
@@ -872,6 +952,13 @@ class TradingStrategy:
                 return "_b" if is_type_b else "_a"
 
             curr_atr = float(_curr_atr())
+            # 막 형성된 막봉은 ATR_B/A가 NaN인 경우가 많음 → 직전 유효 봉의 ATR로 보강
+            if not (curr_atr > 0) and bars_df is not None:
+                fb = TradingStrategy._last_finite_atr_from_bars_df(
+                    bars_df, s, _atr_col
+                )
+                if fb > 0:
+                    curr_atr = fb
             suff = _atr_track_suff()
             use_sl_atr = bool(
                 s.get(f"use_atr_stop_loss{suff}", TradingStrategy._default_use_atr_stop_loss(suff))
@@ -880,7 +967,8 @@ class TradingStrategy:
             run_atr_exit = bool(_rx["use_atr_exit"]) or (
                 curr_atr > 0 and (use_sl_atr or use_trail_atr)
             )
-            if not run_atr_exit or curr_atr <= 0:
+            # NaN: (nan <= 0)은 False라 여기서 걸리지 않아 TRL nan 이 됨 — not (curr_atr > 0) 로 통일
+            if not run_atr_exit or not (curr_atr > 0):
                 return "ATR미사용"
 
             entry_atr = float(TradingStrategy._entry_atr_for_atr_sl(pos, curr_atr))
@@ -912,11 +1000,17 @@ class TradingStrategy:
             parts = []
             if use_sl_atr:
                 sl_px = avg_p - (sl_mult * entry_atr)
-                parts.append(f"SL {sl_px:,.0f}")
+                if np.isfinite(sl_px):
+                    parts.append(f"SL {sl_px:,.0f}")
+                else:
+                    parts.append("SL —")
             if use_trail_atr:
                 if trail_armed:
                     tr_px = max_p - (trail_mult * curr_atr)
-                    parts.append(f"TRL {tr_px:,.0f}")
+                    if np.isfinite(tr_px) and np.isfinite(max_p):
+                        parts.append(f"TRL {tr_px:,.0f}")
+                    else:
+                        parts.append("TRL —")
                 else:
                     parts.append("TRL 무장전")
 

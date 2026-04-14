@@ -550,7 +550,8 @@ class OrderManager:
                         d2_deposit = total_equity
 
                 # ka10085의 d1_samt/d2_samt는 총자산과 혼동·누락되는 경우가 있어 예수금상세 TR로 보강
-                cash_available = 0.0
+                cash_orderable = 0.0  # 주문가능(ord_alow) — 로그·D+2 비교용. 포지션 탭 '예수금'과 별개.
+                cash_withdrawable = 0.0  # 출금가능(pymn_alow) — 포지션 탭 예수금(보유 현금)으로만 사용.
                 dep_detail = self.get_deposit_detail()
                 if dep_detail:
                     d1d = float(dep_detail.get("d1") or 0)
@@ -558,12 +559,17 @@ class OrderManager:
                     # 예수금상세(ka10001/kt00001)가 D+1/D+2 권위 — d2d>0 만 쓰면 음수(D+2 부족)가 무시되어 동기화 표시가 틀어짐
                     d1_deposit = d1d
                     d2_deposit = d2d
-                    cash_available = float(
-                        dep_detail.get("ord_alow")
-                        or dep_detail.get("pymn_alow")
-                        or dep_detail.get("entr")
-                        or 0
-                    )
+                    try:
+                        _ov = float(dep_detail.get("ord_alow") or 0)
+                        if _ov > 0:
+                            cash_orderable = _ov
+                    except (TypeError, ValueError):
+                        cash_orderable = 0.0
+                    try:
+                        _pv = float(dep_detail.get("pymn_alow") or 0)
+                        cash_withdrawable = max(0.0, _pv)
+                    except (TypeError, ValueError):
+                        cash_withdrawable = 0.0
 
                 # 예수금상세로 d2 보강 후: 총자산 = D+2 예수 + 보유 평가 합 (tot_evlu_amt는 이전 d2/예수 기준으로 남을 수 있음)
                 stocks_mv = self._sum_holdings_market_value(holdings)
@@ -572,9 +578,9 @@ class OrderManager:
                     total_equity = float(d2_deposit) + float(stocks_mv)
                 except Exception:
                     pass
-                # 주문가능(ord_alow 등)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
+                # 주문가능(ord)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
                 try:
-                    ca = float(cash_available or 0)
+                    ca = float(cash_orderable or 0)
                     d2v = float(d2_deposit or 0)
                     d1v = float(d1_deposit or 0)
                     tol = max(1.0, d2v * 0.0001) if d2v > 0 else 1.0
@@ -610,7 +616,11 @@ class OrderManager:
                     "total_equity": total_equity,
                     "d1_deposit": d1_deposit,
                     "d2_deposit": d2_deposit,
-                    "cash_available": cash_available,
+                    # 주문가능(로그 등) / 출금가능(포지션 탭 예수금 = actual_deposit)
+                    "cash_orderable": cash_orderable,
+                    "cash_withdrawable": cash_withdrawable,
+                    # 하위 호환: 예전 키 — 출금가능과 동일 의미로 맞춤(주문가능 아님)
+                    "cash_available": cash_withdrawable,
                     # ka10085 보유 행 합산 평가액(evlu_amt 등) — 가상탭·총자산 표시용
                     "stocks_market_value": float(stocks_mv),
                     # 응답 원본 총평가금액(증권사 기준 총자산) — UI 최우선 표시
@@ -690,8 +700,47 @@ class OrderManager:
                 continue
         return None
 
+    def get_withdrawable_deposit(self) -> Optional[int]:
+        """
+        출금가능금액(pymn_alow)만 반환.
+        포지션 탭 '예수금'(actual_deposit)·sync_deposit 전용. 주문가능(ord_alow)과 혼동 금지.
+        """
+        try:
+            d = self.get_deposit_detail()
+            if d:
+                v = float(d.get("pymn_alow") or 0)
+                return int(max(0, v))
+        except Exception:
+            pass
+        use_mock = getattr(config, 'USE_MOCK', False)
+        api_id = 'kt00001' if use_mock else 'ka10001'
+        host = config.MOCK_URL if use_mock else config.URL
+
+        token = self.app.auth_manager.get_auth_token()
+        if not token:
+            return None
+
+        url = f"{host}/api/dostk/acnt"
+        headers = {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'authorization': f'Bearer {token}',
+            'api-id': api_id,
+        }
+
+        try:
+            payload = {'qry_tp': '2'}
+            res = requests.post(url, headers=headers, json=payload, timeout=10)
+            data = res.json()
+            out_body = data.get('output', data.get('data', data))
+
+            raw = out_body.get("pymn_alow_amt") or out_body.get("pymn_alow") or "0"
+            return int(max(0, float(str(raw).replace(",", ""))))
+        except Exception as e:
+            self.app.log(f"❌ 출금가능 예수 조회 실패: {e}")
+            return None
+
     def get_deposit(self) -> Optional[int]:
-        """[v4.5.3] 가용 예수(주문가능 우선) 단일값 — 내부적으로 예수금상세 조회."""
+        """내부 총자산·D+2 보정용 — 주문가능·출금·D+2·entr 중 양수 우선(기존 동작). UI 예수금은 get_withdrawable_deposit()."""
         try:
             d = self.get_deposit_detail()
             if d:
@@ -704,23 +753,24 @@ class OrderManager:
         use_mock = getattr(config, 'USE_MOCK', False)
         api_id = 'kt00001' if use_mock else 'ka10001'
         host = config.MOCK_URL if use_mock else config.URL
-        
+
         token = self.app.auth_manager.get_auth_token()
-        if not token: return None
-        
+        if not token:
+            return None
+
         url = f"{host}/api/dostk/acnt"
         headers = {
             'Content-Type': 'application/json;charset=UTF-8',
             'authorization': f'Bearer {token}',
             'api-id': api_id,
         }
-        
+
         try:
             payload = {'qry_tp': '2'}
             res = requests.post(url, headers=headers, json=payload, timeout=10)
             data = res.json()
             out_body = data.get('output', data.get('data', data))
-            
+
             # ka10001(실전): nstd_re_ib_amt(주문가능현금), kt00001(모의): entr(예수금)
             deposit_str = out_body.get('entr', out_body.get('nstd_re_ib_amt', '0'))
             return int(float(str(deposit_str).replace(',', '')))

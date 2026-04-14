@@ -2,14 +2,14 @@
   "Score": 49,
   "Code": 77,
   "Name": 131,
-  "StratType": 76,
+  "StratType": 117,
   "Price": 103,
-  "AtrExit": 80,
+  "AtrExit": 101,
   "VsPrev": 85,
   "Ratio": 94,
-  "Status": 188,
+  "Status": 179,
   "VolPower": 62,
-  "BidAsk": 164,
+  "BidAsk": 132,
   "Volume": 126,
   "TrdeVal": 90
 }

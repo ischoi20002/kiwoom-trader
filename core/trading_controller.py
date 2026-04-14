@@ -574,9 +574,43 @@ class TradingController:
             return False
             
         # 2. 주문 수량 및 가격 보정
+        # invest_amt는 D+2/(1+매수수수료율) 이하의 매수 원금 상한이다. (portfolio._max_buy_principal_cash_d2_limit)
+        # adj_price(호가+1틱) 기준으로 산출한 주수가 0이면, 1주도 살 돈이 없는 것이므로
+        # max(1, ...)로 1주를 강제하면 D+2 예수금이 마이너스(미수)로 간다 — 절대 금지.
         adj_price = self.app.order_manager.get_adjusted_price(price, "buy")
-        qty = max(1, invest_amt // adj_price)
-        
+        try:
+            qty = int(invest_amt // int(adj_price))
+        except (TypeError, ValueError, ZeroDivisionError):
+            qty = 0
+        if qty <= 0:
+            try:
+                d2v = float(getattr(self.app.portfolio, "d2_deposit", 0) or 0)
+            except (TypeError, ValueError):
+                d2v = 0.0
+            self.log(
+                f"⚠️ [Skip] {name}({code}) S1 매수 생략: D+2 현금 한도로 "
+                f"지정가 기준 1주({adj_price:,}원)도 살 수 없음 "
+                f"(투자원금 상한 {invest_amt:,}원, D+2≈{d2v:,.0f}원). "
+                f"고가주·잔고 부족 시 발생합니다."
+            )
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "buy_skipped",
+                        {
+                            "code": code,
+                            "name": name,
+                            "reason": "d2_insufficient_for_one_lot",
+                            "invest_amt": int(invest_amt),
+                            "adj_price": int(adj_price),
+                            "d2_deposit": d2v,
+                        },
+                    )
+            except Exception:
+                pass
+            return False
+
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
         ord_no = None
         if allow_order:

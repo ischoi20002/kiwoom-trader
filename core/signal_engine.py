@@ -571,6 +571,8 @@ class SignalEngine:
                                 row_for_atr,
                                 float(np_f),
                                 bars_df=_bd_atr,
+                                sel_track_hint=info.get("sel_track")
+                                or info.get("SelTrack"),
                             )
                 except Exception:
                     atr_cell = "—"

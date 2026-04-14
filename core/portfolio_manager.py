@@ -559,9 +559,17 @@ class PortfolioManager:
                 self.total_equity = raw_tot
             else:
                 self.total_equity = float(te_resolved)
-            # 예수금상세(주문가능·출금가능) 우선 — 매수 직후에도 반영된 가용 현금
-            ca = float(account_data.get("cash_available") or 0)
-            self.actual_deposit = ca if ca > 0 else float(account_data.get("d2_deposit", 0) or 0)
+            # 포지션 탭 '예수금' = 출금가능금액(pymn_alow). 주문가능(ord_alow)과 별개.
+            # D+2 추정(d2_deposit)은 결제 추정이라 음수 가능 — 예수금 칸에 쓰지 않음.
+            try:
+                wd = float(
+                    account_data.get("cash_withdrawable")
+                    or account_data.get("cash_available")
+                    or 0
+                )
+                self.actual_deposit = max(0.0, wd)
+            except (TypeError, ValueError):
+                self.actual_deposit = 0.0
         
         server_codes = set()
         updated_count = 0
@@ -617,11 +625,27 @@ class PortfolioManager:
                             except Exception:
                                 pass
                         continue
+                    _sync_sig = "TYPE_A"
+                    try:
+                        mi = getattr(self.app, "monitor_info", None) or {}
+                        for _k in (code, str(code).zfill(6)):
+                            _inf = mi.get(_k)
+                            if isinstance(_inf, dict):
+                                _st = str(
+                                    _inf.get("sel_track")
+                                    or _inf.get("SelTrack")
+                                    or ""
+                                ).strip().upper()
+                                if _st == "B":
+                                    _sync_sig = "TYPE_B"
+                                break
+                    except Exception:
+                        pass
                     self.virtual_positions[code] = {
                         "name": name, "avg_price": avg_price, "qty": qty,
                         "stage": 1, "invested": float(qty) * float(avg_price),
                         "entry_time": datetime.now().isoformat(),
-                        "reason": "SYNCED", "sig_type": "TYPE_A", "events": [], "max_now": avg_price
+                        "reason": "SYNCED", "sig_type": _sync_sig, "events": [], "max_now": avg_price
                     }
                     self.data_manager.save_active_position(code, name, avg_price, qty, 1, float(qty) * float(avg_price), datetime.now().isoformat(), "SYNCED")
                     new_count += 1
@@ -783,10 +807,13 @@ class PortfolioManager:
             )
         
     def sync_deposit(self):
-        """[v4.5.3] 전용 예수금 상세 조회 및 가용금 업데이트"""
-        d = self.order_manager.get_deposit()
+        """[v4.5.3] 예수금상세에서 출금가능금액만 조회해 actual_deposit 갱신(주문가능 아님)."""
+        try:
+            d = self.order_manager.get_withdrawable_deposit()
+        except Exception:
+            d = None
         if d is not None:
-            self.actual_deposit = d
+            self.actual_deposit = float(d)
             self._schedule_gui_callback()
             return d
         return None

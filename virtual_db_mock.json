@@ -778,6 +778,56 @@
             "exit_time": "13:43:38",
             "exit_datetime": "2026-04-13 13:43:38",
             "code": "006260"
+        },
+        {
+            "name": "이수페타시스",
+            "avg_price": 118925.0,
+            "qty": 16,
+            "stage": 1,
+            "invested": 1902800.0,
+            "entry_time": "2026-04-13T09:51:14.052895",
+            "reason": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-04-14 09:03:00",
+                    "action": "SELL",
+                    "price": 124400.0,
+                    "qty": 16,
+                    "snapshot": {
+                        "time": "2026-04-14 09:03:00",
+                        "price": 124400.0,
+                        "market_trend": "UP",
+                        "vol_power": 214.55,
+                        "reason": "EXIT_TAKE_PROFIT",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.1
+                    }
+                }
+            ],
+            "max_now": 119400.0,
+            "ka_cur_prc": 124300.0,
+            "ka_evlu_amt": 1988800.0,
+            "ka_evlu_pfls_amt": 86000.0,
+            "ka_prft_rt": 4.51965524490225,
+            "ka_pur_amt": 1902800.0,
+            "ka_sync_iso": "2026-04-14T09:02:56.180149",
+            "max_p": 124900.0,
+            "max_price": 124900.0,
+            "current_price": 124800.0,
+            "exit_pending": true,
+            "exit_reason": "TAKE_PROFIT",
+            "pending_exit_ord_no": "0010702",
+            "final_pnl_pct": 4.080723144839184,
+            "realized_pnl_amt": 77648.0,
+            "exit_price": 124400.0,
+            "exit_date": "2026-04-14",
+            "exit_time": "09:03:00",
+            "exit_datetime": "2026-04-14 09:03:00",
+            "code": "007660"
         }
     ]
 }

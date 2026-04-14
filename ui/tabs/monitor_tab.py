@@ -959,7 +959,13 @@ class MonitorTab:
                     np_atr = float(now_p) if now_p > 0 else float(ir.get("Close", 0) or 0)
                     if np_atr > 0:
                         atr_cell = TradingStrategy.compute_atr_exit_display_text(
-                            pos, self.app.settings, ir, np_atr, bars_df=bd
+                            pos,
+                            self.app.settings,
+                            ir,
+                            np_atr,
+                            bars_df=bd,
+                            sel_track_hint=info.get("sel_track")
+                            or info.get("SelTrack"),
                         )
         except Exception:
             atr_cell = "—"
