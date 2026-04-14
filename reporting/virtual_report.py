@@ -1,7 +1,7 @@
 import os
 import json
 import importlib
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from reporting.daily_settlement_report import (
@@ -12,6 +12,7 @@ from reporting.daily_settlement_report import (
     _fmt_pct_net_cell,
     _fmt_vp_report_cell,
 )
+from reporting.krx_trading_calendar import trading_days_inclusive
 from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
 from utils.fee_rates import fee_decimal_rates_live_trading
 
@@ -677,8 +678,21 @@ def _fetch_orders_table_html_for_position(
     return _build_orders_table_html_from_rows(enriched, is_open=is_open)
 
 
-def _chart_report_day_for_position(pos: Dict[str, Any], is_open: bool) -> str:
-    """15분 차트 기준 거래일: 미청산=오늘, 청산=청산일(또는 exit_datetime 날짜)."""
+def _entry_day_yyyy_mm_dd(pos: Dict[str, Any]) -> str:
+    """포지션 진입일(YYYY-MM-DD). 파싱 실패 시 오늘."""
+    try:
+        et = pos.get("entry_time")
+        if isinstance(et, str) and len(et) >= 10:
+            head = et.replace("T", " ")[:10]
+            if len(head) == 10 and head[4] == "-" and head[7] == "-":
+                return head
+    except Exception:
+        pass
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _chart_period_end_day_str(pos: Dict[str, Any], is_open: bool) -> str:
+    """15분 차트 구간 끝 캘린더일: 미청산=오늘, 청산=청산일(또는 exit_datetime 날짜)."""
     try:
         if is_open:
             return datetime.now().strftime("%Y-%m-%d")
@@ -693,6 +707,47 @@ def _chart_report_day_for_position(pos: Dict[str, Any], is_open: bool) -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def _concat_15m_bars_for_trading_days(
+    data_manager: Any,
+    code_str: str,
+    trading_days: List[date],
+) -> Any:
+    """
+    거래일별 REST 15분봉을 순회해 이어붙인 DataFrame (없으면 None).
+    API 부하 완화를 위해 호출 간 짧은 대기.
+    """
+    import time
+
+    import pandas as pd
+
+    fn = getattr(data_manager, "fetch_15m_bars_for_trading_day_rest_only", None)
+    if not callable(fn):
+        return None
+    if not trading_days:
+        return None
+    parts: List[Any] = []
+    n = len(trading_days)
+    for i, d in enumerate(trading_days):
+        day_s = d.strftime("%Y-%m-%d")
+        try:
+            chunk = fn(code_str, day_s, logger=None)
+            if chunk is not None and not getattr(chunk, "empty", True):
+                parts.append(chunk)
+        except Exception:
+            pass
+        if i + 1 < n:
+            try:
+                time.sleep(0.12)
+            except Exception:
+                pass
+    if not parts:
+        return None
+    try:
+        return pd.concat(parts, ignore_index=True, sort=False)
+    except Exception:
+        return None
+
+
 def _build_virtual_chart_section_html(
     pos: Dict[str, Any],
     is_open: bool,
@@ -703,45 +758,74 @@ def _build_virtual_chart_section_html(
     code_str: str,
 ) -> str:
     """
-    일일 결산과 동일한 15분 Plotly(캔들+거래량+MA+당일 주문 세로선).
+    일일 결산과 동일한 15분 Plotly(캔들+거래량+MA+주문 세로선).
+    데이터 구간은 **진입일~청산일(또는 오늘)** 의 KRX 거래일마다 15분봉을 이어붙인 것.
     `file://` 호환 인라인 JSON + 펼침 시 렌더(공통 `plotly_deferred_chart_js`).
     """
-    day = _chart_report_day_for_position(pos, is_open)
+    entry_day = _entry_day_yyyy_mm_dd(pos)
+    end_day = _chart_period_end_day_str(pos, is_open)
+    try:
+        d0 = datetime.strptime(entry_day[:10], "%Y-%m-%d").date()
+        d1 = datetime.strptime(end_day[:10], "%Y-%m-%d").date()
+        if d0 > d1:
+            d0, d1 = d1, d0
+            entry_day, end_day = end_day, entry_day
+    except Exception:
+        d0 = datetime.now().date()
+        d1 = d0
+        entry_day = end_day = d0.strftime("%Y-%m-%d")
+
+    try:
+        tdays = trading_days_inclusive(entry_day, end_day)
+    except Exception:
+        tdays = []
+    if not tdays:
+        try:
+            tdays = [datetime.strptime(end_day[:10], "%Y-%m-%d").date()]
+        except Exception:
+            tdays = []
+
     df_15 = None
     if data_manager is not None:
         try:
-            fn = getattr(data_manager, "fetch_15m_bars_for_trading_day_rest_only", None)
-            if callable(fn):
-                df_15 = fn(code_str, day, logger=None)
+            df_15 = _concat_15m_bars_for_trading_days(data_manager, code_str, tdays)
         except Exception:
             df_15 = None
+
     orders_list: List[Dict[str, Any]] = []
     if data_manager is not None:
         try:
-            start_dt = f"{day} 00:00:00"
-            end_dt = f"{day} 23:59:59"
-            for row in data_manager.get_orders_between(start_dt, end_dt) or []:
+            start_full, end_full = _order_query_window_bounds(pos, is_open)
+            for row in data_manager.get_orders_between(start_full, end_full) or []:
                 d = _order_tuple_to_dict(row)
                 if d and str(d.get("code", "")).zfill(6) == code_str:
                     orders_list.append(d)
         except Exception:
             pass
+
+    chart_label = entry_day if entry_day == end_day else f"{entry_day} ~ {end_day}"
     try:
         inner = _build_plotly_15m_section(
             code_str,
             display_name or code_str,
-            day,
+            chart_label,
             df_15,
             orders_list,
+            max_display_rows=None,
+            compress_session_gaps=True,
         )
     except Exception as e:
         inner = f'<p class="warn" style="color:#f7768e;">차트 생성 오류: {_esc(str(e))}</p>'
     panel_id = f"vr-chart-panel-{section_id}"
     btn_open = f"{display_name} 15분봉 차트 접기"
     btn_closed = f"{display_name} 15분봉 차트 펼치기"
+    toolbar_hint = (
+        f"15분봉 · 주문 시각 (진입~{'현재' if is_open else '청산'} · "
+        f"{_esc(entry_day)} ~ {_esc(end_day)}, 거래일 {len(tdays)}일분 REST 조회)"
+    )
     return f"""
         <div class="vr-stock-chart-toolbar">
-            <span class="muted vr-stock-chart-toolbar-label">15분봉 · 주문 시각 (기준일 {_esc(day)})</span>
+            <span class="muted vr-stock-chart-toolbar-label">{toolbar_hint}</span>
             <button type="button" class="chart-toggle-btn"
                 aria-expanded="false"
                 aria-controls="{_esc(panel_id)}"
@@ -869,12 +953,14 @@ def generate_virtual_narrative_report(
     settings: Optional[dict] = None,
     open_positions: Optional[List[Dict[str, Any]]] = None,
     data_manager: Any = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> None:
     """
     가상 매매 종합 리포트: 나러티브 타임라인 + 포트폴리오 백테스트 리포트와 동일한 통계 블록.
     동일 종목코드 청산 이력은 한 카드로 병합.
     open_positions: 미청산 virtual_positions.
     data_manager: 있으면 trading_state.db 주문·체결 원장을 종목별로 표시(일일 결산과 동일 열).
+    progress_callback: GUI 진행 표시용 (done, total, message). total은 고정, done은 0..total.
     """
     history_raw = list(history or [])
     open_positions = list(open_positions or [])
@@ -893,16 +979,43 @@ def generate_virtual_narrative_report(
         if cp0 <= 0 and ap0 > 0:
             _op["current_price"] = ap0
 
+    def _emit_pg(done: int, total: int, msg: str) -> None:
+        """진행률 콜백(스레드·GUI에서 예외 없이 호출 가능)."""
+        if progress_callback is None:
+            return
+        try:
+            tt = max(1, int(total))
+            dd = max(0, min(int(done), tt))
+            progress_callback(dd, tt, str(msg))
+        except Exception:
+            pass
+
     if not history_raw and not open_positions:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("<html><body style='background:#1a1b26; color:#a9b1d6; padding:50px; text-align:center; font-family:sans-serif;'>")
-            f.write(
-                "<h1>표시할 가상 매매 내역이 없습니다.</h1>"
-                "<p>보유 포지션이 없고, 청산 완료된 이력(virtual_history)도 없습니다.</p></body></html>"
-            )
+        _emit_pg(0, 1, "표시할 내역 없음 — 빈 리포트 작성 중…")
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "<html><body style='background:#1a1b26; color:#a9b1d6; padding:50px; text-align:center; font-family:sans-serif;'>"
+                )
+                f.write(
+                    "<h1>표시할 가상 매매 내역이 없습니다.</h1>"
+                    "<p>보유 포지션이 없고, 청산 완료된 이력(virtual_history)도 없습니다.</p></body></html>"
+                )
+        except Exception:
+            pass
+        _emit_pg(1, 1, "완료")
         return
 
+    # 청산 이력 병합(통계·카드 단계 수 산정에 필요) — 본문 카드와 동일 순서
+    history_display = _merge_and_order_closed_history(
+        [h for h in history_raw if isinstance(h, dict)]
+    )
+    n_open = sum(1 for p in open_positions if isinstance(p, dict))
+    n_closed = sum(1 for p in history_display if isinstance(p, dict))
+    total_pg = max(2, n_open + n_closed + 2)
+
     # [1] 포트폴리오 백테스트 리포트와 같은 「백테스트 분석 통계」 (실시간 설정 파라미터는 제외)
+    _emit_pg(0, total_pg, "백테스트형 통계·분석 블록 생성 중…")
     portfolio_analysis_html = ""
     try:
         _fn_df, _fn_html, _imp_err = _resolve_virtual_analysis_helpers()
@@ -935,20 +1048,23 @@ def generate_virtual_narrative_report(
             f"통계 생성 오류: {_e_stats}</p></div>"
         )
 
-    # [2] 동일 종목 청산 병합 + 좌측 바로가기용 앵커
-    history_display = _merge_and_order_closed_history(
-        [h for h in history_raw if isinstance(h, dict)]
-    )
-
+    # [2] 좌측 바로가기용 앵커 (history_display 는 상단에서 이미 병합됨)
     nav_items: List[Tuple[str, str, str]] = [("v-top", "↑ 맨 위", "")]
     _s = settings if isinstance(settings, dict) else {}
     open_parts: List[str] = []
+    pg_step = 1
     for i, p in enumerate(open_positions):
         if not isinstance(p, dict):
             continue
         code = str(p.get("code", "")).zfill(6)
+        nm_disp = str(p.get("name", "Unknown"))
+        _emit_pg(
+            pg_step,
+            total_pg,
+            f"보유 {nm_disp} ({code}) — 주문·15분 차트 조회 중…",
+        )
         nid = f"v-open-{code}-{i}"
-        nav_items.append((nid, str(p.get("name", "Unknown")), code))
+        nav_items.append((nid, nm_disp, code))
         try:
             _ot = _fetch_orders_table_html_for_position(
                 data_manager, _s, p, is_open=True
@@ -977,6 +1093,7 @@ def generate_virtual_narrative_report(
                 settings=_s,
             )
         )
+        pg_step += 1
     open_cards_html = "".join(open_parts)
 
     closed_parts: List[str] = []
@@ -984,8 +1101,14 @@ def generate_virtual_narrative_report(
         if not isinstance(p, dict):
             continue
         code = str(p.get("code", "")).zfill(6)
+        nm_c = str(p.get("name", "Unknown"))
+        _emit_pg(
+            pg_step,
+            total_pg,
+            f"청산 {nm_c} ({code}) — 주문·15분 차트 조회 중…",
+        )
         nid = f"v-closed-{code}-{i}"
-        nav_items.append((nid, str(p.get("name", "Unknown")), code))
+        nav_items.append((nid, nm_c, code))
         try:
             _ot = _fetch_orders_table_html_for_position(
                 data_manager, _s, p, is_open=False
@@ -1014,6 +1137,7 @@ def generate_virtual_narrative_report(
                 settings=_s,
             )
         )
+        pg_step += 1
     closed_trades_html = "".join(closed_parts)
 
     sidebar_links: List[str] = []
@@ -1346,7 +1470,7 @@ def generate_virtual_narrative_report(
             <header id="v-top">
                 <h1>가상 매매 종합 리포트</h1>
                 <p style="color:var(--text); margin:8px 0 0 0;">의사결정 시점 스냅샷·나러티브와 포트폴리오 백테스트형 통계를 함께 봅니다.</p>
-                <p style="color:var(--text); font-size:12px; margin-top:8px; line-height:1.5;">각 종목 카드 하단에 <b>15분봉 차트</b>(일일 결산 리포트와 동일: 캔들·거래량·MA·당일 주문 시각)를 펼쳐 볼 수 있습니다. <code>file://</code> 로 열어도 동작합니다.</p>
+                <p style="color:var(--text); font-size:12px; margin-top:8px; line-height:1.5;">각 종목 카드 하단에 <b>15분봉 차트</b>(캔들·거래량·MA·주문 시각은 일일 결산과 동일 형식, 데이터는 <b>진입일~청산일(미청산 시 현재일)</b> 구간의 거래일 15분봉을 이어 붙임)을 펼쳐 볼 수 있습니다. <code>file://</code> 로 열어도 동작합니다.</p>
                 {_db_line}
             </header>
 
@@ -1403,6 +1527,15 @@ def generate_virtual_narrative_report(
     """
     )
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"✅ 종합 리포트 생성: {output_path}")
+    _emit_pg(pg_step, total_pg, "HTML 파일 저장 중…")
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"✅ 종합 리포트 생성: {output_path}")
+    except Exception as _e_write:
+        try:
+            print(f"[virtual_report] 리포트 저장 실패: {_e_write}")
+        except Exception:
+            pass
+        raise
+    _emit_pg(total_pg, total_pg, "완료")

@@ -13,7 +13,6 @@ from datetime import date, datetime, timedelta
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from reporting.realtime_session_logger import RealtimeSessionLogger
 
 try:
     import plotly.graph_objects as go
@@ -30,13 +29,6 @@ from reporting.krx_trading_calendar import (
 )
 from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
 from utils.fee_rates import fee_decimal_rates_live_trading
-
-
-def _json_dumps_pretty(d: Any) -> str:
-    try:
-        return json.dumps(d, ensure_ascii=False, indent=2)
-    except Exception:
-        return str(d)
 
 
 def _esc(s: Any) -> str:
@@ -665,6 +657,34 @@ def _order_timestamp_aligned_to_bars(ts_raw: Any, bar_times: Any) -> Optional[An
     return t
 
 
+def _order_time_to_nearest_bar_index(ts_raw: Any, bar_times: Any) -> Optional[int]:
+    """
+    장세션 간격 제거(연속 봉 인덱스 x축)용: 주문 시각에 가장 가까운 15분봉 행 인덱스(0..n-1).
+    """
+    import pandas as pd
+
+    t_aligned = _order_timestamp_aligned_to_bars(ts_raw, bar_times)
+    if t_aligned is None:
+        return None
+    series = pd.to_datetime(bar_times, errors="coerce")
+    if series.empty or bool(series.isna().all()):
+        return None
+    try:
+        t = pd.Timestamp(t_aligned)
+        if bool(pd.isna(t)):
+            return None
+    except Exception:
+        return None
+    try:
+        diffs = (series - t).abs()
+        j = int(diffs.argmin())
+    except Exception:
+        return None
+    if j < 0 or j >= len(series):
+        return None
+    return j
+
+
 def _plotly_fig_to_deferred_embed(fig: Any) -> str:
     """
     figure JSON을 HTML에 인라인(`<script type="application/json">`).
@@ -698,12 +718,21 @@ def _build_plotly_15m_section(
     report_day: str,
     df: Any,
     orders_for_code: List[Dict[str, Any]],
+    *,
+    max_display_rows: Optional[int] = 500,
+    compress_session_gaps: bool = False,
 ) -> str:
     """
     15분 OHLC + 거래량 + MA + 주문 시각 (Plotly).
     주문선은 trace가 아니라 shape(세로선).
     렌더는 **펼치기 시점**에 `Plotly.newPlot` (데이터는 HTML 내 JSON 인라인) — 숨김 패널 즉시 newPlot
     및 plotly.js/py 버전 불일치로 인한 `bdata` 깨짐을 피한다.
+
+    Args:
+        report_day: 일일결산은 YYYY-MM-DD 한 날짜, 가상 종합리포트는 "YYYY-MM-DD ~ YYYY-MM-DD" 구간 라벨 가능.
+        max_display_rows: 차트에 쓸 최대 봉 수(초과 시 최신 구간만 tail). None이면 잘라내지 않음.
+        compress_session_gaps: True면 x축을 실시간이 아니라 **연속 봉 번호**로 두어
+            야간·휴장일 사이 빈 구간 없이 장중 봉만 이어서 표시(호버에 실제 일시).
     """
     if not _HAS_PLOTLY:
         return '<p class="warn">Plotly 미설치로 차트를 생략했습니다.</p>'
@@ -712,20 +741,32 @@ def _build_plotly_15m_section(
         import pandas as pd
 
         if df is None or df.empty:
-            return '<p class="muted">해당 일자 15분봉 데이터가 없습니다.</p>'
+            return '<p class="muted">해당 기간 15분봉 데이터가 없습니다.</p>'
 
         work = _prepare_daily_report_15m_df(df)
         if work is None or work.empty:
             return '<p class="muted">차트용 15분봉 정규화 실패(시간·OHLCV 열 확인).</p>'
 
         try:
-            max_rows = 500
-            if len(work) > max_rows:
-                work = work.tail(max_rows).reset_index(drop=True)
+            max_rows = max_display_rows
+            if max_rows is not None and int(max_rows) > 0 and len(work) > int(max_rows):
+                work = work.tail(int(max_rows)).reset_index(drop=True)
         except Exception:
             pass
 
-        x = work["time"]
+        compress = bool(compress_session_gaps)
+        n_bars = len(work)
+        if compress:
+            x_plot = list(range(n_bars))
+            try:
+                ts_hover = work["time"].dt.strftime("%Y-%m-%d %H:%M").tolist()
+            except Exception:
+                ts_hover = [str(v) for v in work["time"].tolist()]
+        else:
+            x_plot = work["time"]
+            ts_hover = None
+
+        x = x_plot
         o = work["Open"].astype(float)
         h = work["High"].astype(float)
         low_s = work["Low"].astype(float)
@@ -735,6 +776,12 @@ def _build_plotly_15m_section(
         ma5 = close_s.rolling(5, min_periods=1).mean()
         ma20 = close_s.rolling(20, min_periods=1).mean()
 
+        rt = str(report_day or "").strip()
+        title_top = f"{name} ({code}) 15분"
+        if rt:
+            title_top = f"{title_top} · {rt}"
+        if compress:
+            title_top = f"{title_top} · 연속 장중"
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -742,26 +789,30 @@ def _build_plotly_15m_section(
             vertical_spacing=0.06,
             row_heights=[0.68, 0.32],
             subplot_titles=(
-                f"{name} ({code}) 15분",
+                title_top,
                 "거래량",
             ),
         )
 
-        # 예전 리포트와 동일: Nord 캔들(실제 고·저), MA는 Scatter, 거래량 단색 막대
-        fig.add_trace(
-            go.Candlestick(
-                x=x,
-                open=o,
-                high=h,
-                low=low_s,
-                close=close_s,
-                name="15m",
-                increasing_line_color="#A3BE8C",
-                decreasing_line_color="#BF616A",
-            ),
-            row=1,
-            col=1,
+        # Nord 캔들(실제 고·저), MA는 Scatter, 거래량 단색 막대
+        _cs_kw: Dict[str, Any] = dict(
+            x=x,
+            open=o,
+            high=h,
+            low=low_s,
+            close=close_s,
+            name="15m",
+            increasing_line_color="#A3BE8C",
+            decreasing_line_color="#BF616A",
         )
+        if compress and ts_hover:
+            _cs_kw["text"] = ts_hover
+            _cs_kw["hovertemplate"] = (
+                "%{text}<br>"
+                "시가 %{open:,.0f} 고 %{high:,.0f} 저 %{low:,.0f} 종 %{close:,.0f}"
+                "<extra></extra>"
+            )
+        fig.add_trace(go.Candlestick(**_cs_kw), row=1, col=1)
         fig.add_trace(
             go.Scatter(
                 x=x,
@@ -805,9 +856,15 @@ def _build_plotly_15m_section(
         for orec in orders_for_code:
             ts = orec.get("ts", "")
             try:
-                tx = _order_timestamp_aligned_to_bars(ts, work["time"])
-                if tx is None:
-                    continue
+                if compress:
+                    jx = _order_time_to_nearest_bar_index(ts, work["time"])
+                    if jx is None:
+                        continue
+                    tx = float(jx)
+                else:
+                    tx = _order_timestamp_aligned_to_bars(ts, work["time"])
+                    if tx is None:
+                        continue
                 side = str(orec.get("side", "")).upper()
                 is_sell = "매도" in side or "SELL" in side
                 col = "#BF616A" if is_sell else "#88C0D0"
@@ -852,25 +909,80 @@ def _build_plotly_15m_section(
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
             xaxis_rangeslider_visible=False,
         )
-        fig.update_xaxes(
-            type="date",
-            rangeslider_visible=False,
-            showspikes=True,
-            spikemode="across",
-            spikesnap="cursor",
-            spikedash="solid",
-            row=1,
-            col=1,
-        )
-        fig.update_xaxes(
-            type="date",
-            showspikes=True,
-            spikemode="across",
-            spikesnap="cursor",
-            spikedash="solid",
-            row=2,
-            col=1,
-        )
+        if compress and n_bars > 0:
+            try:
+                max_ticks = min(14, max(2, n_bars))
+                if n_bars <= 1:
+                    tickvals = [0]
+                    ticktext = [
+                        work["time"].iloc[0].strftime("%m/%d %H:%M")
+                        if hasattr(work["time"].iloc[0], "strftime")
+                        else str(work["time"].iloc[0])
+                    ]
+                else:
+                    step = max(1, (n_bars - 1) // (max_ticks - 1))
+                    tickvals = list(range(0, n_bars, step))
+                    if tickvals[-1] != n_bars - 1:
+                        tickvals.append(n_bars - 1)
+                    ticktext = []
+                    for i in tickvals:
+                        tcell = work["time"].iloc[int(i)]
+                        try:
+                            ticktext.append(
+                                tcell.strftime("%m/%d %H:%M")
+                                if hasattr(tcell, "strftime")
+                                else str(tcell)
+                            )
+                        except Exception:
+                            ticktext.append(str(i))
+            except Exception:
+                tickvals = [0, max(0, n_bars - 1)]
+                ticktext = ["0", str(n_bars - 1)]
+            fig.update_xaxes(
+                type="linear",
+                tickmode="array",
+                tickvals=tickvals,
+                ticktext=ticktext,
+                rangeslider_visible=False,
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikedash="solid",
+                row=1,
+                col=1,
+            )
+            fig.update_xaxes(
+                type="linear",
+                tickmode="array",
+                tickvals=tickvals,
+                ticktext=ticktext,
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikedash="solid",
+                row=2,
+                col=1,
+            )
+        else:
+            fig.update_xaxes(
+                type="date",
+                rangeslider_visible=False,
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikedash="solid",
+                row=1,
+                col=1,
+            )
+            fig.update_xaxes(
+                type="date",
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikedash="solid",
+                row=2,
+                col=1,
+            )
 
         return _plotly_fig_to_deferred_embed(fig)
     except Exception as e:
@@ -965,7 +1077,6 @@ def generate_daily_settlement_report_ex(
     except Exception:
         orders = []
 
-    events = RealtimeSessionLogger().read_events(day)
     summary = _compute_summary_from_app(app, day)
     excl = _report_excluded_watchlist_codes_from_app(app)
 
@@ -1120,25 +1231,6 @@ def generate_daily_settlement_report_ex(
             </div>
         </div>"""
 
-    ev_rows = ""
-    for ev in sorted(events, key=lambda x: x.get("ts", "")):
-        data = ev.get("data", {}) or {}
-        try:
-            raw_c = data.get("code")
-            if raw_c is not None and str(raw_c).strip() != "":
-                ec = str(raw_c).strip().zfill(6)
-                if ec in excl:
-                    continue
-        except Exception:
-            pass
-        k = ev.get("kind", "")
-        ts = ev.get("ts", "")
-        ev_rows += f"""<tr>
-            <td>{_esc(ts)}</td>
-            <td>{_esc(k)}</td>
-            <td class="jsoncell"><pre>{_esc(_json_dumps_pretty(data))}</pre></td>
-        </tr>"""
-
     summary_rows = f"""
         <tr><td>총 자산 (D+2+주식평가, 포지션 관리 탭과 동일)</td><td class="num">{summary['total_assets']:,.0f} 원</td></tr>
         <tr><td>예수금 (가용)</td><td class="num">{summary['cash']:,.0f} 원</td></tr>
@@ -1253,10 +1345,6 @@ def generate_daily_settlement_report_ex(
         table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
         th, td {{ padding: 6px 8px; border-bottom: 1px solid #434C5E; text-align: left; }}
         th {{ color: var(--muted); }}
-        .jsoncell pre {{
-            margin: 0; white-space: pre-wrap; word-break: break-all;
-            font-size: 11px; color: #D8DEE9;
-        }}
         .chartwrap {{ overflow-x: auto; }}
         /* 종목 카드 안: 이 종목 15분봉만 버튼으로 펼침 */
         .stock-chart-toolbar {{
@@ -1305,15 +1393,6 @@ def generate_daily_settlement_report_ex(
     <h2>종목별 리포트 (주문 · 체결 · 15분봉 차트)</h2>
     <p class="muted" style="margin-top:-8px;margin-bottom:16px;">각 종목 카드 하단의 버튼으로 <b>해당 종목</b> 15분봉 차트만 펼칠 수 있습니다.</p>
     {code_sections if code_sections else '<p class="muted">해당 일자 주문 기록이 없습니다.</p>'}
-
-    <h2>세션 이벤트 로그 (JSONL 복사본)</h2>
-    <p class="muted">파일: realtime_session_logs/{_esc(day)}/session_events.jsonl</p>
-    <div class="card" style="padding:0; overflow:auto;">
-        <table>
-            <thead><tr><th>시각</th><th>종류</th><th>데이터</th></tr></thead>
-            <tbody>{ev_rows if ev_rows else '<tr><td colspan="3" class="muted">이벤트 없음</td></tr>'}</tbody>
-        </table>
-    </div>
 
     <footer>K-Trader 실시간 감시 일일 결산</footer>
 </div>

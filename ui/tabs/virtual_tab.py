@@ -5,7 +5,7 @@ import importlib
 import time
 from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import config
 from utils.fee_rates import fee_decimal_rates_live_trading
 
@@ -30,6 +30,8 @@ class VirtualTab:
         self._order_log_date_var: Optional[tk.StringVar] = None
         self._btn_order_log_prev: Optional[ttk.Button] = None
         self._btn_order_log_next: Optional[ttk.Button] = None
+        self.btn_narrative_report: Optional[ttk.Button] = None
+        self._narrative_report_busy: bool = False
 
         self._setup_ui()
         self._render_virtual_positions()
@@ -101,7 +103,10 @@ class VirtualTab:
         btn_group.pack(side=tk.RIGHT)
         
         ttk.Button(btn_group, text="🔄 동기화", width=8, command=self.app._sync_account_deposit).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_group, text="종합리포트", width=10, command=self.generate_report).pack(side=tk.LEFT, padx=2)
+        self.btn_narrative_report = ttk.Button(
+            btn_group, text="종합리포트", width=10, command=self.generate_report
+        )
+        self.btn_narrative_report.pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_group, text="📋 일일결산", width=10, command=self.generate_daily_settlement).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_group, text="⭐ 관심목록", width=10, command=self._open_watchlist_dialog).pack(side=tk.LEFT, padx=2)
         
@@ -1456,7 +1461,17 @@ class VirtualTab:
                 pass
 
     def generate_report(self):
-        """[v4.5.3] 가상 매매 나러티브 리포트 생성 (UI 위임)"""
+        """가상 매매 종합 리포트 생성 (백그라운드 스레드 + 진행률 표시)."""
+        if self._narrative_report_busy:
+            try:
+                messagebox.showinfo(
+                    "종합 리포트",
+                    "이미 리포트를 생성 중입니다. 완료될 때까지 잠시만 기다려 주세요.",
+                    parent=self.parent,
+                )
+            except Exception:
+                pass
+            return
         try:
             import webbrowser
 
@@ -1465,10 +1480,11 @@ class VirtualTab:
                 import reporting.virtual_report as _vr_mod
 
                 importlib.reload(_vr_mod)
-                generate_virtual_narrative_report = _vr_mod.generate_virtual_narrative_report
+                gen_fn: Callable[..., None] = _vr_mod.generate_virtual_narrative_report
             except Exception as _e_reload:
                 from reporting.virtual_report import generate_virtual_narrative_report
 
+                gen_fn = generate_virtual_narrative_report
                 try:
                     self.app.log(
                         f"[Warn] virtual_report reload 실패, 기존 모듈 사용: {_e_reload}"
@@ -1514,22 +1530,155 @@ class VirtualTab:
                     open_vis.append(row)
             except Exception as _e_open:
                 self.app.log(f"[Warn] 리포트용 보유 포지션 수집 실패: {_e_open}")
-            generate_virtual_narrative_report(
-                hist_vis,
-                output_file,
-                self.app.settings,
-                open_positions=open_vis,
-                data_manager=getattr(self.app, "data_manager", None),
-            )
-            
-            abs_path = os.path.abspath(output_file)
-            if os.path.exists(abs_path):
-                webbrowser.open(f"file://{abs_path}")
-                self.app.log(f"[Sync] 가상 매매 종합 리포트 생성 완료: {output_file}")
-            else:
-                self.app.log("[Error] 리포트 파일 생성 실패")
+
+            root = self.parent.winfo_toplevel()
+            dlg = tk.Toplevel(root)
+            dlg.title("종합 리포트 생성 중")
+            dlg.resizable(False, False)
+            try:
+                dlg.transient(root)
+                dlg.grab_set()
+            except Exception:
+                pass
+            frm = ttk.Frame(dlg, padding=16)
+            frm.pack(fill=tk.BOTH, expand=True)
+            status_var = tk.StringVar(value="준비 중…")
+            ttk.Label(frm, textvariable=status_var, wraplength=360).pack(anchor=tk.W)
+            prog = ttk.Progressbar(frm, mode="determinate", maximum=100, length=360)
+            prog.pack(pady=(10, 0), fill=tk.X)
+            ttk.Label(
+                frm,
+                text="종목별 REST 15분봉 조회로 수 분 걸릴 수 있습니다.",
+                font=("Malgun Gothic", 8),
+                foreground="#787c99",
+            ).pack(anchor=tk.W, pady=(8, 0))
+
+            def _block_close() -> None:
+                try:
+                    messagebox.showinfo(
+                        "종합 리포트",
+                        "생성이 끝날 때까지 이 창을 닫을 수 없습니다.",
+                        parent=dlg,
+                    )
+                except Exception:
+                    pass
+
+            try:
+                dlg.protocol("WM_DELETE_WINDOW", _block_close)
+            except Exception:
+                pass
+
+            holder: Dict[str, Any] = {"err": None, "path": None}
+
+            def on_progress(done: int, total: int, msg: str) -> None:
+                try:
+                    tt = max(1, int(total))
+                    dd = max(0, min(int(done), tt))
+                    pct = int(round(100.0 * float(dd) / float(tt)))
+
+                    def apply_ui() -> None:
+                        try:
+                            status_var.set(msg)
+                            prog.configure(maximum=100)
+                            prog["value"] = pct
+                        except tk.TclError:
+                            pass
+
+                    root.after(0, apply_ui)
+                except Exception:
+                    pass
+
+            def worker() -> None:
+                try:
+                    gen_fn(
+                        hist_vis,
+                        output_file,
+                        self.app.settings,
+                        open_positions=open_vis,
+                        data_manager=getattr(self.app, "data_manager", None),
+                        progress_callback=on_progress,
+                    )
+                    holder["path"] = os.path.abspath(output_file)
+                except Exception as e:
+                    holder["err"] = str(e)
+                finally:
+
+                    def finish() -> None:
+                        self._narrative_report_busy = False
+                        try:
+                            dlg.grab_release()
+                        except Exception:
+                            pass
+                        try:
+                            dlg.destroy()
+                        except Exception:
+                            pass
+                        try:
+                            if self.btn_narrative_report is not None:
+                                self.btn_narrative_report.state(["!disabled"])
+                        except Exception:
+                            pass
+                        err = holder.get("err")
+                        pth = holder.get("path")
+                        if err:
+                            try:
+                                self.app.log(f"[Error] 리포트 생성 중 오류: {err}")
+                            except Exception:
+                                pass
+                            try:
+                                messagebox.showerror(
+                                    "종합 리포트",
+                                    str(err),
+                                    parent=self.parent,
+                                )
+                            except Exception:
+                                pass
+                        elif pth and os.path.exists(pth):
+                            try:
+                                webbrowser.open(f"file://{pth}")
+                            except Exception as _wb:
+                                try:
+                                    self.app.log(
+                                        f"[Warn] 브라우저 열기 실패: {_wb}"
+                                    )
+                                except Exception:
+                                    pass
+                            try:
+                                self.app.log(
+                                    f"[Sync] 가상 매매 종합 리포트 생성 완료: {output_file}"
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                self.app.log("[Error] 리포트 파일 생성 실패")
+                            except Exception:
+                                pass
+
+                    root.after(0, finish)
+
+            self._narrative_report_busy = True
+            try:
+                if self.btn_narrative_report is not None:
+                    self.btn_narrative_report.state(["disabled"])
+            except Exception:
+                pass
+            try:
+                dlg.update_idletasks()
+                px = root.winfo_rootx() + (root.winfo_width() // 2) - (dlg.winfo_width() // 2)
+                py = root.winfo_rooty() + (root.winfo_height() // 2) - (dlg.winfo_height() // 2)
+                dlg.geometry(f"+{max(0, px)}+{max(0, py)}")
+            except Exception:
+                pass
+            threading.Thread(target=worker, daemon=True).start()
         except Exception as e:
-            self.app.log(f"[Error] 리포트 생성 중 오류: {e}")
+            self._narrative_report_busy = False
+            try:
+                if self.btn_narrative_report is not None:
+                    self.btn_narrative_report.state(["!disabled"])
+            except Exception:
+                pass
+            self.app.log(f"[Error] 리포트 생성 준비 오류: {e}")
 
     def generate_daily_settlement(self):
         """거래일 배치(빈·미완료 일자 채움) 후 당일 리포트 HTML 열기. 시작일은 UI에서 지정·기억."""
