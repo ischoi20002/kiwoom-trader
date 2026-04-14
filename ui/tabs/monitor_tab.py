@@ -107,14 +107,14 @@ def format_entry_signal_type_label(
         if isinstance(pos, dict):
             st = str(pos.get("sig_type") or "").strip().upper()
             if st == "TYPE_B" or "TYPE_B" in st:
-                return "매수 신호 · Type B"
+                return "전략 B"
             if st == "TYPE_A" or "TYPE_A" in st:
-                return "매수 신호 · Type A"
+                return "전략 A"
             rsn = str(pos.get("reason") or "").upper()
             if "TYPE_B" in rsn:
-                return "매수 신호 · Type B"
+                return "전략 B"
             if "TYPE_A" in rsn and "TYPE_B" not in rsn:
-                return "매수 신호 · Type A"
+                return "전략 A"
     except Exception:
         pass
     return format_strategy_type_label(sel_track)

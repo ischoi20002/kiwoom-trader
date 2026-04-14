@@ -728,6 +728,43 @@ class DataManagerV2:
                 pass
             return []
 
+    def get_distinct_order_calendar_dates(self) -> List[date]:
+        """
+        order_history 에 레코드가 있는 캘린더 날짜 목록(오름차순, 중복 없음).
+        주문 로그 날짜 네비에서 빈 날짜 건너뛰기용.
+        """
+        try:
+            with self._get_state_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT DISTINCT substr(timestamp, 1, 10) AS d
+                    FROM order_history
+                    WHERE timestamp IS NOT NULL AND length(trim(timestamp)) >= 10
+                    ORDER BY d ASC
+                    """
+                )
+                rows = cur.fetchall()
+            out: List[date] = []
+            for row in rows:
+                try:
+                    s = str(row[0]).strip()[:10]
+                    out.append(datetime.strptime(s, "%Y-%m-%d").date())
+                except (TypeError, ValueError, IndexError):
+                    continue
+            return out
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] get_distinct_order_calendar_dates 실패: {e}")
+            except Exception:
+                pass
+            return []
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] get_distinct_order_calendar_dates 오류: {e}")
+            except Exception:
+                pass
+            return []
+
     def get_orders_between(self, start_dt: str, end_dt: str):
         """
         날짜·시간 범위의 주문 이력을 시간순으로 반환합니다.

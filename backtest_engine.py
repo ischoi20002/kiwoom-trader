@@ -508,6 +508,175 @@ class TradingStrategy:
         return True
 
     @staticmethod
+    def compute_s2_confluence_display_text(
+        pos: dict,
+        settings: dict,
+        indicator_row: object,
+        market_trend: str = "UP",
+        curr_dt: object | None = None,
+        sel_track_hint: str | None = None,
+        now_price: float | None = None,
+    ) -> tuple[str, float]:
+        """
+        감시 '신호상태' 열용 S2 추매 합치도 — `_check_s2_approval` 과 동일 조건을 충족 개수/전체 개수로 요약.
+        반환: (표시 문자열, met_ratio 0~1 색상용)
+        """
+        try:
+            if not pos or indicator_row is None:
+                return ("추매 —", 0.0)
+            s = settings or {}
+
+            def _row_get(key: str, default: float = 0.0) -> float:
+                try:
+                    if hasattr(indicator_row, "get"):
+                        v = indicator_row.get(key, default)
+                        return float(v) if v is not None else float(default)
+                except (TypeError, ValueError):
+                    return float(default)
+                return float(default)
+
+            _is_b = TradingStrategy._holding_sig_is_type_b(pos)
+            if not _is_b:
+                try:
+                    _is_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+                except Exception:
+                    _is_b = False
+            if not _is_b and sel_track_hint:
+                try:
+                    if str(sel_track_hint).strip().upper() == "B":
+                        _is_b = True
+                except Exception:
+                    pass
+
+            if _is_b:
+                if not bool(s.get("use_s2_master_b", True)):
+                    return ("S2 비활성(B)", 0.0)
+            else:
+                if not bool(s.get("use_s2_master_a", True)):
+                    return ("S2 비활성(A)", 0.0)
+
+            def _s2(a_key: str, b_key: str, default):
+                return s.get(b_key, default) if _is_b else s.get(a_key, default)
+
+            passed = 0
+            total = 0
+
+            if s.get("use_market_filter", True):
+                total += 1
+                if _is_b:
+                    ok_mt = market_trend in ("UP", "AGGRESSIVE")
+                else:
+                    ok_mt = market_trend in ("UP", "AGGRESSIVE", "NEUTRAL")
+                if ok_mt:
+                    passed += 1
+
+            if _s2("use_s2_delay", "use_s2_b_delay", True):
+                total += 1
+                ok_delay = False
+                try:
+                    min_hours = float(_s2("s2_delay_hours", "s2_b_delay_hours", 24))
+                    et_raw = pos.get("entry_date") or pos.get("entry_time")
+                    if et_raw is not None:
+                        entry_dt = pd.to_datetime(et_raw)
+                        cdt = (
+                            pd.to_datetime(curr_dt)
+                            if curr_dt is not None
+                            else pd.Timestamp.now()
+                        )
+                        if (cdt - entry_dt).total_seconds() / 3600 >= min_hours:
+                            ok_delay = True
+                except Exception:
+                    ok_delay = False
+                if ok_delay:
+                    passed += 1
+
+            cp = float(now_price) if now_price is not None and float(now_price) > 0 else float(
+                _row_get("Close", 0.0)
+            )
+
+            if _s2("use_s2_ma20", "use_s2_b_ma20", True):
+                total += 1
+                ma20_val = _row_get("MA20", 0)
+                gap = float(_s2("s2_ma20_gap", "s2_b_ma20_gap", 0.0))
+                if ma20_val != 0 and cp >= ma20_val * (1 + gap / 100.0):
+                    passed += 1
+
+            if _s2("use_s2_ma5", "use_s2_b_ma5", True):
+                total += 1
+                ma5_val = _row_get("MA5", 0)
+                gap = float(_s2("s2_ma5_gap", "s2_b_ma5_gap", -0.5))
+                if cp >= ma5_val * (1 + gap / 100.0):
+                    passed += 1
+
+            if _s2("use_s2_vol_surge", "use_s2_b_vol_surge", True):
+                total += 1
+                vol_now = _row_get("Volume", 0)
+                if _is_b:
+                    vol_target = float(
+                        _row_get("Prev_Day_Vol_S2_B", 0)
+                        or _row_get("Prev_Day_Vol_B", 0)
+                        or _row_get("Vol_MA20", 0)
+                        or _row_get("Volume", 0)
+                    )
+                else:
+                    vol_target = float(
+                        _row_get("Prev_Day_Vol_S2_A", 0)
+                        or _row_get("Prev_Day_Vol", 0)
+                        or _row_get("Vol_MA20", 0)
+                        or _row_get("Volume", 0)
+                    )
+                ratio = float(_s2("s2_vol_ratio", "s2_b_vol_ratio", 1.5))
+                if vol_now >= vol_target * ratio:
+                    passed += 1
+
+            use_rsi = bool(_s2("use_s2_rsi_sig", "use_s2_b_rsi_sig", True))
+            use_macd = bool(_s2("use_s2_macd_gc", "use_s2_b_macd_gc", True))
+            rsi_sig = _row_get("RSI_Sig", 50)
+            rsi_val = _row_get("RSI", 0)
+            rsi_prev = _row_get("Prev_RSI", rsi_val)
+            rsi_gap = float(_s2("s2_rsi_gap", "s2_b_rsi_gap", 0.0))
+            rsi_ok = rsi_val >= rsi_sig * (1 + rsi_gap / 100.0) and rsi_val > rsi_prev
+
+            macd_val = _row_get("MACD", 0)
+            macd_sig_val = _row_get("MACD_Sig", 0)
+            osc_val = _row_get("OSC", 1)
+            osc_prev = _row_get("Prev_OSC", osc_val)
+            macd_gap = float(_s2("s2_macd_gap", "s2_b_macd_gap", 0.0))
+            macd_ok = (
+                macd_val >= macd_sig_val + macd_gap
+                and osc_val > 0
+                and osc_val > osc_prev
+            )
+
+            if use_rsi or use_macd:
+                total += 1
+                if use_rsi and use_macd:
+                    if rsi_ok or macd_ok:
+                        passed += 1
+                elif use_rsi and rsi_ok:
+                    passed += 1
+                elif use_macd and macd_ok:
+                    passed += 1
+
+            if _s2("use_s2_profit", "use_s2_b_profit", True):
+                total += 1
+                profit_limit = float(_s2("s2_profit_limit", "s2_b_profit_limit", 1.0))
+                avg_price = float(pos.get("avg_price", pos.get("avg_p", cp)) or 0)
+                if avg_price > 0:
+                    current_profit_pct = (cp / avg_price - 1) * 100
+                    if current_profit_pct >= profit_limit:
+                        passed += 1
+
+            if total <= 0:
+                return ("추매 조건 없음", 0.0)
+
+            tr_lab = "B" if _is_b else "A"
+            ratio_clr = min(1.0, max(0.0, float(passed) / float(total)))
+            return (f"추매({tr_lab}) {passed}/{total}", ratio_clr)
+        except Exception:
+            return ("추매 —", 0.0)
+
+    @staticmethod
     def _holding_sig_is_type_b(pos: dict) -> bool:
         """보유 dict의 Type B 판별(sig_type / Sig_Type, NaN·누락은 False)."""
         try:
@@ -645,7 +814,7 @@ class TradingStrategy:
     def _default_use_atr_stop_loss(sfx: str) -> bool:
         """
         use_atr_stop_loss{접미사} 키가 없을 때 기본값.
-        S2(_s2, _s2_b)는 True, S1 A/B(_a, _b)는 False — core/defaults.py와 동일.
+        S2(_s2, _s2_b)만 True, S1 A/B(_a, _b)는 False — ATR SL은 설정에서 명시할 때만.
         """
         try:
             return str(sfx) in ("_s2", "_s2_b")
@@ -1089,6 +1258,15 @@ class TradingStrategy:
                 is_type_b = "TYPE_B" in str(pos.get("reason", "")).upper()
             except Exception:
                 is_type_b = False
+        # 실시간 감시: compute_atr_exit_display_text 의 sel_track_hint 와 동일.
+        # 계좌 동기화만 한 포지션 등 sig_type 이 비어 있어도 트리가 B면 B 트랙 ATR·TP 키로 청산해야 함.
+        if not is_type_b and kwargs:
+            try:
+                sth = kwargs.get("sel_track") or kwargs.get("SelTrack")
+                if sth is not None and str(sth).strip().upper() == "B":
+                    is_type_b = True
+            except Exception:
+                pass
         s = settings
         tp_pct_applied = None  # TAKE_PROFIT 시 체결가 보정용(판정과 동일 %)
         _rx = TradingStrategy._exit_track_risk_bundle(s, is_type_b)
@@ -1106,6 +1284,27 @@ class TradingStrategy:
                 return float(_get_val("ATR", 0.0) or 0.0)
             except (TypeError, ValueError):
                 return 0.0
+
+        def _curr_atr_resolved() -> float:
+            """
+            마지막 봉 지표가 NaN이어도 bars_df·직전 유효 ATR·TR 근사로 보강.
+            실시간 감시 화면(compute_atr_exit_display_text)과 동일 계열 폴백 — 청산만 0 ATR로 무력화되는 현상 방지.
+            """
+            try:
+                base = float(_curr_atr())
+                if base > 0:
+                    return base
+                kw = kwargs or {}
+                bd = kw.get("bars_df")
+                if bd is not None and not getattr(bd, "empty", True):
+                    fb = TradingStrategy._last_finite_atr_from_bars_df(
+                        bd, s, _atr_col
+                    )
+                    if fb > 0:
+                        return float(fb)
+            except Exception:
+                pass
+            return 0.0
 
         # ---------------------------------------------------------
         # [1단계] 탈출(Exit) 조건 검사
@@ -1177,7 +1376,7 @@ class TradingStrategy:
             skip_pct_sl = False
             # ATR SL 토글만 켜도(청산 'ATR 분석 주기'와 무관) %손절과 이중 적용하지 않음 — 지표는 항상 ATR_A/B 계산
             try:
-                _ca = float(_curr_atr())
+                _ca = float(_curr_atr_resolved())
                 _sfx = _atr_track_suff()
                 if _ca > 0 and s.get(
                     f"use_atr_stop_loss{_sfx}",
@@ -1213,7 +1412,7 @@ class TradingStrategy:
         # use_atr_exit: ATR 주기 UI 마스터. OFF여도 ATR SL/트레일 개별 토글이면 해당 로직만 수행(지표 ATR은 이미 존재)
         if not is_exit:
             try:
-                curr_atr = float(_curr_atr())
+                curr_atr = float(_curr_atr_resolved())
                 suff = _atr_track_suff()
                 use_sl_atr = s.get(
                     f"use_atr_stop_loss{suff}",

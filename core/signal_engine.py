@@ -47,22 +47,22 @@ class SignalEngine:
             mb_c = int(self._to_scalar(last_sig.get("Met_B", 0), 0))
             tb_t = max(1, int(self._to_scalar(last_sig.get("Tot_B", 1), 1)))
             if tr == "A":
-                return f"대기 눌림A {ma_c}/{ta_t}"
+                return f"눌림A {ma_c}/{ta_t}"
             if tr == "B":
-                return f"대기 추세B {mb_c}/{tb_t}"
+                return f"추세B {mb_c}/{tb_t}"
             st = str(self._to_scalar(last_sig.get("Sig_Type", "NONE"), "NONE"))
             if st == "TYPE_B":
-                return f"대기 추세B {mb_c}/{tb_t} (눌림A {ma_c}/{ta_t})"
+                return f"추세B {mb_c}/{tb_t} (눌림A {ma_c}/{ta_t})"
             if st == "TYPE_A":
-                return f"대기 눌림A {ma_c}/{ta_t} (추세B {mb_c}/{tb_t})"
-            return f"대기 눌림A {ma_c}/{ta_t} · 추세B {mb_c}/{tb_t}"
+                return f"눌림A {ma_c}/{ta_t} (추세B {mb_c}/{tb_t})"
+            return f"눌림A {ma_c}/{ta_t} · 추세B {mb_c}/{tb_t}"
         except Exception:
             try:
                 mc = int(self._to_scalar(last_sig["Met_Count"], 0))
                 tc = max(1, int(self._to_scalar(last_sig["Total_Count"], 1)))
-                return f"대기 ({mc}/{tc})"
+                return f"({mc}/{tc})"
             except Exception:
-                return "대기"
+                return "—"
 
     def _format_monitor_vs_prev_cell(self, info: dict) -> str:
         """감시 트리 '대비' 열: 전일 종가 대비 등락폭(원). 웹소켓에서 info['diff'] 유지."""
@@ -79,6 +79,43 @@ class SignalEngine:
             return f"{iv:+,}"
         except Exception:
             return "—"
+
+    def _has_open_position(self, code: str) -> bool:
+        """virtual_positions 에 보유 중인지(6자리·접미사 키 호환)."""
+        try:
+            vp = getattr(self.app, "virtual_positions", None) or {}
+            if not vp:
+                return False
+            if code in vp:
+                return True
+            nk = str(code).zfill(6)
+            if nk in vp:
+                return True
+            for k in vp:
+                try:
+                    if str(k).split("_")[0].zfill(6) == nk:
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    def _indicator_last_row_for_exit(self, code: str) -> Optional[dict]:
+        """
+        S1 신호용 min_15m_bars 미만이어도 청산·S2 판단에 쓸 마지막 지표 행.
+        (기존에는 bars_ready 가 False 면 evaluate_position 자체를 호출하지 않아 ATR 등 청산이 멈춤)
+        """
+        try:
+            _bd = (self.app.bars_data or {}).get(code)
+            if _bd is None or getattr(_bd, "empty", True):
+                return None
+            if len(_bd) < 2:
+                return None
+            df_with_ind = TradingStrategy.calculate_indicators(_bd, self.app.settings)
+            return df_with_ind.iloc[-1].to_dict()
+        except Exception:
+            return None
 
     def _parse_ws_vs_prev_close(self, info: dict) -> Tuple[Optional[float], Optional[float]]:
         """
@@ -450,20 +487,65 @@ class SignalEngine:
                 info['confluence'] = f"봉 충전 {current_bar_count}/{_min_sig_bars} (신호·매매 대기)"
                 info['met_ratio'] = 0.0
 
-            # 7. 실시간 보유 포지션: 봉 기준 충족 시에만 청산·S2 판단 (충전 중에는 매매 없음)
+            # 청산·S2 표시 공통: 마지막 지표 행 (봉 부족 시 보유면 보조 계산)
+            eval_ind: Optional[dict] = None
+            if bars_ready:
+                eval_ind = last_row
+            elif self._has_open_position(code):
+                eval_ind = self._indicator_last_row_for_exit(code)
+
+            # 보유 중이면 신호상태는 S1 합치도 대신 S2 추매 합치도
+            if self._code_in_virtual_positions(code) and eval_ind is not None:
+                try:
+                    vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+                    pos_h = vp.get(code) or vp.get(str(code).zfill(6))
+                    if pos_h is None:
+                        nk = str(code).zfill(6)
+                        for k, v in vp.items():
+                            if str(k).split("_")[0].zfill(6) == nk:
+                                pos_h = v
+                                break
+                    if isinstance(pos_h, dict):
+                        stg = int(pos_h.get("entry_n", pos_h.get("stage", 1)) or 1)
+                        if stg >= 2:
+                            info["confluence"] = "추매(S2) 완료"
+                            info["met_ratio"] = 1.0
+                        else:
+                            s2_txt, s2_mr = (
+                                TradingStrategy.compute_s2_confluence_display_text(
+                                    pos_h,
+                                    self.app.settings,
+                                    eval_ind,
+                                    market_trend=getattr(
+                                        self.app, "market_trend", "UP"
+                                    )
+                                    or "UP",
+                                    curr_dt=datetime.now(),
+                                    sel_track_hint=info.get("sel_track")
+                                    or info.get("SelTrack"),
+                                    now_price=float(now_price),
+                                )
+                            )
+                            info["confluence"] = s2_txt
+                            info["met_ratio"] = float(s2_mr)
+                except Exception:
+                    pass
+
+            # 7. 실시간 보유 포지션: 청산·S2 (지표 행 확보 시; 봉 수 부족 시에도 보유면 보조 행 사용)
             bid_ask_ratio = float(self._to_scalar(info.get('bid_ask_ratio', 1.0), 1.0))
             ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
             vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
 
-            if bars_ready and not is_wl_only and _session_ok:
+            if eval_ind is not None and not is_wl_only and _session_ok:
                 res = self.app.strategy_engine.evaluate_position(
                     code,
                     now_price,
-                    ind=last_row,
+                    ind=eval_ind,
                     is_power_exhausted=is_power_exhausted,
                     bid_ask_ratio=bid_ask_ratio,
                     ask_bid_ratio=ask_bid_ratio,
                     vol_power=vol_power,
+                    sel_track=info.get("sel_track") or info.get("SelTrack"),
                 )
                 if res["action"] != "HOLD":
                     self.app._on_strategy_action_needed(
@@ -576,6 +658,13 @@ class SignalEngine:
                             )
                 except Exception:
                     atr_cell = "—"
+                # 미보유일 때만 S1 매수 신호 → 타점 문구 (보유 시 위에서 S2 합치도 유지)
+                try:
+                    if is_buy and not self._code_in_virtual_positions(code):
+                        info["confluence"] = "🔥 타점 포착"
+                        info["status_text"] = "🔥 타점 포착"
+                except Exception:
+                    pass
                 full_values = (
                     f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
                     code,
@@ -596,8 +685,7 @@ class SignalEngine:
                 
                 # 합치도 기반 색상 태그
                 m_ratio = float(self._to_scalar(info.get('met_ratio', 0.0), 0.0))
-                if is_buy:
-                    info['confluence'] = "🔥 타점 포착"
+                if is_buy and not self._code_in_virtual_positions(code):
                     final_tags.append("status_high")
                 elif m_ratio >= 0.7:
                     final_tags.append("status_high")
