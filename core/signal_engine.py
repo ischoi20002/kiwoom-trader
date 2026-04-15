@@ -429,6 +429,32 @@ class SignalEngine:
                         if vol_power < min_p or ask_bid_ratio < min_r:
                             is_buy = False
                             info['confluence'] = "수급 대기"
+                            # 종합 리포트에서 스마트 진입 거절 건수 집계용 — 동일 15분봉당 1회만 기록
+                            try:
+                                _sb_log_key = "_smart_buy_block_logged_bar"
+                                if info.get(_sb_log_key) != current_bar_count:
+                                    info[_sb_log_key] = current_bar_count
+                                    _sl = getattr(self.app, "session_logger", None)
+                                    if _sl:
+                                        _sl.log(
+                                            "smart_buy_blocked",
+                                            {
+                                                "code": str(code).zfill(6),
+                                                "name": str(info.get("name", "")),
+                                                "vol_power": vol_power,
+                                                "ask_bid_ratio": ask_bid_ratio,
+                                                "min_vp": min_p,
+                                                "min_ba": min_r,
+                                                "sig_type": str(
+                                                    self._to_scalar(
+                                                        last_sig.get("Sig_Type", ""),
+                                                        "",
+                                                    )
+                                                ),
+                                            },
+                                        )
+                            except Exception:
+                                pass
 
                 # 관심목록 전용: Type B 매수 신호만 (감시와 동일 필터 후 B만)
                 if is_wl_only and is_buy:

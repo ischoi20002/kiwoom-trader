@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import json
+import re
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 import numpy as np
@@ -280,6 +281,51 @@ def _reason_matches_smart_buy(reason_series: pd.Series) -> pd.Series:
     return r.str.contains(r'SmartBuy|SMART_BUY|smart_buy', case=False, na=False, regex=True)
 
 
+def _tag_reason_for_virtual_smart_buy_stats(
+    reason: str,
+    action: str,
+    sig_type: str,
+    settings: Optional[Dict[str, Any]],
+) -> str:
+    """
+    실시간 가상 체결은 포지션 `reason`에 `SmartBuy|` 접두를 남기지 않는 경우가 많아
+    종합 리포트 스마트 진입 집계가 0으로 나오는 문제를 완화한다.
+
+    설정에서 해당 경로 Smart Buy가 켜져 있으면, **이미 체결된** 매수 진입은 SB 조건을 통과한 것으로 보고
+    백테스트와 동일한 `SmartBuy|` 접두를 붙인다. (감시 세션 JSONL과 무관; 거절 건수는 여전히 DF에 없음)
+    """
+    if not settings:
+        return str(reason or "")
+    r = str(reason or "")
+    if re.search(r"SmartBuy|SMART_BUY|smart_buy", r, re.I):
+        return r
+    ru = r.upper()
+    if "SYNCED" in ru or "RECOVERED" in ru:
+        return r
+    st = str(sig_type or "").upper()
+    is_b = "TYPE_B" in st or "TYPE_B" in ru
+    act_u = str(action or "").upper()
+    is_s2 = "BUY2" in act_u
+    try:
+        if is_s2:
+            if is_b:
+                if bool(settings.get("use_smart_buy_s2_b", True)):
+                    return f"SmartBuy|{r}" if r else "SmartBuy|S2"
+            else:
+                if bool(settings.get("use_smart_buy_s2", True)):
+                    return f"SmartBuy|{r}" if r else "SmartBuy|S2"
+        else:
+            if is_b:
+                if bool(settings.get("use_smart_buy_b", True)):
+                    return f"SmartBuy|{r}" if r else "SmartBuy|SIG"
+            else:
+                if bool(settings.get("use_smart_buy_a", False)):
+                    return f"SmartBuy|{r}" if r else "SmartBuy|SIG"
+    except Exception:
+        pass
+    return r
+
+
 def _build_regime_lookup_prev_day(
     market_df: pd.DataFrame | None,
     vix_df: pd.DataFrame | None,
@@ -531,10 +577,16 @@ def _html_stock_row_regime_badge(
 def virtual_executions_to_trades_df(
     history: List[Dict[str, Any]],
     open_positions: Optional[List[Dict[str, Any]]] = None,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """
     가상 포지션 이력·보유를 포트폴리오 백테스트 리포트와 동일한 집계(`build_virtual_portfolio_analysis_html`)에
     넘길 수 있도록 체결 로그 형태 DataFrame으로 변환합니다.
+
+    Parameters
+    ----------
+    settings
+        있으면 Smart Buy 통과 집계용으로 BUY 행 Reason에 `SmartBuy|` 접두를 보강한다.
     """
     rows: List[Dict[str, Any]] = []
     open_positions = open_positions or []
@@ -592,6 +644,9 @@ def virtual_executions_to_trades_df(
 
             d_entry = _parse_dt(h.get("entry_time")) or pd.Timestamp.now()
             for act, px, qy in buy_specs:
+                _reason_row = _tag_reason_for_virtual_smart_buy_stats(
+                    entry_reason, act, sig_type, settings
+                )
                 rows.append(
                     {
                         "Code": code,
@@ -600,7 +655,7 @@ def virtual_executions_to_trades_df(
                         "Qty": qy,
                         "Fee": 0.0,
                         "Sig_Type": sig_type,
-                        "Reason": entry_reason,
+                        "Reason": _reason_row,
                         "Return": 0.0,
                         "Date": d_entry,
                     }
@@ -636,6 +691,7 @@ def virtual_executions_to_trades_df(
             ap = float(p.get("avg_price") or 0)
             iq = int(p.get("qty") or 0)
             d_entry = _parse_dt(p.get("entry_time")) or pd.Timestamp.now()
+            _er_open = str(p.get("reason", "") or "")
             rows.append(
                 {
                     "Code": code,
@@ -644,7 +700,9 @@ def virtual_executions_to_trades_df(
                     "Qty": iq,
                     "Fee": 0.0,
                     "Sig_Type": sig_type,
-                    "Reason": str(p.get("reason", "") or ""),
+                    "Reason": _tag_reason_for_virtual_smart_buy_stats(
+                        _er_open, "BUY", sig_type, settings
+                    ),
                     "Return": 0.0,
                     "Date": d_entry,
                 }
@@ -658,7 +716,9 @@ def virtual_executions_to_trades_df(
                         "Qty": 0,
                         "Fee": 0.0,
                         "Sig_Type": sig_type,
-                        "Reason": str(p.get("reason", "") or ""),
+                        "Reason": _tag_reason_for_virtual_smart_buy_stats(
+                            _er_open, "BUY2", sig_type, settings
+                        ),
                         "Return": 0.0,
                         "Date": d_entry,
                     }
@@ -703,15 +763,124 @@ def virtual_executions_to_trades_df(
         return pd.DataFrame()
 
 
+def collect_session_jsonl_days_for_virtual_history(
+    history: Optional[List[Dict[str, Any]]],
+    open_positions: Optional[List[Dict[str, Any]]],
+) -> List[str]:
+    """
+    가상 청산 이력·보유의 진입·청산 일자 최소~최대 구간에서,
+    `realtime_session_logs/YYYY-MM-DD/session_events.jsonl` 파일이 실제로 있는 날만 나열합니다.
+    이력과 겹치는 날만 스캔해 불필요한 파일 접근을 줄입니다.
+    """
+    from datetime import date as date_cls
+
+    def _parse_dt(v: Any) -> Optional[pd.Timestamp]:
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return None
+        try:
+            s = str(v).strip().replace("T", " ")
+            if len(s) >= 19:
+                return pd.to_datetime(s[:19])
+            return pd.to_datetime(s)
+        except Exception:
+            try:
+                return pd.to_datetime(v)
+            except Exception:
+                return None
+
+    ts_list: List[pd.Timestamp] = []
+    try:
+        for coll in (history or [], open_positions or []):
+            for item in coll:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("entry_time", "exit_datetime", "exit_date"):
+                    t = _parse_dt(item.get(key))
+                    if t is not None:
+                        ts_list.append(t)
+                ed = str(item.get("exit_date") or "").strip()
+                ex = str(item.get("exit_time") or "").strip()
+                if ed and len(ed) >= 10 and ed[4] == "-":
+                    t = _parse_dt(f"{ed[:10]} {ex}".strip())
+                    if t is not None:
+                        ts_list.append(t)
+    except Exception:
+        pass
+
+    if not ts_list:
+        try:
+            t0 = pd.Timestamp.now().normalize()
+            d_min = d_max = t0.date()
+        except Exception:
+            d_min = d_max = date_cls.today()
+    else:
+        try:
+            d_min = min(ts_list).date()
+            d_max = max(ts_list).date()
+        except Exception:
+            try:
+                t0 = pd.Timestamp.now().normalize()
+                d_min = d_max = t0.date()
+            except Exception:
+                d_min = d_max = date_cls.today()
+
+    out: List[str] = []
+    try:
+        from reporting.realtime_session_logger import RealtimeSessionLogger
+
+        lg = RealtimeSessionLogger()
+        cur = d_min
+        while cur <= d_max:
+            ds = cur.isoformat()
+            try:
+                if os.path.isfile(lg.jsonl_path(ds)):
+                    out.append(ds)
+            except Exception:
+                pass
+            cur = cur + timedelta(days=1)
+    except Exception:
+        pass
+    return out
+
+
+def count_session_kind_events(kind: str, days: Iterable[str]) -> int:
+    """
+    지정 일자들의 세션 JSONL에서 최상위 `kind` 필드가 일치하는 이벤트 건수를 합산합니다.
+    """
+    try:
+        from reporting.realtime_session_logger import RealtimeSessionLogger
+    except Exception:
+        return 0
+
+    k = str(kind or "").strip()
+    if not k:
+        return 0
+    total = 0
+    try:
+        lg = RealtimeSessionLogger()
+    except Exception:
+        return 0
+    for day in days:
+        try:
+            for ev in lg.read_events(day):
+                if str(ev.get("kind", "")).strip() == k:
+                    total += 1
+        except Exception:
+            continue
+    return total
+
+
 def build_virtual_portfolio_analysis_html(
     df: pd.DataFrame,
     *,
     open_holdings_count: int = 0,
+    session_smart_buy_blocked: int = 0,
 ) -> str:
     """
     `dynamic_trade_report.html`의 「백테스트 분석 통계」와 동일한 구조의 HTML을
     가상 체결 DataFrame(`virtual_executions_to_trades_df`) 기준으로 생성합니다.
-    신호 거절·시장 레짐 행은 실시간 로그에 없으므로 해당 행은 0 또는 안내 문구로 둡니다.
+    REJECTED_SIG·시장 레짐 등 백테스트 전용 행은 가상 DF에 없을 수 있어 0 또는 안내로 둡니다.
+    스마트 진입 거절(수급)은 `session_smart_buy_blocked`로 세션 로그 집계를 넘길 수 있습니다.
     """
     if df is None or df.empty:
         return (
@@ -765,8 +934,7 @@ def build_virtual_portfolio_analysis_html(
             ).sum()
         )
         count_rejected = 0
-        count_smart_buy_rejected = 0
-        total_signals = count_smart_buy + count_rejected
+        count_smart_buy_rejected = max(0, int(session_smart_buy_blocked or 0))
         total_smart_buy_events = count_smart_buy + count_smart_buy_rejected
         pass_rate = (
             (count_smart_buy / max(1, total_smart_buy_events)) * 100
@@ -780,9 +948,14 @@ def build_virtual_portfolio_analysis_html(
     except Exception:
         count_a = count_b = count_s2 = 0
         count_smart_buy = count_smart_exit = 0
-        count_rejected = count_smart_buy_rejected = 0
-        total_signals = total_smart_buy_events = 0
-        pass_rate = 0.0
+        count_rejected = 0
+        count_smart_buy_rejected = max(0, int(session_smart_buy_blocked or 0))
+        total_smart_buy_events = count_smart_buy + count_smart_buy_rejected
+        pass_rate = (
+            (count_smart_buy / max(1, total_smart_buy_events)) * 100
+            if total_smart_buy_events > 0
+            else 0.0
+        )
         hold_count = int(open_holdings_count or 0)
 
     a_s1_p, a_s1_i = [], []
@@ -878,8 +1051,11 @@ def build_virtual_portfolio_analysis_html(
     <div id="analysis-stats" class="analysis-report-section depth-section">
         <h2 class="analysis-main-title">📋 백테스트 분석 통계 (가상 체결 기준)</h2>
         <p class="analysis-main-lead">
-            포트폴리오 백테스트 리포트와 동일한 표·집계 구조입니다. 다만 실시간 세션에는 REJECTED_SIG·시장 레짐
-            입력이 없어 해당 항목은 0 또는 안내로 표시됩니다.
+            포트폴리오 백테스트 리포트와 동일한 표·집계 구조입니다. 스마트 진입 &quot;통과&quot; 수는
+            포지션·설정을 바탕으로 추정합니다(체결된 매수에 Smart Buy가 켜진 타입이면 통과로 태깅).
+            스마트 진입 거절(수급)은 감시 세션 JSONL의 <code>smart_buy_blocked</code>를
+            가상 이력 일자 구간에서 합산합니다(해당 날짜에 로그 파일이 있을 때).
+            REJECTED_SIG·시장 레짐 등은 가상 DF에 없으면 0 또는 안내로 표시됩니다.
         </p>
 
         <h3 class="analysis-h3">1. 실행·신호 요약</h3>
@@ -889,11 +1065,10 @@ def build_virtual_portfolio_analysis_html(
                 <tr><td>청산 행 (SELL/HOLD)</td><td class="num">{count_fills}건</td><td style="color:var(--dim);font-size:0.82rem;">로그 상 청산·평가 행 수</td></tr>
                 <tr><td>완료 라운드트립</td><td class="num">{completed_rounds}건</td><td style="color:var(--dim);font-size:0.82rem;">종목별 매수체인→매도 단위</td></tr>
                 <tr><td>미청산 보유 종목 수</td><td class="num">{hold_count}종목</td><td style="color:var(--dim);font-size:0.82rem;">리포트 생성 시점 기준</td></tr>
-                <tr><td>스마트 진입 통과 / 시도</td><td class="num">{count_smart_buy} / {total_smart_buy_events}건</td><td style="color:var(--dim);font-size:0.82rem;">통과율 {pass_rate:.1f}%</td></tr>
-                <tr><td>스마트 진입 거절 (수급)</td><td class="num">{count_smart_buy_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">실시간 로그 미포함</td></tr>
+                <tr><td>스마트 진입 통과 / 시도</td><td class="num">{count_smart_buy} / {total_smart_buy_events}건</td><td style="color:var(--dim);font-size:0.82rem;">통과율 {pass_rate:.1f}% · 통과는 설정+체결 추정</td></tr>
+                <tr><td>스마트 진입 거절 (수급)</td><td class="num">{count_smart_buy_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">세션 <code>smart_buy_blocked</code>·15분봉당 1회</td></tr>
                 <tr><td>신호 거절 전체 (REJECTED_SIG)</td><td class="num">{count_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">실시간 로그 미포함</td></tr>
                 <tr><td>스마트 청산 (SELL·스마트 패턴)</td><td class="num">{count_smart_exit}건</td><td style="color:var(--dim);font-size:0.82rem;">Smart Exit 변형 포함</td></tr>
-                <tr><td>신호 후보 대비 완료 라운드 비중</td><td class="num">{100.0 * completed_rounds / max(1, total_signals):.1f}%</td><td style="color:var(--dim);font-size:0.82rem;">분모 {total_signals}건</td></tr>
                 <tr><td>매수 행·Reason 기준 TYPE_A / TYPE_B</td><td class="num">{count_a} / {count_b}건</td><td style="color:var(--dim);font-size:0.82rem;">참고용</td></tr>
                 <tr><td>추매 관련 매수 행</td><td class="num">{count_s2}건</td><td style="color:var(--dim);font-size:0.82rem;">BUY2·ADDON·Reason 키워드</td></tr>
             </tbody>
@@ -1530,7 +1705,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     count_rejected = len(df_stats[df_stats['Action'] == 'REJECTED_SIG']) if not df_stats.empty else 0
     _sb_rej = _reason_matches_smart_buy(df_stats['Reason']) if not df_stats.empty else pd.Series(dtype=bool)
     count_smart_buy_rejected = int(((df_stats['Action'] == 'REJECTED_SIG') & _sb_rej).sum()) if not df_stats.empty else 0
-    total_signals = count_smart_buy + count_rejected
     total_smart_buy_events = count_smart_buy + count_smart_buy_rejected
     pass_rate = (count_smart_buy / max(1, total_smart_buy_events)) * 100 if total_smart_buy_events > 0 else 0.0
     
@@ -1633,7 +1807,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 <tr><td>스마트 진입 거절 (수급)</td><td class="num">{count_smart_buy_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">REJECTED_SIG 중 SmartBuy 패턴</td></tr>
                 <tr><td>신호 거절 전체 (REJECTED_SIG)</td><td class="num">{count_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">df_stats 기준</td></tr>
                 <tr><td>스마트 청산 (SELL·스마트 패턴)</td><td class="num">{count_smart_exit}건</td><td style="color:var(--dim);font-size:0.82rem;">Smart Exit 변형 포함</td></tr>
-                <tr><td>신호 후보 대비 완료 라운드 비중</td><td class="num">{100.0 * completed_rounds / max(1, total_signals):.1f}%</td><td style="color:var(--dim);font-size:0.82rem;">분모 {total_signals}건(SmartBuy 관련+REJECTED_SIG), 분자는 완료 라운드 {completed_rounds}건</td></tr>
                 <tr><td>매수 행·Reason 기준 TYPE_A / TYPE_B</td><td class="num">{count_a} / {count_b}건</td><td style="color:var(--dim);font-size:0.82rem;">참고용(Reason 문자열)</td></tr>
                 <tr><td>추매 관련 매수 행</td><td class="num">{count_s2}건</td><td style="color:var(--dim);font-size:0.82rem;">BUY2·ADDON·Reason 키워드</td></tr>
             </tbody>

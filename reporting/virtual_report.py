@@ -1020,9 +1020,26 @@ def generate_virtual_narrative_report(
     try:
         _fn_df, _fn_html, _imp_err = _resolve_virtual_analysis_helpers()
         if _fn_df is not None and _fn_html is not None:
-            _adf = _fn_df(history_raw, open_positions)
+            _adf = _fn_df(history_raw, open_positions, _s)
+            _sb_blocked = 0
+            try:
+                from reporting.trade_report import (
+                    collect_session_jsonl_days_for_virtual_history,
+                    count_session_kind_events,
+                )
+
+                _log_days = collect_session_jsonl_days_for_virtual_history(
+                    history_raw, open_positions
+                )
+                _sb_blocked = count_session_kind_events(
+                    "smart_buy_blocked", _log_days
+                )
+            except Exception:
+                pass
             portfolio_analysis_html = _fn_html(
-                _adf, open_holdings_count=len(open_positions)
+                _adf,
+                open_holdings_count=len(open_positions),
+                session_smart_buy_blocked=_sb_blocked,
             )
         else:
             _stat_err_html = (

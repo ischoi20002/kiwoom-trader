@@ -5,6 +5,14 @@
 
 ---
 
+## 0.3.13 (2026-04-15)
+
+- 백테스트·가상 종합 리포트 「실행·신호 요약」표에서 **신호 후보 대비 완료 라운드 비중** 행 제거(단위 불일치로 해석이 어려움) (`reporting/trade_report.py`)
+
+## 0.3.12 (2026-04-15)
+
+- 종합(가상) 리포트 **스마트 진입 거절(수급)**: 실시간 감시에서 Smart Buy 미통과 시 세션 이벤트 `smart_buy_blocked`를 남기고(15분봉·종목당 1회), 가상 이력 일자 구간의 `session_events.jsonl`에서 건수를 합산해 표시 (`core/signal_engine.py`, `reporting/trade_report.py`, `reporting/virtual_report.py`)
+
 ## 0.3.11 (2026-04-15)
 
 - 일일 결산·종합 리포트 **15분 Plotly 차트**: 한국 시장 관례에 맞춰 **상승 봉·상승 거래량 막대 = 빨강(`#BF616A`)**, **하락 = 파랑(`#5E81AC`, MA선과 구분)** (`reporting/daily_settlement_report.py`; 종합 리포트는 동일 `_build_plotly_15m_section` 사용)
