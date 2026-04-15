@@ -1749,7 +1749,7 @@ class SimpleBacktester:
 
         # [Perf] Cache Smart Filter & Exit settings to avoid repeated dictionary lookups in hot loops
         s = self.settings
-        self.use_sb_a = s.get('use_smart_buy_a', True)
+        self.use_sb_a = s.get("use_smart_buy_a", False)  # Type A SB UI 비노출 — defaults와 동일하게 기본 False
         self.use_sb_b = s.get('use_smart_buy_b', True)
         self.use_sb_s2_a = s.get("use_smart_buy_s2", True)
         self.use_sb_s2_b = s.get("use_smart_buy_s2_b", True)

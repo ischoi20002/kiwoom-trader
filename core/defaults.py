@@ -66,8 +66,10 @@ DEFAULT_SETTINGS = {
     "reconcile_remove_grace_seconds": 180,
     # 서버 잔고 목록에 종목이 연속으로 없을 때만 로컬 제거(동기화 주기마다 1씩 증가)
     "reconcile_remove_confirm_syncs": 2,
-    # 실매도 종료 직후 잔고 API 유령으로 SYNC_EXIT가 매매종료내역에 쌓이는 것 억제(시간)
+    # 실매도 종료 직후 잔고 API 유령(SYNCED) 제거 시 '직전 실매도' 판정 윈도우(레거시·시간 단위, 분으로 상한 변환됨)
     "sync_ghost_suppress_hours": 12.0,
+    # SYNCED 유령 제거 전용(분). 너무 길면 동일 종목 당일 재매도 후 매매종료내역 누락 가능
+    "sync_ghost_suppress_minutes": 15.0,
     # 동일 종목에 최근 실매도 종료 이력이 있을 때 신규 SYNCED 자동등록 생략(더 짧게 — 재매수 동기화 오판 완화)
     "sync_ghost_new_synced_hours": 1.0,
     # 종목 선정 시 네이버 실시간 API로 거래정지(HALTED) 종목 제외 (실시간 선정만)

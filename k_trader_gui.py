@@ -690,8 +690,6 @@ class KiwoomApp:
             # CHE가 먼저 처리된 경우 참고가로 덮어쓰지 않음
             if oid and oid in self._exchange_fill_order_ids:
                 return
-            if oid:
-                self._exchange_fill_order_ids.add(oid)
             try:
                 try:
                     _fs = capture_supply_snapshot(self, code)
@@ -712,7 +710,7 @@ class KiwoomApp:
                 code, side, reason, channel="REST"
             )
             snapshot = self.portfolio.capture_snapshot(code, fill_price, reason=snap_reason)
-            self.portfolio.on_fill(
+            applied = self.portfolio.on_fill(
                 code,
                 side,
                 fill_price,
@@ -722,10 +720,20 @@ class KiwoomApp:
                 snapshot=snapshot,
                 fill_channel="exchange",
             )
-            self.log(
-                f"✅ [체결 동기화] REST 접수 직후 가상체결 {code} "
-                f"{'매수' if side == 'buy' else '매도'} {qty}주 ({int(fill_price):,}원)"
-            )
+            # on_fill이 매도 스킵(False)인데 여기서 oid를 먼저 넣으면, 뒤따른 CHE가 on_fill을 영원히 못 타
+            # 매매종료내역 누락으로 이어질 수 있음 — 실제 반영(True)일 때만 중복 마킹
+            if oid and applied:
+                self._exchange_fill_order_ids.add(oid)
+            if applied:
+                self.log(
+                    f"✅ [체결 동기화] REST 접수 직후 가상체결 {code} "
+                    f"{'매수' if side == 'buy' else '매도'} {qty}주 ({int(fill_price):,}원)"
+                )
+            elif str(side or "").lower() == "sell":
+                self.log(
+                    f"⚠️ [체결 동기화] REST 매도 체결은 포트폴리오에 미반영({code}) "
+                    f"— 로컬 보유 없음 등. CHE 또는 다음 동기화에서 재시도됩니다."
+                )
             try:
                 tc = getattr(self, "trading_controller", None)
                 if tc and oid:
@@ -788,11 +796,19 @@ class KiwoomApp:
                 code, side, None, channel="EXEC"
             )
             snapshot = self.portfolio.capture_snapshot(code, price, reason=snap_reason)
-            self.portfolio.on_fill(
+            applied = self.portfolio.on_fill(
                 code, side, price, qty, snapshot=snapshot, fill_channel="exchange"
             )
-            self.log(f"✅ [체결] {code} {'매수' if side=='buy' else '매도'} {qty}주 완료 ({price:,}원)")
-            if oid:
+            if applied:
+                self.log(
+                    f"✅ [체결] {code} {'매수' if side == 'buy' else '매도'} {qty}주 완료 ({price:,}원)"
+                )
+            elif str(side or "").lower() == "sell":
+                self.log(
+                    f"⚠️ [체결] CHE 매도는 포트폴리오에 미반영({code}) "
+                    f"— 로컬 보유 없음(REST 선처리·동기화 순서 등). 주문번호로 재중복 시도 가능."
+                )
+            if oid and applied:
                 self._exchange_fill_order_ids.add(oid)
             try:
                 tc = getattr(self, "trading_controller", None)

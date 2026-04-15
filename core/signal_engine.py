@@ -390,8 +390,31 @@ class SignalEngine:
                 ma60_ratio = (now_price / ma60_scalar) * 100 if ma60_scalar > 0 else 0.0
                 
                 if is_buy:
-                    sig_type = str(self._to_scalar(last_sig.get('Sig_Type', 'TYPE_B'), 'TYPE_B'))
-                    use_sb_for_type = self.app.settings.get('use_smart_buy_a', True) if sig_type == "TYPE_A" else self.app.settings.get('use_smart_buy_b', True)
+                    sig_type = str(
+                        self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B")
+                    )
+                    # Smart Buy 스위치는 감시 '전략유형'(sel_track)과 맞춤. sel_track=A 인데 Sig_Type만 B면
+                    # Type B SB가 적용되어 '수급 대기'가 뜨는 불일치를 방지함.
+                    if _sel_tr == "A":
+                        use_sb_for_type = bool(
+                            self.app.settings.get("use_smart_buy_a", False)
+                        )
+                    elif _sel_tr == "B":
+                        use_sb_for_type = bool(
+                            self.app.settings.get("use_smart_buy_b", True)
+                        )
+                    else:
+                        st_up = str(sig_type).upper()
+                        if "TYPE_B" in st_up:
+                            use_sb_for_type = bool(
+                                self.app.settings.get("use_smart_buy_b", True)
+                            )
+                        elif "TYPE_A" in st_up:
+                            use_sb_for_type = bool(
+                                self.app.settings.get("use_smart_buy_a", False)
+                            )
+                        else:
+                            use_sb_for_type = False
                     
                     if use_sb_for_type:
                         vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))

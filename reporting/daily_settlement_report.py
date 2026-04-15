@@ -778,7 +778,9 @@ def _build_plotly_15m_section(
             ),
         )
 
-        # Nord 캔들(실제 고·저), MA는 Scatter, 거래량 단색 막대
+        # 캔들·거래량: 한국 시장 관례(상승=빨강, 하락=파랑). MA 색(#88C0D0 등)과 구분되게 하락은 #5E81AC.
+        _up = "#BF616A"
+        _dn = "#5E81AC"
         _cs_kw: Dict[str, Any] = dict(
             x=x,
             open=o,
@@ -786,8 +788,10 @@ def _build_plotly_15m_section(
             low=low_s,
             close=close_s,
             name="15m",
-            increasing_line_color="#A3BE8C",
-            decreasing_line_color="#BF616A",
+            increasing_line_color=_up,
+            increasing_fill_color=_up,
+            decreasing_line_color=_dn,
+            decreasing_fill_color=_dn,
         )
         if compress and ts_hover:
             _cs_kw["text"] = ts_hover
@@ -821,7 +825,7 @@ def _build_plotly_15m_section(
         )
 
         colors_vol = [
-            "#A3BE8C" if close_s.iloc[i] >= o.iloc[i] else "#BF616A" for i in range(len(work))
+            _up if close_s.iloc[i] >= o.iloc[i] else _dn for i in range(len(work))
         ]
         fig.add_trace(
             go.Bar(
@@ -1062,6 +1066,20 @@ def generate_daily_settlement_report_ex(
         orders = []
 
     summary = _compute_summary_from_app(app, day)
+
+    # 가상 청산 이력 매칭 시 제외할 종목(예: 지수·더미). 미설정 시 빈 집합.
+    try:
+        raw_excl = getattr(app, "daily_report_exclude_codes", None)
+        if raw_excl is None:
+            excl = set()
+        elif isinstance(raw_excl, (set, frozenset)):
+            excl = set(str(x).strip().zfill(6) for x in raw_excl if str(x).strip())
+        elif isinstance(raw_excl, (list, tuple)):
+            excl = set(str(x).strip().zfill(6) for x in raw_excl if str(x).strip())
+        else:
+            excl = set()
+    except Exception:
+        excl = set()
 
     by_code: Dict[str, List[Dict[str, Any]]] = {}
     for row in orders:

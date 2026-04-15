@@ -5,6 +5,22 @@
 
 ---
 
+## 0.3.11 (2026-04-15)
+
+- 일일 결산·종합 리포트 **15분 Plotly 차트**: 한국 시장 관례에 맞춰 **상승 봉·상승 거래량 막대 = 빨강(`#BF616A`)**, **하락 = 파랑(`#5E81AC`, MA선과 구분)** (`reporting/daily_settlement_report.py`; 종합 리포트는 동일 `_build_plotly_15m_section` 사용)
+
+## 0.3.10 (2026-04-15)
+
+- 일일 결산 HTML 생성: `_build_enriched_order_rows` 호출 시 누락되던 **`excl` 정의** 보강(기본 빈 집합·선택 `app.daily_report_exclude_codes`) — `NameError`로 배치 생성이 막히던 문제 수정 (`reporting/daily_settlement_report.py`)
+- 계좌 동기화: **`SYNCED` 유령 제거** 시 “직전 실매도” 판정을 **분 단위**(`sync_ghost_suppress_minutes`, 레거시 시간 키는 상한 변환)로 좁혀 과도한 억제 완화 (`core/portfolio_manager.py`, `core/defaults.py`, `settings.json`)
+- 체결 동기화: REST 선처리 시 주문번호를 **`on_fill` 성공 후에만** `_exchange_fill_order_ids`에 넣도록 변경 — 매도 스킵 뒤 CHE가 `on_fill`을 못 타 **매매종료내역 누락**될 수 있던 순서 버그 수정 (`k_trader_gui.py`); `on_fill`은 스킵 시 `False` 반환 (`core/portfolio_manager.py`)
+- **도구**: `order_history` → `virtual_history` 복구 스크립트 추가 (`tools/recover_missing_history_from_orders.py`)
+
+## 0.3.9 (2026-04-15)
+
+- 실시간 감시 S1 Smart Buy: **`use_smart_buy_a` 기본 `False`**(키 누락 시에도 Type A SB 비활성), **`sel_track`(A/B/AB)과 동일한 SB 스위치** 적용 — 전략 A 표시인데 Type B 수급 필터만 타던 불일치·「수급 대기」 오표시 완화 (`core/signal_engine.py`)
+- 백테스트: Type A Smart Buy 캐시 **`use_sb_a` 기본 `False`**로 `defaults`와 정합 (`backtest_engine.py`)
+
 ## 0.3.8 (2026-04-15)
 
 - 포지션 관리·종합 리포트·일일 결산: **관심목록으로 종목을 숨기거나 집계에서 제외하지 않음** — 관심은 신호 테스트 등 전용, 계좌 데이터는 전부 반영 (`virtual_tab.py`, `daily_settlement_report.py`, `watchlist_store.py` 설명 정리)

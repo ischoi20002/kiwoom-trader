@@ -348,22 +348,41 @@ class PortfolioManager:
     ) -> bool:
         """
         최근(설정 시간 이내) 동일 종목에 SELL 이벤트가 있는 종료 이력이 있으면 True.
-        within_hours가 None이면 sync_ghost_suppress_hours(기본 12h)를 사용합니다.
-        실매도 직후 잔고 API가 잘못된 잔여 수량으로 SYNCED 유령·SYNC_EXIT 허위 종료가 쌓이는 것을 막습니다.
+
+        - within_hours가 **지정된 경우**(예: SYNCED 자동등록 생략): 해당 시간(시) 윈도우.
+        - within_hours가 **None**(SYNCED 유령 포지션만 로컬 제거): **분 단위** 윈도우.
+          과거 기본 `sync_ghost_suppress_hours`(12h)는 동일 종목 당일 재매도 후에도 True가 되어
+          유령 제거만 하고 실제 체결 `on_fill`은 '보유 없음'으로 스킵 → 매매종료내역 누락이
+          발생할 수 있어, 분 설정(`sync_ghost_suppress_minutes`)을 쓰고 시간 키는 상한 변환만 허용합니다.
         """
         try:
             nc = self._normalize_stock_code(code)
             if not nc:
                 return False
-            try:
-                if within_hours is None:
-                    hrs = float(self.settings.get("sync_ghost_suppress_hours", 12.0))
-                else:
+            st = self.settings or {}
+            if within_hours is None:
+                try:
+                    raw_m = st.get("sync_ghost_suppress_minutes")
+                    if raw_m is not None and str(raw_m).strip() != "":
+                        mins = float(raw_m)
+                    else:
+                        try:
+                            hrs_legacy = float(st.get("sync_ghost_suppress_hours", 12.0))
+                        except (TypeError, ValueError):
+                            hrs_legacy = 12.0
+                        # 레거시(시간) 값은 분으로 바꾸되, 유령 억제에 쓰기엔 과도하게 길지 않게 상한
+                        mins = min(max(hrs_legacy * 60.0, 3.0), 45.0)
+                except (TypeError, ValueError):
+                    mins = 15.0
+                mins = max(2.0, min(mins, 180.0))
+                cutoff = datetime.now() - timedelta(minutes=mins)
+            else:
+                try:
                     hrs = float(within_hours)
-            except (TypeError, ValueError):
-                hrs = 12.0
-            hrs = max(0.25, min(hrs, 168.0))
-            cutoff = datetime.now() - timedelta(hours=hrs)
+                except (TypeError, ValueError):
+                    hrs = 12.0
+                hrs = max(0.25, min(hrs, 168.0))
+                cutoff = datetime.now() - timedelta(hours=hrs)
             for pos in reversed(self.virtual_history):
                 try:
                     pc = self._normalize_stock_code(str(pos.get("code", "")))
@@ -1044,9 +1063,15 @@ class PortfolioManager:
         reason=None,
         snapshot=None,
         fill_channel: str = "virtual",
-    ):
+    ) -> bool:
         """[v18.0] 체결(CHE) 데이터를 처리하여 포지션을 업데이트하며, 시점 스냅샷을 함께 기록합니다.
         fill_channel: \"virtual\" | \"exchange\" — 일별 세션 로그 구분용.
+
+        Returns
+        -------
+        bool
+            True: 포지션·히스토리 반영 후 save_db·GUI 스케줄까지 진행.
+            False: 매도인데 로컬 보유가 없어 스킵(이중 체결·동기화 선행 등) — 호출부에서 주문번호 중복 마킹 생략.
         """
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
@@ -1213,7 +1238,7 @@ class PortfolioManager:
                 )
             except Exception:
                 pass
-            return
+            return False
 
         self.save_db()
         self._schedule_gui_callback()
@@ -1249,6 +1274,8 @@ class PortfolioManager:
                 sl.log("fill", _fd)
         except Exception:
             pass
+
+        return True
 
     def clear_all(self):
         """모든 로컬 포지션을 초기화합니다."""
