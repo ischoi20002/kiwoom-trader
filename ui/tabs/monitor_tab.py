@@ -58,7 +58,6 @@ _DEFAULT_MONITOR_COL_WIDTHS: Dict[str, int] = {
     "VolPower": 52,
     "BidAsk": 118,
     "Volume": 72,
-    "TrdeVal": 64,
 }
 # 열을 너무 좁게 못 쓰게 하는 하한(px)
 _MONITOR_COL_MIN_WIDTH: Dict[str, int] = {
@@ -74,7 +73,6 @@ _MONITOR_COL_MIN_WIDTH: Dict[str, int] = {
     "VolPower": 44,
     "BidAsk": 72,
     "Volume": 56,
-    "TrdeVal": 48,
 }
 
 
@@ -321,7 +319,6 @@ class MonitorTab:
             "VolPower",
             "BidAsk",
             "Volume",
-            "TrdeVal",
         )
         # 워밍업 등에서 '신호상태' 열 값 패치 시 인덱스 오류 방지
         self._monitor_status_value_index = columns.index("Status")
@@ -338,7 +335,6 @@ class MonitorTab:
             "VolPower": "체결강도",
             "BidAsk": "Bid/Ask",
             "Volume": "거래량",
-            "TrdeVal": "대금(억)",
         }
         self._monitor_tree_columns = tuple(columns)
         col_widths = self._load_saved_monitor_col_widths(self._monitor_tree_columns)
@@ -357,17 +353,35 @@ class MonitorTab:
         # 1. 상단 트리뷰 (Active) - 높이 축소
         active_inner = ttk.Frame(active_frame)
         active_inner.pack(fill=tk.BOTH, expand=True)
+        def _monitor_col_anchor(col_id: str) -> str:
+            """
+            보유/감시 트리 **셀(body)** 정렬. 컬럼 헤더(heading)는 항상 가운데.
+            전략유형·신호상태는 중앙, 종목명은 왼쪽, 현재가(Price)부터 오른쪽 열은 수치·호가이므로 오른쪽.
+            """
+            if col_id == "Name":
+                return tk.W
+            if col_id in ("StratType", "Status"):
+                return tk.CENTER
+            if col_id in ("Score", "Code"):
+                return tk.CENTER
+            if col_id in (
+                "Price",
+                "AtrExit",
+                "VsPrev",
+                "Ratio",
+                "VolPower",
+                "BidAsk",
+                "Volume",
+            ):
+                return tk.E
+            return tk.CENTER
+
         self.tree_active_monitor = ttk.Treeview(
             active_inner, columns=columns, show="headings", selectmode="browse", height=3
         )
         for col in columns:
+            anchor = _monitor_col_anchor(col)
             self.tree_active_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
-            if col in ("Name", "StratType"):
-                anchor = tk.W
-            elif col in ("VsPrev", "BidAsk", "AtrExit"):
-                anchor = tk.E
-            else:
-                anchor = tk.CENTER
             mw = _MONITOR_COL_MIN_WIDTH.get(col, 32)
             cw = max(mw, int(col_widths[col]))
             self.tree_active_monitor.column(
@@ -386,13 +400,8 @@ class MonitorTab:
             wl_inner, columns=columns, show="headings", selectmode="browse"
         )
         for col in columns:
+            anchor = _monitor_col_anchor(col)
             self.tree_monitor.heading(col, text=headings[col], anchor=tk.CENTER)
-            if col in ("Name", "StratType"):
-                anchor = tk.W
-            elif col in ("VsPrev", "BidAsk", "AtrExit"):
-                anchor = tk.E
-            else:
-                anchor = tk.CENTER
             mw = _MONITOR_COL_MIN_WIDTH.get(col, 32)
             cw = max(mw, int(col_widths[col]))
             self.tree_monitor.column(
@@ -866,6 +875,17 @@ class MonitorTab:
         except Exception:
             return set()
 
+    def _monitor_target_codes_set(self) -> set:
+        """
+        선정된 **실시간 감시 대상** 코드(6자리).
+        보유만 하다 청산한 종목은 이 집합에 있을 때만 '실시간 감시 목록' 트리에 남긴다.
+        """
+        try:
+            mc = getattr(self.app.trading_controller, "monitor_codes", None) or []
+            return {str(c).split("_")[0].zfill(6) for c in mc}
+        except Exception:
+            return set()
+
     def _monitor_ratio_direction(self, ratio_val: object) -> str:
         """등락률 표시값 → up / down / stable (줄무늬 행 태그용)."""
         try:
@@ -930,10 +950,6 @@ class MonitorTab:
             vol_i = int(float(info.get("volume", 0) or 0))
         except (TypeError, ValueError):
             vol_i = 0
-        try:
-            tv = float(info.get("trde_val", 0) or 0)
-        except (TypeError, ValueError):
-            tv = 0.0
         atr_cell = "—"
         try:
             pos = pos_for_strat
@@ -982,7 +998,6 @@ class MonitorTab:
             f"{vol_pow:.1f}%",
             _monitor_fmt_bid_ask(info),
             f"{vol_i:,}",
-            f"{tv:,.1f}",
         )
 
     def maybe_reconcile_monitor_trees(
@@ -1021,6 +1036,8 @@ class MonitorTab:
                     continue
                 expected.add(nk)
 
+            mc_targets = self._monitor_target_codes_set()
+
             # 관심목록 전용 숨김: 양쪽 트리에서 제거
             for tree in (self.tree_monitor, self.tree_active_monitor):
                 if not tree:
@@ -1037,6 +1054,15 @@ class MonitorTab:
                     info = {"name": nk, "sel_track": "AB"}
                 values = self._compose_monitor_row_values(nk, info)
                 is_active = self._virtual_position_is_active(nk, vp)
+                # 비보유 + 감시 선정 외 종목 → 감시 목록으로 보내지 않고 양쪽 트리에서 제거
+                if not is_active and nk not in mc_targets:
+                    for tr in (self.tree_active_monitor, self.tree_monitor):
+                        if tr and tr.exists(nk):
+                            try:
+                                tr.delete(nk)
+                            except Exception:
+                                pass
+                    continue
                 target = self.tree_active_monitor if is_active else self.tree_monitor
                 other = self.tree_monitor if is_active else self.tree_active_monitor
                 if other.exists(nk):
@@ -1062,8 +1088,19 @@ class MonitorTab:
                 except Exception:
                     pass
 
-            # VP 에 없는데 보유 트리에만 남은 행 (감시 유니버스 밖이면 제거만)
-            self._purge_stale_active_monitor_rows(vp, mi, codes_allowed_for_watch=expected)
+            # VP 에 없는데 보유 트리에만 남은 행; 감시 목록 복구는 감시 대상일 때만
+            self._purge_stale_active_monitor_rows(vp, mi)
+
+            # 틱 경로 등으로 감시 트리에만 남은 '비감시' 행 정리
+            if self.tree_monitor:
+                for iid in list(self.tree_monitor.get_children()):
+                    z = str(iid).split("_")[0].zfill(6)
+                    if z in wl or z in mc_targets:
+                        continue
+                    try:
+                        self.tree_monitor.delete(iid)
+                    except Exception:
+                        pass
         except Exception as e:
             try:
                 print(f"[UI Error] maybe_reconcile_monitor_trees: {e}")
@@ -1093,12 +1130,11 @@ class MonitorTab:
         self,
         virtual_positions: Any,
         monitor_info: Optional[Dict[str, Any]] = None,
-        codes_allowed_for_watch: Optional[set] = None,
     ) -> None:
         """
         virtual_positions 에 없는데 보유 트리에만 남은 행을 제거한다.
         청산 직후 틱이 끊기면 update_view 디바운스(streak<2)로 영구히 '보유'로 남는 문제를 막는다.
-        monitor_info 에 있으면 감시 트리로 복구한다.
+        **실시간 감시 선정(monitor_codes)** 에 포함된 종목만 감시 목록 트리로 복구한다.
         """
         try:
             if not self.tree_active_monitor:
@@ -1124,12 +1160,7 @@ class MonitorTab:
                     self._vp_ever_in_holdings.pop(nk, None)
                 except Exception:
                     pass
-                may_watch = False
-                if codes_allowed_for_watch is not None:
-                    may_watch = nk in codes_allowed_for_watch
-                else:
-                    ent = self._monitor_info_entry(mi, nk)
-                    may_watch = bool(ent)
+                may_watch = nk in self._monitor_target_codes_set()
                 if not may_watch:
                     continue
                 if not self.tree_monitor:
@@ -1166,7 +1197,8 @@ class MonitorTab:
                 items = list(updates.items())
                 updates.clear()
                 wl = self._watchlist_codes_set()
-                
+                mc_targets = self._monitor_target_codes_set()
+
                 for iid_raw, (values, tag, _) in items:
                     # pending 키·monitor_info 키가 3490/003490로 섞여도 트리 iid는 항상 6자리로 통일
                     iid = str(iid_raw).split("_")[0].zfill(6)
@@ -1204,6 +1236,20 @@ class MonitorTab:
                         )
                     except Exception:
                         is_active = is_active_raw
+                    # 청산 후 비보유: 감시 선정 종목만 실시간 감시 목록에 표시
+                    if not is_active and iid not in mc_targets:
+                        for tr in (self.tree_active_monitor, self.tree_monitor):
+                            if tr and tr.exists(iid):
+                                try:
+                                    tr.delete(iid)
+                                except Exception:
+                                    pass
+                        try:
+                            self._vp_ui_inactive_streak.pop(iid, None)
+                            self._vp_ever_in_holdings.pop(iid, None)
+                        except Exception:
+                            pass
+                        continue
                     target_tree = self.tree_active_monitor if is_active else self.tree_monitor
                     other_tree = self.tree_monitor if is_active else self.tree_active_monitor
                     
@@ -1252,6 +1298,7 @@ class MonitorTab:
         # [v4.5.7] 가점(Score) 기준 내림차순 정렬하여 초기 삽입
         sorted_items = sorted(monitor_info.items(), key=lambda x: x[1].get('score', 0), reverse=True)
         wl = self._watchlist_codes_set()
+        mc_tgt = self._monitor_target_codes_set()
         try:
             vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
         except Exception:
@@ -1272,7 +1319,7 @@ class MonitorTab:
                 idx_active += 1
                 tag = f"active_{direction}_{row_type}"
                 self.tree_active_monitor.insert("", tk.END, iid=nk, values=values, tags=(tag,))
-            else:
+            elif nk in mc_tgt:
                 row_type = "even" if (idx_watch % 2 == 0) else "odd"
                 idx_watch += 1
                 tag = f"{direction}_{row_type}"

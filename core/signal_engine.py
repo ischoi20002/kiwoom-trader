@@ -213,8 +213,8 @@ class SignalEngine:
             pass
         return False
 
-    def on_tick_received(self, code, now_price, volume, trde_val, **kwargs):
-        """실시간 체결 데이터(Tick) 처리 본체"""
+    def on_tick_received(self, code, now_price, volume, _trde_val, **kwargs):
+        """실시간 체결 데이터(Tick) 처리 본체. `_trde_val` 은 호출 규격 유지용(감시 트리 대금 열 제거)."""
         try:
             if now_price <= 0: return # [v2.2] 유효하지 않은 가격 데이터 로직 진입 차단
             code = str(code).split("_")[0].zfill(6)
@@ -678,7 +678,6 @@ class SignalEngine:
                     _vp_str,
                     self._format_monitor_bid_ask_cell(info),
                     f"{int(volume):,}",
-                    f"{trde_val:,}",
                 )
                 
                 final_tags = []
