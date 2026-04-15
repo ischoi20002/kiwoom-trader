@@ -781,6 +781,7 @@ def _build_plotly_15m_section(
         # 캔들·거래량: 한국 시장 관례(상승=빨강, 하락=파랑). MA 색(#88C0D0 등)과 구분되게 하락은 #5E81AC.
         _up = "#BF616A"
         _dn = "#5E81AC"
+        # Plotly 5/6: 캔들 색은 increasing/decreasing 하위 dict(line, fillcolor) 사용
         _cs_kw: Dict[str, Any] = dict(
             x=x,
             open=o,
@@ -788,10 +789,8 @@ def _build_plotly_15m_section(
             low=low_s,
             close=close_s,
             name="15m",
-            increasing_line_color=_up,
-            increasing_fill_color=_up,
-            decreasing_line_color=_dn,
-            decreasing_fill_color=_dn,
+            increasing=dict(line=dict(color=_up), fillcolor=_up),
+            decreasing=dict(line=dict(color=_dn), fillcolor=_dn),
         )
         if compress and ts_hover:
             _cs_kw["text"] = ts_hover

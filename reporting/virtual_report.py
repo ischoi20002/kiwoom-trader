@@ -711,10 +711,18 @@ def _concat_15m_bars_for_trading_days(
     data_manager: Any,
     code_str: str,
     trading_days: List[date],
+    *,
+    rest_day_cache: Optional[Dict[Tuple[str, str], Any]] = None,
 ) -> Any:
     """
     거래일별 REST 15분봉을 순회해 이어붙인 DataFrame (없으면 None).
-    API 부하 완화를 위해 호출 간 짧은 대기.
+    API 부하 완화를 위해 **실제 REST를 호출한 뒤에만** 일자 간 짧은 대기.
+
+    Parameters
+    ----------
+    rest_day_cache
+        같은 `generate_virtual_narrative_report` 호출 안에서 공유하는 딕셔너리.
+        키 ``(종목코드 6자리, 'YYYY-MM-DD')`` 로 일자 단위 결과를 재사용해 중복 REST를 줄입니다.
     """
     import time
 
@@ -725,17 +733,33 @@ def _concat_15m_bars_for_trading_days(
         return None
     if not trading_days:
         return None
+    try:
+        n_code = str(code_str).strip().zfill(6)
+    except Exception:
+        n_code = "000000"
     parts: List[Any] = []
     n = len(trading_days)
     for i, d in enumerate(trading_days):
         day_s = d.strftime("%Y-%m-%d")
-        try:
-            chunk = fn(code_str, day_s, logger=None)
-            if chunk is not None and not getattr(chunk, "empty", True):
-                parts.append(chunk)
-        except Exception:
-            pass
-        if i + 1 < n:
+        key = (n_code, day_s)
+        chunk: Any = None
+        did_rest = False
+        if rest_day_cache is not None and key in rest_day_cache:
+            chunk = rest_day_cache[key]
+        else:
+            try:
+                chunk = fn(code_str, day_s, logger=None)
+                did_rest = True
+                if rest_day_cache is not None:
+                    try:
+                        rest_day_cache[key] = chunk
+                    except Exception:
+                        pass
+            except Exception:
+                chunk = None
+        if chunk is not None and not getattr(chunk, "empty", True):
+            parts.append(chunk)
+        if i + 1 < n and did_rest:
             try:
                 time.sleep(0.12)
             except Exception:
@@ -756,6 +780,8 @@ def _build_virtual_chart_section_html(
     section_id: str,
     display_name: str,
     code_str: str,
+    *,
+    rest_day_cache: Optional[Dict[Tuple[str, str], Any]] = None,
 ) -> str:
     """
     일일 결산과 동일한 15분 Plotly(캔들+거래량+MA+주문 세로선).
@@ -788,7 +814,12 @@ def _build_virtual_chart_section_html(
     df_15 = None
     if data_manager is not None:
         try:
-            df_15 = _concat_15m_bars_for_trading_days(data_manager, code_str, tdays)
+            df_15 = _concat_15m_bars_for_trading_days(
+                data_manager,
+                code_str,
+                tdays,
+                rest_day_cache=rest_day_cache,
+            )
         except Exception:
             df_15 = None
 
@@ -821,7 +852,8 @@ def _build_virtual_chart_section_html(
     btn_closed = f"{display_name} 15분봉 차트 펼치기"
     toolbar_hint = (
         f"15분봉 · 주문 시각 (진입~{'현재' if is_open else '청산'} · "
-        f"{_esc(entry_day)} ~ {_esc(end_day)}, 거래일 {len(tdays)}일분 REST 조회)"
+        f"{_esc(entry_day)} ~ {_esc(end_day)}, 거래일 {len(tdays)}일분 · "
+        f"동일 리포트 내 종목·일자 REST 캐시)"
     )
     return f"""
         <div class="vr-stock-chart-toolbar">
@@ -1014,6 +1046,9 @@ def generate_virtual_narrative_report(
     n_closed = sum(1 for p in history_display if isinstance(p, dict))
     total_pg = max(2, n_open + n_closed + 2)
 
+    # 통계·카드·차트 전역에서 사용 (통계 블록보다 먼저 정의해야 함)
+    _s = settings if isinstance(settings, dict) else {}
+
     # [1] 포트폴리오 백테스트 리포트와 같은 「백테스트 분석 통계」 (실시간 설정 파라미터는 제외)
     _emit_pg(0, total_pg, "백테스트형 통계·분석 블록 생성 중…")
     portfolio_analysis_html = ""
@@ -1067,7 +1102,8 @@ def generate_virtual_narrative_report(
 
     # [2] 좌측 바로가기용 앵커 (history_display 는 상단에서 이미 병합됨)
     nav_items: List[Tuple[str, str, str]] = [("v-top", "↑ 맨 위", "")]
-    _s = settings if isinstance(settings, dict) else {}
+    # 동일 리포트 생성 중 (종목 6자리, YYYY-MM-DD) → 15분봉 일자 REST 결과 재사용
+    rest_day_cache: Dict[Tuple[str, str], Any] = {}
     open_parts: List[str] = []
     pg_step = 1
     for i, p in enumerate(open_positions):
@@ -1097,6 +1133,7 @@ def generate_virtual_narrative_report(
                 nid,
                 str(p.get("name", "Unknown")),
                 code,
+                rest_day_cache=rest_day_cache,
             )
         except Exception as _e_ch:
             _ch = f'<p class="warn" style="color:#f7768e;">15분 차트: {_esc(str(_e_ch))}</p>'
@@ -1141,6 +1178,7 @@ def generate_virtual_narrative_report(
                 nid,
                 str(p.get("name", "Unknown")),
                 code,
+                rest_day_cache=rest_day_cache,
             )
         except Exception as _e_ch2:
             _ch = f'<p class="warn" style="color:#f7768e;">15분 차트: {_esc(str(_e_ch2))}</p>'

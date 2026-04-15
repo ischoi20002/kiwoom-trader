@@ -5,6 +5,18 @@
 
 ---
 
+## 0.3.16 (2026-04-15)
+
+- Plotly `go.Candlestick` 호환: `increasing_fill_color` 등 폐기 속성 제거 → `increasing`/`decreasing` dict(`line`, `fillcolor`)로 지정 (`reporting/daily_settlement_report.py` — 종합·일일 결산 15분 차트 공통)
+
+## 0.3.15 (2026-04-15)
+
+- 종합(가상) 리포트 생성 시 15분 차트용 REST를 **종목·거래일 단위로 한 번만** 호출하도록 동일 리포트 내 `rest_day_cache` 공유 (`reporting/virtual_report.py`). 캐시 히트 시 일자 간 `sleep(0.12)` 생략.
+
+## 0.3.14 (2026-04-15)
+
+- 종합(가상) 리포트 **백테스트 분석 통계**: 실행·신호와 전략·스테이지 실현을 **Type A/B × S1/S2 네 칸 + 합계** 한 표로 통합하고, 청산·세션·스마트 시도 등은 **전역·세션 요약** 표로 분리 (`reporting/trade_report.py`)
+
 ## 0.3.13 (2026-04-15)
 
 - 백테스트·가상 종합 리포트 「실행·신호 요약」표에서 **신호 후보 대비 완료 라운드 비중** 행 제거(단위 불일치로 해석이 어려움) (`reporting/trade_report.py`)

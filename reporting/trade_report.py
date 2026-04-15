@@ -281,6 +281,44 @@ def _reason_matches_smart_buy(reason_series: pd.Series) -> pd.Series:
     return r.str.contains(r'SmartBuy|SMART_BUY|smart_buy', case=False, na=False, regex=True)
 
 
+def _reason_str_has_smart_buy(reason: Any) -> bool:
+    """단일 Reason 문자열에 스마트 진입(통과) 태깅이 있는지."""
+    try:
+        s = str(reason or "")
+        return bool(re.search(r"SmartBuy|SMART_BUY|smart_buy", s, re.I))
+    except Exception:
+        return False
+
+
+def _bucket_virtual_buy_row(
+    action: Any,
+    sig_type: Any,
+    reason: Any,
+) -> str:
+    """
+    가상 체결 매수 행을 Type A/B × Stage S1/S2 네 칸 중 하나로 분류합니다.
+    반환: 'AS1'|'AS2'|'BS1'|'BS2'|'' (미분류)
+    """
+    try:
+        act_u = str(action or "").upper().strip()
+        if not act_u.startswith("BUY") and act_u != "ADDON":
+            return ""
+        is_s2 = any(
+            x in act_u for x in ("BUY2", "BUY_2ND", "ADDON", "S2")
+        ) or act_u == "ADDON"
+        st = str(sig_type or "").upper()
+        ru = str(reason or "").upper()
+        has_a = "TYPE_A" in st or "TYPE_A" in ru
+        has_b = "TYPE_B" in st or "TYPE_B" in ru
+        if has_a and not has_b:
+            return "AS2" if is_s2 else "AS1"
+        if has_b:
+            return "BS2" if is_s2 else "BS1"
+        return ""
+    except Exception:
+        return ""
+
+
 def _tag_reason_for_virtual_smart_buy_stats(
     reason: str,
     action: str,
@@ -877,10 +915,12 @@ def build_virtual_portfolio_analysis_html(
     session_smart_buy_blocked: int = 0,
 ) -> str:
     """
-    `dynamic_trade_report.html`의 「백테스트 분석 통계」와 동일한 구조의 HTML을
-    가상 체결 DataFrame(`virtual_executions_to_trades_df`) 기준으로 생성합니다.
-    REJECTED_SIG·시장 레짐 등 백테스트 전용 행은 가상 DF에 없을 수 있어 0 또는 안내로 둡니다.
-    스마트 진입 거절(수급)은 `session_smart_buy_blocked`로 세션 로그 집계를 넘길 수 있습니다.
+    가상 체결 DataFrame 기준 「백테스트 분석 통계」 HTML을 생성합니다.
+
+    - Type A/B × Stage S1/S2 네 칸 집표(완료 라운드·실현·매수 행·스마트 통과)와
+      전역·세션 요약(청산 행·미청산·스마트 시도/거절 등)을 분리합니다.
+    - REJECTED_SIG·시장 레짐 등은 가상 DF에 없으면 0 또는 안내로 둡니다.
+    - 스마트 진입 거절(수급)은 `session_smart_buy_blocked`로 세션 로그 집계를 넘길 수 있습니다.
     """
     if df is None or df.empty:
         return (
@@ -900,29 +940,6 @@ def build_virtual_portfolio_analysis_html(
         )
 
     try:
-        count_a = len(
-            df[
-                (df["Action"].astype(str).str.startswith("BUY", na=False))
-                & (df["Reason"].astype(str).str.contains("TYPE_A", case=False, na=False))
-            ]
-        )
-        count_b = len(
-            df[
-                (df["Action"].astype(str).str.startswith("BUY", na=False))
-                & (df["Reason"].astype(str).str.contains("TYPE_B", case=False, na=False))
-            ]
-        )
-        count_s2 = len(
-            df[
-                (df["Action"].astype(str).str.contains("BUY2", na=False))
-                | (df["Action"].astype(str) == "ADDON")
-                | (
-                    df["Reason"]
-                    .astype(str)
-                    .str.contains("Stage 2|ADDON", case=False, na=False)
-                )
-            ]
-        )
         _sb_on_buy = _reason_matches_smart_buy(df["Reason"])
         count_smart_buy = int(
             ((df["Action"].astype(str).str.startswith("BUY", na=False)) & _sb_on_buy).sum()
@@ -946,7 +963,6 @@ def build_virtual_portfolio_analysis_html(
             len(df[df["Action"].astype(str) == "HOLD"]["Code"].unique()),
         )
     except Exception:
-        count_a = count_b = count_s2 = 0
         count_smart_buy = count_smart_exit = 0
         count_rejected = 0
         count_smart_buy_rejected = max(0, int(session_smart_buy_blocked or 0))
@@ -1047,71 +1063,132 @@ def build_virtual_portfolio_analysis_html(
     cb1, cb2 = len(b_s1_p), len(b_s2_p)
     c_all_s1, c_all_s2 = len(total_s1_p), len(total_s2_p)
 
+    y_all_four = calc_yield(
+        a_s1_p + a_s2_p + b_s1_p + b_s2_p,
+        a_s1_i + a_s2_i + b_s1_i + b_s2_i,
+    )
+    profit_all_four = float(s_a1 + s_a2 + s_b1 + s_b2)
+
+    _BK = ("AS1", "AS2", "BS1", "BS2")
+    n_buy_by: Dict[str, int] = {k: 0 for k in _BK}
+    n_sb_by: Dict[str, int] = {k: 0 for k in _BK}
+    n_buy_unclassified = 0
+    try:
+        for _, row in df.iterrows():
+            act = str(row.get("Action", ""))
+            au = act.upper()
+            if not (au.startswith("BUY") or au == "ADDON"):
+                continue
+            bk = _bucket_virtual_buy_row(
+                act, row.get("Sig_Type"), row.get("Reason")
+            )
+            if not bk:
+                n_buy_unclassified += 1
+                continue
+            n_buy_by[bk] = int(n_buy_by.get(bk, 0)) + 1
+            if _reason_str_has_smart_buy(row.get("Reason")):
+                n_sb_by[bk] = int(n_sb_by.get(bk, 0)) + 1
+    except Exception:
+        pass
+
+    def _vr_td_num(v: int) -> str:
+        return f'<td class="num">{int(v)}</td>'
+
+    def _vr_td_money(v: float) -> str:
+        cl = "gain" if v >= 0 else "loss"
+        return f'<td class="num {cl}">{int(v):,}원</td>'
+
+    def _vr_td_pct(v: float) -> str:
+        cl = "gain" if v >= 0 else "loss"
+        return f'<td class="num {cl}">{v:+.2f}%</td>'
+
+    _pc_all = "gain" if profit_all_four >= 0 else "loss"
+    row_rounds = (
+        "<tr><td><b>완료 라운드 수</b></td>"
+        f"{_vr_td_num(ca1)}{_vr_td_num(ca2)}{_vr_td_num(cb1)}{_vr_td_num(cb2)}"
+        f'<td class="num"><b>{completed_rounds}</b></td></tr>'
+    )
+    row_profit = (
+        "<tr><td><b>총 실현손익(원)</b></td>"
+        f"{_vr_td_money(s_a1)}{_vr_td_money(s_a2)}{_vr_td_money(s_b1)}{_vr_td_money(s_b2)}"
+        f'<td class="num {_pc_all}"><b>{int(profit_all_four):,}원</b></td></tr>'
+    )
+    row_yield = (
+        "<tr><td><b>가중 수익률(%)</b></td>"
+        f"{_vr_td_pct(y_a1)}{_vr_td_pct(y_a2)}{_vr_td_pct(y_b1)}{_vr_td_pct(y_b2)}"
+        f"{_vr_td_pct(y_all_four)}</tr>"
+    )
+    row_sb = (
+        "<tr><td>스마트 진입 통과(매수 행)</td>"
+        f"{_vr_td_num(n_sb_by.get('AS1', 0))}{_vr_td_num(n_sb_by.get('AS2', 0))}"
+        f"{_vr_td_num(n_sb_by.get('BS1', 0))}{_vr_td_num(n_sb_by.get('BS2', 0))}"
+        f'<td class="num"><b>{count_smart_buy}</b></td></tr>'
+    )
+    row_nbuy = (
+        "<tr><td>매수 행 수(BUY·ADDON)</td>"
+        f"{_vr_td_num(n_buy_by.get('AS1', 0))}{_vr_td_num(n_buy_by.get('AS2', 0))}"
+        f"{_vr_td_num(n_buy_by.get('BS1', 0))}{_vr_td_num(n_buy_by.get('BS2', 0))}"
+        f'<td class="num"><b>{sum(n_buy_by.values())}</b></td></tr>'
+    )
+    unclassified_note = ""
+    if n_buy_unclassified > 0:
+        unclassified_note = (
+            f'<p class="depth-subnote" style="margin-top:8px;">'
+            f"TYPE_A/B로 분류되지 않은 매수 행 <b>{n_buy_unclassified}</b>건은 "
+            f"네 칸 합계(매수 행·스마트 진입 통과)에서 제외했습니다."
+            f"</p>"
+        )
+
     analysis_stats_html = f"""
     <div id="analysis-stats" class="analysis-report-section depth-section">
         <h2 class="analysis-main-title">📋 백테스트 분석 통계 (가상 체결 기준)</h2>
         <p class="analysis-main-lead">
-            포트폴리오 백테스트 리포트와 동일한 표·집계 구조입니다. 스마트 진입 &quot;통과&quot; 수는
-            포지션·설정을 바탕으로 추정합니다(체결된 매수에 Smart Buy가 켜진 타입이면 통과로 태깅).
-            스마트 진입 거절(수급)은 감시 세션 JSONL의 <code>smart_buy_blocked</code>를
-            가상 이력 일자 구간에서 합산합니다(해당 날짜에 로그 파일이 있을 때).
+            <b>Type A/B × Stage S1/S2</b> 네 칸 기준으로 완료 라운드·실현손익·매수 행·스마트 진입 통과(매수 행)를 한 표에 모았습니다.
+            스마트 진입 &quot;통과&quot;는 Reason 패턴·설정 기반 추정입니다.
+            스마트 진입 거절(수급)은 세션 <code>smart_buy_blocked</code>를 가상 이력 일자 구간에서 합산합니다.
             REJECTED_SIG·시장 레짐 등은 가상 DF에 없으면 0 또는 안내로 표시됩니다.
         </p>
 
-        <h3 class="analysis-h3">1. 실행·신호 요약</h3>
+        <h3 class="analysis-h3">1. Type×Stage·실행·실현</h3>
+        <p class="depth-subnote" style="margin-bottom:10px;">
+            열: 첫 진입 Type A/B × Stage 1(첫 매수만) / Stage 2(추매 포함).
+            합계 열: 건수·원화·매수 행·스마트 통과는 네 칸 합과 일치합니다.
+            가중 수익률 합계 열은 네 칸을 합산한 금액가중 평균입니다(단순 네 비율의 산술합 아님).
+        </p>
+        <table class="depth-table" style="min-width:720px;">
+            <thead>
+                <tr>
+                    <th>항목</th>
+                    <th class="num">Type A·S1</th>
+                    <th class="num">Type A·S2</th>
+                    <th class="num">Type B·S1</th>
+                    <th class="num">Type B·S2</th>
+                    <th class="num">합계</th>
+                </tr>
+            </thead>
+            <tbody>
+                {row_rounds}
+                {row_profit}
+                {row_yield}
+                {row_sb}
+                {row_nbuy}
+            </tbody>
+        </table>
+        {unclassified_note}
+
+        <h3 class="analysis-h3">2. 전역·세션 요약</h3>
         <table class="depth-table">
             <thead><tr><th>항목</th><th class="num">값</th><th>비고</th></tr></thead>
             <tbody>
                 <tr><td>청산 행 (SELL/HOLD)</td><td class="num">{count_fills}건</td><td style="color:var(--dim);font-size:0.82rem;">로그 상 청산·평가 행 수</td></tr>
-                <tr><td>완료 라운드트립</td><td class="num">{completed_rounds}건</td><td style="color:var(--dim);font-size:0.82rem;">종목별 매수체인→매도 단위</td></tr>
+                <tr><td>완료 라운드트립 (총)</td><td class="num">{completed_rounds}건</td><td style="color:var(--dim);font-size:0.82rem;">위 표 합계 열과 동일</td></tr>
                 <tr><td>미청산 보유 종목 수</td><td class="num">{hold_count}종목</td><td style="color:var(--dim);font-size:0.82rem;">리포트 생성 시점 기준</td></tr>
-                <tr><td>스마트 진입 통과 / 시도</td><td class="num">{count_smart_buy} / {total_smart_buy_events}건</td><td style="color:var(--dim);font-size:0.82rem;">통과율 {pass_rate:.1f}% · 통과는 설정+체결 추정</td></tr>
-                <tr><td>스마트 진입 거절 (수급)</td><td class="num">{count_smart_buy_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">세션 <code>smart_buy_blocked</code>·15분봉당 1회</td></tr>
-                <tr><td>신호 거절 전체 (REJECTED_SIG)</td><td class="num">{count_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">실시간 로그 미포함</td></tr>
-                <tr><td>스마트 청산 (SELL·스마트 패턴)</td><td class="num">{count_smart_exit}건</td><td style="color:var(--dim);font-size:0.82rem;">Smart Exit 변형 포함</td></tr>
-                <tr><td>매수 행·Reason 기준 TYPE_A / TYPE_B</td><td class="num">{count_a} / {count_b}건</td><td style="color:var(--dim);font-size:0.82rem;">참고용</td></tr>
-                <tr><td>추매 관련 매수 행</td><td class="num">{count_s2}건</td><td style="color:var(--dim);font-size:0.82rem;">BUY2·ADDON·Reason 키워드</td></tr>
+                <tr><td>스마트 진입 통과 / 시도</td><td class="num">{count_smart_buy} / {total_smart_buy_events}건</td><td style="color:var(--dim);font-size:0.82rem;">통과율 {pass_rate:.1f}% · 시도=통과+세션 거절</td></tr>
+                <tr><td>스마트 진입 거절 (수급)</td><td class="num">{count_smart_buy_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">세션 <code>smart_buy_blocked</code>·네 칸 미분해</td></tr>
+                <tr><td>신호 거절 전체 (REJECTED_SIG)</td><td class="num">{count_rejected}건</td><td style="color:var(--dim);font-size:0.82rem;">가상 DF에 없으면 0</td></tr>
+                <tr><td>스마트 청산 (SELL·스마트 패턴)</td><td class="num">{count_smart_exit}건</td><td style="color:var(--dim);font-size:0.82rem;">Smart Exit 변형 포함·네 칸 미분해</td></tr>
             </tbody>
         </table>
-
-        <h3 class="analysis-h3">2. 전략·스테이지별 실현 (Type A/B)</h3>
-        <div class="analysis-type-card type-a">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-                <span style="color:#4ade80;font-weight:800;font-size:1.05rem;">Type A (눌림목)</span>
-                <span style="color:var(--dim);font-size:0.88rem;">완료 라운드 <b style="color:#fff;">{ca1 + ca2}</b>건</span>
-            </div>
-            <table class="depth-table">
-                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
-                <tbody>
-                    <tr><td>Stage 1만</td><td class="num">{ca1}</td><td class="num {'gain' if s_a1 >= 0 else 'loss'}">{y_a1:+.2f}%</td><td class="num {'gain' if s_a1 >= 0 else 'loss'}">{int(s_a1):,}원</td></tr>
-                    <tr><td>S2 포함</td><td class="num">{ca2}</td><td class="num {'gain' if s_a2 >= 0 else 'loss'}">{y_a2:+.2f}%</td><td class="num {'gain' if s_a2 >= 0 else 'loss'}">{int(s_a2):,}원</td></tr>
-                </tbody>
-            </table>
-            <div style="text-align:right;margin-top:8px;color:var(--dim);font-size:0.85rem;">Type A 합계 <span class="{'gain' if (s_a1+s_a2) >= 0 else 'loss'}" style="font-weight:800;font-size:1.05rem;">{int(s_a1+s_a2):,}원</span></div>
-        </div>
-        <div class="analysis-type-card type-b">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-                <span style="color:#38bdf8;font-weight:800;font-size:1.05rem;">Type B (추세돌파)</span>
-                <span style="color:var(--dim);font-size:0.88rem;">완료 라운드 <b style="color:#fff;">{cb1 + cb2}</b>건</span>
-            </div>
-            <table class="depth-table">
-                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
-                <tbody>
-                    <tr><td>Stage 1만</td><td class="num">{cb1}</td><td class="num {'gain' if s_b1 >= 0 else 'loss'}">{y_b1:+.2f}%</td><td class="num {'gain' if s_b1 >= 0 else 'loss'}">{int(s_b1):,}원</td></tr>
-                    <tr><td>S2 포함</td><td class="num">{cb2}</td><td class="num {'gain' if s_b2 >= 0 else 'loss'}">{y_b2:+.2f}%</td><td class="num {'gain' if s_b2 >= 0 else 'loss'}">{int(s_b2):,}원</td></tr>
-                </tbody>
-            </table>
-        </div>
-        <div class="analysis-subblock">
-            <div class="depth-subtitle">전체 합산 (타입 무관)</div>
-            <table class="depth-table">
-                <thead><tr><th>구분</th><th class="num">건수</th><th class="num">가중 수익률</th><th class="num">총 수익금</th></tr></thead>
-                <tbody>
-                    <tr><td>S1만 (전 타입)</td><td class="num">{c_all_s1}</td><td class="num {'gain' if s_s1 >= 0 else 'loss'}">{y_s1:.2f}%</td><td class="num {'gain' if s_s1 >= 0 else 'loss'}">{int(s_s1):,}원</td></tr>
-                    <tr><td>S2 포함 (전 타입)</td><td class="num">{c_all_s2}</td><td class="num {'gain' if s_s2 >= 0 else 'loss'}">{y_s2:.2f}%</td><td class="num {'gain' if s_s2 >= 0 else 'loss'}">{int(s_s2):,}원</td></tr>
-                </tbody>
-            </table>
-        </div>
 
         <h3 class="analysis-h3">3. 시장 레짐별 실현</h3>
         <div class="analysis-subblock">{regime_fragment}</div>
