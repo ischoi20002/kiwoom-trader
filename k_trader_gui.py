@@ -90,6 +90,10 @@ try:
 except:
     pass
 
+# 실시간 감시 탭 트리 UI 갱신 주기(ms). 틱·지표 계산은 그대로 — 발열이 불편하면 220~400 사이에서만 조정.
+REALTIME_TREE_UI_REFRESH_MS: int = 280
+
+
 class AuthManager:
     """
     키움 REST 액세스 토큰 관리.
@@ -848,7 +852,7 @@ class KiwoomApp:
                 )
             except Exception:
                 pass
-            self.root.after(200, self._render_tree_updates)
+            self.root.after(REALTIME_TREE_UI_REFRESH_MS, self._render_tree_updates)
         except Exception as e:
             try:
                 self.log(f"⚠️ [UI] _render_tree_updates: {e}")

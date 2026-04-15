@@ -427,17 +427,6 @@ def report_needs_regeneration(
     return False
 
 
-def _report_excluded_watchlist_codes_from_app(app: Any) -> set:
-    try:
-        mc = getattr(app.trading_controller, "monitor_codes", None) or []
-    except Exception:
-        mc = []
-    try:
-        return app.watchlist_store.codes_report_exclusion_set(mc)
-    except Exception:
-        return set()
-
-
 def _normalize_total_assets_display(
     total_assets: float, current_cash: float, stock_eval: float
 ) -> float:
@@ -498,14 +487,11 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
     """VirtualTab 요약과 유사. report_day 기준 금일 실현 필터."""
     portfolio = app.portfolio
     monitor_info = getattr(app, "monitor_info", {}) or {}
-    excl = _report_excluded_watchlist_codes_from_app(app)
     today_str = report_day
 
     total_eval = 0.0
     total_unrealized = 0.0
     for code, pos in portfolio.virtual_positions.items():
-        if str(code).zfill(6) in excl:
-            continue
         info = monitor_info.get(code, {})
         curr_p = float(info.get("price", pos.get("avg_price", 0)))
         qty = int(pos.get("qty", 0))
@@ -517,8 +503,6 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
 
     total_day_realized = 0.0
     for pos in portfolio.virtual_history:
-        if str(pos.get("code", "")).zfill(6) in excl:
-            continue
         pnl_amt = float(pos.get("realized_pnl_amt", 0) or 0)
         if str(pos.get("entry_time", "")).startswith(today_str):
             total_day_realized += pnl_amt
@@ -1078,7 +1062,6 @@ def generate_daily_settlement_report_ex(
         orders = []
 
     summary = _compute_summary_from_app(app, day)
-    excl = _report_excluded_watchlist_codes_from_app(app)
 
     by_code: Dict[str, List[Dict[str, Any]]] = {}
     for row in orders:
@@ -1104,8 +1087,6 @@ def generate_daily_settlement_report_ex(
         except Exception:
             continue
         c = str(code).zfill(6)
-        if c in excl:
-            continue
         if c not in by_code:
             by_code[c] = []
         by_code[c].append(

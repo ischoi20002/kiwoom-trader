@@ -506,24 +506,6 @@ class VirtualTab:
             except Exception:
                 pass
 
-    def _watchlist_hide_codes(self) -> set:
-        """관심목록 종목은 포지션 관리 탭에서 숨김 (감시목록과 별도, 전체 관심 코드)."""
-        try:
-            return self.app.watchlist_store.codes_set()
-        except Exception:
-            return set()
-
-    def _watchlist_report_exclude_codes(self) -> set:
-        """나러티브 리포트에서만 제외: 관심만·비감시. 감시와 겹치면 리포트에 포함."""
-        try:
-            mc = getattr(self.app.trading_controller, "monitor_codes", None) or []
-        except Exception:
-            mc = []
-        try:
-            return self.app.watchlist_store.codes_report_exclusion_set(mc)
-        except Exception:
-            return set()
-
     def _vp_items_by_normalized(self) -> Dict[str, Dict[str, Any]]:
         """
         virtual_positions 키를 6자리로 통일한 뷰 (3490 vs 003490 이중 키 시 첫 항목 유지).
@@ -681,11 +663,13 @@ class VirtualTab:
         return 0.0
 
     def _sorted_active_holdings(self) -> List[Tuple[str, Dict[str, Any]]]:
-        """보유 행 표시 순서를 종목코드 기준으로 고정(줄무늬 태그·인덱스 흔들림 방지)."""
+        """
+        보유 행 표시 순서를 종목코드 기준으로 고정(줄무늬 태그·인덱스 흔들림 방지).
+        관심목록은 신호 테스트용으로만 쓰이며, 포지션 관리 탭 집계·표시와는 연동하지 않습니다.
+        """
         try:
             merged = self._vp_items_by_normalized()
-            wl = self._watchlist_hide_codes()
-            rows = [(nk, p) for nk, p in merged.items() if nk not in wl]
+            rows = list(merged.items())
             return sorted(rows, key=lambda x: x[0])
         except Exception:
             return []
@@ -860,13 +844,9 @@ class VirtualTab:
 
     def _sum_visible_history_realized_pnl(self) -> float:
         """
-        매매 종료 내역과 동일 필터: `virtual_history` 중 관심종목 제외 코드의
-        손익금(`_history_realized_pnl_amt`) 합계. 누적 수익의 청산분에 사용합니다.
+        `virtual_history` 전체에 대해 종료 실현손익(`_history_realized_pnl_amt`) 합계.
+        누적 수익의 청산분에 사용합니다(관심목록과 무관).
         """
-        try:
-            wl = self._watchlist_hide_codes()
-        except Exception:
-            wl = set()
         out = 0.0
         try:
             hist = list(getattr(self.app.portfolio, "virtual_history", None) or [])
@@ -874,12 +854,6 @@ class VirtualTab:
             hist = []
         for pos in hist:
             if not isinstance(pos, dict):
-                continue
-            try:
-                cd = str(pos.get("code", "") or "").zfill(6)
-            except Exception:
-                continue
-            if cd in wl:
                 continue
             try:
                 out += float(self._history_realized_pnl_amt(pos))
@@ -1110,11 +1084,8 @@ class VirtualTab:
             if not self._active_tree_ready():
                 return
             merged = self._vp_items_by_normalized()
-            wl = self._watchlist_hide_codes()
             tr = self.tree_active
             for nk in merged:
-                if nk in wl:
-                    continue
                 if tr is not None and not tr.exists(nk):
                     self._render_virtual_positions()
                     try:
@@ -1192,15 +1163,14 @@ class VirtualTab:
             self._reorder_active_tree_rows()
 
         # 2. 종료 종목
-        wl_hide = self._watchlist_hide_codes()
-
         self.tree_history.delete(*self.tree_history.get_children())
-        hist_visible: List[Dict[str, Any]] = []
-        for pos in self.app.portfolio.virtual_history:
-            if str(pos.get("code", "")).zfill(6) in wl_hide:
-                continue
-            hist_visible.append(pos)
-
+        try:
+            _raw_hist = list(getattr(self.app.portfolio, "virtual_history", None) or [])
+        except Exception:
+            _raw_hist = []
+        hist_visible: List[Dict[str, Any]] = [
+            p for p in _raw_hist if isinstance(p, dict)
+        ]
         hist_visible.sort(key=self._history_exit_sort_ts, reverse=True)
         total_closed_pnl = self._sum_visible_history_realized_pnl()
 
@@ -1377,9 +1347,8 @@ class VirtualTab:
             except Exception:
                 return 0.0
 
-    def _compute_virtual_tab_total_assets(
-        self, portfolio: Any, _stock_eval: float
-    ) -> float:
+    @staticmethod
+    def _compute_virtual_tab_total_assets(portfolio: Any, _stock_eval: float) -> float:
         """
         포지션 관리 탭 '총 자산': D+2 예수 + 화면과 동일한 주식평가(stock_eval) 합이 기준.
         last_tot_evlu_amt(ka10085 단일 총평가)는 D+2 보정 전 값일 수 있어, 합계와 ±2.5% 안에서만 동일 처리.
@@ -1453,7 +1422,6 @@ class VirtualTab:
             except Exception:
                 view_d = date.today()
             orders = self.app.data_manager.get_orders_for_calendar_date(view_d)
-            wl_hide = self._watchlist_hide_codes()
             row_i = 0
             for ord_data in orders:
                 # snap_* = 주문 시점, fill_snap_* = 체결 시점 (감시 Bid/Ask 열과 동일 호가 문자열)
@@ -1478,8 +1446,6 @@ class VirtualTab:
                         _fill_ba,
                     ) = od[:14]
                 except Exception:
-                    continue
-                if str(code).zfill(6) in wl_hide:
                     continue
                 try:
                     tm_raw = str(ts or "").strip()
@@ -1650,12 +1616,7 @@ class VirtualTab:
                     pass
 
             output_file = "virtual_trade_report.html"
-            excl = self._watchlist_report_exclude_codes()
-            hist_vis = [
-                h
-                for h in self.app.portfolio.virtual_history
-                if str(h.get("code", "")).zfill(6) not in excl
-            ]
+            hist_vis = list(getattr(self.app.portfolio, "virtual_history", None) or [])
             open_vis: list = []
             try:
                 try:
@@ -1673,8 +1634,6 @@ class VirtualTab:
                         nc = str(p.get("code") or c_key).zfill(6)
                     except Exception:
                         nc = str(c_key).zfill(6)
-                    if nc in excl:
-                        continue
                     row = dict(p)
                     row.setdefault("code", nc)
                     try:
