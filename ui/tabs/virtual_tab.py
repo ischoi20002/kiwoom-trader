@@ -19,7 +19,7 @@ class VirtualTab:
         self.tree_history = None
         self.tree_orders = None
         self.lbl_mode_badge = None
-        self.btn_env = None
+        self.btn_env = None  # 운영 버튼은 대시보드로 이전됨(레거시 참조용)
         self.lbl_mock_result = None
         # 종목별 REST 시세 폴백 캐시 (API 과다·429 방지)
         self._fallback_quote_cache: Dict[str, Tuple[float, float]] = {}
@@ -85,32 +85,13 @@ class VirtualTab:
         self.lbl_mock_result = ttk.Label(summary_f, text="", font=("Malgun Gothic", 9), foreground="#A3BE8C")
         self.lbl_mock_result.pack(side=tk.LEFT, padx=10, pady=(15, 0))
 
-        # 제어 버튼 (우측)
-        control_f = ttk.Frame(header_f)
-        control_f.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # [v3.9.5] 서버 상태 배지 (모의투자/실전)
-        use_mock = getattr(config, 'USE_MOCK', False)
-        mode_text = " 모의투자모드 " if use_mock else " 실전모드 "
-        mode_bg = "#5E81AC" if use_mock else "#BF616A" 
-        self.lbl_mode_badge = tk.Label(control_f, text=mode_text, font=("Malgun Gothic", 9, "bold"), 
-                                      foreground="white", background=mode_bg, padx=10, pady=2)
-        self.lbl_mode_badge.pack(side=tk.RIGHT, padx=(10, 0))
-
-        btn_group = ttk.Frame(control_f)
-        btn_group.pack(side=tk.RIGHT)
-        
-        ttk.Button(btn_group, text="🔄 동기화", width=8, command=self.app._sync_account_deposit).pack(side=tk.LEFT, padx=2)
-        self.btn_narrative_report = ttk.Button(
-            btn_group, text="종합리포트", width=10, command=self.generate_report
-        )
-        self.btn_narrative_report.pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_group, text="📋 일일결산", width=10, command=self.generate_daily_settlement).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_group, text="⭐ 관심목록", width=10, command=self._open_watchlist_dialog).pack(side=tk.LEFT, padx=2)
-        
-        # [v3.9.5] 버튼명 '서버 전환'으로 변경
-        self.btn_env = ttk.Button(btn_group, text="서버 전환", width=10, command=self._toggle_environment)
-        self.btn_env.pack(side=tk.LEFT, padx=2)
+        # 동기화·리포트·서버 전환 등은 대시보드 탭 「운영 · 계좌」로 이전했습니다.
+        ttk.Label(
+            header_f,
+            text="계좌 동기화·종합리포트·일일결산·관심목록·서버 전환 → 대시보드 탭",
+            font=("Malgun Gothic", 8),
+            foreground="#787c99",
+        ).pack(side=tk.RIGHT, padx=(8, 0), pady=(12, 0))
 
         # --- [2] 메인 레이아웃 (3단 수직 분할) ---
         v_paned = ttk.PanedWindow(main_container, orient=tk.VERTICAL)
@@ -1542,10 +1523,16 @@ class VirtualTab:
                 "   기록이 섞이지 않습니다.",
             )
             
-            mode_bg = "#5E81AC" if new_mock else "#BF616A" 
+            mode_bg = "#5E81AC" if new_mock else "#BF616A"
             mode_text = " 모의투자모드 " if new_mock else " 실전모드 "
-            self.lbl_mode_badge.config(text=mode_text, background=mode_bg)
-            
+            _db = getattr(self.app, "dashboard_tab", None)
+            _badge = getattr(_db, "lbl_mode_badge", None) if _db is not None else None
+            if _badge is not None:
+                try:
+                    _badge.config(text=mode_text, background=mode_bg)
+                except Exception:
+                    pass
+
         except Exception as e:
             messagebox.showerror("오류", f"설정 변경 중 오류가 발생했습니다: {e}")
 
@@ -1582,6 +1569,23 @@ class VirtualTab:
                 self._render_virtual_positions()
             except Exception:
                 pass
+
+    def _narrative_report_buttons(self) -> List[Any]:
+        """종합 리포트 생성 중 비활성화할 버튼(포지션 탭·대시보드)."""
+        out: List[Any] = []
+        try:
+            if self.btn_narrative_report is not None:
+                out.append(self.btn_narrative_report)
+        except Exception:
+            pass
+        try:
+            _db = getattr(self.app, "dashboard_tab", None)
+            _b = getattr(_db, "btn_narrative_report", None) if _db is not None else None
+            if _b is not None:
+                out.append(_b)
+        except Exception:
+            pass
+        return out
 
     def generate_report(self):
         """가상 매매 종합 리포트 생성 (백그라운드 스레드 + 진행률 표시)."""
@@ -1730,8 +1734,8 @@ class VirtualTab:
                         except Exception:
                             pass
                         try:
-                            if self.btn_narrative_report is not None:
-                                self.btn_narrative_report.state(["!disabled"])
+                            for _nb in self._narrative_report_buttons():
+                                _nb.state(["!disabled"])
                         except Exception:
                             pass
                         err = holder.get("err")
@@ -1775,8 +1779,8 @@ class VirtualTab:
 
             self._narrative_report_busy = True
             try:
-                if self.btn_narrative_report is not None:
-                    self.btn_narrative_report.state(["disabled"])
+                for _nb in self._narrative_report_buttons():
+                    _nb.state(["disabled"])
             except Exception:
                 pass
             try:
@@ -1790,8 +1794,8 @@ class VirtualTab:
         except Exception as e:
             self._narrative_report_busy = False
             try:
-                if self.btn_narrative_report is not None:
-                    self.btn_narrative_report.state(["!disabled"])
+                for _nb in self._narrative_report_buttons():
+                    _nb.state(["!disabled"])
             except Exception:
                 pass
             self.app.log(f"[Error] 리포트 생성 준비 오류: {e}")

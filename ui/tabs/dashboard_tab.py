@@ -3,8 +3,9 @@ from tkinter import ttk, scrolledtext, messagebox
 import threading
 import os
 import time
-from typing import List
+from typing import Any, List, Optional
 
+import config
 import pandas as pd
 import strategy_selector
 
@@ -39,16 +40,119 @@ class DashboardTab:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
+        self.lbl_mode_badge: Optional[tk.Label] = None
+        self.btn_sync: Optional[ttk.Button] = None
+        self.btn_narrative_report: Optional[ttk.Button] = None
+        self.btn_daily_settlement: Optional[ttk.Button] = None
+        self.btn_watchlist: Optional[ttk.Button] = None
+        self.btn_server_switch: Optional[ttk.Button] = None
         self._setup_ui()
 
+    def _call_virtual_tab(self, method_name: str) -> None:
+        """포지션 관리 탭에 구현된 동작을 그대로 호출합니다."""
+        try:
+            vt = getattr(self.app, "virtual_tab", None)
+            if vt is None:
+                messagebox.showerror(
+                    "오류",
+                    "포지션 관리 탭이 아직 초기화되지 않았습니다.",
+                    parent=self.parent,
+                )
+                return
+            fn = getattr(vt, method_name, None)
+            if not callable(fn):
+                messagebox.showerror("오류", f"기능을 찾을 수 없습니다: {method_name}")
+                return
+            fn()
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", str(e), parent=self.parent)
+            except Exception:
+                pass
+
     def _setup_ui(self):
-        """대시보드 탭 레이아웃 고도화 (Midnight Control Room 스타일)"""
-        db_main_frame = ttk.Frame(self.parent, padding="25")
+        """대시보드: 운영 메뉴 + 스캐너/수집 타일 + 로그"""
+        db_main_frame = ttk.Frame(self.parent, padding="20")
         db_main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # --- [0] 운영 · 계좌 (기존 포지션 탭 상단 버튼 이전) ---
+        ops = ttk.LabelFrame(
+            db_main_frame,
+            text=" ⚡ 운영 · 계좌 ",
+            padding=(14, 12),
+        )
+        ops.pack(fill=tk.X, pady=(0, 16))
+
+        ops_top = ttk.Frame(ops)
+        ops_top.pack(fill=tk.X)
+
+        use_mock = bool(getattr(config, "USE_MOCK", False))
+        mode_text = " 모의투자 " if use_mock else " 실전 "
+        mode_bg = "#5E81AC" if use_mock else "#BF616A"
+        self.lbl_mode_badge = tk.Label(
+            ops_top,
+            text=mode_text,
+            font=("Malgun Gothic", 9, "bold"),
+            foreground="white",
+            background=mode_bg,
+            padx=12,
+            pady=4,
+        )
+        self.lbl_mode_badge.pack(side=tk.LEFT)
+
+        ttk.Label(
+            ops_top,
+            text="동기화 · 종합리포트 · 일일결산 · 관심목록 · 서버(모의/실전) 전환",
+            font=("Malgun Gothic", 9),
+            foreground=self.app.colors.get("secondary", "#787c99"),
+        ).pack(side=tk.LEFT, padx=(14, 8))
+
+        ops_btns = ttk.Frame(ops_top)
+        ops_btns.pack(side=tk.RIGHT)
+
+        self.btn_sync = ttk.Button(
+            ops_btns,
+            text="동기화",
+            width=11,
+            command=self.app._sync_account_deposit,
+        )
+        self.btn_sync.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_narrative_report = ttk.Button(
+            ops_btns,
+            text="종합리포트",
+            width=11,
+            command=lambda: self._call_virtual_tab("generate_report"),
+        )
+        self.btn_narrative_report.pack(side=tk.LEFT, padx=4)
+
+        self.btn_daily_settlement = ttk.Button(
+            ops_btns,
+            text="일일결산",
+            width=11,
+            command=lambda: self._call_virtual_tab("generate_daily_settlement"),
+        )
+        self.btn_daily_settlement.pack(side=tk.LEFT, padx=4)
+
+        self.btn_watchlist = ttk.Button(
+            ops_btns,
+            text="관심목록",
+            width=11,
+            command=lambda: self._call_virtual_tab("_open_watchlist_dialog"),
+        )
+        self.btn_watchlist.pack(side=tk.LEFT, padx=4)
+
+        self.btn_server_switch = ttk.Button(
+            ops_btns,
+            text="서버 전환",
+            width=11,
+            command=lambda: self._call_virtual_tab("_toggle_environment"),
+        )
+        self.btn_server_switch.pack(side=tk.LEFT, padx=(4, 0))
 
         # 중앙 핵심 컨트롤 센터 (Grid: 두 타일 동일 너비·동일 높이 셀)
         tiles_frame = ttk.Frame(db_main_frame)
-        tiles_frame.pack(fill=tk.X, pady=(0, 25))
+        tiles_frame.pack(fill=tk.X, pady=(0, 18))
         tiles_frame.columnconfigure(0, weight=1, uniform="dashboard_tile")
         tiles_frame.columnconfigure(1, weight=1, uniform="dashboard_tile")
         tiles_frame.rowconfigure(0, minsize=140, weight=0)
