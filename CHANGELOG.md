@@ -7,6 +7,10 @@
 
 ---
 
+## 0.3.32 (2026-04-16)
+
+- **실시간 Smart Buy (Type B)**: 호가 `total_ask`/`total_bid`로 계산한 매도/매수 잔량비를 `info['ask_bid_ratio']`에 넣지 않아, Smart Buy ON 시 `info.get(..., 1.0)` 폴백이 **항상** `smart_buy_ba_ratio`(예: 1.5) 미만으로 처리되던 버그 수정 (`core/signal_engine.py`).
+
 ## 0.3.31 (2026-04-15)
 
 - **포트폴리오 `invested`**: 브로커 동기화·가상 신규 시 체결금액에 **매수 수수료**를 더해 S1 on_fill과 맞춤. S2 추매 시 BUY 이벤트 합산 우선, 없으면 기존 `invested`에 추매 다리(가격×수량+수수료) 가산 (`core/portfolio_manager.py`).

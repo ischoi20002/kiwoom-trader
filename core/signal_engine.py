@@ -301,7 +301,18 @@ class SignalEngine:
             total_bid = info.get('total_bid', 1) # Prevent div by zero
             ask_bid_ratio = total_ask / total_bid if total_bid > 0 else 0
             bid_ask_ratio = total_bid / total_ask if total_ask > 0 else 0
-            
+            # 0D TR은 total_* 만 넣고 ask_bid_ratio 키는 안 넣음. Smart Buy가 info.get(..., 1.0)을 쓰면
+            # BA 임계(예: 1.5)보다 낮은 가짜 1.0으로 매수가 전부 막히는 오류가 난다 → 계산값을 info에 반영.
+            try:
+                info["ask_bid_ratio"] = float(ask_bid_ratio)
+                info["bid_ask_ratio"] = float(bid_ask_ratio)
+            except (TypeError, ValueError):
+                try:
+                    info["ask_bid_ratio"] = 0.0
+                    info["bid_ask_ratio"] = 0.0
+                except Exception:
+                    pass
+
             # 체결강도 하회 지속 관리
             vol_power = info.get('vol_power', 100.0)
             is_power_exhausted = False
