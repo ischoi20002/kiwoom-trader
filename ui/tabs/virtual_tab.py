@@ -61,11 +61,14 @@ class VirtualTab:
         # 주문 로그: 조회 중인 날짜(네비게이션). 기본은 오늘.
         self._order_log_view_date: date = date.today()
         self._order_log_date_var: Optional[tk.StringVar] = None
-        self._btn_order_log_prev: Optional[ttk.Button] = None
-        self._btn_order_log_next: Optional[ttk.Button] = None
+        self._btn_order_log_prev: Optional[tk.Button] = None
+        self._btn_order_log_next: Optional[tk.Button] = None
+        self._btn_order_log_today: Optional[tk.Button] = None
         # 주문·체결 통합 트리 필터(구분 / 체결)
         self._order_filter_side_var: Optional[tk.StringVar] = None
         self._order_filter_fill_var: Optional[tk.StringVar] = None
+        # 구분 필터: 세그먼트 컨트롤(전체·매수·매도) 버튼 참조
+        self._order_side_segment_btns: Dict[str, tk.Button] = {}
         self.btn_narrative_report: Optional[ttk.Button] = None
         self._narrative_report_busy: bool = False
         # 보유/주문 트리 컬럼 폭·세로 Paned 비율 저장
@@ -159,7 +162,7 @@ class VirtualTab:
         v_paned.add(active_f, weight=4)
         self._build_active_holdings_tree(active_f)
 
-        # 2. 주문·체결 내역(필터: 구분 전체·매수·매도 / 체결 전체·체결·미체결)
+        # 2. 주문·체결 내역(한 줄: 구분 세그먼트·체결 콤보 + 날짜 네비)
         v_paned.add(self._build_order_log_section(v_paned, _pm), weight=5)
 
         self._setup_styles()
@@ -540,11 +543,10 @@ class VirtualTab:
         self, paned_parent: ttk.Widget, mode_label: str
     ) -> ttk.LabelFrame:
         """
-        주문·체결 통합: 상단 제목 + 날짜 네비, 그 아래 구분·체결 필터, 트리.
+        주문·체결 통합: 상단 제목, 그 아래 한 줄에 구분·체결 필터(왼쪽) + 날짜 네비(오른쪽), 트리.
         LabelFrame 라벨 슬롯(labelwidget)은 가로로 늘어나지 않아 본문 상단 프레임에 배치한다.
         """
-        # text 비움: labelwidget은 라벨 슬롯만 차지해 가로로 늘어나지 않아 네비가 우측 끝에 못 붙음.
-        # 본문 상단에 fill=X 헤더를 두고 제목은 왼쪽, 날짜 네비는 오른쪽 끝(pack RIGHT)으로 둔다.
+        # text 비움: labelwidget은 라벨 슬롯만 차지해 가로로 늘어나지 않음.
         order_f = ttk.LabelFrame(paned_parent, padding="5", text="")
         try:
             hdr = ttk.Frame(order_f)
@@ -555,56 +557,27 @@ class VirtualTab:
                 text=f" 📋 주문·체결 내역 · {mode_label} ",
                 style="TLabelframe.Label",
             ).pack(side=tk.LEFT)
-            nav = ttk.Frame(hdr)
-            self._btn_order_log_prev = ttk.Button(
-                nav,
-                text="◀ 이전",
-                width=9,
-                command=self._order_log_prev_day,
-            )
-            self._btn_order_log_prev.pack(side=tk.LEFT, padx=(0, 4))
-            self._order_log_date_var = tk.StringVar(value="")
-            ttk.Label(
-                nav,
-                textvariable=self._order_log_date_var,
-                style="TLabelframe.Label",
-            ).pack(side=tk.LEFT, padx=8)
-            self._btn_order_log_next = ttk.Button(
-                nav,
-                text="다음 ▶",
-                width=9,
-                command=self._order_log_next_day,
-            )
-            self._btn_order_log_next.pack(side=tk.LEFT, padx=(4, 0))
-            ttk.Button(
-                nav,
-                text="오늘",
-                width=8,
-                command=self._order_log_today,
-            ).pack(side=tk.LEFT, padx=(12, 0))
-            nav.pack(side=tk.RIGHT)
+
             filt = ttk.Frame(order_f)
             filt.pack(fill=tk.X, pady=(4, 2))
-            ttk.Label(filt, text="구분", font=("Malgun Gothic", 9)).pack(
+            # 오른쪽 고정을 위해 날짜 네비를 먼저 pack(RIGHT)
+            self._build_order_log_date_nav_compact(filt)
+
+            filt_left = ttk.Frame(filt)
+            filt_left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            ttk.Label(filt_left, text="구분", font=("Malgun Gothic", 9)).pack(
                 side=tk.LEFT, padx=(0, 4)
             )
             self._order_filter_side_var = tk.StringVar(value="전체")
-            cb_side = ttk.Combobox(
-                filt,
-                textvariable=self._order_filter_side_var,
-                values=("전체", "매수", "매도"),
-                state="readonly",
-                width=7,
-                font=("Malgun Gothic", 9),
-            )
-            cb_side.pack(side=tk.LEFT, padx=(0, 14))
-            cb_side.bind("<<ComboboxSelected>>", self._on_order_filter_changed)
-            ttk.Label(filt, text="체결", font=("Malgun Gothic", 9)).pack(
+            self._order_side_segment_btns = {}
+            self._build_order_side_segment(filt_left)
+            ttk.Label(filt_left, text="체결", font=("Malgun Gothic", 9)).pack(
                 side=tk.LEFT, padx=(0, 4)
             )
             self._order_filter_fill_var = tk.StringVar(value="전체")
             cb_fill = ttk.Combobox(
-                filt,
+                filt_left,
                 textvariable=self._order_filter_fill_var,
                 values=("전체", "체결", "미체결"),
                 state="readonly",
@@ -625,6 +598,184 @@ class VirtualTab:
             except Exception:
                 self.tree_orders = None
         return order_f
+
+    def _apply_order_side_segment_styles(self, selected: str) -> None:
+        """구분 세그먼트: 선택된 항목만 강조, 나머지는 카드 톤."""
+        try:
+            c = getattr(self.app, "colors", None) or {}
+            bg_dark = str(c.get("bg", "#2E3440"))
+            card = str(c.get("card", "#3B4252"))
+            fg = str(c.get("fg", "#ECEFF4"))
+            primary = str(c.get("primary", "#88C0D0"))
+            hover = "#434C5E"
+            for label, btn in self._order_side_segment_btns.items():
+                if not btn:
+                    continue
+                is_on = label == selected
+                if is_on:
+                    btn.configure(
+                        bg=primary,
+                        fg=bg_dark,
+                        activebackground=primary,
+                        activeforeground=bg_dark,
+                    )
+                else:
+                    btn.configure(
+                        bg=card,
+                        fg=fg,
+                        activebackground=hover,
+                        activeforeground=fg,
+                    )
+        except Exception as e:
+            try:
+                print(f"[UI Error] _apply_order_side_segment_styles: {e}")
+            except Exception:
+                pass
+
+    def _on_order_side_segment(self, label: str) -> None:
+        """구분 세그먼트 클릭: StringVar 갱신 후 주문 트리 재렌더."""
+        try:
+            if self._order_filter_side_var is not None:
+                self._order_filter_side_var.set(label)
+            self._apply_order_side_segment_styles(label)
+            self._on_order_filter_changed()
+        except Exception as e:
+            try:
+                print(f"[UI Error] _on_order_side_segment: {e}")
+            except Exception:
+                pass
+
+    def _build_order_side_segment(self, filt: ttk.Frame) -> None:
+        """
+        전체/매수/매도 필터를 iOS 스타일 세그먼트 컨트롤처럼 한 줄로 배치합니다.
+        (ttk에 네이티브 세그먼트가 없어 tk.Button + 테마색으로 구현)
+        """
+        try:
+            c = getattr(self.app, "colors", None) or {}
+            border_col = str(c.get("border", "#4C566A"))
+
+            outer = tk.Frame(filt, bg=border_col, padx=1, pady=1)
+            outer.pack(side=tk.LEFT, padx=(0, 14))
+            row = tk.Frame(outer, bg=border_col)
+            row.pack()
+
+            labels: Tuple[str, ...] = ("전체", "매수", "매도")
+            self._order_side_segment_btns = {}
+
+            for idx, lab in enumerate(labels):
+                if idx > 0:
+                    sep = tk.Frame(row, width=1, bg=border_col)
+                    sep.pack(side=tk.LEFT, fill=tk.Y)
+
+                btn = tk.Button(
+                    row,
+                    text=lab,
+                    font=("Malgun Gothic", 9),
+                    relief=tk.FLAT,
+                    borderwidth=0,
+                    padx=10,
+                    pady=3,
+                    cursor="hand2",
+                    takefocus=0,
+                    command=lambda l=lab: self._on_order_side_segment(l),
+                )
+                btn.pack(side=tk.LEFT)
+                self._order_side_segment_btns[lab] = btn
+
+            cur = (
+                self._order_filter_side_var.get()
+                if self._order_filter_side_var
+                else "전체"
+            )
+            if cur not in labels:
+                cur = "전체"
+                if self._order_filter_side_var is not None:
+                    self._order_filter_side_var.set(cur)
+            self._apply_order_side_segment_styles(cur)
+        except Exception as e:
+            try:
+                print(f"[UI Error] _build_order_side_segment: {e}")
+            except Exception:
+                pass
+            # 폴백: 최소한 변수는 유지
+            try:
+                if self._order_filter_side_var is None:
+                    self._order_filter_side_var = tk.StringVar(value="전체")
+            except Exception:
+                pass
+
+    def _build_order_log_date_nav_compact(self, parent: ttk.Frame) -> None:
+        """
+        날짜 이전·표시·다음·오늘을 구분 세그먼트와 같은 테두리 스타일로 한 덩어리에 둡니다.
+        필터 행 오른쪽에 배치합니다(pack side=RIGHT는 호출부에서 처리).
+        """
+        try:
+            c = getattr(self.app, "colors", None) or {}
+            border_col = str(c.get("border", "#4C566A"))
+            card = str(c.get("card", "#3B4252"))
+            fg = str(c.get("fg", "#ECEFF4"))
+            hover = "#434C5E"
+
+            if self._order_log_date_var is None:
+                self._order_log_date_var = tk.StringVar(value="")
+
+            outer = tk.Frame(parent, bg=border_col, padx=1, pady=1)
+            outer.pack(side=tk.RIGHT, padx=(12, 0))
+            row = tk.Frame(outer, bg=border_col)
+            row.pack()
+
+            def _nav_btn(text: str, cmd: Callable[[], None]) -> tk.Button:
+                return tk.Button(
+                    row,
+                    text=text,
+                    font=("Malgun Gothic", 9),
+                    relief=tk.FLAT,
+                    borderwidth=0,
+                    padx=8,
+                    pady=3,
+                    cursor="hand2",
+                    takefocus=0,
+                    command=cmd,
+                    bg=card,
+                    fg=fg,
+                    activebackground=hover,
+                    activeforeground=fg,
+                )
+
+            self._btn_order_log_prev = _nav_btn("◀", self._order_log_prev_day)
+            self._btn_order_log_prev.pack(side=tk.LEFT)
+
+            sep1 = tk.Frame(row, width=1, bg=border_col)
+            sep1.pack(side=tk.LEFT, fill=tk.Y)
+
+            tk.Label(
+                row,
+                textvariable=self._order_log_date_var,
+                font=("Malgun Gothic", 9),
+                bg=card,
+                fg=fg,
+                padx=8,
+                pady=3,
+                width=20,
+                anchor="center",
+            ).pack(side=tk.LEFT)
+
+            sep2 = tk.Frame(row, width=1, bg=border_col)
+            sep2.pack(side=tk.LEFT, fill=tk.Y)
+
+            self._btn_order_log_next = _nav_btn("▶", self._order_log_next_day)
+            self._btn_order_log_next.pack(side=tk.LEFT)
+
+            sep3 = tk.Frame(row, width=1, bg=border_col)
+            sep3.pack(side=tk.LEFT, fill=tk.Y)
+
+            self._btn_order_log_today = _nav_btn("오늘", self._order_log_today)
+            self._btn_order_log_today.pack(side=tk.LEFT)
+        except Exception as e:
+            try:
+                print(f"[UI Error] _build_order_log_date_nav_compact: {e}")
+            except Exception:
+                pass
 
     def _order_log_calendar_dates_with_orders(self) -> List[date]:
         """DB에 주문 이력이 있는 날짜(오름차순)."""
@@ -649,17 +800,28 @@ class VirtualTab:
             return None
 
     def _order_log_next_date_with_orders(self, view_d: date) -> Optional[date]:
-        """view_d 보다 이후이면서 오늘까지 — 주문이 있는 가장 이른 캘린더 날."""
+        """
+        view_d 다음으로 이동할 날짜(오늘 이하).
+
+        우선 DB에 주문이 있는 날 중 가장 이른 날을 고릅니다. 그런 날이 없고
+        아직 ``view_d < 오늘``이면 **당일 주문이 없어도** 오늘로 이동할 수 있게
+        오늘을 반환합니다(빈 목록 조회·「오늘」 버튼과 동일 목적).
+        """
         try:
             today = date.today()
+            if view_d >= today:
+                return None
             ds = self._order_log_calendar_dates_with_orders()
             newer = [x for x in ds if view_d < x <= today]
-            return min(newer) if newer else None
+            if newer:
+                return min(newer)
+            # 그 사이에 주문 일자가 없으면(예: 어제까지 거래 후 오늘은 무거래) 화살표로 오늘 복귀
+            return today
         except Exception:
             return None
 
     def _sync_order_log_date_label(self) -> None:
-        """선택 날짜 표시 및 이전/다음(빈 날짜 미포함·양끝에서 비활성)."""
+        """선택 날짜 표시 및 이전/다음 활성화(이전은 주문일만, 다음은 필요 시 무거래 오늘 포함)."""
         try:
             if self._order_log_date_var is None:
                 return
@@ -673,11 +835,11 @@ class VirtualTab:
             can_next = self._order_log_next_date_with_orders(d) is not None
             if self._btn_order_log_prev is not None:
                 self._btn_order_log_prev.config(
-                    state=("normal" if can_prev else "disabled")
+                    state=(tk.NORMAL if can_prev else tk.DISABLED)
                 )
             if self._btn_order_log_next is not None:
                 self._btn_order_log_next.config(
-                    state=("normal" if can_next else "disabled")
+                    state=(tk.NORMAL if can_next else tk.DISABLED)
                 )
         except Exception:
             pass
@@ -732,7 +894,7 @@ class VirtualTab:
                 pass
 
     def _order_log_next_day(self) -> None:
-        """주문 로그: 다음(주문 내역이 있는 가장 가까운 이후 일자, 오늘 이하)."""
+        """주문 로그: 다음 일자(주문일 우선, 없으면 무거래 오늘로 한 단계 이동)."""
         try:
             nd = self._order_log_next_date_with_orders(self._order_log_view_date)
             if nd is None:

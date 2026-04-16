@@ -74,6 +74,9 @@ DEFAULT_SETTINGS = {
     "kodex200_universe_priority": "etf_api_first",
     # True이고 ETF 조회에 성공하면 kodex200.csv 를 자동 덮어씀(백업 후 사용 권장).
     "kodex200_export_csv_on_etf_success": False,
+    # 비어 있지 않으면: 해당 URL에서 kodex200.csv 와 동일 형식(종목코드·종목명) CSV 를 GET 해 유니버스로 사용
+    # (GitHub raw·사내 서버 등). pykrx/KRX 실패 시 로컬 파일보다 우선 시도됨(etf_api_first 모드).
+    "kodex200_constituents_url": "",
     # 지정가(00) 주문 전: 참고가 vs 실시간 캐시·화면 시세 일관성 검증
     "limit_order_price_guard_enabled": True,
     # 주문 기준가와 신뢰 시세(캐시 우선) 허용 차이(호가 단위 개수)

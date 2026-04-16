@@ -1,5 +1,13 @@
-# K-Trader — pip 의존성 (일부는 프로젝트에 이미 포함됨)
+# K-Trader — 최소 pip 의존성 (상세 고정 버전은 requirements-lock.txt)
 pandas>=1.5.0
 numpy>=1.23.0
 plotly>=5.0.0
 pandas-market-calendars>=4.3.0
+requests>=2.28.0
+pykrx>=1.2.4
+finance-datareader>=0.9.50
+matplotlib>=3.6.0
+optuna>=4.0.0
+deprecated>=1.2.0
+multipledispatch>=1.0.0
+openpyxl>=3.0.0

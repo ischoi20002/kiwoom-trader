@@ -7,6 +7,21 @@
 
 ---
 
+## 0.3.42 (2026-04-17)
+
+- **배포·재현**: 회사 PC 등 동일 환경용 **`requirements-lock.txt`**(Python 3.12 `pip freeze`), **`SETUP_COMPANY_PC.md`**, **`requirements.txt`** 보강(pykrx·FDR·optuna 등).
+- **`.gitignore`**: 대용량 DB 명시(`realtime_15m*.db`, `KTrader.db`, `trading_state_*.db` 등). `trading_data.db`는 기존과 같이 제외.
+- **KODEX200 유니버스**(`core/kodex200_universe.py`): KRX PDF 직접 호출·HTTP 재시도·`kodex200_constituents_url` 원격 CSV 등(이전 세션 반영분 포함).
+
+## 0.3.41 (2026-04-17)
+
+- **포지션 관리 탭 UI**: 주문·체결 **날짜 네비**를 필터와 **한 줄**에 두고, 구분 세그먼트와 같은 **컴팩트** 스타일(◀·날짜·▶·오늘)로 정리 (`ui/tabs/virtual_tab.py`).
+- **주문 로그 날짜 네비**: 당일에 주문 이력이 없어 DB 캘린더에 없을 때도 **다음(▶)** 으로 **오늘(빈 목록)** 에 도달하도록 수정 (`_order_log_next_date_with_orders`).
+
+## 0.3.40 (2026-04-17)
+
+- **포지션 관리 탭 UI**: 주문·체결 내역 **구분(전체·매수·매도)** 필터를 콤보박스 대신 **세그먼트 컨트롤** 스타일로 표시 (`ui/tabs/virtual_tab.py`).
+
 ## 0.3.39 (2026-04-16)
 
 - **실시간 감시 탭 UI**: 상단(보유)·하단(감시목록) **세로 분할 비율**(`sash0_rel`) 저장·복원. `monitor_column_widths.json`을 `{"columns":{…},"sash0_rel":…}` 형식으로 확장하고, 기존 평면 컬럼 dict 도 그대로 읽음 (`ui/tabs/monitor_tab.py`).

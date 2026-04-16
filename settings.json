@@ -35,6 +35,7 @@
     "incremental_warmup_stream": true,
     "kodex200_universe_priority": "etf_api_first",
     "kodex200_export_csv_on_etf_success": false,
+    "kodex200_constituents_url": "",
     "limit_order_price_guard_enabled": true,
     "limit_order_max_tick_deviation": 3,
     "limit_order_cache_vs_tree_mismatch_ticks": 10,

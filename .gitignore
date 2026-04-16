@@ -1,8 +1,15 @@
 venv/
 __pycache__/
 *.db
-# 시세·대용량 DB — 별도 복사/동기화 (Git 제외)
+# --- 대용량·로컬 DB (GitHub 백업 제외 — 회사 PC에서는 하베스팅·복사로 별도 준비) ---
+# 시세·일봉 등 메인 하베스팅 DB (수 GB 가능)
 trading_data.db
+# 실시간 15분봉 전용 DB
+realtime_15m*.db
+# 기타 로컬 SQLite (KTrader 등)
+KTrader.db
+trading_state_live.db
+trading_state_mock.db
 # 주문·체결·활성포지션 등 소형 상태 DB — 집/회사 동기화 시 Git 포함 가능(용량 작음)
 !trading_state.db
 *.html
