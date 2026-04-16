@@ -7,7 +7,7 @@ from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import config
-from utils.fee_rates import fee_decimal_rates_live_trading
+from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
 
 class VirtualTab:
     def __init__(self, parent, app):
@@ -770,41 +770,17 @@ class VirtualTab:
         원가는 청산 실현과 동일하게 `invested`(매수 수수료 포함)를 우선 사용합니다.
         """
         try:
-            q = int(qty or 0)
-        except (TypeError, ValueError):
-            q = 0
-        try:
-            px = float(curr_p)
-        except (TypeError, ValueError):
-            px = 0.0
-        if q <= 0 or px <= 0:
+            return float(
+                unrealized_at_price_net_of_sell_fee(
+                    pos,
+                    float(curr_p),
+                    int(qty),
+                    float(avg_price),
+                    self.app.settings,
+                )
+            )
+        except Exception:
             return 0.0
-        try:
-            _, sell_r = fee_decimal_rates_live_trading(self.app.settings)
-            sr = float(sell_r)
-        except Exception:
-            try:
-                _, sell_r = fee_decimal_rates_live_trading({})
-                sr = float(sell_r)
-            except Exception:
-                sr = 0.005
-        try:
-            sr = max(0.0, min(float(sr), 0.5))
-        except Exception:
-            sr = 0.005
-        try:
-            inv = float(pos.get("invested", 0) or 0)
-        except (TypeError, ValueError):
-            inv = 0.0
-        if inv <= 1e-9:
-            try:
-                ap = float(avg_price or 0)
-            except (TypeError, ValueError):
-                ap = 0.0
-            inv = max(0.0, ap * float(q))
-        gross = px * float(q)
-        net_proceeds = gross * (1.0 - sr)
-        return float(net_proceeds - inv)
 
     def _history_realized_pnl_amt(self, pos: Dict[str, Any]) -> float:
         """종료 포지션 실현손익(원). `realized_pnl_amt` 누락·null 시 수익률·투입금으로 근사."""

@@ -14,7 +14,7 @@ from reporting.daily_settlement_report import (
 )
 from reporting.krx_trading_calendar import trading_days_inclusive
 from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
-from utils.fee_rates import fee_decimal_rates_live_trading
+from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
 
 
 def _resolve_virtual_analysis_helpers() -> Tuple[
@@ -169,9 +169,12 @@ def _synthetic_buy_s1_event(pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def _open_mtm_pct_and_krw(pos: Dict[str, Any]) -> Tuple[Optional[float], float]:
+def _open_mtm_pct_and_krw(
+    pos: Dict[str, Any], settings: Optional[Dict[str, Any]] = None
+) -> Tuple[Optional[float], float]:
     """
-    보유 건의 현재가 기준 수익률(%) 및 평가손익(원).
+    보유 건의 현재가 기준 수익률(%) 및 미실현 손익(원).
+    포지션 탭과 동일: 매도 수수료 차감 순입금 − invested(매수비용 우선).
     current_price 가 유효하지 않으면 (None, 0.0).
     """
     try:
@@ -187,8 +190,23 @@ def _open_mtm_pct_and_krw(pos: Dict[str, Any]) -> Tuple[Optional[float], float]:
         return None, 0.0
     if cpf <= 0:
         return None, 0.0
-    pct = (cpf / ap - 1.0) * 100.0
-    krw = (cpf - ap) * float(q)
+    s = settings if isinstance(settings, dict) else {}
+    try:
+        krw = float(unrealized_at_price_net_of_sell_fee(pos, float(cpf), int(q), float(ap), s))
+    except Exception:
+        krw = 0.0
+    try:
+        inv_pf = float(pos.get("invested", 0) or 0)
+    except (TypeError, ValueError):
+        inv_pf = 0.0
+    if inv_pf <= 1e-9 and ap > 0 and q > 0:
+        inv_pf = float(ap) * float(q)
+    if inv_pf > 1e-9:
+        pct = (krw / inv_pf) * 100.0
+    elif ap > 0 and cpf > 0:
+        pct = (cpf / ap - 1.0) * 100.0
+    else:
+        return None, 0.0
     return float(pct), float(krw)
 
 
@@ -1235,7 +1253,7 @@ def generate_virtual_narrative_report(
     for _op in open_positions:
         if not isinstance(_op, dict):
             continue
-        m_pct, _ = _open_mtm_pct_and_krw(_op)
+        m_pct, _ = _open_mtm_pct_and_krw(_op, _s)
         if m_pct is not None and m_pct > 0:
             win_cnt += 1
     n_stats = len(history_raw) + len(open_positions)
@@ -1246,7 +1264,7 @@ def generate_virtual_narrative_report(
     for _op in open_positions:
         if not isinstance(_op, dict):
             continue
-        _pct_u, krw_u = _open_mtm_pct_and_krw(_op)
+        _pct_u, krw_u = _open_mtm_pct_and_krw(_op, _s)
         if _pct_u is not None:
             try:
                 total_pnl += int(round(float(krw_u)))
@@ -1258,7 +1276,7 @@ def generate_virtual_narrative_report(
     for _op in open_positions:
         if not isinstance(_op, dict):
             continue
-        m_pct, _ = _open_mtm_pct_and_krw(_op)
+        m_pct, _ = _open_mtm_pct_and_krw(_op, _s)
         if m_pct is not None:
             pct_parts.append(float(m_pct))
     avg_pnl_pct = (sum(pct_parts) / len(pct_parts)) if pct_parts else 0.0

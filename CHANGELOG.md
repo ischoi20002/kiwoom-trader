@@ -7,6 +7,12 @@
 
 ---
 
+## 0.3.31 (2026-04-15)
+
+- **포트폴리오 `invested`**: 브로커 동기화·가상 신규 시 체결금액에 **매수 수수료**를 더해 S1 on_fill과 맞춤. S2 추매 시 BUY 이벤트 합산 우선, 없으면 기존 `invested`에 추매 다리(가격×수량+수수료) 가산 (`core/portfolio_manager.py`).
+- **미실현 손익 공통화**: `utils/fee_rates.unrealized_at_price_net_of_sell_fee` — 매도 수수료 차감 순입금 − `invested`. 가상 탭·가상 내러티브 리포트·일일 정산 요약에서 동일 식 사용 (`utils/fee_rates.py`, `ui/tabs/virtual_tab.py`, `reporting/virtual_report.py`, `reporting/daily_settlement_report.py`).
+- **설정**: 모의 매도 수수료 `sell_fee_mock` **0.5 → 0.55** (`settings.json`).
+
 ## 0.3.30 (2026-04-16)
 
 - **설정·동작**: `use_auto_virtual`(가상 매매 자동화) 토글 제거 — 설정 탭·`defaults`·`settings.json`·리포트 매핑·`trading_controller` 가드 삭제. 실시간 신호에 따른 매수·전략 액션은 항상 진행 (`ui/tabs/settings_tab.py`, `core/defaults.py`, `core/trading_controller.py`, `reporting/trade_report.py`, `tools/settings_tab_ui_catalog.py`).

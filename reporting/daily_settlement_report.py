@@ -28,7 +28,7 @@ from reporting.krx_trading_calendar import (
     trading_days_inclusive,
 )
 from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
-from utils.fee_rates import fee_decimal_rates_live_trading
+from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
 
 
 def _esc(s: Any) -> str:
@@ -491,13 +491,21 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
 
     total_eval = 0.0
     total_unrealized = 0.0
+    _settings = getattr(app, "settings", None) or {}
     for code, pos in portfolio.virtual_positions.items():
         info = monitor_info.get(code, {})
         curr_p = float(info.get("price", pos.get("avg_price", 0)))
         qty = int(pos.get("qty", 0))
         avg_p = float(pos.get("avg_price", 0))
         eval_amt = curr_p * qty
-        unrealized = (curr_p - avg_p) * qty
+        try:
+            unrealized = float(
+                unrealized_at_price_net_of_sell_fee(
+                    pos, float(curr_p), int(qty), float(avg_p), _settings
+                )
+            )
+        except Exception:
+            unrealized = (curr_p - avg_p) * qty
         total_eval += eval_amt
         total_unrealized += unrealized
 

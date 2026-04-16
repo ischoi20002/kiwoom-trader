@@ -3,7 +3,7 @@
     "buy_fee_live": 0.015,
     "sell_fee_live": 0.215,
     "buy_fee_mock": 0.35,
-    "sell_fee_mock": 0.5,
+    "sell_fee_mock": 0.55,
     "buy_fee_bt": 0.015,
     "sell_fee_bt": 0.215,
     "max_slots": 30,

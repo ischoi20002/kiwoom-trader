@@ -60,6 +60,57 @@ def fee_decimal_rates_live_trading(settings: Mapping[str, Any]) -> Tuple[float, 
     return bp / 100.0, sp / 100.0
 
 
+def unrealized_at_price_net_of_sell_fee(
+    pos: Mapping[str, Any],
+    curr_p: float,
+    qty: int,
+    avg_price: float,
+    settings: Mapping[str, Any],
+) -> float:
+    """
+    전량 매도 가정 시 **매도 수수료를 뺀 매수대(invested 우선)** 대비 미실현 손익(원).
+
+    포지션 관리 탭(`VirtualTab._unrealized_at_price_net_of_sell_fee`)과 동일 식 —
+    종합 리포트 등 다른 모듈에서도 재사용합니다.
+    """
+    try:
+        q = int(qty or 0)
+    except (TypeError, ValueError):
+        q = 0
+    try:
+        px = float(curr_p)
+    except (TypeError, ValueError):
+        px = 0.0
+    if q <= 0 or px <= 0:
+        return 0.0
+    try:
+        _, sell_r = fee_decimal_rates_live_trading(settings)
+        sr = float(sell_r)
+    except Exception:
+        try:
+            _, sell_r = fee_decimal_rates_live_trading({})
+            sr = float(sell_r)
+        except Exception:
+            sr = 0.005
+    try:
+        sr = max(0.0, min(float(sr), 0.5))
+    except Exception:
+        sr = 0.005
+    try:
+        inv = float(pos.get("invested", 0) or 0)
+    except (TypeError, ValueError):
+        inv = 0.0
+    if inv <= 1e-9:
+        try:
+            ap = float(avg_price or 0)
+        except (TypeError, ValueError):
+            ap = 0.0
+        inv = max(0.0, ap * float(q))
+    gross = px * float(q)
+    net_proceeds = gross * (1.0 - sr)
+    return float(net_proceeds - inv)
+
+
 def fee_decimal_rates_backtest(settings: Mapping[str, Any]) -> Tuple[float, float]:
     """백테스트(SimpleBacktester, DynamicBacktester): buy_fee_bt, sell_fee_bt."""
     try:

@@ -453,6 +453,24 @@ class PortfolioManager:
         except Exception:
             return None
 
+    def _gross_to_invested_with_buy_fee(self, gross: float) -> float:
+        """체결금액(수수료 제외)에 매수 수수료를 더한 매입원가 — 동기화·폴백 시 on_fill(S1)과 동일."""
+        try:
+            g = max(0.0, float(gross))
+        except (TypeError, ValueError):
+            return 0.0
+        try:
+            buy_r, _ = fee_decimal_rates_live_trading(self.settings)
+        except Exception:
+            try:
+                buy_r, _ = fee_decimal_rates_live_trading({})
+            except Exception:
+                buy_r = 0.0035
+        try:
+            return float(g + g * float(buy_r))
+        except (TypeError, ValueError):
+            return float(g)
+
     def _try_apply_local_buy_events_cost(
         self, pos: Dict[str, Any], broker_qty: int
     ) -> bool:
@@ -652,7 +670,9 @@ class PortfolioManager:
                     # ka10085 매입평균(pur_pric)은 체결 호가·내부 반올림과 다를 수 있음 — BUY 이벤트가 있으면 체결가 기준 유지
                     if not self._try_apply_local_buy_events_cost(pos_ref, qty):
                         pos_ref["avg_price"] = avg_price
-                        pos_ref["invested"] = float(qty) * float(avg_price)
+                        pos_ref["invested"] = self._gross_to_invested_with_buy_fee(
+                            float(qty) * float(avg_price)
+                        )
                     updated_count += 1
                 else:
                     try:
@@ -690,13 +710,18 @@ class PortfolioManager:
                                 break
                     except Exception:
                         pass
+                    _inv_sync = self._gross_to_invested_with_buy_fee(
+                        float(qty) * float(avg_price)
+                    )
                     self.virtual_positions[code] = {
                         "name": name, "avg_price": avg_price, "qty": qty,
-                        "stage": 1, "invested": float(qty) * float(avg_price),
+                        "stage": 1, "invested": _inv_sync,
                         "entry_time": datetime.now().isoformat(),
                         "reason": "SYNCED", "sig_type": _sync_sig, "events": [], "max_now": avg_price
                     }
-                    self.data_manager.save_active_position(code, name, avg_price, qty, 1, float(qty) * float(avg_price), datetime.now().isoformat(), "SYNCED")
+                    self.data_manager.save_active_position(
+                        code, name, avg_price, qty, 1, _inv_sync, datetime.now().isoformat(), "SYNCED"
+                    )
                     new_count += 1
                 try:
                     pnl_snap = self._parse_ka10085_row_pnl(item)
@@ -1329,7 +1354,6 @@ class PortfolioManager:
                     
                     pos['qty'] = new_total_qty
                     pos['avg_price'] = new_avg_price
-                    pos['invested'] = float(new_avg_price) * float(new_total_qty)
                     pos['stage'] = 2
                     _p2 = self._to_f(price)
                     _q2 = self._to_i(qty)
@@ -1345,9 +1369,22 @@ class PortfolioManager:
                             "snapshot": _snap_s2,
                         }
                     )
+                    # invested: S1과 동일하게 매수수수료 포함(이벤트 합산 우선, 실패 시 추매 다리만 수수료 반영)
+                    _tup_ev = self._cost_basis_from_buy_events(pos)
+                    if _tup_ev is not None:
+                        _w_avg_ev, _inv_ev, _ev_q = _tup_ev
+                        if _ev_q == new_total_qty:
+                            pos["avg_price"] = float(_w_avg_ev)
+                            pos["invested"] = float(_inv_ev)
+                        else:
+                            _fee2 = _p2 * float(_q2) * buy_r
+                            pos["invested"] = float(pos.get("invested", 0) or 0) + _p2 * float(_q2) + _fee2
+                    else:
+                        _fee2 = _p2 * float(_q2) * buy_r
+                        pos["invested"] = float(pos.get("invested", 0) or 0) + _p2 * float(_q2) + _fee2
                     
                     # DB 동기화
-                    self.data_manager.save_active_position(code, pos['name'], new_avg_price, new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
+                    self.data_manager.save_active_position(code, pos['name'], pos['avg_price'], new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
                     self.log(f"[Portfolio] {pos['name']}({code}) 2차 수량 업데이트 (평단: {int(new_avg_price):,}원)")
                     if self.telegram_callback:
                         msg = f"<b>🔥 [추매체결/2차]</b>\n종목: {pos['name']}({code})\n추가: {price:,}원 / {qty}주\n평단: {int(new_avg_price):,}원\n시간: {now_str}"
