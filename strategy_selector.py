@@ -396,17 +396,37 @@ def select_monitoring_targets(
         
         df_top = pd.DataFrame([{'Code': t, 'Name': name_map.get(t, stock.get_market_ticker_name(t))} for t in tickers])
     else:
-        input_file = "kodex200.csv"
-        if os.path.exists(input_file):
-            df_top = pd.read_csv(input_file, dtype={'종목코드': str, 'Code': str})
-            if '종목코드' in df_top.columns:
-                df_top.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
-        else:
-            # FDR 기반 자동 생성
-            df_kospi = fdr.StockListing('KOSPI')
-            df_kospi = df_kospi[df_kospi['Code'].str.endswith('0')]
-            df_top = df_kospi.sort_values(by='Marcap', ascending=False).head(200)
-        
+        # 실시간: pykrx KODEX200 ETF 구성 자동 반영(기본) 또는 local_csv_first 로 수동 CSV 우선
+        try:
+            from core.defaults import DEFAULT_SETTINGS
+
+            _merged = dict(DEFAULT_SETTINGS)
+            _merged.update(settings or {})
+        except Exception:
+            _merged = dict(settings or {})
+        try:
+            from core.kodex200_universe import resolve_kodex200_universe
+
+            df_top = resolve_kodex200_universe(
+                _merged, count=200, log=logger_callback
+            )
+        except Exception as ex:
+            logger_callback(f"⚠️ [선정] KODEX200 유니버스 모듈 실패, 레거시 경로로 시도: {ex}")
+            input_file = "kodex200.csv"
+            if os.path.exists(input_file):
+                df_top = pd.read_csv(
+                    input_file, dtype={"종목코드": str, "Code": str}
+                )
+                if "종목코드" in df_top.columns:
+                    df_top.rename(
+                        columns={"종목코드": "Code", "종목명": "Name"},
+                        inplace=True,
+                    )
+            else:
+                df_kospi = fdr.StockListing("KOSPI")
+                df_kospi = df_kospi[df_kospi["Code"].str.endswith("0")]
+                df_top = df_kospi.sort_values(by="Marcap", ascending=False).head(200)
+
         if df_top is None or df_top.empty:
             logger_callback("[Error] 구성 종목 리스트를 확보하지 못했습니다.")
             return pd.DataFrame()

@@ -598,7 +598,12 @@ class KiwoomApp:
 
     def get_kospi_200(self, force=False):
         self.log("[Data] KODEX200 편입종목 확인 중...")
-        df_200 = self.data_manager.get_kospi_list(count=200, force=force)
+        df_200 = self.data_manager.get_kospi_list(
+            count=200,
+            force=force,
+            settings=getattr(self, "settings", None),
+            universe_log=self.log,
+        )
         if df_200 is not None: 
             self.log(f"[Data] 감시 대상 {len(df_200)}개 종목 로드 완료")
             # [v4.5.2] 종목 선정 버튼 활성화

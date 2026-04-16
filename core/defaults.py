@@ -69,6 +69,11 @@ DEFAULT_SETTINGS = {
     # 준비 완료 종목부터 웹소켓 구독(REG)·감시 시작(나머지는 이어서 합류).
     # require_full_warmup=True 이고 일부만 스트림이 켜진 뒤 다른 종목이 실패하면 감시를 중단합니다.
     "incremental_warmup_stream": True,
+    # KODEX200 유니버스: ``etf_api_first``=pykrx ETF(069500) 구성 최우선(편입 변경 자동 반영),
+    # ``local_csv_first``=kodex200.csv 수동 파일 우선(오프라인·고정 리스트).
+    "kodex200_universe_priority": "etf_api_first",
+    # True이고 ETF 조회에 성공하면 kodex200.csv 를 자동 덮어씀(백업 후 사용 권장).
+    "kodex200_export_csv_on_etf_success": False,
     # 지정가(00) 주문 전: 참고가 vs 실시간 캐시·화면 시세 일관성 검증
     "limit_order_price_guard_enabled": True,
     # 주문 기준가와 신뢰 시세(캐시 우선) 허용 차이(호가 단위 개수)

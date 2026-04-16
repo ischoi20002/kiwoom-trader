@@ -7,6 +7,10 @@
 
 ---
 
+## 0.3.38 (2026-04-16)
+
+- **KODEX200 유니버스 자동 반영**: `core/kodex200_universe.py` — 기본 `kodex200_universe_priority=etf_api_first` 시 pykrx KODEX200 ETF(069500) 구성을 최우선하고, 실패 시 `kodex200.csv`·FDR 순. `local_csv_first` 로 기존(수동 CSV 우선) 동작 유지. 선택 `kodex200_export_csv_on_etf_success` 로 ETF 성공 시 `kodex200.csv` 자동 갱신. `data_manager_v2.get_kospi_list`, `strategy_selector` 실시간 선정 경로 연동 (`core/defaults.py`, `settings.json`, `k_trader_gui.py`).
+
 ## 0.3.37 (2026-04-16)
 
 - **워밍업 UI(신호상태)**: 백그라운드 깊이(ka10080) 조회가 메인 `run()` 종료 후 `is_running` 때문에 조기 종료되고, `prep_progress`만 남아 `(1/41) 분봉 API 1/500…` 에 멈추던 문제 수정. 깊이 보강은 `respect_warmup_lifecycle=False` 로 끝까지 조회, 트리 진행 표시는 `suppress_prep_tree_progress=True` 로 생략, 완료 시 `prep_ok` 로 신호상태 복구. ka10080 진행 알림은 **실제 조회 종목 코드**로 행을 갱신하고 `(i/N)` 은 메인 루프와 같은 종목일 때만 맞춤 (`core/warmup_service.py`).

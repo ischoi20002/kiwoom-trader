@@ -1865,70 +1865,71 @@ class DataManagerV2:
             )
             conn.commit()
 
-    def get_kospi_list(self, count=200, force=False):
+    def get_kospi_list(self, count=200, force=False, settings=None, universe_log=None):
         """
-        [v17.2] KODEX 200 유니버스 확보 (CSV 우선 -> Kiwoom API -> pykrx)
+        KODEX 200 유니버스 확보.
+
+        count<=200: ``core.kodex200_universe`` — pykrx ETF(069500) 자동 구성(기본) 또는
+        ``kodex200_universe_priority=local_csv_first`` 로 수동 CSV 우선.
+        count>200: FDR 코스피 시총 상위 ``count`` (기존과 동일).
         """
-        import FinanceDataReader as fdr
-        from pykrx import stock
-        import pandas as pd
         import os
-        import time
+
+        import FinanceDataReader as fdr
+        import pandas as pd
 
         cache_file = "kodex_200.csv" if count <= 200 else f"kospi_top_{count}.csv"
-        
-        try:
-            # 1. kodex200.csv 파일 확인 (KODEX 200 전용 최우선 소스)
-            if count <= 200:
-                csv_path = os.path.join(os.getcwd(), 'kodex200.csv')
-                if os.path.exists(csv_path):
-                    try:
-                        # 인코딩 문제 대응 (utf-8-sig or cp949)
-                        try:
-                            df_csv = pd.read_csv(csv_path, dtype={'종목코드': str}, encoding='utf-8-sig')
-                        except:
-                            df_csv = pd.read_csv(csv_path, dtype={'종목코드': str}, encoding='cp949')
-                        
-                        if '종목코드' in df_csv.columns:
-                            # 컬럼명 통일 (Code, Name)
-                            df_res = df_csv[['종목코드', '종목명']].copy()
-                            df_res.columns = ['Code', 'Name']
-                            if len(df_res) >= 190:
-                                print(f"DEBUG: Universe loaded from kodex200.csv ({len(df_res)} stocks)")
-                                # 내부 캐시 파일로도 복사하여 일관성 유지
-                                df_res.to_csv(cache_file, index=False, encoding='utf-8-sig')
-                                return df_res
-                    except Exception as e:
-                        print(f"DEBUG ERROR [DataManagerV2]: Failed to read kodex200.csv: {e}")
 
-            # 2. 데이터 확보 (KODEX 200 전용 Fallback)
-            df = None
+        def _ulog(msg: str) -> None:
+            try:
+                if universe_log is not None:
+                    universe_log(msg)
+                else:
+                    print(msg)
+            except Exception:
+                pass
+
+        try:
             if count <= 200:
-                # [v17.3 Fallback] KODEX 200 ETF(069500)의 PDF 구성 종목 직접 조회
-                print("  [Info] CSV 파일이 없어 pykrx를 통한 KODEX 200 ETF(069500) 구성을 요청합니다.")
+                merged: dict = {}
                 try:
-                    tickers_df = stock.get_etf_portfolio_deposit_file("069500")
-                    if tickers_df is not None and not tickers_df.empty:
-                        tickers = tickers_df.index.tolist()
-                        tickers = [t for t in tickers if len(t) == 6 and t.isdigit()]
-                        names = [stock.get_market_ticker_name(t) for t in tickers]
-                        df = pd.DataFrame({'Code': tickers, 'Name': names})
-                except: pass
-            
-            if df is None or df.empty:
-                # 최종 Fallback: FDR 시총순 추출 (KOSPI 상위)
-                print("  [Info] 최종 Fallback으로 FDR 시총 상위 종목을 추출합니다.")
-                df = fdr.StockListing('KOSPI')
-                df = df[df['Code'].str.endswith('0')].sort_values(by='Marcap', ascending=False).head(count)
-                df = df[['Code', 'Name']]
-            
-            # 3. CSV 저장 (최종 고정 리스트)
-            if df is not None and not df.empty:
-                df.to_csv(cache_file, index=False, encoding='utf-8-sig')
+                    from core.defaults import DEFAULT_SETTINGS
+
+                    merged.update(DEFAULT_SETTINGS)
+                except Exception:
+                    pass
+                if isinstance(settings, dict):
+                    merged.update(settings)
+                from core.kodex200_universe import resolve_kodex200_universe
+
+                df = resolve_kodex200_universe(merged, count=200, log=_ulog)
+                if df is not None and not getattr(df, "empty", True):
+                    try:
+                        df.to_csv(cache_file, index=False, encoding="utf-8-sig")
+                    except Exception as ee:
+                        try:
+                            print(
+                                f"DEBUG ERROR [DataManagerV2]: kodex_200.csv 쓰기 실패: {ee}"
+                            )
+                        except Exception:
+                            pass
+                    return df
+                return pd.DataFrame()
+
+            df = fdr.StockListing("KOSPI")
+            df = df[df["Code"].astype(str).str.endswith("0")].sort_values(
+                by="Marcap", ascending=False
+            ).head(int(count))[["Code", "Name"]]
+            if df is not None and not getattr(df, "empty", True):
+                df.to_csv(cache_file, index=False, encoding="utf-8-sig")
             return df
         except Exception as e:
             print(f"  [Error] 종목 리스트 확보 중 오류: {e}")
-            if os.path.exists(cache_file): return pd.read_csv(cache_file, dtype={'Code': str})
+            if os.path.exists(cache_file):
+                try:
+                    return pd.read_csv(cache_file, dtype={"Code": str})
+                except Exception:
+                    pass
             return pd.DataFrame()
 
     def get_remote_command(self):
