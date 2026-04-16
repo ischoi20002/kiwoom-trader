@@ -5,6 +5,40 @@
 
 ---
 
+## 0.3.26 (2026-04-16)
+
+- **trading_data.db 용량**: PK(`code`,`datetime`)와 동일한 보조 인덱스(`idx_bars_1m_code_dt` 등)가 데이터·키를 이중 저장 — `data_manager_v2` 부트 시 `DROP INDEX IF EXISTS`로 정리, 신규에는 동일 인덱스 미생성. 수동 점검: `python tools/audit_trading_db_size.py`, 인덱스만 드롭: `tools/drop_redundant_candle_indexes.sql`. 파일 크기 축소는 `VACUUM`(시간 소요).
+
+## 0.3.25 (2026-04-16)
+
+- **워밍업 분리**: `realtime_warmup_quick_then_deep_background`(기본 True)일 때 메인 워밍업은 최소 봉·당일 갭만 빠르게 채우고, 캘린더·깊이(1년) ka10080 보강은 데몬 스레드 큐에서 종목별 순차 실행. `bars_data` 갱신은 `RLock`으로 스트림 틱과 동기화 (`k_trader_gui.py`, `core/stream_processor.py`, `core/warmup_service.py`).
+
+## 0.3.24 (2026-04-16)
+
+- **워밍업 UI**: ka10080 연속조회(특히 캘린더·깊이 모드) 중에도 `prep_progress`로 페이지 진행 표시·로그(15·50페이지 단위). 연속조회 루프에서 `is_running` 확인으로 중단 가능 (`core/warmup_service.py`, `ui/tabs/monitor_tab.py`, `k_trader_gui.py`).
+
+## 0.3.23 (2026-04-16)
+
+- **실시간 최소 봉수**: `min_15m_bars_for_signal`만이 아니라 설정 탭 ATR 주기 `atr_period_a`·`atr_period_b`(폴백 `atr_period`)와의 **최댓값**을 `effective_min_15m_bars_for_monitoring()`으로 통일 — 신호 엔진·워밍업 검증 공통 (`core/defaults.py`, `core/signal_engine.py`, `core/warmup_service.py`).
+
+## 0.3.22 (2026-04-16)
+
+- **워밍업 과거 1년(캘린더) 확보**: `realtime_warmup_fetch_calendar_history`(기본 True)일 때 ka10080 를 신호 최소봉만으로 조기 종료하지 않고, 가장 오래된 15분봉이 `realtime_15m_calendar_retention_days` 이전이 될 때까지 연속조회. 상한 `realtime_warmup_ka10080_max_pages_deep`(기본 500). 키움 응답 한도로 1년 미만일 수 있음 (`core/warmup_service.py`, `core/defaults.py`).
+
+## 0.3.21 (2026-04-16)
+
+- **실시간 15분 DB 캘린더 롤링**: `realtime_15m_*.db`는 `realtime_15m_calendar_retention_days`(기본 365) 이전 봉을 종목별 DELETE. 워밍업 배치·확정봉 저장 후 동일 트랜잭션에서 정리. 조회는 `datetime >= cutoff` 필터. `realtime_warmup_15m_query_limit` 기본 7000으로 조정(1년 분량 상한). (`core/realtime_monitor_bars_store.py`, `k_trader_gui.py`, `core/defaults.py`)
+
+## 0.3.20 (2026-04-16)
+
+- **실시간 15분 DB 영속화**: 워밍업 검증 통과 직후 종목별 병합 OHLCV를 `realtime_15m_*.db`에 배치 저장(`bulk_upsert_ohlcv_index_frame`). 저장 상한은 `realtime_warmup_15m_query_limit`과 동일. 설정 `realtime_warmup_persist_to_rt15m_db`(기본 True)로 끌 수 있음 (`core/realtime_monitor_bars_store.py`, `core/warmup_service.py`, `core/defaults.py`).
+
+## 0.3.19 (2026-04-16)
+
+- **실시간 감시 전용 15분 DB**: 하베스팅 `trading_data.db`와 분리된 `realtime_15m_mock.db` / `realtime_15m_live.db`에 확정 15분봉 적재 (`core/realtime_monitor_bars_store.py`, `core/stream_processor.py` 콜백, `k_trader_gui.py`).
+- **워밍업**: `realtime_warmup_ohlcv_source`에 `realtime_15m_db_then_api`(별칭 `rt_15m_db`, `monitor_15m_then_api`) — 실시간 DB 우선 후 API 백필 (`core/warmup_service.py`). 기본·`settings.json` 예시를 해당 모드로 정렬 (`core/defaults.py`).
+- **문서**: `docs/realtime_monitor_bar_and_db_notes.md` 구현 섹션 보강.
+
 ## 0.3.18 (2026-04-16)
 
 - **포지션·체결**: 매도 `exit_reason`을 주문 로그(`EXIT_*`)와 동일 문자열로 저장·체결 시 우선 반영 (`core/trading_controller.py`, `core/portfolio_manager.py` `on_fill`).

@@ -8,6 +8,8 @@
   프로젝트 루트에서:  python tools/sync_defaults_from_settings.py
 """
 
+from typing import Any, Mapping, Optional
+
 # 주력 전략 기본 파라미터 (마지막 동기화: settings.json 기준, 키 순서는 기존 defaults 유지)
 DEFAULT_SETTINGS = {
     "backtest_initial_capital": 10000000,
@@ -28,21 +30,33 @@ DEFAULT_SETTINGS = {
     "use_type_balance_gate": False,
     "type_balance_a_pct": 40.0,
     "use_auto_virtual": True,
-    # 실시간: 15분봉 DF 행 수(진행 중 가상 1봉 포함)가 이 값 이상일 때만 S1 신호 판별
+    # 실시간: 15분봉 하한(진행 중 가상 1봉 포함). 실제 임계는 ATR 주기와의 max → effective_min_15m_bars_for_monitoring
     "min_15m_bars_for_signal": 60,
     # 워밍업 OHLCV 출처:
-    # - "api_only": DB(bars_15m/1m)를 쓰지 않고 ka10080 연속조회만으로 15분봉 구성(신호용 데이터를 DB 미검증에 섞지 않음)
-    # - "db_then_api": DB 우선 — 단, trading_data.db 에 분봉이 없으면 자동으로 api_only 로 전환(무DB 배포본)
-    # 전략 종목 선정(select_monitoring_targets) 기본값은 api_only (strategy_selector)
-    "realtime_warmup_ohlcv_source": "api_only",
+    # - "api_only": DB 미사용, ka10080 만
+    # - "realtime_15m_db_then_api": 실시간 전용 realtime_15m_*.db 우선(하베스팅 DB 미사용), 부족 시 API
+    # - "db_then_api": 하베스팅 trading_data.db 의 bars_15m/1m 우선 — 없으면 api_only 로 강등
+    # 전략 종목 선정(strategy_selector)은 별도 키로 api_only 를 쓸 수 있음
+    "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     # 워밍업: DB에서 가져올 최대 15분봉 개수(bars_15m 부족 시 1m→15m 리샘플, db_then_api 일 때만 사용)
-    "realtime_warmup_15m_query_limit": 2500,
+    # 워밍업·실시간 DB 조회 시 한 번에 가져올 15분봉 행 상한(1년 캐시·최대 약 7천 봉 전후)
+    "realtime_warmup_15m_query_limit": 7000,
+    # realtime_15m_*.db 에서 캘린더 기준 이전 일수만큼만 유지(롤링 DELETE)
+    "realtime_15m_calendar_retention_days": 365,
+    # True: 워밍업 검증 통과 시 병합 15분 OHLCV를 realtime_15m_*.db 에 배치 저장(다음 실행 캐시)
+    "realtime_warmup_persist_to_rt15m_db": True,
     # 실시간 bars_data 메모리 상한(StreamProcessor.tail 과 맞춤)
     "realtime_bars_max_keep": 300,
     # DB·리샘플만으로 봉이 부족할 때 키움 분봉 API로 15분봉 메모리 보충
     "use_api_warmup_backfill": True,
-    # 워밍업 분봉 API(ka10080) 연속조회 최대 페이지 수(종목당 상한 — 무한 루프 방지)
+    # 워밍업 분봉 API(ka10080) 연속조회 최대 페이지 수(종목당 — 신호·당일갭만 채울 때)
     "realtime_warmup_ka10080_max_pages": 40,
+    # 캘린더 과거 확보 모드일 때 연속조회 상한(종목당). 1년 분량은 API·페이지당 건수에 따라 더 필요할 수 있음
+    "realtime_warmup_ka10080_max_pages_deep": 500,
+    # True: 가장 오래된 15분봉이 (지금−realtime_15m_calendar_retention_days) 이전이 될 때까지 ka10080 연속조회
+    "realtime_warmup_fetch_calendar_history": True,
+    # True: 메인 워밍업은 최소 봉·당일 갭만 빠르게 — 캘린더·깊이(1년)는 백그라운드 큐에서 순차 보강. False면 예전처럼 메인 스레드에서 전량 조회
+    "realtime_warmup_quick_then_deep_background": True,
     # 연속조회 페이지 사이 대기(초) — 429 완화
     "realtime_warmup_ka10080_page_delay_min": 0.2,
     "realtime_warmup_ka10080_page_delay_max": 0.55,
@@ -283,3 +297,31 @@ def get_allowed_keys(current_settings=None):
         opt_keys = {k for k in current_settings.keys() if k.startswith('opt_')}
         return base.union(opt_keys)
     return base
+
+
+def effective_min_15m_bars_for_monitoring(
+    settings: Optional[Mapping[str, Any]] = None,
+) -> int:
+    """
+    실시간 감시·워밍업 검증 공통: 필요한 최소 15분봉 개수.
+    `min_15m_bars_for_signal` 과 설정 탭 ATR 주기(atr_period_a, atr_period_b, 폴백 atr_period) 중 최댓값.
+    """
+    s: Mapping[str, Any] = settings if settings is not None else DEFAULT_SETTINGS
+    try:
+        base = max(1, int(float(s.get("min_15m_bars_for_signal", 60))))
+    except (TypeError, ValueError):
+        base = 60
+    try:
+        atr_legacy = max(1, int(float(s.get("atr_period", 100))))
+    except (TypeError, ValueError):
+        atr_legacy = 100
+    try:
+        atr_a = max(1, int(float(s.get("atr_period_a", atr_legacy))))
+    except (TypeError, ValueError):
+        atr_a = atr_legacy
+    try:
+        atr_b = max(1, int(float(s.get("atr_period_b", atr_legacy))))
+    except (TypeError, ValueError):
+        atr_b = atr_legacy
+    atr_need = max(atr_a, atr_b)
+    return max(base, atr_need)

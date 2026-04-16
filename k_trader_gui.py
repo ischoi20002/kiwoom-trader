@@ -235,10 +235,41 @@ class KiwoomApp:
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
         self.bars_data = self.config_handler.load_bars_cache()
+        self._bars_data_lock = threading.RLock()
 
         # [v4.5.7] Essential attributes for SignalEngine
+        # 실시간 감시 전용 15분봉 DB(하베스팅 trading_data.db 와 분리) — 슬롯 변경 시 확정 봉 적재
+        from core.realtime_monitor_bars_store import RealtimeMonitorBarsStore
+        try:
+            _rt15_ret = int(
+                float(self.settings.get("realtime_15m_calendar_retention_days", 365))
+            )
+        except (TypeError, ValueError):
+            _rt15_ret = 365
+        _rt15_ret = max(1, min(_rt15_ret, 3650))
+        self.realtime_monitor_bars_store = RealtimeMonitorBarsStore(
+            logger_callback=self.log,
+            retention_calendar_days=_rt15_ret,
+        )
         from core.stream_processor import StreamProcessor
-        self.stream_processor = StreamProcessor(self.settings, logger_callback=self.log)
+
+        _rt15_store = self.realtime_monitor_bars_store
+
+        def _on_rt15_bar_closed(code, ts, o, h, l, c, v):
+            try:
+                _rt15_store.upsert_completed_bar(code, ts, o, h, l, c, v)
+            except Exception as ex:
+                try:
+                    self.log(f"⚠️ [RT15mDB] 확정봉 저장 실패: {ex}")
+                except Exception:
+                    pass
+
+        self.stream_processor = StreamProcessor(
+            self.settings,
+            logger_callback=self.log,
+            on_fifteen_min_bar_closed=_on_rt15_bar_closed,
+            bars_data_lock=self._bars_data_lock,
+        )
         self.streaam_processor = self.stream_processor # [Typo Alias Safety]
         self.rsi_signals = {}
         self._update_timer_active = False # [v4.5.7] UI 업데이트 타이머 상태
@@ -1190,14 +1221,23 @@ class KiwoomApp:
                         event, cur, total, name, code, reason
                     )
                 if hasattr(self, "lbl_monitor_status"):
+                    if event == "prep_progress" and (reason or "").strip():
+                        line = f"상태: ({cur}/{total}) {name} — {reason.strip()}"
+                    else:
+                        line = f"상태: 데이터 준비 중 ({cur}/{total}) {name}"
                     self.lbl_monitor_status.config(
-                        text=f"상태: 데이터 준비 중 ({cur}/{total}) {name}",
+                        text=line,
                         foreground=self.colors["primary"],
                     )
                 if self.status_label:
-                    self.status_label.config(
-                        text=f"상태: 데이터 준비 ({cur}/{total}) {name}"
-                    )
+                    if event == "prep_progress" and (reason or "").strip():
+                        self.status_label.config(
+                            text=f"상태: ({cur}/{total}) {name} — {reason.strip()}"
+                        )
+                    else:
+                        self.status_label.config(
+                            text=f"상태: 데이터 준비 ({cur}/{total}) {name}"
+                        )
             except Exception as e:
                 self.log(f"⚠️ [UI] 워밍업 표시 갱신 실패: {e}")
 

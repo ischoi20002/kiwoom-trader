@@ -55,6 +55,17 @@ def state_db_path_for_live() -> str:
     return os.path.join(project_root(), "trading_state_live.db")
 
 
+def realtime_monitor_15m_db_path() -> str:
+    """
+    실시간 감시 전용 15분봉 SQLite (하베스팅 trading_data.db 와 분리).
+
+    모의/실전에 따라 별도 파일로 두어 배포 시 대용량 캔들 DB와 독립적으로 동기화 가능.
+    """
+    base = project_root()
+    name = "realtime_15m_mock.db" if is_mock_mode() else "realtime_15m_live.db"
+    return os.path.join(base, name)
+
+
 def migrate_legacy_virtual_db_files() -> None:
     """
     구 단일 virtual_db.json → virtual_db_mock.json 으로 1회 이관.

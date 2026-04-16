@@ -1369,6 +1369,13 @@ class MonitorTab:
             if event == "prep_start":
                 st = f"⏳ 데이터 준비 중… ({cur}/{total})"
                 tag = "warmup_pending"
+            elif event == "prep_progress":
+                extra = (reason or "").strip()
+                if extra:
+                    st = f"⏳ ({cur}/{total}) {extra}"
+                else:
+                    st = f"⏳ 데이터 준비 중… ({cur}/{total})"
+                tag = "warmup_pending"
             elif event == "prep_ok":
                 st = "✅ 15분봉·검증 완료"
                 tag = "warmup_ok_row"

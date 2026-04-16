@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 
+import contextlib
+import queue
 import random
+import threading
 import time
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backtest_engine import TradingStrategy
+from core.defaults import effective_min_15m_bars_for_monitoring
 
 
 def _bar_slot_hhmm(ts: Any) -> str:
@@ -41,16 +45,65 @@ class WarmupService:
         self.auth_manager = app.auth_manager
         self.config_handler = app.config_handler
         self.log = logger_callback or print
-        # (event, cur, total, name, code, reason) event: prep_start | prep_ok | prep_fail
+        # event: prep_start | prep_progress | prep_ok | prep_fail (reason=부가문자열)
         self.stock_prep_cb = stock_prep_callback
 
         self.is_running = False
+        # run() 종목 루프에서만 설정 — ka10080 연속조회 중 UI 진행 표시용
+        self._warmup_prep_ui: Optional[Dict[str, Any]] = None
+        # 캘린더·깊이 보강을 메인 워밍업과 분리해 순차 백그라운드 처리
+        self._deep_history_queue: Optional[queue.Queue] = None
+        self._deep_history_worker_started: bool = False
 
     def _warmup_query_limit(self) -> int:
         try:
-            return max(200, int(float(self.app.settings.get("realtime_warmup_15m_query_limit", 2500))))
+            return max(200, int(float(self.app.settings.get("realtime_warmup_15m_query_limit", 7000))))
         except (TypeError, ValueError):
-            return 2500
+            return 7000
+
+    def _warmup_retention_calendar_days(self) -> int:
+        """실시간 15분 DB 롤링과 동일한 캘린더 보존 일수."""
+        try:
+            d = int(float(self.app.settings.get("realtime_15m_calendar_retention_days", 365)))
+        except (TypeError, ValueError):
+            d = 365
+        return max(1, min(d, 3650))
+
+    def _warmup_fetch_calendar_history_enabled(self) -> bool:
+        """True: ka10080 를 캘린더 보존일만큼 과거까지 채울 때까지 연속조회(신호 최소봉만으로 조기종료 안 함)."""
+        try:
+            return bool(self.app.settings.get("realtime_warmup_fetch_calendar_history", True))
+        except Exception:
+            return True
+
+    def _quick_then_deep_background_enabled(self) -> bool:
+        """
+        True: 메인 워밍업은 최소 봉·당일 갭만 빠르게 채우고,
+        캘린더 1년·깊이 보강은 백그라운드 큐에서 종목별 순차 처리.
+        """
+        try:
+            return bool(
+                self.app.settings.get("realtime_warmup_quick_then_deep_background", True)
+            )
+        except Exception:
+            return True
+
+    def _calendar_depth_satisfied(
+        self, merged: pd.DataFrame, retention_days: int
+    ) -> bool:
+        """
+        가장 오래된 15분봉 시각이 (지금 - retention_days) 이전/동일 구간이면 과거 깊이 충족.
+        """
+        try:
+            if merged is None or merged.empty:
+                return False
+            if not isinstance(merged.index, pd.DatetimeIndex):
+                return False
+            oldest = pd.Timestamp(merged.index.min())
+            cutoff = pd.Timestamp.now() - timedelta(days=int(retention_days))
+            return bool(oldest <= cutoff)
+        except Exception:
+            return False
 
     def _bars_max_keep(self) -> int:
         try:
@@ -59,17 +112,25 @@ class WarmupService:
             return 300
 
     def _min_bars_for_signal(self) -> int:
+        """실시간 최소 봉수(설정)와 ATR 주기(atr_period_a/b) 상한을 함께 반영."""
         try:
-            return max(1, int(float(self.app.settings.get("min_15m_bars_for_signal", 60))))
-        except (TypeError, ValueError):
-            return 60
+            return effective_min_15m_bars_for_monitoring(self.app.settings)
+        except Exception:
+            try:
+                return max(
+                    1,
+                    int(float(self.app.settings.get("min_15m_bars_for_signal", 60))),
+                )
+            except (TypeError, ValueError):
+                return 60
 
     def _warmup_ohlcv_source(self) -> str:
         """
         워밍업 시 가격 봉의 출처.
-        api_only — DB 미사용(검증되지 않은 로컬 캔들을 신호 경로에 섞지 않음).
-        db_then_api — DB 우선 후 API 보충(기존).
-        메인 trading_data.db 에 분봉/15분 데이터가 없으면 db_then_api 라도 api_only 로 강등(무DB 배포본).
+        api_only — DB 미사용.
+        realtime_15m_db_then_api — 실시간 전용 15분 DB(realtime_15m_*.db) 우선, 부족 시 API.
+        db_then_api — 하베스팅 trading_data.db 의 bars_15m/1m 우선 후 API.
+        db_then_api 이고 메인 DB에 분봉이 없으면 api_only 로 강등(무DB 배포본).
         """
         try:
             s = str(
@@ -79,6 +140,8 @@ class WarmupService:
             s = "api_only"
         if s in ("api_only", "api", "rest_only"):
             return "api_only"
+        if s in ("realtime_15m_db_then_api", "rt_15m_db", "monitor_15m_then_api"):
+            return "realtime_15m_db_then_api"
         try:
             dm = self.data_manager
             if dm is not None and hasattr(dm, "main_db_has_any_intraday_rows"):
@@ -100,6 +163,65 @@ class WarmupService:
                     pass
             return "api_only"
         return "db_then_api"
+
+    def _persist_warmup_base_to_rt15m_db(self, code: str, base: pd.DataFrame) -> None:
+        """
+        워밍업 검증 통과 직후: 병합된 15분 OHLCV를 realtime_15m_*.db 에 배치 저장합니다.
+        다음 실행 시 로컬 우선 로드가 가능해집니다.
+        """
+        try:
+            if not bool(
+                self.app.settings.get("realtime_warmup_persist_to_rt15m_db", True)
+            ):
+                return
+            store = getattr(self.app, "realtime_monitor_bars_store", None)
+            if store is None or base is None or base.empty:
+                return
+            n = int(store.bulk_upsert_ohlcv_index_frame(code, base))
+            if n > 0:
+                try:
+                    rd = int(
+                        float(
+                            self.app.settings.get(
+                                "realtime_15m_calendar_retention_days", 365
+                            )
+                        )
+                    )
+                except (TypeError, ValueError):
+                    rd = 365
+                self.log(
+                    f"💾 [Warmup-RT15mDB] {code} {n}봉 영속화 "
+                    f"(캘린더 보존 약 {rd}일·롤링, realtime_15m_*.db)"
+                )
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Warmup-RT15mDB] {code} 영속화 실패: {e}")
+            except Exception:
+                pass
+
+    def _load_from_realtime_monitor_db(self, code: str) -> pd.DataFrame:
+        """실시간 전용 realtime_15m_*.db → 워밍업용 OHLCV 인덱스 프레임."""
+        try:
+            store = getattr(self.app, "realtime_monitor_bars_store", None)
+            if store is None:
+                return pd.DataFrame()
+            raw = store.fetch_15m_bars_as_dataframe(code, self._warmup_query_limit())
+            if raw is None or raw.empty or "time" not in raw.columns:
+                return pd.DataFrame()
+            d = raw.copy()
+            d["time"] = pd.to_datetime(d["time"], errors="coerce")
+            d = d.dropna(subset=["time"])
+            d = d.set_index("time").sort_index()
+            for c in ("Open", "High", "Low", "Close", "Volume"):
+                if c not in d.columns:
+                    return pd.DataFrame()
+            return d[["Open", "High", "Low", "Close", "Volume"]].copy()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Warmup-RT15mDB] {code} 정규화 실패: {e}")
+            except Exception:
+                pass
+            return pd.DataFrame()
 
     def _warmup_retry_max(self) -> int:
         """실패 시 추가 재시도 횟수(최초 시도 1회 + 이 값 = 총 시도 상한)."""
@@ -146,6 +268,27 @@ class WarmupService:
         except Exception as e:
             self.log(f"⚠️ [Warmup] stock_prep_cb 오류: {e}")
 
+    def _notify_ka10080_page_progress(
+        self, pages: int, max_pages: int, deep_fetch: bool
+    ) -> None:
+        """연속조회 중 트리·상태줄이 멈춘 것처럼 보이지 않도록 주기적 갱신."""
+        ctx = getattr(self, "_warmup_prep_ui", None)
+        if not ctx:
+            return
+        try:
+            tag = "캘린더·깊이" if deep_fetch else "보충"
+            msg = f"분봉 API {pages}/{max_pages}페이지 ({tag})"
+            self._notify_stock_prep(
+                "prep_progress",
+                int(ctx["cur"]),
+                int(ctx["total"]),
+                str(ctx["name"]),
+                str(ctx["code"]),
+                msg,
+            )
+        except Exception:
+            pass
+
     def _validate_warmup_base(self, base: pd.DataFrame) -> Tuple[bool, str]:
         """
         DB·API 병합 직후 15분봉 시계열이 신호 엔진 기준을 만족하는지 검사.
@@ -185,17 +328,34 @@ class WarmupService:
         token: str,
         base: pd.DataFrame,
         need: int,
+        *,
+        deep_fetch: bool = False,
+        retention_days: int = 365,
     ) -> List[Any]:
         """
         워밍업 전용: ka10080 연속조회로 분봉을 모은 뒤 15m 병합 기준을 만족할 때까지 페이지를 이어 받음.
-        (봉 수·장중 당일 갭이 해소되면 조기 종료 — 불필요한 API 호출 감소)
+        deep_fetch=False: 신호 최소 봉·장중 당일 갭 해소 시 조기 종료.
+        deep_fetch=True: 캘린더 retention_days 만큼 과거까지 확보되고 당일 갭도 없을 때까지 조회(상한 페이지 별도).
         """
         try:
-            max_pages = max(
-                1, int(float(self.app.settings.get("realtime_warmup_ka10080_max_pages", 40)))
-            )
+            if deep_fetch:
+                max_pages = max(
+                    1,
+                    int(
+                        float(
+                            self.app.settings.get(
+                                "realtime_warmup_ka10080_max_pages_deep", 500
+                            )
+                        )
+                    ),
+                )
+            else:
+                max_pages = max(
+                    1,
+                    int(float(self.app.settings.get("realtime_warmup_ka10080_max_pages", 40))),
+                )
         except (TypeError, ValueError):
-            max_pages = 40
+            max_pages = 500 if deep_fetch else 40
         try:
             dmin = float(
                 self.app.settings.get("realtime_warmup_ka10080_page_delay_min", 0.2)
@@ -214,6 +374,9 @@ class WarmupService:
         early_stop = False
 
         for _ in range(max_pages):
+            if not self.is_running:
+                self.log(f"ℹ️ [Warmup-API] {name}({code}) 연속조회 중단(워밍업 stop)")
+                break
             try:
                 raw_list, nk = self.data_manager.fetch_kiwoom_minute_chart_page(
                     code, token, nk
@@ -223,6 +386,12 @@ class WarmupService:
                 break
 
             pages += 1
+            if pages == 1 or (pages % 15 == 0):
+                self._notify_ka10080_page_progress(pages, max_pages, deep_fetch)
+            if pages == 1 or (pages % 50 == 0):
+                self.log(
+                    f"⏳ [Warmup-API] {name}({code}) ka10080 연속조회 {pages}/{max_pages}페이지…"
+                )
             if raw_list is None:
                 self.log(
                     f"⚠️ [Warmup-API] {name}({code}) 페이지 {pages} 응답 없음(오류)"
@@ -244,14 +413,25 @@ class WarmupService:
                 n_merged = (
                     len(merged) if merged is not None and not merged.empty else 0
                 )
-                if n_merged >= need and not self._needs_intraday_api_backfill(merged):
-                    early_stop = True
-                    break
+                if deep_fetch:
+                    depth_ok = self._calendar_depth_satisfied(merged, retention_days)
+                    intraday_ok = not self._needs_intraday_api_backfill(merged)
+                    if depth_ok and intraday_ok:
+                        early_stop = True
+                        break
+                else:
+                    if n_merged >= need and not self._needs_intraday_api_backfill(
+                        merged
+                    ):
+                        early_stop = True
+                        break
             except Exception as e:
                 self.log(f"⚠️ [Warmup-API] {name}({code}) 중간 병합 검사 오류: {e}")
 
             nk = (nk or "").strip()
             if not nk:
+                break
+            if not self.is_running:
                 break
             time.sleep(random.uniform(dmin, dmax))
 
@@ -260,6 +440,7 @@ class WarmupService:
                 f"📡 [Warmup-API] {name}({code}) ka10080 {pages}페이지, "
                 f"유일 분봉 {len(by_tm)}건"
                 + (" (조기 종료)" if early_stop else "")
+                + (" (캘린더·깊이)" if deep_fetch else "")
             )
         return list(by_tm.values())
 
@@ -324,7 +505,7 @@ class WarmupService:
         """
         하베스팅은 보통 전일(이전 영업일)까지이므로, 장중에 감시를 켜면
         당일 09:00~현재에 해당하는 15분봉이 DB에 없을 수 있다.
-        이 경우 봉 개수가 60을 넘더라도 API 로 당일 구간을 메워야 한다.
+        이 경우 봉 개수가 신호 최소 봉수를 넘더라도 API 로 당일 구간을 메워야 한다.
         """
         try:
             if not bool(self.app.settings.get("use_intraday_api_backfill", True)):
@@ -353,12 +534,19 @@ class WarmupService:
             return True
 
     def _maybe_api_backfill_15m(
-        self, code: str, name: str, base: pd.DataFrame, token: Optional[str]
+        self,
+        code: str,
+        name: str,
+        base: pd.DataFrame,
+        token: Optional[str],
+        *,
+        quick_only: bool = False,
     ) -> pd.DataFrame:
         """
         (1) 15m 봉 수 < 신호 기준 이거나
         (2) 장중인데 당일·최근 15분 구간이 DB 에 비어 있는 경우
         → 키움 분봉 API 로 보충 후 병합.
+        quick_only=True: 과거 캘린더 깊이는 생략(빠른 워밍업). 깊이는 백그라운드 큐에서 처리.
         """
         try:
             if self._warmup_ohlcv_source() == "api_only":
@@ -375,15 +563,33 @@ class WarmupService:
             need = self._min_bars_for_signal()
             short = base.empty or len(base) < need
             gap = self._needs_intraday_api_backfill(base)
-            if not short and not gap:
+            deep = self._warmup_fetch_calendar_history_enabled()
+            rd = self._warmup_retention_calendar_days()
+            if quick_only:
+                need_depth = False
+                use_deep_fetch = False
+            else:
+                need_depth = deep and not self._calendar_depth_satisfied(base, rd)
+                use_deep_fetch = deep
+            if not short and not gap and not need_depth:
                 return base
             reason = []
+            if quick_only:
+                reason.append("빠른워밍업")
             if short:
                 reason.append(f"봉수<{need}")
             if gap:
                 reason.append("장중당일갭")
+            if need_depth:
+                reason.append(f"과거{rd}일미충족")
             raw_api = self._fetch_warmup_minute_bars_paginated(
-                code, name, token, base, need
+                code,
+                name,
+                token,
+                base,
+                need,
+                deep_fetch=use_deep_fetch,
+                retention_days=rd,
             )
             api15 = self._minute_api_list_to_15m_ohlcv(raw_api)
             if api15.empty:
@@ -404,12 +610,16 @@ class WarmupService:
 
     def _load_15m_ohlcv_frame(self, code: str) -> pd.DataFrame:
         """
-        db_then_api: DB bars_15m 우선. 비어 있으면 bars_1m 을 15분봉으로 리샘플.
+        realtime_15m_db_then_api: realtime_15m_*.db 우선 (하베스팅 DB 미사용).
+        db_then_api: trading_data.db bars_15m 우선. 비어 있으면 bars_1m 을 15분봉으로 리샘플.
         api_only: 빈 프레임 반환 — 이후 _maybe_api_backfill_15m 가 API 전량으로 채움.
         반환: DatetimeIndex, 열 Open/High/Low/Close/Volume
         """
         if self._warmup_ohlcv_source() == "api_only":
             return pd.DataFrame()
+        if self._warmup_ohlcv_source() == "realtime_15m_db_then_api":
+            base_rt = self._load_from_realtime_monitor_db(code)
+            return base_rt if base_rt is not None and not base_rt.empty else pd.DataFrame()
 
         lim = self._warmup_query_limit()
         try:
@@ -483,8 +693,14 @@ class WarmupService:
         반환: (성공 여부, 실패 사유 또는 빈 문자열, 검증 시점 15m 봉 수 또는 성공 시 스트림 봉 수)
         """
         try:
+            qdeep = self._quick_then_deep_background_enabled()
+            want_cal = self._warmup_fetch_calendar_history_enabled()
+            use_quick = bool(qdeep and want_cal)
+
             base = self._load_15m_ohlcv_frame(code)
-            base = self._maybe_api_backfill_15m(code, name, base, token)
+            base = self._maybe_api_backfill_15m(
+                code, name, base, token, quick_only=use_quick
+            )
             time.sleep(random.uniform(0.25, 0.75))
 
             ok, reason = self._validate_warmup_base(base)
@@ -496,14 +712,22 @@ class WarmupService:
                     pass
                 return False, reason, nbar
 
+            self._persist_warmup_base_to_rt15m_db(code, base)
+
             df_ind = TradingStrategy.calculate_indicators(base, self.app.settings)
-            bars_data[code] = self._finalize_bars_for_stream(df_ind)
+            fin = self._finalize_bars_for_stream(df_ind)
+            lk = getattr(self.app, "_bars_data_lock", None)
+            cm = lk if lk is not None else contextlib.nullcontext()
+            with cm:
+                bars_data[code] = fin
             n_ok = len(bars_data[code]) if bars_data.get(code) is not None else 0
             if on_stock_ready is not None:
                 try:
                     on_stock_ready(code)
                 except Exception as cb_e:
                     self.log(f"⚠️ [Warmup] on_stock_ready 콜백 오류 ({code}): {cb_e}")
+            if use_quick:
+                self._enqueue_deep_history_backfill(code, name)
             return True, "", n_ok
         except Exception as e:
             try:
@@ -511,6 +735,118 @@ class WarmupService:
             except Exception:
                 pass
             return False, str(e), 0
+
+    def _enqueue_deep_history_backfill(self, code: str, name: str) -> None:
+        """캘린더 깊이 보강 작업을 백그라운드 큐에 넣습니다."""
+        try:
+            if not self._warmup_fetch_calendar_history_enabled():
+                return
+            if not self._quick_then_deep_background_enabled():
+                return
+            if self._deep_history_queue is None:
+                self._deep_history_queue = queue.Queue()
+            self._deep_history_queue.put((str(code).zfill(6), str(name)))
+            self._start_deep_history_worker_once()
+        except Exception as e:
+            self.log(f"⚠️ [Warmup-DeepBG] 큐 등록 실패 ({code}): {e}")
+
+    def _start_deep_history_worker_once(self) -> None:
+        if self._deep_history_worker_started:
+            return
+        self._deep_history_worker_started = True
+        t = threading.Thread(
+            target=self._deep_history_worker_loop,
+            daemon=True,
+            name="WarmupDeepHistory",
+        )
+        t.start()
+
+    def _deep_history_worker_loop(self) -> None:
+        while True:
+            q = self._deep_history_queue
+            if q is None:
+                time.sleep(0.5)
+                continue
+            try:
+                code, name = q.get()
+            except Exception:
+                time.sleep(0.5)
+                continue
+            try:
+                self._run_background_deep_history(code, name)
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ [Warmup-DeepBG] {name}({code}) 처리 예외: {e}")
+                except Exception:
+                    pass
+            finally:
+                try:
+                    q.task_done()
+                except Exception:
+                    pass
+
+    def _merge_deep_ohlcv_with_live(
+        self, hist: pd.DataFrame, cur: Optional[pd.DataFrame]
+    ) -> pd.DataFrame:
+        """깊이 보강 OHLCV와 실시간 bars_data 병합 — 겹치는 시각은 cur(스트림) 우선."""
+        try:
+            if hist is None or hist.empty:
+                return pd.DataFrame()
+            if cur is None or getattr(cur, "empty", True):
+                return hist.copy()
+            if not isinstance(cur.index, pd.DatetimeIndex):
+                return hist.copy()
+            ohlc = ("Open", "High", "Low", "Close", "Volume")
+            if not all(c in cur.columns for c in ohlc):
+                return hist.copy()
+            cut = pd.Timestamp(cur.index.min())
+            hpart = hist[hist.index < cut].copy() if len(hist.index) else pd.DataFrame()
+            cpart = cur[list(ohlc)].copy()
+            out = pd.concat([hpart, cpart]).sort_index()
+            out = out[~out.index.duplicated(keep="last")]
+            return out
+        except Exception as e:
+            self.log(f"⚠️ [Warmup-DeepBG] OHLCV 병합 실패: {e}")
+            return pd.DataFrame()
+
+    def _apply_deep_history_to_bars_data(self, code: str, merged_ohlcv: pd.DataFrame) -> None:
+        """깊이 보강 결과로 bars_data[code] 지표 재계산(락 사용)."""
+        lk = getattr(self.app, "_bars_data_lock", None)
+        cm = lk if lk is not None else contextlib.nullcontext()
+        with cm:
+            cur = (self.app.bars_data or {}).get(code)
+            combined = self._merge_deep_ohlcv_with_live(merged_ohlcv, cur)
+            if combined is None or combined.empty:
+                return
+            df_ind = TradingStrategy.calculate_indicators(combined, self.app.settings)
+            fin = self._finalize_bars_for_stream(df_ind)
+            if not isinstance(self.app.bars_data, dict):
+                self.app.bars_data = {}
+            self.app.bars_data[code] = fin
+
+    def _run_background_deep_history(self, code: str, name: str) -> None:
+        """캘린더 깊이 ka10080 보강 → RT DB 영속화 → bars_data 병합 갱신."""
+        self.log(f"📥 [Warmup-DeepBG] {name}({code}) 과거·깊이 보강 시작(백그라운드)…")
+        token: Optional[str] = None
+        try:
+            token = self.auth_manager.get_auth_token()
+        except Exception:
+            pass
+        if not token:
+            self.log(f"⚠️ [Warmup-DeepBG] {code} 토큰 없음 — 건너뜀")
+            return
+        base = self._load_15m_ohlcv_frame(code)
+        merged = self._maybe_api_backfill_15m(
+            code, name, base, token, quick_only=False
+        )
+        if merged is None or merged.empty:
+            self.log(f"⚠️ [Warmup-DeepBG] {name}({code}) 병합 결과 없음")
+            return
+        self._persist_warmup_base_to_rt15m_db(code, merged)
+        self._apply_deep_history_to_bars_data(code, merged)
+        self.log(
+            f"✅ [Warmup-DeepBG] {name}({code}) 깊이 보강·DB·메모리 반영 완료 ({len(merged)}봉)"
+        )
 
     def _finalize_bars_for_stream(self, df_ind: pd.DataFrame) -> pd.DataFrame:
         """StreamProcessor 가 기대하는 time(HHMM)·cum_v_start 를 붙이고 길이를 제한."""
@@ -563,59 +899,101 @@ class WarmupService:
                 "ℹ️ [Warmup] OHLCV 는 DB(bars_15m/1m)를 사용하지 않습니다 — "
                 "ka10080 연속조회만 신호용 워밍업에 사용합니다."
             )
+        elif _src == "realtime_15m_db_then_api":
+            self.log(
+                "ℹ️ [Warmup] OHLCV 는 실시간 전용 DB(realtime_15m_*.db) 우선 — "
+                "부족 시 ka10080 보충 (하베스팅 trading_data.db 미사용). "
+                "검증 통과 시 병합 봉을 동일 DB에 영속화합니다."
+            )
+        if self._warmup_fetch_calendar_history_enabled():
+            try:
+                mp = int(
+                    float(
+                        self.app.settings.get(
+                            "realtime_warmup_ka10080_max_pages_deep", 500
+                        )
+                    )
+                )
+            except (TypeError, ValueError):
+                mp = 500
+            self.log(
+                f"ℹ️ [Warmup] ka10080 은 캘린더 약 {self._warmup_retention_calendar_days()}일 "
+                f"과거(가장 오래된 봉 기준)까지 확보 후 조기 종료합니다. "
+                f"연속조회 상한 약 {mp}페이지/종목(API·키움 응답 한도에 따라 더 짧을 수 있음). "
+                f"끄려면 realtime_warmup_fetch_calendar_history=false"
+            )
+        if self._quick_then_deep_background_enabled() and self._warmup_fetch_calendar_history_enabled():
+            self.log(
+                "ℹ️ [Warmup] 메인 워밍업은 최소 봉·당일 갭만 빠르게 채웁니다. "
+                "캘린더·깊이(1년) 보강은 백그라운드에서 종목별 순차 실행됩니다. "
+                "끄려면 realtime_warmup_quick_then_deep_background=false"
+            )
         for i, code in enumerate(monitor_codes):
             if not self.is_running:
                 break
             name = monitor_info.get(code, {}).get("name", "Unknown")
-            self._notify_stock_prep("prep_start", i + 1, total, name, code, "")
+            self._warmup_prep_ui = {
+                "cur": i + 1,
+                "total": total,
+                "name": name,
+                "code": code,
+            }
+            try:
+                self._notify_stock_prep("prep_start", i + 1, total, name, code, "")
 
-            final_reason = ""
-            final_nbar = 0
+                final_reason = ""
+                final_nbar = 0
 
-            for attempt in range(max_attempts):
-                if not self.is_running:
-                    break
-                token = self.auth_manager.get_auth_token()
-                ok, reason, nbar = self._execute_warmup_one_code(
-                    code, name, token, bars_data, on_stock_ready
-                )
-                if ok:
-                    results[code] = {
-                        "ok": True,
-                        "reason": "",
-                        "bars": nbar,
-                    }
-                    if attempt > 0:
-                        self.log(
-                            f"✅ [Warmup] {name}({code}) "
-                            f"{attempt + 1}번째 시도에서 성공 (bars={nbar})"
+                for attempt in range(max_attempts):
+                    if not self.is_running:
+                        break
+                    token = self.auth_manager.get_auth_token()
+                    ok, reason, nbar = self._execute_warmup_one_code(
+                        code, name, token, bars_data, on_stock_ready
+                    )
+                    if ok:
+                        results[code] = {
+                            "ok": True,
+                            "reason": "",
+                            "bars": nbar,
+                        }
+                        if attempt > 0:
+                            self.log(
+                                f"✅ [Warmup] {name}({code}) "
+                                f"{attempt + 1}번째 시도에서 성공 (bars={nbar})"
+                            )
+                        else:
+                            self.log(
+                                f"✅ [Warmup] {name}({code}) 준비 완료 (bars={nbar})"
+                            )
+                        self._notify_stock_prep(
+                            "prep_ok", i + 1, total, name, code, ""
                         )
-                    else:
-                        self.log(f"✅ [Warmup] {name}({code}) 준비 완료 (bars={nbar})")
-                    self._notify_stock_prep("prep_ok", i + 1, total, name, code, "")
-                    break
+                        break
 
-                final_reason, final_nbar = reason, nbar
-                last_try = attempt >= max_attempts - 1
-                if not last_try and self.is_running:
-                    self.log(
-                        f"⏳ [Warmup] {name}({code}) 실패 "
-                        f"(시도 {attempt + 1}/{max_attempts}): {reason} — "
-                        f"{retry_delay:.0f}초 후 재시도…"
-                    )
-                    self._interruptible_sleep(retry_delay)
-                elif last_try:
-                    results[code] = {
-                        "ok": False,
-                        "reason": final_reason,
-                        "bars": final_nbar,
-                    }
-                    self.log(
-                        f"❌ [Warmup] {name}({code}) {max_attempts}회 시도 후 최종 실패: {final_reason}"
-                    )
-                    self._notify_stock_prep(
-                        "prep_fail", i + 1, total, name, code, final_reason
-                    )
+                    final_reason, final_nbar = reason, nbar
+                    last_try = attempt >= max_attempts - 1
+                    if not last_try and self.is_running:
+                        self.log(
+                            f"⏳ [Warmup] {name}({code}) 실패 "
+                            f"(시도 {attempt + 1}/{max_attempts}): {reason} — "
+                            f"{retry_delay:.0f}초 후 재시도…"
+                        )
+                        self._interruptible_sleep(retry_delay)
+                    elif last_try:
+                        results[code] = {
+                            "ok": False,
+                            "reason": final_reason,
+                            "bars": final_nbar,
+                        }
+                        self.log(
+                            f"❌ [Warmup] {name}({code}) {max_attempts}회 시도 후 최종 실패: {final_reason}"
+                        )
+                        self._notify_stock_prep(
+                            "prep_fail", i + 1, total, name, code, final_reason
+                        )
+            finally:
+                self._warmup_prep_ui = None
 
         for code in monitor_codes:
             if code not in results:

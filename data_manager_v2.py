@@ -194,9 +194,19 @@ class DataManagerV2:
                     status TEXT
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1m_code_dt ON bars_1m (code, datetime)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_15m_code_dt ON bars_15m (code, datetime)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_1d_code_dt ON bars_1d (code, datetime)")
+            # PRIMARY KEY (code, datetime) 가 이미 동일 순서 인덱스 역할.
+            # 보조 인덱스 (code, datetime) 는 중복 저장만 유발 → 생성하지 않음.
+            # 기존 DB에 남아 있으면 제거(용량·freelist 정리; 파일 축소는 VACUUM).
+            for _ix in (
+                "idx_bars_1m_code_dt",
+                "idx_bars_15m_code_dt",
+                "idx_bars_1d_code_dt",
+                "idx_bars_1d_code_date",
+            ):
+                try:
+                    conn.execute(f"DROP INDEX IF EXISTS {_ix}")
+                except sqlite3.Error:
+                    pass
             # [v4.12] 예전 실시간 스냅샷 테이블 — 적재 경로 없음, 백테는 합성 지표로 처리. 잔여 파일 정리.
             try:
                 conn.execute("DROP INDEX IF EXISTS idx_realtime_snap_code_dt")

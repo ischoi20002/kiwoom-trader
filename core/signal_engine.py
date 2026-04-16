@@ -4,6 +4,7 @@ import threading
 from datetime import datetime
 import traceback
 from backtest_engine import TradingStrategy
+from core.defaults import effective_min_15m_bars_for_monitoring
 from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
 from typing import Any, Optional, Tuple
@@ -320,8 +321,10 @@ class SignalEngine:
             info['tick_count'] = info.get('tick_count', 0) + 1
             last_bar_count = info.get('last_bar_count', 0)
             try:
-                _min_sig_bars = max(1, int(float(self.app.settings.get("min_15m_bars_for_signal", 60))))
-            except (TypeError, ValueError):
+                _min_sig_bars = effective_min_15m_bars_for_monitoring(
+                    self.app.settings
+                )
+            except Exception:
                 _min_sig_bars = 60
             _bd = (self.app.bars_data or {}).get(code)
             try:

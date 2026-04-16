@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
+from typing import Any, Dict
+
 import pandas as pd
 from backtest_engine import TradingStrategy
 from strategy.indicator_constants import (
@@ -12,16 +14,46 @@ from strategy.indicator_constants import (
 
 class StreamProcessor:
     """실시간 시세 데이터 처리 및 지표 계산 전용 클래스"""
-    def __init__(self, settings, logger_callback=None):
+    def __init__(
+        self,
+        settings,
+        logger_callback=None,
+        on_fifteen_min_bar_closed=None,
+        bars_data_lock=None,
+    ):
         self.settings = settings
         self.logger = logger_callback or print
+        # (code, bar_index_ts, open, high, low, close, volume) — 슬롯이 바뀔 때 직전 봉 확정 시 1회
+        self._on_bar_closed = on_fifteen_min_bar_closed
+        self._bars_data_lock = bars_data_lock
 
     def log(self, message):
         if self.logger:
             self.logger(message)
 
-    def update_realtime_bar(self, code, price, volume, bars_data):
+    @staticmethod
+    def _scalar_cell(df, idx, col: str):
+        try:
+            v = df.at[idx, col]
+            if hasattr(v, "iloc"):
+                return v.iloc[0]
+            return v
+        except Exception:
+            return None
+
+    def update_realtime_bar(
+        self, code, price, volume, bars_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """틱 정보를 DataFrame 기반 봉에 반영"""
+        lk = self._bars_data_lock
+        if lk is not None:
+            with lk:
+                return self._update_realtime_bar_impl(code, price, volume, bars_data)
+        return self._update_realtime_bar_impl(code, price, volume, bars_data)
+
+    def _update_realtime_bar_impl(
+        self, code, price, volume, bars_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
         now = datetime.now()
         # [v3.5] 15분 단위 슬롯으로 원복 (지표 안정성 확보)
         target_minute = ((now.minute // 15) + 1) * 15
@@ -61,6 +93,18 @@ class StreamProcessor:
             start_v = start_v_v.iloc[0] if hasattr(start_v_v, 'iloc') else start_v_v
             df.at[last_idx, 'Volume'] = max(0, volume - float(start_v))
         else:
+            # 직전 슬롯 15분봉 확정 → 실시간 전용 DB 저장 (부하: 종목당 15분당 1회)
+            if self._on_bar_closed is not None:
+                try:
+                    o = float(self._scalar_cell(df, last_idx, "Open"))
+                    h = float(self._scalar_cell(df, last_idx, "High"))
+                    l = float(self._scalar_cell(df, last_idx, "Low"))
+                    c = float(self._scalar_cell(df, last_idx, "Close"))
+                    v = float(self._scalar_cell(df, last_idx, "Volume"))
+                    self._on_bar_closed(code, last_idx, o, h, l, c, v)
+                except Exception as e:
+                    if self.logger:
+                        self.logger(f"⚠️ [Stream] 확정 15분봉 저장 콜백 실패: {e}")
             # 새 봉 추가 및 300개 유지 (충분한 지표 계산용)
             new_row_data = {'datetime': dt_str, 'time': slot_time, 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 0, 'cum_v_start': volume}
             new_row_df = pd.DataFrame([new_row_data])
