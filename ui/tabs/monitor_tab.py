@@ -2,7 +2,7 @@ import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import asyncio
 import websockets
 import json
@@ -154,6 +154,10 @@ class MonitorTab:
         # 보유 종목 추가 시 웹소켓 REG 재전송 요청(과도 호출 방지는 루프에서 스로틀)
         self._pending_reg_refresh: bool = False
         self._last_stream_reg_ts: float = 0.0
+        # 직전 REG에 실린 종목 집합(정규화·정렬). 동일이면 재전송·대시보드 로그 생략(스팸 방지)
+        self._last_stream_reg_sig: Optional[Tuple[str, ...]] = None
+        # 증분 워밍업 등으로 REG는 자주 가도, 사용자 로그는 이 간격(초) 이상일 때만 1줄 출력
+        self._last_stream_reg_user_log_ts: float = 0.0
         # 감시 트리 열 폭 저장(구분선 드래그 후 디바운스)
         self._monitor_col_width_save_job: Optional[Any] = None
         self._monitor_width_source_tree: Optional[ttk.Treeview] = None
@@ -165,6 +169,26 @@ class MonitorTab:
         # 틱이 끊긴 종목도 monitor_info 기준으로 트리에 유지 (봉 마감·무거래 구간)
         self._last_monitor_tree_reconcile_ts: float = 0.0
         self._setup_ui()
+
+    @staticmethod
+    def _subscription_codes_signature(codes: Any) -> Tuple[str, ...]:
+        """REG `item` 리스트를 비교용 시그니처로 만듭니다(6자리·중복 제거·정렬)."""
+        try:
+            if not codes:
+                return tuple()
+            seen: Set[str] = set()
+            out: List[str] = []
+            for x in codes:
+                try:
+                    nk = str(x).split("_")[0].zfill(6)
+                except Exception:
+                    continue
+                if nk not in seen:
+                    seen.add(nk)
+                    out.append(nk)
+            return tuple(sorted(out))
+        except Exception:
+            return tuple()
 
     def _monitor_col_widths_json_path(self) -> str:
         """settings.json 과 같은 폴더에 열 폭을 둡니다."""
@@ -337,11 +361,12 @@ class MonitorTab:
             font=("Malgun Gothic", 10),
             foreground=self.app.colors["primary"],
         )
-        # 오른쪽 묶음: 왼쪽→오른쪽 읽기 순서 = 일일감시목록선정 | 실시간 감시 시작 | 상태
-        # (side=RIGHT 는 나중에 pack한 위젯이 더 오른쪽에 붙음)
-        self.lbl_monitor_status.pack(side=tk.RIGHT, padx=(4, 0))
-        self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 8))
+        # 오른쪽 묶음: 읽기 순서(왼→오) = 상태 | 실시간 감시 시작/중단 | 일일 감시목록 선정
+        # side=RIGHT 는 먼저 pack 한 위젯이 부모의 오른쪽에 붙고, 다음은 그 왼쪽에 이어 붙음.
+        # 상태 라벨을 왼쪽에 두면 문구 길이가 바뀌어도 두 버튼은 오른쪽 고정으로 겹침·밀림이 줄어듦.
         self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
+        self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 8))
+        self.lbl_monitor_status.pack(side=tk.RIGHT, padx=(4, 0))
 
         self.lbl_headwind_caution = ttk.Label(self.ctrl_frame, text="⚠️ 시장 역풍 - 매수 신호가 일시 정지되었습니다", 
                                                 font=("Malgun Gothic", 10, "bold"), foreground="#BF616A")
@@ -853,6 +878,9 @@ class MonitorTab:
                     ws_url = 'wss://api.kiwoom.com:10000/api/dostk/websocket'
                 
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
+                    # 새 소켓마다 시그니처 초기화 — 재연결 직후 이전 세션과 비교하면 안 됨
+                    self._last_stream_reg_sig = None
+                    self._last_stream_reg_user_log_ts = 0.0
                     self.app.root.after(0, self.app.log, "✅ [시스템] 서버 연결 성공. 로그인 시도...")
                     
                     login_packet = {'trnm': 'LOGIN', 'token': access_token}
@@ -866,25 +894,58 @@ class MonitorTab:
                             if getattr(self, "_pending_reg_refresh", False):
                                 now_ts = time.time()
                                 if now_ts - getattr(self, "_last_stream_reg_ts", 0) >= 4.0:
-                                    self._pending_reg_refresh = False
-                                    self._last_stream_reg_ts = now_ts
                                     try:
                                         _sc = self.app.stream_subscription_codes()
                                         if _sc:
-                                            reg_packet = {
-                                                "trnm": "REG",
-                                                "grp_no": "1",
-                                                "refresh": "1",
-                                                "market": "AL",
-                                                "data": [{"item": _sc, "type": ["0B", "0D"]}],
-                                            }
-                                            await ws.send(json.dumps(reg_packet))
-                                            self.app.root.after(
-                                                0,
-                                                self.app.log,
-                                                "📡 [시스템] 실시간 스트림 재등록 (보유·감시 반영)",
+                                            sig = self._subscription_codes_signature(_sc)
+                                            prev_sig = getattr(
+                                                self, "_last_stream_reg_sig", None
                                             )
+                                            if sig and sig == prev_sig:
+                                                # 직전 REG와 동일 구독 — 전송·로그 생략(동일 요청 반복 시 대시보드 스팸 방지)
+                                                self._pending_reg_refresh = False
+                                                self._last_stream_reg_ts = now_ts
+                                            else:
+                                                self._pending_reg_refresh = False
+                                                self._last_stream_reg_ts = now_ts
+                                                reg_packet = {
+                                                    "trnm": "REG",
+                                                    "grp_no": "1",
+                                                    "refresh": "1",
+                                                    "market": "AL",
+                                                    "data": [{"item": _sc, "type": ["0B", "0D"]}],
+                                                }
+                                                await ws.send(json.dumps(reg_packet))
+                                                self._last_stream_reg_sig = sig
+                                                # 구독 목록이 종목마다 조금씩 늘어나도 시그니처가 매번 달라
+                                                # 동일 시그니처 스킵만으로는 로그가 과다함 → 시간 스로틀
+                                                try:
+                                                    log_prev = float(
+                                                        getattr(
+                                                            self,
+                                                            "_last_stream_reg_user_log_ts",
+                                                            0.0,
+                                                        )
+                                                    )
+                                                except (TypeError, ValueError):
+                                                    log_prev = 0.0
+                                                if now_ts - log_prev >= 25.0:
+                                                    self._last_stream_reg_user_log_ts = float(
+                                                        now_ts
+                                                    )
+                                                    n_sub = len(sig)
+                                                    self.app.root.after(
+                                                        0,
+                                                        self.app.log,
+                                                        "📡 [시스템] 실시간 스트림 재등록 "
+                                                        f"(보유·감시 반영, {n_sub}종목)",
+                                                    )
+                                        else:
+                                            self._pending_reg_refresh = False
+                                            self._last_stream_reg_ts = now_ts
                                     except Exception as re:
+                                        self._pending_reg_refresh = False
+                                        self._last_stream_reg_ts = now_ts
                                         self.app.root.after(
                                             0,
                                             self.app.log,
@@ -917,6 +978,13 @@ class MonitorTab:
                                             'data': [{'item': _sc, 'type': ['0B', '0D']}]
                                         }
                                         await ws.send(json.dumps(reg_packet))
+                                        try:
+                                            self._last_stream_reg_sig = (
+                                                self._subscription_codes_signature(_sc)
+                                            )
+                                            self._last_stream_reg_ts = time.time()
+                                        except Exception:
+                                            pass
                                     else:
                                         self.app.log(f"❌ [시스템] 로그인 실패: {packet.get('return_msg')}. 15초 후 재시도...")
                                         await asyncio.sleep(15)

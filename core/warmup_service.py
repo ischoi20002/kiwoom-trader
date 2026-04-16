@@ -54,6 +54,8 @@ class WarmupService:
         # 캘린더·깊이 보강을 메인 워밍업과 분리해 순차 백그라운드 처리
         self._deep_history_queue: Optional[queue.Queue] = None
         self._deep_history_worker_started: bool = False
+        # run() 한 번당 1m→15m 리샘플 안내 로그 상한(대시보드 스팸 방지)
+        self._warmup_resample_hint_count: int = 0
 
     def _warmup_query_limit(self) -> int:
         try:
@@ -177,22 +179,8 @@ class WarmupService:
             store = getattr(self.app, "realtime_monitor_bars_store", None)
             if store is None or base is None or base.empty:
                 return
-            n = int(store.bulk_upsert_ohlcv_index_frame(code, base))
-            if n > 0:
-                try:
-                    rd = int(
-                        float(
-                            self.app.settings.get(
-                                "realtime_15m_calendar_retention_days", 365
-                            )
-                        )
-                    )
-                except (TypeError, ValueError):
-                    rd = 365
-                self.log(
-                    f"💾 [Warmup-RT15mDB] {code} {n}봉 영속화 "
-                    f"(캘린더 보존 약 {rd}일·롤링, realtime_15m_*.db)"
-                )
+            int(store.bulk_upsert_ohlcv_index_frame(code, base))
+            # 성공 영속화 로그는 종목 수만큼 반복되어 생략(실패만 except 에서 기록).
         except Exception as e:
             try:
                 self.log(f"⚠️ [Warmup-RT15mDB] {code} 영속화 실패: {e}")
@@ -269,21 +257,36 @@ class WarmupService:
             self.log(f"⚠️ [Warmup] stock_prep_cb 오류: {e}")
 
     def _notify_ka10080_page_progress(
-        self, pages: int, max_pages: int, deep_fetch: bool
+        self,
+        pages: int,
+        max_pages: int,
+        deep_fetch: bool,
+        *,
+        stock_code: str,
+        stock_name: str,
     ) -> None:
-        """연속조회 중 트리·상태줄이 멈춘 것처럼 보이지 않도록 주기적 갱신."""
-        ctx = getattr(self, "_warmup_prep_ui", None)
-        if not ctx:
-            return
+        """
+        연속조회 진행을 감시 트리 신호상태 열에 반영합니다.
+        메인 run() 루프의 `_warmup_prep_ui` 종목과 **실제 API 조회 종목**이 다를 수 있어
+        (백그라운드 깊이 보강 등), 행 키는 항상 `stock_code` 를 쓰고 (cur/total) 은
+        메인에서 같은 종목을 처리 중일 때만 전체 진행률(i/N)을 맞춥니다.
+        """
         try:
             tag = "캘린더·깊이" if deep_fetch else "보충"
             msg = f"분봉 API {pages}/{max_pages}페이지 ({tag})"
+            nk = str(stock_code).split("_")[0].zfill(6)
+            ctx = getattr(self, "_warmup_prep_ui", None)
+            if ctx and str(ctx.get("code", "")).split("_")[0].zfill(6) == nk:
+                cur = int(ctx["cur"])
+                total = int(ctx["total"])
+            else:
+                cur, total = 1, 1
             self._notify_stock_prep(
                 "prep_progress",
-                int(ctx["cur"]),
-                int(ctx["total"]),
-                str(ctx["name"]),
-                str(ctx["code"]),
+                cur,
+                total,
+                str(stock_name),
+                nk,
                 msg,
             )
         except Exception:
@@ -331,11 +334,16 @@ class WarmupService:
         *,
         deep_fetch: bool = False,
         retention_days: int = 365,
+        respect_warmup_lifecycle: bool = True,
+        suppress_prep_tree_progress: bool = False,
     ) -> List[Any]:
         """
         워밍업 전용: ka10080 연속조회로 분봉을 모은 뒤 15m 병합 기준을 만족할 때까지 페이지를 이어 받음.
         deep_fetch=False: 신호 최소 봉·장중 당일 갭 해소 시 조기 종료.
         deep_fetch=True: 캘린더 retention_days 만큼 과거까지 확보되고 당일 갭도 없을 때까지 조회(상한 페이지 별도).
+        respect_warmup_lifecycle=False: 메인 run() 종료로 is_running 이 꺼진 뒤에도
+        백그라운드 깊이 조회가 끝까지 진행되도록 is_running 조기 break 를 쓰지 않습니다.
+        suppress_prep_tree_progress=True: 신호상태 열 prep_progress 갱신을 하지 않습니다(백그라운드용).
         """
         try:
             if deep_fetch:
@@ -374,8 +382,8 @@ class WarmupService:
         early_stop = False
 
         for _ in range(max_pages):
-            if not self.is_running:
-                self.log(f"ℹ️ [Warmup-API] {name}({code}) 연속조회 중단(워밍업 stop)")
+            if respect_warmup_lifecycle and (not self.is_running):
+                # 메인 워밍업만 중단 시 루프 종료.백그라운드 깊이 조회는 respect_warmup_lifecycle=False.
                 break
             try:
                 raw_list, nk = self.data_manager.fetch_kiwoom_minute_chart_page(
@@ -386,12 +394,25 @@ class WarmupService:
                 break
 
             pages += 1
-            if pages == 1 or (pages % 15 == 0):
-                self._notify_ka10080_page_progress(pages, max_pages, deep_fetch)
-            if pages == 1 or (pages % 50 == 0):
-                self.log(
-                    f"⏳ [Warmup-API] {name}({code}) ka10080 연속조회 {pages}/{max_pages}페이지…"
+            if (not suppress_prep_tree_progress) and (
+                pages == 1 or (pages % 40 == 0)
+            ):
+                self._notify_ka10080_page_progress(
+                    pages,
+                    max_pages,
+                    deep_fetch,
+                    stock_code=code,
+                    stock_name=name,
                 )
+            # 1페이지만 찍히면 스팸에 가깝고, 장시간 조회는 120페이지 단위로만 대시보드에 기록
+            if pages > 0 and pages % 120 == 0:
+                try:
+                    self.log(
+                        f"⏳ [Warmup-API] {name}({code}) ka10080 연속조회 "
+                        f"{pages}/{max_pages}페이지…"
+                    )
+                except Exception:
+                    pass
             if raw_list is None:
                 self.log(
                     f"⚠️ [Warmup-API] {name}({code}) 페이지 {pages} 응답 없음(오류)"
@@ -431,17 +452,22 @@ class WarmupService:
             nk = (nk or "").strip()
             if not nk:
                 break
-            if not self.is_running:
+            if respect_warmup_lifecycle and (not self.is_running):
                 break
             time.sleep(random.uniform(dmin, dmax))
 
         if by_tm:
-            self.log(
-                f"📡 [Warmup-API] {name}({code}) ka10080 {pages}페이지, "
-                f"유일 분봉 {len(by_tm)}건"
-                + (" (조기 종료)" if early_stop else "")
-                + (" (캘린더·깊이)" if deep_fetch else "")
-            )
+            # 소량 페이지(빠른 통과)는 생략, 깊이 조회·다페이지만 요약 로그
+            if deep_fetch or pages >= 20 or len(by_tm) >= 500:
+                try:
+                    self.log(
+                        f"📡 [Warmup-API] {name}({code}) ka10080 {pages}페이지, "
+                        f"유일 분봉 {len(by_tm)}건"
+                        + (" (조기 종료)" if early_stop else "")
+                        + (" (캘린더·깊이)" if deep_fetch else "")
+                    )
+                except Exception:
+                    pass
         return list(by_tm.values())
 
     def _merge_15m_ohlcv(self, a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
@@ -541,6 +567,8 @@ class WarmupService:
         token: Optional[str],
         *,
         quick_only: bool = False,
+        respect_warmup_lifecycle: bool = True,
+        suppress_prep_tree_progress: bool = False,
     ) -> pd.DataFrame:
         """
         (1) 15m 봉 수 < 신호 기준 이거나
@@ -590,6 +618,8 @@ class WarmupService:
                 need,
                 deep_fetch=use_deep_fetch,
                 retention_days=rd,
+                respect_warmup_lifecycle=respect_warmup_lifecycle,
+                suppress_prep_tree_progress=suppress_prep_tree_progress,
             )
             api15 = self._minute_api_list_to_15m_ohlcv(raw_api)
             if api15.empty:
@@ -599,10 +629,7 @@ class WarmupService:
                     )
                 return base
             merged = self._merge_15m_ohlcv(base, api15)
-            self.log(
-                f"📡 [Warmup] {name}({code}) API 15m 보충 [{','.join(reason)}] "
-                f"로컬 {len(base) if base is not None and not base.empty else 0} → 합계 {len(merged)}봉 (신호기준≥{need})"
-            )
+            # 보충 성공은 종목 수만큼 반복되므로 대시보드에는 남기지 않음(실패·경고만 로그).
             return merged
         except Exception as e:
             self.log(f"⚠️ [Warmup-API] {code} 보충 실패: {e}")
@@ -673,7 +700,14 @@ class WarmupService:
             )
             if out.empty:
                 return pd.DataFrame()
-            self.log(f"ℹ️ [Warmup] {code}: bars_15m 비어 1m→15m 리샘플 ({len(out)}봉)")
+            try:
+                if self._warmup_resample_hint_count < 3:
+                    self._warmup_resample_hint_count += 1
+                    self.log(
+                        f"ℹ️ [Warmup] {code}: bars_15m 비어 1m→15m 리샘플 ({len(out)}봉)"
+                    )
+            except Exception:
+                pass
             return out
         except Exception as e:
             self.log(f"⚠️ [Warmup] {code} 1m→15m 리샘플 실패: {e}")
@@ -826,7 +860,6 @@ class WarmupService:
 
     def _run_background_deep_history(self, code: str, name: str) -> None:
         """캘린더 깊이 ka10080 보강 → RT DB 영속화 → bars_data 병합 갱신."""
-        self.log(f"📥 [Warmup-DeepBG] {name}({code}) 과거·깊이 보강 시작(백그라운드)…")
         token: Optional[str] = None
         try:
             token = self.auth_manager.get_auth_token()
@@ -837,16 +870,24 @@ class WarmupService:
             return
         base = self._load_15m_ohlcv_frame(code)
         merged = self._maybe_api_backfill_15m(
-            code, name, base, token, quick_only=False
+            code,
+            name,
+            base,
+            token,
+            quick_only=False,
+            respect_warmup_lifecycle=False,
+            suppress_prep_tree_progress=True,
         )
         if merged is None or merged.empty:
             self.log(f"⚠️ [Warmup-DeepBG] {name}({code}) 병합 결과 없음")
             return
         self._persist_warmup_base_to_rt15m_db(code, merged)
         self._apply_deep_history_to_bars_data(code, merged)
-        self.log(
-            f"✅ [Warmup-DeepBG] {name}({code}) 깊이 보강·DB·메모리 반영 완료 ({len(merged)}봉)"
-        )
+        # 메인 워밍업에서 prep_ok 가 나간 뒤 깊이 조회가 신호상태를 덮었을 수 있어 복구
+        try:
+            self._notify_stock_prep("prep_ok", 1, 1, str(name), str(code).zfill(6), "")
+        except Exception:
+            pass
 
     def _finalize_bars_for_stream(self, df_ind: pd.DataFrame) -> pd.DataFrame:
         """StreamProcessor 가 기대하는 time(HHMM)·cum_v_start 를 붙이고 길이를 제한."""
@@ -884,30 +925,17 @@ class WarmupService:
         """
         results: Dict[str, Dict[str, Any]] = {}
         self.is_running = True
+        self._warmup_resample_hint_count = 0
         total = len(monitor_codes)
         retry_max = self._warmup_retry_max()
         retry_delay = self._warmup_retry_delay_sec()
         max_attempts = max(1, 1 + retry_max)
 
         _src = self._warmup_ohlcv_source()
-        self.log(
-            f"📦 [Warmup] {total}개 종목 15분봉 기준 검증·적재 중… "
-            f"(OHLCV출처={_src}, 실패 시 최대 {retry_max}회 재시도, 간격 {retry_delay:.0f}초)"
-        )
-        if _src == "api_only":
-            self.log(
-                "ℹ️ [Warmup] OHLCV 는 DB(bars_15m/1m)를 사용하지 않습니다 — "
-                "ka10080 연속조회만 신호용 워밍업에 사용합니다."
-            )
-        elif _src == "realtime_15m_db_then_api":
-            self.log(
-                "ℹ️ [Warmup] OHLCV 는 실시간 전용 DB(realtime_15m_*.db) 우선 — "
-                "부족 시 ka10080 보충 (하베스팅 trading_data.db 미사용). "
-                "검증 통과 시 병합 봉을 동일 DB에 영속화합니다."
-            )
+        mp_deep = 500
         if self._warmup_fetch_calendar_history_enabled():
             try:
-                mp = int(
+                mp_deep = int(
                     float(
                         self.app.settings.get(
                             "realtime_warmup_ka10080_max_pages_deep", 500
@@ -915,19 +943,28 @@ class WarmupService:
                     )
                 )
             except (TypeError, ValueError):
-                mp = 500
-            self.log(
-                f"ℹ️ [Warmup] ka10080 은 캘린더 약 {self._warmup_retention_calendar_days()}일 "
-                f"과거(가장 오래된 봉 기준)까지 확보 후 조기 종료합니다. "
-                f"연속조회 상한 약 {mp}페이지/종목(API·키움 응답 한도에 따라 더 짧을 수 있음). "
-                f"끄려면 realtime_warmup_fetch_calendar_history=false"
+                mp_deep = 500
+        hint_parts: List[str] = []
+        if _src == "api_only":
+            hint_parts.append("DB 미사용·ka10080 전용")
+        elif _src == "realtime_15m_db_then_api":
+            hint_parts.append("실시간15mDB→API·통과 시 RT DB 영속화")
+        else:
+            hint_parts.append("하베스팅 DB→API")
+        if self._warmup_fetch_calendar_history_enabled():
+            hint_parts.append(
+                f"캘린더~{self._warmup_retention_calendar_days()}일·깊이상한~{mp_deep}p/종목"
             )
         if self._quick_then_deep_background_enabled() and self._warmup_fetch_calendar_history_enabled():
+            hint_parts.append("깊이보강=백그라운드")
+        try:
             self.log(
-                "ℹ️ [Warmup] 메인 워밍업은 최소 봉·당일 갭만 빠르게 채웁니다. "
-                "캘린더·깊이(1년) 보강은 백그라운드에서 종목별 순차 실행됩니다. "
-                "끄려면 realtime_warmup_quick_then_deep_background=false"
+                f"📦 [Warmup] {total}개 종목 검증·적재 (출처={_src}, 재시도≤{retry_max}회·"
+                f"{retry_delay:.0f}s) — "
+                + " · ".join(hint_parts)
             )
+        except Exception:
+            pass
         for i, code in enumerate(monitor_codes):
             if not self.is_running:
                 break
@@ -962,10 +999,7 @@ class WarmupService:
                                 f"✅ [Warmup] {name}({code}) "
                                 f"{attempt + 1}번째 시도에서 성공 (bars={nbar})"
                             )
-                        else:
-                            self.log(
-                                f"✅ [Warmup] {name}({code}) 준비 완료 (bars={nbar})"
-                            )
+                        # 1차 성공은 종목별 로그 생략 — 루프 종료 후 요약 한 줄만 출력
                         self._notify_stock_prep(
                             "prep_ok", i + 1, total, name, code, ""
                         )
@@ -1012,6 +1046,28 @@ class WarmupService:
                 )
 
         self.is_running = False
+        if total > 0:
+            try:
+                n_ok = sum(
+                    1
+                    for c in monitor_codes
+                    if isinstance(results.get(c), dict) and results[c].get("ok")
+                )
+                n_fail = int(total) - n_ok
+                if n_fail > 0:
+                    self.log(
+                        f"✅ [Warmup] 메인 요약: 성공 {n_ok}/{total}종목, 실패 {n_fail}종목 "
+                        f"(실패 상세는 위 ❌ 로그 참고)"
+                    )
+                else:
+                    self.log(
+                        f"✅ [Warmup] 메인 요약: 전 종목 성공 {n_ok}/{total}종목"
+                    )
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ [Warmup] 요약 로그 출력 실패: {e}")
+                except Exception:
+                    pass
         return results
 
     def stop(self):
