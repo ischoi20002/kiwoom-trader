@@ -7,6 +7,11 @@
 
 ---
 
+## 0.3.39 (2026-04-16)
+
+- **실시간 감시 탭 UI**: 상단(보유)·하단(감시목록) **세로 분할 비율**(`sash0_rel`) 저장·복원. `monitor_column_widths.json`을 `{"columns":{…},"sash0_rel":…}` 형식으로 확장하고, 기존 평면 컬럼 dict 도 그대로 읽음 (`ui/tabs/monitor_tab.py`).
+- **포지션 관리 탭 UI**: 보유 트리·주문·체결 트리 **컬럼 폭** 및 보유/주문 영역 **세로 분할** 저장·복원. `virtual_portfolio_ui.json` (`settings.json`과 동일 폴더) (`ui/tabs/virtual_tab.py`).
+
 ## 0.3.38 (2026-04-16)
 
 - **KODEX200 유니버스 자동 반영**: `core/kodex200_universe.py` — 기본 `kodex200_universe_priority=etf_api_first` 시 pykrx KODEX200 ETF(069500) 구성을 최우선하고, 실패 시 `kodex200.csv`·FDR 순. `local_csv_first` 로 기존(수동 CSV 우선) 동작 유지. 선택 `kodex200_export_csv_on_etf_success` 로 ETF 성공 시 `kodex200.csv` 자동 갱신. `data_manager_v2.get_kospi_list`, `strategy_selector` 실시간 선정 경로 연동 (`core/defaults.py`, `settings.json`, `k_trader_gui.py`).

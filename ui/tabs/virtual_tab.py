@@ -1,13 +1,49 @@
 import tkinter as tk
 import threading
 import os
+import json
 import importlib
 import time
 from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import config
 from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
+
+# 포지션 탭 트리 컬럼 기본 폭(px). 사용자 조절·세로 분할은 virtual_portfolio_ui.json 에 저장합니다.
+_DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS: Dict[str, int] = {
+    "Code": 72,
+    "Name": 120,
+    "Qty": 56,
+    "AvgP": 88,
+    "BuyIn": 96,
+    "CurP": 88,
+    "Eval": 100,
+    "PnL": 100,
+    "PnLPct": 72,
+    "Entry": 140,
+}
+_DEFAULT_VIRTUAL_ORDER_COL_WIDTHS: Dict[str, int] = {
+    "Time": 138,
+    "Code": 88,
+    "Name": 100,
+    "Side": 88,
+    "Qty": 88,
+    "FQty": 72,
+    "OrderP": 88,
+    "FilledP": 88,
+    "VPOrd": 72,
+    "BAOrd": 200,
+    "Status": 88,
+    "Reason": 120,
+}
+_VIRTUAL_ACTIVE_COLS: Tuple[str, ...] = tuple(_DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS.keys())
+_VIRTUAL_ORDER_COLS: Tuple[str, ...] = tuple(_DEFAULT_VIRTUAL_ORDER_COL_WIDTHS.keys())
+_VIRTUAL_COL_MIN: Dict[str, int] = {c: 40 for c in _VIRTUAL_ACTIVE_COLS}
+_VIRTUAL_COL_MIN.update(
+    {c: 40 for c in _VIRTUAL_ORDER_COLS if c not in _VIRTUAL_COL_MIN}
+)
+
 
 class VirtualTab:
     def __init__(self, parent, app):
@@ -16,7 +52,6 @@ class VirtualTab:
         self.vars = {}
         # [v4.5.3] 실시간 보유: ttk.Treeview (행 iid=6자리 코드, 종료/주문과 동일 패턴)
         self.tree_active: Optional[ttk.Treeview] = None
-        self.tree_history = None
         self.tree_orders = None
         self.lbl_mode_badge = None
         self.btn_env = None  # 운영 버튼은 대시보드로 이전됨(레거시 참조용)
@@ -28,8 +63,15 @@ class VirtualTab:
         self._order_log_date_var: Optional[tk.StringVar] = None
         self._btn_order_log_prev: Optional[ttk.Button] = None
         self._btn_order_log_next: Optional[ttk.Button] = None
+        # 주문·체결 통합 트리 필터(구분 / 체결)
+        self._order_filter_side_var: Optional[tk.StringVar] = None
+        self._order_filter_fill_var: Optional[tk.StringVar] = None
         self.btn_narrative_report: Optional[ttk.Button] = None
         self._narrative_report_busy: bool = False
+        # 보유/주문 트리 컬럼 폭·세로 Paned 비율 저장
+        self._virtual_ui_save_job: Optional[Any] = None
+        self._virtual_main_paned: Optional[ttk.PanedWindow] = None
+        self._virtual_saved_sash_rel: Optional[float] = None
 
         self._setup_ui()
         self._render_virtual_positions()
@@ -44,7 +86,7 @@ class VirtualTab:
             pass
 
     def _setup_ui(self):
-        """[v3.9] 3-판넬 수직 레이아웃 (보유/종료/주문 통합)"""
+        """[v3.9] 수직 레이아웃: 보유 + 주문·체결(필터로 매도·체결 시 종료 매도와 동일 뷰)."""
         main_container = ttk.Frame(self.parent, padding="10")
         main_container.pack(fill=tk.BOTH, expand=True)
 
@@ -93,9 +135,14 @@ class VirtualTab:
             foreground="#787c99",
         ).pack(side=tk.RIGHT, padx=(8, 0), pady=(12, 0))
 
-        # --- [2] 메인 레이아웃 (3단 수직 분할) ---
+        # --- [2] 메인 레이아웃 (보유 + 주문·체결 2단) ---
         v_paned = ttk.PanedWindow(main_container, orient=tk.VERTICAL)
         v_paned.pack(fill=tk.BOTH, expand=True)
+        self._virtual_main_paned = v_paned
+        try:
+            v_paned.bind("<<PanedWindowMoved>>", self._on_virtual_paned_moved, add="+")
+        except Exception:
+            pass
 
         # 모의/실전별 저장 파일 분리 — config.USE_MOCK 과 표시 라벨 일치
         try:
@@ -112,19 +159,208 @@ class VirtualTab:
         v_paned.add(active_f, weight=4)
         self._build_active_holdings_tree(active_f)
 
-        # 2. 매매 종료
-        history_f = ttk.LabelFrame(
-            v_paned,
-            text=f" ✅ 매매 종료 내역 · {_pm} ",
-            padding="5",
-        )
-        v_paned.add(history_f, weight=3)
-        self.tree_history = self._build_history_tree(history_f)
-
-        # 3. 주문 내역 — 제목·날짜 네비 한 줄(세로 공간 절약)
-        v_paned.add(self._build_order_log_section(v_paned, _pm), weight=3)
+        # 2. 주문·체결 내역(필터: 구분 전체·매수·매도 / 체결 전체·체결·미체결)
+        v_paned.add(self._build_order_log_section(v_paned, _pm), weight=5)
 
         self._setup_styles()
+        self._schedule_restore_virtual_sash()
+
+    def _virtual_ui_json_path(self) -> str:
+        """settings.json 과 같은 폴더에 포지션 탭 UI 상태를 둡니다."""
+        try:
+            ch = getattr(self.app, "config_handler", None)
+            sf = getattr(ch, "settings_file", None) if ch else None
+            if sf:
+                base = os.path.dirname(os.path.abspath(sf))
+                if base:
+                    return os.path.join(base, "virtual_portfolio_ui.json")
+        except Exception:
+            pass
+        return os.path.join(os.getcwd(), "virtual_portfolio_ui.json")
+
+    def _read_virtual_ui_file(self) -> Dict[str, Any]:
+        try:
+            path = self._virtual_ui_json_path()
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                return raw if isinstance(raw, dict) else {}
+        except Exception as e:
+            try:
+                print(f"[VirtualTab] UI 상태 파일 읽기 실패: {e}")
+            except Exception:
+                pass
+        return {}
+
+    @staticmethod
+    def _parse_virtual_sash_rel(raw: Dict[str, Any]) -> Optional[float]:
+        try:
+            v = raw.get("sash0_rel")
+            if v is None:
+                return None
+            x = float(v)
+            if x != x:
+                return None
+            return max(0.08, min(0.88, x))
+        except (TypeError, ValueError):
+            return None
+
+    def _merge_virtual_col_widths(
+        self,
+        keys: Tuple[str, ...],
+        defaults: Dict[str, int],
+        saved: Any,
+    ) -> Dict[str, int]:
+        out = {k: int(defaults.get(k, 64)) for k in keys}
+        if not isinstance(saved, dict):
+            return out
+        for k, v in saved.items():
+            if k not in out:
+                continue
+            try:
+                iw = int(v)
+                lo = int(_VIRTUAL_COL_MIN.get(k, 32))
+                if lo <= iw <= 4000:
+                    out[k] = iw
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    def _flush_virtual_ui_to_disk(self) -> None:
+        """보유·주문 트리 컬럼 폭과 세로 분할 비율을 저장합니다."""
+        self._virtual_ui_save_job = None
+        try:
+            ca: Dict[str, int] = {
+                c: int(_DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS.get(c, 64))
+                for c in _VIRTUAL_ACTIVE_COLS
+            }
+            co: Dict[str, int] = {
+                c: int(_DEFAULT_VIRTUAL_ORDER_COL_WIDTHS.get(c, 88))
+                for c in _VIRTUAL_ORDER_COLS
+            }
+            ta = getattr(self, "tree_active", None)
+            if ta is not None:
+                for c in _VIRTUAL_ACTIVE_COLS:
+                    try:
+                        lo = int(_VIRTUAL_COL_MIN.get(c, 32))
+                        ca[c] = max(lo, int(ta.column(c, "width")))
+                    except Exception:
+                        pass
+            to = getattr(self, "tree_orders", None)
+            if to is not None:
+                for c in _VIRTUAL_ORDER_COLS:
+                    try:
+                        lo = int(_VIRTUAL_COL_MIN.get(c, 32))
+                        co[c] = max(lo, int(to.column(c, "width")))
+                    except Exception:
+                        pass
+            rel = self._virtual_current_sash_rel()
+            if rel is None:
+                rel = getattr(self, "_virtual_saved_sash_rel", None)
+            if rel is None:
+                rel = self._parse_virtual_sash_rel(self._read_virtual_ui_file())
+            path = self._virtual_ui_json_path()
+            dname = os.path.dirname(path)
+            if dname:
+                os.makedirs(dname, exist_ok=True)
+            payload: Dict[str, Any] = {
+                "columns_active": ca,
+                "columns_orders": co,
+            }
+            if rel is not None:
+                payload["sash0_rel"] = float(rel)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            try:
+                print(f"[VirtualTab] UI 상태 저장 실패: {e}")
+            except Exception:
+                pass
+
+    def _schedule_virtual_ui_save(self) -> None:
+        try:
+            r = getattr(self.app, "root", None)
+            if r is None:
+                return
+            jid = self._virtual_ui_save_job
+            if jid is not None:
+                try:
+                    r.after_cancel(jid)
+                except Exception:
+                    pass
+            self._virtual_ui_save_job = r.after(380, self._flush_virtual_ui_to_disk)
+        except Exception:
+            pass
+
+    def _virtual_current_sash_rel(self) -> Optional[float]:
+        try:
+            p = self._virtual_main_paned
+            if p is None:
+                return None
+            h = int(p.winfo_height())
+            if h < 40:
+                return None
+            sp = int(p.sashpos(0))
+            return max(0.08, min(0.88, float(sp) / float(h)))
+        except (tk.TclError, TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    def _on_virtual_paned_moved(self, _event: Any = None) -> None:
+        try:
+            rel = self._virtual_current_sash_rel()
+            if rel is not None:
+                self._virtual_saved_sash_rel = rel
+            self._schedule_virtual_ui_save()
+        except Exception:
+            pass
+
+    def _schedule_restore_virtual_sash(self) -> None:
+        try:
+            root = getattr(self.app, "root", None)
+            if root is None:
+                return
+
+            def _try(attempt: int = 0) -> None:
+                try:
+                    rel = getattr(self, "_virtual_saved_sash_rel", None)
+                    p = self._virtual_main_paned
+                    if rel is None or p is None:
+                        return
+                    try:
+                        p.update_idletasks()
+                    except Exception:
+                        pass
+                    h = int(p.winfo_height())
+                    if h < 80 and attempt < 12:
+                        root.after(100, lambda: _try(attempt + 1))
+                        return
+                    pos = int(max(80, min(h - 120, float(rel) * float(h))))
+                    p.sashpos(0, pos)
+                except Exception:
+                    if attempt < 12:
+                        root.after(100, lambda: _try(attempt + 1))
+
+            root.after(120, lambda: _try(0))
+        except Exception:
+            pass
+
+    def _on_virtual_tree_column_drag_end(self, event: tk.Event) -> None:
+        """열 구분선 드래그 후 저장 예약."""
+        w: Any = None
+        try:
+            w = event.widget
+            if not isinstance(w, ttk.Treeview):
+                return
+            reg = str(w.identify_region(event.x, event.y)).lower()
+            if reg != "separator":
+                return
+        except tk.TclError:
+            return
+        except Exception:
+            return
+        if w is None:
+            return
+        self._schedule_virtual_ui_save()
 
     def _build_active_holdings_tree(self, parent: ttk.Widget) -> None:
         """실시간 보유: 매매종료·주문과 동일한 Treeview 패턴 (스크롤·줄무늬·태그)."""
@@ -141,6 +377,16 @@ class VirtualTab:
                 "PnLPct",
                 "Entry",
             )
+            raw_ui = self._read_virtual_ui_file()
+            try:
+                self._virtual_saved_sash_rel = self._parse_virtual_sash_rel(raw_ui)
+            except Exception:
+                pass
+            wid_map = self._merge_virtual_col_widths(
+                _VIRTUAL_ACTIVE_COLS,
+                _DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS,
+                raw_ui.get("columns_active"),
+            )
             tree = ttk.Treeview(
                 parent, columns=cols, show="headings", selectmode="browse"
             )
@@ -156,17 +402,30 @@ class VirtualTab:
                 "수익률",
                 "진입일시",
             ]
-            widths = (72, 120, 56, 88, 96, 88, 100, 100, 72, 140)
             # 진입일시(Entry)는 중앙 정렬
             anchors = (tk.W, tk.W, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.CENTER)
-            for col, text, w, an in zip(cols, heads, widths, anchors):
+            for col, text, an in zip(cols, heads, anchors):
                 tree.heading(col, text=text)
-                tree.column(col, width=w, anchor=an)
+                try:
+                    mw = int(_VIRTUAL_COL_MIN.get(col, 40))
+                    cw = max(mw, int(wid_map.get(col, mw)))
+                    tree.column(
+                        col,
+                        width=cw,
+                        anchor=an,
+                        minwidth=mw,
+                        stretch=False,
+                    )
+                except Exception:
+                    tree.column(col, width=72, anchor=an, minwidth=40, stretch=False)
 
             sb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
             tree.configure(yscrollcommand=sb.set)
             tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             sb.pack(side=tk.RIGHT, fill=tk.Y)
+            tree.bind(
+                "<ButtonRelease-1>", self._on_virtual_tree_column_drag_end, add="+"
+            )
             self.tree_active = tree
         except Exception as e:
             try:
@@ -175,50 +434,6 @@ class VirtualTab:
                 pass
             self.tree_active = None
 
-    def _build_history_tree(self, parent):
-        cols = (
-            "Time",
-            "Code",
-            "Name",
-            "Qty",
-            "BuyP",
-            "SellP",
-            "Fees",
-            "PnL",
-            "Profit",
-            "Reason",
-        )
-        tree = ttk.Treeview(parent, columns=cols, show="headings", selectmode="browse")
-        heads = [
-            "종료일시",
-            "코드",
-            "종목명",
-            "수량",
-            "매수가",
-            "매도가",
-            "수수료",
-            "손익금",
-            "수익률",
-            "사유",
-        ]
-        for col, text in zip(cols, heads):
-            tree.heading(col, text=text)
-            tree.column(col, width=85, anchor=tk.CENTER)
-        tree.column("Time", width=152, anchor=tk.CENTER)
-        tree.column("Name", width=110, anchor=tk.W)
-        tree.column("BuyP", anchor=tk.E)
-        tree.column("SellP", anchor=tk.E)
-        tree.column("Fees", width=78, anchor=tk.E)
-        tree.column("PnL", width=90, anchor=tk.E)
-        tree.column("Profit", anchor=tk.E)
-        tree.column("Reason", width=120, anchor=tk.CENTER)
-        
-        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        return tree
-
     def _build_order_tree(self, parent):
         cols = (
             "Time",
@@ -226,6 +441,7 @@ class VirtualTab:
             "Name",
             "Side",
             "Qty",
+            "FQty",
             "OrderP",
             "FilledP",
             "VPOrd",
@@ -245,7 +461,8 @@ class VirtualTab:
             "코드",
             "종목명",
             "구분",
-            "수량",
+            "주문수량",
+            "체결수량",
             "주문가",
             "체결가",
             "VP",
@@ -253,24 +470,62 @@ class VirtualTab:
             "상태",
             "사유",
         ]
+        try:
+            raw_ui = self._read_virtual_ui_file()
+            if getattr(self, "_virtual_saved_sash_rel", None) is None:
+                self._virtual_saved_sash_rel = self._parse_virtual_sash_rel(raw_ui)
+            wid_map = self._merge_virtual_col_widths(
+                _VIRTUAL_ORDER_COLS,
+                _DEFAULT_VIRTUAL_ORDER_COL_WIDTHS,
+                raw_ui.get("columns_orders"),
+            )
+        except Exception:
+            wid_map = {
+                c: int(_DEFAULT_VIRTUAL_ORDER_COL_WIDTHS.get(c, 88))
+                for c in _VIRTUAL_ORDER_COLS
+            }
         for col, text in zip(cols, display_names):
             tree.heading(col, text=text)
-            w = 88
-            if col == "Time":
-                w = 138
-            elif col == "BAOrd":
-                w = 200
-            elif col == "VPOrd":
-                w = 72
-            elif col == "Reason":
-                w = 120
-            tree.column(col, width=w, anchor=tk.CENTER)
-        tree.column("Name", width=100, anchor=tk.W)
-        tree.column("OrderP", anchor=tk.E)
-        tree.column("FilledP", anchor=tk.E)
-        tree.column("VPOrd", anchor=tk.E)
-        tree.column("Reason", width=120, anchor=tk.CENTER)
-        tree.column("BAOrd", anchor=tk.E)
+            try:
+                mw = int(_VIRTUAL_COL_MIN.get(col, 40))
+                w = max(mw, int(wid_map.get(col, mw)))
+                tree.column(
+                    col, width=w, anchor=tk.CENTER, minwidth=mw, stretch=False
+                )
+            except Exception:
+                tree.column(
+                    col, width=88, anchor=tk.CENTER, minwidth=40, stretch=False
+                )
+        try:
+            mw_nm = int(_VIRTUAL_COL_MIN.get("Name", 40))
+            tree.column(
+                "Name",
+                width=max(mw_nm, int(wid_map.get("Name", 100))),
+                anchor=tk.W,
+                minwidth=mw_nm,
+                stretch=False,
+            )
+            for c in ("Qty", "FQty", "OrderP", "FilledP", "VPOrd", "BAOrd"):
+                mw_c = int(_VIRTUAL_COL_MIN.get(c, 40))
+                tree.column(
+                    c,
+                    width=max(mw_c, int(wid_map.get(c, mw_c))),
+                    anchor=tk.E,
+                    minwidth=mw_c,
+                    stretch=False,
+                )
+            mw_rs = int(_VIRTUAL_COL_MIN.get("Reason", 40))
+            tree.column(
+                "Reason",
+                width=max(mw_rs, int(wid_map.get("Reason", 120))),
+                anchor=tk.CENTER,
+                minwidth=mw_rs,
+                stretch=False,
+            )
+        except Exception:
+            pass
+
+        tree.bind("<ButtonRelease-1>", self._on_virtual_tree_column_drag_end, add="+")
 
         # 호가(매도/매수/비율) 열이 넓어 가로 스크롤 제공
         scroll_y = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=tree.yview)
@@ -285,7 +540,7 @@ class VirtualTab:
         self, paned_parent: ttk.Widget, mode_label: str
     ) -> ttk.LabelFrame:
         """
-        주문 로그: 상단 한 줄에 왼쪽 제목 + 오른쪽 끝 날짜 네비(이전/다음/오늘).
+        주문·체결 통합: 상단 제목 + 날짜 네비, 그 아래 구분·체결 필터, 트리.
         LabelFrame 라벨 슬롯(labelwidget)은 가로로 늘어나지 않아 본문 상단 프레임에 배치한다.
         """
         # text 비움: labelwidget은 라벨 슬롯만 차지해 가로로 늘어나지 않아 네비가 우측 끝에 못 붙음.
@@ -297,7 +552,7 @@ class VirtualTab:
             # 매매 종료 내역 등 상단 LabelFrame 제목과 동일: TLabelframe.Label (styles.py)
             ttk.Label(
                 hdr,
-                text=f" 📄 주문 로그 · {mode_label} ",
+                text=f" 📋 주문·체결 내역 · {mode_label} ",
                 style="TLabelframe.Label",
             ).pack(side=tk.LEFT)
             nav = ttk.Frame(hdr)
@@ -328,6 +583,36 @@ class VirtualTab:
                 command=self._order_log_today,
             ).pack(side=tk.LEFT, padx=(12, 0))
             nav.pack(side=tk.RIGHT)
+            filt = ttk.Frame(order_f)
+            filt.pack(fill=tk.X, pady=(4, 2))
+            ttk.Label(filt, text="구분", font=("Malgun Gothic", 9)).pack(
+                side=tk.LEFT, padx=(0, 4)
+            )
+            self._order_filter_side_var = tk.StringVar(value="전체")
+            cb_side = ttk.Combobox(
+                filt,
+                textvariable=self._order_filter_side_var,
+                values=("전체", "매수", "매도"),
+                state="readonly",
+                width=7,
+                font=("Malgun Gothic", 9),
+            )
+            cb_side.pack(side=tk.LEFT, padx=(0, 14))
+            cb_side.bind("<<ComboboxSelected>>", self._on_order_filter_changed)
+            ttk.Label(filt, text="체결", font=("Malgun Gothic", 9)).pack(
+                side=tk.LEFT, padx=(0, 4)
+            )
+            self._order_filter_fill_var = tk.StringVar(value="전체")
+            cb_fill = ttk.Combobox(
+                filt,
+                textvariable=self._order_filter_fill_var,
+                values=("전체", "체결", "미체결"),
+                state="readonly",
+                width=7,
+                font=("Malgun Gothic", 9),
+            )
+            cb_fill.pack(side=tk.LEFT, padx=(0, 8))
+            cb_fill.bind("<<ComboboxSelected>>", self._on_order_filter_changed)
             self.tree_orders = self._build_order_tree(order_f)
             self._sync_order_log_date_label()
         except Exception as e:
@@ -526,79 +811,6 @@ class VirtualTab:
         return (str(entry_raw)[:16] if entry_raw else "-") or "-"
 
     @staticmethod
-    def _format_history_exit_display(pos: Dict[str, Any], last_event: Dict[str, Any]) -> str:
-        """
-        매매 종료일시 표시.
-        exit_datetime(신규 저장) → exit_date+exit_time → 구버전(시각만)은 entry_time 날짜와 결합 시도.
-        """
-        try:
-            ex_dt = str(pos.get("exit_datetime") or "").strip()
-            if ex_dt:
-                return ex_dt[:19] if len(ex_dt) >= 19 else ex_dt
-            ed = str(pos.get("exit_date") or "").strip()
-            et = str(pos.get("exit_time") or "").strip()
-            le_t = str(last_event.get("time") or "").strip()
-            if not et:
-                et = le_t
-            if ed and et and " " not in et:
-                return f"{ed} {et}"
-            if et and len(et) >= 10 and et[4] == "-" and " " in et:
-                return et[:19] if len(et) >= 19 else et
-            if ed and le_t and " " not in le_t:
-                return f"{ed} {le_t}"
-            if et:
-                entry_iso = str(pos.get("entry_time") or "").strip()
-                if "T" in entry_iso:
-                    d0 = entry_iso.split("T", 1)[0]
-                    if len(d0) == 10 and d0[4] == "-":
-                        return f"{d0} {et}"
-                return et
-            return le_t or "-"
-        except Exception:
-            return "-"
-
-    @staticmethod
-    def _history_closed_reason_display(pos: Dict[str, Any]) -> str:
-        """
-        매매 종료 내역 '사유': 매도·정리 사유(주문 로그 사유와 동일 계열).
-        `reason` 필드는 진입(TYPE A/B 등)용이므로 표시에 쓰지 않는다.
-        """
-        try:
-            er = str(pos.get("exit_reason") or "").strip()
-        except Exception:
-            er = ""
-        if er:
-            return er
-        try:
-            for ev in reversed(list(pos.get("events") or [])):
-                if not isinstance(ev, dict):
-                    continue
-                act = str(ev.get("action") or "").upper()
-                if "SELL" not in act and act != "SYNC_EXIT":
-                    continue
-                r_ev = str(ev.get("reason") or "").strip()
-                snap = ev.get("snapshot")
-                r_snap = ""
-                if isinstance(snap, dict):
-                    try:
-                        r_snap = str(snap.get("reason") or "").strip()
-                    except Exception:
-                        r_snap = ""
-                for cand in (r_snap, r_ev):
-                    if cand:
-                        return cand
-                break
-        except Exception:
-            pass
-        try:
-            r0 = str(pos.get("reason") or "").strip()
-            if r0.upper() in ("RECONCILIATION", "SYNCED"):
-                return r0
-        except Exception:
-            pass
-        return "MANUAL"
-
-    @staticmethod
     def _order_log_status_display(result: object) -> str:
         """주문 로그 '상태': 체결 완료는 사용자 표기 '성공'."""
         try:
@@ -610,38 +822,35 @@ class VirtualTab:
         return s
 
     @staticmethod
-    def _history_exit_sort_ts(pos: Dict[str, Any]) -> float:
-        """매매 종료 내역 정렬 키: 종료 시각(epoch). 클수록 최신."""
+    def _normalize_order_side_raw(side_raw: object) -> Literal["buy", "sell", "unknown"]:
+        """DB·코어에서 오는 side 값을 buy/sell로 정규화(필터·표시용)."""
         try:
-            s = str(pos.get("exit_datetime") or "").strip()
-            if len(s) >= 19:
-                return float(
-                    datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").timestamp()
-                )
-            ed = str(pos.get("exit_date") or "").strip()
-            et = str(pos.get("exit_time") or "").strip()
-            if ed and et:
-                if " " in et and len(et) >= 16 and et[4] == "-":
-                    frag = et[:19].replace("T", " ")
-                    return float(
-                        datetime.strptime(frag[:19], "%Y-%m-%d %H:%M:%S").timestamp()
-                    )
-                frag2 = f"{ed} {et.strip()[:8]}"
-                return float(
-                    datetime.strptime(frag2, "%Y-%m-%d %H:%M:%S").timestamp()
-                )
-            if et and len(et) <= 10 and ":" in et:
-                entry_iso = str(pos.get("entry_time") or "").strip()
-                if "T" in entry_iso:
-                    d0 = entry_iso.split("T", 1)[0]
-                    if len(d0) == 10 and d0[4] == "-":
-                        frag3 = f"{d0} {et.strip()[:8]}"
-                        return float(
-                            datetime.strptime(frag3, "%Y-%m-%d %H:%M:%S").timestamp()
-                        )
-        except (TypeError, ValueError, OSError):
+            s = str(side_raw or "").strip().lower()
+        except Exception:
+            return "unknown"
+        if s in ("buy", "b", "매수", "bid"):
+            return "buy"
+        if s in ("sell", "s", "매도", "ask"):
+            return "sell"
+        return "unknown"
+
+    @staticmethod
+    def _order_log_row_is_filled(result: object, f_price: object, f_qty: object) -> bool:
+        """
+        체결 여부: result가 FILLED이거나 체결 수량이 1주 이상이면 체결로 간주합니다.
+        (부분체결·레거시 행도 필터에서 빠지지 않도록 수량 우선)
+        """
+        try:
+            if str(result or "").strip().upper() == "FILLED":
+                return True
+        except Exception:
             pass
-        return 0.0
+        try:
+            if int(f_qty or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        return False
 
     def _sorted_active_holdings(self) -> List[Tuple[str, Dict[str, Any]]]:
         """
@@ -1119,46 +1328,11 @@ class VirtualTab:
         if self._active_tree_ready():
             self._reorder_active_tree_rows()
 
-        # 2. 종료 종목
-        self.tree_history.delete(*self.tree_history.get_children())
+        # 2. 종료 포지션 실현손익 합계(상단 누적 수익용). 표시는 주문·체결 트리 필터로 대체.
         try:
-            _raw_hist = list(getattr(self.app.portfolio, "virtual_history", None) or [])
+            total_closed_pnl = float(self._sum_visible_history_realized_pnl())
         except Exception:
-            _raw_hist = []
-        hist_visible: List[Dict[str, Any]] = [
-            p for p in _raw_hist if isinstance(p, dict)
-        ]
-        hist_visible.sort(key=self._history_exit_sort_ts, reverse=True)
-        total_closed_pnl = self._sum_visible_history_realized_pnl()
-
-        hist_row = 0
-        for pos in hist_visible:
-            last_event = pos["events"][-1] if pos.get("events") else {}
-            pnl_amt = self._history_realized_pnl_amt(pos)
-            try:
-                fee_sum = float(self._history_total_fees_amt(pos))
-            except Exception:
-                fee_sum = 0.0
-            tag_base = "even" if hist_row % 2 == 0 else "odd"
-            hist_row += 1
-            p_tag = "price_up" if pos.get("final_pnl_pct", 0) > 0 else "price_down"
-            self.tree_history.insert(
-                "",
-                tk.END,
-                values=(
-                    self._format_history_exit_display(pos, last_event),
-                    pos.get("code"),
-                    pos["name"],
-                    f"{pos.get('qty', 0):,}",
-                    f"{pos.get('avg_price', 0):,.0f}",
-                    f"{pos.get('exit_price', 0):,.0f}",
-                    f"{int(round(fee_sum)):,}",
-                    f"{int(round(pnl_amt)):+,}",
-                    f"{pos.get('final_pnl_pct', 0):+.2f}%",
-                    self._history_closed_reason_display(pos),
-                ),
-                tags=(tag_base, p_tag),
-            )
+            total_closed_pnl = 0.0
 
         # 3. 요약 정보 (Account Summary - REST API Synced) — 주문 로그는 위 0단계에서 이미 반영
         portfolio = self.app.portfolio
@@ -1369,10 +1543,39 @@ class VirtualTab:
             return "-"
 
     def _render_orders(self) -> None:
-        """DB 기반 주문 내역 동기화. 선택 날짜(네비게이션) 기준, 주문 시점 VP·호가 표시."""
+        """
+        DB 주문 내역을 선택 날짜(네비) 기준으로 조회합니다.
+        구분(전체·매수·매도)·체결(전체·체결·미체결) 필터 적용 후 트리에 표시합니다.
+        (매도+체결 조합은 기존 '매매 종료 내역'과 같은 매도 체결 주문 목록에 해당)
+        """
         if not getattr(self, "tree_orders", None):
             return
         self.tree_orders.delete(*self.tree_orders.get_children())
+        want_side: Literal["all", "buy", "sell"] = "all"
+        want_fill: Literal["all", "filled", "unfilled"] = "all"
+        try:
+            sv = (
+                (self._order_filter_side_var.get() if self._order_filter_side_var else "전체")
+                or "전체"
+            ).strip()
+            if sv == "매수":
+                want_side = "buy"
+            elif sv == "매도":
+                want_side = "sell"
+        except Exception:
+            want_side = "all"
+        try:
+            fv = (
+                (self._order_filter_fill_var.get() if self._order_filter_fill_var else "전체")
+                or "전체"
+            ).strip()
+            if fv == "체결":
+                want_fill = "filled"
+            elif fv == "미체결":
+                want_fill = "unfilled"
+        except Exception:
+            want_fill = "all"
+
         try:
             try:
                 view_d = self._order_log_view_date
@@ -1405,16 +1608,64 @@ class VirtualTab:
                 except Exception:
                     continue
                 try:
+                    norm = self._normalize_order_side_raw(side)
+                except Exception:
+                    norm = "unknown"
+                if want_side == "buy" and norm != "buy":
+                    continue
+                if want_side == "sell" and norm != "sell":
+                    continue
+                try:
+                    is_filled = self._order_log_row_is_filled(result, f_price, f_qty)
+                except Exception:
+                    is_filled = False
+                if want_fill == "filled" and not is_filled:
+                    continue
+                if want_fill == "unfilled" and is_filled:
+                    continue
+
+                try:
                     tm_raw = str(ts or "").strip()
                     tm = tm_raw if tm_raw else "-"
                 except Exception:
                     tm = "-"
-                side_kr = "매수" if side == "buy" else "매도"
-                f_p_str = f"{f_price:,}" if f_price > 0 else "-"
-                ba_o = (snap_ba or "").strip() or "-"
+                if norm == "buy":
+                    side_kr = "매수"
+                    side_tag = "price_up"
+                elif norm == "sell":
+                    side_kr = "매도"
+                    side_tag = "price_down"
+                else:
+                    try:
+                        side_kr = str(side or "?").strip() or "?"
+                    except Exception:
+                        side_kr = "?"
+                    side_tag = "price_down"
+
+                try:
+                    qn = int(qty or 0)
+                except (TypeError, ValueError):
+                    qn = 0
+                try:
+                    pn = float(price or 0)
+                except (TypeError, ValueError):
+                    pn = 0.0
+                try:
+                    fpn = float(f_price or 0)
+                except (TypeError, ValueError):
+                    fpn = 0.0
+                f_p_str = f"{fpn:,.0f}" if fpn > 0 else "-"
+                try:
+                    fqi = int(f_qty or 0)
+                except (TypeError, ValueError):
+                    fqi = 0
+                fq_str = f"{fqi:,}" if fqi > 0 else "-"
+                try:
+                    ba_o = (str(snap_ba or "").strip() or "-")
+                except Exception:
+                    ba_o = "-"
                 tag_base = "even" if row_i % 2 == 0 else "odd"
                 row_i += 1
-                side_tag = "price_up" if side == "buy" else "price_down"
 
                 self.tree_orders.insert(
                     "",
@@ -1424,8 +1675,9 @@ class VirtualTab:
                         code,
                         name,
                         side_kr,
-                        f"{qty:,}",
-                        f"{price:,}",
+                        f"{qn:,}",
+                        fq_str,
+                        f"{pn:,.0f}",
                         f_p_str,
                         self._order_log_vp_cell(snap_vp),
                         ba_o,
@@ -1443,6 +1695,16 @@ class VirtualTab:
             self._sync_order_log_date_label()
         except Exception:
             pass
+
+    def _on_order_filter_changed(self, _event: Any = None) -> None:
+        """구분·체결 필터 변경 시 주문 트리만 다시 그립니다."""
+        try:
+            self._render_orders()
+        except Exception as e:
+            try:
+                print(f"[UI Error] _on_order_filter_changed: {e}")
+            except Exception:
+                pass
 
     def _toggle_environment(self):
         """[v3.9.6] 실전/모의 서버 설정(config.py)을 토글하고 재시작 안내를 강화합니다.
@@ -1513,7 +1775,7 @@ class VirtualTab:
             messagebox.showerror("오류", f"설정 변경 중 오류가 발생했습니다: {e}")
 
     def log_order(self, code, side, qty, price, order_type, result, reason=""):
-        """[v4.5.3] DB 기록 및 신규 3판넬 UI 갱신 (캡슐화)"""
+        """[v4.5.3] DB 기록 및 포지션 탭(보유·주문) UI 갱신 (캡슐화)"""
         try:
             from core.supply_display import capture_supply_snapshot
 
@@ -1882,7 +2144,7 @@ class VirtualTab:
         up_col = "#E35F5F" # Nord Red variant
         dn_col = "#81A1C3" # Nord Blue variant
         
-        for t in [self.tree_active, self.tree_history, self.tree_orders]:
+        for t in [self.tree_active, self.tree_orders]:
             if t is None:
                 continue
             # [v4.8.4] TCheckbutton 스타일은 메인에서 관리하므로 태그에 집중
