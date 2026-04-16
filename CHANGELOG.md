@@ -5,6 +5,10 @@
 
 ---
 
+## 0.3.27 (2026-04-15)
+
+- **계좌 REST 주기 동기화**: KRX 장중/장외 구분·보유만으로 타이머 유지 로직을 제거하고, **실시간 감시가 켜져 있을 때만** 약 30초마다 동기화. 감시 중이 아니면 30초 루프 없음 (`k_trader_gui.py`).
+
 ## 0.3.26 (2026-04-16)
 
 - **trading_data.db 용량**: PK(`code`,`datetime`)와 동일한 보조 인덱스(`idx_bars_1m_code_dt` 등)가 데이터·키를 이중 저장 — `data_manager_v2` 부트 시 `DROP INDEX IF EXISTS`로 정리, 신규에는 동일 인덱스 미생성. 수동 점검: `python tools/audit_trading_db_size.py`, 인덱스만 드롭: `tools/drop_redundant_candle_indexes.sql`. 파일 크기 축소는 `VACUUM`(시간 소요).

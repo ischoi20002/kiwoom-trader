@@ -977,6 +977,57 @@
             "exit_time": "12:00:04",
             "exit_datetime": "2026-04-14 12:00:04",
             "code": "000150"
+        },
+        {
+            "name": "농심",
+            "avg_price": 381143.0,
+            "qty": 7,
+            "stage": 2,
+            "invested": 2668001.0,
+            "entry_time": "2026-04-14T09:11:16.853367",
+            "reason": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-04-16 14:41:50",
+                    "action": "SELL",
+                    "price": 380000.0,
+                    "qty": 7,
+                    "snapshot": {
+                        "time": "2026-04-16 14:41:50",
+                        "price": 380000.0,
+                        "market_trend": "UP",
+                        "vol_power": 154.81,
+                        "reason": "EXIT_ATR_TRAIL",
+                        "rsi": 55.1,
+                        "macd": 758.3,
+                        "osc": -225.45,
+                        "adx": 35.2,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.82
+                    }
+                }
+            ],
+            "max_now": 381928.5714285714,
+            "ka_cur_prc": 381000.0,
+            "ka_evlu_amt": 2667000.0,
+            "ka_evlu_pfls_amt": -1000.0,
+            "ka_prft_rt": -0.037481259370314844,
+            "ka_pur_amt": 2668000.0,
+            "ka_sync_iso": "2026-04-16T14:41:21.139681",
+            "max_p": 383500.0,
+            "max_price": 383500.0,
+            "current_price": 381000.0,
+            "exit_pending": true,
+            "exit_reason": "ATR_TRAIL",
+            "pending_exit_ord_no": "0178808",
+            "final_pnl_pct": -0.7983880066011969,
+            "realized_pnl_amt": -21301.0,
+            "exit_price": 380000.0,
+            "exit_date": "2026-04-16",
+            "exit_time": "14:41:50",
+            "exit_datetime": "2026-04-16 14:41:50",
+            "code": "004370"
         }
-    ]
+    ],
+    "pending_exit_snapshots": {}
 }

@@ -8,7 +8,6 @@ import requests
 import pandas as pd
 import os
 import json
-from datetime import datetime, date, timedelta
 import threading
 import time
 import FinanceDataReader as fdr
@@ -30,7 +29,6 @@ import strategy_selector
 from reporting.trade_report import generate_trade_report
 from reporting.virtual_report import generate_virtual_narrative_report
 from reporting.realtime_session_logger import RealtimeSessionLogger
-from reporting.krx_trading_calendar import is_krx_regular_session_local, is_trading_day
 from strategy.data_loader import BacktestDataLoader
 
 # Modularized UI Tabs [v4.5.3 Restructured]
@@ -220,7 +218,7 @@ class KiwoomApp:
         self.pending_tree_updates = {} # [v4.5.3] UI 지연 업데이트용 큐
         # REST 선체결 vs 웹소켓 CHE 중복 on_fill 방지 (주문번호 기준)
         self._exchange_fill_order_ids: Set[str] = set()
-        # 계좌 REST 주기 동기화 — 장중(KRX 정규장)만. 장외는 시작 시·체결 후 등 별도 호출.
+        # 계좌 REST 주기 동기화 — 실시간 감시 중일 때만 약 30초마다. 감시 중이 아니면 타이머 없음.
         self._account_sync_job: Optional[Any] = None
         self._account_sync_job_running: bool = False
         self._virtual_tab_render_pending: bool = False
@@ -993,22 +991,12 @@ class KiwoomApp:
                 out.append(c)
         return out
 
-    def _account_sync_allowed_session_now(self) -> bool:
-        """주기 동기화 허용 시각: KRX 거래일 + 정규장(09:00~15:30) 로컬. (타임존은 한국 기준 가정)"""
-        try:
-            now = datetime.now()
-            if not is_trading_day(now.date()):
-                return False
-            return is_krx_regular_session_local(now)
-        except Exception:
-            return False
-
     def _maybe_start_account_sync_timer(self) -> None:
-        """감시 중이거나 보유가 있으면 REST 계좌 주기 타이머를 시작합니다(실제 동기화는 장중에만)."""
+        """실시간 감시 중일 때만 REST 계좌 주기 타이머(약 30초)를 시작합니다."""
         try:
             if self._account_sync_job_running:
                 return
-            if not (self.is_monitoring or len(self.portfolio.virtual_positions) > 0):
+            if not self.is_monitoring:
                 return
             self._account_sync_job_running = True
             self._periodic_account_refresh_loop()
@@ -1016,9 +1004,9 @@ class KiwoomApp:
             pass
 
     def _maybe_stop_account_sync_timer(self) -> None:
-        """감시 중단 후 보유도 없으면 주기 갱신을 중지합니다."""
+        """실시간 감시가 꺼지면 주기 갱신을 중지합니다."""
         try:
-            if self.is_monitoring or len(self.portfolio.virtual_positions) > 0:
+            if self.is_monitoring:
                 return
             if self._account_sync_job is not None:
                 try:
@@ -1032,20 +1020,21 @@ class KiwoomApp:
 
     def _periodic_account_refresh_loop(self) -> None:
         """
-        약 30초마다 타이머만 돌리고, KRX 장중일 때만 REST 동기화(총자산·예수금·보유).
-        장외·주말·휴장일에는 호출하지 않음 — 로그인 직후 1회·체결 후 스케줄로 충분.
+        실시간 감시 중: 약 30초마다 REST 동기화(총자산·예수금·보유).
+        감시 중이 아니면 재예약하지 않습니다.
         """
         try:
             if not self.root.winfo_exists():
                 return
-            if self.is_monitoring or len(self.portfolio.virtual_positions) > 0:
-                if self._account_sync_allowed_session_now():
-                    self.portfolio.sync_with_actual_account(silent=True, force=True)
+            if self.is_monitoring:
+                self.portfolio.sync_with_actual_account(silent=True, force=True)
         except Exception:
             pass
         try:
-            if self.is_monitoring or len(self.portfolio.virtual_positions) > 0:
-                self._account_sync_job = self.root.after(30000, self._periodic_account_refresh_loop)
+            if self.is_monitoring:
+                self._account_sync_job = self.root.after(
+                    30_000, self._periodic_account_refresh_loop
+                )
             else:
                 self._account_sync_job = None
                 self._account_sync_job_running = False
