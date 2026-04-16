@@ -5,6 +5,13 @@
 
 ---
 
+## 0.3.18 (2026-04-16)
+
+- **포지션·체결**: 매도 `exit_reason`을 주문 로그(`EXIT_*`)와 동일 문자열로 저장·체결 시 우선 반영 (`core/trading_controller.py`, `core/portfolio_manager.py` `on_fill`).
+- **매매 종료 누락 방지**: 로컬 보유 없이 매도 체결만 온 경우 `order_history` 기반 `record_orphan_sell_close` 보강 (`data_manager_v2.py`, `k_trader_gui.py`).
+- **근본 보강**: 실매도 접수 성공 직후 포지션 전체를 주문번호로 `pending_exit_snapshots`에 저장·`virtual_db` 영속화, 체결 시 스냅샷으로 종료 확정; `on_fill(..., order_no=)` 전달 (`core/portfolio_manager.py`, `k_trader_gui.py`, `core/trading_controller.py`). 락을 `RLock`으로 변경.
+- **비상 매도**: `sell_all`에서 접수 번호가 있으면 동일 스냅샷 등록 (`core/portfolio_manager.py`).
+
 ## 0.3.17 (2026-04-15)
 
 - **UI**: 동기화·종합리포트·일일결산·관심목록·서버 전환·모드 배지를 **대시보드** `운영 · 계좌` 영역으로 이전. 포지션 관리 탭 상단에는 안내 문구만 표시 (`ui/tabs/dashboard_tab.py`, `ui/tabs/virtual_tab.py`). 종합리포트 생성 중 버튼 비활성화는 대시보드·기존 로직 겸용.

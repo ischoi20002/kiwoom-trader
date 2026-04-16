@@ -1,10 +1,12 @@
 import threading
+import copy
 import json
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+import config
 from utils.fee_rates import fee_decimal_rates_live_trading
 from utils.server_mode_paths import migrate_legacy_virtual_db_files, virtual_db_path
 
@@ -41,7 +43,12 @@ class PortfolioManager:
         # 서버 잔고 목록에 종목이 없을 때 연속 몇 번인지 (API 일시 누락·파싱 실패로 인한 UI 깜빡임 방지)
         self._reconcile_server_missing_streak: Dict[str, int] = {}
 
-        self.lock = threading.Lock()
+        # on_fill 등에서 보조 메서드가 같은 스레드로 lock 재진입할 수 있음
+        self.lock = threading.RLock()
+        # record_orphan_sell_close 동일 주문번호 중복 기록 방지
+        self._orphan_sell_order_ids: Set[str] = set()
+        # 매도 주문 접수 직후 포지션 전체 스냅샷(주문번호 키) — 동기화로 로컬 보유가 먼저 사라져도 체결 시 종료 확정
+        self._pending_exit_snapshots: Dict[str, Dict[str, Any]] = {}
 
     def _virtual_db_path(self) -> str:
         """종료내역 JSON — config.USE_MOCK 에 따라 virtual_db_mock.json / virtual_db_live.json."""
@@ -477,6 +484,17 @@ class PortfolioManager:
                     with open(vpath, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         self.virtual_history = data.get('history', [])
+                        try:
+                            pend = data.get("pending_exit_snapshots") or {}
+                            if isinstance(pend, dict):
+                                self._pending_exit_snapshots = {
+                                    str(k).strip(): v
+                                    for k, v in pend.items()
+                                    if str(k).strip() and isinstance(v, dict)
+                                }
+                                self._prune_stale_pending_exit_snapshots()
+                        except Exception:
+                            pass
                         # 구버전 이력: exit_date+exit_time 만 있으면 exit_datetime 보강(종료일시 UI 일관)
                         for h in self.virtual_history:
                             try:
@@ -517,8 +535,20 @@ class PortfolioManager:
     def save_db(self):
         """현재 상태를 파일에 저장합니다 (히스토리 위주)."""
         try:
+            try:
+                self._prune_stale_pending_exit_snapshots()
+            except Exception:
+                pass
             with open(self._virtual_db_path(), 'w', encoding='utf-8') as f:
-                json.dump({'history': self.virtual_history}, f, ensure_ascii=False, indent=4)
+                json.dump(
+                    {
+                        "history": self.virtual_history,
+                        "pending_exit_snapshots": self._pending_exit_snapshots,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=4,
+                )
         except Exception as e:
             self.log(f"[Error] [Portfolio] DB 저장 실패: {e}")
 
@@ -1053,6 +1083,160 @@ class PortfolioManager:
         except (ValueError, TypeError):
             return 0
 
+    def _prune_stale_pending_exit_snapshots(self) -> None:
+        """오래된 매도 대기 스냅샷 제거(재시작 후 쌓임 방지)."""
+        try:
+            cutoff = datetime.now() - timedelta(days=14)
+            to_del: List[str] = []
+            for k, v in list(self._pending_exit_snapshots.items()):
+                try:
+                    ra = str((v or {}).get("registered_at") or "")
+                    if not ra:
+                        continue
+                    dt = datetime.strptime(ra[:19], "%Y-%m-%dT%H:%M:%S")
+                    if dt < cutoff:
+                        to_del.append(k)
+                except Exception:
+                    continue
+            for k in to_del:
+                self._pending_exit_snapshots.pop(k, None)
+            if len(self._pending_exit_snapshots) > 80:
+                items = sorted(
+                    self._pending_exit_snapshots.items(),
+                    key=lambda x: str((x[1] or {}).get("registered_at") or ""),
+                )
+                for k, _ in items[: max(0, len(items) - 60)]:
+                    self._pending_exit_snapshots.pop(k, None)
+        except Exception:
+            pass
+
+    def register_pending_exit_snapshot(
+        self,
+        order_no: str,
+        code: str,
+        pos: Dict[str, Any],
+        exit_reason: str,
+    ) -> None:
+        """
+        실매도 주문 접수 성공 직후 호출: 포지션 전체를 주문번호에 묶어 저장합니다.
+        이후 계좌 동기화로 로컬 보유가 지워져도 체결 시 종료 내역을 복원할 수 있습니다.
+        """
+        try:
+            oid = str(order_no or "").strip()
+            if not oid or not isinstance(pos, dict):
+                return
+            nc = self._normalize_stock_code(code)
+            if not nc:
+                return
+            with self.lock:
+                self._pending_exit_snapshots[oid] = {
+                    "code": nc,
+                    "exit_reason": str(exit_reason or ""),
+                    "registered_at": datetime.now().isoformat(),
+                    "pos": copy.deepcopy(pos),
+                }
+                self._prune_stale_pending_exit_snapshots()
+            self.save_db()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Portfolio] 매도 대기 스냅샷 저장 실패: {e}")
+            except Exception:
+                pass
+
+    def _take_pending_exit_for_order(self, order_no: str) -> Optional[Dict[str, Any]]:
+        """주문번호에 해당하는 매도 스냅샷을 꺼내고 저장소에서 제거합니다."""
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return None
+            with self.lock:
+                rec = self._pending_exit_snapshots.pop(oid, None)
+            if isinstance(rec, dict):
+                self.save_db()
+                return rec
+        except Exception:
+            pass
+        return None
+
+    def _discard_pending_exit_snapshot(self, order_no: str) -> None:
+        """정상 청산 완료 등으로 더 이상 필요 없는 대기 스냅샷을 제거합니다."""
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return
+            with self.lock:
+                self._pending_exit_snapshots.pop(oid, None)
+            self.save_db()
+        except Exception:
+            pass
+
+    def _finalize_sell_close_to_history(
+        self,
+        pos: Dict[str, Any],
+        code: str,
+        p_val: float,
+        exit_reason: str,
+        snapshot: Optional[Dict[str, Any]],
+        sell_r: float,
+        now_str: str,
+        *,
+        remove_from_vp: bool,
+    ) -> None:
+        """매도 체결 1건을 종료 이력으로 확정합니다 (보유 dict 또는 접수 스냅샷 공통)."""
+        if not isinstance(pos.get("events"), list):
+            pos["events"] = []
+        pos["exit_reason"] = exit_reason
+        avg_p = self._to_f(pos.get("avg_price", 0.0))
+        qty_val = self._to_i(pos.get("qty", 0))
+        sell_fee = p_val * qty_val * sell_r
+        net_proceeds = p_val * qty_val - sell_fee
+        cost_basis = pos.get("invested", avg_p * qty_val)
+        pnl_amt = net_proceeds - cost_basis
+        pnl_pct = (pnl_amt / cost_basis) * 100 if cost_basis != 0 else 0
+        pos["final_pnl_pct"] = pnl_pct
+        pos["realized_pnl_amt"] = pnl_amt
+        pos["exit_price"] = p_val
+        _ex = datetime.now()
+        pos["exit_date"] = _ex.strftime("%Y-%m-%d")
+        pos["exit_time"] = _ex.strftime("%H:%M:%S")
+        pos["exit_datetime"] = _ex.strftime("%Y-%m-%d %H:%M:%S")
+        pos["code"] = code
+        _snap_ex = self._ensure_fill_snapshot(
+            code, p_val, snapshot, str(exit_reason)
+        )
+        try:
+            rsnap = str((_snap_ex or {}).get("reason", "") or "")
+            if rsnap.upper().startswith("REST_") or rsnap.upper().startswith(
+                "EXEC_"
+            ):
+                _snap_ex["reason"] = str(exit_reason)
+        except Exception:
+            pass
+        pos["events"].append(
+            {
+                "time": now_str,
+                "action": "SELL",
+                "price": p_val,
+                "qty": qty_val,
+                "snapshot": _snap_ex,
+            }
+        )
+        self.virtual_history.append(pos)
+        if remove_from_vp:
+            self.virtual_positions.pop(code, None)
+        try:
+            self.data_manager.delete_active_position(code)
+        except Exception:
+            pass
+        self.log(f"[Portfolio] {pos['name']}({code}) 최종 청산 완료 ({pnl_pct:+.2f}%)")
+        if self.telegram_callback:
+            msg = (
+                f"<b>🚨 [매도완료/{exit_reason}]</b>\n종목: {pos['name']}({code})\n"
+                f"최종수익: {pnl_pct:+.1f}%\n수익금: {int(pnl_amt):,}원\n"
+                f"시간: {pos.get('exit_datetime', _ex.strftime('%Y-%m-%d %H:%M:%S'))}"
+            )
+            threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
+
     def on_fill(
         self,
         code,
@@ -1063,6 +1247,7 @@ class PortfolioManager:
         reason=None,
         snapshot=None,
         fill_channel: str = "virtual",
+        order_no: Optional[str] = None,
     ) -> bool:
         """[v18.0] 체결(CHE) 데이터를 처리하여 포지션을 업데이트하며, 시점 스냅샷을 함께 기록합니다.
         fill_channel: \"virtual\" | \"exchange\" — 일별 세션 로그 구분용.
@@ -1169,66 +1354,63 @@ class PortfolioManager:
                         threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
             
             elif side == "sell":
-                # 청산
-                if code not in self.virtual_positions:
+                # 청산 — 보유 dict 우선, 없으면 매도 접수 시 저장한 스냅샷(주문번호)
+                oid = ""
+                try:
+                    oid = str(order_no or "").strip()
+                except Exception:
+                    oid = ""
+                pos: Optional[Dict[str, Any]] = None
+                remove_from_vp = True
+                pending_rec: Optional[Dict[str, Any]] = None
+
+                if code in self.virtual_positions:
+                    pos = self.virtual_positions[code]
+                elif oid:
+                    pending_rec = self._take_pending_exit_for_order(oid)
+                    if pending_rec:
+                        try:
+                            pos = copy.deepcopy(pending_rec.get("pos") or {})
+                        except Exception:
+                            pos = pending_rec.get("pos") or {}
+                        remove_from_vp = False
+                        try:
+                            self.log(
+                                f"📎 [Portfolio] 매도 체결 — 접수 시 스냅샷으로 종료 확정 "
+                                f"({code}, 주문 {oid})"
+                            )
+                        except Exception:
+                            pass
+
+                if pos is None:
                     skipped_sell_no_position = True
                 else:
-                    pos = self.virtual_positions[code]
-                    exit_reason = pos.get('exit_reason', 'MANUAL')
-                    
-                    avg_p = self._to_f(pos.get('avg_price', 0.0))
-                    qty_val = self._to_i(pos.get('qty', 0))
-                    p_val = self._to_f(price)
-                    
-                    # [v3.9] Apply Sell Fee
-                    sell_fee = p_val * qty_val * sell_r
-                    net_proceeds = p_val * qty_val - sell_fee
-                    cost_basis = pos.get('invested', avg_p * qty_val)
-                    
-                    pnl_amt = net_proceeds - cost_basis
-                    pnl_pct = (pnl_amt / cost_basis) * 100 if cost_basis != 0 else 0
-                    
-                    pos['final_pnl_pct'] = pnl_pct
-                    pos['realized_pnl_amt'] = pnl_amt
-                    pos['exit_price'] = p_val
-                    _ex = datetime.now()
-                    pos["exit_date"] = _ex.strftime("%Y-%m-%d")
-                    pos["exit_time"] = _ex.strftime("%H:%M:%S")
-                    pos["exit_datetime"] = _ex.strftime("%Y-%m-%d %H:%M:%S")
-                    pos['code'] = code
-                    _snap_ex = self._ensure_fill_snapshot(
-                        code, p_val, snapshot, str(exit_reason)
-                    )
-                    # REST/CHE 체결 경로에서 스냅샷 사유가 REST_SELL·EXEC_SELL로만 남는 경우 청산 사유로 교체
                     try:
-                        rsnap = str((_snap_ex or {}).get("reason", "") or "")
-                        if rsnap.upper().startswith("REST_") or rsnap.upper().startswith(
-                            "EXEC_"
-                        ):
-                            _snap_ex["reason"] = str(exit_reason)
+                        er_order = str(reason or "").strip()
                     except Exception:
-                        pass
-                    pos["events"].append(
-                        {
-                            "time": now_str,
-                            "action": "SELL",
-                            "price": p_val,
-                            "qty": qty_val,
-                            "snapshot": _snap_ex,
-                        }
+                        er_order = ""
+                    try:
+                        er_pend = str((pending_rec or {}).get("exit_reason") or "").strip()
+                    except Exception:
+                        er_pend = ""
+                    try:
+                        er_pos = str(pos.get("exit_reason") or "").strip()
+                    except Exception:
+                        er_pos = ""
+                    exit_reason = er_order or er_pend or er_pos or "MANUAL"
+                    p_val = self._to_f(price)
+                    self._finalize_sell_close_to_history(
+                        pos,
+                        code,
+                        p_val,
+                        exit_reason,
+                        snapshot,
+                        sell_r,
+                        now_str,
+                        remove_from_vp=remove_from_vp,
                     )
-                    self.virtual_history.append(pos)
-                    
-                    self.virtual_positions.pop(code, None)
-                    self.data_manager.delete_active_position(code)
-                    self.log(f"[Portfolio] {pos['name']}({code}) 최종 청산 완료 ({pnl_pct:+.2f}%)")
-                    if self.telegram_callback:
-                        msg = (
-                            f"<b>🚨 [매도완료/{exit_reason}]</b>\n종목: {pos['name']}({code})\n"
-                            f"최종수익: {pnl_pct:+.1f}%\n수익금: {int(pnl_amt):,}원\n"
-                            f"시간: {pos.get('exit_datetime', _ex.strftime('%Y-%m-%d %H:%M:%S'))}"
-                        )
-                        threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
+                    if remove_from_vp and oid:
+                        self._discard_pending_exit_snapshot(oid)
 
         if skipped_sell_no_position:
             try:
@@ -1277,6 +1459,247 @@ class PortfolioManager:
 
         return True
 
+    def record_orphan_sell_close(
+        self,
+        code: str,
+        price: float,
+        qty: int,
+        name: Optional[str],
+        reason: Optional[str],
+        order_no: str,
+        snapshot: Optional[Dict[str, Any]],
+        fill_channel: str = "exchange",
+    ) -> bool:
+        """
+        로컬 보유(`virtual_positions`)가 없을 때도 거래소 매도 체결이 들어오면
+        주문 로그와 매매종료내역이 어긋나지 않도록 종료 행을 보강합니다.
+        (동기화 유령 제거·타 경로 매도 등으로 보유 레코드가 먼저 사라진 경우)
+        """
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        disp_name = ""
+        exit_reason = "MANUAL"
+        try:
+            buy_r, sell_r = fee_decimal_rates_live_trading(self.settings)
+        except Exception:
+            try:
+                buy_r, sell_r = fee_decimal_rates_live_trading({})
+            except Exception:
+                buy_r, sell_r = 0.0035, 0.005
+        try:
+            ncode = self._normalize_stock_code(code)
+        except Exception:
+            ncode = str(code).split("_")[0].zfill(6)
+        oid = str(order_no or "").strip()
+        pending_handled = False
+
+        with self.lock:
+            self._merge_vp_alias_to_canonical(ncode)
+            if not ncode:
+                return False
+            if ncode in self.virtual_positions:
+                return False
+            if oid and oid in self._orphan_sell_order_ids:
+                return False
+
+            p_val = self._to_f(price)
+            qty_val = self._to_i(qty)
+            if qty_val <= 0 or p_val <= 0:
+                return False
+
+            try:
+                exit_reason = str(reason or "").strip()
+            except Exception:
+                exit_reason = ""
+            if not exit_reason:
+                exit_reason = "MANUAL"
+
+            # 1) 접수 시 저장해 둔 스냅샷(주문번호) — on_fill 에서 못 쓴 경우에만 여기서 소비
+            if oid:
+                try:
+                    pend = self._take_pending_exit_for_order(oid)
+                except Exception:
+                    pend = None
+                if pend:
+                    try:
+                        pos = copy.deepcopy(pend.get("pos") or {})
+                    except Exception:
+                        pos = pend.get("pos") or {}
+                    er = (
+                        str(reason or "").strip()
+                        or str(pend.get("exit_reason") or "").strip()
+                        or "MANUAL"
+                    )
+                    self._finalize_sell_close_to_history(
+                        pos,
+                        ncode,
+                        p_val,
+                        er,
+                        snapshot,
+                        sell_r,
+                        now_str,
+                        remove_from_vp=False,
+                    )
+                    if oid:
+                        self._orphan_sell_order_ids.add(oid)
+                    try:
+                        disp_name = str(pos.get("name") or "Unknown")
+                    except Exception:
+                        disp_name = "Unknown"
+                    exit_reason = er
+                    pending_handled = True
+
+            if not pending_handled:
+                buy_info: Optional[Dict[str, Any]] = None
+                try:
+                    buy_info = self.data_manager.get_last_successful_buy_for_code(ncode)
+                except Exception:
+                    buy_info = None
+
+                if buy_info:
+                    buy_px = self._to_f(buy_info.get("buy_price"))
+                    bq = self._to_i(buy_info.get("qty"))
+                    use_q = min(qty_val, bq) if bq > 0 else qty_val
+                    if use_q <= 0:
+                        use_q = qty_val
+                    fee_buy_leg = buy_px * float(use_q) * buy_r
+                    cost_basis = buy_px * float(use_q) + fee_buy_leg
+                    if bq > 0 and qty_val > bq:
+                        try:
+                            self.log(
+                                f"⚠️ [Portfolio] 종료내역 보강: 매도수량({qty_val})이 주문로그 매수수량({bq}) 초과 "
+                                f"— 손익은 부분 원가만 반영({ncode})"
+                            )
+                        except Exception:
+                            pass
+                else:
+                    buy_px = p_val
+                    cost_basis = p_val * float(qty_val) * (1.0 + buy_r)
+                    try:
+                        self.log(
+                            f"⚠️ [Portfolio] 종료내역 보강: 해당 종목 매수 로그 없음 — "
+                            f"손익은 매도가 기준 근사({ncode})"
+                        )
+                    except Exception:
+                        pass
+
+                sell_fee = p_val * float(qty_val) * sell_r
+                net_proceeds = p_val * float(qty_val) - sell_fee
+                pnl_amt = net_proceeds - cost_basis
+                pnl_pct = (pnl_amt / cost_basis) * 100 if cost_basis != 0 else 0.0
+
+                try:
+                    dn = str(name or "").strip()
+                except Exception:
+                    dn = ""
+                if not dn and buy_info:
+                    dn = str(buy_info.get("name") or "").strip()
+                disp_name = dn or "Unknown"
+
+                pos: Dict[str, Any] = {
+                    "name": disp_name,
+                    "avg_price": buy_px,
+                    "qty": qty_val,
+                    "stage": 1,
+                    "invested": cost_basis,
+                    "entry_time": str(buy_info.get("timestamp") if buy_info else "")
+                    or datetime.now().isoformat(),
+                    "reason": str(buy_info.get("reason") if buy_info else "ORPHAN_NO_LOCAL_POSITION"),
+                    "sig_type": "TYPE_A",
+                    "events": [],
+                    "max_now": p_val,
+                }
+                if buy_info:
+                    pos["events"].append(
+                        {
+                            "time": str(buy_info.get("timestamp") or now_str),
+                            "action": "BUY_S1",
+                            "price": buy_px,
+                            "qty": use_q,
+                            "snapshot": {},
+                        }
+                    )
+
+                pos["exit_reason"] = exit_reason
+                pos["final_pnl_pct"] = pnl_pct
+                pos["realized_pnl_amt"] = pnl_amt
+                pos["exit_price"] = p_val
+                _ex = datetime.now()
+                pos["exit_date"] = _ex.strftime("%Y-%m-%d")
+                pos["exit_time"] = _ex.strftime("%H:%M:%S")
+                pos["exit_datetime"] = _ex.strftime("%Y-%m-%d %H:%M:%S")
+                pos["code"] = ncode
+
+                _snap_ex = self._ensure_fill_snapshot(
+                    ncode, p_val, snapshot, str(exit_reason)
+                )
+                try:
+                    rsnap = str((_snap_ex or {}).get("reason", "") or "")
+                    if rsnap.upper().startswith("REST_") or rsnap.upper().startswith(
+                        "EXEC_"
+                    ):
+                        _snap_ex["reason"] = str(exit_reason)
+                except Exception:
+                    pass
+                pos["events"].append(
+                    {
+                        "time": now_str,
+                        "action": "SELL",
+                        "price": p_val,
+                        "qty": qty_val,
+                        "snapshot": _snap_ex,
+                    }
+                )
+
+                self.virtual_history.append(pos)
+                if oid:
+                    self._orphan_sell_order_ids.add(oid)
+
+                try:
+                    self.log(
+                        f"📌 [Portfolio] 종료내역 보강(보유 없음 매도체결): {disp_name}({ncode}) "
+                        f"{qty_val}주 @ {int(p_val):,}원 | 사유={exit_reason}"
+                    )
+                except Exception:
+                    pass
+
+        self.save_db()
+        self._schedule_gui_callback()
+
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                _fd: Dict[str, Any] = {
+                    "code": ncode,
+                    "side": "sell",
+                    "price": self._to_f(price),
+                    "qty": self._to_i(qty),
+                    "name": disp_name,
+                    "reason": exit_reason,
+                    "fill_channel": fill_channel,
+                    "orphan_close": True,
+                }
+                try:
+                    from core.supply_display import (
+                        capture_supply_snapshot,
+                        format_vol_power_column,
+                    )
+
+                    _sn = capture_supply_snapshot(self.app, ncode)
+                    _fd["snap_vol_power"] = _sn.get("vol_power")
+                    _fd["snap_vol_power_str"] = format_vol_power_column(
+                        _sn.get("vol_power")
+                    )
+                    _fd["snap_bid_ask"] = _sn.get("bid_ask_text")
+                except Exception:
+                    _fd["snap_vol_power"] = None
+                    _fd["snap_vol_power_str"] = "—"
+                    _fd["snap_bid_ask"] = "— / — (—)"
+                sl.log("fill", _fd)
+        except Exception:
+            pass
+
+        return True
+
     def clear_all(self):
         """모든 로컬 포지션을 초기화합니다."""
         with self.lock:
@@ -1284,6 +1707,7 @@ class PortfolioManager:
             for code in codes:
                 self.data_manager.delete_active_position(code)
             self.virtual_positions = {}
+            self._pending_exit_snapshots = {}
         self.save_db()
         self._schedule_gui_callback()
 
@@ -1306,7 +1730,7 @@ class PortfolioManager:
                 use_mock = getattr(config, 'USE_MOCK', False)
                 allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
                 if allow_order:
-                    self.order_manager.place_order(
+                    ord_no_em = self.order_manager.place_order(
                         code,
                         qty,
                         curr_p,
@@ -1316,6 +1740,16 @@ class PortfolioManager:
                         reason="EMERGENCY",
                         skip_price_guard=True,
                     )
+                    if ord_no_em:
+                        try:
+                            self.register_pending_exit_snapshot(
+                                str(ord_no_em).strip(),
+                                code,
+                                pos,
+                                "EMERGENCY",
+                            )
+                        except Exception as ex:
+                            self.log(f"⚠️ [Emergency] 매도 스냅샷 등록 실패: {ex}")
                 
                 # 가상 상태 업데이트 (즉시 삭제 대신 '매도 대기' 상태로 전환하여 체결 대기)
                 pos['exit_pending'] = True

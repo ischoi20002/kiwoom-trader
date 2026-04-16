@@ -22,7 +22,7 @@ import itertools
 import importlib.util
 import webbrowser
 import subprocess
-from typing import Any, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 from backtest_engine import TradingStrategy
 from data_manager_v2 import DataManagerV2 as DataManager
@@ -719,7 +719,26 @@ class KiwoomApp:
                 reason=reason or None,
                 snapshot=snapshot,
                 fill_channel="exchange",
+                order_no=str(order_no or "").strip() or None,
             )
+            # 로컬 보유가 없어 on_fill 이 스킵된 매도: 주문 로그는 있는데 종료내역만 누락되는 경우 보강
+            if (
+                not applied
+                and str(side or "").lower() == "sell"
+            ):
+                try:
+                    applied = self.portfolio.record_orphan_sell_close(
+                        code,
+                        float(fill_price),
+                        int(qty),
+                        str(name or ""),
+                        str(reason or ""),
+                        str(order_no or ""),
+                        snapshot,
+                        "exchange",
+                    )
+                except Exception as oe:
+                    self.log(f"⚠️ [체결 동기화] 종료내역 보강 실패: {oe}")
             # on_fill이 매도 스킵(False)인데 여기서 oid를 먼저 넣으면, 뒤따른 CHE가 on_fill을 영원히 못 타
             # 매매종료내역 누락으로 이어질 수 있음 — 실제 반영(True)일 때만 중복 마킹
             if oid and applied:
@@ -732,7 +751,7 @@ class KiwoomApp:
             elif str(side or "").lower() == "sell":
                 self.log(
                     f"⚠️ [체결 동기화] REST 매도 체결은 포트폴리오에 미반영({code}) "
-                    f"— 로컬 보유 없음 등. CHE 또는 다음 동기화에서 재시도됩니다."
+                    f"— 로컬 보유 없음·종료내역 보강도 실패. 주문 로그와 DB를 확인하세요."
                 )
             try:
                 tc = getattr(self, "trading_controller", None)
@@ -797,8 +816,41 @@ class KiwoomApp:
             )
             snapshot = self.portfolio.capture_snapshot(code, price, reason=snap_reason)
             applied = self.portfolio.on_fill(
-                code, side, price, qty, snapshot=snapshot, fill_channel="exchange"
+                code,
+                side,
+                price,
+                qty,
+                snapshot=snapshot,
+                fill_channel="exchange",
+                order_no=oid or None,
             )
+            if (
+                not applied
+                and str(side or "").lower() == "sell"
+            ):
+                meta: Optional[Dict[str, Any]] = None
+                try:
+                    meta = self.data_manager.get_sell_order_meta_by_order_no(oid)
+                except Exception:
+                    meta = None
+                try:
+                    nm = str((meta or {}).get("name") or "")
+                    rs = str((meta or {}).get("reason") or "")
+                except Exception:
+                    nm, rs = "", ""
+                try:
+                    applied = self.portfolio.record_orphan_sell_close(
+                        code,
+                        float(price),
+                        int(qty),
+                        nm,
+                        rs,
+                        oid,
+                        snapshot,
+                        "exchange",
+                    )
+                except Exception as oe:
+                    self.log(f"⚠️ [체결] 종료내역 보강 실패: {oe}")
             if applied:
                 self.log(
                     f"✅ [체결] {code} {'매수' if side == 'buy' else '매도'} {qty}주 완료 ({price:,}원)"
@@ -806,7 +858,7 @@ class KiwoomApp:
             elif str(side or "").lower() == "sell":
                 self.log(
                     f"⚠️ [체결] CHE 매도는 포트폴리오에 미반영({code}) "
-                    f"— 로컬 보유 없음(REST 선처리·동기화 순서 등). 주문번호로 재중복 시도 가능."
+                    f"— 로컬 보유 없음·종료내역 보강도 실패. 주문 로그를 확인하세요."
                 )
             if oid and applied:
                 self._exchange_fill_order_ids.add(oid)

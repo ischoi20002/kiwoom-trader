@@ -737,8 +737,19 @@ class TradingController:
                     pass
                 if ord_no:
                     pos["exit_pending"] = True
-                    pos["exit_reason"] = reason
+                    # 주문 로그 `reason` 컬럼과 동일 문자열 — 종료내역·on_fill과 정합
+                    pos["exit_reason"] = f"EXIT_{reason}"
                     pos["pending_exit_ord_no"] = str(ord_no).strip()
+                    # 동기화로 로컬 보유가 사라져도 체결 시 종료 확정할 수 있게 접수 직후 스냅샷 저장
+                    try:
+                        self.app.portfolio.register_pending_exit_snapshot(
+                            str(ord_no).strip(),
+                            code,
+                            pos,
+                            f"EXIT_{reason}",
+                        )
+                    except Exception as ex:
+                        self.log(f"⚠️ [Exit] 매도 스냅샷 등록 실패: {ex}")
                     try:
                         self._register_limit_order_watch(
                             str(ord_no).strip(),
@@ -783,7 +794,13 @@ class TradingController:
                     code, now_price, reason=f"EXIT_{reason}"
                 )
                 self.app.portfolio.on_fill(
-                    code, "sell", now_price, pos["qty"], snapshot=snapshot
+                    code,
+                    "sell",
+                    now_price,
+                    pos["qty"],
+                    name=pos.get("name"),
+                    reason=f"EXIT_{reason}",
+                    snapshot=snapshot,
                 )
                 self.log(
                     f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 가상 청산 ({profit_ratio:+.2f}%)"

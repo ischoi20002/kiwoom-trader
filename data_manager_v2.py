@@ -904,6 +904,140 @@ class DataManagerV2:
             res = cursor.fetchone()
             return res if res else (None, None)
 
+    def _normalize_order_stock_code(self, raw: Any) -> str:
+        """order_history.code 와 포트폴리오 6자리 키를 맞추기 위한 정규화."""
+        try:
+            s = str(raw or "").strip()
+            if not s:
+                return ""
+            if "_" in s:
+                s = s.split("_", 1)[0]
+            return s.zfill(6)
+        except Exception:
+            return ""
+
+    def get_last_successful_buy_for_code(self, code: str) -> Optional[Dict[str, Any]]:
+        """
+        동일 종목의 가장 최근 매수 성공(또는 체결) 건 — 로컬 보유 없이 매도만 반영될 때 원가 추정용.
+        """
+        try:
+            target = self._normalize_order_stock_code(code)
+            if not target:
+                return None
+            with self._get_state_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, code, qty, price, filled_price, filled_qty, result, name, reason
+                    FROM order_history
+                    WHERE lower(side) = 'buy'
+                      AND (
+                          upper(result) IN ('SUCCESS', 'FILLED', 'MOCK')
+                          OR result = 'MOCK'
+                      )
+                    ORDER BY timestamp DESC
+                    LIMIT 120
+                    """
+                )
+                rows = cur.fetchall()
+            for row in rows:
+                (
+                    ts,
+                    c,
+                    q,
+                    p,
+                    fp,
+                    fq,
+                    _res,
+                    nm,
+                    rs,
+                ) = row
+                if self._normalize_order_stock_code(c) != target:
+                    continue
+                try:
+                    fq_i = int(fq or 0)
+                except (TypeError, ValueError):
+                    fq_i = 0
+                try:
+                    q_i = int(q or 0)
+                except (TypeError, ValueError):
+                    q_i = 0
+                try:
+                    fp_i = int(fp or 0)
+                except (TypeError, ValueError):
+                    fp_i = 0
+                try:
+                    p_i = int(p or 0)
+                except (TypeError, ValueError):
+                    p_i = 0
+                buy_px = float(fp_i if fp_i > 0 else p_i)
+                if buy_px <= 0:
+                    continue
+                qty_eff = fq_i if fq_i > 0 else q_i
+                if qty_eff <= 0:
+                    continue
+                return {
+                    "timestamp": str(ts or ""),
+                    "code": str(c or ""),
+                    "qty": int(qty_eff),
+                    "buy_price": buy_px,
+                    "name": str(nm or ""),
+                    "reason": str(rs or ""),
+                }
+            return None
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] get_last_successful_buy_for_code 실패: {e}")
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] get_last_successful_buy_for_code 오류: {e}")
+            except Exception:
+                pass
+            return None
+
+    def get_sell_order_meta_by_order_no(self, order_no: str) -> Optional[Dict[str, Any]]:
+        """주문번호로 매도 접수 행 조회 — CHE 경로에서 종목명·사유 보강."""
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return None
+            with self._get_state_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT name, reason, qty, price, code
+                    FROM order_history
+                    WHERE order_no = ?
+                      AND lower(side) = 'sell'
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """,
+                    (oid,),
+                )
+                row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "name": str(row[0] or ""),
+                "reason": str(row[1] or ""),
+                "qty": int(row[2] or 0),
+                "price": int(row[3] or 0),
+                "code": str(row[4] or ""),
+            }
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] get_sell_order_meta_by_order_no 실패: {e}")
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] get_sell_order_meta_by_order_no 오류: {e}")
+            except Exception:
+                pass
+            return None
+
     def update_order_status(
         self,
         code,
