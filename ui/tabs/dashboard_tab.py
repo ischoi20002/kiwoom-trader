@@ -39,7 +39,7 @@ class DashboardTab:
                 pass
 
     def _setup_ui(self):
-        """대시보드: 운영 메뉴 + 데이터 수집 타일 + 로그"""
+        """대시보드: 운영 메뉴 + 로그 (시세 수집은 백테스팅 탭)"""
         db_main_frame = ttk.Frame(self.parent, padding="20")
         db_main_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -118,24 +118,6 @@ class DashboardTab:
         )
         self.btn_server_switch.pack(side=tk.LEFT, padx=(4, 0))
 
-        # 중앙 핵심 컨트롤 센터 (Grid: 두 타일 동일 너비·동일 높이 셀)
-        tiles_frame = ttk.Frame(db_main_frame)
-        tiles_frame.pack(fill=tk.X, pady=(0, 18))
-        tiles_frame.columnconfigure(0, weight=1, uniform="dashboard_tile")
-        tiles_frame.columnconfigure(1, weight=1, uniform="dashboard_tile")
-        tiles_frame.rowconfigure(0, minsize=140, weight=0)
-
-        # [타일] 데이터 수집 (Harvest) — 종목 일일 선정은 실시간 감시 탭으로 이전됨
-        harvest_tile = ttk.LabelFrame(tiles_frame, text=" 🚜 데이터 수집 ", padding="15")
-        harvest_tile.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=0)
-        ttk.Label(
-            harvest_tile,
-            text="최신 시장 데이터를\n로컬 DB로 저장합니다.",
-            foreground="#EBCB8B",
-        ).pack(expand=True)
-        self.btn_harvest = ttk.Button(harvest_tile, text="수집 시작", style="Action.TButton", command=self._on_btn_harvest)
-        self.btn_harvest.pack(side=tk.BOTTOM, fill=tk.X, pady=(15,0))
-
         # 상태 요약 라인 (아이콘 추가)
         status_info_frame = ttk.Frame(db_main_frame)
         status_info_frame.pack(fill=tk.X, pady=(0, 12))
@@ -160,15 +142,3 @@ class DashboardTab:
         self.app.log_area.tag_configure("error", foreground="#BF616A") # Aurora Red
         self.app.log_area.tag_configure("warning", foreground="#D08770") # Aurora Orange
         self.app.log_area.tag_configure("header", foreground="#B48EAD", font=("Consolas", 10, "bold")) # Purple
-
-    def _on_btn_harvest(self):
-        """데이터 하베스팅 서비스 실행 (독립 프로세스)"""
-        try:
-            import subprocess
-            # 별도 콘솔 창에서 실행하여 GUI 종료와 무관하게 동작하도록 함
-            subprocess.Popen(["python", "harvest_service.py"], creationflags=subprocess.CREATE_NEW_CONSOLE)
-            self.app.log("🚀 [하베스팅] 전 종목 수집 프로세스가 별도 창에서 시작되었습니다.")
-            messagebox.showinfo("알림", "데이터 하베스팅이 별도 창에서 시작되었습니다.\n이 프로그램(GUI)을 종료해도 수집은 계속됩니다.")
-        except Exception as e:
-            self.app.log(f"❌ [하베스팅] 실행 실패: {e}")
-            messagebox.showerror("오류", f"수집 프로세스 실행 중 오류 발생: {e}")

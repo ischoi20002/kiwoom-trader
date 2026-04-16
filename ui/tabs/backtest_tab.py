@@ -171,14 +171,36 @@ class BacktestTab:
             self.parent.after(100, self._poll_queue)
 
     def _setup_ui(self):
-        """백테스팅 탭 레이아웃 구성 (v16.8: 직관적인 그룹화 레이아웃 적용)"""
-        # ---상단: 가로 배치 섹션 (설정 / 최적화 / 백테스트)---
-        top_grid_frame = ttk.Frame(self.parent)
-        top_grid_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        """백테스팅 탭 레이아웃: 시세 수집 → 기간·최적화·검증 → 진행·결과."""
+        # --- 시세 DB (선행 작업): 대시보드에서 이전, 설명 문구 없음 ---
+        data_strip = ttk.LabelFrame(self.parent, text=" 📥 시세 데이터 ", padding=(12, 8))
+        data_strip.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(10, 4))
+        data_row = ttk.Frame(data_strip)
+        data_row.pack(fill=tk.X)
+        self.btn_harvest_prices = ttk.Button(
+            data_row,
+            text="최신주가데이타수집",
+            style="Action.TButton",
+            width=22,
+            command=self._on_harvest_latest_prices,
+        )
+        self.btn_harvest_prices.pack(side=tk.RIGHT)
+
+        # --- 워크플로: 기간 → 최적화 → 성과 검증 (3열 동일 비중) ---
+        workflow = ttk.LabelFrame(
+            self.parent,
+            text=" 📋 기간 · 최적화 · 성과 검증 ",
+            padding=(10, 8),
+        )
+        workflow.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=10, pady=(2, 6))
+        top_grid_frame = ttk.Frame(workflow)
+        top_grid_frame.pack(fill=tk.BOTH, expand=True)
+        for c in (0, 1, 2):
+            top_grid_frame.columnconfigure(c, weight=1, uniform="bt_top_col")
         
         # 1. 기간 설정 (Date Settings)
         date_lf = ttk.LabelFrame(top_grid_frame, text=" 📅 1. 기본 기간 설정 ", padding="15")
-        date_lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        date_lf.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=2)
         
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         
@@ -198,7 +220,7 @@ class BacktestTab:
 
         # 2. 전략 최적화 (Optimization)
         opt_lf = ttk.LabelFrame(top_grid_frame, text=" 🚀 2. 전략 최적화 ", padding="15")
-        opt_lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        opt_lf.grid(row=0, column=1, sticky="nsew", padx=4, pady=2)
         
         btn_row_opt = ttk.Frame(opt_lf)
         btn_row_opt.pack(expand=True)
@@ -232,7 +254,7 @@ class BacktestTab:
 
         # 3. 성과 검증 (Portfolio Backtest)
         bt_lf = ttk.LabelFrame(top_grid_frame, text=" 📈 3. 성과 검증 ", padding="15")
-        bt_lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        bt_lf.grid(row=0, column=2, sticky="nsew", padx=(4, 0), pady=2)
         
         btn_row_bt = ttk.Frame(bt_lf)
         btn_row_bt.pack(pady=5)
@@ -342,7 +364,44 @@ class BacktestTab:
                 except: return None
             return None
         ToolTip(self.tree_backtest, get_header_tip)
-        
+
+    def _on_harvest_latest_prices(self) -> None:
+        """harvest_service.py 를 별도 콘솔에서 실행해 로컬 시세 DB를 갱신합니다."""
+        try:
+            import subprocess
+
+            creationflags = (
+                int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+                if os.name == "nt"
+                else 0
+            )
+            subprocess.Popen(
+                ["python", "harvest_service.py"],
+                creationflags=creationflags,
+            )
+            try:
+                self.app.log("🚀 [하베스팅] 전 종목 수집 프로세스가 별도 창에서 시작되었습니다.")
+            except Exception:
+                pass
+            messagebox.showinfo(
+                "알림",
+                "데이터 하베스팅이 별도 창에서 시작되었습니다.\n이 프로그램(GUI)을 종료해도 수집은 계속됩니다.",
+                parent=self.parent,
+            )
+        except Exception as e:
+            try:
+                self.app.log(f"❌ [하베스팅] 실행 실패: {e}")
+            except Exception:
+                pass
+            try:
+                messagebox.showerror(
+                    "오류",
+                    f"수집 프로세스 실행 중 오류 발생: {e}",
+                    parent=self.parent,
+                )
+            except Exception:
+                pass
+
     def _get_dynamic_search_space(self, settings):
         """[v15.7] 현재 설정값을 기준으로 주변 탐색 범위를 동적으로 생성"""
         s = settings
