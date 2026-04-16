@@ -1255,7 +1255,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "최대 감시 종목 수 (Track B)", "key": "max_slots_b", "unit": "개"},
                 {"label": "1단계(정찰) 비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"},
                 {"label": "2단계(본대) 비중", "keys": ["stage2_amt", "s2_equity_pct"], "unit_key": "s2_sizing_unit"},
-                {"label": "가상 매매 자동화", "toggle": "use_auto_virtual"}
             ]
         },
         {

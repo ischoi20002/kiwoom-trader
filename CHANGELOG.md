@@ -7,6 +7,10 @@
 
 ---
 
+## 0.3.30 (2026-04-16)
+
+- **설정·동작**: `use_auto_virtual`(가상 매매 자동화) 토글 제거 — 설정 탭·`defaults`·`settings.json`·리포트 매핑·`trading_controller` 가드 삭제. 실시간 신호에 따른 매수·전략 액션은 항상 진행 (`ui/tabs/settings_tab.py`, `core/defaults.py`, `core/trading_controller.py`, `reporting/trade_report.py`, `tools/settings_tab_ui_catalog.py`).
+
 ## 0.3.29 (2026-04-16)
 
 - **하베스팅 UI**: 대시보드 데이터 수집 타일 제거. **최신주가데이타수집** 버튼을 백테스팅 탭 상단 `시세 데이터` 구역으로 이전(설명 문구 없음). 기간·최적화·성과 검증은 `grid` 균등 3열·`기간 · 최적화 · 성과 검증` 프레임으로 정리 (`ui/tabs/backtest_tab.py`, `ui/tabs/dashboard_tab.py`).

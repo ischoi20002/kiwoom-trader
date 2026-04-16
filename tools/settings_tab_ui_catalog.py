@@ -87,14 +87,6 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "Type A 목표 비중(%)",
         "type_balance_a_pct",
     ),
-    SettingUiRow(
-        1090,
-        "① 자금 · 사이징",
-        "[1] 자금 및 계좌 관리",
-        "",
-        "가상 매매 자동화 — 토글",
-        "use_auto_virtual",
-    ),
     # ─── ② 유니버스 · 종목선정 — Track A ───
     SettingUiRow(
         2000,

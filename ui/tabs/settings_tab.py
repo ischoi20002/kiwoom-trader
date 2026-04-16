@@ -483,7 +483,6 @@ class SettingsTab:
             '%',
             'Type B 목표 = (100 − A)%. 예: 60이면 A 60%·B 40%에 가깝게 유지',
         )
-        add_param_row(cap_f, '가상 매매 자동화', None, '', '로직 포착 시 자동 진입 시뮬레이션', toggle_key='use_auto_virtual')
         add_param_row(
             cap_f,
             '선정 시 거래정지 종목 제외',

@@ -29,7 +29,6 @@ DEFAULT_SETTINGS = {
     "s2_sizing_unit": "%",
     "use_type_balance_gate": False,
     "type_balance_a_pct": 40.0,
-    "use_auto_virtual": True,
     # 실시간: 15분봉 하한(진행 중 가상 1봉 포함). 실제 임계는 ATR 주기와의 max → effective_min_15m_bars_for_monitoring
     "min_15m_bars_for_signal": 60,
     # 워밍업 OHLCV 출처:
@@ -280,7 +279,6 @@ ALLOWED_EXTRA_KEYS = {
     'bt_start_date', 'bt_end_date', 
     's1_sizing_unit', 's2_sizing_unit', 
     'mock_account_id', 'backtest_initial_capital',
-    'use_auto_virtual',
     'buy_fee_live', 'sell_fee_live',
     'buy_fee_bt', 'sell_fee_bt',
     'buy_fee_mock', 'sell_fee_mock',

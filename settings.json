@@ -15,7 +15,6 @@
     "s2_sizing_unit": "%",
     "use_type_balance_gate": false,
     "type_balance_a_pct": 40.0,
-    "use_auto_virtual": true,
     "min_15m_bars_for_signal": 60,
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,

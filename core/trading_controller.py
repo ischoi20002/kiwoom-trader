@@ -541,20 +541,6 @@ class TradingController:
         except Exception:
             pass
 
-        # 0. 자동 매매 마스터 스위치 확인 (UI 연동)
-        if not self.app.settings.get('use_auto_virtual', False):
-            self.log(f"🔔 [Signal] {name}({code}) {reason} 포착! (자동 매매 OFF 상태)")
-            try:
-                sl = getattr(self.app, "session_logger", None)
-                if sl:
-                    sl.log(
-                        "buy_skipped",
-                        {"code": code, "name": name, "reason": "use_auto_virtual_off"},
-                    )
-            except Exception:
-                pass
-            return False
-
         # 1. 투자금액 산출 (Risk Management)
         use_mock = getattr(config, 'USE_MOCK', False)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
@@ -693,19 +679,6 @@ class TradingController:
         
         use_mock = getattr(config, 'USE_MOCK', False)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
-
-        # 0. 자동 매매 마스터 스위치 확인 (UI 연동)
-        if not self.app.settings.get('use_auto_virtual', False):
-            try:
-                sl = getattr(self.app, "session_logger", None)
-                if sl:
-                    sl.log(
-                        "strategy_action_skipped",
-                        {"code": code, "action": action, "reason": "use_auto_virtual_off"},
-                    )
-            except Exception:
-                pass
-            return
 
         if action == "EXIT":
             # [Audit] Exit Execution — 주문 실패 시 exit_pending 미설정(재평가·재시도 가능)
