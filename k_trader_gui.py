@@ -602,8 +602,8 @@ class KiwoomApp:
         if df_200 is not None: 
             self.log(f"[Data] 감시 대상 {len(df_200)}개 종목 로드 완료")
             # [v4.5.2] 종목 선정 버튼 활성화
-            if hasattr(self, 'dashboard_tab') and hasattr(self.dashboard_tab, 'btn_select'):
-                self.root.after(0, lambda: self.dashboard_tab.btn_select.config(state=tk.NORMAL))
+            if hasattr(self, "monitor_tab") and hasattr(self.monitor_tab, "btn_select"):
+                self.root.after(0, lambda: self.monitor_tab.btn_select.config(state=tk.NORMAL))
 
     def _on_realtime_data_received(self, code, now_price, volume, trde_val, **kwargs):
         """

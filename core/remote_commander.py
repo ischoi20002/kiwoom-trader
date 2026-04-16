@@ -77,8 +77,13 @@ class RemoteCommander:
     def _handle_remote_select(self):
         """원격 종목 선정 트리거 (Auto-Confirm 모드)"""
         self.log("[Remote] 원격 종목 선정 시작...")
-        if hasattr(self.app, 'dashboard_tab'):
+        if hasattr(self.app, "monitor_tab") and hasattr(
+            self.app.monitor_tab, "start_selection_thread"
+        ):
             # GUI 스레드 세이프하게 호출
-            self.app.root.after(0, lambda: self.app.dashboard_tab.start_selection_thread(auto_confirm=True))
+            self.app.root.after(
+                0,
+                lambda: self.app.monitor_tab.start_selection_thread(auto_confirm=True),
+            )
         else:
-            self.log("[Error] [Remote] DashboardTab이 로드되지 않아 명령을 수행할 수 없습니다.")
+            self.log("[Error] [Remote] MonitorTab이 로드되지 않아 명령을 수행할 수 없습니다.")
