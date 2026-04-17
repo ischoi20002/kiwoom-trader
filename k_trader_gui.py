@@ -598,21 +598,12 @@ class KiwoomApp:
             pass
 
         try:
-            # 반복 루프마다 찍지 않고, 인증 직후 한 번만 기동 맥락을 요약한다.
+            # 상세 요약은 첫 계좌 동기화(REST)가 끝난 뒤 `PortfolioManager` 에서 한 번만 출력한다.
             try:
-                _lines = [
-                    "[기동 요약] 인증 성공 후 이어서 실행되는 작업:",
-                    "  (1) 포트폴리오 메모리 재로드(load_all)",
-                    "  (2) 시장 지수 모니터링 — 실시간 약 10초 / 정밀 트렌드 약 2분 주기",
-                    "  (3) 원격 명령 DB 폴링 — 약 5초 주기",
-                    "  (4) 약 2초 후 실계좌 REST 동기화 1회(로컬·서버 정합)",
-                    "  (5) KOSPI200 유니버스 로드 — 별도 스레드(완료 시 종목 수 로그)",
-                ]
-                if getattr(self, "auto_start", False):
-                    _lines.append(
-                        "  (6) 자동 실행 모드: 약 8초 후 실시간 감시 시작 예약"
-                    )
-                self.log("\n".join(_lines))
+                self.log(
+                    "[기동] 인증 완료 → 약 2초 후 첫 계좌 동기화. "
+                    "『계좌 동기화』로그 이후에도 잠시 바쁘면, 동기화 완료 직후 요약 로그를 확인하세요."
+                )
             except Exception:
                 pass
             self.portfolio.load_all()
@@ -620,7 +611,9 @@ class KiwoomApp:
             self.remote_commander.start()
             self.root.after(
                 2000,
-                lambda: self.portfolio.sync_with_actual_account(silent=True, force=True),
+                lambda: self.portfolio.sync_with_actual_account(
+                    silent=True, force=True, log_boot_summary=True
+                ),
             )
             threading.Thread(
                 target=lambda: self.get_kospi_200(force=True), daemon=True
@@ -1551,8 +1544,16 @@ class KiwoomApp:
         except Exception:
             pass
 
-    def sync_with_actual_account(self, silent: bool = False, force: bool = False) -> None:
-        self.portfolio.sync_with_actual_account(silent=silent, force=force)
+    def sync_with_actual_account(
+        self,
+        silent: bool = False,
+        force: bool = False,
+        *,
+        log_boot_summary: bool = False,
+    ) -> None:
+        self.portfolio.sync_with_actual_account(
+            silent=silent, force=force, log_boot_summary=log_boot_summary
+        )
 
     def _sync_account_deposit(self) -> None:
         # [v4.9.0] 전체 계좌 동기화 — 버튼 클릭 시 API 스로틀을 우회(force)
