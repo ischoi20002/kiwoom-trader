@@ -464,6 +464,12 @@ class KiwoomApp:
         if "백테스팅" in tab_text and hasattr(self, 'backtest_tab'):
             # [v26.1] 탭 전환 시 현재 선택된 최적화 항목만 컬럼으로 표시하도록 즉시 리프레시
             self.backtest_tab._refresh_columns_from_settings()
+        # 포지션 탭은 기동 직후에는 Notebook 에 안 그려져 Paned 높이가 0 — 아침 첫 진입 시 sash 복원 필요
+        if "포지션" in tab_text and hasattr(self, "virtual_tab"):
+            try:
+                self.virtual_tab._schedule_restore_virtual_sash()
+            except Exception:
+                pass
 
     def log(self, message): self.gui_utils.log(message)
 

@@ -159,6 +159,9 @@ class MonitorTab:
         self._last_stream_reg_sig: Optional[Tuple[str, ...]] = None
         # 증분 워밍업 등으로 REG는 자주 가도, 사용자 로그는 이 간격(초) 이상일 때만 1줄 출력
         self._last_stream_reg_user_log_ts: float = 0.0
+        # 웹소켓 LOGIN 실패(8005 등) 로그 스팸 방지·재시도 카운트
+        self._ws_login_fail_streak: int = 0
+        self._last_ws_login_fail_log_ts: float = 0.0
         # 감시 트리 열 폭·세로 Paned 비율 저장(구분선 / sash 드래그 후 디바운스)
         self._monitor_col_width_save_job: Optional[Any] = None
         self._monitor_width_source_tree: Optional[ttk.Treeview] = None
@@ -1082,6 +1085,7 @@ class MonitorTab:
                                 trnm = packet.get('trnm')
                                 if trnm == 'LOGIN':
                                     if packet.get('return_code') == 0:
+                                        self._ws_login_fail_streak = 0
                                         try:
                                             _sc = self.app.stream_subscription_codes()
                                         except Exception:
@@ -1109,8 +1113,67 @@ class MonitorTab:
                                         except Exception:
                                             pass
                                     else:
-                                        self.app.log(f"❌ [시스템] 로그인 실패: {packet.get('return_msg')}. 15초 후 재시도...")
-                                        await asyncio.sleep(15)
+                                        # CODE=8005 등: REST TTL 캐시 토큰과 WS 요구가 어긋나 동일 문자열로 무한 실패할 수 있음 → 캐시 무효화 후 재발급
+                                        self._ws_login_fail_streak += 1
+                                        try:
+                                            am = getattr(
+                                                self.app, "auth_manager", None
+                                            )
+                                            if am is not None and hasattr(
+                                                am, "invalidate_cached_token"
+                                            ):
+                                                am.invalidate_cached_token()
+                                        except Exception:
+                                            pass
+                                        try:
+                                            tm = TokenManager()
+                                            for _name in (
+                                                "clear_cache",
+                                                "invalidate",
+                                                "reset",
+                                                "clear",
+                                            ):
+                                                _fn = getattr(tm, _name, None)
+                                                if callable(_fn):
+                                                    _fn()
+                                                    break
+                                        except Exception:
+                                            pass
+                                        rmsg = str(packet.get("return_msg") or "")
+                                        now_ts = time.time()
+                                        _log_detail = (
+                                            self._ws_login_fail_streak == 1
+                                            or self._ws_login_fail_streak % 8 == 0
+                                            or (
+                                                now_ts
+                                                - getattr(
+                                                    self,
+                                                    "_last_ws_login_fail_log_ts",
+                                                    0.0,
+                                                )
+                                            )
+                                            >= 60.0
+                                        )
+                                        if _log_detail:
+                                            self._last_ws_login_fail_log_ts = now_ts
+                                            try:
+                                                _mock = bool(
+                                                    getattr(config, "USE_MOCK", True)
+                                                )
+                                            except Exception:
+                                                _mock = True
+                                            self.app.log(
+                                                f"❌ [시스템] 웹소켓 로그인 실패: {rmsg}. "
+                                                "REST 토큰 캐시를 비웠습니다 — 재발급 후 재접속합니다. "
+                                                f"(모의={'ON' if _mock else 'OFF'}, "
+                                                "모의/실전·앱키 불일치 시 지속될 수 있음) "
+                                                f"[연속 {self._ws_login_fail_streak}회]"
+                                            )
+                                        await asyncio.sleep(
+                                            5
+                                            if self._ws_login_fail_streak <= 3
+                                            else 15
+                                        )
                                         break
                                 elif trnm == 'PING':
                                     await ws.send(json.dumps(packet))

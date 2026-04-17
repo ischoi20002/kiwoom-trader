@@ -75,6 +75,7 @@ class VirtualTab:
         self._narrative_report_busy: bool = False
         # 보유/주문 트리 컬럼 폭·세로 Paned 비율 저장
         self._virtual_ui_save_job: Optional[Any] = None
+        self._virtual_sash_sync_job: Optional[Any] = None  # 세시 이동 직후 sashpos 동기화용(디바운스)
         self._virtual_main_paned: Optional[ttk.PanedWindow] = None
         self._virtual_saved_sash_rel: Optional[float] = None
 
@@ -146,6 +147,11 @@ class VirtualTab:
         self._virtual_main_paned = v_paned
         try:
             v_paned.bind("<<PanedWindowMoved>>", self._on_virtual_paned_moved, add="+")
+        except Exception:
+            pass
+        # Windows 등에서 <<PanedWindowMoved>> 가 누락되거나, 이벤트 직후 sashpos 가 아직 갱신 안 되는 경우 대비
+        try:
+            v_paned.bind("<ButtonRelease-1>", self._on_virtual_paned_mouse_release, add="+")
         except Exception:
             pass
 
@@ -310,12 +316,65 @@ class VirtualTab:
         except (tk.TclError, TypeError, ValueError, ZeroDivisionError):
             return None
 
-    def _on_virtual_paned_moved(self, _event: Any = None) -> None:
+    def _request_virtual_sash_sync(self) -> None:
+        """
+        세로 분할(sash) 변경 직후에는 Tk가 내부 좌표를 한 틱 늦게 반영하는 경우가 있어
+        짧게 지연한 뒤 비율을 읽어 저장합니다. (<<PanedWindowMoved>> 누락·타이밍 이슈 완화)
+        """
+        try:
+            r = getattr(self.app, "root", None)
+            if r is None:
+                return
+            jid = self._virtual_sash_sync_job
+            if jid is not None:
+                try:
+                    r.after_cancel(jid)
+                except Exception:
+                    pass
+            self._virtual_sash_sync_job = r.after(20, self._apply_virtual_sash_sync)
+        except Exception:
+            pass
+
+    def _apply_virtual_sash_sync(self) -> None:
+        """지연 후 메모리에 sash 비율을 반영하고 디스크 저장을 예약합니다."""
+        self._virtual_sash_sync_job = None
         try:
             rel = self._virtual_current_sash_rel()
             if rel is not None:
                 self._virtual_saved_sash_rel = rel
             self._schedule_virtual_ui_save()
+        except Exception:
+            pass
+
+    def _release_is_on_paned_sash(self, event: Any) -> bool:
+        """패인 자식에서 올린 마우스 이벤트도 오므로, 세시 위에서만 True."""
+        try:
+            p = self._virtual_main_paned
+            if p is None:
+                return False
+            ex = int(event.x_root - p.winfo_rootx())
+            ey = int(event.y_root - p.winfo_rooty())
+            rid = p.identify(ex, ey)
+            # Windows ttk: 패인 영역은 '' , 세시는 정수 인덱스(0, 1, …)로 오는 경우가 많음
+            if rid is None:
+                return False
+            if isinstance(rid, int):
+                return True
+            s = str(rid).lower()
+            return "sash" in s
+        except (tk.TclError, TypeError, ValueError):
+            return False
+        except Exception:
+            return False
+
+    def _on_virtual_paned_moved(self, _event: Any = None) -> None:
+        self._request_virtual_sash_sync()
+
+    def _on_virtual_paned_mouse_release(self, event: Any) -> None:
+        try:
+            if not self._release_is_on_paned_sash(event):
+                return
+            self._request_virtual_sash_sync()
         except Exception:
             pass
 
@@ -333,8 +392,10 @@ class VirtualTab:
             def _try(attempt: int = 0) -> None:
                 try:
                     rel = getattr(self, "_virtual_saved_sash_rel", None)
+                    if rel is None:
+                        rel = 0.42
                     p = self._virtual_main_paned
-                    if rel is None or p is None:
+                    if p is None:
                         return
                     try:
                         p.update_idletasks()
