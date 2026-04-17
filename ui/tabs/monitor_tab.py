@@ -1,4 +1,5 @@
 import os
+import shutil
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
@@ -164,6 +165,7 @@ class MonitorTab:
         self._last_ws_login_fail_log_ts: float = 0.0
         # 감시 트리 열 폭·세로 Paned 비율 저장(구분선 / sash 드래그 후 디바운스)
         self._monitor_col_width_save_job: Optional[Any] = None
+        self._monitor_sash_sync_job: Optional[Any] = None  # 세시 드래그 직후 sashpos 지연 읽기
         self._monitor_width_source_tree: Optional[ttk.Treeview] = None
         self._monitor_paned: Optional[ttk.PanedWindow] = None
         self._monitor_saved_sash_rel: Optional[float] = None  # _load_saved_monitor_col_widths 에서 채움
@@ -197,17 +199,34 @@ class MonitorTab:
             return tuple()
 
     def _monitor_col_widths_json_path(self) -> str:
-        """settings.json 과 같은 폴더에 열 폭을 둡니다."""
+        """
+        monitor_column_widths.json — **항상** k_trader_gui.py 와 같은 폴더(``_app_root_dir``).
+        예전에는 cwd 등에만 있던 파일이 있으면 **한 번만** 그 내용을 루트로 복사한다.
+        (여러 후보 중 '먼저 발견된 파일'에만 쓰면 사용자가 보는 경로와 달라 저장이 안 되는 것처럼 보였음)
+        """
         try:
-            ch = getattr(self.app, "config_handler", None)
-            sf = getattr(ch, "settings_file", None) if ch else None
-            if sf:
-                base = os.path.dirname(os.path.abspath(sf))
-                if base:
-                    return os.path.join(base, "monitor_column_widths.json")
+            app = self.app
+            root_dir = getattr(app, "_app_root_dir", None)
+            if not isinstance(root_dir, str) or not root_dir.strip():
+                root_dir = os.getcwd()
+            path = os.path.abspath(os.path.join(root_dir, "monitor_column_widths.json"))
+            if not getattr(self, "_monitor_json_migrated", False):
+                try:
+                    if not os.path.isfile(path):
+                        cwd_f = os.path.abspath(
+                            os.path.join(os.getcwd(), "monitor_column_widths.json")
+                        )
+                        if cwd_f != path and os.path.isfile(cwd_f):
+                            shutil.copy2(cwd_f, path)
+                except Exception:
+                    pass
+                try:
+                    self._monitor_json_migrated = True
+                except Exception:
+                    pass
+            return path
         except Exception:
-            pass
-        return os.path.join(os.getcwd(), "monitor_column_widths.json")
+            return os.path.abspath(os.path.join(os.getcwd(), "monitor_column_widths.json"))
 
     def _read_monitor_ui_file(self) -> Dict[str, Any]:
         """monitor_column_widths.json 원본(dict). 없거나 오류 시 {}."""
@@ -323,22 +342,62 @@ class MonitorTab:
             if p is None:
                 return None
             h = int(p.winfo_height())
-            if h < 40:
+            # 탭 비활성·레이아웃 미계산 시 winfo_height 가 0에 가깝게 나와 저장이 막히는 경우 보완
+            if h < 8:
+                try:
+                    h = max(h, int(p.winfo_reqheight()))
+                except (tk.TclError, TypeError, ValueError):
+                    pass
+            if h < 8:
+                try:
+                    par = p.master
+                    if par is not None:
+                        h = max(h, int(par.winfo_height()))
+                except (tk.TclError, TypeError, ValueError):
+                    pass
+            if h < 8:
                 return None
             sp = int(p.sashpos(0))
             return max(0.06, min(0.90, float(sp) / float(h)))
         except (tk.TclError, TypeError, ValueError, ZeroDivisionError):
             return None
 
-    def _on_monitor_paned_moved(self, _event: Any = None) -> None:
-        """상·하단 분할 변경 시 저장 예약."""
+    def _request_monitor_sash_sync(self) -> None:
+        """
+        세로 세시(sash) 드래그 직후에는 Tk가 sashpos 를 한 틱 늦게 반영하는 경우가 있어
+        짧게 지연한 뒤 비율을 읽어 저장합니다. (<<PanedWindowMoved>> 누락 완화는 마우스 업 바인딩)
+        """
         try:
             r = getattr(self.app, "root", None)
             if r is None:
                 return
+            jid = getattr(self, "_monitor_sash_sync_job", None)
+            if jid is not None:
+                try:
+                    r.after_cancel(jid)
+                except Exception:
+                    pass
+            self._monitor_sash_sync_job = r.after(20, self._apply_monitor_sash_sync)
+        except Exception:
+            pass
+
+    def _apply_monitor_sash_sync(self, attempt: int = 0) -> None:
+        """지연 후 메모리에 sash 비율을 반영하고 monitor_column_widths.json 저장을 예약합니다."""
+        if attempt == 0:
+            self._monitor_sash_sync_job = None
+        try:
             rel = self._monitor_current_sash_rel()
             if rel is not None:
                 self._monitor_saved_sash_rel = rel
+            r = getattr(self.app, "root", None)
+            if r is None:
+                return
+            # sashpos 가 한두 틱 더 늦게 맞는 경우 재시도(저장 None 방지)
+            if rel is None and attempt < 3:
+                self._monitor_sash_sync_job = r.after(
+                    90, lambda: self._apply_monitor_sash_sync(attempt + 1)
+                )
+                return
             jid = self._monitor_col_width_save_job
             if jid is not None:
                 try:
@@ -346,13 +405,49 @@ class MonitorTab:
                 except Exception:
                     pass
             self._monitor_col_width_save_job = r.after(
-                400, self._flush_monitor_col_widths_to_disk
+                250, self._flush_monitor_col_widths_to_disk
             )
         except Exception:
             pass
 
+    def _release_is_on_monitor_paned_sash(self, event: Any) -> bool:
+        """패인 자식에서 올린 이벤트도 오므로, 세시 위에서만 True."""
+        try:
+            p = self._monitor_paned
+            if p is None:
+                return False
+            ex = int(event.x_root - p.winfo_rootx())
+            ey = int(event.y_root - p.winfo_rooty())
+            rid = p.identify(ex, ey)
+            if rid is None:
+                return False
+            if isinstance(rid, int):
+                return True
+            s = str(rid).lower()
+            return "sash" in s
+        except (tk.TclError, TypeError, ValueError):
+            return False
+        except Exception:
+            return False
+
+    def _on_monitor_paned_mouse_release(self, event: Any) -> None:
+        try:
+            if not self._release_is_on_monitor_paned_sash(event):
+                return
+            self._request_monitor_sash_sync()
+        except Exception:
+            pass
+
+    def _on_monitor_paned_moved(self, _event: Any = None) -> None:
+        """상·하단 분할 변경 시 저장 예약."""
+        self._request_monitor_sash_sync()
+
     def _schedule_restore_monitor_sash(self) -> None:
-        """창 실제 높이가 잡힌 뒤 저장된 비율로 첫 sash 를 복원합니다."""
+        """
+        창 실제 높이가 잡힌 뒤 저장된 비율로 첫 sash 를 복원합니다.
+        Notebook 에서 숨겨진 탭은 winfo_height 가 매우 작게 나오므로,
+        포지션 탭과 같이 탭을 처음 열 때(k_trader_gui._on_tab_changed) 다시 호출하는 것이 안전합니다.
+        """
         try:
             root = getattr(self.app, "root", None)
             if root is None:
@@ -362,21 +457,49 @@ class MonitorTab:
                 try:
                     rel = getattr(self, "_monitor_saved_sash_rel", None)
                     p = self._monitor_paned
-                    if rel is None or p is None:
+                    if p is None:
                         return
                     try:
                         p.update_idletasks()
                     except Exception:
                         pass
                     h = int(p.winfo_height())
-                    if h < 80 and attempt < 12:
-                        root.after(100, lambda: _try(attempt + 1))
+                    # 저장 시와 동일: 미계산 높이 보완
+                    if h < 8:
+                        try:
+                            h = max(h, int(p.winfo_reqheight()))
+                        except (tk.TclError, TypeError, ValueError):
+                            pass
+                    if h < 8:
+                        try:
+                            par = p.master
+                            if par is not None:
+                                h = max(h, int(par.winfo_height()))
+                        except (tk.TclError, TypeError, ValueError):
+                            pass
+                    # 레이아웃 미확정 시 대기 — 작은 h 에서 sashpos 하면 한쪽 패인이 사실상 사라진 것처럼 보임
+                    if h < 160 and attempt < 24:
+                        root.after(100, lambda a=attempt + 1: _try(a))
                         return
-                    pos = int(max(48, min(h - 100, float(rel) * float(h))))
+                    # 저장 없음: 상단이 접히는 환경 대비 기본 비율(약 22%)
+                    if rel is None:
+                        rel = 0.22
+                    min_top = 96
+                    min_bot = 120
+                    if h < 300:
+                        min_top = 72
+                        min_bot = 96
+                    raw = float(rel) * float(h)
+                    pos = int(round(raw))
+                    pos = max(min_top, min(pos, h - min_bot))
+                    if pos >= h - 8:
+                        pos = max(min_top, h // 2)
+                    if pos < min_top:
+                        pos = min_top
                     p.sashpos(0, pos)
                 except Exception:
-                    if attempt < 12:
-                        root.after(100, lambda: _try(attempt + 1))
+                    if attempt < 24:
+                        root.after(100, lambda a=attempt + 1: _try(a))
 
             root.after(120, lambda: _try(0))
         except Exception:
@@ -387,23 +510,36 @@ class MonitorTab:
         self._monitor_col_width_save_job = None
         try:
             cols = self._monitor_tree_columns
-            if not cols or not hasattr(self, "tree_monitor"):
-                return
-            src = self._monitor_width_source_tree
-            if src is None:
-                src = self.tree_monitor
+            raw_existing = self._read_monitor_ui_file()
             data: Dict[str, int] = {}
-            for c in cols:
-                try:
-                    mw = _MONITOR_COL_MIN_WIDTH.get(c, 32)
-                    data[c] = max(mw, int(src.column(c, "width")))
-                except Exception:
-                    data[c] = int(_DEFAULT_MONITOR_COL_WIDTHS.get(c, 64))
+            tr = getattr(self, "tree_monitor", None)
+            if cols and tr is not None:
+                src = self._monitor_width_source_tree
+                if src is None:
+                    src = tr
+                for c in cols:
+                    try:
+                        mw = _MONITOR_COL_MIN_WIDTH.get(c, 32)
+                        data[c] = max(mw, int(src.column(c, "width")))
+                    except Exception:
+                        data[c] = int(_DEFAULT_MONITOR_COL_WIDTHS.get(c, 64))
+            else:
+                # 트리 미준비 시에도 세로 분할(sash)만 갱신할 수 있게 기존 열 폭 유지
+                prev_c = raw_existing.get("columns") if isinstance(raw_existing, dict) else None
+                if isinstance(prev_c, dict):
+                    for k, v in prev_c.items():
+                        try:
+                            data[str(k)] = int(v)
+                        except (TypeError, ValueError):
+                            pass
+                if not data and cols:
+                    for c in cols:
+                        data[c] = int(_DEFAULT_MONITOR_COL_WIDTHS.get(c, 64))
             rel = self._monitor_current_sash_rel()
             if rel is None:
                 rel = getattr(self, "_monitor_saved_sash_rel", None)
             if rel is None:
-                rel = self._parse_monitor_sash_rel(self._read_monitor_ui_file())
+                rel = self._parse_monitor_sash_rel(raw_existing)
             path = self._monitor_col_widths_json_path()
             dname = os.path.dirname(path)
             if dname:
@@ -411,11 +547,95 @@ class MonitorTab:
             payload: Dict[str, Any] = {"columns": data}
             if rel is not None:
                 payload["sash0_rel"] = float(rel)
-            with open(path, "w", encoding="utf-8") as f:
+            elif isinstance(raw_existing, dict) and raw_existing.get("sash0_rel") is not None:
+                # 측정·메모리 모두 실패해도 기존 파일의 세로 분할은 유지(실수로 키 삭제 방지)
+                try:
+                    payload["sash0_rel"] = float(raw_existing["sash0_rel"])
+                except (TypeError, ValueError):
+                    pass
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
+            try:
+                os.replace(tmp_path, path)
+            except OSError:
+                try:
+                    shutil.copyfile(tmp_path, path)
+                finally:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
         except Exception as e:
             try:
-                print(f"[MonitorTab] UI 상태 저장 실패: {e}")
+                log_fn = getattr(self.app, "log", None)
+                if callable(log_fn):
+                    log_fn(f"[MonitorTab] UI 상태 저장 실패: {e}")
+                else:
+                    print(f"[MonitorTab] UI 상태 저장 실패: {e}")
+            except Exception:
+                pass
+
+    def flush_monitor_ui_before_quit(self) -> None:
+        """
+        종료 직전 동기 저장. root.destroy() 가 예약된 after(저장) 보다 먼저 실행되면
+        디스크에 한 번도 안 쓰이는 문제가 생길 수 있어, 대기 중 작업을 취소하고 즉시 flush 한다.
+        """
+        try:
+            r = getattr(self.app, "root", None)
+            if r is not None:
+                for jid in (
+                    getattr(self, "_monitor_sash_sync_job", None),
+                    getattr(self, "_monitor_col_width_save_job", None),
+                ):
+                    if jid is not None:
+                        try:
+                            r.after_cancel(jid)
+                        except (tk.TclError, ValueError, AttributeError):
+                            pass
+                self._monitor_sash_sync_job = None
+                self._monitor_col_width_save_job = None
+            try:
+                p = self._monitor_paned
+                if p is not None:
+                    p.update_idletasks()
+            except (tk.TclError, AttributeError):
+                pass
+            if r is not None:
+                try:
+                    r.update()
+                except (tk.TclError, RuntimeError):
+                    pass
+                for _ in range(20):
+                    try:
+                        r.update_idletasks()
+                    except (tk.TclError, RuntimeError):
+                        break
+                    rel = self._monitor_current_sash_rel()
+                    if rel is not None:
+                        self._monitor_saved_sash_rel = rel
+                        break
+            self._flush_monitor_col_widths_to_disk()
+            try:
+                pth = self._monitor_col_widths_json_path()
+                sr: Any = "?"
+                try:
+                    if os.path.isfile(pth):
+                        with open(pth, "r", encoding="utf-8") as f:
+                            jd = json.load(f)
+                        sr = jd.get("sash0_rel", "?")
+                except Exception:
+                    pass
+                log_fn = getattr(self.app, "log", None)
+                if callable(log_fn):
+                    log_fn(f"[UI] 종료 시 감시 레이아웃 저장: {pth} sash0_rel={sr}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                log_fn = getattr(self.app, "log", None)
+                if callable(log_fn):
+                    log_fn(f"[MonitorTab] 종료 시 UI 저장 실패: {e}")
             except Exception:
                 pass
 
@@ -493,14 +713,25 @@ class MonitorTab:
             paned.bind("<<PanedWindowMoved>>", self._on_monitor_paned_moved, add="+")
         except Exception:
             pass
-        
+        # Windows 등에서 <<PanedWindowMoved>> 누락·sashpos 지연 반영 대비(포지션 탭과 동일 패턴)
+        try:
+            paned.bind("<ButtonRelease-1>", self._on_monitor_paned_mouse_release, add="+")
+        except Exception:
+            pass
+
         # [상단] 보유 종목 창 (세로폭 축소)
+        # weight=0 은 일부 Windows/ttk에서 상단 패널 높이가 0에 가깝게 붙어 트리가 안 보이는 사례가 있어
+        # 양쪽 모두 weight>0 + 상단 minsize 로 최소 높이를 보장한다.
         active_frame = ttk.LabelFrame(paned, text=" 🔥 보유 및 대응 종목 (Active Positions) ", padding="5")
-        paned.add(active_frame, weight=0) # 고정 비중(최소화)
-        
+        paned.add(active_frame, weight=1)
+
         # [하단] 일반 감시 창 (확대)
         watchlist_frame = ttk.LabelFrame(paned, text=" 👁️ 실시간 감시 목록 (Watchlist) ", padding="5")
-        paned.add(watchlist_frame, weight=1)
+        paned.add(watchlist_frame, weight=3)
+        try:
+            paned.paneconfigure(active_frame, minsize=96)
+        except (tk.TclError, AttributeError):
+            pass
         
         columns = (
             "Score",

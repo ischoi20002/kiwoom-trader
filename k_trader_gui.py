@@ -203,6 +203,12 @@ class KiwoomApp:
         self.gui_utils = GuiUtils(root=self.root)
         self.auth_manager = AuthManager(logger_callback=self.log)
         self.config_handler = ConfigHandler(logger_callback=self.log)
+        # UI 상태 JSON 경로 고정: cwd 가 달라져도 k_trader_gui.py 와 같은 폴더를 쓴다
+        # (예: 바로가기 실행 시 cwd 가 달라 monitor_column_widths.json 이 다른 위치에 생기던 문제 완화)
+        try:
+            self._app_root_dir = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            self._app_root_dir = os.getcwd()
         self.data_manager = DataManager()
         # 실시간 감시 일별 JSONL (신호·주문·체결 추적)
         self.session_logger = RealtimeSessionLogger()
@@ -468,6 +474,12 @@ class KiwoomApp:
         if "포지션" in tab_text and hasattr(self, "virtual_tab"):
             try:
                 self.virtual_tab._schedule_restore_virtual_sash()
+            except Exception:
+                pass
+        # 실시간 감시 탭도 동일: 숨겨진 상태에서 _setup_ui 직후 복원하면 높이가 안 잡혀 하단이 가려진 것처럼 보일 수 있음
+        if "실시간 감시" in tab_text and hasattr(self, "monitor_tab"):
+            try:
+                self.monitor_tab._schedule_restore_monitor_sash()
             except Exception:
                 pass
 
@@ -1278,6 +1290,15 @@ class KiwoomApp:
 
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")
+        try:
+            mt = getattr(self, "monitor_tab", None)
+            if mt is not None and hasattr(mt, "flush_monitor_ui_before_quit"):
+                mt.flush_monitor_ui_before_quit()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [UI] 감시 탭 레이아웃 저장 실패: {e}")
+            except Exception:
+                pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()
         self.root.destroy()
 
