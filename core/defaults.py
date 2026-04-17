@@ -48,14 +48,18 @@ DEFAULT_SETTINGS = {
     "realtime_bars_max_keep": 300,
     # DB·리샘플만으로 봉이 부족할 때 키움 분봉 API로 15분봉 메모리 보충
     "use_api_warmup_backfill": True,
+    # 실시간 감시 워밍업·RT15m DB 보충 시 ka10080 봉 주기(문자열). "15"=15분봉만 수신(1분→15분 리샘플 없음)
+    "realtime_warmup_ka10080_tic_scope": "15",
     # 워밍업 분봉 API(ka10080) 연속조회 최대 페이지 수(종목당 — 신호·당일갭만 채울 때)
     "realtime_warmup_ka10080_max_pages": 40,
     # 캘린더 과거 확보 모드일 때 연속조회 상한(종목당). 1년 분량은 API·페이지당 건수에 따라 더 필요할 수 있음
     "realtime_warmup_ka10080_max_pages_deep": 500,
     # True: 가장 오래된 15분봉이 (지금−realtime_15m_calendar_retention_days) 이전이 될 때까지 ka10080 연속조회
     "realtime_warmup_fetch_calendar_history": True,
-    # True: 메인 워밍업은 최소 봉·당일 갭만 빠르게 — 캘린더·깊이(1년)는 백그라운드 큐에서 순차 보강. False면 예전처럼 메인 스레드에서 전량 조회
+    # 레거시 키(호환). 캘린더 깊이(1년)는 항상 백그라운드 큐에서만 처리 — 메인 워밍업은 감시 시작에 필요한 최소·당일만
     "realtime_warmup_quick_then_deep_background": True,
+    # 워밍업·깊이보강 후 지표 계산 시 사용할 최대 15분봉 행 수(꼬리만). 수천 봉 전체 RSI/MACD 반복을 막아 CPU·GIL 부하 완화
+    "realtime_warmup_indicator_calc_max_rows": 2000,
     # 연속조회 페이지 사이 대기(초) — 429 완화
     "realtime_warmup_ka10080_page_delay_min": 0.2,
     "realtime_warmup_ka10080_page_delay_max": 0.55,

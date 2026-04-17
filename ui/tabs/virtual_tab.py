@@ -12,16 +12,18 @@ from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_
 
 # 포지션 탭 트리 컬럼 기본 폭(px). 사용자 조절·세로 분할은 virtual_portfolio_ui.json 에 저장합니다.
 _DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS: Dict[str, int] = {
+    "Entry": 140,
     "Code": 72,
     "Name": 120,
     "Qty": 56,
-    "AvgP": 88,
-    "BuyIn": 96,
-    "CurP": 88,
-    "Eval": 100,
     "PnL": 100,
     "PnLPct": 72,
-    "Entry": 140,
+    "Eval": 100,
+    "BuyIn": 96,
+    "CurP": 88,
+    "AvgP": 88,
+    "DayChg": 88,
+    "WtPct": 72,
 }
 _DEFAULT_VIRTUAL_ORDER_COL_WIDTHS: Dict[str, int] = {
     "Time": 138,
@@ -318,6 +320,11 @@ class VirtualTab:
             pass
 
     def _schedule_restore_virtual_sash(self) -> None:
+        """
+        세로 Paned: 저장된 비율로 sash 복원.
+        높이가 아직 1~2px일 때 pos 를 크게 잡으면 상단(보유) 영역이 사실상 사라진 것처럼 보일 수 있어
+        최소 높이·클램프를 강화한다.
+        """
         try:
             root = getattr(self.app, "root", None)
             if root is None:
@@ -334,13 +341,25 @@ class VirtualTab:
                     except Exception:
                         pass
                     h = int(p.winfo_height())
-                    if h < 80 and attempt < 12:
+                    # 레이아웃 미확정 시 대기 (너무 작은 h 에서 sashpos 하면 상단 패인이 0에 가깝게 붕괴)
+                    if h < 160 and attempt < 24:
                         root.after(100, lambda: _try(attempt + 1))
                         return
-                    pos = int(max(80, min(h - 120, float(rel) * float(h))))
+                    min_top = 100
+                    min_bot = 100
+                    if h < 300:
+                        min_top = 72
+                        min_bot = 72
+                    raw = float(rel) * float(h)
+                    pos = int(round(raw))
+                    pos = max(min_top, min(pos, h - min_bot))
+                    if pos >= h - 8:
+                        pos = max(min_top, h // 2)
+                    if pos < min_top:
+                        pos = min_top
                     p.sashpos(0, pos)
                 except Exception:
-                    if attempt < 12:
+                    if attempt < 24:
                         root.after(100, lambda: _try(attempt + 1))
 
             root.after(120, lambda: _try(0))
@@ -369,16 +388,18 @@ class VirtualTab:
         """실시간 보유: 매매종료·주문과 동일한 Treeview 패턴 (스크롤·줄무늬·태그)."""
         try:
             cols = (
+                "Entry",
                 "Code",
                 "Name",
                 "Qty",
-                "AvgP",
-                "BuyIn",
-                "CurP",
-                "Eval",
                 "PnL",
                 "PnLPct",
-                "Entry",
+                "Eval",
+                "BuyIn",
+                "CurP",
+                "AvgP",
+                "DayChg",
+                "WtPct",
             )
             raw_ui = self._read_virtual_ui_file()
             try:
@@ -390,23 +411,41 @@ class VirtualTab:
                 _DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS,
                 raw_ui.get("columns_active"),
             )
+            # Paned 상단 칸에서 LabelFrame 자식만 pack 할 때 세로 확장이 0에 가까워지는 경우 방지
+            hold_wrap = ttk.Frame(parent)
+            hold_wrap.pack(fill=tk.BOTH, expand=True)
             tree = ttk.Treeview(
-                parent, columns=cols, show="headings", selectmode="browse"
+                hold_wrap, columns=cols, show="headings", selectmode="browse"
             )
             heads = [
+                "진입일시",
                 "코드",
                 "종목명",
                 "수량",
-                "평단가",
-                "매입가",
-                "현재가",
-                "평가금",
                 "손익금",
-                "수익률",
-                "진입일시",
+                "수익율",
+                "평가금액",
+                "매입금액",
+                "현재가",
+                "평균단가",
+                "전일대비",
+                "보유비중",
             ]
             # 진입일시(Entry)는 중앙 정렬
-            anchors = (tk.W, tk.W, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.E, tk.CENTER)
+            anchors = (
+                tk.CENTER,
+                tk.W,
+                tk.W,
+                tk.E,
+                tk.E,
+                tk.E,
+                tk.E,
+                tk.E,
+                tk.E,
+                tk.E,
+                tk.E,
+                tk.E,
+            )
             for col, text, an in zip(cols, heads, anchors):
                 tree.heading(col, text=text)
                 try:
@@ -422,7 +461,7 @@ class VirtualTab:
                 except Exception:
                     tree.column(col, width=72, anchor=an, minwidth=40, stretch=False)
 
-            sb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
+            sb = ttk.Scrollbar(hold_wrap, orient=tk.VERTICAL, command=tree.yview)
             tree.configure(yscrollcommand=sb.set)
             tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             sb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1249,13 +1288,36 @@ class VirtualTab:
                 fee_sell = ex * float(qty) * sr
         return float(fee_buy + fee_sell)
 
+    @staticmethod
+    def _fmt_active_vs_prev(info: Dict[str, Any]) -> str:
+        """전일 종가 대비 등락폭(원). monitor_info['diff']와 감시 탭과 동일 규칙."""
+        try:
+            raw = info.get("diff")
+            if raw is None:
+                return "—"
+            s = str(raw).strip().replace(",", "")
+            if s in ("", "-", "—"):
+                return "—"
+            iv = int(round(float(s)))
+            if iv == 0:
+                return "0"
+            return f"{iv:+,}"
+        except Exception:
+            return "—"
+
     def _active_row_vals_and_tags(
-        self, row_idx: int, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
+        self,
+        row_idx: int,
+        nk: str,
+        pos: Dict[str, Any],
+        info: Dict[str, Any],
+        total_eval_for_weight: Optional[float] = None,
     ) -> Tuple[tuple, Tuple[str, ...], float, float, float]:
         """
         실시간 보유 한 행의 values·tags·수익률% (트리/요약 공통).
         반환 (vals, tags, profit_pct, unrealized_raw, eval_amt_raw):
         상단 요약 합계는 **트리와 동일**한 unrealized·eval을 쓰려면 이 값을 그대로 더하면 됩니다.
+        `total_eval_for_weight`: 보유비중(%) 분모. None이면 해당 열은 '—'.
         """
         try:
             live_p = float(self._monitor_live_price(nk, pos))
@@ -1326,17 +1388,31 @@ class VirtualTab:
             else ("price_down" if profit_pct < 0 else "")
         )
         nm = pos.get("name", nk)
+        day_chg_disp = self._fmt_active_vs_prev(info)
+        try:
+            te = float(total_eval_for_weight) if total_eval_for_weight is not None else 0.0
+        except (TypeError, ValueError):
+            te = 0.0
+        if total_eval_for_weight is None or te <= 1e-9:
+            wt_disp = "—"
+        else:
+            try:
+                wt_disp = f"{(float(eval_amt) / te) * 100.0:.2f}%"
+            except Exception:
+                wt_disp = "—"
         vals = (
+            entry_disp,
             nk,
             nm,
             f"{qty:,}",
-            f"{ap:,.0f}",
-            f"{buy_in_amt:,}",
-            f"{curr_p:,.0f}",
-            f"{int(eval_amt):,}",
             f"{int(unrealized):+,}",
             p_str,
-            entry_disp,
+            f"{int(eval_amt):,}",
+            f"{buy_in_amt:,}",
+            f"{curr_p:,.0f}",
+            f"{ap:,.0f}",
+            day_chg_disp,
+            wt_disp,
         )
         # 전체 렌더와 동일하게 항상 (줄무늬, 방향) 2튜플 + 요약 합산용 원시 금액
         return (
@@ -1388,14 +1464,14 @@ class VirtualTab:
         """보유 트리: 동일 iid(종목코드)면 values/tags만 갱신, 없으면 삽입."""
         try:
             tr = self.tree_active
-            if tr is None or len(vals) < 10:
+            if tr is None or len(vals) < 12:
                 return
             tag_list = tuple(t for t in tags if t)
-            v10 = tuple(str(vals[i]) for i in range(10))
+            v12 = tuple(str(vals[i]) for i in range(12))
             if tr.exists(nk):
-                tr.item(nk, values=v10, tags=tag_list)
+                tr.item(nk, values=v12, tags=tag_list)
             else:
-                tr.insert("", tk.END, iid=nk, values=v10, tags=tag_list)
+                tr.insert("", tk.END, iid=nk, values=v12, tags=tag_list)
         except Exception as e:
             try:
                 print(f"[UI Error] _upsert_active_tree_row: {e}")
@@ -1465,10 +1541,20 @@ class VirtualTab:
                 skip_orphan_delete = True
 
         mi = getattr(self.app, "monitor_info", None) or {}
+        total_eval_weight = 0.0
+        try:
+            for idx, (nk, pos) in enumerate(active_list):
+                info = mi.get(nk, {}) or {}
+                _, _, _, _, ev_part = self._active_row_vals_and_tags(
+                    idx, nk, pos, info, None
+                )
+                total_eval_weight += float(ev_part)
+        except Exception:
+            total_eval_weight = 0.0
         for idx, (nk, pos) in enumerate(active_list):
             info = mi.get(nk, {}) or {}
             vals, row_tags, profit_pct, ur_row, ev_row = self._active_row_vals_and_tags(
-                idx, nk, pos, info
+                idx, nk, pos, info, total_eval_weight
             )
             total_eval += ev_row
             total_invested += float(pos.get("invested", 0) or 0)
@@ -1544,10 +1630,21 @@ class VirtualTab:
             return
         try:
             mi = getattr(self.app, "monitor_info", None) or {}
-            for idx, (nk, pos) in enumerate(self._sorted_active_holdings()):
+            holdings = self._sorted_active_holdings()
+            total_eval_weight = 0.0
+            try:
+                for idx, (nk, pos) in enumerate(holdings):
+                    info = mi.get(nk, {}) or {}
+                    _, _, _, _, ev_part = self._active_row_vals_and_tags(
+                        idx, nk, pos, info, None
+                    )
+                    total_eval_weight += float(ev_part)
+            except Exception:
+                total_eval_weight = 0.0
+            for idx, (nk, pos) in enumerate(holdings):
                 info = mi.get(nk, {}) or {}
                 vals, row_tags, profit_pct, _, _ = self._active_row_vals_and_tags(
-                    idx, nk, pos, info
+                    idx, nk, pos, info, total_eval_weight
                 )
                 self._upsert_active_tree_row(nk, vals, row_tags)
             self._reorder_active_tree_rows()
@@ -1576,13 +1673,24 @@ class VirtualTab:
                         pass
 
             mi = getattr(self.app, "monitor_info", None) or {}
+            holdings = self._sorted_active_holdings()
+            total_eval_weight = 0.0
+            try:
+                for idx, (nk, pos) in enumerate(holdings):
+                    info = mi.get(nk, {}) or {}
+                    _, _, _, _, ev_part = self._active_row_vals_and_tags(
+                        idx, nk, pos, info, None
+                    )
+                    total_eval_weight += float(ev_part)
+            except Exception:
+                total_eval_weight = 0.0
             total_eval = 0.0
             total_unrealized_pnl = 0.0
             total_invested_open = 0.0
-            for idx, (nk, pos) in enumerate(self._sorted_active_holdings()):
+            for idx, (nk, pos) in enumerate(holdings):
                 info = mi.get(nk, {}) or {}
                 _v, _t, _p, ur_row, ev_row = self._active_row_vals_and_tags(
-                    idx, nk, pos, info
+                    idx, nk, pos, info, total_eval_weight
                 )
                 total_eval += ev_row
                 total_unrealized_pnl += ur_row

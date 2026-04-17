@@ -7,8 +7,21 @@
 
 ---
 
+## 0.3.43 (2026-04-17)
+
+- **실시간 감시 UI**: 워밍업 `prep_ok` 시 상단 상태를 「데이터 준비 중」으로 덮어 **감시 중** 문구가 사라지던 현상 수정 (`k_trader_gui.py`).
+- **웹소켓 구독 목록**: `_active_stream_codes`만 쓰면 워밍업이 일부만 반영될 때 **한 종목만 REG** 되던 문제 수정 — 감시·관심·보유 합집합에 워밍업 코드 **병합** (`k_trader_gui.py` `stream_subscription_codes`). 구독 목록이 비었을 때 **감시를 끄지 않고** 재시도, `selected_targets.csv` 폴백.
+- **실시간 패킷**: 호가(0D)만 오고 체결가가 없을 때 `price==0`으로 틱이 전부 무시되던 경로 완화 (`ui/tabs/monitor_tab.py`).
+- **워밍업**: 지표 계산은 꼬리 봉만 (`realtime_warmup_indicator_calc_max_rows`, `core/warmup_service.py`). 메인 워밍업은 **항상** 최소·당일만 — 캘린더 깊이(1년)는 **백그라운드 큐만** (`realtime_warmup_quick_then_deep_background` 분기 제거).
+- **포지션 탭**: 세로 Paned **sash 복원** 안전화(높이 미확정·클램프), 보유 트리 **래퍼 프레임**으로 확장 고정 (`ui/tabs/virtual_tab.py`).
+- **설정**: `realtime_warmup_indicator_calc_max_rows` (`core/defaults.py`, `settings.json`).
+- **동일 환경**: 회사 PC는 `SETUP_COMPANY_PC.md`대로 클론 후 `pip install -r requirements.txt` 또는 동일 재현 시 `requirements-lock.txt`(저장소에 동봉).
+
 ## 0.3.42 (2026-04-17)
 
+- **실시간 워밍업·RT15m DB 보충(ka10080)**: 기본 **`tic_scope` 15분봉**만 연속조회하고, 1분→15분 리샘플을 하지 않음. 설정 `realtime_warmup_ka10080_tic_scope`(`core/defaults.py`, `settings.json`). `data_manager_v2.fetch_kiwoom_minute_chart_page`에 `tic_scope` 인자 추가 (`core/warmup_service.py`).
+- **일일결산 15분 차트(REST)**: `fetch_15m_bars_for_trading_day_rest_only`도 **ka10080 15분봉**만 받고 1분 리샘플 제거 (`data_manager_v2.py`).
+- **감시 탭 신호상태**: 백그라운드 깊이 보강 완료 시 `prep_ok` 를 다시 보내 **15분봉·검증 완료**로 덮어쓰던 현상 제거 (`core/warmup_service.py`).
 - **배포·재현**: 회사 PC 등 동일 환경용 **`requirements-lock.txt`**(Python 3.12 `pip freeze`), **`SETUP_COMPANY_PC.md`**, **`requirements.txt`** 보강(pykrx·FDR·optuna 등).
 - **`.gitignore`**: 대용량 DB 명시(`realtime_15m*.db`, `KTrader.db`, `trading_state_*.db` 등). `trading_data.db`는 기존과 같이 제외.
 - **KODEX200 유니버스**(`core/kodex200_universe.py`): KRX PDF 직접 호출·HTTP 재시도·`kodex200_constituents_url` 원격 CSV 등(이전 세션 반영분 포함).

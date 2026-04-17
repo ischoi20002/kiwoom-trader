@@ -21,7 +21,7 @@ import itertools
 import importlib.util
 import webbrowser
 import subprocess
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from backtest_engine import TradingStrategy
 from data_manager_v2 import DataManagerV2 as DataManager
@@ -965,11 +965,11 @@ class KiwoomApp:
             except Exception:
                 pass
 
-    def stream_subscription_codes(self):
-        """웹소켓 등록 후보: 감시 종목 ∪ 관심목록(중복 제거). 워밍업 직후에는 _active_stream_codes 우선."""
-        ac = getattr(self, "_active_stream_codes", None)
-        if isinstance(ac, list) and ac:
-            return list(ac)
+    def stream_subscription_codes(self) -> List[str]:
+        """
+        웹소켓 REG용 구독 종목: 감시 ∪ 관심 ∪ 보유를 합친 뒤, 워밍업에서 채운 _active_stream_codes 를 **추가** 병합한다.
+        (_active_stream_codes 만 반환하면 워밍업이 일부만 반영될 때 나머지 종목은 REG 에 안 올라가 틱이 영구히 안 옴)
+        """
         try:
             mc = list(getattr(self.trading_controller, "monitor_codes", []) or [])
         except Exception:
@@ -988,12 +988,34 @@ class KiwoomApp:
                 base.append(str(c).zfill(6))
         except Exception:
             pass
-        seen = set()
-        out = []
+        seen: Set[str] = set()
+        out: List[str] = []
         for c in base:
             if c not in seen:
                 seen.add(c)
                 out.append(c)
+        try:
+            ac = getattr(self, "_active_stream_codes", None)
+            if isinstance(ac, list) and ac:
+                for c in ac:
+                    cn = str(c).zfill(6)
+                    if cn not in seen:
+                        seen.add(cn)
+                        out.append(cn)
+        except Exception:
+            pass
+        if not out:
+            try:
+                p = os.path.join(os.getcwd(), "selected_targets.csv")
+                if os.path.isfile(p):
+                    df = pd.read_csv(p, dtype={"Code": str})
+                    for raw in df.get("Code", pd.Series(dtype=str)).tolist():
+                        cn = str(raw).zfill(6)
+                        if cn not in seen:
+                            seen.add(cn)
+                            out.append(cn)
+            except Exception:
+                pass
         return out
 
     def _maybe_start_account_sync_timer(self) -> None:
@@ -1214,17 +1236,28 @@ class KiwoomApp:
                     self.monitor_tab.update_warmup_stock_prep(
                         event, cur, total, name, code, reason
                     )
+                # prep_ok 는 종목 행(update_warmup_stock_prep)만 갱신 — 상단은 건드리지 않음.
+                # (그렇지 않으면 STARTED 로 이미 "감시 중"이 된 뒤에도 매 종목마다
+                #  "데이터 준비 중"으로 덮여 감시가 안 된 것처럼 보임.)
                 if hasattr(self, "lbl_monitor_status"):
-                    if event == "prep_progress" and (reason or "").strip():
+                    if event == "prep_ok":
+                        pass
+                    elif event == "prep_progress" and (reason or "").strip():
                         line = f"상태: ({cur}/{total}) {name} — {reason.strip()}"
+                        self.lbl_monitor_status.config(
+                            text=line,
+                            foreground=self.colors["primary"],
+                        )
                     else:
                         line = f"상태: 데이터 준비 중 ({cur}/{total}) {name}"
-                    self.lbl_monitor_status.config(
-                        text=line,
-                        foreground=self.colors["primary"],
-                    )
+                        self.lbl_monitor_status.config(
+                            text=line,
+                            foreground=self.colors["primary"],
+                        )
                 if self.status_label:
-                    if event == "prep_progress" and (reason or "").strip():
+                    if event == "prep_ok":
+                        pass
+                    elif event == "prep_progress" and (reason or "").strip():
                         self.status_label.config(
                             text=f"상태: ({cur}/{total}) {name} — {reason.strip()}"
                         )

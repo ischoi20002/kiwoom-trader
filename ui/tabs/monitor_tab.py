@@ -985,9 +985,15 @@ class MonitorTab:
                 except Exception:
                     stream_codes = list(getattr(self.app.trading_controller, "monitor_codes", []) or [])
                 if not stream_codes:
-                    self.app.root.after(0, self.app.log, "⚠️ [시스템] 웹소켓 등록할 종목이 없습니다.")
-                    self.app.is_monitoring = False
-                    return
+                    # 일시적으로 목록이 비면 감시를 끄면 UI·틱이 영구 정지한 것처럼 보임 → 재시도만 함
+                    self.app.root.after(
+                        0,
+                        self.app.log,
+                        "⚠️ [시스템] 구독 종목 목록이 비어 있습니다. 5초 후 재접속합니다. "
+                        "(선정 CSV·감시 종목을 확인하세요)",
+                    )
+                    await asyncio.sleep(5)
+                    continue
 
                 if getattr(config, 'USE_MOCK', False):
                     ws_url = 'wss://mockapi.kiwoom.com:10000/api/dostk/websocket'
@@ -1166,8 +1172,11 @@ class MonitorTab:
                     except: return default
 
                 if p_type == '0B':
-                    now_price = int(get_val(10)) 
-                    if now_price == 0: return
+                    now_price = int(get_val(10))
+                    # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
+                    # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
+                    if now_price == 0:
+                        continue
                     volume = int(get_val(13))
                     trde_val = int(get_val(26) // 1000)
                     ratio_val = vals.get('12', '0')
@@ -1185,8 +1194,21 @@ class MonitorTab:
                     total_bid = int(get_val(125))
                     info['total_ask'] = total_ask
                     info['total_bid'] = total_bid
-                    self.app._on_realtime_data_received(code, info.get('price', 0), info.get('volume', 0), info.get('trde_val', 0), 
-                                                        total_ask=total_ask, total_bid=total_bid)
+                    # 체결(0B) 전에 호가만 오면 price 가 0 → 틱 콜백이 전부 차단되는 것처럼 보일 수 있음
+                    try:
+                        lp = int(info.get("price") or 0)
+                    except (TypeError, ValueError):
+                        lp = 0
+                    if lp <= 0:
+                        continue
+                    self.app._on_realtime_data_received(
+                        code,
+                        lp,
+                        info.get("volume", 0),
+                        info.get("trde_val", 0),
+                        total_ask=total_ask,
+                        total_bid=total_bid,
+                    )
                 mkt = item_data.get('market', item_data.get('mkt', ''))
                 if mkt == 'NXT' or '_nx' in full_code.lower():
                     info['is_nxt'] = True

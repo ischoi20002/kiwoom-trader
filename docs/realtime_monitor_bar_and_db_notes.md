@@ -8,7 +8,8 @@
 
 - **전략·지표·신호**에 쓰는 시계열은 **15분봉**이다. (`bars_data`, `SignalEngine`, `min_15m_bars_for_signal` 등)
 - **실시간**에서는 `StreamProcessor`가 틱을 **곧바로 현재 15분 슬롯 봉**에 반영한다. **1분봉을 만든 뒤 15분으로 합치는 구조가 아니다.**
-- **1분봉 DB/API**는 주로 **워밍업**에서 `bars_15m`이 비었을 때 **1m→15m 리샘플**로 채우는 **폴백**에 가깝다. 백테스트 하베스팅용 1분과 역할이 다르다.
+- **실시간 워밍업의 키움 보충(ka10080)** 은 기본 **`tic_scope: 15`(15분봉)** 만 받고, 메모리·`realtime_15m_*.db` 축적도 **15분 OHLCV**이다(1분→15분 리샘플 없음). 설정 `realtime_warmup_ka10080_tic_scope`로 바꿀 수 있다.
+- **하베스팅 DB(`db_then_api`)** 경로에서 `bars_15m`이 비었을 때 **bars_1m→15m 리샘플** 폴백은 남아 있으며, 백테스트용 1분 데이터와 역할이 다르다.
 
 ---
 
@@ -74,7 +75,7 @@
 - **파일**: 모의 `realtime_15m_mock.db`, 실전 `realtime_15m_live.db` (프로젝트 루트). 경로: `utils/server_mode_paths.realtime_monitor_15m_db_path()`
 - **모듈**: `core/realtime_monitor_bars_store.py` — 테이블 `bars_15m_rt`, `symbol_meta_rt`(last_seen)
 - **적재**: `core/stream_processor.py` — 15분 슬롯이 바뀔 때 직전 봉을 `upsert_completed_bar`로 저장
-- **워밍업**: `core/warmup_service.py` — `realtime_warmup_ohlcv_source == "realtime_15m_db_then_api"` 이면 위 DB 우선 조회 후 `_maybe_api_backfill_15m`. 검증 통과 시 병합 15분 OHLCV를 `bulk_upsert_ohlcv_index_frame`으로 디스크에 반영(다음 실행 캐시). `realtime_warmup_persist_to_rt15m_db` 로 끌 수 있음.
+- **워밍업**: `core/warmup_service.py` — `realtime_warmup_ohlcv_source == "realtime_15m_db_then_api"` 이면 위 DB 우선 조회 후 `_maybe_api_backfill_15m`(ka10080는 기본 **15분봉** 연속조회). 검증 통과 시 병합 15분 OHLCV를 `bulk_upsert_ohlcv_index_frame`으로 디스크에 반영(다음 실행 캐시). `realtime_warmup_persist_to_rt15m_db` 로 끌 수 있음.
 - **롤링**: `realtime_15m_calendar_retention_days`(기본 365) — 캘린더 기준 이전 봉은 종목별 삭제. 조회 시에도 동일 cutoff로 필터.
 - **워밍업 깊이**: `realtime_warmup_fetch_calendar_history` — True이면 ka10080 을 위 일수만큼 과거까지 채운 뒤 조기 종료(페이지 상한 `realtime_warmup_ka10080_max_pages_deep`). False이면 예전처럼 신호용 최소봉·당일 갭만 보충.
 - **기본 설정**: `core/defaults.py` 의 `realtime_warmup_ohlcv_source` 기본값을 `realtime_15m_db_then_api` 로 두어 실시간 DB를 쓴다. 하베스팅 DB만 쓰려면 `db_then_api`, API만이면 `api_only`.

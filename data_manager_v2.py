@@ -1381,16 +1381,25 @@ class DataManagerV2:
         return None
 
     def fetch_kiwoom_minute_chart_page(
-        self, code: str, token: str, next_key: str = ""
+        self,
+        code: str,
+        token: str,
+        next_key: str = "",
+        *,
+        tic_scope: str = "1",
     ) -> Tuple[Optional[List[Any]], str]:
         """
         키움 ka10080 주식분봉 1페이지 조회.
+        tic_scope: 봉 주기(문자열). 예) "1"=1분, "15"=15분 — 키움 스펙에 따름.
         next_key 가 비어 있으면 최초 조회, 있으면 연속조회(cont-yn=Y).
         반환: (분봉 레코드 리스트 또는 오류 시 None, 다음 페이지용 next_key)
         """
         base = config.MOCK_URL if getattr(config, "USE_MOCK", False) else config.URL
         url = f"{base}/api/dostk/chart"
-        body: Dict[str, Any] = {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1"}
+        ts = str(tic_scope).strip() if tic_scope is not None else "1"
+        if not ts:
+            ts = "1"
+        body: Dict[str, Any] = {"stk_cd": code, "tic_scope": ts, "upd_stkpc_tp": "1"}
         nk_in = (next_key or "").strip()
         max_retries = 3
         for attempt in range(max_retries):
@@ -1447,7 +1456,7 @@ class DataManagerV2:
     ) -> Any:
         """
         일일결산 리포트 전용: trading_data.db 를 읽거나 쓰지 않고,
-        키움 ka10080(1분) 연속조회만으로 해당 일자(00:00~23:59) 1분봉을 모은 뒤 15분봉으로 리샘플합니다.
+        키움 ka10080 을 **15분봉(tic_scope=15)** 연속조회만으로 해당 일자(00:00~23:59) 구간을 채웁니다.
         반환 형식은 get_bars(..., interval='15m') 와 유사(time, Open, High, Low, Close, Volume).
         """
         import pandas as pd
@@ -1473,7 +1482,7 @@ class DataManagerV2:
         except Exception:
             token = None
         if not token:
-            _log(f"[일일결산] {n_code} 토큰 없음 — 분봉 REST 생략")
+            _log(f"[일일결산] {n_code} 토큰 없음 — 15분봉 REST 생략")
             return pd.DataFrame()
 
         def _clean_px(v: Any) -> int:
@@ -1496,7 +1505,7 @@ class DataManagerV2:
         seen_dt: set = set()
         for page in range(max(1, int(max_pages))):
             raw_list, next_key_out = self.fetch_kiwoom_minute_chart_page(
-                n_code, token, next_key_in
+                n_code, token, next_key_in, tic_scope="15"
             )
             if not raw_list:
                 break
@@ -1556,31 +1565,17 @@ class DataManagerV2:
                     pass
 
         if not rows_acc:
-            _log(f"[일일결산] {n_code} {day} ka10080 구간 분봉 없음(REST 연속조회 종료)")
+            _log(f"[일일결산] {n_code} {day} ka10080(15분) 구간 봉 없음(REST 연속조회 종료)")
             return pd.DataFrame()
 
         try:
-            df1 = pd.DataFrame(rows_acc)
-            df1["datetime"] = pd.to_datetime(df1["datetime"], errors="coerce")
-            df1 = df1.dropna(subset=["datetime"])
-            df1 = df1.sort_values("datetime").drop_duplicates(
+            df15 = pd.DataFrame(rows_acc)
+            df15["datetime"] = pd.to_datetime(df15["datetime"], errors="coerce")
+            df15 = df15.dropna(subset=["datetime"])
+            df15 = df15.sort_values("datetime").drop_duplicates(
                 subset=["datetime"], keep="last"
             )
-            df1 = df1.set_index("datetime")
-            df15 = (
-                df1.resample("15min", closed="right", label="right")
-                .agg(
-                    {
-                        "open": "first",
-                        "high": "max",
-                        "low": "min",
-                        "close": "last",
-                        "volume": "sum",
-                    }
-                )
-                .dropna(subset=["open", "high", "low", "close"], how="any")
-            )
-            df15 = df15.reset_index()
+            df15 = df15.reset_index(drop=True)
             df15.rename(
                 columns={
                     "datetime": "time",

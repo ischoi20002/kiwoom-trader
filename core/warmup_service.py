@@ -71,22 +71,22 @@ class WarmupService:
             d = 365
         return max(1, min(d, 3650))
 
+    def _warmup_ka10080_tic_scope(self) -> str:
+        """
+        실시간 감시 워밍업·RT15m DB 보충용 ka10080 봉 주기(키움 tic_scope).
+        기본 \"15\" — 15분봉만 수신하고 1분→15분 리샘플을 하지 않는다.
+        """
+        try:
+            v = self.app.settings.get("realtime_warmup_ka10080_tic_scope", "15")
+            s = str(v).strip() if v is not None else "15"
+            return s if s else "15"
+        except Exception:
+            return "15"
+
     def _warmup_fetch_calendar_history_enabled(self) -> bool:
         """True: ka10080 를 캘린더 보존일만큼 과거까지 채울 때까지 연속조회(신호 최소봉만으로 조기종료 안 함)."""
         try:
             return bool(self.app.settings.get("realtime_warmup_fetch_calendar_history", True))
-        except Exception:
-            return True
-
-    def _quick_then_deep_background_enabled(self) -> bool:
-        """
-        True: 메인 워밍업은 최소 봉·당일 갭만 빠르게 채우고,
-        캘린더 1년·깊이 보강은 백그라운드 큐에서 종목별 순차 처리.
-        """
-        try:
-            return bool(
-                self.app.settings.get("realtime_warmup_quick_then_deep_background", True)
-            )
         except Exception:
             return True
 
@@ -112,6 +112,43 @@ class WarmupService:
             return max(60, int(float(self.app.settings.get("realtime_bars_max_keep", 300))))
         except (TypeError, ValueError):
             return 300
+
+    def _indicator_calc_input_tail(self, df: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """
+        실시간 감시용 지표는 결국 `realtime_bars_max_keep` 꼬리만 쓴다.
+        1년치 수천 봉 전체에 RSI/MACD/ATR 을 돌리면 CPU·GIL 부하만 커지므로,
+        롤링 안정화에 충분한 꼬리만 잘라 계산한다. (DB 적재·검증용 전체 df 는 그대로 유지)
+        """
+        try:
+            if df is None or getattr(df, "empty", True):
+                return df if df is not None else pd.DataFrame()
+            try:
+                need = effective_min_15m_bars_for_monitoring(self.app.settings)
+            except Exception:
+                need = 120
+            keep = self._bars_max_keep()
+            try:
+                cap_max = int(
+                    float(
+                        self.app.settings.get(
+                            "realtime_warmup_indicator_calc_max_rows", 2000
+                        )
+                    )
+                )
+            except (TypeError, ValueError):
+                cap_max = 2000
+            cap_max = max(400, min(cap_max, 20000))
+            cap = max(int(need * 3), int(keep * 2), 400)
+            cap = min(cap, cap_max)
+            if len(df) <= cap:
+                return df
+            return df.tail(cap).copy()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Warmup] 지표 계산용 tail 자르기 실패(전체 사용): {e}")
+            except Exception:
+                pass
+            return df if df is not None else pd.DataFrame()
 
     def _min_bars_for_signal(self) -> int:
         """실시간 최소 봉수(설정)와 ATR 주기(atr_period_a/b) 상한을 함께 반영."""
@@ -273,7 +310,9 @@ class WarmupService:
         """
         try:
             tag = "캘린더·깊이" if deep_fetch else "보충"
-            msg = f"분봉 API {pages}/{max_pages}페이지 ({tag})"
+            ts = self._warmup_ka10080_tic_scope()
+            bar_lbl = "15분봉" if str(ts).strip() == "15" else f"{ts}분봉"
+            msg = f"{bar_lbl} API {pages}/{max_pages}페이지 ({tag})"
             nk = str(stock_code).split("_")[0].zfill(6)
             ctx = getattr(self, "_warmup_prep_ui", None)
             if ctx and str(ctx.get("code", "")).split("_")[0].zfill(6) == nk:
@@ -338,7 +377,7 @@ class WarmupService:
         suppress_prep_tree_progress: bool = False,
     ) -> List[Any]:
         """
-        워밍업 전용: ka10080 연속조회로 분봉을 모은 뒤 15m 병합 기준을 만족할 때까지 페이지를 이어 받음.
+        워밍업 전용: ka10080 연속조회(설정 주기, 기본 15분봉)로 봉을 모은 뒤 15m OHLCV 병합 기준을 만족할 때까지 페이지를 이어 받음.
         deep_fetch=False: 신호 최소 봉·장중 당일 갭 해소 시 조기 종료.
         deep_fetch=True: 캘린더 retention_days 만큼 과거까지 확보되고 당일 갭도 없을 때까지 조회(상한 페이지 별도).
         respect_warmup_lifecycle=False: 메인 run() 종료로 is_running 이 꺼진 뒤에도
@@ -376,6 +415,7 @@ class WarmupService:
         if dmax < dmin:
             dmin, dmax = dmax, dmin
 
+        tic_scope = self._warmup_ka10080_tic_scope()
         by_tm: Dict[str, Any] = {}
         nk: str = ""
         pages = 0
@@ -387,7 +427,7 @@ class WarmupService:
                 break
             try:
                 raw_list, nk = self.data_manager.fetch_kiwoom_minute_chart_page(
-                    code, token, nk
+                    code, token, nk, tic_scope=tic_scope
                 )
             except Exception as e:
                 self.log(f"⚠️ [Warmup-API] {name}({code}) 페이지 조회 예외: {e}")
@@ -429,7 +469,9 @@ class WarmupService:
                     by_tm[k] = item
 
             try:
-                api15 = self._minute_api_list_to_15m_ohlcv(list(by_tm.values()))
+                api15 = self._minute_api_list_to_15m_ohlcv(
+                    list(by_tm.values()), tic_scope=tic_scope
+                )
                 merged = self._merge_15m_ohlcv(base, api15)
                 n_merged = (
                     len(merged) if merged is not None and not merged.empty else 0
@@ -460,9 +502,11 @@ class WarmupService:
             # 소량 페이지(빠른 통과)는 생략, 깊이 조회·다페이지만 요약 로그
             if deep_fetch or pages >= 20 or len(by_tm) >= 500:
                 try:
+                    ts = str(tic_scope).strip() or "?"
+                    bar_lbl = "15분봉" if ts == "15" else f"{ts}분봉"
                     self.log(
-                        f"📡 [Warmup-API] {name}({code}) ka10080 {pages}페이지, "
-                        f"유일 분봉 {len(by_tm)}건"
+                        f"📡 [Warmup-API] {name}({code}) ka10080({bar_lbl}) {pages}페이지, "
+                        f"유일 봉 {len(by_tm)}건"
                         + (" (조기 종료)" if early_stop else "")
                         + (" (캘린더·깊이)" if deep_fetch else "")
                     )
@@ -484,13 +528,19 @@ class WarmupService:
             self.log(f"⚠️ [Warmup] 15m 병합 실패: {e}")
             return a if a is not None and not a.empty else pd.DataFrame()
 
-    def _minute_api_list_to_15m_ohlcv(self, raw_api: Any) -> pd.DataFrame:
+    def _minute_api_list_to_15m_ohlcv(
+        self, raw_api: Any, *, tic_scope: Optional[str] = None
+    ) -> pd.DataFrame:
         """
-        키움 ka10080 분봉 응답 리스트 → 15분 OHLCV (closed='right', label='right').
-        data_manager.parse_to_bars / fetch_and_parse_15m_bars 와 동일 리샘플 규칙.
+        키움 ka10080 응답 리스트 → 15분 OHLCV DataFrame.
+        - tic_scope \"15\"(기본): 서버가 이미 15분봉을 주므로 리샘플 없이 OHLCV만 정렬·중복 제거.
+        - 그 외(예: \"1\"): 1분봉을 closed='right', label='right' 로 15분봉에 합침(레거시·비권장).
         """
         if not raw_api:
             return pd.DataFrame()
+        ts = str(tic_scope).strip() if tic_scope is not None else ""
+        if not ts:
+            ts = self._warmup_ka10080_tic_scope()
         try:
             df = pd.DataFrame(raw_api)
             f_cl, f_op, f_hg, f_lw, f_tm, f_vl = (
@@ -513,6 +563,20 @@ class WarmupService:
             if df.empty:
                 return pd.DataFrame()
             df = df.set_index("datetime").sort_index()
+            df = df[~df.index.duplicated(keep="last")]
+            if str(ts).strip() == "15":
+                out = df[[f_op, f_hg, f_lw, f_cl, f_vl]].copy()
+                out.rename(
+                    columns={
+                        f_op: "Open",
+                        f_hg: "High",
+                        f_lw: "Low",
+                        f_cl: "Close",
+                        f_vl: "Volume",
+                    },
+                    inplace=True,
+                )
+                return out[["Open", "High", "Low", "Close", "Volume"]].copy()
             out = (
                 df.resample("15min", closed="right", label="right")
                 .agg({f_op: "first", f_hg: "max", f_lw: "min", f_cl: "last", f_vl: "sum"})
@@ -621,7 +685,9 @@ class WarmupService:
                 respect_warmup_lifecycle=respect_warmup_lifecycle,
                 suppress_prep_tree_progress=suppress_prep_tree_progress,
             )
-            api15 = self._minute_api_list_to_15m_ohlcv(raw_api)
+            api15 = self._minute_api_list_to_15m_ohlcv(
+                raw_api, tic_scope=self._warmup_ka10080_tic_scope()
+            )
             if api15.empty:
                 if gap or short:
                     self.log(
@@ -727,13 +793,10 @@ class WarmupService:
         반환: (성공 여부, 실패 사유 또는 빈 문자열, 검증 시점 15m 봉 수 또는 성공 시 스트림 봉 수)
         """
         try:
-            qdeep = self._quick_then_deep_background_enabled()
-            want_cal = self._warmup_fetch_calendar_history_enabled()
-            use_quick = bool(qdeep and want_cal)
-
+            # 감시 시작 조건: 최소 봉·장중 당일 갭만 — 캘린더 1년 깊이는 기다리지 않음(백그라운드 큐).
             base = self._load_15m_ohlcv_frame(code)
             base = self._maybe_api_backfill_15m(
-                code, name, base, token, quick_only=use_quick
+                code, name, base, token, quick_only=True
             )
             time.sleep(random.uniform(0.25, 0.75))
 
@@ -748,7 +811,8 @@ class WarmupService:
 
             self._persist_warmup_base_to_rt15m_db(code, base)
 
-            df_ind = TradingStrategy.calculate_indicators(base, self.app.settings)
+            df_slice = self._indicator_calc_input_tail(base)
+            df_ind = TradingStrategy.calculate_indicators(df_slice, self.app.settings)
             fin = self._finalize_bars_for_stream(df_ind)
             lk = getattr(self.app, "_bars_data_lock", None)
             cm = lk if lk is not None else contextlib.nullcontext()
@@ -760,7 +824,7 @@ class WarmupService:
                     on_stock_ready(code)
                 except Exception as cb_e:
                     self.log(f"⚠️ [Warmup] on_stock_ready 콜백 오류 ({code}): {cb_e}")
-            if use_quick:
+            if self._warmup_fetch_calendar_history_enabled():
                 self._enqueue_deep_history_backfill(code, name)
             return True, "", n_ok
         except Exception as e:
@@ -774,8 +838,6 @@ class WarmupService:
         """캘린더 깊이 보강 작업을 백그라운드 큐에 넣습니다."""
         try:
             if not self._warmup_fetch_calendar_history_enabled():
-                return
-            if not self._quick_then_deep_background_enabled():
                 return
             if self._deep_history_queue is None:
                 self._deep_history_queue = queue.Queue()
@@ -852,7 +914,8 @@ class WarmupService:
             combined = self._merge_deep_ohlcv_with_live(merged_ohlcv, cur)
             if combined is None or combined.empty:
                 return
-            df_ind = TradingStrategy.calculate_indicators(combined, self.app.settings)
+            df_slice = self._indicator_calc_input_tail(combined)
+            df_ind = TradingStrategy.calculate_indicators(df_slice, self.app.settings)
             fin = self._finalize_bars_for_stream(df_ind)
             if not isinstance(self.app.bars_data, dict):
                 self.app.bars_data = {}
@@ -883,11 +946,9 @@ class WarmupService:
             return
         self._persist_warmup_base_to_rt15m_db(code, merged)
         self._apply_deep_history_to_bars_data(code, merged)
-        # 메인 워밍업에서 prep_ok 가 나간 뒤 깊이 조회가 신호상태를 덮었을 수 있어 복구
-        try:
-            self._notify_stock_prep("prep_ok", 1, 1, str(name), str(code).zfill(6), "")
-        except Exception:
-            pass
+        # 깊이 보강은 suppress_prep_tree_progress 로 신호상태 열을 건드리지 않음.
+        # 여기서 prep_ok 를 다시 쏘면 메인 워밍업 이후 SignalEngine 이 넣은 감시·신호 문구가
+        # 「✅ 15분봉·검증 완료」로 되돌아가는 회귀가 생기므로 UI 알림은 보내지 않음.
 
     def _finalize_bars_for_stream(self, df_ind: pd.DataFrame) -> pd.DataFrame:
         """StreamProcessor 가 기대하는 time(HHMM)·cum_v_start 를 붙이고 길이를 제한."""
@@ -953,10 +1014,8 @@ class WarmupService:
             hint_parts.append("하베스팅 DB→API")
         if self._warmup_fetch_calendar_history_enabled():
             hint_parts.append(
-                f"캘린더~{self._warmup_retention_calendar_days()}일·깊이상한~{mp_deep}p/종목"
+                f"캘린더~{self._warmup_retention_calendar_days()}일·깊이≤{mp_deep}p/종목→백그라운드"
             )
-        if self._quick_then_deep_background_enabled() and self._warmup_fetch_calendar_history_enabled():
-            hint_parts.append("깊이보강=백그라운드")
         try:
             self.log(
                 f"📦 [Warmup] {total}개 종목 검증·적재 (출처={_src}, 재시도≤{retry_max}회·"
