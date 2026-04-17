@@ -238,6 +238,8 @@ class KiwoomApp:
         # 포지션 탭 무거운 렌더 중 사용자에게 피드백(하단 라벨·커서)
         self._ui_busy: bool = False
         self.lbl_ui_reactivity: Optional[ttk.Label] = None
+        # sync_with_actual_account 는 REST·DB·정합으로 수 초 걸릴 수 있음 — 백그라운드에서 한 번에 하나만
+        self._portfolio_sync_thread_lock: threading.Lock = threading.Lock()
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
@@ -519,6 +521,55 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def _run_portfolio_sync_in_daemon_thread(
+        self,
+        *,
+        silent: bool = True,
+        force: bool = False,
+        log_boot_summary: bool = False,
+    ) -> None:
+        """
+        계좌 동기화는 REST(ka85·예수 등)·정합·JSON 저장으로 메인 스레드에서 실행 시
+        탭 전환·클릭이 수 초~10초 이상 막힐 수 있어 워커 스레드에서 실행한다.
+        gui_callback 은 PortfolioManager 가 root.after(0) 으로 메인에 넘긴다.
+        동시에 두 번 돌면 상태가 꼬일 수 있어 락으로 직렬화(이미 실행 중이면 이번 호출은 생략).
+        """
+        def _worker() -> None:
+            acquired = False
+            try:
+                acquired = self._portfolio_sync_thread_lock.acquire(blocking=False)
+                if not acquired:
+                    return
+                self.portfolio.sync_with_actual_account(
+                    silent=silent, force=force, log_boot_summary=log_boot_summary
+                )
+            except Exception as e:
+                try:
+                    r = getattr(self, "root", None)
+                    if r is not None:
+                        r.after(
+                            0,
+                            lambda m=str(e): self.log(
+                                f"❌ [Sync] 백그라운드 계좌 동기화 예외: {m}"
+                            ),
+                        )
+                except Exception:
+                    pass
+            finally:
+                if acquired:
+                    try:
+                        self._portfolio_sync_thread_lock.release()
+                    except Exception:
+                        pass
+
+        try:
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception as e:
+            try:
+                self.log(f"❌ [Sync] 동기화 스레드 시작 실패: {e}")
+            except Exception:
+                pass
+
     def get_auth_token(self) -> None:
         """
         REST 토큰 발급 및 초기 동기화(포트폴리오·시장·원격·계좌·유니버스).
@@ -635,8 +686,8 @@ class KiwoomApp:
             # 상세 요약은 첫 계좌 동기화(REST)가 끝난 뒤 `PortfolioManager` 에서 한 번만 출력한다.
             try:
                 self.log(
-                    "[기동] 인증 완료 → 약 2초 후 첫 계좌 동기화. "
-                    "『계좌 동기화』로그 이후에도 잠시 바쁘면, 동기화 완료 직후 요약 로그를 확인하세요."
+                    "[기동] 인증 완료 → 약 2초 후 첫 계좌 동기화(백그라운드). "
+                    "그동안 탭 전환 가능. 로그는 동기화가 끝나는 대로 올라옵니다."
                 )
             except Exception:
                 pass
@@ -645,7 +696,7 @@ class KiwoomApp:
             self.remote_commander.start()
             self.root.after(
                 2000,
-                lambda: self.portfolio.sync_with_actual_account(
+                lambda: self._run_portfolio_sync_in_daemon_thread(
                     silent=True, force=True, log_boot_summary=True
                 ),
             )
@@ -864,7 +915,12 @@ class KiwoomApp:
         try:
             r = getattr(self, "root", None)
             if r is not None:
-                r.after(2500, lambda: self.portfolio.sync_with_actual_account(silent=True, force=True))
+                r.after(
+                    2500,
+                    lambda: self._run_portfolio_sync_in_daemon_thread(
+                        silent=True, force=True
+                    ),
+                )
         except Exception:
             pass
 
@@ -1116,7 +1172,7 @@ class KiwoomApp:
             if not self.root.winfo_exists():
                 return
             if self.is_monitoring:
-                self.portfolio.sync_with_actual_account(silent=True, force=True)
+                self._run_portfolio_sync_in_daemon_thread(silent=True, force=True)
         except Exception:
             pass
         try:
@@ -1626,13 +1682,14 @@ class KiwoomApp:
         *,
         log_boot_summary: bool = False,
     ) -> None:
-        self.portfolio.sync_with_actual_account(
+        """UI에서 호출되는 계좌 동기화 — 메인 스레드를 막지 않도록 백그라운드로 위임."""
+        self._run_portfolio_sync_in_daemon_thread(
             silent=silent, force=force, log_boot_summary=log_boot_summary
         )
 
     def _sync_account_deposit(self) -> None:
         # [v4.9.0] 전체 계좌 동기화 — 버튼 클릭 시 API 스로틀을 우회(force)
-        self.portfolio.sync_with_actual_account(silent=False, force=True)
+        self._run_portfolio_sync_in_daemon_thread(silent=False, force=True)
     def _sell_all_virtual(self):
         if messagebox.askyesno("🚨 비상 청산", "모든 보유 종목을 즉시 시장가로 매도하시겠습니까?"):
             self.portfolio.sell_all()
