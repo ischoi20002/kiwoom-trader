@@ -1,14 +1,17 @@
 {
-  "Score": 49,
-  "Code": 77,
-  "Name": 131,
-  "StratType": 117,
-  "Price": 103,
-  "AtrExit": 101,
-  "VsPrev": 85,
-  "Ratio": 94,
-  "Status": 290,
-  "VolPower": 62,
-  "BidAsk": 132,
-  "Volume": 126
+  "columns": {
+    "Score": 49,
+    "Code": 77,
+    "Name": 131,
+    "StratType": 117,
+    "Price": 103,
+    "AtrExit": 101,
+    "VsPrev": 85,
+    "Ratio": 94,
+    "Status": 249,
+    "VolPower": 62,
+    "BidAsk": 132,
+    "Volume": 126
+  },
+  "sash0_rel": 0.20317002881844382
 }

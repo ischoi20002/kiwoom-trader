@@ -78,6 +78,9 @@ class VirtualTab:
         self._virtual_sash_sync_job: Optional[Any] = None  # 세시 이동 직후 sashpos 동기화용(디바운스)
         self._virtual_main_paned: Optional[ttk.PanedWindow] = None
         self._virtual_saved_sash_rel: Optional[float] = None
+        # 보유 합계(수수료 제외) 값 라벨 — 손익 부호에 따라 전경색 갱신
+        self._hold_agg_lbl_pnl: Optional[tk.Label] = None
+        self._hold_agg_lbl_pct: Optional[tk.Label] = None
 
         self._setup_ui()
         self._render_virtual_positions()
@@ -111,7 +114,12 @@ class VirtualTab:
             "d1_cash": tk.StringVar(value="0"),
             "d2_cash": tk.StringVar(value="0"),
             "day": tk.StringVar(value="0 (0.00%)"),
-            "cum": tk.StringVar(value="0 (+0.00%)")
+            "cum": tk.StringVar(value="0 (+0.00%)"),
+            # 실시간 보유 트리 하단: 보유 전체 합계(매수·매도 수수료 미반영)
+            "hold_sum_buy_ex": tk.StringVar(value="0"),
+            "hold_sum_eval_ex": tk.StringVar(value="0"),
+            "hold_sum_pnl_ex": tk.StringVar(value="0"),
+            "hold_sum_pct_ex": tk.StringVar(value="0.00%"),
         })
 
         for label, var, color in [
@@ -475,8 +483,69 @@ class VirtualTab:
             # Paned 상단 칸에서 LabelFrame 자식만 pack 할 때 세로 확장이 0에 가까워지는 경우 방지
             hold_wrap = ttk.Frame(parent)
             hold_wrap.pack(fill=tk.BOTH, expand=True)
+            # --- 보유 전체 통계(수수료 제외): 종목 목록 위 · 컴팩트 한 줄 카드
+            c = getattr(self.app, "colors", None) or {}
+            card = str(c.get("card", "#3B4252"))
+            border = str(c.get("border", "#4C566A"))
+            fg = str(c.get("fg", "#ECEFF4"))
+            sec = str(c.get("secondary", "#81A1C1"))
+
+            agg_outer = ttk.Frame(hold_wrap)
+            agg_outer.pack(side=tk.TOP, fill=tk.X, pady=(0, 6), padx=0)
+            agg_card = tk.Frame(
+                agg_outer,
+                bg=card,
+                highlightbackground=border,
+                highlightthickness=1,
+            )
+            agg_card.pack(fill=tk.X)
+            ipad = tk.Frame(agg_card, bg=card)
+            ipad.pack(fill=tk.X, padx=8, pady=(4, 5))
+            metrics = tk.Frame(ipad, bg=card)
+            metrics.pack(fill=tk.X)
+            stat_cols: Tuple[Tuple[str, str], ...] = (
+                ("매입금액", "hold_sum_buy_ex"),
+                ("평가금액", "hold_sum_eval_ex"),
+                ("평가손익", "hold_sum_pnl_ex"),
+                ("수익율", "hold_sum_pct_ex"),
+            )
+            for i, (lab_txt, vkey) in enumerate(stat_cols):
+                gcol = i * 2
+                cell = tk.Frame(metrics, bg=card)
+                cell.grid(
+                    row=0,
+                    column=gcol,
+                    sticky=tk.NSEW,
+                    padx=(8 if i == 0 else 6, 8),
+                )
+                metrics.grid_columnconfigure(gcol, weight=1, uniform="hold_stat")
+                tk.Label(
+                    cell,
+                    text=lab_txt,
+                    font=("Malgun Gothic", 8),
+                    bg=card,
+                    fg=sec,
+                ).pack(anchor=tk.CENTER)
+                val_lbl = tk.Label(
+                    cell,
+                    textvariable=self.vars[vkey],
+                    font=("Malgun Gothic", 10, "bold"),
+                    bg=card,
+                    fg=fg,
+                )
+                val_lbl.pack(anchor=tk.CENTER, pady=(1, 0))
+                if vkey == "hold_sum_pnl_ex":
+                    self._hold_agg_lbl_pnl = val_lbl
+                elif vkey == "hold_sum_pct_ex":
+                    self._hold_agg_lbl_pct = val_lbl
+                if i < len(stat_cols) - 1:
+                    sp = tk.Frame(metrics, width=1, bg=border)
+                    sp.grid(row=0, column=gcol + 1, sticky=tk.NS, pady=3, padx=0)
+
+            body = ttk.Frame(hold_wrap)
+            body.pack(fill=tk.BOTH, expand=True)
             tree = ttk.Treeview(
-                hold_wrap, columns=cols, show="headings", selectmode="browse"
+                body, columns=cols, show="headings", selectmode="browse"
             )
             heads = [
                 "진입일시",
@@ -522,7 +591,7 @@ class VirtualTab:
                 except Exception:
                     tree.column(col, width=72, anchor=an, minwidth=40, stretch=False)
 
-            sb = ttk.Scrollbar(hold_wrap, orient=tk.VERTICAL, command=tree.yview)
+            sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=tree.yview)
             tree.configure(yscrollcommand=sb.set)
             tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             sb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1366,19 +1435,17 @@ class VirtualTab:
         except Exception:
             return "—"
 
-    def _active_row_vals_and_tags(
-        self,
-        row_idx: int,
-        nk: str,
-        pos: Dict[str, Any],
-        info: Dict[str, Any],
-        total_eval_for_weight: Optional[float] = None,
-    ) -> Tuple[tuple, Tuple[str, ...], float, float, float]:
+    def _resolve_active_holdings_prices(
+        self, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
+    ) -> Tuple[float, int, float, float, int]:
         """
-        실시간 보유 한 행의 values·tags·수익률% (트리/요약 공통).
-        반환 (vals, tags, profit_pct, unrealized_raw, eval_amt_raw):
-        상단 요약 합계는 **트리와 동일**한 unrealized·eval을 쓰려면 이 값을 그대로 더하면 됩니다.
-        `total_eval_for_weight`: 보유비중(%) 분모. None이면 해당 열은 '—'.
+        실시간 보유 1건의 가격·금액(트리 표시와 동일 규칙).
+
+        반환
+        ----
+        (ap, qty, curr_p, eval_amt, buy_in_display)
+            ``buy_in_display``: 트리 「매입금액」열(잔고 ka_pur 사용 시 수수료 포함일 수 있음).
+            수수료 **제외** 매입원은 항상 ``ap * qty``(아래 ``_holding_cost_ex_fee``).
         """
         try:
             live_p = float(self._monitor_live_price(nk, pos))
@@ -1426,6 +1493,97 @@ class VirtualTab:
                 ap = curr_p
             eval_amt = curr_p * qty
             buy_in_amt = int(round(float(ap) * float(qty)))
+
+        return (float(ap), int(qty), float(curr_p), float(eval_amt), int(buy_in_amt))
+
+    @staticmethod
+    def _holding_cost_ex_fee(ap: float, qty: int) -> float:
+        """매수 수수료를 제외한 매입금액(평균단가×수량)."""
+        try:
+            if qty <= 0:
+                return 0.0
+            a = float(ap)
+            if abs(a) <= 1e-12:
+                return 0.0
+            return float(a) * float(qty)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _update_holdings_aggregate_fee_excluded(self) -> None:
+        """보유 합계 라벨: 매입·평가·손익·수익율(매수·매도 수수료 미반영)."""
+        try:
+            mi = getattr(self.app, "monitor_info", None) or {}
+            s_cost = 0.0
+            s_eval = 0.0
+            for nk, pos in self._sorted_active_holdings():
+                info = mi.get(nk, {}) or {}
+                ap, qty, _cp, eval_amt, _bi = self._resolve_active_holdings_prices(
+                    nk, pos, info
+                )
+                s_cost += self._holding_cost_ex_fee(ap, qty)
+                s_eval += float(eval_amt)
+            s_pnl = s_eval - s_cost
+            if s_cost > 1e-6:
+                s_pct = (s_pnl / s_cost) * 100.0
+            else:
+                s_pct = 0.0
+            self.vars["hold_sum_buy_ex"].set(f"{int(round(s_cost)):,}")
+            self.vars["hold_sum_eval_ex"].set(f"{int(round(s_eval)):,}")
+            self.vars["hold_sum_pnl_ex"].set(f"{int(round(s_pnl)):+,}")
+            self.vars["hold_sum_pct_ex"].set(f"{s_pct:+.2f}%")
+            # 손익·수익율: 흑자/적자 색 (0 근처는 기본 전경)
+            c2 = getattr(self.app, "colors", None) or {}
+            base_fg = str(c2.get("fg", "#ECEFF4"))
+            ok_c = str(c2.get("success", "#A3BE8C"))
+            ng_c = str(c2.get("danger", "#BF616A"))
+            lp = getattr(self, "_hold_agg_lbl_pnl", None)
+            lr = getattr(self, "_hold_agg_lbl_pct", None)
+            if lp is not None and lr is not None:
+                if s_pnl > 0.5:
+                    col = ok_c
+                elif s_pnl < -0.5:
+                    col = ng_c
+                else:
+                    col = base_fg
+                try:
+                    lp.config(foreground=col)
+                    lr.config(foreground=col)
+                except tk.TclError:
+                    pass
+        except Exception:
+            try:
+                self.vars["hold_sum_buy_ex"].set("0")
+                self.vars["hold_sum_eval_ex"].set("0")
+                self.vars["hold_sum_pnl_ex"].set("0")
+                self.vars["hold_sum_pct_ex"].set("0.00%")
+                c2 = getattr(self.app, "colors", None) or {}
+                base_fg = str(c2.get("fg", "#ECEFF4"))
+                for w in (getattr(self, "_hold_agg_lbl_pnl", None), getattr(self, "_hold_agg_lbl_pct", None)):
+                    if w is not None:
+                        try:
+                            w.config(foreground=base_fg)
+                        except tk.TclError:
+                            pass
+            except Exception:
+                pass
+
+    def _active_row_vals_and_tags(
+        self,
+        row_idx: int,
+        nk: str,
+        pos: Dict[str, Any],
+        info: Dict[str, Any],
+        total_eval_for_weight: Optional[float] = None,
+    ) -> Tuple[tuple, Tuple[str, ...], float, float, float]:
+        """
+        실시간 보유 한 행의 values·tags·수익률% (트리/요약 공통).
+        반환 (vals, tags, profit_pct, unrealized_raw, eval_amt_raw):
+        상단 요약 합계는 **트리와 동일**한 unrealized·eval을 쓰려면 이 값을 그대로 더하면 됩니다.
+        `total_eval_for_weight`: 보유비중(%) 분모. None이면 해당 열은 '—'.
+        """
+        ap, qty, curr_p, eval_amt, buy_in_amt = self._resolve_active_holdings_prices(
+            nk, pos, info
+        )
 
         unrealized = self._unrealized_at_price_net_of_sell_fee(pos, float(curr_p), qty, ap)
         try:
@@ -1684,6 +1842,7 @@ class VirtualTab:
             
         self.vars["day"].set(f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
         self.vars["cum"].set(f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
+        self._update_holdings_aggregate_fee_excluded()
 
     def _render_real_data(self):
         """실시간 틱·동기화 후 보유 트리 값만 갱신."""
@@ -1789,6 +1948,7 @@ class VirtualTab:
             _set_if_diff("d2_cash", f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
             _set_if_diff("day", f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
             _set_if_diff("cum", f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
+            self._update_holdings_aggregate_fee_excluded()
         except Exception:
             pass
 

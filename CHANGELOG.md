@@ -7,6 +7,17 @@
 
 ---
 
+## 0.3.47 (2026-04-18)
+
+- **포지션 관리 · 실시간 보유**: 보유 **전체 합계**(매입·평가·평가손익·수익율)를 **수수료 미반영**(평단×수량·시장 평가)으로 집계, 종목 트리 **위** 컴팩트 카드로 표시(`ui/tabs/virtual_tab.py`). 제목·부제 제거·여백 축소로 높이 정리, 손익/수익율 색상.
+- **컬럼 폭**: `monitor_column_widths.json` 저장 반영.
+
+## 0.3.46 (2026-04-18)
+
+- **KODEX200 유니버스**: `kodex200_universe_priority`에 **`csv_only`** 추가 — `kodex200.csv`만 사용하고 pykrx·원격 URL·FDR 폴백 없음. 기본값을 **`csv_only`**로 변경(`core/kodex200_universe.py`, `core/defaults.py`, `settings.json`).
+- **기동 로그**: KOSPI200 유니버스 로드 문구에서 「편입종목 확인」 표현 제거(`k_trader_gui.py`).
+- **문서**: `get_kospi_list` 독스트링을 설정 기반 설명으로 정리(`data_manager_v2.py`).
+
 ## 0.3.45 (2026-04-17)
 
 - **포지션 관리 탭 레이아웃**: 기동 직후 다른 탭에 있으면 Paned 높이가 잡히기 전에 sash만 복원되는 문제 완화 — **「포지션」탭으로 전환할 때** 세로 분할(sash) 복원을 다시 예약 (`k_trader_gui.py`).

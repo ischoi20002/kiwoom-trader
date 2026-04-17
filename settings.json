@@ -35,7 +35,7 @@
     "use_intraday_api_backfill": true,
     "require_full_warmup_for_monitoring": false,
     "incremental_warmup_stream": true,
-    "kodex200_universe_priority": "etf_api_first",
+    "kodex200_universe_priority": "csv_only",
     "kodex200_export_csv_on_etf_success": false,
     "kodex200_constituents_url": "",
     "limit_order_price_guard_enabled": true,

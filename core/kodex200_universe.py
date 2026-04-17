@@ -2,8 +2,9 @@
 """
 KODEX 200 유니버스 로딩.
 
-편입은 연 2회 등으로 바뀌므로, 수동 ``kodex200.csv`` 만 고집하면 구버전이 남습니다.
-``kodex200_universe_priority`` 설정으로 **pykrx ETF(069500) 구성 자동 조회**를 최우선할 수 있습니다.
+``kodex200_universe_priority``:
+- ``csv_only``: 루트 ``kodex200.csv`` 만 읽고 pykrx·원격 URL·FDR 폴백 없음(당분간 고정 리스트 유지용).
+- ``etf_api_first`` / ``local_csv_first``: ETF(PDF)·URL·로컬 CSV·FDR 순 조합(아래 ``resolve_kodex200_universe`` 참고).
 """
 
 from __future__ import annotations
@@ -378,7 +379,8 @@ def resolve_kodex200_universe(
     KODEX200에 가까운 ``Code``/``Name`` 목록을 반환합니다.
 
     ``kodex200_universe_priority``:
-        - ``etf_api_first`` (기본): pykrx/KRX PDF(069500) → ``kodex200_constituents_url`` →
+        - ``csv_only``: 로컬 ``kodex200.csv`` 만 (외부 편입 조회·폴백 없음).
+        - ``etf_api_first``: pykrx/KRX PDF(069500) → ``kodex200_constituents_url`` →
           로컬 ``kodex200.csv`` → FDR
         - ``local_csv_first``: 로컬 CSV → ETF 경로 → URL → FDR
     """
@@ -399,6 +401,25 @@ def resolve_kodex200_universe(
         ).strip().lower()
     except Exception:
         priority = "etf_api_first"
+
+    if priority in ("csv_only", "file_only", "local_csv_only", "kodex200_csv_only"):
+        try:
+            df_csv = _try_read_kodex200_csv(log=log)
+            if df_csv is not None and not df_csv.empty:
+                _log(
+                    log,
+                    "[KODEX200] kodex200.csv 전용 모드: ETF·원격·FDR 조회를 생략합니다.",
+                )
+                return df_csv
+            _log(
+                log,
+                "⚠️ [KODEX200] kodex200.csv 가 없거나(또는 유효 행 수 부족) "
+                "csv_only 모드에서는 폴백하지 않습니다. 빈 목록을 반환합니다.",
+            )
+            return pd.DataFrame()
+        except Exception as e:
+            _log(log, f"❌ [KODEX200] csv_only 로드 예외: {e}")
+            return pd.DataFrame()
 
     etf_first = priority in ("etf_api_first", "etf", "pykrx", "auto", "live")
 

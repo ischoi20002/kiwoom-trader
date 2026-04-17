@@ -603,7 +603,7 @@ class KiwoomApp:
                 pass
 
     def get_kospi_200(self, force=False):
-        self.log("[Data] KODEX200 편입종목 확인 중...")
+        self.log("[Data] KOSPI200 유니버스 로드(kodex200.csv·설정 kodex200_universe_priority)...")
         df_200 = self.data_manager.get_kospi_list(
             count=200,
             force=force,

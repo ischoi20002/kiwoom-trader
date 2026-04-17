@@ -1864,8 +1864,8 @@ class DataManagerV2:
         """
         KODEX 200 유니버스 확보.
 
-        count<=200: ``core.kodex200_universe`` — pykrx ETF(069500) 자동 구성(기본) 또는
-        ``kodex200_universe_priority=local_csv_first`` 로 수동 CSV 우선.
+        count<=200: ``core.kodex200_universe.resolve_kodex200_universe`` —
+        ``kodex200_universe_priority`` (예: ``csv_only``=kodex200.csv 전용, ``etf_api_first`` 등).
         count>200: FDR 코스피 시총 상위 ``count`` (기존과 동일).
         """
         import os
