@@ -365,6 +365,67 @@ class BacktestTab:
             return None
         ToolTip(self.tree_backtest, get_header_tip)
 
+    def _show_harvest_started_toast(self) -> None:
+        """
+        하베스팅 시작 안내 — 2초 후 자동으로 닫힘.
+        messagebox.showinfo 는 모달이라 탭 전환까지 막으므로 Toplevel 비모달 사용.
+        """
+        msg = (
+            "데이터 하베스팅이 별도 창에서 시작되었습니다.\n"
+            "이 프로그램(GUI)을 종료해도 수집은 계속됩니다."
+        )
+        try:
+            root = getattr(self.app, "root", None)
+            if root is None:
+                messagebox.showinfo("알림", msg, parent=self.parent)
+                return
+            top = tk.Toplevel(root)
+            top.title("알림")
+            try:
+                top.transient(root)
+            except Exception:
+                pass
+            try:
+                top.resizable(False, False)
+            except Exception:
+                pass
+            bg, fg = "#2E3440", "#ECEFF4"
+            try:
+                bg = str(self.app.colors.get("bg", bg))
+                fg = str(self.app.colors.get("fg", fg))
+            except Exception:
+                pass
+            top.configure(bg=bg)
+            frm = tk.Frame(top, bg=bg, padx=18, pady=14)
+            frm.pack(fill=tk.BOTH, expand=True)
+            tk.Label(
+                frm,
+                text=msg,
+                bg=bg,
+                fg=fg,
+                font=("Malgun Gothic", 10),
+                justify=tk.LEFT,
+            ).pack()
+            top.update_idletasks()
+            w = int(top.winfo_reqwidth())
+            h = int(top.winfo_reqheight())
+            rx = int(root.winfo_rootx())
+            ry = int(root.winfo_rooty())
+            rw = int(root.winfo_width())
+            rh = int(root.winfo_height())
+            x = rx + max(0, (rw - w) // 2)
+            y = ry + max(0, (rh - h) // 2)
+            top.geometry(f"+{x}+{y}")
+            try:
+                top.after(2000, top.destroy)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                messagebox.showinfo("알림", msg, parent=self.parent)
+            except Exception:
+                pass
+
     def _on_harvest_latest_prices(self) -> None:
         """harvest_service.py 를 별도 콘솔에서 실행해 로컬 시세 DB를 갱신합니다."""
         try:
@@ -383,11 +444,7 @@ class BacktestTab:
                 self.app.log("🚀 [하베스팅] 전 종목 수집 프로세스가 별도 창에서 시작되었습니다.")
             except Exception:
                 pass
-            messagebox.showinfo(
-                "알림",
-                "데이터 하베스팅이 별도 창에서 시작되었습니다.\n이 프로그램(GUI)을 종료해도 수집은 계속됩니다.",
-                parent=self.parent,
-            )
+            self._show_harvest_started_toast()
         except Exception as e:
             try:
                 self.app.log(f"❌ [하베스팅] 실행 실패: {e}")

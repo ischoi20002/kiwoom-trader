@@ -461,12 +461,10 @@ if __name__ == "__main__":
     service = HarvestService()
     try:
         service.run()
-        print("\n" + "="*50)
-        input("✅ 모든 작업이 완료되었습니다. 결과를 확인한 후 Enter를 누르면 창이 닫힙니다...")
+        print("\n" + "=" * 50)
+        print("✅ 모든 작업이 완료되었습니다. (콘솔은 자동으로 닫힙니다)")
     except KeyboardInterrupt:
         service.running = False
         print("\n🛑 사용자에 의해 중지되었습니다.")
-        input("종료하려면 Enter를 누르세요...")
     except Exception as e:
         print(f"\n❌ 치명적 오류 발생: {e}")
-        input("오류를 확인한 후 Enter를 누르세요...")
