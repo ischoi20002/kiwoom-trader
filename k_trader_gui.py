@@ -235,6 +235,9 @@ class KiwoomApp:
         # REST 인증 자동 재시도: 동시에 하나의 워커만 실행
         self._auth_worker_lock = threading.Lock()
         self._auth_worker_running = False
+        # 포지션 탭 무거운 렌더 중 사용자에게 피드백(하단 라벨·커서)
+        self._ui_busy: bool = False
+        self.lbl_ui_reactivity: Optional[ttk.Label] = None
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
@@ -411,6 +414,14 @@ class KiwoomApp:
             
             self.lbl_remote_status = ttk.Label(status_frame, text="원격: 비활성", font=("Malgun Gothic", 9), foreground=self.colors['border'])
             self.lbl_remote_status.pack(side=tk.LEFT, padx=10)
+            # 무거운 UI 갱신(포지션 탭 전체 그리기 등) 중 표시 — 탭 전환이 잠시 먹지 않을 때 원인 안내
+            self.lbl_ui_reactivity = ttk.Label(
+                status_frame,
+                text="",
+                font=("Malgun Gothic", 9),
+                foreground="#EBCB8B",
+            )
+            self.lbl_ui_reactivity.pack(side=tk.LEFT, padx=(16, 0))
             
             self.notebook = ttk.Notebook(self.root)
             self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=0)
@@ -484,6 +495,29 @@ class KiwoomApp:
                 pass
 
     def log(self, message): self.gui_utils.log(message)
+
+    def _set_ui_busy(self, busy: bool, hint: str = "") -> None:
+        """
+        메인 스레드에서 Treeview 등 무거운 작업 시 사용자에게 피드백.
+        Tk는 동기 렌더 중 이벤트를 못 받아 탭 전환이 밀리므로, 호출부에서는 가능하면
+        `after(1, ...)` 로 한 틱 미룬 뒤 실제 작업을 수행한다.
+        """
+        try:
+            self._ui_busy = bool(busy)
+            lbl = getattr(self, "lbl_ui_reactivity", None)
+            if lbl is not None and lbl.winfo_exists():
+                if busy and (hint or "").strip():
+                    lbl.config(text=f"처리 중: {hint.strip()}")
+                elif not busy:
+                    lbl.config(text="")
+            r = getattr(self, "root", None)
+            if r is not None and r.winfo_exists():
+                try:
+                    r.config(cursor=("watch" if busy else "arrow"))
+                except (tk.TclError, AttributeError):
+                    pass
+        except Exception:
+            pass
 
     def get_auth_token(self) -> None:
         """
@@ -1450,6 +1484,7 @@ class KiwoomApp:
         """
         PortfolioManager gui_callback 진입점.
         포지션 구조가 이전과 같으면 히스토리·주문 트리 전체 삭제 없이 보유 셀·요약만 갱신한다.
+        전체 리빌드는 무거우므로 한 틱 지연 후 수행하고, 그동안 하단에 처리 중 표시.
         """
         try:
             self._maybe_start_account_sync_timer()
@@ -1482,20 +1517,40 @@ class KiwoomApp:
                 return
         except Exception:
             pass
+
+        def _heavy_vp_render() -> None:
+            try:
+                self.virtual_tab._render_virtual_positions()
+                self._last_vp_render_sig = self._vp_structure_signature()
+            except Exception:
+                pass
+            finally:
+                try:
+                    self._set_ui_busy(False)
+                except Exception:
+                    pass
+            try:
+                mt = getattr(self, "monitor_tab", None)
+                if mt is not None:
+                    mt._purge_stale_active_monitor_rows(
+                        self.portfolio.virtual_positions,
+                        getattr(self, "monitor_info", None) or {},
+                    )
+            except Exception:
+                pass
+
         try:
-            self.virtual_tab._render_virtual_positions()
-            self._last_vp_render_sig = self._vp_structure_signature()
+            self._set_ui_busy(True, "보유·주문 화면을 그리는 중")
+            r = getattr(self, "root", None)
+            if r is not None:
+                r.after(1, _heavy_vp_render)
+            else:
+                _heavy_vp_render()
         except Exception:
-            pass
-        try:
-            mt = getattr(self, "monitor_tab", None)
-            if mt is not None:
-                mt._purge_stale_active_monitor_rows(
-                    self.portfolio.virtual_positions,
-                    getattr(self, "monitor_info", None) or {},
-                )
-        except Exception:
-            pass
+            try:
+                self._set_ui_busy(False)
+            except Exception:
+                pass
 
     def refresh_virtual_tab_orders_only(self) -> None:
         """포지션 관리 탭 — 주문 로그 트리만 갱신(증권사 체결 API 병합 후 경량 호출)."""
@@ -1520,29 +1575,49 @@ class KiwoomApp:
                 pass
         except Exception:
             pass
-        if hasattr(self, "virtual_tab"):
+
+        def _heavy_full() -> None:
             try:
-                self.virtual_tab._render_virtual_positions()
+                if hasattr(self, "virtual_tab"):
+                    try:
+                        self.virtual_tab._render_virtual_positions()
+                    except Exception:
+                        pass
+                    try:
+                        self.virtual_tab._render_orders()
+                    except Exception:
+                        pass
+                try:
+                    self._last_vp_render_sig = self._vp_structure_signature()
+                except Exception:
+                    pass
+                try:
+                    mt = getattr(self, "monitor_tab", None)
+                    if mt is not None:
+                        mt._purge_stale_active_monitor_rows(
+                            self.portfolio.virtual_positions,
+                            getattr(self, "monitor_info", None) or {},
+                        )
+                except Exception:
+                    pass
+            finally:
+                try:
+                    self._set_ui_busy(False)
+                except Exception:
+                    pass
+
+        try:
+            self._set_ui_busy(True, "포지션 탭 전체 갱신")
+            r = getattr(self, "root", None)
+            if r is not None:
+                r.after(1, _heavy_full)
+            else:
+                _heavy_full()
+        except Exception:
+            try:
+                self._set_ui_busy(False)
             except Exception:
                 pass
-            # 포지션 관리 탭 실시간 주문 로그(VP·호가 열)는 VP 렌더 중에도 갱신되나, 예외 시에도 한 번 더 맞춤
-            try:
-                self.virtual_tab._render_orders()
-            except Exception:
-                pass
-        try:
-            self._last_vp_render_sig = self._vp_structure_signature()
-        except Exception:
-            pass
-        try:
-            mt = getattr(self, "monitor_tab", None)
-            if mt is not None:
-                mt._purge_stale_active_monitor_rows(
-                    self.portfolio.virtual_positions,
-                    getattr(self, "monitor_info", None) or {},
-                )
-        except Exception:
-            pass
 
     def sync_with_actual_account(
         self,
