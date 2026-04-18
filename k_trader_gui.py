@@ -45,7 +45,7 @@ from ui.styles import NordicStyle
 from core.portfolio_manager import PortfolioManager
 from core.market_service import MarketDataService
 from core.remote_commander import RemoteCommander
-from core.trading_controller import TradingController
+from core.trading_controller import TradingController, virtual_position_reference_price_for_monitor
 from core.strategy_engine import StrategyEngine
 from core.selection_service import SelectionService
 from core.defaults import DEFAULT_SETTINGS, get_allowed_keys
@@ -1241,6 +1241,10 @@ class KiwoomApp:
                 return
             nm = pos.get("name") or nk
             ap = float(pos.get("avg_price", 0) or 0)
+            try:
+                ref_p = float(virtual_position_reference_price_for_monitor(pos))
+            except Exception:
+                ref_p = 0.0
             stub = {
                 "name": nm,
                 "ma20": 0.0,
@@ -1249,8 +1253,8 @@ class KiwoomApp:
                 "score": 0.0,
                 "ma_buffer_scale": 1.0,
                 "open": ap,
-                # 평단을 last_price에 넣으면 미실현이 항상 0%로 보임 — 틱 전까지 0 + 스텁 플래그
-                "last_price": 0.0,
+                # 계좌 스냅(ka_cur_prc 등)이 있으면 보유 탭과 같이 참고가 표시. 평단은 넣지 않음.
+                "last_price": ref_p,
                 "sel_track": "AB",
                 "vp_price_stub": True,
             }

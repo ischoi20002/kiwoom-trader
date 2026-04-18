@@ -10,6 +10,33 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
 
+def virtual_position_reference_price_for_monitor(pos: Dict[str, Any]) -> float:
+    """
+    가상보유 포지션 dict에서 감시 트리·monitor_info 표시용 참고 현재가를 꺼냅니다.
+
+    보유 탭(`virtual_tab`)과 동일하게 **계좌 동기화(ka10085) 스냅**을 우선합니다.
+    웹소켓 틱 전이라도 `ka_cur_prc` 또는 평가금액/수량으로 복원 가능하면 0 대신 표시합니다.
+
+    평균단가(`avg_price`)는 넣지 않습니다. 평단을 현재가처럼 쓰면 등락·미실현 표시가 오해를 부를 수 있습니다.
+
+    Returns:
+        0.0 초과 시 참고가, 없으면 0.0
+    """
+    try:
+        if not isinstance(pos, dict):
+            return 0.0
+        ka_cur = float(pos.get("ka_cur_prc") or 0)
+        if ka_cur > 0:
+            return ka_cur
+        qty = int(pos.get("qty", 0) or 0)
+        ka_ev = float(pos.get("ka_evlu_amt") or 0)
+        if ka_ev > 0 and qty > 0:
+            return float(ka_ev) / float(qty)
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    return 0.0
+
+
 class TradingController:
     """
     [v4.5.3] 트레이딩 생명주기 및 각 엔진의 흐트러진 제어권을 통합 관리하는 마스터 컨트롤러.
@@ -182,6 +209,7 @@ class TradingController:
                     continue
                 nm = pos.get("name") or c
                 ap = float(pos.get("avg_price", 0) or 0)
+                ref_p = virtual_position_reference_price_for_monitor(pos)
                 self.monitor_info[c] = {
                     "name": nm,
                     "ma20": 0.0,
@@ -190,7 +218,7 @@ class TradingController:
                     "score": 0.0,
                     "ma_buffer_scale": 1.0,
                     "open": ap,
-                    "last_price": 0.0,
+                    "last_price": float(ref_p),
                     "sel_track": "AB",
                     "vp_price_stub": True,
                 }

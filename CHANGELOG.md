@@ -7,6 +7,14 @@
 
 ---
 
+## 0.3.63 (2026-04-18)
+
+- **S1 ATR 트레일 표시·청산**: Type A·B 공통으로 **S1**에서 트랙별「ATR 분석 주기」(`use_atr_exit_a` / `use_atr_exit_b`)가 OFF인데도 `use_atr_trailing_stop_*` 기본값 True 때문에 감시·리포트에 **TRL** 이 나오던 현상 수정. 마스터 OFF 시 S1 트레일 비활성, SL만 ATR 토글이 켜진 경우 `SL …` 만 표시 (`backtest_engine.py` — `compute_atr_exit_display_text`, `evaluate_position`, TP 연기 분기).
+
+## 0.3.62 (2026-04-18)
+
+- **감시 트리·가상보유 스텁 현재가**: 선정 CSV에 없는 종목만 감시에 올릴 때(`vp_price_stub`) `last_price` 가 항상 0이던 문제 — 계좌 동기화 스냅(`ka_cur_prc`, 없으면 `ka_evlu_amt`/수량)으로 참고가를 채움. 보유 탭과 동일한 우선순위이며 평단은 넣지 않음 (`core/trading_controller.py`, `k_trader_gui.py`).
+
 ## 0.3.61 (2026-04-18)
 
 - **롤백(실시간 감시 UI)**: 0.3.59~0.3.60 에서 넣었던 `monitor_tab.py`·`k_trader_gui.py` 변경(현재가 0 보완·`monitor_info` 참조·ka10004 스캔 등)이 감시 중단·트리뷰 소실 등 부작용을 일으켜, 해당 두 파일을 **0.3.58 직후(워밍업 수정만 반영된 상태)** 로 되돌림. 포지션 탭 현재가는 기존처럼 계좌 스냅·REST 폴백 경로를 사용.

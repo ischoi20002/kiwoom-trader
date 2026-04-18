@@ -1,4 +1,5 @@
 import tkinter as tk
+import math
 import threading
 import os
 import json
@@ -81,6 +82,9 @@ class VirtualTab:
         # 보유 합계(수수료 제외) 값 라벨 — 손익 부호에 따라 전경색 갱신
         self._hold_agg_lbl_pnl: Optional[tk.Label] = None
         self._hold_agg_lbl_pct: Optional[tk.Label] = None
+        self._hold_fee_toggle_cv: Optional[tk.Canvas] = None
+        # 수수료 토글: UI(슬라이더) 즉시 반응 후 합계·트리는 after 로 지연
+        self._hold_fee_toggle_after_id: Optional[Any] = None
 
         self._setup_ui()
         self._render_virtual_positions()
@@ -120,6 +124,8 @@ class VirtualTab:
             "hold_sum_eval_ex": tk.StringVar(value="0"),
             "hold_sum_pnl_ex": tk.StringVar(value="0"),
             "hold_sum_pct_ex": tk.StringVar(value="0.00%"),
+            # 보유 합계 카드: 수수료 반영 표시 ON/OFF (기본 OFF = 수수료 제외 합계)
+            "hold_agg_fee_reflect": tk.BooleanVar(value=False),
         })
 
         for label, var, color in [
@@ -501,8 +507,11 @@ class VirtualTab:
             agg_card.pack(fill=tk.X)
             ipad = tk.Frame(agg_card, bg=card)
             ipad.pack(fill=tk.X, padx=8, pady=(4, 5))
+            toggle_col = tk.Frame(ipad, bg=card)
+            toggle_col.pack(side=tk.LEFT, padx=(2, 14), pady=(2, 0))
+            self._build_holdings_fee_toggle(toggle_col, card, border, sec)
             metrics = tk.Frame(ipad, bg=card)
-            metrics.pack(fill=tk.X)
+            metrics.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             stat_cols: Tuple[Tuple[str, str], ...] = (
                 ("매입금액", "hold_sum_buy_ex"),
                 ("평가금액", "hold_sum_eval_ex"),
@@ -1509,47 +1518,212 @@ class VirtualTab:
         except (TypeError, ValueError):
             return 0.0
 
-    def _update_holdings_aggregate_fee_excluded(self) -> None:
-        """보유 합계 라벨: 매입·평가·손익·수익율(매수·매도 수수료 미반영)."""
+    @staticmethod
+    def _finite_tree_float(x: object, fallback: float = 0.0) -> float:
+        """Treeview 숫자 표시용: nan·inf·변환 실패 시 fallback."""
         try:
-            mi = getattr(self.app, "monitor_info", None) or {}
-            s_cost = 0.0
-            s_eval = 0.0
-            for nk, pos in self._sorted_active_holdings():
-                info = mi.get(nk, {}) or {}
-                ap, qty, _cp, eval_amt, _bi = self._resolve_active_holdings_prices(
-                    nk, pos, info
-                )
-                s_cost += self._holding_cost_ex_fee(ap, qty)
-                s_eval += float(eval_amt)
-            s_pnl = s_eval - s_cost
-            if s_cost > 1e-6:
-                s_pct = (s_pnl / s_cost) * 100.0
-            else:
-                s_pct = 0.0
-            self.vars["hold_sum_buy_ex"].set(f"{int(round(s_cost)):,}")
-            self.vars["hold_sum_eval_ex"].set(f"{int(round(s_eval)):,}")
-            self.vars["hold_sum_pnl_ex"].set(f"{int(round(s_pnl)):+,}")
-            self.vars["hold_sum_pct_ex"].set(f"{s_pct:+.2f}%")
-            # 손익·수익율: 흑자/적자 색 (0 근처는 기본 전경)
-            c2 = getattr(self.app, "colors", None) or {}
-            base_fg = str(c2.get("fg", "#ECEFF4"))
-            ok_c = str(c2.get("success", "#A3BE8C"))
-            ng_c = str(c2.get("danger", "#BF616A"))
-            lp = getattr(self, "_hold_agg_lbl_pnl", None)
-            lr = getattr(self, "_hold_agg_lbl_pct", None)
-            if lp is not None and lr is not None:
-                if s_pnl > 0.5:
-                    col = ok_c
-                elif s_pnl < -0.5:
-                    col = ng_c
-                else:
-                    col = base_fg
+            v = float(x)
+        except (TypeError, ValueError):
+            return float(fallback)
+        if not math.isfinite(v):
+            return float(fallback)
+        return float(v)
+
+    def _build_holdings_fee_toggle(
+        self,
+        parent: tk.Widget,
+        card: str,
+        border: str,
+        sec: str,
+    ) -> None:
+        """보유 합계 카드 왼쪽: 수수료반영 슬라이드 스위치(기본 OFF)."""
+        try:
+            bg = card
+            wrap = tk.Frame(parent, bg=bg)
+            wrap.pack(anchor=tk.N)
+            tk.Label(
+                wrap,
+                text="수수료반영",
+                font=("Malgun Gothic", 8),
+                bg=bg,
+                fg=sec,
+            ).pack(anchor=tk.CENTER)
+            cv = tk.Canvas(
+                wrap,
+                width=48,
+                height=26,
+                bg=bg,
+                highlightthickness=0,
+                bd=0,
+                cursor="hand2",
+            )
+            cv.pack(anchor=tk.CENTER, pady=(4, 0))
+            self._hold_fee_toggle_cv = cv
+
+            def _on_click(_event: tk.Event) -> None:
                 try:
-                    lp.config(foreground=col)
-                    lr.config(foreground=col)
-                except tk.TclError:
-                    pass
+                    v = self.vars.get("hold_agg_fee_reflect")
+                    if v is None:
+                        return
+                    v.set(not bool(v.get()))
+                    # 슬라이더는 즉시 그림 → 메인 스레드가 바로 돌아가 체감 반응 개선
+                    self._redraw_holdings_fee_toggle_canvas()
+                    try:
+                        cv.update_idletasks()
+                    except (tk.TclError, AttributeError):
+                        pass
+                    self._schedule_holdings_fee_toggle_apply()
+                except (tk.TclError, AttributeError) as e:
+                    try:
+                        print(f"[UI] 수수료반영 토글 오류: {e}")
+                    except Exception:
+                        pass
+
+            cv.bind("<Button-1>", _on_click)
+            self._redraw_holdings_fee_toggle_canvas()
+        except Exception as e:
+            try:
+                print(f"[UI Error] _build_holdings_fee_toggle: {e}")
+            except Exception:
+                pass
+            self._hold_fee_toggle_cv = None
+
+    def _redraw_holdings_fee_toggle_canvas(self) -> None:
+        """외부에서 값이 바뀐 경우 등 토글 캔버스만 동기화."""
+        cv = getattr(self, "_hold_fee_toggle_cv", None)
+        if cv is None:
+            return
+        try:
+            cv.delete("all")
+            v = self.vars.get("hold_agg_fee_reflect")
+            on = bool(v is not None and v.get())
+            cset = getattr(self.app, "colors", None) or {}
+            border = str(cset.get("border", "#4C566A"))
+            track_off = str(cset.get("border", "#4C566A"))
+            track_on = str(cset.get("secondary", "#81A1C1"))
+            knob = str(cset.get("fg", "#ECEFF4"))
+            track_fill = track_on if on else track_off
+            cv.create_rectangle(4, 9, 44, 17, fill=track_fill, outline=track_fill)
+            cx = 34 if on else 14
+            cv.create_oval(cx - 9, 5, cx + 9, 21, fill=knob, outline=border, width=1)
+        except tk.TclError:
+            pass
+
+    def _holdings_agg_fee_reflect_on(self) -> bool:
+        """보유 합계·종목행 표시: 수수료반영 토글 ON 여부."""
+        try:
+            bv = self.vars.get("hold_agg_fee_reflect")
+            return bool(bv is not None and bv.get())
+        except (tk.TclError, TypeError, AttributeError):
+            return False
+
+    def _apply_holdings_aggregate_display(self, s_den: float, s_eval: float, s_pnl: float) -> None:
+        """합계 카드 숫자·손익 색·토글 캔버스까지 반영."""
+        if s_den > 1e-6:
+            s_pct = (s_pnl / s_den) * 100.0
+        else:
+            s_pct = 0.0
+
+        buy_disp = int(round(s_den))
+        self.vars["hold_sum_buy_ex"].set(f"{buy_disp:,}")
+        self.vars["hold_sum_eval_ex"].set(f"{int(round(s_eval)):,}")
+        self.vars["hold_sum_pnl_ex"].set(f"{int(round(s_pnl)):+,}")
+        self.vars["hold_sum_pct_ex"].set(f"{s_pct:+.2f}%")
+
+        self._redraw_holdings_fee_toggle_canvas()
+
+        c2 = getattr(self.app, "colors", None) or {}
+        base_fg = str(c2.get("fg", "#ECEFF4"))
+        ok_c = str(c2.get("success", "#A3BE8C"))
+        ng_c = str(c2.get("danger", "#BF616A"))
+        lp = getattr(self, "_hold_agg_lbl_pnl", None)
+        lr = getattr(self, "_hold_agg_lbl_pct", None)
+        if lp is not None and lr is not None:
+            if s_pnl > 0.5:
+                col = ok_c
+            elif s_pnl < -0.5:
+                col = ng_c
+            else:
+                col = base_fg
+            try:
+                lp.config(foreground=col)
+                lr.config(foreground=col)
+            except tk.TclError:
+                pass
+
+    def _holdings_full_row_cache(
+        self,
+    ) -> List[Tuple[str, Dict[str, Any], Dict[str, Any], Tuple[float, int, float, float, int], float]]:
+        """
+        보유 1회 스캔: 시세 resolve + 미실현(수수료포함)만 계산.
+        토글 시 합계·트리에서 동일 값을 재사용해 중복 연산을 줄인다.
+        """
+        mi = getattr(self.app, "monitor_info", None) or {}
+        out: List[
+            Tuple[str, Dict[str, Any], Dict[str, Any], Tuple[float, int, float, float, int], float]
+        ] = []
+        for nk, pos in self._sorted_active_holdings():
+            info = mi.get(nk, {}) or {}
+            try:
+                ap, qty, curr_p, eval_amt, bi = self._resolve_active_holdings_prices(nk, pos, info)
+                ur = self._finite_tree_float(
+                    self._unrealized_at_price_net_of_sell_fee(pos, float(curr_p), qty, ap)
+                )
+            except Exception:
+                try:
+                    ap, qty, curr_p, eval_amt, bi = self._resolve_active_holdings_prices(
+                        nk, pos, info
+                    )
+                except Exception:
+                    continue
+                ur = 0.0
+            out.append((nk, pos, info, (ap, qty, curr_p, eval_amt, bi), ur))
+        return out
+
+    def _update_holdings_aggregate_fee_excluded(self) -> None:
+        """보유 합계 카드: 매입·평가·손익·수익율. 토글 OFF=수수료 제외, ON=수수료 반영."""
+        try:
+            fee_on = self._holdings_agg_fee_reflect_on()
+
+            mi = getattr(self.app, "monitor_info", None) or {}
+            s_eval = 0.0
+            s_pnl = 0.0
+            s_den = 0.0  # 수익률 분모(토글에 따라 매입 정의)
+
+            if not fee_on:
+                s_den = 0.0
+                for nk, pos in self._sorted_active_holdings():
+                    info = mi.get(nk, {}) or {}
+                    ap, qty, _cp, eval_amt, _bi = self._resolve_active_holdings_prices(
+                        nk, pos, info
+                    )
+                    s_den += self._holding_cost_ex_fee(ap, qty)
+                    s_eval += float(eval_amt)
+                s_pnl = s_eval - s_den
+            else:
+                for nk, pos in self._sorted_active_holdings():
+                    info = mi.get(nk, {}) or {}
+                    ap, qty, curr_p, eval_amt, _bi = self._resolve_active_holdings_prices(
+                        nk, pos, info
+                    )
+                    try:
+                        inv = float(pos.get("invested", 0) or 0)
+                    except (TypeError, ValueError):
+                        inv = 0.0
+                    s_den += inv
+                    try:
+                        ur = float(
+                            self._unrealized_at_price_net_of_sell_fee(
+                                pos, float(curr_p), int(qty), float(ap)
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        ur = 0.0
+                    s_pnl += ur
+                    # 평가금액: 전량 매도·매도수수료 차감 후 순매각대금(행 합계 = 매입+미실현)
+                    s_eval += inv + ur
+
+            self._apply_holdings_aggregate_display(s_den, s_eval, s_pnl)
         except Exception:
             try:
                 self.vars["hold_sum_buy_ex"].set("0")
@@ -1567,6 +1741,106 @@ class VirtualTab:
             except Exception:
                 pass
 
+    def _schedule_holdings_fee_toggle_apply(self) -> None:
+        """합계·트리 갱신을 다음 이벤트 루프로 미룸(연속 클릭 시 직전 예약 취소)."""
+        try:
+            aid = getattr(self, "_hold_fee_toggle_after_id", None)
+            if aid is not None:
+                try:
+                    self.parent.after_cancel(aid)
+                except (tk.TclError, ValueError, AttributeError):
+                    pass
+                self._hold_fee_toggle_after_id = None
+            self._hold_fee_toggle_after_id = self.parent.after(
+                0, self._deferred_holdings_fee_toggle_apply
+            )
+        except Exception:
+            try:
+                self._apply_holdings_fee_toggle_fast()
+            except Exception:
+                pass
+
+    def _deferred_holdings_fee_toggle_apply(self) -> None:
+        """after 콜백: 예약 id 정리 후 실제 계산·트리 반영."""
+        try:
+            self._hold_fee_toggle_after_id = None
+        except Exception:
+            pass
+        try:
+            self._apply_holdings_fee_toggle_fast()
+        except Exception:
+            pass
+
+    def _apply_holdings_fee_toggle_fast(self) -> None:
+        """수수료 토글: 1회 스캔으로 합계+트리 갱신(중복 resolve/미실현 제거)."""
+        try:
+            rows = self._holdings_full_row_cache()
+            fee_on = self._holdings_agg_fee_reflect_on()
+            s_eval = 0.0
+            s_pnl = 0.0
+            s_den = 0.0
+            if not fee_on:
+                for _nk, pos, _info, res, _ur in rows:
+                    ap, qty, _cp, eval_amt, _bi = res
+                    s_den += self._holding_cost_ex_fee(ap, qty)
+                    s_eval += float(eval_amt)
+                s_pnl = s_eval - s_den
+            else:
+                for _nk, pos, _info, res, ur in rows:
+                    ap, qty, _cp, _eval_amt, _bi = res
+                    try:
+                        inv = float(pos.get("invested", 0) or 0)
+                    except (TypeError, ValueError):
+                        inv = 0.0
+                    s_den += inv
+                    s_pnl += ur
+                    s_eval += inv + ur
+
+            self._apply_holdings_aggregate_display(s_den, s_eval, s_pnl)
+
+            if not self._active_tree_ready():
+                return
+
+            total_eval_weight = 0.0
+            for _nk, _pos, _info, res, _ur in rows:
+                total_eval_weight += self._finite_tree_float(float(res[3]))
+
+            valid_nks = {r[0] for r in rows}
+            for idx, (nk, pos, info, res, ur) in enumerate(rows):
+                vals, row_tags, _, _, _, _ = self._active_row_vals_and_tags(
+                    idx,
+                    nk,
+                    pos,
+                    info,
+                    total_eval_weight,
+                    _resolved=res,
+                    _ur_fee_incl=ur,
+                )
+                self._upsert_active_tree_row(nk, vals, row_tags)
+
+            tr = self.tree_active
+            if tr is not None and valid_nks:
+                try:
+                    for cid in list(tr.get_children()):
+                        if cid not in valid_nks:
+                            self._remove_active_tree_row(cid)
+                except Exception as e:
+                    try:
+                        print(f"[UI] 보유 트리 고아 행 제거 실패: {e}")
+                    except Exception:
+                        pass
+            self._reorder_active_tree_rows()
+        except Exception as e:
+            try:
+                print(f"[UI] 빠른 수수료 토글 실패, 일반 경로로 폴백: {e}")
+            except Exception:
+                pass
+            try:
+                self._update_holdings_aggregate_fee_excluded()
+                self._refresh_active_holdings_tree_rows()
+            except Exception:
+                pass
+
     def _active_row_vals_and_tags(
         self,
         row_idx: int,
@@ -1574,49 +1848,99 @@ class VirtualTab:
         pos: Dict[str, Any],
         info: Dict[str, Any],
         total_eval_for_weight: Optional[float] = None,
-    ) -> Tuple[tuple, Tuple[str, ...], float, float, float]:
+        *,
+        _resolved: Optional[Tuple[float, int, float, float, int]] = None,
+        _ur_fee_incl: Optional[float] = None,
+    ) -> Tuple[tuple, Tuple[str, ...], float, float, float, float]:
         """
-        실시간 보유 한 행의 values·tags·수익률% (트리/요약 공통).
-        반환 (vals, tags, profit_pct, unrealized_raw, eval_amt_raw):
-        상단 요약 합계는 **트리와 동일**한 unrealized·eval을 쓰려면 이 값을 그대로 더하면 됩니다.
-        `total_eval_for_weight`: 보유비중(%) 분모. None이면 해당 열은 '—'.
-        """
-        ap, qty, curr_p, eval_amt, buy_in_amt = self._resolve_active_holdings_prices(
-            nk, pos, info
-        )
+        실시간 보유 한 행.
 
-        unrealized = self._unrealized_at_price_net_of_sell_fee(pos, float(curr_p), qty, ap)
-        try:
-            inv_pf = float(pos.get("invested", 0) or 0)
-        except (TypeError, ValueError):
-            inv_pf = 0.0
-        if inv_pf <= 1e-9 and ap > 0 and qty > 0:
-            inv_pf = float(ap) * float(qty)
-        if inv_pf > 1e-9:
-            profit_pct = (unrealized / inv_pf) * 100.0
-        elif ap > 0 and float(curr_p) > 0:
-            profit_pct = (float(curr_p) / ap - 1.0) * 100.0
+        반환
+        ----
+        (vals, tags, profit_pct_for_tag, unrealized_for_tag, eval_amt_gross_for_weight, unrealized_fee_included)
+            - ``hold_agg_fee_reflect`` OFF: 매입=평단×수량, 평가=시장평가액, 손익·% = 수수료 미반영.
+            - ON: 매입=invested, 평가=순매각대금(invested+미실현), 손익·% = 매도수수료·매입원 반영.
+            ``eval_amt_gross_for_weight``: 보유비중 분모용(항상 시장 평가액 합 기준).
+            ``unrealized_fee_included``: 상단 계좌 요약 합산용(변경 없음).
+        `total_eval_for_weight`: 보유비중(%) 분모. None이면 해당 열은 '—'.
+        `_resolved` / `_ur_fee_incl`: 토글 등에서 이미 계산한 시세·미실현을 넘기면 중복 연산 생략.
+        """
+        if _resolved is not None:
+            ap, qty, curr_p, eval_amt, _buy_in_amt = _resolved
         else:
-            profit_pct = 0.0
-        p_str = f"{profit_pct:+.2f}%"
+            ap, qty, curr_p, eval_amt, _buy_in_amt = self._resolve_active_holdings_prices(
+                nk, pos, info
+            )
+
+        if _ur_fee_incl is not None:
+            unrealized_fee_included = self._finite_tree_float(_ur_fee_incl)
+        else:
+            unrealized_fee_included = self._finite_tree_float(
+                self._unrealized_at_price_net_of_sell_fee(pos, float(curr_p), qty, ap)
+            )
+        cost_ex = self._holding_cost_ex_fee(ap, qty)
+        try:
+            inv = float(pos.get("invested", 0) or 0)
+        except (TypeError, ValueError):
+            inv = 0.0
+
+        gross_eval = self._finite_tree_float(float(eval_amt))
+        fee_on = self._holdings_agg_fee_reflect_on()
+        if not fee_on:
+            unrealized_row = gross_eval - float(cost_ex)
+            buy_disp = int(round(float(cost_ex)))
+            eval_disp = int(round(gross_eval))
+            if cost_ex > 1e-6:
+                profit_pct_row = (unrealized_row / cost_ex) * 100.0
+            elif ap > 0 and float(curr_p) > 0:
+                profit_pct_row = (float(curr_p) / float(ap) - 1.0) * 100.0
+            else:
+                profit_pct_row = 0.0
+        else:
+            unrealized_row = float(unrealized_fee_included)
+            buy_disp = int(round(inv)) if inv > 1e-6 else int(round(float(cost_ex)))
+            eval_disp = int(round(inv + unrealized_row))
+            if inv > 1e-6:
+                profit_pct_row = (unrealized_row / inv) * 100.0
+            elif cost_ex > 1e-6:
+                profit_pct_row = (unrealized_row / cost_ex) * 100.0
+            elif ap > 0 and float(curr_p) > 0:
+                profit_pct_row = (float(curr_p) / float(ap) - 1.0) * 100.0
+            else:
+                profit_pct_row = 0.0
+
+        unrealized_row = self._finite_tree_float(unrealized_row)
+        profit_pct_row = self._finite_tree_float(profit_pct_row)
+        p_str = f"{profit_pct_row:+.2f}%"
         entry_disp = self._format_entry_datetime(pos.get("entry_time", ""))
         tag_base = "even" if row_idx % 2 == 0 else "odd"
         p_tag = (
             "price_up"
-            if profit_pct > 0
-            else ("price_down" if profit_pct < 0 else "")
+            if unrealized_row > 0
+            else ("price_down" if unrealized_row < 0 else "")
         )
-        nm = pos.get("name", nk)
+        # name 키가 "" 로 있으면 get(name, nk) 가 빈칸이 되므로 종목코드로 폴백
+        try:
+            raw_nm = pos.get("name")
+            nm = (str(raw_nm).strip() if raw_nm is not None else "") or str(nk)
+        except Exception:
+            nm = str(nk)
         day_chg_disp = self._fmt_active_vs_prev(info)
         try:
             te = float(total_eval_for_weight) if total_eval_for_weight is not None else 0.0
         except (TypeError, ValueError):
             te = 0.0
+        if not math.isfinite(te):
+            te = 0.0
         if total_eval_for_weight is None or te <= 1e-9:
             wt_disp = "—"
         else:
             try:
-                wt_disp = f"{(float(eval_amt) / te) * 100.0:.2f}%"
+                ratio = (gross_eval / te) * 100.0
+                if not math.isfinite(ratio):
+                    wt_disp = "—"
+                else:
+                    wt_disp = f"{ratio:.2f}%"
             except Exception:
                 wt_disp = "—"
         vals = (
@@ -1624,23 +1948,76 @@ class VirtualTab:
             nk,
             nm,
             f"{qty:,}",
-            f"{int(unrealized):+,}",
+            f"{int(round(unrealized_row)):+,}",
             p_str,
-            f"{int(eval_amt):,}",
-            f"{buy_in_amt:,}",
+            f"{eval_disp:,}",
+            f"{buy_disp:,}",
             f"{curr_p:,.0f}",
             f"{ap:,.0f}",
             day_chg_disp,
             wt_disp,
         )
-        # 전체 렌더와 동일하게 항상 (줄무늬, 방향) 2튜플 + 요약 합산용 원시 금액
         return (
             vals,
             (tag_base, p_tag),
-            float(profit_pct),
-            float(unrealized),
-            float(eval_amt),
+            float(profit_pct_row),
+            float(unrealized_row),
+            float(gross_eval),
+            float(unrealized_fee_included),
         )
+
+    def _refresh_active_holdings_tree_rows(self) -> None:
+        """수수료반영 토글 등 표시 규칙만 바뀐 뒤 보유 트리 열 값을 즉시 다시 채웁니다."""
+        if not self._active_tree_ready():
+            return
+        try:
+            mi = getattr(self.app, "monitor_info", None) or {}
+            holdings = self._sorted_active_holdings()
+            valid_nks = {nk for nk, _ in holdings}
+            total_eval_weight = 0.0
+            for idx, (nk, pos) in enumerate(holdings):
+                try:
+                    info = mi.get(nk, {}) or {}
+                    _va, _tg, _pc, _ur, ev_part, _un = self._active_row_vals_and_tags(
+                        idx, nk, pos, info, None
+                    )
+                    total_eval_weight += float(ev_part)
+                except Exception as e:
+                    try:
+                        print(f"[UI] 보유 가중치 계산 스킵({nk}): {e}")
+                    except Exception:
+                        pass
+            for idx, (nk, pos) in enumerate(holdings):
+                try:
+                    info = mi.get(nk, {}) or {}
+                    vals, row_tags, _, _, _, _ = self._active_row_vals_and_tags(
+                        idx, nk, pos, info, total_eval_weight
+                    )
+                    self._upsert_active_tree_row(nk, vals, row_tags)
+                except Exception as e:
+                    try:
+                        print(f"[UI] 보유 행 갱신 스킵({nk}): {e}")
+                    except Exception:
+                        pass
+            tr = self.tree_active
+            # 정규화 전 iid·중복 삽입 등으로 남은 고아 행이 있으면 move 순서가 밀려
+            # 특정 슬롯이 비어 보이거나 다른 종목이 끼어 보일 수 있어 제거한다.
+            if tr is not None and valid_nks:
+                try:
+                    for cid in list(tr.get_children()):
+                        if cid not in valid_nks:
+                            self._remove_active_tree_row(cid)
+                except Exception as e:
+                    try:
+                        print(f"[UI] 보유 트리 고아 행 제거 실패: {e}")
+                    except Exception:
+                        pass
+            self._reorder_active_tree_rows()
+        except Exception as e:
+            try:
+                print(f"[UI Error] _refresh_active_holdings_tree_rows: {e}")
+            except Exception:
+                pass
 
     def _active_tree_ready(self) -> bool:
         return self.tree_active is not None
@@ -1661,11 +2038,21 @@ class VirtualTab:
             if tr is None:
                 return
             ordered = [nk for nk, _ in self._sorted_active_holdings()]
-            for i, nk in enumerate(ordered):
+            try:
+                if list(tr.get_children()) == ordered:
+                    return
+            except (tk.TclError, AttributeError):
+                pass
+            # 0→N-1 순으로 연속 move() 하면 Windows ttk에서 중간에 빈 칸·행 순서 꼬임이
+            # 나는 사례가 있어, 목표 인덱스가 큰 행부터 옮긴다.
+            for i in range(len(ordered) - 1, -1, -1):
+                nk = ordered[i]
                 if not tr.exists(nk):
                     continue
                 try:
                     tr.move(nk, "", i)
+                except tk.TclError:
+                    pass
                 except Exception:
                     pass
         except Exception as e:
@@ -1764,7 +2151,7 @@ class VirtualTab:
         try:
             for idx, (nk, pos) in enumerate(active_list):
                 info = mi.get(nk, {}) or {}
-                _, _, _, _, ev_part = self._active_row_vals_and_tags(
+                _, _, _, _, ev_part, _ = self._active_row_vals_and_tags(
                     idx, nk, pos, info, None
                 )
                 total_eval_weight += float(ev_part)
@@ -1772,12 +2159,12 @@ class VirtualTab:
             total_eval_weight = 0.0
         for idx, (nk, pos) in enumerate(active_list):
             info = mi.get(nk, {}) or {}
-            vals, row_tags, profit_pct, ur_row, ev_row = self._active_row_vals_and_tags(
+            vals, row_tags, _pct, _ur_ex, ev_row, ur_net = self._active_row_vals_and_tags(
                 idx, nk, pos, info, total_eval_weight
             )
             total_eval += ev_row
             total_invested += float(pos.get("invested", 0) or 0)
-            total_unrealized_pnl += ur_row
+            total_unrealized_pnl += ur_net
 
             updated_nks.add(nk)
             if self._active_tree_ready():
@@ -1808,7 +2195,7 @@ class VirtualTab:
         stock_eval = self._stock_eval_for_summary(portfolio, float(total_eval))
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
-        # 보유주식 손익(미청산): 금일 청산 실현은 제외, 현재 보유 종목 손익금(미실현) 합만.
+        # 보유주식 손익(미청산): 수수료·매입원가 반영 미실현 합(트리 열과 별도).
         # %는 보유 매입금(invested, 매수수수료 포함) 합 대비.
         day_pnl_total = float(total_unrealized_pnl)
         try:
@@ -1855,7 +2242,7 @@ class VirtualTab:
             try:
                 for idx, (nk, pos) in enumerate(holdings):
                     info = mi.get(nk, {}) or {}
-                    _, _, _, _, ev_part = self._active_row_vals_and_tags(
+                    _, _, _, _, ev_part, _ = self._active_row_vals_and_tags(
                         idx, nk, pos, info, None
                     )
                     total_eval_weight += float(ev_part)
@@ -1863,7 +2250,7 @@ class VirtualTab:
                 total_eval_weight = 0.0
             for idx, (nk, pos) in enumerate(holdings):
                 info = mi.get(nk, {}) or {}
-                vals, row_tags, profit_pct, _, _ = self._active_row_vals_and_tags(
+                vals, row_tags, _, _, _, _ = self._active_row_vals_and_tags(
                     idx, nk, pos, info, total_eval_weight
                 )
                 self._upsert_active_tree_row(nk, vals, row_tags)
@@ -1898,7 +2285,7 @@ class VirtualTab:
             try:
                 for idx, (nk, pos) in enumerate(holdings):
                     info = mi.get(nk, {}) or {}
-                    _, _, _, _, ev_part = self._active_row_vals_and_tags(
+                    _, _, _, _, ev_part, _ = self._active_row_vals_and_tags(
                         idx, nk, pos, info, None
                     )
                     total_eval_weight += float(ev_part)
@@ -1909,11 +2296,11 @@ class VirtualTab:
             total_invested_open = 0.0
             for idx, (nk, pos) in enumerate(holdings):
                 info = mi.get(nk, {}) or {}
-                _v, _t, _p, ur_row, ev_row = self._active_row_vals_and_tags(
+                _v, _t, _p, _ur_ex, ev_row, ur_net = self._active_row_vals_and_tags(
                     idx, nk, pos, info, total_eval_weight
                 )
                 total_eval += ev_row
-                total_unrealized_pnl += ur_row
+                total_unrealized_pnl += ur_net
                 try:
                     total_invested_open += float(pos.get("invested", 0) or 0)
                 except (TypeError, ValueError):
@@ -2634,13 +3021,19 @@ class VirtualTab:
         bg_odd = "#3B4252"
         up_col = "#E35F5F" # Nord Red variant
         dn_col = "#81A1C3" # Nord Blue variant
+        try:
+            cset = getattr(self.app, "colors", None) or {}
+            row_fg = str(cset.get("fg", "#ECEFF4"))
+        except Exception:
+            row_fg = "#ECEFF4"
         
         for t in [self.tree_active, self.tree_orders]:
             if t is None:
                 continue
             # [v4.8.4] TCheckbutton 스타일은 메인에서 관리하므로 태그에 집중
-            t.tag_configure("even", background=bg_even)
-            t.tag_configure("odd", background=bg_odd)
+            # even/odd 에 기본 전경을 두어, 손익 태그 제거 후 글자색이 배경에 묻는(ttk) 현상을 막음
+            t.tag_configure("even", background=bg_even, foreground=row_fg)
+            t.tag_configure("odd", background=bg_odd, foreground=row_fg)
             
             # [v4.7.5] 글로벌 일관성을 위해 고밀도 시인성 컬러 적용
             t.tag_configure("price_up", foreground=up_col)

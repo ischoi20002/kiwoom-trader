@@ -846,6 +846,39 @@ class TradingStrategy:
         }
 
     @staticmethod
+    def _effective_use_atr_trailing_for_stage(
+        _settings: dict,
+        _rx: dict,
+        stage: Any,
+        use_trailing_stop_toggle: bool,
+    ) -> bool:
+        """
+        ATR 트레일(표시·청산) 적용 여부.
+
+        설정 UI: S1에서「ATR 트레일링」토글은 ATR 분석 주기와 함께 설명되며,
+        **S1 구간**에서는 트랙별 `use_atr_exit_a` / `use_atr_exit_b`(마스터)가 꺼져 있으면
+        트레일을 쓰지 않는 것이 맞다. 기본값 `use_atr_trailing_stop_*` True 만으로 TRL 이
+        표시되던 버그를 막는다.
+
+        S2(`_s2` / `_s2_b`)는 추매 전용 토글·배수로 처리하고, 여기서는 단계만 구분한다.
+        """
+        try:
+            st = int(float(stage))
+        except (TypeError, ValueError):
+            st = 1
+        try:
+            if st != 1:
+                return bool(use_trailing_stop_toggle)
+            if not bool((_rx or {}).get("use_atr_exit", False)):
+                return False
+        except Exception:
+            try:
+                return bool(use_trailing_stop_toggle)
+            except Exception:
+                return False
+        return bool(use_trailing_stop_toggle)
+
+    @staticmethod
     def _use_atr_trail_only_after_tp_for_stage(
         settings: dict | None, is_type_b: bool, stage: int | float
     ) -> bool:
@@ -1133,6 +1166,9 @@ class TradingStrategy:
                 s.get(f"use_atr_stop_loss{suff}", TradingStrategy._default_use_atr_stop_loss(suff))
             )
             use_trail_atr = bool(s.get(f"use_atr_trailing_stop{suff}", True))
+            use_trail_atr = TradingStrategy._effective_use_atr_trailing_for_stage(
+                s, _rx, stage, use_trail_atr
+            )
             run_atr_exit = bool(_rx["use_atr_exit"]) or (
                 curr_atr > 0 and (use_sl_atr or use_trail_atr)
             )
@@ -1335,7 +1371,10 @@ class TradingStrategy:
         if _trail_only_after_tp:
             try:
                 _sfx_defer = _atr_track_suff()
-                if s.get(f"use_atr_trailing_stop{_sfx_defer}", True):
+                _raw_tr = bool(s.get(f"use_atr_trailing_stop{_sfx_defer}", True))
+                if TradingStrategy._effective_use_atr_trailing_for_stage(
+                    s, _rx, stage, _raw_tr
+                ):
                     defer_fixed_tp_for_trail = True
             except Exception:
                 pass
@@ -1425,6 +1464,12 @@ class TradingStrategy:
                     TradingStrategy._default_use_atr_stop_loss(suff),
                 )
                 use_trail_atr = s.get(f"use_atr_trailing_stop{suff}", True)
+                try:
+                    use_trail_atr = TradingStrategy._effective_use_atr_trailing_for_stage(
+                        s, _rx, stage, bool(use_trail_atr)
+                    )
+                except Exception:
+                    use_trail_atr = bool(use_trail_atr)
                 run_atr_exit = _rx["use_atr_exit"] or (
                     curr_atr > 0 and (use_sl_atr or use_trail_atr)
                 )
