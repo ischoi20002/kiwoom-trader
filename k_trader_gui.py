@@ -1066,6 +1066,10 @@ class KiwoomApp:
                 self.pending_tree_updates, self.portfolio.virtual_positions
             )
             try:
+                self.monitor_tab.maybe_backfill_zero_prices_from_rest()
+            except Exception:
+                pass
+            try:
                 self.monitor_tab.maybe_reconcile_monitor_trees(
                     getattr(self, "monitor_info", None) or {},
                     self.portfolio.virtual_positions,
@@ -1321,8 +1325,9 @@ class KiwoomApp:
                 self.monitor_tab.update_watchlist(self.monitor_info)
         elif status == "STARTED":
             self.is_monitoring = True
+            # shallow copy(dict)는 틱이 컨트롤러 쪽 dict 만 갱신할 때 앱과 어긋날 수 있어 동일 참조 유지
             try:
-                self.monitor_info = dict(self.trading_controller.monitor_info or {})
+                self.monitor_info = self.trading_controller.monitor_info
             except Exception:
                 pass
             self._maybe_start_account_sync_timer()
