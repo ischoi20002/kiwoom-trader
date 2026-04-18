@@ -7,6 +7,10 @@
 
 ---
 
+## 0.3.55 (2026-04-18)
+
+- **실시간 워밍업(RT15m DB)**: `ORDER BY datetime DESC LIMIT` 으로만 메모리에 올린 프레임의 `index.min()` 으로는 DB 에 쌓인 **실제 과거 깊이**를 알 수 없어, 재시작 후에도 `과거 N일 미충족`으로 오판하며 ka10080 캘린더·깊이 조회가 반복되던 문제 수정 — RT15m SQLite 에서 `MIN(datetime)` 으로 깊이 판정 (`core/warmup_service.py`, `core/realtime_monitor_bars_store.py`).
+
 ## 0.3.54 (2026-04-18)
 
 - **데이터 하베스팅(GUI)**: 시작 안내를 `messagebox` 대신 **2초 후 자동 닫힘** 비모달 창으로 표시(`ui/tabs/backtest_tab.py`).

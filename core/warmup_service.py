@@ -107,6 +107,35 @@ class WarmupService:
         except Exception:
             return False
 
+    def _calendar_depth_satisfied_for_code(
+        self,
+        code: str,
+        merged: pd.DataFrame,
+        retention_days: int,
+    ) -> bool:
+        """
+        깊이 충족 여부.
+        realtime_15m DB 는 워밍업 로드가 `ORDER BY datetime DESC LIMIT N` 이라
+        메모리 프레임의 index.min() 이 DB 안의 **진짜** 최저 시각이 아닐 수 있다(가장 흔한 재API 원인).
+        이 경우 RT15m SQLite 에서 MIN(datetime) 으로 판정한다.
+        """
+        try:
+            src = self._warmup_ohlcv_source()
+            if src == "realtime_15m_db_then_api":
+                store = getattr(self.app, "realtime_monitor_bars_store", None)
+                if store is not None:
+                    tmin = store.earliest_bar_datetime_in_retention(
+                        code, retention_days
+                    )
+                    if tmin is not None and pd.notna(tmin):
+                        cutoff = pd.Timestamp.now() - timedelta(
+                            days=int(retention_days)
+                        )
+                        return bool(pd.Timestamp(tmin) <= cutoff)
+        except Exception:
+            pass
+        return self._calendar_depth_satisfied(merged, retention_days)
+
     def _bars_max_keep(self) -> int:
         try:
             return max(60, int(float(self.app.settings.get("realtime_bars_max_keep", 300))))
@@ -477,7 +506,9 @@ class WarmupService:
                     len(merged) if merged is not None and not merged.empty else 0
                 )
                 if deep_fetch:
-                    depth_ok = self._calendar_depth_satisfied(merged, retention_days)
+                    depth_ok = self._calendar_depth_satisfied_for_code(
+                        code, merged, retention_days
+                    )
                     intraday_ok = not self._needs_intraday_api_backfill(merged)
                     if depth_ok and intraday_ok:
                         early_stop = True
@@ -661,7 +692,9 @@ class WarmupService:
                 need_depth = False
                 use_deep_fetch = False
             else:
-                need_depth = deep and not self._calendar_depth_satisfied(base, rd)
+                need_depth = deep and not self._calendar_depth_satisfied_for_code(
+                    code, base, rd
+                )
                 use_deep_fetch = deep
             if not short and not gap and not need_depth:
                 return base

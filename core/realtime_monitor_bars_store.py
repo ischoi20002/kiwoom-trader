@@ -270,6 +270,46 @@ class RealtimeMonitorBarsStore:
                 pass
             return 0
 
+    def earliest_bar_datetime_in_retention(
+        self,
+        code: str,
+        retention_days: Optional[int] = None,
+    ) -> Optional[pd.Timestamp]:
+        """
+        보존 구간(`datetime >= cutoff`) 안에서 해당 종목의 **가장 오래된** 봉 시각.
+        워밍업 시 LIMIT 으로 최신 N개만 로드하면 index.min() 으로는 깊이를 판단할 수 없어
+        별도 MIN 쿼리로 판별한다.
+        """
+        nc = _norm_code(code)
+        if not nc:
+            return None
+        try:
+            rd = int(retention_days) if retention_days is not None else self._retention_days
+            rd = max(1, min(rd, 3650))
+            cutoff = self._retention_cutoff_str(rd)
+        except Exception:
+            cutoff = self._retention_cutoff_str()
+        try:
+            with self._lock:
+                with sqlite3.connect(self._db_path) as conn:
+                    cur = conn.execute(
+                        """
+                        SELECT MIN(datetime) FROM bars_15m_rt
+                        WHERE code = ? AND datetime >= ?
+                        """,
+                        (nc, cutoff),
+                    )
+                    row = cur.fetchone()
+            if not row or row[0] is None:
+                return None
+            return pd.Timestamp(str(row[0]))
+        except Exception as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] MIN(datetime) 조회 실패 ({nc}): {e}")
+            except Exception:
+                pass
+            return None
+
     def fetch_15m_bars_as_dataframe(
         self,
         code: str,
