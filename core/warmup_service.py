@@ -722,7 +722,10 @@ class WarmupService:
                 need_depth = deep and not self._calendar_depth_satisfied_for_code(
                     code, base, rd
                 )
-                use_deep_fetch = deep
+                # 캘린더 깊이(1년) 보강이 필요할 때만 deep_fetch(다페이지·깊이 루프).
+                # need_depth=False 인데 gap(장중 당일)만 있으면 얕은 연속조회로 충분 — deep 켜져 있어도
+                # 매번 (캘린더·깊이) 경로로 오해·과다 조회되던 문제 방지.
+                use_deep_fetch = bool(deep and need_depth)
             if not short and not gap and not need_depth:
                 return base
             reason = []
