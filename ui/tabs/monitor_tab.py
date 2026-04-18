@@ -74,96 +74,6 @@ def _monitor_fmt_bid_ask(info: Dict[str, Any]) -> str:
         return "— / — (—)"
 
 
-def _coerce_ws_values_dict(raw: Any) -> Dict[str, Any]:
-    """
-    키움 REST 웹소켓 REAL 의 `values` 가 dict·JSON 문자열·fid 리스트 등으로 올 수 있어 통일한다.
-    """
-    try:
-        if isinstance(raw, dict):
-            return raw
-        if isinstance(raw, str) and raw.strip().startswith("{"):
-            try:
-                j = json.loads(raw)
-                return j if isinstance(j, dict) else {}
-            except Exception:
-                return {}
-        if isinstance(raw, list):
-            out: Dict[str, Any] = {}
-            for it in raw:
-                if not isinstance(it, dict):
-                    continue
-                fk = it.get("fid") or it.get("FID") or it.get("id")
-                fv = (
-                    it.get("value")
-                    or it.get("val")
-                    or it.get("data")
-                    or it.get("contents")
-                )
-                if fk is not None:
-                    out[str(fk).strip()] = fv
-            return out
-    except Exception:
-        pass
-    return {}
-
-
-def _normalize_ws_real_type(raw: Any) -> str:
-    """REG 시 type 이 ['0B','0D'] 처럼 리스트로 오면 분기가 전부 실패할 수 있어 단일 타입으로 정규화."""
-    try:
-        if isinstance(raw, list):
-            tl = [str(x).strip().upper() for x in raw if x is not None and str(x).strip()]
-            if "0B" in tl:
-                return "0B"
-            if "0D" in tl:
-                return "0D"
-            return tl[0] if tl else "0B"
-        s = str(raw or "0B").strip().upper()
-        return s if s in ("0B", "0D") else "0B"
-    except Exception:
-        return "0B"
-
-
-def _ws_indicative_price_from_values(vals: Dict[str, Any]) -> int:
-    """
-    웹소켓 REAL 패킷 `values` 에서 참고 현재가(원).
-    체결(0B) fid 10 이 0인 구간·호가만 선도착 시, 키움 우선호가 FID 로 보완한다.
-    (27·28 최우선 매도/매수, 41·51 매도1·매수1 — OpenAPI 실시간 FID 표 기준)
-    """
-    try:
-        if not isinstance(vals, dict):
-            return 0
-
-        def gv(fid: int) -> float:
-            try:
-                v = vals.get(str(fid))
-                if v is None or v == "":
-                    return 0.0
-                return float(str(v).replace("+", "").replace("-", "").strip())
-            except Exception:
-                return 0.0
-
-        p10 = int(gv(10))
-        if p10 > 0:
-            return p10
-        a27, b28 = int(gv(27)), int(gv(28))
-        if a27 > 0 and b28 > 0:
-            return int(round((a27 + b28) / 2))
-        if a27 > 0:
-            return a27
-        if b28 > 0:
-            return b28
-        a41, b51 = int(gv(41)), int(gv(51))
-        if a41 > 0 and b51 > 0:
-            return int(round((a41 + b51) / 2))
-        if a41 > 0:
-            return a41
-        if b51 > 0:
-            return b51
-        return 0
-    except Exception:
-        return 0
-
-
 # 감시 트리 컬럼 기본 폭(px). 사용자 조절값·세로 분할 비율은 monitor_column_widths.json 에 저장됩니다.
 # JSON 형식: {"columns": {..}, "sash0_rel": 0.0~1.0} — 구버전 평면 dict 는 columns 만 있는 것으로 간주합니다.
 _DEFAULT_MONITOR_COL_WIDTHS: Dict[str, int] = {
@@ -266,9 +176,6 @@ class MonitorTab:
         self._vp_ever_in_holdings: Dict[str, bool] = {}
         # 틱이 끊긴 종목도 monitor_info 기준으로 트리에 유지 (봉 마감·무거래 구간)
         self._last_monitor_tree_reconcile_ts: float = 0.0
-        # 감시 트리 표시용 ka10004 폴백(웹소켓만으로 price 가 0일 때) — 종목당 캐시
-        self._monitor_rest_quote_cache: Dict[str, Tuple[float, float]] = {}
-        self._last_monitor_rest_scan_ts: float = 0.0
         self._setup_ui()
 
     @staticmethod
@@ -1547,89 +1454,58 @@ class MonitorTab:
                 self.app._on_execution_received(code, order_no, cntg_qty, cntg_unpr, side)
                 continue
 
-            mi = self.app.monitor_info
-            info_key: Optional[str] = None
-            if code in mi:
-                info_key = code
-            else:
-                try:
-                    for k in mi.keys():
-                        if str(k).split("_")[0].zfill(6) == code:
-                            info_key = str(k)
-                            break
-                except Exception:
-                    info_key = None
-            if info_key is None:
-                continue
-            info = mi[info_key]
-            try:
-                vals = _coerce_ws_values_dict(item_data.get("values"))
-                p_type = _normalize_ws_real_type(item_data.get("type"))
-            except Exception:
-                vals = {}
-                p_type = "0B"
+            if code in self.app.monitor_info:
+                info = self.app.monitor_info[code]
+                vals = item_data.get('values', {})
+                p_type = item_data.get('type', '0B')
+                
+                def get_val(fid, default=0):
+                    v = vals.get(str(fid))
+                    if v is None or v == "": return default
+                    try: return float(str(v).replace('+', '').replace('-', '').strip())
+                    except: return default
 
-            def get_val(fid, default=0):
-                v = vals.get(str(fid))
-                if v is None or v == "":
-                    return default
-                try:
-                    return float(str(v).replace("+", "").replace("-", "").strip())
-                except Exception:
-                    return default
-
-            if p_type == "0B":
-                now_price = int(get_val(10))
-                if now_price <= 0:
-                    now_price = _ws_indicative_price_from_values(vals)
-                # 체결 전·장 시작 직후 fid 10 이 0이고 호가 FID 도 없으면 스킵.
-                if now_price == 0:
-                    continue
-                volume = int(get_val(13))
-                trde_val = int(get_val(26) // 1000)
-                ratio_val = vals.get("12", "0")
-                diff_val = vals.get("11", "0")
-                vol_power = get_val(228)
-                info["price"] = now_price
-                info["ratio"] = ratio_val
-                info["diff"] = diff_val
-                info["volume"] = volume
-                info["trde_val"] = trde_val
-                info["vol_power"] = vol_power
-                self.app._on_realtime_data_received(
-                    code, now_price, volume, trde_val, vol_power=vol_power
-                )
-            elif p_type == "0D":
-                total_ask = int(get_val(121))
-                total_bid = int(get_val(125))
-                info["total_ask"] = total_ask
-                info["total_bid"] = total_bid
-                # 체결(0B) 전에 호가만 오면 price 가 0 → 우선호가로 참고가 채움 후 갱신
-                try:
-                    lp = int(info.get("price") or 0)
-                except (TypeError, ValueError):
-                    lp = 0
-                if lp <= 0:
-                    hoga_px = _ws_indicative_price_from_values(vals)
-                    if hoga_px > 0:
-                        try:
-                            info["price"] = hoga_px
-                            lp = hoga_px
-                        except Exception:
-                            pass
-                if lp <= 0:
-                    continue
-                self.app._on_realtime_data_received(
-                    code,
-                    lp,
-                    info.get("volume", 0),
-                    info.get("trde_val", 0),
-                    total_ask=total_ask,
-                    total_bid=total_bid,
-                )
-            mkt = item_data.get("market", item_data.get("mkt", ""))
-            if mkt == "NXT" or "_nx" in full_code.lower():
-                info["is_nxt"] = True
+                if p_type == '0B':
+                    now_price = int(get_val(10))
+                    # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
+                    # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
+                    if now_price == 0:
+                        continue
+                    volume = int(get_val(13))
+                    trde_val = int(get_val(26) // 1000)
+                    ratio_val = vals.get('12', '0')
+                    diff_val = vals.get('11', '0')
+                    vol_power = get_val(228)
+                    info['price'] = now_price
+                    info['ratio'] = ratio_val
+                    info['diff'] = diff_val
+                    info['volume'] = volume
+                    info['trde_val'] = trde_val
+                    info['vol_power'] = vol_power
+                    self.app._on_realtime_data_received(code, now_price, volume, trde_val, vol_power=vol_power)
+                elif p_type == '0D':
+                    total_ask = int(get_val(121))
+                    total_bid = int(get_val(125))
+                    info['total_ask'] = total_ask
+                    info['total_bid'] = total_bid
+                    # 체결(0B) 전에 호가만 오면 price 가 0 → 틱 콜백이 전부 차단되는 것처럼 보일 수 있음
+                    try:
+                        lp = int(info.get("price") or 0)
+                    except (TypeError, ValueError):
+                        lp = 0
+                    if lp <= 0:
+                        continue
+                    self.app._on_realtime_data_received(
+                        code,
+                        lp,
+                        info.get("volume", 0),
+                        info.get("trde_val", 0),
+                        total_ask=total_ask,
+                        total_bid=total_bid,
+                    )
+                mkt = item_data.get('market', item_data.get('mkt', ''))
+                if mkt == 'NXT' or '_nx' in full_code.lower():
+                    info['is_nxt'] = True
 
     def _update_visual_theme(self, trend):
         """[v27.3] 시장 지질(Background) 테마를 '온몸'으로 변경"""
@@ -1744,19 +1620,6 @@ class MonitorTab:
             pass
         return "stable"
 
-    def _monitor_info_live_ref(self, nk: str) -> Optional[Dict[str, Any]]:
-        """트리·표시 갱신용: `monitor_info` 안의 **원본** dict 참조(복사본이 아님)."""
-        try:
-            mi = getattr(self.app, "monitor_info", None) or {}
-            if nk in mi and isinstance(mi.get(nk), dict):
-                return mi[nk]
-            for k, v in mi.items():
-                if str(k).split("_")[0].zfill(6) == nk and isinstance(v, dict):
-                    return v
-        except Exception:
-            pass
-        return None
-
     def _monitor_info_entry(self, mi: Dict[str, Any], nk: str) -> Dict[str, Any]:
         """monitor_info 키가 003490 / 3490 혼재해도 6자리 nk로 조회."""
         try:
@@ -1769,145 +1632,17 @@ class MonitorTab:
             pass
         return {}
 
-    def maybe_backfill_zero_prices_from_rest(self) -> None:
-        """
-        틱이 오래 없어 `_compose` 가 안 돌아도 현재가 0 이 남지 않도록 주기적으로 스캔한다.
-        (종목당 ka10004 는 `_fill` 내부 캐시로 스로틀)
-        """
-        try:
-            now = time.time()
-            if now - float(getattr(self, "_last_monitor_rest_scan_ts", 0.0)) < 5.0:
-                return
-            self._last_monitor_rest_scan_ts = now
-            mi = getattr(self.app, "monitor_info", None) or {}
-            for k in list(mi.keys()):
-                row = mi.get(k)
-                if not isinstance(row, dict):
-                    continue
-                nk = str(k).split("_")[0].zfill(6)
-                try:
-                    rp = row.get("price")
-                    if rp not in (None, "", 0) and float(rp) > 0:
-                        continue
-                except Exception:
-                    pass
-                self._fill_monitor_price_from_rest_if_zero(nk, row)
-        except Exception:
-            pass
-
-    def _refresh_monitor_row_for_code(self, nk: str) -> None:
-        """틱 큐 없이 monitor_info 만 갱신된 경우 해당 행만 트리에 반영한다."""
-        try:
-            ref = self._monitor_info_live_ref(nk)
-            if not ref:
-                return
-            values = self._compose_monitor_row_values(nk, ref)
-            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
-            wl = self._watchlist_codes_set()
-            if nk in wl:
-                return
-            is_active = self._virtual_position_is_active(nk, vp)
-            mc_targets = self._monitor_target_codes_set()
-            if not is_active and nk not in mc_targets:
-                return
-            target = self.tree_active_monitor if is_active else self.tree_monitor
-            if not target or not target.exists(nk):
-                return
-            direction = self._monitor_ratio_direction(ref.get("ratio", "0"))
-            try:
-                idx = int(target.index(nk))
-            except Exception:
-                idx = 0
-            row_type = "even" if (idx % 2 == 0) else "odd"
-            final_tag = (
-                f"active_{direction}_{row_type}"
-                if is_active
-                else f"{direction}_{row_type}"
-            )
-            target.item(nk, values=values, tags=(final_tag,))
-        except Exception:
-            pass
-
-    def _fill_monitor_price_from_rest_if_zero(self, nk: str, info: Dict[str, Any]) -> None:
-        """
-        웹소켓만으로 `price` 가 채워지지 않을 때(패킷 타입·values 형식 등) 감시·보유 트리 현재가가 0으로
-        남는 것을 키움 ka10004 로 보완한다. `virtual_tab` 과 유사하게 종목당 캐시(55s)로 호출을 줄인다.
-        """
-        try:
-            raw = info.get("price")
-            if raw not in (None, "", 0):
-                try:
-                    if float(raw) > 0:
-                        return
-                except (TypeError, ValueError):
-                    pass
-            try:
-                raw_lp = info.get("last_price")
-                if raw_lp not in (None, "", 0):
-                    if float(raw_lp) > 0 and not info.get("vp_price_stub"):
-                        return
-            except (TypeError, ValueError):
-                pass
-            now_m = time.monotonic()
-            cached = self._monitor_rest_quote_cache.get(nk)
-            if cached is not None and (now_m - cached[0]) < 55.0 and cached[1] > 0:
-                v = float(cached[1])
-                info["price"] = v
-                info["last_price"] = v
-                try:
-                    if info.get("vp_price_stub"):
-                        info.pop("vp_price_stub", None)
-                except Exception:
-                    pass
-                try:
-                    r = getattr(self.app, "root", None)
-                    if r is not None:
-                        r.after(0, lambda c=nk: self._refresh_monitor_row_for_code(c))
-                except Exception:
-                    pass
-                return
-            om = getattr(self.app, "order_manager", None)
-            fn = getattr(om, "fetch_stock_cur_prc_rest", None) if om is not None else None
-            if not callable(fn):
-                return
-            px = fn(nk)
-            if px is not None:
-                v = float(px)
-                if v > 0:
-                    self._monitor_rest_quote_cache[nk] = (now_m, v)
-                    info["price"] = v
-                    info["last_price"] = v
-                    try:
-                        if info.get("vp_price_stub"):
-                            info.pop("vp_price_stub", None)
-                    except Exception:
-                        pass
-                    try:
-                        r = getattr(self.app, "root", None)
-                        if r is not None:
-                            r.after(0, lambda c=nk: self._refresh_monitor_row_for_code(c))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
     def _compose_monitor_row_values(self, nk: str, info: Dict[str, Any]) -> Tuple[Any, ...]:
         """감시·보유 트리 한 행 values (컬럼 순서는 _setup_ui 와 동일)."""
-        row = self._monitor_info_live_ref(nk) or info
-        try:
-            # ka10004 보강은 반드시 monitor_info 원본에 써야 다음 틱까지 유지됨(복사본 금지).
-            self._fill_monitor_price_from_rest_if_zero(nk, row)
-        except Exception:
-            pass
         try:
             now_p = float(
-                row.get("price")
-                if row.get("price") not in (None, "", 0)
-                else (row.get("last_price") or 0)
+                info.get("price")
+                if info.get("price") not in (None, "", 0)
+                else (info.get("last_price") or 0)
             )
         except (TypeError, ValueError):
             now_p = 0.0
-        sel_tr = row.get("sel_track", row.get("SelTrack", "AB"))
+        sel_tr = info.get("sel_track", info.get("SelTrack", "AB"))
         pos_for_strat: Optional[Dict[str, Any]] = None
         try:
             vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
@@ -1920,18 +1655,18 @@ class MonitorTab:
         except Exception:
             pos_for_strat = None
         strat = format_entry_signal_type_label(pos_for_strat, sel_tr)
-        ratio_disp = row.get("ratio", "0")
-        nm = str(row.get("name", nk) or nk)
+        ratio_disp = info.get("ratio", "0")
+        nm = str(info.get("name", nk) or nk)
         try:
-            sc = float(row.get("score", 0) or 0)
+            sc = float(info.get("score", 0) or 0)
         except (TypeError, ValueError):
             sc = 0.0
         try:
-            vol_pow = float(row.get("vol_power", 0) or 0)
+            vol_pow = float(info.get("vol_power", 0) or 0)
         except (TypeError, ValueError):
             vol_pow = 0.0
         try:
-            vol_i = int(float(row.get("volume", 0) or 0))
+            vol_i = int(float(info.get("volume", 0) or 0))
         except (TypeError, ValueError):
             vol_i = 0
         atr_cell = "—"
@@ -1964,8 +1699,8 @@ class MonitorTab:
                             ir,
                             np_atr,
                             bars_df=bd,
-                            sel_track_hint=row.get("sel_track")
-                            or row.get("SelTrack"),
+                            sel_track_hint=info.get("sel_track")
+                            or info.get("SelTrack"),
                         )
         except Exception:
             atr_cell = "—"
@@ -1976,11 +1711,11 @@ class MonitorTab:
             strat,
             f"{now_p:,.0f}",
             atr_cell,
-            _monitor_fmt_vs_prev(row),
+            _monitor_fmt_vs_prev(info),
             str(ratio_disp),
-            row.get("status_text", "대기"),
+            info.get("status_text", "대기"),
             f"{vol_pow:.1f}%",
-            _monitor_fmt_bid_ask(row),
+            _monitor_fmt_bid_ask(info),
             f"{vol_i:,}",
         )
 
