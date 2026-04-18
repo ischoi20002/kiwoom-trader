@@ -42,6 +42,8 @@ DEFAULT_SETTINGS = {
     "realtime_warmup_15m_query_limit": 7000,
     # realtime_15m_*.db 에서 캘린더 기준 이전 일수만큼만 유지(롤링 DELETE)
     "realtime_15m_calendar_retention_days": 365,
+    # 캘린더 깊이 판정 시 (보존 N일 − 슬랙)일 이상이면 충족. 주말·연휴로 첫 봉 날짜가 며칠 밀릴 수 있음.
+    "realtime_warmup_depth_calendar_slack_days": 21,
     # True: 워밍업 검증 통과 시 병합 15분 OHLCV를 realtime_15m_*.db 에 배치 저장(다음 실행 캐시)
     "realtime_warmup_persist_to_rt15m_db": True,
     # 실시간 bars_data 메모리 상한(StreamProcessor.tail 과 맞춤)

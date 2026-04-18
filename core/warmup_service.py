@@ -90,11 +90,40 @@ class WarmupService:
         except Exception:
             return True
 
+    def _warmup_depth_calendar_slack_days(self) -> int:
+        """깊이 판정 시 허용하는 캘린더 일수 여유(주말·공휴일·첫 봉 시각)."""
+        try:
+            s = int(float(self.app.settings.get("realtime_warmup_depth_calendar_slack_days", 21)))
+        except (TypeError, ValueError):
+            s = 21
+        return max(0, min(s, 120))
+
+    def _retention_calendar_depth_ok(self, oldest_ts: Any, retention_days: int) -> bool:
+        """
+        가장 오래된 봉이 '캘린더 보존 N일' 요구를 충족하는지.
+
+        시각 비교 `oldest <= now - N일` 만 쓰면 롤링 보존 후 남는 가장 오래된 봉이
+        컷오프 **이후**(같은 날 장 시작 등)인 경우가 대부분이라 조건이 거짓으로 고정될 수 있다.
+        (오늘 날짜 − 최초 봉 날짜) 일수가 (N − 슬랙) 이상이면 충족으로 본다.
+        """
+        try:
+            rd = max(1, min(int(retention_days), 3650))
+            slack = self._warmup_depth_calendar_slack_days()
+            oldest = pd.Timestamp(oldest_ts)
+            if pd.isna(oldest):
+                return False
+            age_days = (
+                pd.Timestamp.now().normalize() - oldest.normalize()
+            ).days
+            return bool(age_days >= rd - slack)
+        except Exception:
+            return False
+
     def _calendar_depth_satisfied(
         self, merged: pd.DataFrame, retention_days: int
     ) -> bool:
         """
-        가장 오래된 15분봉 시각이 (지금 - retention_days) 이전/동일 구간이면 과거 깊이 충족.
+        가장 오래된 15분봉이 캘린더 보존 일수(슬랙 적용)를 만족하면 과거 깊이 충족.
         """
         try:
             if merged is None or merged.empty:
@@ -102,8 +131,7 @@ class WarmupService:
             if not isinstance(merged.index, pd.DatetimeIndex):
                 return False
             oldest = pd.Timestamp(merged.index.min())
-            cutoff = pd.Timestamp.now() - timedelta(days=int(retention_days))
-            return bool(oldest <= cutoff)
+            return self._retention_calendar_depth_ok(oldest, retention_days)
         except Exception:
             return False
 
@@ -132,10 +160,9 @@ class WarmupService:
                         code, retention_days
                     )
                     if tmin is not None and pd.notna(tmin):
-                        cutoff = pd.Timestamp.now() - timedelta(
-                            days=int(retention_days)
+                        return self._retention_calendar_depth_ok(
+                            tmin, retention_days
                         )
-                        return bool(pd.Timestamp(tmin) <= cutoff)
         except Exception:
             pass
         return self._calendar_depth_satisfied(merged, retention_days)
