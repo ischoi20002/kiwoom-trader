@@ -7,6 +7,10 @@
 
 ---
 
+## 0.3.56 (2026-04-18)
+
+- **실시간 워밍업 깊이 판정**: (1) RT15m DB 보존 구간 `MIN(datetime)` 이 캘린더 컷오프 이전이거나, (2) ka10080 연속조회에서 **next-key 없이 끝난 종목**(브로커·종목 이력상 과거 한계)은 `symbol_meta_rt`에 기록해 동일·더 짧은 보존 일수로 재적재하지 않음. 페이지네이션 루프 내 깊이 조기 종료는 누적 `merged` 기준으로 판정(`core/warmup_service.py`, `core/realtime_monitor_bars_store.py`).
+
 ## 0.3.55 (2026-04-18)
 
 - **실시간 워밍업(RT15m DB)**: `ORDER BY datetime DESC LIMIT` 으로만 메모리에 올린 프레임의 `index.min()` 으로는 DB 에 쌓인 **실제 과거 깊이**를 알 수 없어, 재시작 후에도 `과거 N일 미충족`으로 오판하며 ka10080 캘린더·깊이 조회가 반복되던 문제 수정 — RT15m SQLite 에서 `MIN(datetime)` 으로 깊이 판정 (`core/warmup_service.py`, `core/realtime_monitor_bars_store.py`).

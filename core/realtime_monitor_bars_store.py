@@ -104,12 +104,35 @@ class RealtimeMonitorBarsStore:
                         "CREATE INDEX IF NOT EXISTS idx_bars_15m_rt_code_dt "
                         "ON bars_15m_rt (code, datetime)"
                     )
+                    self._migrate_symbol_meta_rt_columns(conn)
                     conn.commit()
         except sqlite3.Error as e:
             try:
                 self._log(f"⚠️ [RT15mDB] 스키마 초기화 실패: {e}")
             except Exception:
                 pass
+
+    def _migrate_symbol_meta_rt_columns(self, conn: sqlite3.Connection) -> None:
+        """symbol_meta_rt 에 ka10080 깊이 꼬리 플래그 컬럼을 추가합니다(기존 DB 호환)."""
+        try:
+            cur = conn.execute("PRAGMA table_info(symbol_meta_rt)")
+            cols = {str(row[1]) for row in cur.fetchall()}
+            stmts: list[str] = []
+            if "ka10080_deep_exhausted" not in cols:
+                stmts.append(
+                    "ALTER TABLE symbol_meta_rt ADD COLUMN ka10080_deep_exhausted INTEGER DEFAULT 0"
+                )
+            if "ka10080_deep_exhausted_for_rd" not in cols:
+                stmts.append(
+                    "ALTER TABLE symbol_meta_rt ADD COLUMN ka10080_deep_exhausted_for_rd INTEGER DEFAULT 0"
+                )
+            for sql in stmts:
+                try:
+                    conn.execute(sql)
+                except sqlite3.Error:
+                    pass
+        except sqlite3.Error:
+            pass
 
     def touch_last_seen(self, code: str) -> None:
         """감시 대상으로 올라온 시각 기록(정리·메타용)."""
@@ -309,6 +332,109 @@ class RealtimeMonitorBarsStore:
             except Exception:
                 pass
             return None
+
+    def set_ka10080_deep_exhausted(self, code: str, retention_days: int) -> None:
+        """
+        ka10080 연속조회에서 next-key 가 더 이상 없어 **브로커가 제공하는 과거 한계**에 도달했음을 기록합니다.
+        이후 동일·더 짧은 캘린더 보존 요구에서는 '과거 미충족'으로 재조회하지 않습니다.
+        retention_days 는 그때 워밍업에 쓰인 값이며, 행마다 max 로 누적합니다.
+        """
+        nc = _norm_code(code)
+        if not nc:
+            return
+        try:
+            rd = int(retention_days)
+        except (TypeError, ValueError):
+            rd = int(self._retention_days)
+        rd = max(1, min(rd, 3650))
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._lock:
+                with sqlite3.connect(self._db_path) as conn:
+                    self._migrate_symbol_meta_rt_columns(conn)
+                    cur = conn.execute(
+                        """
+                        SELECT COALESCE(ka10080_deep_exhausted_for_rd, 0)
+                        FROM symbol_meta_rt WHERE code = ?
+                        """,
+                        (nc,),
+                    )
+                    row = cur.fetchone()
+                    prev_rd = 0
+                    if row and row[0] is not None:
+                        try:
+                            prev_rd = int(row[0])
+                        except (TypeError, ValueError):
+                            prev_rd = 0
+                    for_rd = max(prev_rd, rd)
+                    conn.execute(
+                        """
+                        INSERT INTO symbol_meta_rt
+                        (code, last_seen, ka10080_deep_exhausted, ka10080_deep_exhausted_for_rd)
+                        VALUES (?, ?, 1, ?)
+                        ON CONFLICT(code) DO UPDATE SET
+                            last_seen = excluded.last_seen,
+                            ka10080_deep_exhausted = 1,
+                            ka10080_deep_exhausted_for_rd = excluded.ka10080_deep_exhausted_for_rd
+                        """,
+                        (nc, now, for_rd),
+                    )
+                    conn.commit()
+        except sqlite3.Error as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] ka10080 꼬리 플래그 저장 실패 ({nc}): {e}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] ka10080 꼬리 플래그 예외 ({nc}): {e}")
+            except Exception:
+                pass
+
+    def is_ka10080_deep_exhausted_ok(
+        self, code: str, retention_days: Optional[int] = None
+    ) -> bool:
+        """
+        깊이 요구(retention_days)에 대해 '로컬 1년'은 아니지만 이미 ka10080 으로 꼬리까지 받은 상태인지.
+        기록된 보존 일수가 현재 요구 이상이면 True.
+        """
+        nc = _norm_code(code)
+        if not nc:
+            return False
+        try:
+            req = (
+                int(retention_days)
+                if retention_days is not None
+                else int(self._retention_days)
+            )
+        except (TypeError, ValueError):
+            req = int(self._retention_days)
+        req = max(1, min(req, 3650))
+        try:
+            with self._lock:
+                with sqlite3.connect(self._db_path) as conn:
+                    cur = conn.execute(
+                        """
+                        SELECT COALESCE(ka10080_deep_exhausted, 0),
+                               COALESCE(ka10080_deep_exhausted_for_rd, 0)
+                        FROM symbol_meta_rt WHERE code = ?
+                        """,
+                        (nc,),
+                    )
+                    row = cur.fetchone()
+            if not row:
+                return False
+            ex = int(row[0] or 0)
+            for_rd = int(row[1] or 0)
+            if ex != 1:
+                return False
+            return for_rd >= req
+        except Exception as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] ka10080 꼬리 플래그 조회 실패 ({nc}): {e}")
+            except Exception:
+                pass
+            return False
 
     def fetch_15m_bars_as_dataframe(
         self,

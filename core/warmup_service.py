@@ -118,12 +118,16 @@ class WarmupService:
         realtime_15m DB 는 워밍업 로드가 `ORDER BY datetime DESC LIMIT N` 이라
         메모리 프레임의 index.min() 이 DB 안의 **진짜** 최저 시각이 아닐 수 있다(가장 흔한 재API 원인).
         이 경우 RT15m SQLite 에서 MIN(datetime) 으로 판정한다.
+        또한 로컬이 캘린더 N일을 못 채워도, ka10080 이 next-key 없이 끝나 **브로커가 주는 과거 한계까지**
+        이미 받은 종목은 깊이 요구를 만족한 것으로 본다(종목별 메타).
         """
         try:
             src = self._warmup_ohlcv_source()
             if src == "realtime_15m_db_then_api":
                 store = getattr(self.app, "realtime_monitor_bars_store", None)
                 if store is not None:
+                    if store.is_ka10080_deep_exhausted_ok(code, retention_days):
+                        return True
                     tmin = store.earliest_bar_datetime_in_retention(
                         code, retention_days
                     )
@@ -449,6 +453,8 @@ class WarmupService:
         nk: str = ""
         pages = 0
         early_stop = False
+        # ka10080 응답에 next-key 가 없으면 브로커 과거 한계(또는 해당 종목 이력 끝)
+        ka10080_terminal_no_next = False
 
         for _ in range(max_pages):
             if respect_warmup_lifecycle and (not self.is_running):
@@ -488,7 +494,8 @@ class WarmupService:
                 )
                 break
             if not raw_list:
-                if not nk:
+                if not (nk or "").strip():
+                    ka10080_terminal_no_next = True
                     break
                 continue
 
@@ -506,9 +513,9 @@ class WarmupService:
                     len(merged) if merged is not None and not merged.empty else 0
                 )
                 if deep_fetch:
-                    depth_ok = self._calendar_depth_satisfied_for_code(
-                        code, merged, retention_days
-                    )
+                    # 루프 안 merged 는 누적 API+base 이므로 index.min() 으로 깊이 판정 가능.
+                    # (_calendar_depth_satisfied_for_code 는 DB MIN 만 보아 페이지 중엔 과소평가될 수 있음)
+                    depth_ok = self._calendar_depth_satisfied(merged, retention_days)
                     intraday_ok = not self._needs_intraday_api_backfill(merged)
                     if depth_ok and intraday_ok:
                         early_stop = True
@@ -524,10 +531,30 @@ class WarmupService:
 
             nk = (nk or "").strip()
             if not nk:
+                ka10080_terminal_no_next = True
                 break
             if respect_warmup_lifecycle and (not self.is_running):
                 break
             time.sleep(random.uniform(dmin, dmax))
+
+        if (
+            deep_fetch
+            and ka10080_terminal_no_next
+            and (not early_stop)
+            and len(by_tm) > 0
+            and self._warmup_ohlcv_source() == "realtime_15m_db_then_api"
+        ):
+            try:
+                store = getattr(self.app, "realtime_monitor_bars_store", None)
+                if store is not None:
+                    store.set_ka10080_deep_exhausted(code, retention_days)
+            except Exception as e:
+                try:
+                    self.log(
+                        f"⚠️ [Warmup-API] {name}({code}) ka10080 꼬리 플래그 기록 실패: {e}"
+                    )
+                except Exception:
+                    pass
 
         if by_tm:
             # 소량 페이지(빠른 통과)는 생략, 깊이 조회·다페이지만 요약 로그
