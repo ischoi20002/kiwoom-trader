@@ -7,6 +7,12 @@
 
 ---
 
+## 0.3.64 (2026-04-19)
+
+- **일일 결산 요약**: 보유 시세를 포지션 탭과 동일하게 해석(`VirtualTab._resolve_active_holdings_prices` 재사용·폴백). **금일 실현**은 청산일(`exit_date` / `exit_datetime`) 기준. **금일 손익**은 전일 HTML이 아니라 **`eod_equity_snapshots_*.json`** 에 저장된 직전 영업일 EOD 총자산 대비(`reporting/daily_settlement_report.py`, `utils/eod_equity_snapshots.py`).
+- **EOD 스냅샷**: 모의/실전별 JSON 경로(`utils/server_mode_paths.eod_equity_snapshots_path`). 장 마감+버퍼 이후 포지션 탭 갱신 시 자동 기록, 일일 결산 생성 시에도 동일 조건에서 해당 영업일 키로 저장.
+- **포지션 관리 상단**: **미실현(보유)** 와 **금일 손익(전일 EOD)** 를 분리 표시(`ui/tabs/virtual_tab.py`).
+
 ## 0.3.63 (2026-04-18)
 
 - **S1 ATR 트레일 표시·청산**: Type A·B 공통으로 **S1**에서 트랙별「ATR 분석 주기」(`use_atr_exit_a` / `use_atr_exit_b`)가 OFF인데도 `use_atr_trailing_stop_*` 기본값 True 때문에 감시·리포트에 **TRL** 이 나오던 현상 수정. 마스터 OFF 시 S1 트레일 비활성, SL만 ATR 토글이 켜진 경우 `SL …` 만 표시 (`backtest_engine.py` — `compute_atr_exit_display_text`, `evaluate_position`, TP 연기 분기).

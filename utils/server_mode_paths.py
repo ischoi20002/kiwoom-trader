@@ -3,6 +3,7 @@
 모의/실전(config.USE_MOCK)별 로컬 저장 경로.
 
 - 포지션 JSON: virtual_db_mock.json / virtual_db_live.json
+- EOD 총자산 스냅샷: eod_equity_snapshots_mock.json / eod_equity_snapshots_live.json
 - 주문·활성포지션 SQLite: trading_state_mock.db / trading_state_live.db
 
 구 단일 파일(virtual_db.json, trading_state.db)은 최초 1회 모의 쪽으로 이관합니다.
@@ -53,6 +54,17 @@ def state_db_path_for_mock() -> str:
 def state_db_path_for_live() -> str:
     """실전 전용 state DB 경로."""
     return os.path.join(project_root(), "trading_state_live.db")
+
+
+def eod_equity_snapshots_path() -> str:
+    """
+    영업일별 총자산(EOD) 스냅샷 JSON — 모의/실전 분리.
+
+    금일 손익(전 영업일 EOD 대비) 계산·포지션 관리 탭·일일 결산이 동일 파일을 참조합니다.
+    """
+    base = project_root()
+    name = "eod_equity_snapshots_mock.json" if is_mock_mode() else "eod_equity_snapshots_live.json"
+    return os.path.join(base, name)
 
 
 def realtime_monitor_15m_db_path() -> str:

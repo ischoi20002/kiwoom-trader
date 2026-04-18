@@ -9,6 +9,7 @@ from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import config
+from utils.eod_equity_snapshots import compute_day_pnl_vs_eod_store, maybe_record_eod_after_session
 from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
 
 # 포지션 탭 트리 컬럼 기본 폭(px). 사용자 조절·세로 분할은 virtual_portfolio_ui.json 에 저장합니다.
@@ -117,7 +118,8 @@ class VirtualTab:
             "stock": tk.StringVar(value="0"),
             "d1_cash": tk.StringVar(value="0"),
             "d2_cash": tk.StringVar(value="0"),
-            "day": tk.StringVar(value="0 (0.00%)"),
+            "open_ur": tk.StringVar(value="0 (0.00%)"),
+            "day": tk.StringVar(value="— (전일 EOD 없음)"),
             "cum": tk.StringVar(value="0 (+0.00%)"),
             # 실시간 보유 트리 하단: 보유 전체 합계(매수·매도 수수료 미반영)
             "hold_sum_buy_ex": tk.StringVar(value="0"),
@@ -134,7 +136,8 @@ class VirtualTab:
             ("D+1 예상", "d1_cash", self.app.colors['primary']),
             ("D+2 예상", "d2_cash", self.app.colors['primary']),
             ("주식 평가금", "stock", None),
-            ("보유주식 손익(미청산)", "day", "#BF616A"),
+            ("미실현 (보유)", "open_ur", "#88C0D0"),
+            ("금일 손익 (전일 EOD)", "day", "#EBCB8B"),
             ("누적 수익(종료+보유)", "cum", "#A3BE8C")
         ]:
             f = ttk.Frame(summary_f)
@@ -2195,21 +2198,42 @@ class VirtualTab:
         stock_eval = self._stock_eval_for_summary(portfolio, float(total_eval))
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
-        # 보유주식 손익(미청산): 수수료·매입원가 반영 미실현 합(트리 열과 별도).
-        # %는 보유 매입금(invested, 매수수수료 포함) 합 대비.
-        day_pnl_total = float(total_unrealized_pnl)
+        # 미실현(보유): 수수료·매입 반영 미실현 합(트리와 동일). %는 invested 합 대비.
+        try:
+            open_ur_amt = float(total_unrealized_pnl)
+        except (TypeError, ValueError):
+            open_ur_amt = 0.0
         try:
             inv_den = float(total_invested)
         except (TypeError, ValueError):
             inv_den = 0.0
         if inv_den > 1e-6:
-            day_pnl_pct = (day_pnl_total / inv_den) * 100.0
+            open_ur_pct = (open_ur_amt / inv_den) * 100.0
         else:
-            day_pnl_pct = 0.0
+            open_ur_pct = 0.0
         try:
             ta = float(total_assets)
         except (TypeError, ValueError):
             ta = 0.0
+
+        # 금일 손익: 전 영업일 EOD 스냅샷 대비( eod_equity_snapshots_*.json ).
+        try:
+            maybe_record_eod_after_session(self.app, float(total_assets))
+        except Exception:
+            pass
+        try:
+            d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
+                self.app,
+                calendar_day=datetime.now().date(),
+                current_total_assets=float(total_assets),
+            )
+        except Exception:
+            d_amt, d_pct = None, None
+        if d_amt is not None and d_pct is not None:
+            day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
+        else:
+            day_pnl_txt = "— (전일 EOD 없음)"
+        open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
 
         # 누적 수익(종료+보유): 매매종료 손익금 합 + 실시간 보유 손익금(미실현) 합.
         # % 분모는 총자산(백테스트 초기자본은 실시간 요약에 사용하지 않음).
@@ -2226,8 +2250,9 @@ class VirtualTab:
         # [v4.5.3] D+1, D+2 예상 예수금 업데이트
         self.vars["d1_cash"].set(f"{getattr(portfolio, 'd1_deposit', 0):,.0f}")
         self.vars["d2_cash"].set(f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
-            
-        self.vars["day"].set(f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
+
+        self.vars["open_ur"].set(open_ur_txt)
+        self.vars["day"].set(day_pnl_txt)
         self.vars["cum"].set(f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
         self._update_holdings_aggregate_fee_excluded()
 
@@ -2311,15 +2336,36 @@ class VirtualTab:
             stock_eval = self._stock_eval_for_summary(portfolio, float(total_eval))
             total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
-            day_pnl_total = float(total_unrealized_pnl)
+            try:
+                open_ur_amt = float(total_unrealized_pnl)
+            except (TypeError, ValueError):
+                open_ur_amt = 0.0
             if total_invested_open > 1e-6:
-                day_pnl_pct = (day_pnl_total / total_invested_open) * 100.0
+                open_ur_pct = (open_ur_amt / total_invested_open) * 100.0
             else:
-                day_pnl_pct = 0.0
+                open_ur_pct = 0.0
             try:
                 ta = float(total_assets)
             except (TypeError, ValueError):
                 ta = 0.0
+
+            try:
+                maybe_record_eod_after_session(self.app, float(total_assets))
+            except Exception:
+                pass
+            try:
+                d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
+                    self.app,
+                    calendar_day=datetime.now().date(),
+                    current_total_assets=float(total_assets),
+                )
+            except Exception:
+                d_amt, d_pct = None, None
+            if d_amt is not None and d_pct is not None:
+                day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
+            else:
+                day_pnl_txt = "— (전일 EOD 없음)"
+            open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
 
             closed_h = self._sum_visible_history_realized_pnl()
             cum_pnl_amt = float(closed_h) + float(total_unrealized_pnl)
@@ -2333,7 +2379,8 @@ class VirtualTab:
             _set_if_diff("stock", f"{stock_eval:,.0f}")
             _set_if_diff("d1_cash", f"{getattr(portfolio, 'd1_deposit', 0):,.0f}")
             _set_if_diff("d2_cash", f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
-            _set_if_diff("day", f"{int(day_pnl_total):+,} ({day_pnl_pct:+.2f}%)")
+            _set_if_diff("open_ur", open_ur_txt)
+            _set_if_diff("day", day_pnl_txt)
             _set_if_diff("cum", f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
             self._update_holdings_aggregate_fee_excluded()
         except Exception:

@@ -19,6 +19,7 @@
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,
     "realtime_15m_calendar_retention_days": 365,
+    "realtime_warmup_depth_calendar_slack_days": 21,
     "realtime_warmup_persist_to_rt15m_db": true,
     "realtime_bars_max_keep": 300,
     "use_api_warmup_backfill": true,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 from datetime import date, datetime, timedelta
 from collections import defaultdict
@@ -28,6 +29,7 @@ from reporting.krx_trading_calendar import (
     trading_days_inclusive,
 )
 from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
+from utils.eod_equity_snapshots import read_prev_eod_total_assets_for_calendar_day
 from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
 
 
@@ -396,6 +398,27 @@ def read_embedded_meta(html_text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _virtual_history_exited_on_report_day(pos: Dict[str, Any], report_day: str) -> bool:
+    """가상 청산 이력 1건의 청산일이 report_day(YYYY-MM-DD)와 같은지."""
+    day_key = str(report_day)[:10]
+    try:
+        exd = str(pos.get("exit_date", "") or "").strip()[:10]
+        if exd and exd == day_key:
+            return True
+    except (TypeError, ValueError, AttributeError):
+        pass
+    exdt = pos.get("exit_datetime")
+    if not exdt:
+        return False
+    try:
+        s = str(exdt).strip().replace("T", " ")
+        if len(s) >= 10 and s[:10] == day_key:
+            return True
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return False
+
+
 def report_needs_regeneration(
     path: str,
     report_day: str,
@@ -483,51 +506,293 @@ def _compute_total_assets_for_daily_report(portfolio: Any, stock_eval: float) ->
             return 0.0
 
 
+def _daily_row_has_ka_snapshot(pos: Dict[str, Any]) -> bool:
+    """VirtualTab._row_has_ka_snapshot 과 동일: 잔고(ka10085) 동기화 스냅샷 존재 여부."""
+    try:
+        if not pos.get("ka_sync_iso"):
+            return False
+        if float(pos.get("ka_evlu_amt") or 0) > 0:
+            return True
+        if abs(float(pos.get("ka_evlu_pfls_amt") or 0)) > 1e-6:
+            return True
+        if float(pos.get("ka_cur_prc") or 0) > 0:
+            return True
+        if float(pos.get("ka_pur_amt") or 0) > 0:
+            return True
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return False
+
+
+def _daily_has_live_tick_price(info: Dict[str, Any]) -> bool:
+    """VirtualTab._has_live_tick_price 와 동일(행 단위 info)."""
+    try:
+        if bool(info.get("vp_price_stub")):
+            return False
+        raw_p = info.get("price")
+        if raw_p in (None, "", 0):
+            return False
+        return float(raw_p) > 0
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _daily_rest_quote_cur_prc(app: Any, nk: str) -> float:
+    """VirtualTab._rest_quote_fallback_close 와 동등(인스턴스 캐시 없이 단순 호출)."""
+    try:
+        om = getattr(app, "order_manager", None)
+        fn = getattr(om, "fetch_stock_cur_prc_rest", None) if om is not None else None
+        if not callable(fn):
+            return 0.0
+        px = fn(nk)
+        if px is None:
+            return 0.0
+        v = float(px)
+        return v if v > 0 else 0.0
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def _daily_monitor_live_price_for_holding(
+    app: Any, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
+) -> float:
+    """
+    VirtualTab._monitor_live_price 와 동등한 폴백 체인(틱 price → last_price → REST → 평단).
+    일일 결산 요약 전용으로 info 를 인자로 받습니다.
+    """
+    stub_flag = bool(info.get("vp_price_stub"))
+    try:
+        ap = float(pos.get("avg_price", 0) or 0)
+    except (TypeError, ValueError):
+        ap = 0.0
+    try:
+        raw_p = info.get("price")
+        if raw_p not in (None, "", 0):
+            v = float(raw_p)
+            if v > 0:
+                return v
+    except (TypeError, ValueError):
+        pass
+    if not stub_flag:
+        try:
+            raw_lp = info.get("last_price")
+            if raw_lp not in (None, "", 0):
+                v = float(raw_lp)
+                if v > 0:
+                    if ap > 0 and abs(v - ap) < 1e-6 and "price" not in info:
+                        pass
+                    else:
+                        return v
+        except (TypeError, ValueError):
+            pass
+    api_px = _daily_rest_quote_cur_prc(app, nk)
+    if api_px > 0:
+        return api_px
+    try:
+        if ap > 0:
+            return ap
+    except (TypeError, ValueError):
+        pass
+    return 0.0
+
+
+def _daily_resolve_holdings_prices_no_vt(
+    app: Any, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
+) -> Tuple[float, int, float, float]:
+    """
+    VirtualTab._resolve_active_holdings_prices 와 동일 분기(virtual_tab 미초기화 시).
+    반환: (ap, qty, curr_p, eval_amt).
+    """
+    try:
+        live_p = float(_daily_monitor_live_price_for_holding(app, nk, pos, info))
+    except (TypeError, ValueError):
+        try:
+            live_p = float(pos.get("avg_price", 0) or 0)
+        except (TypeError, ValueError):
+            live_p = 0.0
+    try:
+        ap = float(pos.get("avg_price", 0) or 0)
+    except (TypeError, ValueError):
+        ap = 0.0
+    try:
+        qty = int(pos.get("qty", 0) or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    if ap <= 0:
+        ap = live_p if live_p > 0 else ap
+
+    use_tick = _daily_has_live_tick_price(info)
+    use_ka = (not use_tick) and _daily_row_has_ka_snapshot(pos)
+
+    if use_tick and live_p > 0:
+        curr_p = live_p
+        eval_amt = curr_p * float(qty)
+    elif use_ka:
+        try:
+            ka_cur = float(pos.get("ka_cur_prc") or 0)
+            ka_ev = float(pos.get("ka_evlu_amt") or 0)
+        except (TypeError, ValueError):
+            ka_cur, ka_ev = 0.0, 0.0
+        if ka_cur > 0:
+            curr_p = ka_cur
+        elif ka_ev > 0 and qty > 0:
+            curr_p = ka_ev / float(qty)
+        else:
+            curr_p = live_p if live_p > 0 else ap
+        if ka_ev > 0:
+            eval_amt = ka_ev
+        else:
+            eval_amt = curr_p * float(qty)
+    else:
+        curr_p = live_p
+        if ap <= 0:
+            ap = curr_p if curr_p > 0 else ap
+        eval_amt = curr_p * float(qty)
+
+    return (float(ap), int(qty), float(curr_p), float(eval_amt))
+
+
+def _resolve_holding_prices_for_daily_summary(
+    app: Any, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
+) -> Tuple[float, int, float, float]:
+    """
+    포지션 관리 탭과 동일한 규칙으로 (평단 ap, 수량, 현재가, 평가금)을 구합니다.
+    GUI에 VirtualTab 이 있으면 해당 구현을 그대로 재사용합니다.
+    """
+    vt = getattr(app, "virtual_tab", None)
+    if vt is not None:
+        try:
+            ap, qty, curr_p, eval_amt, _bi = vt._resolve_active_holdings_prices(nk, pos, info)
+            return (float(ap), int(qty), float(curr_p), float(eval_amt))
+        except Exception:
+            pass
+    try:
+        return _daily_resolve_holdings_prices_no_vt(app, nk, pos, info)
+    except Exception:
+        try:
+            ap0 = float(pos.get("avg_price", 0) or 0)
+        except (TypeError, ValueError):
+            ap0 = 0.0
+        try:
+            q0 = int(pos.get("qty", 0) or 0)
+        except (TypeError, ValueError):
+            q0 = 0
+        try:
+            cp0 = float(info.get("price", pos.get("avg_price", 0)) or 0)
+        except (TypeError, ValueError):
+            cp0 = 0.0
+        return (float(ap0), int(q0), float(cp0), float(cp0) * float(q0))
+
+
 def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
-    """VirtualTab 요약과 유사. report_day 기준 금일 실현 필터."""
+    """
+    일일 결산 요약.
+
+    - ``realized_today``: 당일 **청산 완료**된 가상 이력의 실현손익 합(청산일 기준).
+    - ``day_pnl_amt`` / ``day_pnl_pct``: 당일 총자산 − 직전 영업일 ``eod_equity_snapshots_*.json`` EOD 스냅샷.
+      스냅샷이 없으면 None → HTML 에서 '—' 표시.
+    - ``unrealized``: 보유분 누적 미실현(당일 변동분이 아님).
+    """
     portfolio = app.portfolio
     monitor_info = getattr(app, "monitor_info", {}) or {}
-    today_str = report_day
+    today_str = str(report_day)[:10]
 
     total_eval = 0.0
     total_unrealized = 0.0
     _settings = getattr(app, "settings", None) or {}
     for code, pos in portfolio.virtual_positions.items():
-        info = monitor_info.get(code, {})
-        curr_p = float(info.get("price", pos.get("avg_price", 0)))
-        qty = int(pos.get("qty", 0))
-        avg_p = float(pos.get("avg_price", 0))
-        eval_amt = curr_p * qty
+        info = monitor_info.get(code, {}) or {}
+        try:
+            ap, qty, curr_p, eval_amt = _resolve_holding_prices_for_daily_summary(
+                app, str(code), pos, info
+            )
+        except Exception:
+            try:
+                ap = float(pos.get("avg_price", 0) or 0)
+            except (TypeError, ValueError):
+                ap = 0.0
+            try:
+                qty = int(pos.get("qty", 0) or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            try:
+                curr_p = float(info.get("price", pos.get("avg_price", 0)) or 0)
+            except (TypeError, ValueError):
+                curr_p = 0.0
+            eval_amt = float(curr_p) * float(qty)
         try:
             unrealized = float(
                 unrealized_at_price_net_of_sell_fee(
-                    pos, float(curr_p), int(qty), float(avg_p), _settings
+                    pos, float(curr_p), int(qty), float(ap), _settings
                 )
             )
         except Exception:
-            unrealized = (curr_p - avg_p) * qty
+            try:
+                unrealized = (float(curr_p) - float(ap)) * float(qty)
+            except (TypeError, ValueError):
+                unrealized = 0.0
         total_eval += eval_amt
         total_unrealized += unrealized
 
     total_day_realized = 0.0
-    for pos in portfolio.virtual_history:
-        pnl_amt = float(pos.get("realized_pnl_amt", 0) or 0)
-        if str(pos.get("entry_time", "")).startswith(today_str):
-            total_day_realized += pnl_amt
+    try:
+        hist = list(getattr(portfolio, "virtual_history", None) or [])
+    except Exception:
+        hist = []
+    for pos in hist:
+        if not isinstance(pos, dict):
+            continue
+        if not _virtual_history_exited_on_report_day(pos, today_str):
+            continue
+        try:
+            pnl_amt = float(pos.get("realized_pnl_amt", 0) or 0)
+        except (TypeError, ValueError):
+            pnl_amt = 0.0
+        total_day_realized += pnl_amt
 
     current_cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
     api_mv = float(getattr(portfolio, "holdings_stocks_mv_api", 0) or 0)
     stock_eval = api_mv if api_mv > 0 else total_eval
     total_assets = _compute_total_assets_for_daily_report(portfolio, stock_eval)
 
-    day_pnl_total = total_day_realized + total_unrealized
+    prev_close_assets: Optional[float] = None
     try:
-        start_cap = float(str(app.settings.get("backtest_initial_capital", 10000000)).replace(",", ""))
+        cal = datetime.strptime(today_str, "%Y-%m-%d").date()
+    except ValueError:
+        cal = datetime.now().date()
+    try:
+        prev_close_assets = read_prev_eod_total_assets_for_calendar_day(cal)
     except Exception:
+        prev_close_assets = None
+
+    day_pnl_total: Optional[float] = None
+    day_pnl_pct: Optional[float] = None
+    if prev_close_assets is not None and prev_close_assets > 0:
+        try:
+            d_amt = float(total_assets) - float(prev_close_assets)
+            if math.isfinite(d_amt):
+                day_pnl_total = float(d_amt)
+                day_pnl_pct = (day_pnl_total / float(prev_close_assets)) * 100.0
+                if not math.isfinite(day_pnl_pct):
+                    day_pnl_pct = 0.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            day_pnl_total, day_pnl_pct = None, None
+
+    try:
+        start_cap = float(
+            str(app.settings.get("backtest_initial_capital", 10000000)).replace(",", "")
+        )
+    except (TypeError, ValueError, AttributeError):
         start_cap = 10000000.0
-    safe_cap = max(1.0, start_cap if total_assets == 0 else (total_assets - day_pnl_total))
-    day_pnl_pct = (day_pnl_total / safe_cap) * 100 if safe_cap else 0.0
-    total_profit_pct = (total_assets / safe_cap - 1) * 100 if safe_cap else 0.0
+    sc = max(1.0, float(start_cap))
+    try:
+        total_profit_pct = (float(total_assets) / sc - 1.0) * 100.0
+        if not math.isfinite(total_profit_pct):
+            total_profit_pct = 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        total_profit_pct = 0.0
 
     d1 = float(getattr(portfolio, "d1_deposit", 0) or 0)
     d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)
@@ -543,6 +808,7 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
         "cum_return_pct": total_profit_pct,
         "unrealized": total_unrealized,
         "realized_today": total_day_realized,
+        "prev_total_assets_close_for_ddpnl": prev_close_assets,
     }
 
 
@@ -1073,6 +1339,16 @@ def generate_daily_settlement_report_ex(
         orders = []
 
     summary = _compute_summary_from_app(app, day)
+    try:
+        from utils.eod_equity_snapshots import write_eod_total_assets_for_day
+
+        gen_now = datetime.now()
+        if gen_now >= _session_end_local(day, buffer_minutes):
+            write_eod_total_assets_for_day(day, float(summary["total_assets"]))
+    except (TypeError, ValueError, KeyError):
+        pass
+    except Exception:
+        pass
 
     # 가상 청산 이력 매칭 시 제외할 종목(예: 지수·더미). 미설정 시 빈 집합.
     try:
@@ -1237,16 +1513,51 @@ def generate_daily_settlement_report_ex(
             </div>
         </div>"""
 
+    try:
+        _rt = float(summary.get("realized_today", 0) or 0)
+    except (TypeError, ValueError):
+        _rt = 0.0
+    try:
+        _re = float(summary.get("unrealized", 0) or 0)
+    except (TypeError, ValueError):
+        _re = 0.0
+    _dpa = summary.get("day_pnl_amt")
+    _dpp = summary.get("day_pnl_pct")
+    _pref = summary.get("prev_total_assets_close_for_ddpnl")
+
+    if _dpa is not None and _dpp is not None:
+        ref_note = ""
+        try:
+            if _pref is not None:
+                pf = float(_pref)
+                if math.isfinite(pf) and pf > 0:
+                    ref_note = f' <span class="muted">(전일 {pf:,.0f}원 대비)</span>'
+        except (TypeError, ValueError):
+            ref_note = ""
+        day_pnl_html = (
+            f'<tr><td>금일 손익 (전 영업일 EOD 총자산 대비)</td>'
+            f'<td class="num">{float(_dpa):+,.0f} 원 ({float(_dpp):+.2f}%){ref_note}</td></tr>'
+        )
+    else:
+        day_pnl_html = (
+            "<tr><td>금일 손익 (전 영업일 EOD 총자산 대비)</td>"
+            '<td class="num">— <span class="muted">'
+            "직전 영업일 EOD 스냅샷(eod_equity_snapshots_*.json)이 없습니다. "
+            "장 마감 이후 포지션 탭이 갱신되거나 일일 결산을 생성하면 당일 스냅이 저장되며, "
+            "그 다음 거래일부터 금일 손익이 계산됩니다."
+            "</span></td></tr>"
+        )
+
     summary_rows = f"""
         <tr><td>총 자산 (D+2+주식평가, 포지션 관리 탭과 동일)</td><td class="num">{summary['total_assets']:,.0f} 원</td></tr>
         <tr><td>예수금 (가용)</td><td class="num">{summary['cash']:,.0f} 원</td></tr>
         <tr><td>예수금 D+1</td><td class="num">{summary['d1_cash']:,.0f} 원</td></tr>
         <tr><td>예수금 D+2</td><td class="num">{summary['d2_cash']:,.0f} 원</td></tr>
         <tr><td>주식 평가금 (보유 합)</td><td class="num">{summary['stock_eval']:,.0f} 원</td></tr>
-        <tr><td>금일 실현(엔트리일 기준 합산)</td><td class="num">{summary['realized_today']:+,.0f} 원</td></tr>
-        <tr><td>미실현 손익 (보유분)</td><td class="num">{summary['unrealized']:+,.0f} 원</td></tr>
-        <tr><td>금일 손익 (실현+미실현)</td><td class="num">{summary['day_pnl_amt']:+,.0f} 원 ({summary['day_pnl_pct']:+.2f}%)</td></tr>
-        <tr><td>누적 수익률 (참고)</td><td class="num">{summary['cum_return_pct']:+.2f}%</td></tr>
+        <tr><td>금일 실현 (당일 청산·청산일 기준)</td><td class="num">{_rt:+,.0f} 원</td></tr>
+        <tr><td>미실현 손익 (보유·누적)</td><td class="num">{_re:+,.0f} 원</td></tr>
+        {day_pnl_html}
+        <tr><td>누적 수익률 (참고·초기자본 대비)</td><td class="num">{summary['cum_return_pct']:+.2f}%</td></tr>
     """
 
     gen_str = generated_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -1260,8 +1571,12 @@ def generate_daily_settlement_report_ex(
         "generation_marked_complete": bool(complete_flag),
         "chart_failed_codes": chart_failures,
         "warnings": warnings,
-        "schema_version": 1,
+        "schema_version": 2,
     }
+    try:
+        meta_obj["total_assets_close"] = float(summary["total_assets"])
+    except (TypeError, ValueError, KeyError):
+        meta_obj["total_assets_close"] = 0.0
     try:
         import plotly
 
