@@ -74,6 +74,47 @@ def _monitor_fmt_bid_ask(info: Dict[str, Any]) -> str:
         return "— / — (—)"
 
 
+def _ws_indicative_price_from_values(vals: Dict[str, Any]) -> int:
+    """
+    웹소켓 REAL 패킷 `values` 에서 참고 현재가(원).
+    체결(0B) fid 10 이 0인 구간·호가만 선도착 시, 키움 우선호가 FID 로 보완한다.
+    (27·28 최우선 매도/매수, 41·51 매도1·매수1 — OpenAPI 실시간 FID 표 기준)
+    """
+    try:
+        if not isinstance(vals, dict):
+            return 0
+
+        def gv(fid: int) -> float:
+            try:
+                v = vals.get(str(fid))
+                if v is None or v == "":
+                    return 0.0
+                return float(str(v).replace("+", "").replace("-", "").strip())
+            except Exception:
+                return 0.0
+
+        p10 = int(gv(10))
+        if p10 > 0:
+            return p10
+        a27, b28 = int(gv(27)), int(gv(28))
+        if a27 > 0 and b28 > 0:
+            return int(round((a27 + b28) / 2))
+        if a27 > 0:
+            return a27
+        if b28 > 0:
+            return b28
+        a41, b51 = int(gv(41)), int(gv(51))
+        if a41 > 0 and b51 > 0:
+            return int(round((a41 + b51) / 2))
+        if a41 > 0:
+            return a41
+        if b51 > 0:
+            return b51
+        return 0
+    except Exception:
+        return 0
+
+
 # 감시 트리 컬럼 기본 폭(px). 사용자 조절값·세로 분할 비율은 monitor_column_widths.json 에 저장됩니다.
 # JSON 형식: {"columns": {..}, "sash0_rel": 0.0~1.0} — 구버전 평면 dict 는 columns 만 있는 것으로 간주합니다.
 _DEFAULT_MONITOR_COL_WIDTHS: Dict[str, int] = {
@@ -1467,8 +1508,9 @@ class MonitorTab:
 
                 if p_type == '0B':
                     now_price = int(get_val(10))
-                    # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
-                    # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
+                    if now_price <= 0:
+                        now_price = _ws_indicative_price_from_values(vals)
+                    # 체결 전·장 시작 직후 fid 10 이 0이고 호가 FID 도 없으면 스킵.
                     if now_price == 0:
                         continue
                     volume = int(get_val(13))
@@ -1488,11 +1530,19 @@ class MonitorTab:
                     total_bid = int(get_val(125))
                     info['total_ask'] = total_ask
                     info['total_bid'] = total_bid
-                    # 체결(0B) 전에 호가만 오면 price 가 0 → 틱 콜백이 전부 차단되는 것처럼 보일 수 있음
+                    # 체결(0B) 전에 호가만 오면 price 가 0 → 우선호가로 참고가 채움 후 갱신
                     try:
                         lp = int(info.get("price") or 0)
                     except (TypeError, ValueError):
                         lp = 0
+                    if lp <= 0:
+                        hoga_px = _ws_indicative_price_from_values(vals)
+                        if hoga_px > 0:
+                            try:
+                                info["price"] = hoga_px
+                                lp = hoga_px
+                            except Exception:
+                                pass
                     if lp <= 0:
                         continue
                     self.app._on_realtime_data_received(
