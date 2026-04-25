@@ -11,6 +11,8 @@ import os
 import threading
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from core.monitor_code_sets import watchlist_only_codes_set
+
 _DEFAULT_FILE = "watchlist_favorites.json"
 
 
@@ -95,13 +97,13 @@ class WatchlistStore:
         """
         (레거시) 관심만·비감시 코드 집합. 포지션/결산 리포트는 더 이상 이 집합으로 필터하지 않습니다.
         스크립트·외부 연동 호환용으로 메서드는 유지합니다.
+        감시 선정과의 차집합은 `core.monitor_code_sets.watchlist_only_codes_set` 과 동일 규칙이다.
         """
-        wl = self.codes_set()
         try:
-            mon = {str(c).zfill(6) for c in (monitor_codes or [])}
+            wl = self.codes_set()
+            return watchlist_only_codes_set(wl, monitor_codes or [])
         except Exception:
-            mon = set()
-        return wl - mon
+            return set()
 
     def get_name(self, code: str) -> str:
         c = str(code).strip().zfill(6)

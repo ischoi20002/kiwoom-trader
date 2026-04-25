@@ -15,6 +15,10 @@ import FinanceDataReader as fdr
 # Custom modules
 import config
 import strategy_selector
+from core.monitor_code_sets import (
+    monitor_selection_codes_set,
+    watchlist_only_codes_set,
+)
 from backtest_engine import TradingStrategy
 from kiwoom_rest_api.auth.token import TokenManager
 
@@ -1605,7 +1609,7 @@ class MonitorTab:
         """
         try:
             mc = getattr(self.app.trading_controller, "monitor_codes", None) or []
-            return {str(c).split("_")[0].zfill(6) for c in mc}
+            return monitor_selection_codes_set(mc)
         except Exception:
             return set()
 
@@ -1616,16 +1620,8 @@ class MonitorTab:
         """
         try:
             wl = self._watchlist_codes_set()
-            mc = self._monitor_target_codes_set()
-            out: Set[str] = set()
-            for c in wl:
-                try:
-                    nk = str(c).split("_")[0].zfill(6)
-                except Exception:
-                    continue
-                if nk not in mc:
-                    out.add(nk)
-            return out
+            mc = getattr(self.app.trading_controller, "monitor_codes", None) or []
+            return watchlist_only_codes_set(wl, mc)
         except Exception:
             return set()
 

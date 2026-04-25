@@ -7,6 +7,10 @@
 
 ---
 
+## 0.4.5 (2026-04-26)
+
+- **모니터 코드 집합 SSOT**: 감시 선정·관심목록 전용(wl_only) 판별을 `core/monitor_code_sets.py` 한곳에서 정규화·차집합 처리. `ui/tabs/monitor_tab.py`, `core/signal_engine.py`, `core/watchlist_store.codes_report_exclusion_set` 가 동일 규칙을 사용한다.
+
 ## 0.4.4 (2026-04-26)
 
 - **실시간 감시·보유 트리**: 감시 선정 종목이 관심목록에도 있을 때 「관심목록 전용 숨김」 로직이 전체 관심목록 기준으로 동작해 보유·감시 트리에서 빠지거나 틱 갱신이 막히던 문제 수정. **관심목록만**(감시 미선정)에 한해 숨김·스킵하도록 `wl_only` 집합 사용, `signal_engine` 트리 큐잉도 동일 기준 (`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).

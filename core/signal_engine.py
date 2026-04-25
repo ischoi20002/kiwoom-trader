@@ -5,6 +5,7 @@ from datetime import datetime
 import traceback
 from backtest_engine import TradingStrategy
 from core.defaults import effective_min_15m_bars_for_monitoring
+from core.monitor_code_sets import watchlist_only_codes_set
 from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
 from typing import Any, Optional, Tuple
@@ -774,17 +775,13 @@ class SignalEngine:
                 self._last_realtime_err = str(e)
 
     def _watchlist_only_codes(self) -> set:
-        """감시 목록에 없고 관심목록에만 있는 종목 (정규화 6자리)."""
+        """감시 선정에 없고 관심목록에만 있는 종목 (6자리). `core.monitor_code_sets` 와 동일 규칙."""
         try:
             mc = getattr(self.app.trading_controller, "monitor_codes", None) or []
-            mon = {str(c).zfill(6) for c in mc}
+            wl = self.app.watchlist_store.codes_set()
+            return watchlist_only_codes_set(wl, mc)
         except Exception:
-            mon = set()
-        try:
-            wl = {str(c).zfill(6) for c in self.app.watchlist_store.get_codes()}
-        except Exception:
-            wl = set()
-        return wl - mon
+            return set()
 
     def _send_watchlist_telegram(self, msg: str) -> None:
         try:
