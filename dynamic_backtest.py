@@ -22,6 +22,7 @@ from backtest_engine import (
     settings_for_backtest,
 )
 from utils.fee_rates import fee_decimal_rates_backtest
+from utils.krx_bars import m1_window_start_for_15m_end
 from strategy.synthetic_realtime_fill import (
     synthesize_bid_ask_ratio_vectorized,
     synthesize_vol_power_vectorized,
@@ -85,6 +86,23 @@ def _m1_float_ohlc(
     except (TypeError, KeyError, ValueError):
         pass
     return float(default)
+
+
+def _floor_sell_px_to_same_15m_bar(px_m1: float, curr_15m: Any) -> float:
+    """
+    동일 15분 구간(curr_15m_time)에 대해: 1·15분 DB 집계가 어긋나 1분 저가가
+    15분 저가보다 밑으로 떨어질 수 없다. 그럴 때 체결·EXIT 판가는 15분 저가를 하한으로 쓴다.
+    (15분 차트 OHL·리포트와의 모순 완화)
+    """
+    try:
+        if curr_15m is None or not (px_m1 > 0) or not np.isfinite(float(px_m1)):
+            return float(px_m1)
+        lo_15 = _m1_float_ohlc(curr_15m, "Low", "low", float("nan"))
+        if lo_15 == lo_15 and lo_15 > 0 and float(px_m1) < float(lo_15):
+            return float(lo_15)
+    except (TypeError, ValueError, KeyError):
+        pass
+    return float(px_m1)
 
 
 def _dual_track_new_candidates(
@@ -1025,9 +1043,21 @@ class DynamicBacktester:
         m1_full = self.cached_1m_data[cache_key]
         if m1_full is not None:
             try:
-                # [v37.5] 15분봉 시각(curr_time)은 해당 봉의 마감 시각이므로, T-14분~T 범위를 가져와야 정합성이 맞음
-                return m1_full.loc[curr_time - timedelta(minutes=14) : curr_time]
-            except: 
+                # [v38] 15m 행 시각=구간 끝: 09:15봉만 1m [09:00,09:15] (T-15), 나머지 (T-14) — utils.krx_bars
+                _ct = (
+                    pd.Timestamp(curr_time)
+                    if not isinstance(curr_time, pd.Timestamp)
+                    else curr_time
+                )
+                t0 = m1_window_start_for_15m_end(_ct)
+                return m1_full.loc[t0:curr_time]
+            except (TypeError, KeyError) as e:
+                print(f"[_get_m1_chunk] 1m 슬라이스 실패: {e!r}", flush=True)
+                return None
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:  # noqa: BLE001
+                print(f"[_get_m1_chunk] 예기치 않은 실패: {e!r}", flush=True)
                 return None
         return None
 
@@ -1095,6 +1125,7 @@ class DynamicBacktester:
                 
                 # 보수적 백테: EXIT 판가·체결을 1분 저가 기준(종가 X)
                 px_sell = _m1_sell_price_conservative(m1_r)
+                px_sell = _floor_sell_px_to_same_15m_bar(px_sell, curr_15m)
                 # 1분 단위 정밀 매도 평가 (indicator_to_use에 시뮬레이션 데이터 전달)
                 res = TradingStrategy.evaluate_position(
                     code, px_sell, h_info, self.settings,

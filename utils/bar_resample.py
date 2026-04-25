@@ -7,6 +7,7 @@ from typing import Optional
 
 import pandas as pd
 
+from utils.krx_bars import resample_1m_ohlcv_to_15m_krx
 from utils.normalization import normalize_code
 
 
@@ -85,14 +86,17 @@ def refresh_resampled_data_at_path(db_path: str, code: str) -> Optional[str]:
             )
             if df_1m.empty:
                 return None
-            df_1m["datetime"] = pd.to_datetime(df_1m["datetime"])
-            df_1m.set_index("datetime", inplace=True)
-            df_15m = df_1m.resample("15min").agg(
-                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-            ).dropna()
-            df_15m.reset_index(inplace=True)
-            df_15m["datetime"] = df_15m["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
-            df_15m["code"] = code
+            df_1m["datetime"] = pd.to_datetime(df_1m["datetime"], errors="coerce")
+            df_1m = df_1m.dropna(subset=["datetime"])
+            for c in ("open", "high", "low", "close", "volume"):
+                df_1m[c] = pd.to_numeric(df_1m[c], errors="coerce")
+            df_1m = df_1m.dropna(subset=["open", "high", "low", "close", "volume"])
+            if df_1m.empty:
+                return None
+            df_1m = df_1m.set_index("datetime").sort_index()
+            df_15m = resample_1m_ohlcv_to_15m_krx(df_1m, code)
+            if df_15m is None or len(df_15m) == 0:
+                return None
             conn.execute("DELETE FROM bars_15m WHERE code = ?", (code,))
             df_15m.to_sql("bars_15m", conn, if_exists="append", index=False)
             conn.commit()

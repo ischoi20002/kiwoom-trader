@@ -7,6 +7,13 @@
 
 ---
 
+## 0.4.2 (2026-04-26)
+
+- **포지션 탭 계좌 요약**: 실시간 감시 중 30초 주기는 **보유(ka10085) 정합만** 하고 예수금상세 TR는 생략. **예수금·D+1/D+2**는 매매 체결 후 전체 동기화(및 수동 동기화)에서만 REST 갱신. **주식평가금·총자산**은 보유 행 합계·틱 갱신과 일치하도록 정리 (`k_trader_gui.py`, `core/order_manager.py`, `core/portfolio_manager.py`, `ui/tabs/virtual_tab.py`).
+- **kt00007 체결 일시**: `YYYYMMDDHHMMSS`(14자리) 및 행의 `cntr_dt`·`ord_dt` 등을 반영해 `order_history`의 표시 일시·`fill_row_key`가 어긋나던 문제 수정 (`core/order_manager.py`).
+- **바·백테스트·설정**: `utils/bar_resample.py`, `backtest_engine.py`, `dynamic_backtest.py`, `core/defaults.py`, `settings.json`, `monitor_column_widths.json` 반영.
+- **도구**: `tools/refresh_all_bars_15m_krx.py`, `tools/verify_1m_15m_alignment.py`, `utils/krx_bars.py` 추가.
+
 ## 0.4.1 (2026-04-25)
 
 - **고정밀 백테(보수적 체결가)**: 1분 경로에서 **매도·EXIT 판가·체결 = 1분 저가**, **매수 체결 = 1분 고가** (`dynamic_backtest.py`, `backtest_engine.py` / `SimpleBacktester` 1분 시뮬). 지표 `simulate_intrabar`는 기존처럼 종가·OHLC 흐름.

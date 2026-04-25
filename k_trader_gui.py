@@ -507,12 +507,16 @@ class KiwoomApp:
         silent: bool = True,
         force: bool = False,
         log_boot_summary: bool = False,
+        refresh_cash_deposit: bool = True,
     ) -> None:
         """
         계좌 동기화는 REST(ka85·예수 등)·정합·JSON 저장으로 메인 스레드에서 실행 시
         탭 전환·클릭이 수 초~10초 이상 막힐 수 있어 워커 스레드에서 실행한다.
         gui_callback 은 PortfolioManager 가 root.after(0) 으로 메인에 넘긴다.
         동시에 두 번 돌면 상태가 꼬일 수 있어 락으로 직렬화(이미 실행 중이면 이번 호출은 생략).
+
+        refresh_cash_deposit=False: ka10085 보유 정합만 하고 예수금상세 등 현금 API는 생략
+        (30초 주기 루프). 예수·D+n·출금가능은 체결 후 동기화 등 refresh_cash_deposit=True 경로에서만.
         """
         def _worker() -> None:
             acquired = False
@@ -521,7 +525,10 @@ class KiwoomApp:
                 if not acquired:
                     return
                 self.portfolio.sync_with_actual_account(
-                    silent=silent, force=force, log_boot_summary=log_boot_summary
+                    silent=silent,
+                    force=force,
+                    log_boot_summary=log_boot_summary,
+                    refresh_cash_deposit=refresh_cash_deposit,
                 )
             except Exception as e:
                 try:
@@ -1129,14 +1136,16 @@ class KiwoomApp:
 
     def _periodic_account_refresh_loop(self) -> None:
         """
-        실시간 감시 중: 약 30초마다 REST 동기화(총자산·예수금·보유).
-        감시 중이 아니면 재예약하지 않습니다.
+        실시간 감시 중: 약 30초마다 보유(ka10085) 정합만 수행.
+        예수금·D+1/D+2·총자산 REST는 매매 체결 후 동기화에서만 갱신(refresh_cash_deposit=True).
         """
         try:
             if not self.root.winfo_exists():
                 return
             if self.is_monitoring:
-                self._run_portfolio_sync_in_daemon_thread(silent=True, force=True)
+                self._run_portfolio_sync_in_daemon_thread(
+                    silent=True, force=True, refresh_cash_deposit=False
+                )
         except Exception:
             pass
         try:
@@ -1649,10 +1658,14 @@ class KiwoomApp:
         force: bool = False,
         *,
         log_boot_summary: bool = False,
+        refresh_cash_deposit: bool = True,
     ) -> None:
         """UI에서 호출되는 계좌 동기화 — 메인 스레드를 막지 않도록 백그라운드로 위임."""
         self._run_portfolio_sync_in_daemon_thread(
-            silent=silent, force=force, log_boot_summary=log_boot_summary
+            silent=silent,
+            force=force,
+            log_boot_summary=log_boot_summary,
+            refresh_cash_deposit=refresh_cash_deposit,
         )
 
     def _sync_account_deposit(self) -> None:

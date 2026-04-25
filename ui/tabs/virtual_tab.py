@@ -2191,11 +2191,13 @@ class VirtualTab:
         except Exception:
             total_closed_pnl = 0.0
 
-        # 3. 요약 정보 (Account Summary - REST API Synced) — 주문 로그는 위 0단계에서 이미 반영
+        # 3. 요약: 예수금·D+n은 포트폴리오(체결/수동 동기화 시 REST). 주식평가·총자산은 보유행 합계 기준.
         portfolio = self.app.portfolio
         current_cash = getattr(portfolio, "actual_deposit", 0)
-        # 상단 '주식 평가금': 잔고 API(ka10085) 합산, 미동기화 시 그리드 실시간 합 폴백
-        stock_eval = self._stock_eval_for_summary(portfolio, float(total_eval))
+        try:
+            stock_eval = float(total_eval)
+        except (TypeError, ValueError):
+            stock_eval = 0.0
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
         # 미실현(보유): 수수료·매입 반영 미실현 합(트리와 동일). %는 invested 합 대비.
@@ -2289,7 +2291,10 @@ class VirtualTab:
         self._update_summary_after_tick()
 
     def _update_summary_after_tick(self) -> None:
-        """틱 직후 상단 요약(주식평가금·보유주식 손익·총자산 등)만 재계산합니다."""
+        """
+        틱 직후 상단 요약 중 주식평가금·총자산·손익만 재계산합니다.
+        예수금·D+1/D+2는 REST(매매 체결 후 동기화)에서만 바뀌므로 여기서는 갱신하지 않습니다.
+        """
         try:
             def _set_if_diff(key: str, text: str) -> None:
                 try:
@@ -2332,8 +2337,10 @@ class VirtualTab:
                     pass
 
             portfolio = self.app.portfolio
-            current_cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
-            stock_eval = self._stock_eval_for_summary(portfolio, float(total_eval))
+            try:
+                stock_eval = float(total_eval)
+            except (TypeError, ValueError):
+                stock_eval = 0.0
             total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
             try:
@@ -2375,10 +2382,7 @@ class VirtualTab:
                 cum_pnl_pct = 0.0
 
             _set_if_diff("total", f"{total_assets:,.0f}")
-            _set_if_diff("cash", f"{current_cash:,.0f}")
             _set_if_diff("stock", f"{stock_eval:,.0f}")
-            _set_if_diff("d1_cash", f"{getattr(portfolio, 'd1_deposit', 0):,.0f}")
-            _set_if_diff("d2_cash", f"{getattr(portfolio, 'd2_deposit', 0):,.0f}")
             _set_if_diff("open_ur", open_ur_txt)
             _set_if_diff("day", day_pnl_txt)
             _set_if_diff("cum", f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
@@ -2389,8 +2393,7 @@ class VirtualTab:
     @staticmethod
     def _stock_eval_for_summary(portfolio: Any, local_total_eval: float) -> float:
         """
-        상단 '주식 평가금': 잔고 API(ka10085)에서 합산한 보유 평가액 우선.
-        미동기화·API 0이면 로컬 실시간 합(local_total_eval) 폴백.
+        (레거시) API 합산 평가액 vs 로컬 합. 포지션 탭 상단은 틱·전체 렌더 시 보유행 합계를 직접 사용합니다.
         """
         try:
             api_mv = float(getattr(portfolio, "holdings_stocks_mv_api", 0) or 0)

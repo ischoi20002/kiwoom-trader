@@ -1476,11 +1476,9 @@ class SimpleBacktester:
     def run(self, df, code="SAMPLE", market_df=None, vix_df=None, log_to_csv=False, skip_indicators=False, high_precision=False, m1_df_preloaded=None):
         """[v15.0] Ultra-High Performance Backtest Engine"""
         try:
-            # [v30.6/v30.8] 멀티스레드 환경에서 컬럼 추가/수정(In-place)으로 인한 pandas 내부 Index 충돌 버그 방지
-            if not skip_indicators:
-                df = df.copy()
-            else:
-                df = df.copy(deep=False) # 얕은 복사로 메모리는 아끼고, Series 주소망 분리
+            # [v30.6] 멀티스레드: In-place·공유 캐시(_G_DATA)로 인한 충돌 방지. 항상 deep copy.
+            # [v40.1] skip_indicators(최적화) + 얕은 복사 시 trial 간 Signal/수익·MDD 동일 버그
+            df = df.copy()
             # 1. Initialization
             self.df = df # [v36.9.2] 인스턴스 변수에 저장하여 정밀 루프에서 참조 가능하게 함
             if not skip_indicators:
@@ -1599,9 +1597,14 @@ class SimpleBacktester:
                 # Find the starting index of 1M data for each 15M timestamp
                 times_15m = df.index
                 m1_times = m1_df_preloaded.index
-                # [v37.6] 15분봉 시각(times_15m)은 마감 시각이므로 T-14분~T 구간의 1분봉을 매핑함
-                start_idxs = np.searchsorted(m1_times, times_15m - pd.Timedelta(minutes=14))
-                end_idxs = np.searchsorted(m1_times, times_15m, side='right')
+                # [v38] 15m 끝 시각과 동일 규칙: 09:15(첫 봉) T-15, 그 외 T-14 (utils.krx_bars.m1_window_start* 와 동일)
+                _h = times_15m.hour.values
+                _m = times_15m.minute.values
+                _dmin = np.where((_h == 9) & (_m == 15), 15, 14).astype("int32")
+                _starts = times_15m - pd.to_timedelta(_dmin, unit="m")
+                m1a = np.asarray(m1_times.values, dtype="datetime64[ns]")
+                start_idxs = np.searchsorted(m1a, _starts.to_numpy(), side="left")
+                end_idxs = np.searchsorted(m1a, times_15m.to_numpy(), side="right")
                 # Store as (start, end) tuples or arrays
                 m1_boundaries = list(zip(start_idxs, end_idxs))
                 # [v4.5.10] Extract VP/BA for 1M Smart Exit simulation
@@ -1904,7 +1907,21 @@ class SimpleBacktester:
                     px_exit = _lo if (np.isfinite(_lo) and _lo > 0) else float(m1_p)
                 except (TypeError, ValueError):
                     px_exit = float(m1_p)
-                res = TradingStrategy.evaluate_position(code, px_exit, pos, self.settings, indicator_row=indicator_to_use, current_time=m1_t)
+                # 1m 저가 < 동일 15m 행 저가 인 경우(소스/구간 엇갈림) — 15m Low 를 하한으로
+                try:
+                    if indicators is not None and "Low" in indicators:
+                        _lo_15m = float(indicators["Low"][i])
+                        if (
+                            np.isfinite(_lo_15m)
+                            and _lo_15m > 0
+                            and float(px_exit) < float(_lo_15m)
+                        ):
+                            px_exit = _lo_15m
+                except (TypeError, ValueError, KeyError, IndexError):
+                    pass
+                res = TradingStrategy.evaluate_position(
+                    code, px_exit, pos, self.settings, indicator_row=indicator_to_use, current_time=m1_t
+                )
                 
                 if res['action'] == 'EXIT':
                     e_price = px_exit

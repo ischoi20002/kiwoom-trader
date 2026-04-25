@@ -507,8 +507,15 @@ class OrderManager:
             detail = detail[:1500] + " ...(생략)"
         return (len(parts), detail)
 
-    def get_holdings(self):
-        """[v4.0.0] 실시간 계좌 잔고 동기화 (ka10085 규격)"""
+    def get_holdings(self, *, refresh_cash_deposit: bool = True):
+        """
+        실시간 계좌 잔고 동기화 (ka10085 규격).
+
+        refresh_cash_deposit=False 인 경우: 보유 목록(ka10085)만 사용하고
+        예수금상세(ka10001)·별도 예수 TR(get_deposit) 호출을 생략합니다.
+        포지션 탭에서 주기(30초) 정합 시 API 부하·과다 갱신을 줄이기 위함이며,
+        예수금·D+1/D+2·출금가능은 매매 체결 후 전체 동기화에서만 갱신합니다.
+        """
         if not self.account_api:
             return None
 
@@ -541,76 +548,107 @@ class OrderManager:
                     merged, holdings, stocks_mv, api_tot, d1_deposit, d2_deposit
                 )
 
-                # [v4.8.5] 보유 없을 때 총자산·예수금 보정
-                if total_equity == 0 and len(holdings) == 0:
-                    deposit = self.get_deposit()
-                    if deposit:
-                        total_equity = float(deposit)
-                        d1_deposit = total_equity
-                        d2_deposit = total_equity
-
-                # ka10085의 d1_samt/d2_samt는 총자산과 혼동·누락되는 경우가 있어 예수금상세 TR로 보강
                 cash_orderable = 0.0  # 주문가능(ord_alow) — 로그·D+2 비교용. 포지션 탭 '예수금'과 별개.
                 cash_withdrawable = 0.0  # 출금가능(pymn_alow) — 포지션 탭 예수금(보유 현금)으로만 사용.
-                dep_detail = self.get_deposit_detail()
-                if dep_detail:
-                    d1d = float(dep_detail.get("d1") or 0)
-                    d2d = float(dep_detail.get("d2") or 0)
-                    # 예수금상세(ka10001/kt00001)가 D+1/D+2 권위 — d2d>0 만 쓰면 음수(D+2 부족)가 무시되어 동기화 표시가 틀어짐
-                    d1_deposit = d1d
-                    d2_deposit = d2d
-                    try:
-                        _ov = float(dep_detail.get("ord_alow") or 0)
-                        if _ov > 0:
-                            cash_orderable = _ov
-                    except (TypeError, ValueError):
-                        cash_orderable = 0.0
-                    try:
-                        _pv = float(dep_detail.get("pymn_alow") or 0)
-                        cash_withdrawable = max(0.0, _pv)
-                    except (TypeError, ValueError):
-                        cash_withdrawable = 0.0
 
-                # 예수금상세로 d2 보강 후: 총자산 = D+2 예수 + 보유 평가 합 (tot_evlu_amt는 이전 d2/예수 기준으로 남을 수 있음)
-                stocks_mv = self._sum_holdings_market_value(holdings)
-                n_hold, hold_detail = self._summarize_holdings_qty_positive(holdings)
-                try:
-                    total_equity = float(d2_deposit) + float(stocks_mv)
-                except Exception:
-                    pass
-                # 주문가능(ord)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
-                try:
-                    ca = float(cash_orderable or 0)
-                    d2v = float(d2_deposit or 0)
-                    d1v = float(d1_deposit or 0)
-                    tol = max(1.0, d2v * 0.0001) if d2v > 0 else 1.0
-                    if ca > 0 and abs(ca - d2v) > tol:
-                        dep_seg = (
-                            f"주문가능금액 {ca:,.0f}원 | D+2 예수금 {d2v:,.0f}원 | "
-                            f"D+1 예수금 {d1v:,.0f}원"
-                        )
-                    else:
-                        show_amt = d2v if d2v > 0 else ca
-                        dep_seg = (
-                            f"주문가능금액(D+2예수) {show_amt:,.0f}원 | "
-                            f"D+1 예수금 {d1v:,.0f}원"
-                        )
-                except Exception:
-                    dep_seg = (
-                        f"주문가능금액(D+2예수) {d2_deposit:,.0f}원 | "
-                        f"D+1 예수금 {d1_deposit:,.0f}원"
-                    )
-                try:
-                    self.app.log(
-                        f"✅ [{mode_str}] 계좌 동기화 | 총자산 {total_equity:,.0f}원 | "
-                        f"{dep_seg} | 실질 보유 {n_hold}종목"
-                        f"\n   └ 보유: {hold_detail}"
-                    )
-                except Exception as le:
+                if refresh_cash_deposit:
+                    # [v4.8.5] 보유 없을 때 총자산·예수금 보정
+                    if total_equity == 0 and len(holdings) == 0:
+                        try:
+                            deposit = self.get_deposit()
+                            if deposit:
+                                total_equity = float(deposit)
+                                d1_deposit = total_equity
+                                d2_deposit = total_equity
+                        except Exception as dep_ex:
+                            try:
+                                self.app.log(f"⚠️ [계좌] 예수 보정(get_deposit) 실패: {dep_ex}")
+                            except Exception:
+                                pass
+
+                    # ka10085의 d1_samt/d2_samt는 총자산과 혼동·누락되는 경우가 있어 예수금상세 TR로 보강
                     try:
-                        self.app.log(f"⚠️ [계좌] 동기화 요약 로그 실패: {le}")
+                        dep_detail = self.get_deposit_detail()
+                    except Exception as det_ex:
+                        dep_detail = None
+                        try:
+                            self.app.log(f"⚠️ [계좌] 예수금상세 조회 실패: {det_ex}")
+                        except Exception:
+                            pass
+                    if dep_detail:
+                        d1d = float(dep_detail.get("d1") or 0)
+                        d2d = float(dep_detail.get("d2") or 0)
+                        # 예수금상세(ka10001/kt00001)가 D+1/D+2 권위 — d2d>0 만 쓰면 음수(D+2 부족)가 무시되어 동기화 표시가 틀어짐
+                        d1_deposit = d1d
+                        d2_deposit = d2d
+                        try:
+                            _ov = float(dep_detail.get("ord_alow") or 0)
+                            if _ov > 0:
+                                cash_orderable = _ov
+                        except (TypeError, ValueError):
+                            cash_orderable = 0.0
+                        try:
+                            _pv = float(dep_detail.get("pymn_alow") or 0)
+                            cash_withdrawable = max(0.0, _pv)
+                        except (TypeError, ValueError):
+                            cash_withdrawable = 0.0
+
+                    # 예수금상세로 d2 보강 후: 총자산 = D+2 예수 + 보유 평가 합 (tot_evlu_amt는 이전 d2/예수 기준으로 남을 수 있음)
+                    stocks_mv = self._sum_holdings_market_value(holdings)
+                    try:
+                        total_equity = float(d2_deposit) + float(stocks_mv)
                     except Exception:
                         pass
+
+                n_hold, hold_detail = self._summarize_holdings_qty_positive(holdings)
+
+                if refresh_cash_deposit:
+                    # 주문가능(ord)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
+                    try:
+                        ca = float(cash_orderable or 0)
+                        d2v = float(d2_deposit or 0)
+                        d1v = float(d1_deposit or 0)
+                        tol = max(1.0, d2v * 0.0001) if d2v > 0 else 1.0
+                        if ca > 0 and abs(ca - d2v) > tol:
+                            dep_seg = (
+                                f"주문가능금액 {ca:,.0f}원 | D+2 예수금 {d2v:,.0f}원 | "
+                                f"D+1 예수금 {d1v:,.0f}원"
+                            )
+                        else:
+                            show_amt = d2v if d2v > 0 else ca
+                            dep_seg = (
+                                f"주문가능금액(D+2예수) {show_amt:,.0f}원 | "
+                                f"D+1 예수금 {d1v:,.0f}원"
+                            )
+                    except Exception:
+                        dep_seg = (
+                            f"주문가능금액(D+2예수) {d2_deposit:,.0f}원 | "
+                            f"D+1 예수금 {d1_deposit:,.0f}원"
+                        )
+                    try:
+                        self.app.log(
+                            f"✅ [{mode_str}] 계좌 동기화 | 총자산 {total_equity:,.0f}원 | "
+                            f"{dep_seg} | 실질 보유 {n_hold}종목"
+                            f"\n   └ 보유: {hold_detail}"
+                        )
+                    except Exception as le:
+                        try:
+                            self.app.log(f"⚠️ [계좌] 동기화 요약 로그 실패: {le}")
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        self.app.log(
+                            f"✅ [{mode_str}] 보유 정합(주기) | 실질 보유 {n_hold}종목 | "
+                            f"예수금·D+1/D+2·총자산 REST는 생략(매매 체결 시 반영)"
+                            f"\n   └ 보유: {hold_detail}"
+                        )
+                    except Exception as le:
+                        try:
+                            self.app.log(f"⚠️ [계좌] 정합 로그 실패: {le}")
+                        except Exception:
+                            pass
+
                 return {
                     "holdings": holdings,
                     "total_equity": total_equity,
@@ -865,15 +903,112 @@ class OrderManager:
             return ""
 
     @staticmethod
-    def _kiwoom_time_to_hms(clock: Any) -> str:
-        """확인시간·주문시간(숫자만) → HH:MM:SS."""
+    def _digits_only(s: Any) -> str:
+        """문자열에서 숫자만 추출 (키움 API 시각·일자 필드용)."""
         try:
-            d = "".join(ch for ch in str(clock or "") if ch.isdigit())
+            return "".join(ch for ch in str(s or "") if ch.isdigit())
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _kiwoom_time_to_hms(clock: Any) -> str:
+        """
+        순수 시각 6자리(HHMMSS) → HH:MM:SS.
+        14자리 이상(YYYYMMDDHHMMSS)은 앞 6자를 시각으로 쓰면 안 되므로,
+        이 경우에는 시각 부(뒤 6자)만 사용합니다.
+        """
+        try:
+            d = OrderManager._digits_only(clock)
+            if len(d) >= 14:
+                d = d[8:14]
             if len(d) >= 6:
                 return f"{d[0:2]}:{d[2:4]}:{d[4:6]}"
         except Exception:
             pass
         return "00:00:00"
+
+    @staticmethod
+    def _kt00007_row_fill_timestamp(
+        query_ord_dt_yyyymmdd: str, raw: Dict[str, Any]
+    ) -> Tuple[str, str, str]:
+        """
+        kt00007 한 행에서 order_history.timestamp 및 fill_row_key용 일·시각을 만듭니다.
+
+        - API가 체결(또는 확인) 시각을 YYYYMMDDHHMMSS(14자리)로 주면 그대로 사용합니다.
+        - 6자리(HHMMSS)만 오면 일자는 행의 cntr_dt·ord_dt 등 8자리 필드를 우선하고,
+          없으면 조회에 사용한 ord_dt(query)를 붙입니다.
+
+        Returns:
+            (timestamp 'YYYY-MM-DD HH:MM:SS', yyyymmdd_key, hhmmss_key 'HH:MM:SS')
+        """
+        qd = OrderManager._digits_only(query_ord_dt_yyyymmdd)
+        if len(qd) >= 8:
+            qd = qd[:8]
+        else:
+            qd = ""
+
+        # 체결/확인/주문 시각 후보 (REST 필드명이 버전별로 다를 수 있어 순차 시도)
+        clock_raw = (
+            raw.get("cntr_tm")
+            or raw.get("cnfm_tm")
+            or raw.get("ord_tm")
+            or raw.get("tm")
+            or raw.get("cntg_tm")
+            or raw.get("stck_cntg_hour")
+            or ""
+        )
+        clock = OrderManager._digits_only(clock_raw)
+
+        # 14자리 이상: YYYYMMDDHHMMSS (초까지 포함된 표준 형)
+        if len(clock) >= 14:
+            ymd = clock[:8]
+            hms6 = clock[8:14]
+            ts = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]} {hms6[0:2]}:{hms6[2:4]}:{hms6[4:6]}"
+            hms_key = f"{hms6[0:2]}:{hms6[2:4]}:{hms6[4:6]}"
+            return (ts, ymd, hms_key)
+
+        # 12자리: YYYYMMDDHHMM (초는 00)
+        if len(clock) == 12:
+            ymd = clock[:8]
+            hm = clock[8:12]
+            ts = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]} {hm[0:2]}:{hm[2:4]}:00"
+            hms_key = f"{hm[0:2]}:{hm[2:4]}:00"
+            return (ts, ymd, hms_key)
+
+        # 6자리(또는 그 이상에서 뒤 6자리): 당일 시각만 — 일자는 행 필드 우선
+        hms6 = clock[:6] if len(clock) >= 6 else (clock.zfill(6) if len(clock) > 0 else "000000")
+        if len(hms6) < 6:
+            hms6 = hms6.zfill(6)
+
+        row_date = ""
+        for key in (
+            "cntr_dt",
+            "ord_dt",
+            "stk_ord_dt",
+            "trde_dt",
+            "dt",
+            "ordr_dt",
+            "rgst_dt",
+            "exec_dt",
+        ):
+            try:
+                dd = OrderManager._digits_only(raw.get(key))
+                if len(dd) >= 8:
+                    row_date = dd[:8]
+                    break
+            except Exception:
+                continue
+
+        use_d = row_date if len(row_date) == 8 else qd
+        if len(use_d) != 8:
+            try:
+                use_d = datetime.now().strftime("%Y%m%d")
+            except Exception:
+                use_d = "19700101"
+
+        hms_key = f"{hms6[0:2]}:{hms6[2:4]}:{hms6[4:6]}"
+        ts = f"{use_d[:4]}-{use_d[4:6]}-{use_d[6:8]} {hms_key}"
+        return (ts, use_d, hms_key)
 
     @staticmethod
     def _side_from_kt00007_row(row: Dict[str, Any]) -> str:
@@ -1004,13 +1139,29 @@ class OrderManager:
                     if fq <= 0 or fp <= 0:
                         continue
                     ord_no = str(raw.get("ord_no") or "").strip()
-                    cnfm = raw.get("cnfm_tm") or raw.get("ord_tm") or ""
-                    hms = self._kiwoom_time_to_hms(cnfm)
-                    ts = f"{ord_dt[:4]}-{ord_dt[4:6]}-{ord_dt[6:8]} {hms}"
+                    try:
+                        ts, day_key, hms_key = self._kt00007_row_fill_timestamp(
+                            ord_dt, raw
+                        )
+                    except Exception:
+                        # 파싱 실패 시 조회일 + 시각 0 (로그만 남기고 행은 가능한 한 삽입)
+                        try:
+                            self.logger.debug(
+                                "kt00007 일시 파싱 폴백: ord_no=%s raw_tm=%s",
+                                ord_no,
+                                raw.get("cntr_tm")
+                                or raw.get("cnfm_tm")
+                                or raw.get("ord_tm"),
+                            )
+                        except Exception:
+                            pass
+                        day_key = ord_dt[:8] if len(ord_dt) >= 8 else ord_dt
+                        hms_key = "00:00:00"
+                        ts = f"{day_key[:4]}-{day_key[4:6]}-{day_key[6:8]} {hms_key}"
                     side = self._side_from_kt00007_row(raw)
                     nm = str(raw.get("stk_nm") or "").strip() or code
                     hint = str(raw.get("io_tp_nm") or raw.get("trde_tp") or "").strip()
-                    fill_key = f"{ord_dt}|{ord_no}|{hms}|{code}|{fq}|{fp}|{side}"
+                    fill_key = f"{day_key}|{ord_no}|{hms_key}|{code}|{fq}|{fp}|{side}"
                     out.append(
                         {
                             "fill_row_key": fill_key,

@@ -576,6 +576,7 @@ class PortfolioManager:
         force: bool = False,
         *,
         log_boot_summary: bool = False,
+        refresh_cash_deposit: bool = True,
     ) -> None:
         """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 포지션을 동기화 (Reconciliation)"""
         # [v4.5.1 API Throttle] 자동 동기화만 쿨다운; 동기화 버튼(force=True)은 즉시 실행
@@ -588,7 +589,13 @@ class PortfolioManager:
             return
 
         # [v4.5 Asset Harden] get_holdings()가 딕셔너리를 반환함에 따라 호출부 수정
-        account_data = self.order_manager.get_holdings()
+        try:
+            account_data = self.order_manager.get_holdings(
+                refresh_cash_deposit=refresh_cash_deposit
+            )
+        except Exception as gh_ex:
+            self.log(f"[Error] [Sync] 계좌 조회 호출 실패: {gh_ex}")
+            return
         if account_data is None: 
             self.log("[Error] [Sync] 계좌 정보를 실시간으로 가져올 수 없습니다. (혹은 API 429 제한)")
             return
@@ -598,51 +605,54 @@ class PortfolioManager:
         holdings = account_data.get('holdings', [])
         te_resolved = float(account_data.get('total_equity', 0) or 0)
         
-        with self.lock:
-            self.d1_deposit = account_data.get('d1_deposit', 0)
-            self.d2_deposit = account_data.get('d2_deposit', 0)
-            try:
-                self.holdings_stocks_mv_api = float(
-                    account_data.get("stocks_market_value", 0) or 0
-                )
-            except (TypeError, ValueError):
-                self.holdings_stocks_mv_api = 0.0
-            try:
-                self.last_tot_evlu_amt = float(
-                    account_data.get("tot_evlu_amt", 0) or 0
-                )
-            except (TypeError, ValueError):
-                self.last_tot_evlu_amt = 0.0
-            # 총자산: D+2(예수금상세 반영) + 보유평가 합이 기본. tot_evlu_amt는 이전 예수 기준이거나 음수 D+2와 불일치할 수 있음.
-            try:
-                te_parts = float(self.d2_deposit or 0) + float(self.holdings_stocks_mv_api or 0)
-            except (TypeError, ValueError):
-                te_parts = 0.0
-            raw_tot = float(self.last_tot_evlu_amt or 0)
-            if abs(te_parts) > 1e-6 or self.holdings_stocks_mv_api > 0 or self.d2_deposit != 0:
-                if raw_tot > 0:
-                    den = max(abs(raw_tot), abs(te_parts), 1.0)
-                    if abs(raw_tot - te_parts) / den <= 0.025:
-                        self.total_equity = raw_tot
+        # refresh_cash_deposit=False: 주기 정합 — 보유(ka10085)만 반영하고
+        # 예수금·D+1/D+2·총자산·API 평가액 캐시는 유지(매매 체결 후 전체 동기화에서만 REST 반영).
+        if refresh_cash_deposit:
+            with self.lock:
+                self.d1_deposit = account_data.get('d1_deposit', 0)
+                self.d2_deposit = account_data.get('d2_deposit', 0)
+                try:
+                    self.holdings_stocks_mv_api = float(
+                        account_data.get("stocks_market_value", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    self.holdings_stocks_mv_api = 0.0
+                try:
+                    self.last_tot_evlu_amt = float(
+                        account_data.get("tot_evlu_amt", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    self.last_tot_evlu_amt = 0.0
+                # 총자산: D+2(예수금상세 반영) + 보유평가 합이 기본. tot_evlu_amt는 이전 예수 기준이거나 음수 D+2와 불일치할 수 있음.
+                try:
+                    te_parts = float(self.d2_deposit or 0) + float(self.holdings_stocks_mv_api or 0)
+                except (TypeError, ValueError):
+                    te_parts = 0.0
+                raw_tot = float(self.last_tot_evlu_amt or 0)
+                if abs(te_parts) > 1e-6 or self.holdings_stocks_mv_api > 0 or self.d2_deposit != 0:
+                    if raw_tot > 0:
+                        den = max(abs(raw_tot), abs(te_parts), 1.0)
+                        if abs(raw_tot - te_parts) / den <= 0.025:
+                            self.total_equity = raw_tot
+                        else:
+                            self.total_equity = float(te_parts)
                     else:
                         self.total_equity = float(te_parts)
+                elif raw_tot > 0:
+                    self.total_equity = raw_tot
                 else:
-                    self.total_equity = float(te_parts)
-            elif raw_tot > 0:
-                self.total_equity = raw_tot
-            else:
-                self.total_equity = float(te_resolved)
-            # 포지션 탭 '예수금' = 출금가능금액(pymn_alow). 주문가능(ord_alow)과 별개.
-            # D+2 추정(d2_deposit)은 결제 추정이라 음수 가능 — 예수금 칸에 쓰지 않음.
-            try:
-                wd = float(
-                    account_data.get("cash_withdrawable")
-                    or account_data.get("cash_available")
-                    or 0
-                )
-                self.actual_deposit = max(0.0, wd)
-            except (TypeError, ValueError):
-                self.actual_deposit = 0.0
+                    self.total_equity = float(te_resolved)
+                # 포지션 탭 '예수금' = 출금가능금액(pymn_alow). 주문가능(ord_alow)과 별개.
+                # D+2 추정(d2_deposit)은 결제 추정이라 음수 가능 — 예수금 칸에 쓰지 않음.
+                try:
+                    wd = float(
+                        account_data.get("cash_withdrawable")
+                        or account_data.get("cash_available")
+                        or 0
+                    )
+                    self.actual_deposit = max(0.0, wd)
+                except (TypeError, ValueError):
+                    self.actual_deposit = 0.0
         
         server_codes = set()
         updated_count = 0
