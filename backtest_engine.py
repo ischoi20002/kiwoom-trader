@@ -29,7 +29,6 @@ import itertools
 from utils.normalization import normalize_code
 from strategy.data_loader import BacktestDataLoader
 # from reporting.signal_report import generate_signal_report (DELETED)
-from reporting.charts import generate_stock_market_chart
 import reporting.trade_report
 import importlib
 importlib.reload(reporting.trade_report)
@@ -47,10 +46,6 @@ from strategy.synthetic_realtime_fill import (
     synthesize_vol_power_vectorized,
 )
 from utils.fee_rates import fee_decimal_rates_backtest
-from strategy.market_regime import (
-    classify_market_regime_series,
-    regime_to_trend_status,
-)
 
 csv_lock = threading.Lock()
 # [v15.3.7] Script-relative absolute paths for robust log management
@@ -80,46 +75,6 @@ TRADE_CSV = os.path.join(BASE_DIR, "backtest_trades.csv")
 # Dynamic 백테스트 등에서 매 거래마다 파일 open/append 하지 않도록 행 단위 버퍼
 TRADE_CSV_HEADER_LINE: str = "Date,Code,Name,Action,Price,Qty,Return,Reason,Fee,Sig_Type\n"
 _trade_csv_buffer: list[str] = []
-
-
-def derive_market_regime_scalar(trend: str | None, status: str | None) -> str:
-    """
-    매수·S2 게이트 전용 4단계 레짐.
-    Market_Status(WATCH/SAFE/RISK 등)는 내부 산출용이며, 매수 제한에는 본 함수 결과만 사용한다.
-    """
-    try:
-        t = str(trend or "UP").strip().upper()
-        s = str(status or "SAFE").strip().upper()
-        if t == "DOWN":
-            return "DOWN"
-        if t == "NEUTRAL":
-            return "NEUTRAL"
-        if t == "UP" and s == "AGGRESSIVE":
-            return "AGGRESSIVE"
-        if t == "UP":
-            return "UP"
-        return "UP"
-    except Exception:
-        return "UP"
-
-
-def derive_market_regime_series(trend_s: pd.Series, status_s: pd.Series) -> pd.Series:
-    """일별 Market_Trend·Market_Status로부터 Market_Regime 열을 벡터화 산출."""
-    try:
-        t = trend_s.astype(str).str.strip().str.upper()
-        s = status_s.astype(str).str.strip().str.upper()
-        reg = np.where(
-            t == "DOWN",
-            "DOWN",
-            np.where(
-                t == "NEUTRAL",
-                "NEUTRAL",
-                np.where((t == "UP") & (s == "AGGRESSIVE"), "AGGRESSIVE", "UP"),
-            ),
-        )
-        return pd.Series(reg, index=trend_s.index, dtype=object)
-    except Exception:
-        return pd.Series("UP", index=trend_s.index, dtype=object)
 
 
 def clear_trade_csv_buffer() -> None:
@@ -160,20 +115,15 @@ def flush_trade_csv_buffer() -> None:
 # [v40.0] Multiprocessing Infrastructure for Portfolio Backtesting
 _G_BT_DATA = {}
 _G_BT_M1 = {}
-_G_BT_MKT = None
-_G_BT_VIX = None
-
 def init_bt_worker(cache_path):
     """Worker process initialization: Load data from pickle cache once."""
-    global _G_BT_DATA, _G_BT_M1, _G_BT_MKT, _G_BT_VIX
+    global _G_BT_DATA, _G_BT_M1
     try:
         if os.path.exists(cache_path):
             with open(cache_path, 'rb') as f:
                 cache = pickle.load(f)
                 _G_BT_DATA = cache.get('data', {})
                 _G_BT_M1 = cache.get('m1', {})
-                _G_BT_MKT = cache.get('market', None)
-                _G_BT_VIX = cache.get('vix', None)
     except Exception as e:
         print(f"  (!) BT Worker Init Error: {e}")
 
@@ -181,17 +131,15 @@ def _run_single_backtest_task(args):
     """Top-level function for ProcessPoolExecutor to run a single stock backtest."""
     code, settings, interval, force_refresh, high_precision = args
     
-    global _G_BT_DATA, _G_BT_M1, _G_BT_MKT, _G_BT_VIX
-    
+    global _G_BT_DATA, _G_BT_M1
+
     data = _G_BT_DATA.get(code)
     m1_pre = _G_BT_M1.get(code)
-    market_df = _G_BT_MKT
-    vix_df = _G_BT_VIX
-    
+
     if data is not None:
         tester = SimpleBacktester(settings)
         try:
-            summary = tester.run(data, code, market_df=market_df, vix_df=vix_df, 
+            summary = tester.run(data, code, market_df=None, vix_df=None, 
                               log_to_csv=True, high_precision=high_precision, 
                               m1_df_preloaded=m1_pre)
             return code, data, summary
@@ -246,30 +194,6 @@ class TradingStrategy:
     def calculate_indicators(df, settings):
         """지표 계산 (공통)"""
         return calculate_all_indicators(df, settings)
-
-    @staticmethod
-    def get_market_status(market_df, vix_value=None):
-        """[v8.2] MSI, ADX, VIX를 조합한 시장 상태 판정"""
-        if market_df is None or len(market_df) < 120:
-            return 'SAFE'
-            
-        # 시장지수 지표 계산
-        m_df = TradingStrategy.calculate_indicators(market_df, {})
-        last = m_df.iloc[-1]
-        
-        msi = last.get('MSI', 0)
-        adx = last.get('ADX', 0)
-        vix = vix_value if vix_value is not None else 15.0 # 기본값
-        
-        # 판정 로직 (v8.2 명세)
-        if msi > 0 and adx >= 25 and vix <= 20:
-            return 'AGGRESSIVE'
-        elif msi > 0 and vix <= 20:
-            return 'SAFE'
-        elif msi < 0 and vix >= 30:
-            return 'RISK'
-        else:
-            return 'WATCH'
 
     @staticmethod
     def simulate_intrabar_indicators(last_15m_dict, m1_row, settings, hist_df_prices_tail=None):
@@ -415,15 +339,6 @@ class TradingStrategy:
             """Type A는 s2_* 만, Type B는 s2_b_* 만 사용."""
             return s.get(b_key, default) if _is_b else s.get(a_key, default)
 
-        # [v4.8] 시장 필터
-        if s.get('use_market_filter', True):
-            if _is_b:
-                if market_trend not in ('UP', 'AGGRESSIVE'):
-                    return False
-            else:
-                if market_trend not in ('UP', 'AGGRESSIVE', 'NEUTRAL'):
-                    return False
-
         # 0. 최소 대기 기간
         if _s2('use_s2_delay', 'use_s2_b_delay', True):
             min_hours = float(_s2('s2_delay_hours', 's2_b_delay_hours', 24))
@@ -560,15 +475,6 @@ class TradingStrategy:
 
             passed = 0
             total = 0
-
-            if s.get("use_market_filter", True):
-                total += 1
-                if _is_b:
-                    ok_mt = market_trend in ("UP", "AGGRESSIVE")
-                else:
-                    ok_mt = market_trend in ("UP", "AGGRESSIVE", "NEUTRAL")
-                if ok_mt:
-                    passed += 1
 
             if _s2("use_s2_delay", "use_s2_b_delay", True):
                 total += 1
@@ -1686,6 +1592,7 @@ class SimpleBacktester:
             
             m1_np_high = None
             m1_np_close = None
+            m1_np_low = None
             m1_np_time = None
             m1_boundaries = None
             if high_precision and m1_df_preloaded is not None:
@@ -1700,6 +1607,11 @@ class SimpleBacktester:
                 # [v4.5.10] Extract VP/BA for 1M Smart Exit simulation
                 m1_np_high = m1_df_preloaded['High'].values
                 m1_np_close = m1_df_preloaded['Close'].values
+                m1_np_low = (
+                    m1_df_preloaded['Low'].values
+                    if 'Low' in m1_df_preloaded.columns
+                    else m1_df_preloaded['Close'].values
+                )
                 m1_np_time = m1_df_preloaded.index.values
                 # Bid/Ask Ratio mapping (v4.5: Ensure column names match data_loader)
                 m1_np_ba = m1_df_preloaded['total_bid'].values / m1_df_preloaded['total_ask'].values if 'total_bid' in m1_df_preloaded.columns else np.full(len(m1_df_preloaded), 1.0)
@@ -1731,7 +1643,7 @@ class SimpleBacktester:
             balance = params['balance']
             
             for i in range(1, total_bars):
-                m1_info = (m1_np_high, m1_np_close, m1_np_time, m1_boundaries[i], m1_np_ba, m1_np_vp) if m1_boundaries else None
+                m1_info = (m1_np_high, m1_np_close, m1_np_low, m1_np_time, m1_boundaries[i], m1_np_ba, m1_np_vp) if m1_boundaries else None
                 
                 # Update loop locals
                 params['position'] = pos
@@ -1874,122 +1786,15 @@ class SimpleBacktester:
         self.use_s2_profit = s.get('use_s2_profit', True)
         self.s2_trigger = float(s.get('s2_profit_limit', 1.0))
         
-        # 시장 상태 계산
-        if market_df is not None and not market_df.empty:
-            # [Perf] Pre-calculated market indicators check
-            if 'MSI' in market_df.columns and 'ADX' in market_df.columns:
-                m_df = market_df
-            else:
-                m_df = TradingStrategy.calculate_indicators(market_df.copy(), {})
-            # [Fix] Align VIX with market index to prevent shape mismatch (broadcast error)
-            vix_s = vix_df['Close'].reindex(m_df.index).ffill().fillna(15.0) if vix_df is not None and 'Close' in vix_df.columns else pd.Series(15.0, index=m_df.index)
-            
-            # [v4.7] 다이나믹 백테·실시간과 동일한 4단계 레짐 → (Trend, Status)로 전개 후 전일 기준 적용
-            try:
-                _reg_s = classify_market_regime_series(
-                    m_df["MSI"], m_df["ADX"], vix_s, self.settings
-                )
-                _trend_list: list[str] = []
-                _status_list: list[str] = []
-                for _r in _reg_s.astype(str):
-                    tr, st = regime_to_trend_status(_r)
-                    _trend_list.append(tr)
-                    _status_list.append(st)
-                m_df["Trend"] = _trend_list
-                m_df["Status"] = _status_list
-            except Exception:
-                m_df["Trend"] = "UP"
-                m_df["Status"] = "WATCH"
+        # 시장 지표/레짐 비사용 — 호환 열은 항상 UP(허용)로 고정 (market_df/vix_df 인자는 무시)
+        df['Market_Status'] = 'SAFE'
+        df['Market_Trend'] = 'UP'
+        df['Market_Regime'] = 'UP'
 
-            # [Realism] Today's market trend is determined by yesterday's close data to avoid look-ahead bias
-            m_df['Trend'] = m_df['Trend'].shift(1).fillna('UP')
-            m_df['Status'] = m_df['Status'].shift(1).fillna('WATCH')
-            
-            # [v35.7] Safety: ensure DatetimeIndex for normalize()
-            if not isinstance(df.index, pd.DatetimeIndex):
-                if 'datetime' in df.columns:
-                    df.index = pd.to_datetime(df['datetime'])
-                elif 'time' in df.columns:
-                    df.index = pd.to_datetime(df['time'])
-                else:
-                    # If index is still RangeIndex, normalize() will fail
-                    pass
-            
-            if isinstance(df.index, pd.DatetimeIndex):
-                df_daily_idx = df.index.normalize()
-                df['Market_Status'] = df_daily_idx.map(m_df['Status']).fillna('WATCH')
-                df['Market_Trend'] = df_daily_idx.map(m_df['Trend']).fillna('UP')
-            else:
-                df['Market_Status'] = 'WATCH'
-                df['Market_Trend'] = 'UP'
-            # [Fix] FutureWarning: infer_objects to ensure clean dtype
-            df['Market_Status'] = df['Market_Status'].infer_objects(copy=False)
-            df['Market_Trend'] = df['Market_Trend'].infer_objects(copy=False)
-        else:
-            df['Market_Status'] = 'SAFE'
-            df['Market_Trend'] = 'UP'
-
-        try:
-            df["Market_Regime"] = derive_market_regime_series(df["Market_Trend"], df["Market_Status"])
-        except Exception:
-            df["Market_Regime"] = "UP"
-
-        # [v26.1] 신호 미리 계산 (최적화 시 신호 파라미터가 바뀔 수 있으므로 매번 수행)
-        # [v39.0] 레짐 1차: 해당 타입이 켜져 있을 때만 병합 (A만 레짐 ON·A OFF인 유령 경로 제거)
-        _reg_a = bool(self.settings.get("use_type_a_regime_phase1", False)) and bool(
-            self.settings.get("use_type_a", False)
-        )
-        _reg_b = bool(self.settings.get("use_type_b_regime_phase1", False)) and bool(
-            self.settings.get("use_type_b", False)
-        )
-        if _reg_a or _reg_b:
-            try:
-                from strategy.type_a_regime import apply_type_a_phase1_settings
-                from strategy.type_b_regime import apply_type_b_phase1_overlay
-
-                s_aggr = apply_type_a_phase1_settings(self.settings, "AGGRESSIVE")
-                s_up = apply_type_a_phase1_settings(self.settings, "UP")
-                s_neu = apply_type_a_phase1_settings(self.settings, "NEUTRAL")
-                s_aggr = apply_type_b_phase1_overlay(self.settings, s_aggr, "AGGRESSIVE")
-                s_up = apply_type_b_phase1_overlay(self.settings, s_up, "UP")
-                s_neu = apply_type_b_phase1_overlay(self.settings, s_neu, "NEUTRAL")
-                sig_aggr = TradingStrategy.get_buy_signals_detailed(df, s_aggr, market_trend="UP")
-                sig_up = TradingStrategy.get_buy_signals_detailed(df, s_up, market_trend="UP")
-                sig_neu = TradingStrategy.get_buy_signals_detailed(df, s_neu, market_trend="UP")
-                reg = df["Market_Regime"]
-                is_neutral = reg == "NEUTRAL"
-                is_aggr = reg == "AGGRESSIVE"
-                is_up_rest = reg == "UP"
-                sig_combined = (
-                    (sig_aggr["Signal"] & is_aggr)
-                    | (sig_up["Signal"] & is_up_rest)
-                    | (sig_neu["Signal"] & is_neutral)
-                )
-                type_ag = sig_aggr["Sig_Type"].astype(str)
-                type_up = sig_up["Sig_Type"].astype(str)
-                type_ne = sig_neu["Sig_Type"].astype(str)
-                type_combined = np.where(
-                    is_aggr, type_ag, np.where(is_up_rest, type_up, np.where(is_neutral, type_ne, "NONE"))
-                )
-                sigs = sig_aggr.copy()
-                sigs["Signal"] = sig_combined
-                sigs["Sig_Type"] = type_combined
-            except Exception as e:
-                try:
-                    print(f"[WARN] 레짐 신호 병합 실패, 단일 경로로 폴백: {e}")
-                except Exception:
-                    pass
-                sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend="UP")
-        else:
-            sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend="UP")
+        # [v26.1] 신호 미리 계산
+        sigs = TradingStrategy.get_buy_signals_detailed(df, self.settings, market_trend="UP")
         for c in sigs.columns:
             df[c] = sigs[c]
-        # [v4.5 Rule] 시장지수 필터링 (UP/NEUTRAL/DOWN 3단계)
-        if self.settings.get('use_market_filter', True):
-            # 1. DOWN (역풍): 모든 신호 차단
-            df.loc[df['Market_Trend'] == 'DOWN', 'Signal'] = False
-            # 2. NEUTRAL (중립): Type B 신호 차단
-            df.loc[(df['Market_Trend'] == 'NEUTRAL') & (df['Sig_Type'] == 'TYPE_B'), 'Signal'] = False
 
         # [v30.0] 로직 변경: 신호 발생 즉시 매수 (지연 없음)
         df['Signal_Shifted'] = df['Signal'].astype(bool)
@@ -2009,28 +1814,9 @@ class SimpleBacktester:
         }
 
     def _check_s2_approval_v2(self, pos, indicators, i, curr_dt=None):
-        try:
-            if "Market_Regime" in indicators:
-                m_reg = indicators["Market_Regime"][i]
-            else:
-                m_reg = derive_market_regime_scalar(
-                    indicators["Market_Trend"][i] if "Market_Trend" in indicators else "UP",
-                    indicators["Market_Status"][i] if "Market_Status" in indicators else "SAFE",
-                )
-        except Exception:
-            m_reg = "UP"
-        if self.settings.get("use_market_filter", True):
-            _sb = "TYPE_B" in str(pos.get("sig_type", pos.get("reason", "")))
-            if _sb:
-                if m_reg not in ("UP", "AGGRESSIVE"):
-                    return False
-            else:
-                if m_reg not in ("UP", "AGGRESSIVE", "NEUTRAL"):
-                    return False
-
         return TradingStrategy._check_s2_approval(
             pos, None, self.settings,
-            market_trend=m_reg,
+            market_trend="UP",
             curr_dt=curr_dt,
             indicators_dict=indicators, i=i
         )
@@ -2063,8 +1849,24 @@ class SimpleBacktester:
         return True
 
             
-    def _process_intra_bar_full_v3(self, i, code, m1_highs, m1_closes, m1_times, params, hour, minute, m1_ba=None, m1_vp=None, indicators=None, signal_shifted=False):
+    def _process_intra_bar_full_v3(
+        self,
+        i,
+        code,
+        m1_highs,
+        m1_closes,
+        m1_lows,
+        m1_times,
+        params,
+        hour,
+        minute,
+        m1_ba=None,
+        m1_vp=None,
+        indicators=None,
+        signal_shifted=False,
+    ):
         """[v40.0] Optimized High-Precision Simulation (O(1) Indicator Updates)"""
+        # [보수적 1분 체결] 매도/EXIT 판가: 저가(m1_l), 매수 체결: 고가(m1_h) — 시뮬·지표 경로는 종가(m1_p) 유지
         # [Perf] Pre-calculated tail data for incremental indicator updates
         # Using index i-1 as the base for the current 15m bar simulation
         base_idx = max(0, i-1)
@@ -2080,12 +1882,13 @@ class SimpleBacktester:
         for idx in range(len(m1_highs)):
             m1_p = m1_closes[idx]
             m1_h = m1_highs[idx]
+            m1_l = m1_lows[idx] if idx < len(m1_lows) else m1_p
             m1_t = m1_times[idx]
             m1_ba_val = m1_ba[idx] if m1_ba is not None else 1.0
             m1_vp_val = m1_vp[idx] if m1_vp is not None else 100.0
             
             # [v40.0] Incremental Indicator Simulation
-            m1_row_data = {'Close': m1_p, 'High': m1_h, 'Low': m1_p, 'bid_ask_ratio': m1_ba_val, 'vol_power': m1_vp_val}
+            m1_row_data = {'Close': m1_p, 'High': m1_h, 'Low': m1_l, 'bid_ask_ratio': m1_ba_val, 'vol_power': m1_vp_val}
             indicator_to_use = TradingStrategy.simulate_intrabar_indicators(last_15m_dict, m1_row_data, self.settings, hist_df_prices_tail=prices_tail)
             
             if indicator_to_use is None:
@@ -2096,26 +1899,15 @@ class SimpleBacktester:
                 pos = params['position']
                 if m1_h > pos['max_price']: pos['max_price'] = m1_h
                 
-                res = TradingStrategy.evaluate_position(code, m1_p, pos, self.settings, indicator_row=indicator_to_use, current_time=m1_t)
+                try:
+                    _lo = float(m1_l)
+                    px_exit = _lo if (np.isfinite(_lo) and _lo > 0) else float(m1_p)
+                except (TypeError, ValueError):
+                    px_exit = float(m1_p)
+                res = TradingStrategy.evaluate_position(code, px_exit, pos, self.settings, indicator_row=indicator_to_use, current_time=m1_t)
                 
                 if res['action'] == 'EXIT':
-                    e_price = m1_p
-                    if res['reason'] == 'TAKE_PROFIT':
-                        tpp = res.get('tp_pct_applied')
-                        if tpp is not None:
-                            e_price = float(pos['avg_price']) * (1 + float(tpp) / 100.0)
-                        else:
-                            stage_eff = int(pos.get('entry_n', pos.get('stage', 1)) or 1)
-                            _is_b = TradingStrategy._holding_sig_is_type_b(pos)
-                            tp_key = (
-                                ('s2_b_take_profit' if _is_b else 's2_take_profit')
-                                if stage_eff == 2
-                                else ('s1_b_take_profit' if _is_b else 's1_a_take_profit')
-                            )
-                            e_price = float(pos['avg_price']) * (
-                                1 + float(self.settings.get(tp_key, 5.0)) / 100.0
-                            )
-                    
+                    e_price = px_exit
                     params = self._execute_sell(m1_t, e_price, f"1M_{res['reason']}+{idx}m", params, indicators=indicators, i=i)
                     return params # 매도 발생 시 블록 종료
                 
@@ -2133,7 +1925,15 @@ class SimpleBacktester:
                             s2_reason = f"1M_ADDON(S2)|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.2f}+{idx}m"
                             if _use_s2_sb:
                                 s2_reason = "1M_SmartBuy|" + s2_reason
-                            params = self._execute_buy(m1_t, m1_p, "BUY_2ND", params, stage=2, reason=s2_reason, indicators=indicators, i=i)
+                            try:
+                                _hi = float(m1_h)
+                                px_in = _hi if (np.isfinite(_hi) and _hi > 0) else float(m1_p)
+                            except (TypeError, ValueError):
+                                px_in = float(m1_p)
+                            params = self._execute_buy(
+                                m1_t, px_in, "BUY_2ND", params, stage=2, reason=s2_reason,
+                                indicators=indicators, i=i, max_p=px_in
+                            )
                             return params # 추가매수 시 해당 분 사이클 종료
             
             # 2. 신규 진입(Entry) 감시
@@ -2141,17 +1941,6 @@ class SimpleBacktester:
                 is_buy_signal = (indicator_to_use.get('Signal', False) and indicator_to_use.get('Ready', False))
                 if is_buy_signal:
                     sig_type = indicator_to_use.get('Sig_Type', 'TYPE_B')
-                    try:
-                        m_reg = indicator_to_use.get("Market_Regime")
-                        if m_reg is None:
-                            m_reg = derive_market_regime_scalar(
-                                indicator_to_use.get("Market_Trend", "UP"),
-                                indicator_to_use.get("Market_Status", "SAFE"),
-                            )
-                    except Exception:
-                        m_reg = "UP"
-                    if m_reg == "DOWN" or (m_reg == "NEUTRAL" and str(sig_type).upper() != "TYPE_A"):
-                        return params
                     use_sb = self.use_sb_a if sig_type == 'TYPE_A' else self.use_sb_b
                     
                     can_buy = True
@@ -2163,7 +1952,15 @@ class SimpleBacktester:
                     if can_buy:
                         b_reason = f"1M_SIG|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.2f}+{idx}m"
                         if use_sb: b_reason = "1M_SmartBuy|" + b_reason
-                        params = self._execute_buy(m1_t, m1_p, "BUY_1ST", params, stage=1, reason=b_reason, indicators=indicators, i=i)
+                        try:
+                            _hi2 = float(m1_h)
+                            px_in = _hi2 if (np.isfinite(_hi2) and _hi2 > 0) else float(m1_p)
+                        except (TypeError, ValueError):
+                            px_in = float(m1_p)
+                        params = self._execute_buy(
+                            m1_t, px_in, "BUY_1ST", params, stage=1, reason=b_reason,
+                            indicators=indicators, i=i, max_p=px_in, sig_type=sig_type
+                        )
                         return params
 
         return params
@@ -2177,10 +1974,11 @@ class SimpleBacktester:
         
         # 1. High Precision Entry/Exit/Addon Monitoring
         if high_precision and m1_info is not None:
-            m1_high_total, m1_close_total, m1_time_total, (s_idx, e_idx), m1_ba_total, m1_vp_total = m1_info
+            m1_high_total, m1_close_total, m1_low_total, m1_time_total, (s_idx, e_idx), m1_ba_total, m1_vp_total = m1_info
             if e_idx > s_idx:
                 m1_highs = m1_high_total[s_idx:e_idx]
                 m1_closes = m1_close_total[s_idx:e_idx]
+                m1_lows = m1_low_total[s_idx:e_idx]
                 m1_ba = m1_ba_total[s_idx:e_idx] if m1_ba_total is not None else None
                 m1_vp = m1_vp_total[s_idx:e_idx] if m1_vp_total is not None else None
                 
@@ -2188,7 +1986,7 @@ class SimpleBacktester:
                 if params['position'] is not None or signal_shifted[i]:
                     old_pos = params['position']
                     params = self._process_intra_bar_full_v3(
-                        i, code, m1_highs, m1_closes, m1_time_total[s_idx:e_idx], 
+                        i, code, m1_highs, m1_closes, m1_lows, m1_time_total[s_idx:e_idx], 
                         params, time_hours[i], time_minutes[i], 
                         m1_ba=m1_ba, m1_vp=m1_vp, indicators=indicators,
                         signal_shifted=signal_shifted[i]
@@ -2226,21 +2024,8 @@ class SimpleBacktester:
         
         # 3. Entry Check
         elif signal_shifted[i]:
-            try:
-                if "Market_Regime" in indicators:
-                    m_reg = indicators["Market_Regime"][i]
-                else:
-                    m_reg = derive_market_regime_scalar(
-                        indicators["Market_Trend"][i] if "Market_Trend" in indicators else "UP",
-                        indicators["Market_Status"][i] if "Market_Status" in indicators else "SAFE",
-                    )
-            except Exception:
-                m_reg = "UP"
             sig_type = indicators['Sig_Type'][i]
-            is_ok = m_reg != "DOWN"
-            if m_reg == "NEUTRAL" and str(sig_type).upper() != "TYPE_A":
-                is_ok = False
-
+            is_ok = True
             if is_ok:
                 use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
                 if use_sb_for_type:
@@ -2522,15 +2307,13 @@ class PortfolioBacktester:
         
         # 1. 초기화
         self._reset_csv_logs()
-        market_df, vix_df = self._prepare_market_data(start_date, end_date)
-        
         # 2. 실행
         print(f"Starting Backtest for {len(self.codes)} stocks ({start_date} ~ {end_date}, {interval})")
-        summaries, all_equity = self._run_parallel_backtests(start_date, end_date, market_df, vix_df, interval, force_refresh, high_precision)
+        summaries, all_equity = self._run_parallel_backtests(start_date, end_date, interval, force_refresh, high_precision)
         
         # 3. 결과 리포트 생성
         if summaries:
-            self._generate_summary_reports(summaries, all_equity, market_df, vix_df, start_date, end_date, interval, high_precision=high_precision)
+            self._generate_summary_reports(summaries, all_equity, start_date, end_date, interval, high_precision=high_precision)
             return pd.DataFrame(summaries)
         return None
 
@@ -2543,50 +2326,12 @@ class PortfolioBacktester:
                     try: open(f, 'w').close()
                     except: pass
 
-    def _prepare_market_data(self, start_date, end_date):
-        """시장 지수 및 변동성 지수 데이터 준비"""
-        print(f"  [API] Fetching Market Index & Volatility data...")
-        w_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
-        
-        try:
-            import FinanceDataReader as fdr
-            market_df = fdr.DataReader('KS11', w_start_dt, end_date)
-            try:
-                vix_df = fdr.DataReader('VIX', w_start_dt, end_date)
-            except:
-                try: vix_df = fdr.DataReader('FRED:VIXCLS', w_start_dt, end_date)
-                except: 
-                    vix_df = pd.DataFrame(index=market_df.index)
-                    vix_df['Close'] = np.nan
-            
-            if market_df is not None:
-                market_df.columns = [c.capitalize() if c.lower() == 'close' else c for c in market_df.columns]
-                
-            if vix_df is not None:
-                if 'Close' not in vix_df.columns:
-                    if not vix_df.empty:
-                        vix_df.columns = ['Close'] + list(vix_df.columns[1:])
-                    else:
-                        vix_df['Close'] = np.nan
-                vix_df.columns = [c.capitalize() if c.lower() == 'close' else c for c in vix_df.columns]
-                vix_df = vix_df.reindex(market_df.index).ffill()
-            return market_df, vix_df
-        except Exception as e:
-            print(f"  (!) Market/VIX Data Error: {e}")
-            return None, None
-
-    def _run_parallel_backtests(self, start_date, end_date, market_df, vix_df, interval, force_refresh, high_precision):
+    def _run_parallel_backtests(self, start_date, end_date, interval, force_refresh, high_precision):
         """병렬로 개별 종목 백테스트 수행 (v40.0: Multiprocessing Optimized)"""
         w_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
         self.tester.settings['_original_start_dt'] = start_date
-        
-        # 1. 시장 지표 선행 계산 (중복 계산 방지)
-        if market_df is not None and not market_df.empty:
-            if 'MSI' not in market_df.columns:
-                print("  [Perf] Pre-calculating market indicators...")
-                market_df = TradingStrategy.calculate_indicators(market_df.copy(), {})
 
-        # 2. 전 종목 데이터 선행 로딩 (PPE 오버헤드 감소)
+        # 1. 전 종목 데이터 선행 로딩 (PPE 오버헤드 감소)
         data_cache = {}
         data_cache_m1 = {}
         print(f"  [Perf] Pre-loading historical data for {len(self.codes)} stocks...")
@@ -2607,7 +2352,7 @@ class PortfolioBacktester:
                         data_cache_m1[code] = dm1
 
         # 3. 데이터 캐싱 및 워커 초기화 준비 (Windows 최적화)
-        cache_data = {'data': data_cache, 'm1': data_cache_m1, 'market': market_df, 'vix': vix_df}
+        cache_data = {'data': data_cache, 'm1': data_cache_m1}
         cache_path = os.path.join(BASE_DIR, "bt_portfolio_cache.tmp")
         try:
             with open(cache_path, 'wb') as f:
@@ -2650,7 +2395,7 @@ class PortfolioBacktester:
             
         return summaries, all_equity
 
-    def _generate_summary_reports(self, summaries, all_equity, market_df, vix_df, start_date, end_date, interval, high_precision=False):
+    def _generate_summary_reports(self, summaries, all_equity, start_date, end_date, interval, high_precision=False):
         """최종 통계 출력 및 리포트 생성"""
         df_sum = pd.DataFrame(summaries)
         
@@ -2700,7 +2445,7 @@ class PortfolioBacktester:
         
         generate_trade_report(trades_df, interval, trd_path, len(summaries), 
                               df_sum['win_rate'].mean(), df_sum['final_ret'].mean(), self.settings,
-                              market_df=market_df, vix_df=vix_df, target_codes=self.codes,
+                              target_codes=self.codes,
                               start_date=start_date, end_date=end_date, daily_equity=daily_equity_list,
                               high_precision=high_precision)
 

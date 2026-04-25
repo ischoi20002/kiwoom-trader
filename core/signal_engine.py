@@ -357,195 +357,190 @@ class SignalEngine:
                 if should_recalc or 'last_detailed_sig' not in info:
                     df_with_ind = TradingStrategy.calculate_indicators(self.app.bars_data[code], self.app.settings)
                     try:
-                        from strategy.type_a_regime import apply_type_a_phase1_settings
-                        from strategy.type_b_regime import apply_type_b_phase1_overlay
-
-                        _mt = getattr(self.app, "market_trend", "UP") or "UP"
-                        _s = self.app.settings
-                        _need = (
-                            bool(_s.get("use_type_a_regime_phase1", False))
-                            and bool(_s.get("use_type_a", False))
-                        ) or (
-                            bool(_s.get("use_type_b_regime_phase1", False))
-                            and bool(_s.get("use_type_b", False))
+                        info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(
+                            df_with_ind, self.app.settings, "UP"
                         )
-                        if _need:
-                            _eff = apply_type_a_phase1_settings(self.app.settings, _mt)
-                            _eff = apply_type_b_phase1_overlay(self.app.settings, _eff, _mt)
-                        else:
-                            _eff = self.app.settings
-                    except Exception:
-                        _eff = self.app.settings
-                    info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(
-                        df_with_ind, _eff, getattr(self.app, "market_trend", "UP")
-                    )
-                    info['last_bar_count'] = current_bar_count
-                    info['last_row_cache'] = df_with_ind.iloc[-1].to_dict()
-                
-                detailed_signals = info['last_detailed_sig']
-                last_sig = detailed_signals.iloc[-1]
-                
-                # [v4.5.9] 전방위적 스칼라 쉴드 적용
-                is_buy = bool(self._to_scalar(last_sig['Signal'], False))
-                _sel_tr = str(
-                    info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
-                ).strip().upper()
-                info['confluence'] = self._format_s1_confluence_status_line(
-                    last_sig, _sel_tr
-                )
-                info['met_ratio'] = float(self._to_scalar(last_sig['Met_Ratio'], 0.0))
-                
-                last_row = info['last_row_cache']
-                rsi_sig = float(self._to_scalar(last_row.get('RSI_Sig', 0), 0.0))
-                macd_val = float(self._to_scalar(last_row.get('MACD', 0), 0.0))
-                osc_val = float(self._to_scalar(last_row.get('OSC', 0), 0.0))
-                
-                ma60_scalar = float(self._to_scalar(last_row['MA60'], 0.0))
-                ma60_ratio = (now_price / ma60_scalar) * 100 if ma60_scalar > 0 else 0.0
-                
-                if is_buy:
-                    sig_type = str(
-                        self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B")
-                    )
-                    # Smart Buy 스위치는 감시 '전략유형'(sel_track)과 맞춤. sel_track=A 인데 Sig_Type만 B면
-                    # Type B SB가 적용되어 '수급 대기'가 뜨는 불일치를 방지함.
-                    if _sel_tr == "A":
-                        use_sb_for_type = bool(
-                            self.app.settings.get("use_smart_buy_a", False)
-                        )
-                    elif _sel_tr == "B":
-                        use_sb_for_type = bool(
-                            self.app.settings.get("use_smart_buy_b", True)
-                        )
-                    else:
-                        st_up = str(sig_type).upper()
-                        if "TYPE_B" in st_up:
-                            use_sb_for_type = bool(
-                                self.app.settings.get("use_smart_buy_b", True)
+                        info['last_bar_count'] = current_bar_count
+                        info['last_row_cache'] = df_with_ind.iloc[-1].to_dict()
+                    except Exception as exc_sig:
+                        # 시그널/지표 계산 실패 시 캐시가 없으면 아래 분기에서 안내 문구 표시
+                        if self._last_realtime_err != str(exc_sig):
+                            self._last_realtime_err = str(exc_sig)
+                            print(
+                                f"[SignalEngine] get_buy_signals_detailed 실패 ({code}): {exc_sig}"
                             )
-                        elif "TYPE_A" in st_up:
+                            traceback.print_exc()
+                
+                if "last_detailed_sig" not in info:
+                    info["confluence"] = "시그널 계산 실패(봉·지표 확인)"
+                    info["met_ratio"] = 0.0
+                    is_buy = False
+                    last_row = None
+                else:
+                    detailed_signals = info['last_detailed_sig']
+                    last_sig = detailed_signals.iloc[-1]
+                
+                    # [v4.5.9] 전방위적 스칼라 쉴드 적용
+                    is_buy = bool(self._to_scalar(last_sig['Signal'], False))
+                    _sel_tr = str(
+                        info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                    ).strip().upper()
+                    info['confluence'] = self._format_s1_confluence_status_line(
+                        last_sig, _sel_tr
+                    )
+                    info['met_ratio'] = float(self._to_scalar(last_sig['Met_Ratio'], 0.0))
+                
+                    last_row = info['last_row_cache']
+                    rsi_sig = float(self._to_scalar(last_row.get('RSI_Sig', 0), 0.0))
+                    macd_val = float(self._to_scalar(last_row.get('MACD', 0), 0.0))
+                    osc_val = float(self._to_scalar(last_row.get('OSC', 0), 0.0))
+                
+                    ma60_scalar = float(self._to_scalar(last_row['MA60'], 0.0))
+                    ma60_ratio = (now_price / ma60_scalar) * 100 if ma60_scalar > 0 else 0.0
+                
+                    if is_buy:
+                        sig_type = str(
+                            self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B")
+                        )
+                        # Smart Buy 스위치는 감시 '전략유형'(sel_track)과 맞춤. sel_track=A 인데 Sig_Type만 B면
+                        # Type B SB가 적용되어 '수급 대기'가 뜨는 불일치를 방지함.
+                        if _sel_tr == "A":
                             use_sb_for_type = bool(
                                 self.app.settings.get("use_smart_buy_a", False)
                             )
+                        elif _sel_tr == "B":
+                            use_sb_for_type = bool(
+                                self.app.settings.get("use_smart_buy_b", True)
+                            )
                         else:
-                            use_sb_for_type = False
+                            st_up = str(sig_type).upper()
+                            if "TYPE_B" in st_up:
+                                use_sb_for_type = bool(
+                                    self.app.settings.get("use_smart_buy_b", True)
+                                )
+                            elif "TYPE_A" in st_up:
+                                use_sb_for_type = bool(
+                                    self.app.settings.get("use_smart_buy_a", False)
+                                )
+                            else:
+                                use_sb_for_type = False
                     
-                    if use_sb_for_type:
-                        vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
-                        ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
-                        min_p = float(self.app.settings.get('smart_buy_vp', 100.0))
-                        # S2·백테스트와 동일 키. 구버전에 smart_buy_ratio만 있으면 폴백
-                        _st = self.app.settings
-                        min_r = float(
-                            _st.get("smart_buy_ba_ratio", _st.get("smart_buy_ratio", 1.5))
-                        )
+                        if use_sb_for_type:
+                            vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
+                            ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
+                            min_p = float(self.app.settings.get('smart_buy_vp', 100.0))
+                            # S2·백테스트와 동일 키. 구버전에 smart_buy_ratio만 있으면 폴백
+                            _st = self.app.settings
+                            min_r = float(
+                                _st.get("smart_buy_ba_ratio", _st.get("smart_buy_ratio", 1.5))
+                            )
                         
-                        if vol_power < min_p or ask_bid_ratio < min_r:
-                            is_buy = False
-                            info['confluence'] = "수급 대기"
-                            # 종합 리포트에서 스마트 진입 거절 건수 집계용 — 동일 15분봉당 1회만 기록
-                            try:
-                                _sb_log_key = "_smart_buy_block_logged_bar"
-                                if info.get(_sb_log_key) != current_bar_count:
-                                    info[_sb_log_key] = current_bar_count
-                                    _sl = getattr(self.app, "session_logger", None)
-                                    if _sl:
-                                        _sl.log(
-                                            "smart_buy_blocked",
-                                            {
-                                                "code": str(code).zfill(6),
-                                                "name": str(info.get("name", "")),
-                                                "vol_power": vol_power,
-                                                "ask_bid_ratio": ask_bid_ratio,
-                                                "min_vp": min_p,
-                                                "min_ba": min_r,
-                                                "sig_type": str(
-                                                    self._to_scalar(
-                                                        last_sig.get("Sig_Type", ""),
-                                                        "",
-                                                    )
-                                                ),
-                                            },
-                                        )
-                            except Exception:
-                                pass
+                            if vol_power < min_p or ask_bid_ratio < min_r:
+                                is_buy = False
+                                info['confluence'] = "수급 대기"
+                                # 종합 리포트에서 스마트 진입 거절 건수 집계용 — 동일 15분봉당 1회만 기록
+                                try:
+                                    _sb_log_key = "_smart_buy_block_logged_bar"
+                                    if info.get(_sb_log_key) != current_bar_count:
+                                        info[_sb_log_key] = current_bar_count
+                                        _sl = getattr(self.app, "session_logger", None)
+                                        if _sl:
+                                            _sl.log(
+                                                "smart_buy_blocked",
+                                                {
+                                                    "code": str(code).zfill(6),
+                                                    "name": str(info.get("name", "")),
+                                                    "vol_power": vol_power,
+                                                    "ask_bid_ratio": ask_bid_ratio,
+                                                    "min_vp": min_p,
+                                                    "min_ba": min_r,
+                                                    "sig_type": str(
+                                                        self._to_scalar(
+                                                            last_sig.get("Sig_Type", ""),
+                                                            "",
+                                                        )
+                                                    ),
+                                                },
+                                            )
+                                except Exception:
+                                    pass
 
-                # 관심목록 전용: Type B 매수 신호만 (감시와 동일 필터 후 B만)
-                if is_wl_only and is_buy:
-                    _st_wl = str(self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B"))
-                    if "TYPE_B" not in _st_wl.upper():
+                    # 관심목록 전용: Type B 매수 신호만 (감시와 동일 필터 후 B만)
+                    if is_wl_only and is_buy:
+                        _st_wl = str(self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B"))
+                        if "TYPE_B" not in _st_wl.upper():
+                            is_buy = False
+
+                    # 정규장 외(장전·장후): 매수·알림 전에 차단 (합치도 문구만 통일)
+                    if not _session_ok:
+                        info["confluence"] = "⏳ 정규장 외(실시간 체결 미진행) · 봉 준비"
+                        info["met_ratio"] = 0.0
                         is_buy = False
 
-                # 정규장 외(장전·장후): 매수·알림 전에 차단 (합치도 문구만 통일)
-                if not _session_ok:
-                    info["confluence"] = "⏳ 정규장 외(실시간 체결 미진행) · 봉 준비"
-                    info["met_ratio"] = 0.0
-                    is_buy = False
-
-                # 쿨타임 및 중복 진입 방지
-                is_cool = True
-                if code in self.last_buy_sig_time:
-                    if (datetime.now() - self.last_buy_sig_time[code]).total_seconds() < 180:
-                        is_cool = False
+                    # 쿨타임 및 중복 진입 방지
+                    is_cool = True
+                    if code in self.last_buy_sig_time:
+                        if (datetime.now() - self.last_buy_sig_time[code]).total_seconds() < 180:
+                            is_cool = False
                 
-                if is_buy and is_cool and (not is_wl_only) and code not in self.app.virtual_positions:
-                    try:
-                        sl = getattr(self.app, "session_logger", None)
-                        if sl:
-                            sl.log(
-                                "signal_s1_raw",
-                                {
-                                    "code": code,
-                                    "name": str(info.get("name", "")),
-                                    "price": float(now_price),
-                                    "met_ratio": float(
-                                        self._to_scalar(info.get("met_ratio", 0.0), 0.0)
-                                    ),
-                                    "confluence": str(info.get("confluence", "")),
-                                },
-                            )
-                    except Exception:
-                        pass
-                    try:
-                        buy_ok = bool(
-                            self.app._on_buy_signal_received(
-                                code,
-                                now_price,
-                                rsi_sig,
-                                macd_val,
-                                osc_val,
-                                ma60_ratio,
-                            )
-                        )
-                    except Exception:
-                        buy_ok = False
-                    if buy_ok:
-                        self.last_buy_sig_time[code] = datetime.now()
-
-                # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
-                if is_wl_only and is_buy and is_cool and not has_wl_avg:
-                    _t_wb = self._wl_buy_last_tm.get(code)
-                    if _t_wb is None or (datetime.now() - _t_wb).total_seconds() >= 180:
-                        self._wl_buy_last_tm[code] = datetime.now()
+                    if is_buy and is_cool and (not is_wl_only) and code not in self.app.virtual_positions:
                         try:
-                            _nm = self.app.watchlist_store.get_display_name(code)
+                            sl = getattr(self.app, "session_logger", None)
+                            if sl:
+                                sl.log(
+                                    "signal_s1_raw",
+                                    {
+                                        "code": code,
+                                        "name": str(info.get("name", "")),
+                                        "price": float(now_price),
+                                        "met_ratio": float(
+                                            self._to_scalar(info.get("met_ratio", 0.0), 0.0)
+                                        ),
+                                        "confluence": str(info.get("confluence", "")),
+                                    },
+                                )
                         except Exception:
-                            _nm = str(info.get("name", code))
-                        _mr = float(self._to_scalar(info.get("met_ratio", 0.0), 0.0))
-                        _msg = (
-                            "<b>⭐ [텔레그램·관심목록 전용]</b>\n"
-                            "<i>감시 자동매매/주문과 별도 채널 (알림만)</i>\n\n"
-                            "<b>TYPE B 매수 신호</b>\n"
-                            f"종목: {_nm} ({code})\n"
-                            f"가: {int(now_price):,}원\n"
-                            f"합치도: {_mr * 100:.0f}%\n"
-                            f"시간: {datetime.now().strftime('%H:%M:%S')}"
-                        )
-                        threading.Thread(
-                            target=self._send_watchlist_telegram,
-                            args=(_msg,),
-                            daemon=True,
-                        ).start()
+                            pass
+                        try:
+                            buy_ok = bool(
+                                self.app._on_buy_signal_received(
+                                    code,
+                                    now_price,
+                                    rsi_sig,
+                                    macd_val,
+                                    osc_val,
+                                    ma60_ratio,
+                                )
+                            )
+                        except Exception:
+                            buy_ok = False
+                        if buy_ok:
+                            self.last_buy_sig_time[code] = datetime.now()
+
+                    # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
+                    if is_wl_only and is_buy and is_cool and not has_wl_avg:
+                        _t_wb = self._wl_buy_last_tm.get(code)
+                        if _t_wb is None or (datetime.now() - _t_wb).total_seconds() >= 180:
+                            self._wl_buy_last_tm[code] = datetime.now()
+                            try:
+                                _nm = self.app.watchlist_store.get_display_name(code)
+                            except Exception:
+                                _nm = str(info.get("name", code))
+                            _mr = float(self._to_scalar(info.get("met_ratio", 0.0), 0.0))
+                            _msg = (
+                                "<b>⭐ [텔레그램·관심목록 전용]</b>\n"
+                                "<i>감시 자동매매/주문과 별도 채널 (알림만)</i>\n\n"
+                                "<b>TYPE B 매수 신호</b>\n"
+                                f"종목: {_nm} ({code})\n"
+                                f"가: {int(now_price):,}원\n"
+                                f"합치도: {_mr * 100:.0f}%\n"
+                                f"시간: {datetime.now().strftime('%H:%M:%S')}"
+                            )
+                            threading.Thread(
+                                target=self._send_watchlist_telegram,
+                                args=(_msg,),
+                                daemon=True,
+                            ).start()
             else:
                 info['confluence'] = f"봉 충전 {current_bar_count}/{_min_sig_bars} (신호·매매 대기)"
                 info['met_ratio'] = 0.0
@@ -579,10 +574,7 @@ class SignalEngine:
                                     pos_h,
                                     self.app.settings,
                                     eval_ind,
-                                    market_trend=getattr(
-                                        self.app, "market_trend", "UP"
-                                    )
-                                    or "UP",
+                                    market_trend="UP",
                                     curr_dt=datetime.now(),
                                     sel_track_hint=info.get("sel_track")
                                     or info.get("SelTrack"),

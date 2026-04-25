@@ -23,8 +23,6 @@ import pickle
 # [v30.0] 멀티프로세싱 오버헤드 최적화를 위한 전역 변수 (Windows 피클링 방지)
 _G_DATA = {}
 _G_M1 = {}
-_G_MKT = None
-_G_VIX = None
 # [Perf] 지표 계산 결과 캐시 (지표에 영향을 주는 파라미터가 같으면 재사용)
 _G_IND_CACHE: dict = {}
 
@@ -81,29 +79,23 @@ SIGNAL_ONLY_PARAMS = frozenset({
     'min_trde_val', 'vol_ratio',
     'stage1_amt', 'stage2_amt',
     'ma60_min', 'ma60_max',
-    'type_a_phase1_up_vol_surge_add', 'type_a_phase1_neutral_vol_surge_add',
-    'type_a_phase1_up_ma60_shrink_pct', 'type_a_phase1_neutral_ma60_shrink_pct',
-    'type_b_phase1_up_vol_surge_add', 'type_b_phase1_neutral_vol_surge_add',
     's2_ma5_gap', 'use_s2_ma20', 'use_s2_vol_surge', 'use_s2_rsi_sig', 'use_s2_macd_gc',
     'use_s2_b_ma20', 'use_s2_b_ma5', 'use_s2_b_vol_surge', 'use_s2_b_rsi_sig', 'use_s2_b_macd_gc',
     'use_s2_b_profit', 'use_s2_b_delay',
     'use_atr_stop_loss_s2_b', 'use_atr_trailing_stop_s2_b',
-    'use_market_filter', 'use_macd_signal',
+    'use_macd_signal',
     'use_type_balance_gate', 'type_balance_a_pct',
-    'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
     'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
 })
 
 def init_worker(data_path):
     """프로세스 생성 시 데이터를 한 번만 로드하여 메모리에 상주"""
-    global _G_DATA, _G_M1, _G_MKT, _G_VIX, _G_IND_CACHE
+    global _G_DATA, _G_M1, _G_IND_CACHE
     try:
         with open(data_path, 'rb') as f:
             cache = pickle.load(f)
             _G_DATA = cache.get('data', {})
             _G_M1 = cache.get('m1', {})
-            _G_MKT = cache.get('market', None)
-            _G_VIX = cache.get('vix', None)
         _G_IND_CACHE = {}  # 워커마다 독립적인 지표 캐시 초기화
     except Exception as e:
         print(f"  (!) Worker Init Error: {e}")
@@ -115,7 +107,7 @@ def run_single_combination(args):
     idx, settings, is_indicator_constant, high_precision = args
     
     # [v30.0] 워커 프로세스에서 데이터가 로드되지 않은 경우 지연 로딩 (Windows 최적화)
-    global _G_DATA, _G_M1, _G_MKT, _G_VIX, _G_IND_CACHE
+    global _G_DATA, _G_M1, _G_IND_CACHE
     if not _G_DATA:
         tmp_cache_path = os.path.join(BASE_DIR, "bt_opt_cache.tmp")
         if os.path.exists(tmp_cache_path):
@@ -124,8 +116,6 @@ def run_single_combination(args):
     summaries = []
     data_cache = _G_DATA
     data_cache_m1 = _G_M1
-    market_df = _G_MKT
-    vix_df = _G_VIX
 
     # [Perf] 지표 재계산이 필요한 경우, 같은 지표 파라미터 조합이면 캐시 재사용
     if not is_indicator_constant:
@@ -148,7 +138,7 @@ def run_single_combination(args):
             tester = SimpleBacktester(settings)
             m1_pre = data_cache_m1.get(code) if data_cache_m1 else None
             try:
-                summary = tester.run(data, code, market_df=market_df, vix_df=vix_df, log_to_csv=False, 
+                summary = tester.run(data, code, market_df=None, vix_df=None, log_to_csv=False, 
                                       skip_indicators=skip_ind, high_precision=high_precision, m1_df_preloaded=m1_pre)
                 if summary:
                     summaries.append(summary)
@@ -238,101 +228,6 @@ class ParameterOptimizer:
         data_cache = {}
         total_finished = 0
         
-        market_cache_path = os.path.join(loader.cache_dir, "market_master.csv")
-        vix_cache_path = os.path.join(loader.cache_dir, "vix_master.csv")
-        
-        market_df, vix_df = None, None
-        w_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
-        
-        # [Fix] 내부 DB 코드(001)와 FDR 티커(KS11) 매핑
-        FDR_TICKER_MAP = {'001': 'KS11', '^VIX': 'VIX'}
-        
-        def load_master_index(path, symbol, start, end):
-            symbol = FDR_TICKER_MAP.get(symbol, symbol)
-            df_m = None
-            if os.path.exists(path):
-                try:
-                    df_m = pd.read_csv(path, index_col=0, parse_dates=True)
-                    if not df_m.empty:
-                        c_start, c_end = df_m.index.min(), df_m.index.max()
-                        if c_start.strftime("%Y-%m-%d") <= start and c_end.strftime("%Y-%m-%d") >= end:
-                            print(f"  [Cache] {symbol} index hit!")
-                            return df_m
-                except: pass
-            
-            print(f"  [API] Fetching {symbol} data...")
-            try:
-                import FinanceDataReader as fdr
-                df_new = fdr.DataReader(symbol, start, end)
-                if df_new is not None and not df_new.empty:
-                    if df_m is not None:
-                        df_m = pd.concat([df_m, df_new])
-                        df_m = df_m[~df_m.index.duplicated(keep='last')].sort_index()
-                    else:
-                        df_m = df_new
-                    df_m.to_csv(path)
-                    return df_m
-            except Exception as e:
-                print(f"  (!) {symbol} Load Error: {e}")
-            return df_m
-
-        try:
-            # [Fix v38.1] 로컬 DB 우선 조회 (외부 API '001' 404 오류 방지)
-            try:
-                from data_manager_v2 import DataManagerV2 as _DM
-                _dm = _DM("trading_data.db")
-                _mdf = _dm.get_daily_bars('001', w_start_dt, end_date)
-                _vdf = _dm.get_daily_bars('^VIX', w_start_dt, end_date)
-                if _mdf is not None and not _mdf.empty:
-                    _mdf['time'] = pd.to_datetime(_mdf['time'])
-                    _mdf.set_index('time', inplace=True)
-                    market_df = _mdf
-                    print(f"  [DB] 시장지수(001) 로컬 DB 로드 완료 ({len(market_df)}일)")
-                if _vdf is not None and not _vdf.empty:
-                    _vdf['time'] = pd.to_datetime(_vdf['time'])
-                    _vdf.set_index('time', inplace=True)
-                    vix_df = _vdf
-                    print(f"  [DB] VIX 로컬 DB 로드 완료 ({len(vix_df)}일)")
-            except Exception as _db_e:
-                print(f"  [DB] 로컬 DB 조회 실패, API 폴백: {_db_e}")
-
-            if market_df is None:
-                market_df = load_master_index(market_cache_path, '001', w_start_dt, end_date)
-            if os.path.exists(vix_cache_path) and vix_df is None:
-                try:
-                    vix_df = pd.read_csv(vix_cache_path, index_col=0, parse_dates=True)
-                    v_start, v_end = vix_df.index.min(), vix_df.index.max()
-                    if v_start.strftime("%Y-%m-%d") <= w_start_dt and v_end.strftime("%Y-%m-%d") >= end_date:
-                        print(f"  [Cache] VIX hit!")
-                    else:
-                        vix_df = None
-                except: vix_df = None
-
-            if vix_df is None:
-                print("  [API] Fetching VIX data...")
-                import FinanceDataReader as fdr
-                try: vix_df = fdr.DataReader('VIX', w_start_dt, end_date)
-                except:
-                    try: vix_df = fdr.DataReader('FRED:VIXCLS', w_start_dt, end_date)
-                    except: vix_df = pd.DataFrame(index=market_df.index if market_df is not None else [])
-                
-                if not vix_df.empty:
-                    vix_df = vix_df[~vix_df.index.duplicated(keep='last')].sort_index()
-                    if 'Close' not in vix_df: 
-                        if not vix_df.empty: vix_df.columns = ['Close'] + list(vix_df.columns[1:])
-                        else: vix_df['Close'] = np.nan
-                    vix_df.to_csv(vix_cache_path)
-        except Exception as e:
-            print(f"  (!) Market Data Caching Error: {e}")
-
-        self.vix_df = vix_df
-        
-        # [Perf] Pre-calculate market indicators once to avoid redundant calcs in trials
-        if market_df is not None and not market_df.empty:
-            print("  [Perf] Pre-calculating market indicators...")
-            market_df = TradingStrategy.calculate_indicators(market_df, {})
-        self.market_df = market_df
-
         data_cache_m1 = {}
         
         with TPE(max_workers=3) as executor:
@@ -371,7 +266,7 @@ class ParameterOptimizer:
             print("  [Perf] Parameters affect indicators. Recalculating indicators for each trial.")
 
         # [v30.0] 거대한 데이터를 임시 파일로 저장하여 워커 프로세스에서 개별 로드 (Windows 피클링 오버헤드 방지)
-        cache_data = {'data': data_cache, 'm1': data_cache_m1, 'market': market_df, 'vix': vix_df}
+        cache_data = {'data': data_cache, 'm1': data_cache_m1}
         tmp_cache_path = os.path.join(BASE_DIR, "bt_opt_cache.tmp")
         try:
             with open(tmp_cache_path, 'wb') as f:
@@ -492,7 +387,7 @@ class ParameterOptimizer:
                     if data is not None:
                         local_final_tester = SimpleBacktester(best_settings)
                         m1_pre = data_cache_m1.get(code)
-                        local_final_tester.run(data, code, market_df=self.market_df, vix_df=self.vix_df, log_to_csv=True,
+                        local_final_tester.run(data, code, market_df=None, vix_df=None, log_to_csv=True,
                                                high_precision=high_precision, m1_df_preloaded=m1_pre)
 
                 with TPE(max_workers=4) as executor:
@@ -526,7 +421,7 @@ class ParameterOptimizer:
                 except: pass
 
             generate_trade_report(trades_df, interval, trd_path, total_trades_count, 
-                                  win_rate_calc, avg_ret_calc, best_settings, market_df=self.market_df, vix_df=self.vix_df, 
+                                  win_rate_calc, avg_ret_calc, best_settings,
                                   callback=callback, target_codes=self.codes, daily_equity=None, high_precision=high_precision)
 
             return df_results

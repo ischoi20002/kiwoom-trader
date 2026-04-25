@@ -78,20 +78,8 @@ def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bo
 
 
 def get_buy_signals_detailed(df, settings, market_trend='UP'):
-    """매수 신호 상세 분석 (Type A/B 통합). market_trend는 4단계 레짐 문자열(DOWN/NEUTRAL/UP/AGGRESSIVE)을 권장."""
-    # [v4.7] 시장 게이트 ON일 때만: DOWN 전면 차단, NEUTRAL에서 Type B 원천 차단(아래 use_b)
-    if _settings_bool(settings, "use_market_filter", True) and market_trend == "DOWN":
-        # DOWN (역풍): 모든 신호 차단
-        return pd.DataFrame({
-            'Signal': False, 'Sig_Type': 'NONE',
-            'Met_Count': 0, 'Total_Count': 1, 'Met_Ratio': 0.0,
-            'Met_A': 0, 'Tot_A': 1, 'Met_B': 0, 'Tot_B': 1,
-            'RSI_Range': False, 'RSI_Cross': False,
-            'MACD_OK': False, 'MA60_Range': False, 'MA_GC': False, 'Vol_Surge': False
-        }, index=df.index)
-    
-    # NEUTRAL (중립): Type B는 나중에 차단 (signal_b에서 처리)
-        
+    """매수 신호 상세 분석 (Type A/B 통합). market_trend 인자는 호환용(시장·레짐 비사용 시 무시)."""
+    _ = market_trend  # 시장 지표/레짐 제거: 미사용
     settings = settings or {}
     ma60_ratio = (df['Close'] / df['MA60']) * 100
     
@@ -178,9 +166,6 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     # 6. Type B: 추세 돌파 (RSI 제약 + 정배열 + MACD GC)
     # [v26.3] Default to False if missing for safety
     use_b = settings.get('use_type_b', False)
-    # [v27.3] 중립(NEUTRAL)에서 Type B 차단은 시장 게이트(use_market_filter) ON일 때만 적용
-    if _settings_bool(settings, "use_market_filter", True) and market_trend == "NEUTRAL":
-        use_b = False
 
     cond_trend_aligned = (df['MA20'] > df['MA60']) & (df['Close'] > df['MA20'])
     cond_macd_gc = (df['MACD'] > df['MACD_Sig']) & (df['MACD'].shift(1) <= df['MACD_Sig'].shift(1))

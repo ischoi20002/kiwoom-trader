@@ -1,6 +1,5 @@
 import pandas as pd
 from backtest_engine import SimpleBacktester, BacktestDataLoader
-import FinanceDataReader as fdr
 import os
 
 settings = {
@@ -12,7 +11,6 @@ settings = {
     "use_gc": True,
     "use_rsi_signal": True,
     "rsi_window": 45,
-    "use_market_filter": True,
     "use_macd_signal": True,
     "macd_fast": 12,
     "macd_slow": 26,
@@ -32,7 +30,6 @@ code = "000660"
 start_date = "2025-01-01"
 end_date = "2026-03-10"
 
-market_df = fdr.DataReader('KS11', start_date, end_date)
 data = loader.get_data(code, start_date, end_date, interval='15m')
 
 # Monkey patch log_trade to write to specific file
@@ -41,7 +38,7 @@ orig_log = tester.run # We can't easily monkey patch the inner function,
 # so we'll just let it write to backtest_trades.csv and copy it
 
 if os.path.exists("backtest_trades.csv"): os.remove("backtest_trades.csv")
-df, summary = tester.run(data, code, market_df=market_df, log_to_csv=True)
+df, summary = tester.run(data, code, market_df=None, log_to_csv=True)
 print(f"Summary: {summary}")
 
 if os.path.exists("backtest_trades.csv"):

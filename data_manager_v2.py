@@ -1810,97 +1810,12 @@ class DataManagerV2:
                 pass
             return False
 
-    def load_settings_dict_for_market(self) -> dict:
-        """실시간 지수 레짐에 사용할 settings.json (없으면 빈 dict → 모듈 기본 임계값)."""
-        path = os.path.join(self.ABS_DIR, "settings.json")
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    def get_market_indices(self, settings=None):
-        """
-        KOSPI/KOSDAQ 일봉 기반 MSI·ADX·VIX로 4단계 레짐 산출 (백테·다이나믹과 동일 분기).
-        settings: dict 미전달 시 프로젝트 루트 settings.json 로드 시도.
-        """
-        import FinanceDataReader as fdr
-        from strategy import indicators
-        from strategy.market_regime import classify_market_regime_row, regime_reason_korean
-
-        eff_settings = settings if isinstance(settings, dict) else self.load_settings_dict_for_market()
-        indices = {"KS11": "KOSPI", "KQ11": "KOSDAQ"}
-        results: dict = {}
-        # VIX: 당일(마지막 행)이 NaN이면 전일 등 직전 유효 종가 사용 — 동적 백테 VIX ffill과 동일 의도
-        vix_val = 15.0
-        try:
-            vix_df = fdr.DataReader("VIX", (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"))
-            if not vix_df.empty and "Close" in vix_df.columns:
-                last_valid = None
-                for x in pd.to_numeric(vix_df["Close"], errors="coerce").values:
-                    try:
-                        fx = float(x)
-                        if fx == fx and abs(fx) != float("inf"):
-                            last_valid = fx
-                    except (TypeError, ValueError):
-                        continue
-                if last_valid is not None:
-                    vix_val = float(last_valid)
-        except Exception:
-            pass
-        for ticker, name in indices.items():
-            try:
-                df = fdr.DataReader(ticker, (datetime.now() - timedelta(days=300)).strftime("%Y-%m-%d"))
-                if df is not None and len(df) >= 120:
-                    df.columns = [c.capitalize() if c.lower() == "close" else c for c in df.columns]
-                    df = indicators.calculate_all_indicators(df, eff_settings)
-                    last = df.iloc[-1]
-                    msi = float(last.get("MSI", 0))
-                    adx = float(last.get("ADX", 0))
-                    regime = classify_market_regime_row(msi, adx, vix_val, eff_settings)
-                    reason = regime_reason_korean(regime, msi, adx, vix_val, name)
-                    results[name] = {
-                        "val": float(last["Close"]),
-                        "ratio": float((last["Close"] / df.iloc[-2]["Close"] - 1) * 100),
-                        "trend": regime,
-                        "regime": regime,
-                        "reason": reason,
-                        "msi": msi,
-                        "adx": adx,
-                        "vix": vix_val,
-                    }
-            except Exception:
-                continue
-        return results
-
-    def get_realtime_indices(self):
-        try:
-            resp = requests.get("https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ", timeout=5)
-            if resp.status_code == 200:
-                return {item['itemCode']: {'val': float(item['closePriceRaw']), 'ratio': float(item['fluctuationsRatioRaw'])} for item in resp.json().get('datas', [])}
-        except: return {}
-        return {}
-
     def get_active_positions(self):
         with self._get_state_connection() as conn:
             cursor = conn.execute(
                 "SELECT code, name, avg_price, qty, stage, invested, entry_time, reason FROM active_positions WHERE status='OPEN'"
             )
             return cursor.fetchall()
-
-    def get_market_trend_label(self):
-        with self._get_state_connection() as conn:
-            row = conn.execute("SELECT value FROM system_config WHERE key='market_trend'").fetchone()
-            return row[0] if row else "NEUTRAL"
-
-    def set_market_trend_label(self, label):
-        with self._lock, self._get_state_connection() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('market_trend', ?)",
-                (label,),
-            )
-            conn.commit()
 
     def get_kospi_list(self, count=200, force=False, settings=None, universe_log=None):
         """

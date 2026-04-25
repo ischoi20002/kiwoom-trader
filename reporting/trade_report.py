@@ -18,7 +18,6 @@ if root_dir not in sys.path:
     sys.path.append(root_dir)
 
 from strategy.data_loader import BacktestDataLoader
-from strategy.market_regime import classify_market_regime_row as _classify_market_regime_row
 from utils.plotly_cdn import plotly_cdn_script_tag
 
 
@@ -363,254 +362,6 @@ def _tag_reason_for_virtual_smart_buy_stats(
     except Exception:
         pass
     return r
-
-
-def _build_regime_lookup_prev_day(
-    market_df: pd.DataFrame | None,
-    vix_df: pd.DataFrame | None,
-    settings: dict | None,
-) -> dict:
-    """
-    영업일(당일) -> 레짐 문자열.
-    당일 D의 레짐은 전 영업일(D-1) 종가 시점 MSI/ADX 및 해당일 VIX로 판정 (다이나믹 백테스트 SSOT).
-    """
-    out: dict = {}
-    try:
-        if market_df is None or market_df.empty:
-            return out
-        mdf = market_df.copy()
-        if not isinstance(mdf.index, pd.DatetimeIndex):
-            if "time" in mdf.columns:
-                mdf["time"] = pd.to_datetime(mdf["time"])
-                mdf.set_index("time", inplace=True)
-            elif "Date" in mdf.columns:
-                mdf["Date"] = pd.to_datetime(mdf["Date"])
-                mdf.set_index("Date", inplace=True)
-            else:
-                return out
-        col_map = {c.lower(): c for c in mdf.columns}
-        for need in ("close", "high", "low"):
-            if need not in col_map:
-                return out
-        c_close = col_map["close"]
-        c_high = col_map["high"]
-        c_low = col_map["low"]
-        mdf = mdf[[c_close, c_high, c_low]].copy()
-        mdf.columns = ["Close", "High", "Low"]
-        vol_key = col_map.get("volume")
-        if vol_key:
-            mdf["Volume"] = pd.to_numeric(market_df[vol_key], errors="coerce").fillna(0)
-        else:
-            mdf["Volume"] = 0
-
-        from strategy.indicators import calculate_all_indicators
-
-        m_ind = calculate_all_indicators(mdf, settings or {})
-        if "MSI" not in m_ind.columns or "ADX" not in m_ind.columns:
-            return out
-
-        n = len(m_ind)
-        vix_vals = np.full(n, 15.0, dtype=float)
-        if vix_df is not None and not vix_df.empty:
-            try:
-                vdf = vix_df.copy()
-                if not isinstance(vdf.index, pd.DatetimeIndex):
-                    if "time" in vdf.columns:
-                        vdf["time"] = pd.to_datetime(vdf["time"])
-                        vdf.set_index("time", inplace=True)
-                    elif "Date" in vdf.columns:
-                        vdf["Date"] = pd.to_datetime(vdf["Date"])
-                        vdf.set_index("Date", inplace=True)
-                vc = {c.lower(): c for c in vdf.columns}.get("close")
-                if vc:
-                    vs = vdf[vc].astype(float).reindex(m_ind.index, method="pad")
-                    vix_vals = vs.fillna(15.0).values.astype(float)
-            except Exception:
-                pass
-
-        for i, ts in enumerate(m_ind.index):
-            ts_norm = pd.Timestamp(ts).normalize()
-            if i == 0:
-                out[ts_norm] = "UP"
-                continue
-            prev_i = i - 1
-            try:
-                row = m_ind.iloc[prev_i]
-                msi = float(row["MSI"])
-                adx = float(row["ADX"])
-                v_val = float(vix_vals[prev_i])
-            except Exception:
-                out[ts_norm] = "UP"
-                continue
-            out[ts_norm] = _classify_market_regime_row(msi, adx, v_val, settings)
-        return out
-    except Exception:
-        return out
-
-
-def _build_market_regime_fragment(
-    df: pd.DataFrame,
-    regime_lookup: dict,
-    best_settings: dict | None,
-) -> str:
-    """완료 라운드트립을 진입일 기준 시장 레짐별로 집계한 HTML (통합 분석 섹션용 조각)."""
-    try:
-        if df is None or df.empty:
-            return '<p class="depth-subnote">매매 데이터가 없습니다.</p>'
-        if not regime_lookup:
-            return '<p class="depth-subnote">시장 지수 데이터가 없어 레짐별 집계를 할 수 없습니다.</p>'
-
-        work = df.sort_values(["Code", "Date"]).copy()
-        rows = work.to_dict("records")
-        n = len(rows)
-        idx = 0
-
-        by_reg: dict[str, dict[str, float | int]] = defaultdict(
-            lambda: {"trips": 0, "wins": 0, "profit": 0.0, "ret_num": 0.0, "ret_den": 0.0}
-        )
-
-        while idx < n:
-            r = rows[idx]
-            act = str(r.get("Action", ""))
-            if not act.upper().startswith("BUY"):
-                idx += 1
-                continue
-            code = str(r.get("Code", ""))
-            first_buy_dt = r.get("Date")
-            cost = 0.0
-            j = idx
-            while j < n and str(rows[j].get("Code", "")) == code:
-                a = str(rows[j].get("Action", ""))
-                if not a.upper().startswith("BUY"):
-                    break
-                px = float(rows[j].get("Price", 0) or 0)
-                qy = int(float(rows[j].get("Qty", 0) or 0))
-                fee = float(rows[j].get("Fee", 0) or 0) if not pd.isna(rows[j].get("Fee", 0)) else 0.0
-                cost += px * qy + fee
-                j += 1
-
-            if j >= n or str(rows[j].get("Code", "")) != code:
-                idx = j
-                continue
-
-            ex = rows[j]
-            if str(ex.get("Action", "")) not in ("SELL", "HOLD"):
-                idx = j + 1
-                continue
-
-            sell_p = float(ex.get("Price", 0) or 0)
-            sell_q = int(float(ex.get("Qty", 0) or 0))
-            ret_pct = float(ex.get("Return", 0) or 0) if not pd.isna(ex.get("Return", 0)) else 0.0
-            fee_s = float(ex.get("Fee", 0) or 0) if not pd.isna(ex.get("Fee", 0)) else 0.0
-            gross = sell_p * sell_q
-            profit_krw = gross - cost - fee_s
-            amt = float(cost) if cost > 0 else 1.0
-
-            try:
-                d_key = pd.Timestamp(first_buy_dt).normalize()
-            except Exception:
-                d_key = None
-            reg = "UNKNOWN"
-            if d_key is not None:
-                reg = regime_lookup.get(d_key, "UNKNOWN")
-
-            b = by_reg[reg]
-            b["trips"] = int(b["trips"]) + 1
-            if ret_pct > 0:
-                b["wins"] = int(b["wins"]) + 1
-            b["profit"] = float(b["profit"]) + profit_krw
-            b["ret_num"] = float(b["ret_num"]) + ret_pct * amt
-            b["ret_den"] = float(b["ret_den"]) + amt
-
-            idx = j + 1
-
-        if sum(int(by_reg[k]["trips"]) for k in by_reg) == 0:
-            return '<p class="depth-subnote">완료 라운드트립이 없어 레짐별 집계를 생략합니다.</p>'
-
-        order = ["AGGRESSIVE", "UP", "NEUTRAL", "DOWN", "UNKNOWN"]
-        keys_sorted = [k for k in order if k in by_reg] + [k for k in sorted(by_reg.keys()) if k not in order]
-
-        body_rows = []
-        for reg in keys_sorted:
-            b = by_reg[reg]
-            trips = int(b["trips"])
-            if trips == 0:
-                continue
-            wins = int(b["wins"])
-            wr = 100.0 * wins / trips
-            prof = float(b["profit"])
-            den = float(b["ret_den"])
-            avg_r = (float(b["ret_num"]) / den) if den > 0 else 0.0
-            pc = "var(--gain)" if prof >= 0 else "var(--loss)"
-            body_rows.append(
-                f"<tr><td><b>{reg}</b></td>"
-                f"<td class='num'>{trips}</td>"
-                f"<td class='num'>{wr:.1f}%</td>"
-                f"<td class='num'>{avg_r:+.2f}%</td>"
-                f"<td class='num' style='color:{pc};font-weight:700;'>{int(prof):+,}</td></tr>"
-            )
-
-        filt_on = True
-        try:
-            filt_on = bool((best_settings or {}).get("use_market_filter", True))
-        except Exception:
-            pass
-
-        return f"""
-            <p class="depth-subnote" style="margin-bottom:14px;">
-                첫 매수 영업일 기준 매핑 · 레짐은 <b>전 영업일 종가</b> MSI·ADX·VIX 및 설정 임계값으로 판정 (다이나믹 SSOT).
-                시장지수 필터: <b>{'ON' if filt_on else 'OFF'}</b>.
-                아래 종목별 체결표의 시장 배지도 <b>동일 lookup</b>을 씁니다(구버전의 당일 일봉 OR식 NEUTRAL 표기와 다를 수 있음).
-            </p>
-            <table class="depth-table">
-                <thead>
-                    <tr>
-                        <th>레짐</th>
-                        <th class="num">완료 건수</th>
-                        <th class="num">승률</th>
-                        <th class="num">금액가중 평균 수익률</th>
-                        <th class="num">합계 실현손익(원)</th>
-                    </tr>
-                </thead>
-                <tbody>{"".join(body_rows)}</tbody>
-            </table>
-            <p class="depth-subnote">미결제·진행 중 라운드트립은 제외합니다.</p>
-        """
-    except Exception as e:
-        return f'<p class="depth-err">시장 레짐 집계 오류: {e}</p>'
-
-
-def _html_stock_row_regime_badge(
-    regime_key: str,
-    m_val_p: float | None,
-    a_val_p: float | None,
-    v_val_p: float | None,
-) -> str:
-    """
-    종목별 체결 행의 시장 배지 — §3 regime_lookup과 동일한 레짐 문자열 사용.
-    M/V/A는 가능하면 전 영업일(집계와 동일한 판정 입력) 근사치로 표시.
-    """
-    reg = str(regime_key or "UNKNOWN").upper()
-    if reg == "AGGRESSIVE":
-        label, color = "AGGRESSIVE", "#22c55e"
-    elif reg == "UP":
-        label, color = "UP", "#84cc16"
-    elif reg == "NEUTRAL":
-        label, color = "NEUTRAL", "#f97316"
-    elif reg == "DOWN":
-        label, color = "DOWN", "#ef4444"
-    else:
-        label, color = reg, "#64748b"
-    if m_val_p is not None and a_val_p is not None and v_val_p is not None:
-        sub = f"M:{m_val_p:+.2f} V:{v_val_p:.1f} A:{a_val_p:.1f} (전일·SSOT)"
-    else:
-        sub = "전일 종가 기준 SSOT"
-    return f"""
-                        <div style="display:flex; flex-direction:column; align-items:center; gap:2px;">
-                            <span style="background:{color}; color:white; padding:2px 8px; border-radius:4px; font-weight:800; font-size:0.75rem; white-space:nowrap;">{label}</span>
-                            <span style="font-size:0.65rem; color:var(--dim); font-family:monospace; line-height:1;">{sub}</span>
-                        </div>
-                        """
 
 
 def virtual_executions_to_trades_df(
@@ -1204,7 +955,7 @@ def build_virtual_portfolio_analysis_html(
     return f'<div class="vr-analysis-wrap">{analysis_stats_html}</div>'
 
 
-def generate_trade_report(df, interval, output_path="trade_report.html", total_trades=0, win_rate=0, avg_ret=0, best_settings=None, market_df=None, vix_df=None, callback=None, target_codes=None, start_date=None, end_date=None, daily_equity=None, high_precision=False):
+def generate_trade_report(df, interval, output_path="trade_report.html", total_trades=0, win_rate=0, avg_ret=0, best_settings=None, callback=None, target_codes=None, start_date=None, end_date=None, daily_equity=None, high_precision=False):
     """매매 실행 내역 HTML 리포트 생성 (v8.1) - 고정밀 모드 표시 지원"""
     # [v8.2] 표시용 인터벌 조정
     display_interval = "1m" if high_precision else interval
@@ -1317,16 +1068,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "B) MACD 모멘텀", "toggle": "use_s2_b_macd_gc", "key": "s2_b_macd_gap", "unit": "%"},
                 {"label": "B) 수익권 필터", "toggle": "use_s2_b_profit", "key": "s2_b_profit_limit", "unit": "%"},
                 {"label": "B) 대기 시간", "toggle": "use_s2_b_delay", "key": "s2_b_delay_hours", "unit": "시간"},
-            ]
-        },
-        {
-            "name": "🌐 시장 트렌드 게이트 (MSI/ADX/VIX — S1·S2 공통)",
-            "items": [
-                {"label": "시장 게이트 전체", "toggle": "use_market_filter"},
-                {"label": "MSI 하한 (DOWN)", "key": "msi_down_threshold"},
-                {"label": "MSI 상한 (UP)", "key": "msi_up_threshold"},
-                {"label": "ADX 최소 (NEUTRAL)", "key": "adx_min_threshold"},
-                {"label": "VIX 상한 (DOWN)", "key": "vix_down_threshold"},
             ]
         },
         {
@@ -1858,8 +1599,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     completed_rounds = len(total_s1_p) + len(total_s2_p)
 
     depth_fragment = _build_depth_analytics_html(df)
-    regime_lookup = _build_regime_lookup_prev_day(market_df, vix_df, best_settings)
-    regime_fragment = _build_market_regime_fragment(df, regime_lookup, best_settings)
+    regime_fragment = '<p class="depth-subnote">시장 지표·레짐 분석은 사용하지 않습니다.</p>'
 
     ca1, ca2 = len(a_s1_p), len(a_s2_p)
     cb1, cb2 = len(b_s1_p), len(b_s2_p)
@@ -2002,73 +1742,6 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         except Exception as e:
             equity_chart_html = f"<p style='color:red'>Chart generation error: {e}</p>"
 
-    # Market Indicators for context
-    msi, adx, vix_series = None, None, None
-    if market_df is not None and not market_df.empty:
-        try:
-            mdf = market_df.copy()
-            # [v38.0] Daily index 강제 정규화 (DynamicBacktester 등에서 원시 DF 전달되는 경우 대응)
-            if not isinstance(mdf.index, pd.DatetimeIndex):
-                if 'time' in mdf.columns:
-                    mdf['time'] = pd.to_datetime(mdf['time'])
-                    mdf.set_index('time', inplace=True)
-                elif 'Date' in mdf.columns:
-                    mdf['Date'] = pd.to_datetime(mdf['Date'])
-                    mdf.set_index('Date', inplace=True)
-                else:
-                    # 인덱스에 날짜 정보가 없으면 시장지표 계산을 건너뜀
-                    raise ValueError("market_df has no datetime index or time/Date column")
-            
-            # 컬럼명 정규화 (대소문자 혼합 방지)
-            cols = {c.lower(): c for c in mdf.columns}
-            c_close = cols.get('close')
-            c_high = cols.get('high')
-            c_low = cols.get('low')
-            if not (c_close and c_high and c_low):
-                raise ValueError("market_df missing price columns")
-
-            close_s = mdf[c_close].astype(float)
-            high_s = mdf[c_high].astype(float)
-            low_s = mdf[c_low].astype(float)
-
-            m_ma20 = close_s.rolling(20).mean()
-            m_ma60 = close_s.rolling(60).mean()
-            m_ma120 = close_s.rolling(120).mean()
-            # [Standard] MSI scale alignment (Remove * 100 to match engine indicators.py)
-            msi = ((m_ma20 / m_ma60 - 1) + (m_ma60 / m_ma120 - 1)) 
-            
-            def _calc_adx_from_series(h, l, c, n=14):
-                tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
-                pdm = np.where((h - h.shift(1)) > (l.shift(1) - l), np.maximum(h - h.shift(1), 0), 0)
-                mdm = np.where((l.shift(1) - l) > (h - h.shift(1)), np.maximum(l.shift(1) - l, 0), 0)
-                trs = tr.rolling(n).sum()
-                pdms = pd.Series(pdm, index=h.index).rolling(n).sum()
-                mdms = pd.Series(mdm, index=h.index).rolling(n).sum()
-                pdi = 100 * (pdms / (trs + 1e-10))
-                mdi = 100 * (mdms / (trs + 1e-10))
-                return 100 * (abs(pdi - mdi) / (pdi + mdi + 1e-10)).rolling(n).mean()
-
-            adx = _calc_adx_from_series(high_s, low_s, close_s)
-
-            # VIX 시리즈도 동일한 날짜 인덱스로 맞춰서 사용
-            if vix_df is not None and not vix_df.empty:
-                vdf = vix_df.copy()
-                if not isinstance(vdf.index, pd.DatetimeIndex):
-                    if 'time' in vdf.columns:
-                        vdf['time'] = pd.to_datetime(vdf['time'])
-                        vdf.set_index('time', inplace=True)
-                    elif 'Date' in vdf.columns:
-                        vdf['Date'] = pd.to_datetime(vdf['Date'])
-                        vdf.set_index('Date', inplace=True)
-                v_cols = {c.lower(): c for c in vdf.columns}
-                v_close = v_cols.get('close')
-                if v_close:
-                    # msi 인덱스 기준으로 패딩 리샘플
-                    vix_series = vdf[v_close].astype(float).reindex(msi.index, method='pad')
-        except Exception as _e:
-            # 시장지표 계산 실패 시, 기존처럼 '-' 배지를 유지
-            msi, adx, vix_series = None, None, None
-
     loader = BacktestDataLoader()
     content = []
     sidebar_items = []
@@ -2093,35 +1766,11 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                                  (group['Date'].max() + timedelta(days=5)).strftime('%Y-%m-%d'), interval=interval)
         
         for _, r in group.iterrows():
-            status_badge = "-"
-            try:
-                d_norm = pd.Timestamp(r["Date"]).normalize()
-                m_val_p = a_val_p = v_val_p = None
-                if msi is not None and adx is not None and vix_series is not None:
-                    m_idx = msi.index.get_indexer([d_norm], method="pad")[0]
-                    if m_idx == -1:
-                        m_idx = msi.index.get_indexer([r["Date"]], method="pad")[0]
-                    # §3·다이나믹 SSOT: 영업일 D의 레짐은 전 영업일(D-1) 종가 지표로 판정 → 표시도 D-1 행
-                    if m_idx >= 1:
-                        m_val_p = float(msi.iloc[m_idx - 1])
-                        a_val_p = float(adx.iloc[m_idx - 1])
-                        v_val_p = float(vix_series.iloc[m_idx - 1])
-
-                if regime_lookup:
-                    reg = regime_lookup.get(d_norm, "UNKNOWN")
-                    status_badge = _html_stock_row_regime_badge(reg, m_val_p, a_val_p, v_val_p)
-                elif m_val_p is not None:
-                    reg = _classify_market_regime_row(
-                        m_val_p, a_val_p, v_val_p, best_settings
-                    )
-                    status_badge = _html_stock_row_regime_badge(reg, m_val_p, a_val_p, v_val_p)
-                else:
-                    status_badge = (
-                        '<span style="background:#64748b; color:white; padding:2px 8px; '
-                        'border-radius:4px; font-weight:800; font-size:0.75rem;">-</span>'
-                    )
-            except Exception:
-                pass
+            # 시장 지표·레짐 배지는 사용하지 않음
+            status_badge = (
+                '<span style="background:#64748b; color:white; padding:2px 8px; '
+                'border-radius:4px; font-weight:800; font-size:0.75rem;">-</span>'
+            )
 
             amt = r['Price'] * r['Qty']
             fee = r.get('Fee', 0) if not pd.isna(r.get('Fee', 0)) else 0

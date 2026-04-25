@@ -26,8 +26,65 @@ from strategy.synthetic_realtime_fill import (
     synthesize_bid_ask_ratio_vectorized,
     synthesize_vol_power_vectorized,
 )
-from strategy.market_regime import classify_market_regime_row
 from typing import Any, Callable, List, Optional
+
+
+def _m1_sell_price_conservative(m1_r: Any) -> float:
+    """
+    고정밀 1분: 매도 체결·손익(보수적) — 저가(없으면 종가).
+    1분 안에서 낙폭·손절을 가혹히 반영.
+    """
+    try:
+        if m1_r is None:
+            return 0.0
+        c = _m1_float_ohlc(m1_r, "Close", "close", 0.0)
+        v = _m1_float_ohlc(m1_r, "Low", "low", float("nan"))
+        if v > 0 and np.isfinite(v):
+            return float(v)
+        if c > 0:
+            return float(c)
+    except (TypeError, ValueError, KeyError):
+        pass
+    return 0.0
+
+
+def _m1_buy_price_conservative(m1_r: Any) -> float:
+    """
+    고정밀 1분: 매수 체결(보수적) — 고가(없으면 종가).
+    체결가를 불리하게(더 비쌈) 잡기.
+    """
+    try:
+        if m1_r is None:
+            return 0.0
+        c = _m1_float_ohlc(m1_r, "Close", "close", 0.0)
+        v = _m1_float_ohlc(m1_r, "High", "high", float("nan"))
+        if v > 0 and np.isfinite(v):
+            return float(v)
+        if c > 0:
+            return float(c)
+    except (TypeError, ValueError, KeyError):
+        pass
+    return 0.0
+
+
+def _m1_float_ohlc(
+    m1_r: Any, cname: str, cname2: str, default: float
+) -> float:
+    """Series/dict 겸용 OHLC 스칼라 읽기."""
+    try:
+        for name in (cname, cname2):
+            v = None
+            if hasattr(m1_r, "get"):
+                v = m1_r.get(name)
+            elif name in m1_r:
+                v = m1_r[name]
+            if v is not None and not pd.isna(v):
+                f = float(v)
+                if np.isfinite(f):
+                    return f
+    except (TypeError, KeyError, ValueError):
+        pass
+    return float(default)
 
 
 def _dual_track_new_candidates(
@@ -164,12 +221,6 @@ class DynamicBacktester:
         )
         self.use_type_b = s.get('use_type_b', False)
         self.gap_down_lmt = float(s.get("gap_down_limit_a", s.get("gap_down_limit", -5.0)))
-        self.msi_down_thr = float(s.get('msi_down_threshold', -0.10))
-        self.msi_up_thr = float(s.get('msi_up_threshold', 0.10))
-        self.adx_min_thr = float(s.get('adx_min_threshold', 15))
-        self.adx_down_thr = float(s.get('adx_down_threshold', 20))
-        self.vix_down_thr = float(s.get('vix_down_threshold', 30))
-
     def _type_balance_allows_new_s1(self, sig_type: str) -> bool:
         """
         신규 S1(Type A/B) 진입 허용 여부. 보유 **종목 수**로 A/B를 세고,
@@ -189,41 +240,27 @@ class DynamicBacktester:
         callback: Optional[Callable[[str, Any], None]],
     ) -> bool:
         """
-        시장지표·유니버스·15분 캐시까지 로드. 성공 시 self._bt_trading_days 등 설정.
+        영업일 캘린더(001 bars_1d)·유니버스·15분 캐시 로드. 시장 지표·VIX·레짐은 사용하지 않는다.
         """
         if callback:
-            callback("시장지수 및 VIX 데이터 로드 중...", 2)
-        warmup_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=280)).strftime("%Y-%m-%d")
-        market_df_raw = self.db.get_daily_bars("001", warmup_start, end_date)
-        vix_df = self.db.get_daily_bars("^VIX", warmup_start, end_date)
-        if market_df_raw is None or market_df_raw.empty:
-            print("[Error] [Dynamic] 시장 데이터(KS11)가 없어 백테스트를 진행할 수 없습니다.")
+            callback("영업일 캘린더 로드 중...", 2)
+        try:
+            raw_days = self.db.get_trading_days(start_date, end_date)
+        except Exception as e:
+            print(f"[Error] [Dynamic] 영업일 조회 실패: {e}")
             return False
-        market_df_raw["time"] = pd.to_datetime(market_df_raw["time"])
-        market_df_raw.set_index("time", inplace=True)
-        market_df_full = TradingStrategy.calculate_indicators(market_df_raw, self.settings)
-        market_df = market_df_full.loc[start_date:]
-        if market_df.empty:
-            print(f"[Error] [Dynamic] {start_date} 이후 시장 데이터가 없습니다.")
-            return False
-        trading_days = market_df.index.strftime("%Y-%m-%d").tolist()
-        vix_series: pd.Series | None = None
-        if vix_df is not None and not vix_df.empty:
+        trading_days: list[str] = []
+        for d in raw_days or []:
             try:
-                _vix = vix_df.copy()
-                _vix["time"] = pd.to_datetime(_vix["time"]) if "time" in _vix.columns else _vix.index
-                if "time" in _vix.columns:
-                    _vix = _vix.set_index("time")
-                _vix.index = pd.to_datetime(_vix.index)
-                td_idx = pd.to_datetime(trading_days)
-                vix_series = _vix["Close"].reindex(td_idx, method="ffill")
-                filled = int(vix_series.notna().sum())
-                print(f"[Dynamic] VIX 전처리 완료 ({filled}/{len(trading_days)} 거래일 유효)")
-            except Exception as e:
-                print(f"[Dynamic] VIX 전처리 실패 (직전값 방식으로 계속 진행): {e}")
-                vix_series = None
-        else:
-            print("[Dynamic] [경고] VIX 데이터 없음 — 시장 트렌드 판정에서 VIX 필터 비활성화됨")
+                trading_days.append(pd.to_datetime(d).strftime("%Y-%m-%d"))
+            except Exception:
+                continue
+        if not trading_days:
+            print(
+                "[Error] [Dynamic] 해당 기간에 영업일(001 bars_1d)이 없습니다. "
+                "DB에 시장지수 001 일봉이 수집되어 있는지 확인하세요."
+            )
+            return False
         print(f"[Dynamic] 백테스트 시작: {start_date} ~ {end_date} ({len(trading_days)} 영업일)")
         t_start = time.time()
         _result = strategy_selector.prepare_dynamic_universe(
@@ -250,8 +287,6 @@ class DynamicBacktester:
             )
         self.cached_1m_data = {}
         self._bt_trading_days = trading_days
-        self._bt_market_df = market_df
-        self._bt_vix_series = vix_series
         return True
 
     def diagnose_intraday_entry_potential(
@@ -279,8 +314,6 @@ class DynamicBacktester:
         if not self._bootstrap_portfolio_data(start_date, end_date, callback):
             return pd.DataFrame()
         trading_days = self._bt_trading_days
-        market_df = self._bt_market_df
-        vix_series = self._bt_vix_series
         rows: list[dict[str, Any]] = []
         saved_holdings = self.holdings
         self.holdings = {}
@@ -310,28 +343,7 @@ class DynamicBacktester:
                     )
                 else:
                     monitoring_list = top_codes[: max_sa + max_sb]
-                m_trend = "UP"
-                try:
-                    if prev_day_idx >= 0:
-                        m_data = market_df.loc[trading_days[prev_day_idx]]
-                        msi = m_data.get("MSI", 0)
-                        adx = m_data.get("ADX", 20)
-                        v_val = 15.0
-                        if vix_series is not None:
-                            try:
-                                current_dt = pd.to_datetime(trading_days[prev_day_idx])
-                                looked_up = vix_series.get(current_dt)
-                                if looked_up is not None and not pd.isna(looked_up):
-                                    v_val = float(looked_up)
-                            except Exception:
-                                pass
-                        m_trend = classify_market_regime_row(
-                            float(msi), float(adx), float(v_val), self.settings
-                        )
-                except Exception:
-                    pass
-                n_before = 0
-                n_after = 0
+                n_sig = 0
                 n_bars = 0
                 n_codes_with_data = 0
                 for code in monitoring_list:
@@ -343,50 +355,16 @@ class DynamicBacktester:
                         continue
                     n_codes_with_data += 1
                     n_bars += len(day_full)
-                    if (
-                        (
-                            bool(self.settings.get("use_type_a_regime_phase1", False))
-                            and bool(self.settings.get("use_type_a", False))
-                        )
-                        or (
-                            bool(self.settings.get("use_type_b_regime_phase1", False))
-                            and bool(self.settings.get("use_type_b", False))
-                        )
-                    ) and m_trend in (
-                        "AGGRESSIVE",
-                        "UP",
-                        "NEUTRAL",
-                    ):
-                        try:
-                            reg_ix = {"AGGRESSIVE": 0, "UP": 1, "NEUTRAL": 2}[m_trend]
-                            day_full["Signal"] = day_full[f"Signal_TA_REG{reg_ix}"]
-                            day_full["Sig_Type"] = day_full[f"Sig_Type_TA_REG{reg_ix}"]
-                        except (KeyError, TypeError) as _reg_e:
-                            try:
-                                print(
-                                    f"[WARN] 레짐 열 없음 {code} {current_day}: {_reg_e} "
-                                    f"(설정 저장 후 재실행·캐시 무효 확인)"
-                                )
-                            except Exception:
-                                pass
                     sig_r = day_full["Signal"].astype(bool) & day_full["Ready"].astype(bool)
-                    n_before += int(sig_r.sum())
-                    if self.settings.get("use_market_filter", True) and m_trend == "DOWN":
-                        day_full["Signal"] = False
-                    elif self.settings.get("use_market_filter", True) and m_trend == "NEUTRAL":
-                        is_type_b = day_full["Sig_Type"] == "TYPE_B"
-                        day_full.loc[is_type_b, "Signal"] = False
-                    sig_a = day_full["Signal"].astype(bool) & day_full["Ready"].astype(bool)
-                    n_after += int(sig_a.sum())
+                    n_sig += int(sig_r.sum())
                 rows.append(
                     {
                         "date": current_day,
-                        "m_trend": m_trend,
                         "n_monitor_codes": len(monitoring_list),
                         "n_codes_15m": n_codes_with_data,
                         "n_15m_bars": n_bars,
-                        "n_signal_ready_pre_mkt": n_before,
-                        "n_signal_ready_post_mkt": n_after,
+                        "n_signal_ready_pre_mkt": n_sig,
+                        "n_signal_ready_post_mkt": n_sig,
                     }
                 )
         finally:
@@ -412,9 +390,7 @@ class DynamicBacktester:
             return None
 
         trading_days = self._bt_trading_days
-        market_df = self._bt_market_df
-        vix_series = self._bt_vix_series
-        
+
         # [v17.3] 시작 시점(Day 0) 자산 기록 (트레이딩 시작 전일 혹은 시작일 아침으로 기록하여 중복 방지)
         # [v18.9] Plotly date parsing 호환성을 위해 유효한 시간 형식(08:59) 사용
         self.daily_equity = [{'date': start_date + " 08:59:00", 'equity': self.initial_cash, 'cash': self.initial_cash, 'holdings_n': 0}]
@@ -490,35 +466,9 @@ class DynamicBacktester:
                     c for c in top_codes if c not in hc_set
                 ][: max_sa + max_sb]
             monitoring_list = holdings_codes + new_candidates
-            
-            # 2-2. [v4.5.10] Unified Triple-Lock 기반 시장 트렌드 통합 판별 (Single Source of Truth)
-            m_trend = 'UP'
-            try:
-                if prev_day_idx >= 0:
-                    m_data = market_df.loc[trading_days[prev_day_idx]]
-                    msi = m_data.get('MSI', 0)
-                    adx = m_data.get('ADX', 20)
-                    
-                    # [v4.6] VIX 조회: 전처리된 ffill Series에서 직접 읽기
-                    # — 해당 날짜 값이 없으면 직전 거래일 값이 자동 유지됨
-                    # — vix_series 자체가 None이면 15.0 기본값 사용 (VIX 필터 비활성화)
-                    v_val = 15.0
-                    if vix_series is not None:
-                        try:
-                            current_dt = pd.to_datetime(trading_days[prev_day_idx])
-                            looked_up = vix_series.get(current_dt)
-                            if looked_up is not None and not pd.isna(looked_up):
-                                v_val = float(looked_up)
-                        except Exception:
-                            pass
-                    
-                    # [Rule v4.7] 4단계 레짐 — strategy.market_regime.classify_market_regime_row 단일 정의
-                    m_trend = classify_market_regime_row(
-                        float(msi), float(adx), float(v_val), self.settings
-                    )
-            except: pass
 
-            # 2-3. 당일 데이터 및 지표 추출
+            # 2-3. 당일 데이터 및 지표 추출 (시장·레짐 필터 없음)
+            m_trend = "UP"  # 호환: S2 승인·1분 루프에만 사용
             day_data = {}
             day_signals = {}
             for code in monitoring_list:
@@ -528,43 +478,6 @@ class DynamicBacktester:
                 day_full = base_df.loc[current_day:current_day + " 23:59:59"].copy()
                 if day_full.empty: continue
 
-                # [v39.0] 전일 레짐에 맞는 보정 신호 열 선택 (해당 타입 ON일 때만)
-                if (
-                    (
-                        bool(self.settings.get("use_type_a_regime_phase1", False))
-                        and bool(self.settings.get("use_type_a", False))
-                    )
-                    or (
-                        bool(self.settings.get("use_type_b_regime_phase1", False))
-                        and bool(self.settings.get("use_type_b", False))
-                    )
-                ) and m_trend in (
-                    "AGGRESSIVE",
-                    "UP",
-                    "NEUTRAL",
-                ):
-                    try:
-                        reg_ix = {"AGGRESSIVE": 0, "UP": 1, "NEUTRAL": 2}[m_trend]
-                        day_full["Signal"] = day_full[f"Signal_TA_REG{reg_ix}"]
-                        day_full["Sig_Type"] = day_full[f"Sig_Type_TA_REG{reg_ix}"]
-                    except (KeyError, TypeError) as _reg_e:
-                        try:
-                            print(
-                                f"[WARN] 레짐 열 없음 {code} {current_day}: {_reg_e} "
-                                f"(use_type_*_regime_phase1 ON인데 사전계산 실패 시 기본 Signal 유지)"
-                            )
-                        except Exception:
-                            pass
-                
-                # [v16.92] Optimization: Signal calculation was moved to _prepare_15m_cached_data (PRE-CALC)
-                # The 'm_trend' filter is still applied here if needed, but the base signals are ready.
-                if self.settings.get('use_market_filter', True) and m_trend == 'DOWN':
-                    day_full['Signal'] = False
-                elif self.settings.get('use_market_filter', True) and m_trend == 'NEUTRAL':
-                    # Type B is blocked in NEUTRAL
-                    is_type_b = (day_full['Sig_Type'] == 'TYPE_B')
-                    day_full.loc[is_type_b, 'Signal'] = False
-                
                 day_data[code] = day_full
                 day_signals[code] = day_full
 
@@ -596,7 +509,7 @@ class DynamicBacktester:
                     for code in m1_targets:
                         m1_chunk = self._get_m1_chunk_on_demand(code, current_day, curr_time)
                         if m1_chunk is not None and not m1_chunk.empty:
-                            self._process_intra_bar_dynamic(code, m1_chunk, day_data.get(code), m_trend, today_sells, curr_time)
+                            self._process_intra_bar_dynamic(code, m1_chunk, day_data.get(code), today_sells, curr_time)
                             m1_processed.add(code)
 
                 # 2-4-1. 매도 감시 (보유 중인 종목)
@@ -653,7 +566,7 @@ class DynamicBacktester:
                             
                             if is_addon_target:
                                 # 추매 승인 조건 체크 (TradingStrategy 통합 로직 사용)
-                                if self._check_s2_approval(code, h_info, last_sig, market_trend=m_trend):
+                                if self._check_s2_approval(code, h_info, last_sig, market_trend="UP"):
                                     # [v33.9] Stage 2 Smart Buy Filter
                                     can_execute_s2 = True
                                     if (self.use_sb_s2_b if "TYPE_B" in str(h_info.get("sig_type", "")) else self.use_sb_s2_a):
@@ -771,9 +684,29 @@ class DynamicBacktester:
             pass
         return self._finalize_backtest(interval)
 
-    def _handle_buy_execution(self, code, sig_res, curr_time, last_row, indicator_row=None) -> bool:
-        """매수 실행. 실제 매수가 이루어진 경우 True 반환, 조건 미충족 시 False 반환."""
-        price = last_row['Close']
+    def _handle_buy_execution(
+        self,
+        code,
+        sig_res,
+        curr_time,
+        last_row,
+        indicator_row=None,
+        fill_price: Optional[float] = None,
+    ) -> bool:
+        """매수 실행. 실제 매수가 이루어진 경우 True 반환, 조건 미충족 시 False 반환.
+        fill_price: 고정밀 1분 — 보수적 체결가(고가) 등, 지정 시 우선(미지정 시 last_row['Close']).
+        """
+        try:
+            if fill_price is not None and float(fill_price) > 0:
+                price = float(fill_price)
+            elif hasattr(last_row, "get"):
+                price = float(last_row.get("Close", last_row.get("close", 0.0)) or 0.0)  # type: ignore[union-attr]
+            else:
+                price = float(last_row["Close"])
+        except (TypeError, ValueError, KeyError):
+            return False
+        if price <= 0:
+            return False
         h_info = self.holdings.get(code)
         s1_amt = float(self.settings.get('stage1_amt', 1_000_000))
         s2_amt = float(self.settings.get('stage2_amt', 2_000_000))
@@ -961,12 +894,7 @@ class DynamicBacktester:
             except Exception as e:
                 print(f"[Error] Failed to save portfolio curve: {e}")
 
-            # [v37.9] 시장지수 필터(MSI/ADX) 계산을 위해 백테스트 시작일 기준 200일의 과거 버퍼 추가 확보
-            report_start = (datetime.strptime(self.start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
-            
-            generate_trade_report(trades_df, interval, trd_path, len(exit_trades), win_rate, avg_ret, self.settings, 
-                                  market_df=self.db.get_daily_bars('001', report_start, self.end_date),
-                                  vix_df=self.db.get_daily_bars('^VIX', report_start, self.end_date),
+            generate_trade_report(trades_df, interval, trd_path, len(exit_trades), win_rate, avg_ret, self.settings,
                                   start_date=self.start_date, end_date=self.end_date, daily_equity=self.daily_equity,
                                   high_precision=self.high_precision)
         return trades_df
@@ -1038,53 +966,9 @@ class DynamicBacktester:
             df_ind['RSI_Pulse_Count'] = is_rsi_above_50.groupby(rsi_group_id).cumsum()
             
             # [v16.92] Pre-calculate signals for the ENTIRE time series at once (Vectorized)
-            # This makes the daily loop in run() a simple O(1) lookup
-            # [v39.0] 레짐 1차: Type A(vol·MA60) 및/또는 Type B(vol_surge_b) — 3열 사전계산
-            _reg_a = bool(self.settings.get("use_type_a_regime_phase1", False)) and bool(
-                self.settings.get("use_type_a", False)
+            full_sigs = TradingStrategy.get_buy_signals_detailed(
+                df_ind, self.settings, market_trend="UP"
             )
-            _reg_b = bool(self.settings.get("use_type_b_regime_phase1", False)) and bool(
-                self.settings.get("use_type_b", False)
-            )
-            if _reg_a or _reg_b:
-                try:
-                    from strategy.type_a_regime import apply_type_a_phase1_settings
-                    from strategy.type_b_regime import apply_type_b_phase1_overlay
-
-                    s_aggr = apply_type_a_phase1_settings(self.settings, "AGGRESSIVE")
-                    s_up = apply_type_a_phase1_settings(self.settings, "UP")
-                    s_neu = apply_type_a_phase1_settings(self.settings, "NEUTRAL")
-                    s_aggr = apply_type_b_phase1_overlay(self.settings, s_aggr, "AGGRESSIVE")
-                    s_up = apply_type_b_phase1_overlay(self.settings, s_up, "UP")
-                    s_neu = apply_type_b_phase1_overlay(self.settings, s_neu, "NEUTRAL")
-                    sig_aggr = TradingStrategy.get_buy_signals_detailed(
-                        df_ind, s_aggr, market_trend="UP"
-                    )
-                    sig_up = TradingStrategy.get_buy_signals_detailed(
-                        df_ind, s_up, market_trend="UP"
-                    )
-                    sig_neu = TradingStrategy.get_buy_signals_detailed(
-                        df_ind, s_neu, market_trend="UP"
-                    )
-                    df_ind["Signal_TA_REG0"] = sig_aggr["Signal"]
-                    df_ind["Sig_Type_TA_REG0"] = sig_aggr["Sig_Type"]
-                    df_ind["Signal_TA_REG1"] = sig_up["Signal"]
-                    df_ind["Sig_Type_TA_REG1"] = sig_up["Sig_Type"]
-                    df_ind["Signal_TA_REG2"] = sig_neu["Signal"]
-                    df_ind["Sig_Type_TA_REG2"] = sig_neu["Sig_Type"]
-                    full_sigs = sig_aggr
-                except Exception as e:
-                    try:
-                        print(f"[WARN] 레짐 신호 사전계산 실패, 단일 경로로 폴백: {e}")
-                    except Exception:
-                        pass
-                    full_sigs = TradingStrategy.get_buy_signals_detailed(
-                        df_ind, self.settings, market_trend="UP"
-                    )
-            else:
-                full_sigs = TradingStrategy.get_buy_signals_detailed(
-                    df_ind, self.settings, market_trend="UP"
-                )
             df_ind = df_ind.join(full_sigs.drop(columns='Signal', errors='ignore'))
             df_ind['Signal'] = full_sigs['Signal']
             
@@ -1151,7 +1035,7 @@ class DynamicBacktester:
         # [REMOVED] v23.0부터는 지연 로딩을 사용하므로 사전 로드가 불필요함
         return {}
 
-    def _process_intra_bar_dynamic(self, code, m1_chunk, day_df_15m, m_trend, today_sells, curr_15m_time):
+    def _process_intra_bar_dynamic(self, code, m1_chunk, day_df_15m, today_sells, curr_15m_time):
         """[v36.2] 통합된 1분봉 정밀 시뮬레이션 (매도/매수 순차 처리 및 지표 동기화)"""
         # [v37.8] 전달받은 curr_15m_time을 사용하여 15분봉 데이터 매칭 (m1_dt_first 대신 사용)
         curr_15m = day_df_15m.loc[curr_15m_time] if day_df_15m is not None and curr_15m_time in day_df_15m.index else None
@@ -1209,9 +1093,11 @@ class DynamicBacktester:
                 # 고가 갱신 (익절/트레일링용)
                 if m1_r['High'] > h_info['max_p']: h_info['max_p'] = m1_r['High']
                 
+                # 보수적 백테: EXIT 판가·체결을 1분 저가 기준(종가 X)
+                px_sell = _m1_sell_price_conservative(m1_r)
                 # 1분 단위 정밀 매도 평가 (indicator_to_use에 시뮬레이션 데이터 전달)
                 res = TradingStrategy.evaluate_position(
-                    code, m1_r['Close'], h_info, self.settings,
+                    code, px_sell, h_info, self.settings,
                     indicator_row=indicator_to_use, # [v36.8] 시뮬레이션된 15분 지표 사용
                     current_time=m1_time,
                     is_realtime=False,
@@ -1219,20 +1105,8 @@ class DynamicBacktester:
                 )
                 
                 if res['action'] == 'EXIT':
-                    e_price = m1_r['Close']
-                    # 익절(TP)인 경우 지침에 따라 가격 보정 (평단 + 목표익절%)
-                    if res['reason'] == 'TAKE_PROFIT':
-                        tpp = res.get('tp_pct_applied')
-                        if tpp is not None:
-                            e_price = float(h_info['avg_p']) * (1 + float(tpp) / 100.0)
-                        else:
-                            is_type_b_h = "TYPE_B" in str(h_info.get('sig_type', ''))
-                            if h_info['entry_n'] == 2:
-                                tp_key = 's2_b_take_profit' if is_type_b_h else 's2_take_profit'
-                            else:
-                                tp_key = 's1_b_take_profit' if is_type_b_h else 's1_a_take_profit'
-                            tp_val = self.settings.get(tp_key, 5.0)
-                            e_price = h_info['avg_p'] * (1 + float(tp_val)/100.0)
+                    # 익절(TP)도 체결 기록은 1분 저가(보수적) — reason은 TAKE_PROFIT 유지
+                    e_price = px_sell
                     
                     reason = f"1M_{res['reason']}+{m1_idx}m"
                     self._execute_sell(code, e_price, m1_time, reason, indicator_row=indicator_to_use)
@@ -1266,7 +1140,7 @@ class DynamicBacktester:
                     
                     if is_addon_target:
                         if not self._check_s2_approval(
-                            code, h_info, indicator_to_use, market_trend=m_trend, curr_dt_for_delay=m1_time
+                            code, h_info, indicator_to_use, market_trend="UP", curr_dt_for_delay=m1_time
                         ):
                             can_execute = False
 
@@ -1313,6 +1187,7 @@ class DynamicBacktester:
                             m1_time,
                             m1_r,
                             indicator_row=indicator_to_use,
+                            fill_price=_m1_buy_price_conservative(m1_r),
                         )
                         if executed:
                             return # 매수 실제 체결된 경우에만 해당 15분 청크 종료

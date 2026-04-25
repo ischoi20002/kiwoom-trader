@@ -904,6 +904,11 @@ class MonitorTab:
                 font=row_font,
             )
 
+        try:
+            self._apply_default_monitor_theme()
+        except Exception:
+            pass
+
     def start_selection_thread(self, auto_confirm: bool = False) -> None:
         """일일 감시 목록 선정을 백그라운드에서 실행합니다."""
         try:
@@ -1507,85 +1512,66 @@ class MonitorTab:
                 if mkt == 'NXT' or '_nx' in full_code.lower():
                     info['is_nxt'] = True
 
-    def _update_visual_theme(self, trend):
-        """[v27.3] 시장 지질(Background) 테마를 '온몸'으로 변경"""
-        themes = {
-            "UP": {
-                "bg": "#2E3440", "field": "#242933",
-                "odd": "#242933", "even": "#3B4252",
-                "fg": "#ECEFF4", "desc": "🟢 레짐 UP: 백테 4단계 — Type A/B 가동",
-            },
-            "AGGRESSIVE": {
-                "bg": "#2E3440", "field": "#263238",
-                "odd": "#263238", "even": "#37474F",
-                "fg": "#A3BE8C", "desc": "🔥 공격적 강세(AGGRESSIVE): MSI·ADX 강세 구간 — 백테와 동일 레짐",
-            },
-            "NEUTRAL": {
-                "bg": "#3B4252", "field": "#3B4252",
-                "odd": "#343B47", "even": "#434C5E",
-                "fg": "#D8DEE9", "desc": "⚪ 시장 중립: Type B 매수 차단 (관망 권장)",
-            },
-            "DOWN": {
-                "bg": "#3B2E2E", "field": "#3B2E2E",
-                "odd": "#2E2424", "even": "#423B3B",
-                "fg": "#D8DEE9", "desc": "⚠️ 시장 역풍: 모든 매수 신호 정지",
-            },
+    def _apply_default_monitor_theme(self) -> None:
+        """시장 레짐 비사용: 노르딕 기본(UP과 동일) 팔레트로 고정."""
+        t = {
+            "bg": "#2E3440",
+            "field": "#242933",
+            "odd": "#242933",
+            "even": "#3B4252",
+            "fg": "#ECEFF4",
         }
-        tr_key = str(trend).strip().upper()
-        t = themes.get(tr_key, themes["UP"])
-        style = ttk.Style()
-        style.configure("Monitor.TFrame", background=t['bg'])
-        style.configure("Monitor.TLabel", background=t['bg'], foreground=t['fg'])
-        self.mo_main_frame.config(style="Monitor.TFrame")
-        self.ctrl_frame.config(style="Monitor.TFrame")
-        for widget in self.mo_main_frame.winfo_children():
-            if isinstance(widget, ttk.Label): widget.config(style="Monitor.TLabel")
-        for widget in self.ctrl_frame.winfo_children():
-            if isinstance(widget, ttk.Label): widget.config(style="Monitor.TLabel")
-        style.configure("Treeview", fieldbackground=t['field'], background=t['field'])
-        # 감시·보유 트리: 등락 태그의 짝/홀 배경을 장세 테마 odd/even에 맞춤
-        row_font_th = ("Malgun Gothic", 9, "normal")
-        up_c = "#E35F5F"
-        dn_c = "#81A1C3"
-        for tree in (self.tree_monitor, self.tree_active_monitor):
-            if not tree:
-                continue
-            for direction, fg in (("up", up_c), ("down", dn_c), ("stable", "#D8DEE9")):
-                tree.tag_configure(
-                    f"{direction}_even",
-                    background=t["even"],
-                    foreground=fg,
-                    font=row_font_th,
-                )
-                tree.tag_configure(
-                    f"{direction}_odd",
-                    background=t["odd"],
-                    foreground=fg,
-                    font=row_font_th,
-                )
-                tree.tag_configure(
-                    f"active_{direction}_even",
-                    background=t["even"],
-                    foreground=fg,
-                    font=row_font_th,
-                )
-                tree.tag_configure(
-                    f"active_{direction}_odd",
-                    background=t["odd"],
-                    foreground=fg,
-                    font=row_font_th,
-                )
-        if self.tree_monitor:
-            self.tree_monitor.tag_configure("oddrow", background=t['odd'])
-            self.tree_monitor.tag_configure("evenrow", background=t['even'])
-        if hasattr(self, 'lbl_headwind_caution'):
-            self.lbl_headwind_caution.config(text=t['desc'], background=t['bg'])
-            if tr_key in ("UP", "AGGRESSIVE"):
+        try:
+            style = ttk.Style()
+            style.configure("Monitor.TFrame", background=t["bg"])
+            style.configure("Monitor.TLabel", background=t["bg"], foreground=t["fg"])
+            self.mo_main_frame.config(style="Monitor.TFrame")
+            self.ctrl_frame.config(style="Monitor.TFrame")
+            for widget in self.mo_main_frame.winfo_children():
+                if isinstance(widget, ttk.Label):
+                    widget.config(style="Monitor.TLabel")
+            for widget in self.ctrl_frame.winfo_children():
+                if isinstance(widget, ttk.Label):
+                    widget.config(style="Monitor.TLabel")
+            style.configure("Treeview", fieldbackground=t["field"], background=t["field"])
+            row_font_th = ("Malgun Gothic", 9, "normal")
+            up_c = "#E35F5F"
+            dn_c = "#81A1C3"
+            for tree in (self.tree_monitor, self.tree_active_monitor):
+                if not tree:
+                    continue
+                for direction, fg in (("up", up_c), ("down", dn_c), ("stable", "#D8DEE9")):
+                    tree.tag_configure(
+                        f"{direction}_even",
+                        background=t["even"],
+                        foreground=fg,
+                        font=row_font_th,
+                    )
+                    tree.tag_configure(
+                        f"{direction}_odd",
+                        background=t["odd"],
+                        foreground=fg,
+                        font=row_font_th,
+                    )
+                    tree.tag_configure(
+                        f"active_{direction}_even",
+                        background=t["even"],
+                        foreground=fg,
+                        font=row_font_th,
+                    )
+                    tree.tag_configure(
+                        f"active_{direction}_odd",
+                        background=t["odd"],
+                        foreground=fg,
+                        font=row_font_th,
+                    )
+            if self.tree_monitor:
+                self.tree_monitor.tag_configure("oddrow", background=t["odd"])
+                self.tree_monitor.tag_configure("evenrow", background=t["even"])
+            if hasattr(self, "lbl_headwind_caution"):
                 self.lbl_headwind_caution.pack_forget()
-            else:
-                self.lbl_headwind_caution.pack(side=tk.LEFT, padx=10)
-        if self.app.status_label:
-            self.app.status_label.config(text=f"장세: {trend}", foreground=t['fg'], background=t['bg'])
+        except Exception:
+            pass
 
     def _watchlist_codes_set(self) -> set:
         """관심목록 코드(6자리). 감시목록과 독립이며, 이 집합은 감시 화면에서 숨김."""

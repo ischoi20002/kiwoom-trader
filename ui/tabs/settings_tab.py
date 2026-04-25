@@ -17,7 +17,6 @@ class SettingsTab:
         self.type_b_widgets = []
         self.s2_a_widgets = []
         self.s2_b_widgets = []
-        self.mkt_gate_widgets = []
         self.grid_rows = {} 
         self.sizing_rows = []
         self.opt_sync_tasks = [] 
@@ -221,8 +220,8 @@ class SettingsTab:
                 '  ↓ ② 유니버스 종목선정 (A/B)\n'
                 '  ↓ ③ S1 (공통필터 → A → B)\n'
                 '  ↓ ④ Stage 2 추매 (A/B)\n'
-                '  ↓ ⑤⑥ 수급·시장\n'
-                '  ↓ ⑦ 청산'
+                '  ↓ ⑤ Smart Buy / Smart Exit\n'
+                '  ↓ ⑥ 청산'
             ),
             fg='#D8DEE9',
             bg=nord_deep,
@@ -252,8 +251,7 @@ class SettingsTab:
             ('s1', '③ Stage 1 진입 (공통/A/B)'),
             ('s2', '④ Stage 2 추매 (A/B)'),
             ('smart', '⑤ Smart Wall'),
-            ('mkt', '⑥ 시장 게이트'),
-            ('exit', '⑦ 청산 · 리스크 (A/B)'),
+            ('exit', '⑥ 청산 · 리스크 (A/B)'),
         ]
         self._settings_section_keys: list[str] = [k for k, _ in section_entries]
         self._section_by_key: dict[str, ttk.Frame] = {}
@@ -639,12 +637,6 @@ class SettingsTab:
             '15분 S1 Type A: Prev_Day_Vol_S1_A 산출(거래일 N일). 구 prev_vol_lookback 미설정 시 폴백',
             widget_list=self.type_a_widgets,
         )
-        add_param_row(strat_f, '시장레짐 Type A 보정(1차)', None, '', 'AGGRESSIVE=기준, UP/NEUTRAL에서 vol·MA60만 보수화', toggle_key='use_type_a_regime_phase1', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, '  ㄴ UP 거래량 +Δ', 'type_a_phase1_up_vol_surge_add', '배', '기준 vol_surge에 가산', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, '  ㄴ NEUTRAL 거래량 +Δ', 'type_a_phase1_neutral_vol_surge_add', '배', 'UP보다 크게', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, '  ㄴ UP MA60 폭 축소', 'type_a_phase1_up_ma60_shrink_pct', '%p', '하한↑·상한↓ 각각 이 만큼', widget_list=self.type_a_widgets)
-        add_param_row(strat_f, '  ㄴ NEUTRAL MA60 폭 축소', 'type_a_phase1_neutral_ma60_shrink_pct', '%p', 'UP보다 크게', widget_list=self.type_a_widgets)
-
         add_header(strat_f, '── Type B: 돌파형 진입 조건 ──')
         add_param_row(strat_f, 'B 전용 사용', None, '', '순풍(UP) 장세 전용', toggle_key='use_type_b')
         r_sb = get_next_row(strat_f)
@@ -695,31 +687,6 @@ class SettingsTab:
             'prev_vol_lookback_s1_b',
             '일',
             '15분 S1 Type B: Prev_Day_Vol_S1_B. 구 prev_vol_lookback_b 미설정 시 폴백',
-            widget_list=self.type_b_widgets,
-        )
-        add_param_row(
-            strat_f,
-            '시장레짐 Type B 보정(1차)',
-            None,
-            '',
-            'AGGRESSIVE=기준, UP/NEUTRAL에서 vol_surge_b만 보수화(A와 독립)',
-            toggle_key='use_type_b_regime_phase1',
-            widget_list=self.type_b_widgets,
-        )
-        add_param_row(
-            strat_f,
-            '  ㄴ UP 거래량 +Δ(B)',
-            'type_b_phase1_up_vol_surge_add',
-            '배',
-            '기준 vol_surge_b에 가산',
-            widget_list=self.type_b_widgets,
-        )
-        add_param_row(
-            strat_f,
-            '  ㄴ NEUTRAL 거래량 +Δ(B)',
-            'type_b_phase1_neutral_vol_surge_add',
-            '배',
-            'UP보다 크게',
             widget_list=self.type_b_widgets,
         )
         add_param_row(strat_f, '추세 정렬 확인', None, '', '일봉/1분봉 추세 일치 여부', toggle_key='use_trend_aligned_b', widget_list=self.type_b_widgets)
@@ -930,55 +897,8 @@ class SettingsTab:
         add_param_row(rt_f, 'Smart Exit 탈출용 매도벽 비율', 'smart_exit_ba_ratio', '배', '매도잔량/매수잔량(Smart Buy BA와 동일). 임계 이상이면 탈출 후보', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락 폭(%) — 양수 권장. 음수 입력 시에도 절댓값으로 동일 적용', toggle_key='use_smart_exit')
 
-        mkt_f = ttk.LabelFrame(
-            _sec_parent('mkt'),
-            text=' 🌐 [6] 시장 트렌드 게이트 (MSI / ADX / VIX · S1·S2 공통) ',
-            padding='15',
-        )
-        mkt_f.pack(fill=tk.X, pady=10)
-        add_param_row(
-            mkt_f,
-            '★ 시장 게이트 전체',
-            None,
-            '',
-            'ON: 아래 임계값으로 UP/NEUTRAL/DOWN 판정 후 S1·S2에 반영. OFF: 시장차단 없음(임계값은 저장만)',
-            toggle_key='use_market_filter',
-        )
-        add_param_row(
-            mkt_f,
-            'MSI 하락 임계값 (DOWN 기준)',
-            'msi_down_threshold',
-            '',
-            '이 값 미만이면 DOWN 후보 (동적 백테스트 SSOT, 기본 -0.10)',
-            widget_list=self.mkt_gate_widgets,
-        )
-        add_param_row(
-            mkt_f,
-            'MSI 상승 임계값 (UP 기준)',
-            'msi_up_threshold',
-            '',
-            'UP/NEUTRAL 경계 등에 사용 (기본 0.10)',
-            widget_list=self.mkt_gate_widgets,
-        )
-        add_param_row(
-            mkt_f,
-            'ADX 최소 추세강도 (NEUTRAL 기준)',
-            'adx_min_threshold',
-            '',
-            'ADX가 이 값 미만이면 NEUTRAL 후보 (기본 15)',
-            widget_list=self.mkt_gate_widgets,
-        )
-        add_param_row(
-            mkt_f,
-            'VIX 공포지수 상한 (DOWN 기준)',
-            'vix_down_threshold',
-            '',
-            '이 값 초과 시 DOWN 후보 (기본 30)',
-            widget_list=self.mkt_gate_widgets,
-        )
-
         exit_parent = _sec_parent('exit')
-        exit_a_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [7-A] Type A 청산 · 리스크 (눌림·A추매) ', padding='15')
+        exit_a_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [6-A] Type A 청산 · 리스크 (눌림·A추매) ', padding='15')
         exit_a_f.pack(fill=tk.X, pady=10)
         add_param_row(
             exit_a_f,
@@ -1061,7 +981,7 @@ class SettingsTab:
             toggle_key='use_atr_trail_only_after_tp_s2_a',
         )
 
-        exit_b_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [7-B] Type B 청산 · 리스크 (돌파·B추매) ', padding='15')
+        exit_b_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [6-B] Type B 청산 · 리스크 (돌파·B추매) ', padding='15')
         exit_b_f.pack(fill=tk.X, pady=10)
         add_param_row(
             exit_b_f,
@@ -1187,12 +1107,6 @@ class SettingsTab:
                 'write', lambda *a: apply_st(self.s2_b_widgets, self.conf_vars['use_s2_master_b'].get())
             )
             apply_st(self.s2_b_widgets, self.conf_vars['use_s2_master_b'].get())
-        if 'use_market_filter' in self.conf_vars:
-            self.conf_vars['use_market_filter'].trace_add(
-                'write', lambda *a: apply_st(self.mkt_gate_widgets, self.conf_vars['use_market_filter'].get())
-            )
-            apply_st(self.mkt_gate_widgets, self.conf_vars['use_market_filter'].get())
-
         # 유니버스 Track A/B → 해당 타입 S1·S2 마스터 동기화 (사용자가 한 곳에서 켜고 끄도록)
         def _sync_sel_track_a_to_type_a(*_args: object) -> None:
             try:

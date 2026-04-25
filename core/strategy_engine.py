@@ -92,7 +92,7 @@ class StrategyEngine:
                     None,
                     s,
                     indicator_row=ind,
-                    market_trend=str(getattr(self.app, "market_trend", "UP")),
+                    market_trend="UP",
                     curr_dt=datetime.now(),
                 ):
                     return {"action": "HOLD"}
@@ -138,17 +138,6 @@ class StrategyEngine:
             """S2 표시용: Type A는 s2_* 만, Type B는 s2_b_* 만."""
             return s.get(b_key, default) if _is_b else s.get(a_key, default)
 
-        # 0. 시장지수 (A는 NEUTRAL 허용, B는 UP/AGGRESSIVE만)
-        if s.get('use_market_filter', True):
-            total += 1
-            mt = getattr(self.app, 'market_trend', 'NEUTRAL')
-            if _is_b:
-                if mt in ('UP', 'AGGRESSIVE'):
-                    met += 1
-            else:
-                if mt in ('UP', 'AGGRESSIVE', 'NEUTRAL'):
-                    met += 1
-        
         # 1. 시간 지연
         if _s2x('use_s2_delay', 'use_s2_b_delay', True):
             total += 1

@@ -7,6 +7,12 @@
 
 ---
 
+## 0.4.1 (2026-04-25)
+
+- **고정밀 백테(보수적 체결가)**: 1분 경로에서 **매도·EXIT 판가·체결 = 1분 저가**, **매수 체결 = 1분 고가** (`dynamic_backtest.py`, `backtest_engine.py` / `SimpleBacktester` 1분 시뮬). 지표 `simulate_intrabar`는 기존처럼 종가·OHLC 흐름.
+- **시장 지표·시장 레짐 전면 비사용**: `use_market_filter`·MSI/VIX·Type A/B 레짐 phase·관련 UI·`MarketDataService`·레짐 모듈·일부 루트 plot 스크립트 제거. 전략·백테·최적화·리포트·대시보드/상단 UI 정리, `settings.json` 키·`core/signal_engine` 구문 수정 등.
+- **기타**: `analyze_hynix` 시장 데이터 제거, `plot_with_vix`/`plot_kospi_*`(MSI) 루트 스크립트 삭제.
+
 ## 0.4.0 (2026-04-25)
 
 - **동적 유니버스·KODEX200**: KRX/pykrx 의존 제거, `kodex200.csv`·`core/kodex200_universe` 정리. `diagnose_dynamic_universe_selection_by_trading_day`로 일봉·`Valid_B`·스케줄 진단. `prepare_dynamic_universe` 지표·스코어 추출에 `_score_dynamic_universe_daily_ohlcv` 사용.

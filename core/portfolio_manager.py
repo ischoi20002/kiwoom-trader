@@ -1070,12 +1070,10 @@ class PortfolioManager:
         if not hasattr(self, 'app') or not self.app: return {}
         
         info = self.app.monitor_info.get(code, {})
-        m_trend = getattr(self.app, 'market_trend', 'NEUTRAL')
-        
         snapshot = {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "price": price,
-            "market_trend": m_trend,
+            "market_trend": "N/A",
             "vol_power": info.get('vol_power', 100.0),
             "reason": reason,
             "rsi": 0.0, "macd": 0.0, "osc": 0.0, "adx": 0.0,

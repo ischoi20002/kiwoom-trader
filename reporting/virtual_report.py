@@ -158,7 +158,7 @@ def _synthetic_buy_s1_event(pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "qty": q,
         "snapshot": {
             "time": ts,
-            "market_trend": "NEUTRAL",
+            "market_trend": "N/A",
             "vol_power": 100.0,
             "bid_ask_ratio": "-",
             "ma_alignment": "N/A",
@@ -446,12 +446,9 @@ def _build_events_html(pos: Dict[str, Any]) -> str:
 
         sn_html = ""
         if sn:
-            m_trend = sn.get("market_trend", "NEUTRAL")
-            m_color = "#f7768e" if m_trend == "DOWN" else "#9ece6a" if m_trend == "UP" else "#7aa2f7"
             vp_show = _format_vol_power_snip(sn)
             sn_html = f"""
                 <div class="snapshot-card">
-                    <div class="sn-item"><span>시장:</span> <b style="color:{m_color}">{m_trend}</b></div>
                     <div class="sn-item"><span>RSI:</span> <b>{sn.get('rsi', '-')}</b></div>
                     <div class="sn-item"><span>체결강도:</span> <b>{vp_show}</b></div>
                     <div class="sn-item"><span>매도벽(B/A):</span> <b>{sn.get('bid_ask_ratio', '-')}</b></div>

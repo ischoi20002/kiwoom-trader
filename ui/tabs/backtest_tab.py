@@ -48,15 +48,9 @@ class BacktestTab:
             'ma60_max': ('MA60_Max%', 'S1 Type A', 'MA60 이격 상한(%)'),
             'vol_surge': ('A_Vol_Surge', 'S1 Type A', '거래량 급증 배수'),
             'prev_vol_lookback_s1_a': ('PrevVol_S1A', 'S1 Type A', '전일동시간 평균 일수 S1·A'),
-            'type_a_phase1_up_vol_surge_add': ('A_RegUp_Vol', 'S1 Type A', '레짐 UP 거래량 +Δ'),
-            'type_a_phase1_neutral_vol_surge_add': ('A_RegNeu_Vol', 'S1 Type A', '레짐 NEUTRAL 거래량 +Δ'),
-            'type_a_phase1_up_ma60_shrink_pct': ('A_RegUp_M60', 'S1 Type A', '레짐 UP MA60 폭 축소'),
-            'type_a_phase1_neutral_ma60_shrink_pct': ('A_RegNe_M60', 'S1 Type A', '레짐 NEUTRAL MA60 폭 축소'),
             'buy_rsi_max_b': ('B_RSI_High', 'S1 Type B', '돌파(B) RSI 상한선'),
             'vol_surge_b': ('B_Vol_Surge', 'S1 Type B', '돌파 거래량 배수'),
             'prev_vol_lookback_s1_b': ('PrevVol_S1B', 'S1 Type B', '전일동시간 평균 일수 S1·B'),
-            'type_b_phase1_up_vol_surge_add': ('B_RegUp_Vol', 'S1 Type B', '레짐 UP vol +Δ(B)'),
-            'type_b_phase1_neutral_vol_surge_add': ('B_RegNeu_Vol', 'S1 Type B', '레짐 NEUTRAL vol +Δ(B)'),
             's2_ma20_gap': ('S2_MA20', 'S2 Type A', '20일선 지지 갭(%)'),
             's2_ma5_gap': ('S2_MA5', 'S2 Type A', '5일선 갭(%)'),
             's2_rsi_gap': ('S2_RSI_Gap', 'S2 Type A', 'RSI 시그널 갭(%)'),
@@ -77,10 +71,6 @@ class BacktestTab:
             'smart_exit_vp': ('SX_Min_VP', '전술적 수급', 'Smart Exit 체결강도 하한 (%)'),
             'smart_exit_ba_ratio': ('SX_BA_Ratio', '전술적 수급', 'Smart Exit 매도벽 비율 (배, 매도/매수)'),
             'smart_exit_price_threshold': ('SX_Price_Thr', '전술적 수급', 'Smart Exit 가격 하락 임계 (%)'),
-            'msi_down_threshold': ('MSI_Down', '시장 트렌드 필터', 'DOWN 판정 MSI 하한선'),
-            'msi_up_threshold': ('MSI_Up', '시장 트렌드 필터', 'UP 판정 MSI 최소값'),
-            'adx_min_threshold': ('ADX_Min', '시장 트렌드 필터', 'NEUTRAL 판정 ADX 하한선'),
-            'vix_down_threshold': ('VIX_Down', '시장 트렌드 필터', 'DOWN 판정 VIX 상한선'),
             'gap_down_limit_a': ('Gap_A', 'Type A 청산', '갭하락 즉시 손절 (A) (%)'),
             'gap_grace_mins_a': ('Grace_A', 'Type A 청산', '개장 매도 유예 (A) (분)'),
             'atr_period_a': ('ATR_P_A', 'Type A 청산', 'ATR 분석 주기 (A) (봉)'),
@@ -547,15 +537,6 @@ class BacktestTab:
             'sel_b_rsi_min': range_for(s.get('sel_b_rsi_min', 45.0), 5.0),
             'sel_b_rsi_max': range_for(s.get('sel_b_rsi_max', 75.0), 5.0),
             'sel_b_min_trde_val': range_for(s.get('sel_b_min_trde_val', 60.0), 10),
-            # [v4.6] 시장 트렌드 필터 임계값 탐색 범위
-            # msi_down: 역배열 강도 (음수 깊을수록 엄격), step=0.05
-            'msi_down_threshold': range_for(s.get('msi_down_threshold', -0.10), 0.05),
-            # msi_up: 정배열 최소 기준 (0.05~0.20 탐색), step=0.05
-            'msi_up_threshold':   range_for(s.get('msi_up_threshold', 0.10), 0.05),
-            # adx_min: 추세 강도 하한 (10~20 탐색), step=5, int
-            'adx_min_threshold':  [10, 15, 20],
-            # vix_down: 공포지수 임계 (25~35 탐색), step=5, int
-            'vix_down_threshold': [25, 30, 35],
         }
 
     def _refresh_columns_from_settings(self, re_render=True):

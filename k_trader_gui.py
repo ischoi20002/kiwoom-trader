@@ -43,7 +43,6 @@ from ui.styles import NordicStyle
 
 # [v3.8] Core Modules extraction
 from core.portfolio_manager import PortfolioManager
-from core.market_service import MarketDataService
 from core.remote_commander import RemoteCommander
 from core.trading_controller import TradingController, virtual_position_reference_price_for_monitor
 from core.strategy_engine import StrategyEngine
@@ -215,8 +214,6 @@ class KiwoomApp:
         self.config = config
         self.nordic_style = NordicStyle(self.root)
 
-        self.market_trend = "NEUTRAL"
-        self._last_m_trend = None
         self.is_monitoring = False
 
         self.notebook = None
@@ -312,16 +309,12 @@ class KiwoomApp:
             'stage1_amt', 's1_equity_pct', 'stage2_amt', 's2_equity_pct', 'type_balance_a_pct',
             'buy_rsi_min', 'buy_rsi_max_a', 'gc_window', 'rsi_window', 'ma60_min', 'ma60_max',
             'vol_surge', 'prev_vol_lookback_s1_a',
-            'type_a_phase1_up_vol_surge_add', 'type_a_phase1_neutral_vol_surge_add',
-            'type_a_phase1_up_ma60_shrink_pct', 'type_a_phase1_neutral_ma60_shrink_pct',
             'buy_rsi_max_b', 'vol_surge_b', 'prev_vol_lookback_s1_b',
-            'type_b_phase1_up_vol_surge_add', 'type_b_phase1_neutral_vol_surge_add',
             's2_ma20_gap', 's2_ma5_gap', 's2_rsi_gap', 's2_macd_gap', 's2_vol_ratio',
             'prev_vol_lookback_s2_a', 's2_profit_limit', 's2_delay_hours',
             's2_b_ma20_gap', 's2_b_rsi_gap', 's2_b_macd_gap', 's2_b_vol_ratio',
             'prev_vol_lookback_s2_b', 's2_b_profit_limit', 's2_b_delay_hours',
             'smart_buy_vp', 'smart_buy_ba_ratio', 'smart_exit_vp', 'smart_exit_ba_ratio', 'smart_exit_price_threshold',
-            'msi_down_threshold', 'msi_up_threshold', 'adx_min_threshold', 'vix_down_threshold',
             'gap_down_limit_a', 'gap_grace_mins_a', 'atr_period_a',
             's1_a_take_profit', 's1_a_stop_loss', 's1_a_flash_exit_pct',
             'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
@@ -337,12 +330,6 @@ class KiwoomApp:
             # 설정 파일에 저장된 값이 있으면 그것을 사용, 없으면 False 초기화
             saved_val = self.settings.get(f"opt_{key}", False)
             self.opt_params_vars[key] = tk.BooleanVar(value=saved_val)
-        self.market_service = MarketDataService(
-            self.data_manager,
-            log_func=self.log,
-            gui_callback=self._on_market_data_update,
-            settings_provider=lambda: getattr(self, "settings", {}) or {},
-        )
         self.remote_commander = RemoteCommander(
             self,
             self.data_manager,
@@ -404,9 +391,13 @@ class KiwoomApp:
             self.header_frame = ttk.Frame(self.root, padding=(15, 8))
             self.header_frame.pack(side=tk.TOP, fill=tk.X)
             
-            self.lbl_market_indices = ttk.Label(self.header_frame, text="시장 지수: 데이터 로딩 중...", 
-                                              font=("Malgun Gothic", 10, "bold"), foreground=self.colors['primary'])
-            self.lbl_market_indices.pack(side=tk.LEFT)
+            self.lbl_header_title = ttk.Label(
+                self.header_frame,
+                text=f"K-Trader v{APP_VERSION}",
+                font=("Malgun Gothic", 10, "bold"),
+                foreground=self.colors["primary"],
+            )
+            self.lbl_header_title.pack(side=tk.LEFT)
 
             status_frame = ttk.Frame(self.root)
             status_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
@@ -466,17 +457,6 @@ class KiwoomApp:
             self._initial_threads_started = True
             # 인증은 내부에서 백그라운드 워커로 재시도하므로 여기서는 추가 스레드 불필요
             self.get_auth_token()
-
-    def _on_market_data_update(self, indices=None, trend=None, display_text=None):
-        # after(0) 콜백은 기본인자로 값을 고정해 클로저 지연 바인딩으로 라벨이 꼬이지 않게 함
-        if trend is not None and str(trend).strip() != "":
-            tr = str(trend).strip().upper()
-            if self.market_trend != tr:
-                self.market_trend = tr
-                self.root.after(0, lambda t=tr: self._update_market_visuals(t))
-        if display_text and self.lbl_market_indices:
-            dt = str(display_text)
-            self.root.after(0, lambda s=dt: self.lbl_market_indices.config(text=s))
 
     def _on_tab_changed(self, event):
         tab_text = self.notebook.tab(self.notebook.select(), "text")
@@ -692,7 +672,6 @@ class KiwoomApp:
             except Exception:
                 pass
             self.portfolio.load_all()
-            self.market_service.start()
             self.remote_commander.start()
             self.root.after(
                 2000,
@@ -1023,21 +1002,6 @@ class KiwoomApp:
             self._schedule_account_sync_after_fill()
         except Exception as e:
             self.log(f"⚠️ [체결] 처리 실패: {e}")
-
-    def _update_market_visuals(self, trend):
-        c = self.nordic_style.colors
-        theme = {
-            "UP": (c["bg"], c["primary"]),
-            "AGGRESSIVE": (c["bg"], "#A3BE8C"),
-            "NEUTRAL": ("#3B4252", "#E5E9F0"),
-            "DOWN": ("#3B2E2E", "#BF616A"),
-        }
-        bg_col, fg_col = theme.get(str(trend).strip().upper(), (c["bg"], c["primary"]))
-        style = ttk.Style()
-        style.configure("Header.TFrame", background=bg_col)
-        if hasattr(self, 'header_frame'): self.header_frame.config(style="Header.TFrame")
-        if hasattr(self, 'lbl_market_indices'): self.lbl_market_indices.config(background=bg_col, foreground=fg_col)
-        if hasattr(self, 'monitor_tab'): self.monitor_tab._update_visual_theme(trend)
 
     def _render_tree_updates(self) -> None:
         """
