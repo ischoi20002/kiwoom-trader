@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""bars_1m → bars_15m 재샘플 (CLI·배치용, 무거운 의존성 없음)."""
+"""bars_1m → bars_15m 재샘플, bars_1m → bars_1d 일봉 집계 (CLI·배치·하베스팅)."""
 from __future__ import annotations
 
 import sqlite3
@@ -8,6 +8,65 @@ from typing import Optional
 import pandas as pd
 
 from utils.normalization import normalize_code
+
+
+def aggregate_daily_ohlcv_from_1m_dataframe(df_1m: pd.DataFrame) -> pd.DataFrame:
+    """
+    1분봉 DataFrame(datetime, open, high, low, close, volume)을
+    캘린더 일자별 OHLCV로 집계한다. ``save_daily_bars``에 넣을 수 있게
+    ``datetime`` 은 'YYYY-MM-DD' 문자열 열로 둔다.
+    """
+    if df_1m is None or df_1m.empty:
+        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    try:
+        d = df_1m.copy()
+        d["datetime"] = pd.to_datetime(d["datetime"], errors="coerce")
+        d = d.dropna(subset=["datetime"])
+        if d.empty:
+            return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+        for c in ("open", "high", "low", "close", "volume"):
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+        d = d.dropna(subset=["open", "high", "low", "close", "volume"])
+        if d.empty:
+            return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+        d = d.sort_values("datetime")
+        d["d"] = d["datetime"].dt.normalize()
+        daily = (
+            d.groupby("d", as_index=False)
+            .agg(
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last"),
+                volume=("volume", "sum"),
+            )
+        )
+        daily["datetime"] = daily["d"].dt.strftime("%Y-%m-%d")
+        out = daily[["datetime", "open", "high", "low", "close", "volume"]].copy()
+        for c in ("open", "high", "low", "close", "volume"):
+            out[c] = out[c].round(0).astype("int64")
+        return out
+    except (ValueError, TypeError, KeyError):
+        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+
+
+def aggregate_daily_ohlcv_from_1m_db(db_path: str, code: str) -> pd.DataFrame:
+    """
+    SQLite ``bars_1m`` 에서 해당 종목의 전체 1분봉을 읽어 일봉 집계.
+    DB 오류·빈 데이터 시 빈 DataFrame.
+    """
+    code = normalize_code(code)
+    try:
+        with sqlite3.connect(db_path, timeout=120) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            df_1m = pd.read_sql_query(
+                "SELECT datetime, open, high, low, close, volume FROM bars_1m WHERE code = ?",
+                conn,
+                params=[code],
+            )
+    except (sqlite3.Error, OSError):
+        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    return aggregate_daily_ohlcv_from_1m_dataframe(df_1m)
 
 
 def refresh_resampled_data_at_path(db_path: str, code: str) -> Optional[str]:

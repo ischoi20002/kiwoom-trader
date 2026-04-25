@@ -1,15 +1,75 @@
 import os
+import logging
 import pandas as pd
 import FinanceDataReader as fdr
-from pykrx import stock  # [v16.0] 과거 지수 구성 종목 조회용
 from datetime import datetime, timedelta
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 
 class SelectionDbStaleError(Exception):
     """로컬 일봉 DB가 최신 장마감까지 갱신되지 않아 실시간 종목 선정을 중단할 때."""
+
+
+def load_kodex200_universe_codes(
+    logger_callback: Optional[Callable[[str], None]] = None,
+) -> list[str]:
+    """
+    KRX·pykrx 미사용. 프로젝트 루트의 ``kodex200.csv``(및 대체 파일명)에서
+    6자리 종목코드 리스트를 읽는다.
+    """
+    for f_name in ("kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"):
+        p = f_name
+        if not os.path.isfile(p):
+            continue
+        try:
+            df_k = pd.read_csv(p, dtype=str)
+        except (OSError, ValueError, pd.errors.EmptyDataError) as e:
+            try:
+                logging.info("kodex CSV 읽기 생략 %s: %s", f_name, e)
+            except Exception:
+                pass
+            if logger_callback is not None:
+                try:
+                    logger_callback(f"  [Warn] {f_name} 읽기 실패: {e}")
+                except Exception:
+                    pass
+            continue
+        try:
+            if "Code" in df_k.columns:
+                c_col = "Code"
+            elif "종목코드" in df_k.columns:
+                c_col = "종목코드"
+            else:
+                c_col = None
+            if c_col is None:
+                continue
+            tickers: list[str] = []
+            for x in df_k[c_col].tolist():
+                s = str(x).strip().zfill(6)
+                if len(s) == 6 and s.isdigit():
+                    tickers.append(s)
+            if tickers:
+                if logger_callback is not None:
+                    try:
+                        logger_callback(
+                            f"  [Info] KRX 미사용 — 유니버스 {len(tickers)}종목 ({f_name})"
+                        )
+                    except Exception:
+                        pass
+                return tickers
+        except Exception as e:
+            try:
+                logging.warning("kodex CSV 파싱 실패 %s: %s", f_name, e, exc_info=True)
+            except Exception:
+                pass
+            if logger_callback is not None:
+                try:
+                    logger_callback(f"  [Warn] {f_name} 파싱 실패: {e}")
+                except Exception:
+                    pass
+    return []
 
 
 def calculate_rsi(series, period=14):
@@ -339,64 +399,61 @@ def select_monitoring_targets(
                 )
                 raise SelectionDbStaleError(stale_msg)
     
-    # 1. 대상 유니버스 확보 (KOSPI 200)
+    # 1. 대상 유니버스 확보 (KOSPI 200) — KRX·pykrx 미사용, kodex200.csv(및 대체 경로) 고정
     tickers = []
     if target_date:
-        # 과거 특정 시점의 구성 종목 조회 (pykrx)
         dt_str = target_date.strftime("%Y%m%d")
         try:
-            tickers = stock.get_index_portfolio_deposit_file("1028", dt_str)
-            if isinstance(tickers, pd.DataFrame):
-                tickers = tickers.index.tolist() if not tickers.empty else []
-            
-            # 휴장일 등 리스트가 비어있을 경우 이전 영업일 리스트 탐색 (최대 5일)
-            if tickers is None or len(tickers) == 0:
-                for i in range(1, 6):
-                    prev_dt = (target_date - timedelta(days=i)).strftime("%Y%m%d")
-                    tickers = stock.get_index_portfolio_deposit_file("1028", prev_dt)
-                    if isinstance(tickers, pd.DataFrame):
-                        tickers = tickers.index.tolist() if not tickers.empty else []
-                    if tickers and len(tickers) > 0: break
+            tickers = load_kodex200_universe_codes(logger_callback=logger_callback)
         except Exception as e:
-            logger_callback(f"  [Warn] pykrx 오류: {e}")
+            try:
+                logging.warning("과거 선정 유니버스 로드 예외: %s", e, exc_info=True)
+            except Exception:
+                pass
+            logger_callback(f"  [Warn] 유니버스 CSV 로드 오류: {e}")
             tickers = []
-            
-        # pykrx 실패 시 로컬 파일(kodex_200.csv) 또는 FDR 활용
-        if tickers is None or len(tickers) == 0:
-            if os.path.exists("kodex200.csv"):
-                logger_callback("  [Info] Local 'kodex200.csv'에서 유니버스를 로드합니다.")
-                df_csv = pd.read_csv("kodex200.csv", dtype={'종목코드': str, 'Code': str})
-                if '종목코드' in df_csv.columns:
-                    df_csv.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
-                tickers = df_csv['Code'].tolist()
-            else:
-                logger_callback("  [Info] FDR StockListing에서 상위 종목을 추출합니다.")
+        if not tickers:
+            logger_callback("  [Info] FDR StockListing에서 상위 종목을 추출합니다. (KRX 미사용)")
+            try:
+                df_fdr = fdr.StockListing('KOSPI')
+                df_fdr['Code'] = df_fdr['Code'].astype(str)
+                df_fdr = df_fdr[df_fdr['Code'].str.endswith('0')]
+                m_col = 'Marcap' if 'Marcap' in df_fdr.columns else 'MarketCap'
+                if m_col not in df_fdr.columns:
+                    m_col = df_fdr.columns[-1]
+                tickers = (
+                    df_fdr.sort_values(by=m_col, ascending=False).head(200)['Code']
+                    .astype(str).str.zfill(6)
+                    .tolist()
+                )
+            except Exception as e:
                 try:
-                    df_fdr = fdr.StockListing('KOSPI')
-                    df_fdr['Code'] = df_fdr['Code'].astype(str)
-                    df_fdr = df_fdr[df_fdr['Code'].str.endswith('0')]
-                    # Marcap 컬럼명 대소문자 대응
-                    m_col = 'Marcap' if 'Marcap' in df_fdr.columns else 'MarketCap'
-                    if m_col not in df_fdr.columns: m_col = df_fdr.columns[-1] # 최후의 수단
-                    
-                    tickers = df_fdr.sort_values(by=m_col, ascending=False).head(200)['Code'].tolist()
-                except Exception as e:
-                    logger_callback(f"  [Error] FDR fallback 실패: {e}")
-            
-        if tickers is None or len(tickers) == 0:
+                    logging.error("FDR KOSPI 상위 200 fallback 실패: %s", e, exc_info=True)
+                except Exception:
+                    pass
+                logger_callback(f"  [Error] FDR fallback 실패: {e}")
+        if not tickers:
             logger_callback(f"[Error] [{dt_str}] 구성 종목 리스트를 확보하지 못했습니다.")
             return pd.DataFrame()
-            
-        # 종목명 매핑 (pykrx가 깨질 수 있으므로 FDR/로컬 정보 우선 활용)
-        name_map = {}
+        name_map: dict[str, str] = {}
         try:
             df_fdr_names = fdr.StockListing('KOSPI')
-            name_map = dict(zip(df_fdr_names['Code'], df_fdr_names['Name']))
-        except: pass
-        
-        df_top = pd.DataFrame([{'Code': t, 'Name': name_map.get(t, stock.get_market_ticker_name(t))} for t in tickers])
+            name_map = dict(
+                zip(
+                    df_fdr_names['Code'].astype(str).str.zfill(6),
+                    df_fdr_names['Name'],
+                )
+            )
+        except Exception as e:
+            try:
+                logging.info("FDR 종목명 매핑 생략: %s", e)
+            except Exception:
+                pass
+        df_top = pd.DataFrame(
+            [{'Code': t, 'Name': name_map.get(t, t)} for t in tickers]
+        )
     else:
-        # 실시간: pykrx KODEX200 ETF 구성 자동 반영(기본) 또는 local_csv_first 로 수동 CSV 우선
+        # 실시간: ``resolve_kodex200_universe``(기본 csv_only) + 레거시 CSV·FDR 폴백
         try:
             from core.defaults import DEFAULT_SETTINGS
 
@@ -610,6 +667,114 @@ def select_monitoring_targets(
     )
     return df_result
 
+
+def _score_dynamic_universe_daily_ohlcv(
+    df_all: pd.DataFrame,
+    settings: dict,
+    *,
+    with_b_debug: bool = False,
+) -> None:
+    """
+    ``prepare_dynamic_universe`` 와 동일: 일봉 OHLCV → 지표·Valid_A/Valid_B(트랙 선정)까지 in-place.
+    with_b_debug=True 이면 Track B 부분조건 열(Dbg_*)을 붙여 일자별 진단에 쓴다.
+    """
+    # 4. 벡터 지표
+    df_all["close"] = df_all["close"].astype(float)
+    df_all["volume"] = df_all["volume"].astype(float)
+    df_all["trde_val"] = df_all["close"] * df_all["volume"]
+    df_all["MA5"] = df_all.groupby("code")["close"].rolling(5).mean().reset_index(0, drop=True)
+    df_all["MA20"] = df_all.groupby("code")["close"].rolling(20).mean().reset_index(0, drop=True)
+    df_all["MA60"] = df_all.groupby("code")["close"].rolling(60).mean().reset_index(0, drop=True)
+    delta = df_all.groupby("code")["close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    ema_up = gain.groupby(df_all["code"]).ewm(com=13, adjust=False).mean().reset_index(0, drop=True)
+    ema_down = loss.groupby(df_all["code"]).ewm(com=13, adjust=False).mean().reset_index(0, drop=True)
+    df_all["RSI"] = 100 - (100 / (1 + ema_up / (ema_down + 1e-10)))
+    m_f, m_sl, m_sg = (
+        int(settings.get("macd_fast_daily", 12)),
+        int(settings.get("macd_slow_daily", 26)),
+        int(settings.get("macd_sig_daily", 9)),
+    )
+    ema_f = df_all.groupby("code")["close"].ewm(span=m_f, adjust=False).mean().reset_index(0, drop=True)
+    ema_s = df_all.groupby("code")["close"].ewm(span=m_sl, adjust=False).mean().reset_index(0, drop=True)
+    df_all["MACD"] = ema_f - ema_s
+    macd_s = df_all.groupby("code")["MACD"].ewm(span=m_sg, adjust=False).mean().reset_index(0, drop=True)
+    df_all["OSC"] = df_all["MACD"] - macd_s
+
+    min_억 = float(settings.get("min_trde_val", 40.0))
+    conv = float(settings.get("ma_convergence", 3.0)) / 100.0
+    vol_lookback = int(settings.get("vol_lookback", 10))
+    df_all["AvgVal5"] = df_all.groupby("code")["trde_val"].rolling(5).mean().reset_index(0, drop=True)
+    df_all["MA_Diff"] = (df_all["MA5"] - df_all["MA20"]).abs() / df_all["MA20"]
+    df_all["Pos_Diff"] = (df_all["close"] - df_all["MA20"]).abs() / df_all["MA20"]
+    df_all["VolRatio"] = df_all["volume"] / df_all.groupby("code")["volume"].shift(1)
+    df_all["OSC_Prev"] = df_all.groupby("code")["OSC"].shift(1)
+
+    vol_ratio_a = float(settings.get("vol_ratio", 1.5))
+    df_all["VolBurst_A"] = (df_all["VolRatio"] >= vol_ratio_a) & (
+        df_all["close"] > df_all.groupby("code")["close"].shift(1)
+    )
+    df_all["VolBurstActive_A"] = (
+        df_all.groupby("code")["VolBurst_A"].rolling(vol_lookback).max().reset_index(0, drop=True)
+    )
+    vol_ratio_b = float(settings.get("sel_b_vol_ratio", vol_ratio_a))
+    vol_lookback_b = int(settings.get("sel_b_vol_lookback", vol_lookback))
+    df_all["VolBurst_B"] = (df_all["VolRatio"] >= vol_ratio_b) & (
+        df_all["close"] > df_all.groupby("code")["close"].shift(1)
+    )
+    df_all["VolBurstActive_B"] = (
+        df_all.groupby("code")["VolBurst_B"].rolling(vol_lookback_b).max().reset_index(0, drop=True)
+    )
+
+    c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
+    c5 = df_all["OSC"] > 0
+    c_ma60 = df_all["MA60"].notna()
+    use_a = settings.get("use_sel_track_a", True)
+    c2_a = (df_all["MA_Diff"] <= conv) if use_a else pd.Series(False, index=df_all.index)
+    c3_a = (df_all["RSI"] >= float(settings.get("sel_rsi_min", 35.0))) & (
+        df_all["RSI"] <= float(settings.get("sel_rsi_max", 70.0))
+    )
+    c4_a = df_all["VolBurstActive_A"] == 1
+    df_all["Valid_A"] = c1 & c4_a & c5 & c_ma60 & c2_a & c3_a
+    df_all["Score_A"] = (
+        ((1 - (df_all["MA_Diff"] / conv)) * 100).clip(lower=0) * 0.4
+        + (df_all["RSI"] / 70 * 100).clip(upper=100) * 0.3
+        + (df_all["AvgVal5"] / 50000000000 * 100).clip(upper=100) * 0.2
+        + ((1 - (df_all["Pos_Diff"] / 0.03)) * 100).clip(lower=0) * 0.1
+    )
+    df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_A"] += 10.0
+
+    use_b = settings.get("use_sel_track_b", True)
+    c2_b = ((df_all["MA20"] > df_all["MA60"]) & (df_all["close"] > df_all["MA20"])) if use_b else pd.Series(
+        False, index=df_all.index
+    )
+    sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
+    sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))
+    sel_b_min_val = float(settings.get("sel_b_min_trde_val", 60.0)) * 100000000
+    c3_b = (df_all["RSI"] >= sel_b_rsi_min) & (df_all["RSI"] <= sel_b_rsi_max)
+    c1_b = df_all["AvgVal5"] >= sel_b_min_val
+    c4_b = df_all["VolBurstActive_B"] == 1
+    if with_b_debug:
+        df_all["Dbg_B1_avg5_ge_selB"] = c1_b.astype(bool)
+        df_all["Dbg_B2_trend_mas"] = c2_b.astype(bool)
+        df_all["Dbg_B3_rsi_range"] = c3_b.astype(bool)
+        df_all["Dbg_B4_volburst1"] = c4_b.astype(bool)
+        df_all["Dbg_C5_osc_pos"] = c5.astype(bool)
+        df_all["Dbg_C_ma60_ok"] = c_ma60.astype(bool)
+    df_all["Valid_B"] = c1_b & c2_b & c3_b & c4_b & c5 & c_ma60
+    trend_strength = ((df_all["close"] / df_all["MA20"] - 1) * 100).clip(lower=0, upper=10) * 10
+    df_all["Score_B"] = (
+        trend_strength * 0.4
+        + (df_all["RSI"] / 70 * 100).clip(upper=100) * 0.3
+        + (df_all["AvgVal5"] / 50000000000 * 100).clip(upper=100) * 0.2
+        + (df_all["OSC"].clip(lower=0) / (df_all["OSC"].abs().max() + 1e-10) * 100) * 0.1
+    )
+    df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_B"] += 10.0
+    df_all["Valid"] = df_all["Valid_A"] | df_all["Valid_B"]
+    df_all["Score"] = df_all[["Score_A", "Score_B"]].max(axis=1)
+
+
 def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logger_callback):
     """
     [v17.7] True Batching: 전 기간 데이터를 한 번에 조회하고 Pandas 벡터 연산으로 스크리닝 (성능 10x+ 향상)
@@ -634,57 +799,34 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
 
     def get_monthly_universe(dt):
+        """KRX 미사용. ``kodex200.csv`` 등으로 월 키별 캐시(메모리)에 동일 리스트를 넣는다."""
         m_key = dt.strftime("%Y%m")
-        if m_key in universe_cache: return universe_cache[m_key]
-        
-        # [v17.8] 로컬 파일 캐시 확인 (pykrx 네트워크 행 방지)
-        cache_file = os.path.join("backtest_data", f"kospi200_{m_key}.csv")
-        if os.path.exists(cache_file):
-            df_c = pd.read_csv(cache_file, dtype=str)
-            tickers = df_c['Code'].tolist()
-            universe_cache[m_key] = tickers
-            return tickers
-
-        # [v17.9] 주말/공휴일 대응: 해당월의 첫 영업일 5일간 시도
-        # (pykrx는 장이 열리지 않은 날짜에 대해 빈 리스트를 반환할 수 있음)
-        for offset in range(5):
-            check_dt = dt + timedelta(days=offset)
-            if check_dt.month != dt.month: break
-            dt_str = check_dt.strftime("%Y%m%d")
+        if m_key in universe_cache:
+            return universe_cache[m_key]
+        try:
+            tickers = load_kodex200_universe_codes(logger_callback=logger_callback)
+        except Exception as e:
             try:
-                logger_callback(f"    - [API] pykrx 유니버스 조회 ({dt_str})...")
-                tickers = stock.get_index_portfolio_deposit_file("1028", dt_str)
-                if isinstance(tickers, pd.DataFrame): tickers = tickers.index.tolist()
-                if tickers and len(tickers) > 100: 
-                    universe_cache[m_key] = tickers
-                    if not os.path.exists("backtest_data"): os.makedirs("backtest_data")
-                    pd.DataFrame({'Code': tickers}).to_csv(cache_file, index=False)
-                    return tickers
-            except: pass
-        
-        # [v18.0] 최종 Fallback: 루트의 kodex_200.csv 사용 (네트워크 무관)
-        if os.path.exists("kodex200.csv"):
-            logger_callback("    - [Fallback] 'kodex200.csv' 로컬 파일 사용")
-            df_f = pd.read_csv("kodex200.csv", dtype=str)
-            if '종목코드' in df_f.columns:
-                df_f.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
-            tickers = df_f['Code'].tolist() if 'Code' in df_f.columns else df_f.iloc[:, 0].tolist()
+                logging.warning("배치 유니버스 CSV 로드 실패: %s", e, exc_info=True)
+            except Exception:
+                pass
+            tickers = []
+        if tickers:
             universe_cache[m_key] = tickers
-            return tickers
-            
-        return []
-
+        return tickers
 
     # [v17.9] Lean Mode: 6개월 미만 근거리 백테스트는 유니버스 변경이 적으므로 한 번만 조회 (2초 내 완료)
     duration_days = (all_days[-1] - all_days[0]).days if not all_days.empty else 0
-    
+
     if duration_days < 180:
-        logger_callback(f"  [Batch] Lean 모드 활성화 ({duration_days}일): 단일 유니버스 기준 분석")
+        logger_callback(
+            f"  [Batch] Lean 모드 활성화 ({duration_days}일): 단일 유니버스 기준 분석 (KRX 미사용)"
+        )
         union_tickers = set(get_monthly_universe(all_days[0]))
-        if not union_tickers:
-            union_tickers = set(get_monthly_universe(datetime.now()))
     else:
-        logger_callback("  [Batch] 정밀 모드 활성화: 월별 유니버스 구성 분석 중...")
+        logger_callback(
+            "  [Batch] 정밀 모드: 월별 캐시 키 순회 (소스는 kodex200.csv, KRX 미사용)…"
+        )
         last_m = ""
         for d in all_days:
             curr_m = d.strftime("%Y%m")
@@ -694,8 +836,9 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 logger_callback(f"    - {d.strftime('%Y-%m')} 유니버스 체크 완료 (누적 {len(union_tickers)}종목)")
     
     if not union_tickers:
-        # [v16.94] Robust Fallback: Use local kodex200.csv if monthly files are missing
-        logger_callback("  [Warning] 월별 유니버스 파일이 없어 로컬 리스트 활용을 시도합니다.")
+        logger_callback(
+            "  [Warning] kodex200.csv(및 대체 파일명)에서 유니버스를 읽지 못해 추가 시도합니다."
+        )
         for f_name in ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]:
             if os.path.exists(f_name):
                 try:
@@ -737,103 +880,8 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     # [Bugfix] Convert time to datetime to use .dt accessor later
     df_all['time'] = pd.to_datetime(df_all['time'])
 
-    # 4. 벡터 지표 계산 (Vectorized Performance)
     logger_callback(f"  [Batch] {len(df_all)}개 데이터 포인트에 대해 고속 벡터 연산 중...")
-    df_all['close'] = df_all['close'].astype(float)
-    df_all['volume'] = df_all['volume'].astype(float)
-    df_all['trde_val'] = df_all['close'] * df_all['volume']
-    
-    # [v17.9] Groupby.transform(lambda)는 매우 느림 -> Vectorized Rolling으로 전격 교체 
-    df_all['MA5'] = df_all.groupby('code')['close'].rolling(5).mean().reset_index(0, drop=True)
-    df_all['MA20'] = df_all.groupby('code')['close'].rolling(20).mean().reset_index(0, drop=True)
-    df_all['MA60'] = df_all.groupby('code')['close'].rolling(60).mean().reset_index(0, drop=True)
-    
-    # RSI (Vectorized Grouped) - High Speed v30.10
-    delta = df_all.groupby('code')['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    
-    # Use vectorized .ewm on groupby directly (100x faster than transform(lambda))
-    ema_up = gain.groupby(df_all['code']).ewm(com=13, adjust=False).mean().reset_index(0, drop=True)
-    ema_down = loss.groupby(df_all['code']).ewm(com=13, adjust=False).mean().reset_index(0, drop=True)
-    df_all['RSI'] = 100 - (100 / (1 + ema_up / (ema_down + 1e-10)))
-    
-    m_f, m_sl, m_sg = int(settings.get('macd_fast_daily', 12)), int(settings.get('macd_slow_daily', 26)), int(settings.get('macd_sig_daily', 9))
-    ema_f = df_all.groupby('code')['close'].ewm(span=m_f, adjust=False).mean().reset_index(0, drop=True)
-    ema_s = df_all.groupby('code')['close'].ewm(span=m_sl, adjust=False).mean().reset_index(0, drop=True)
-    df_all['MACD'] = ema_f - ema_s
-    macd_s = df_all.groupby('code')['MACD'].ewm(span=m_sg, adjust=False).mean().reset_index(0, drop=True)
-    df_all['OSC'] = df_all['MACD'] - macd_s
-
-    # 5. 필터링 및 점수화
-    min_억 = float(settings.get('min_trde_val', 40.0))
-    conv = float(settings.get('ma_convergence', 3.0)) / 100.0
-    vol_lookback = int(settings.get('vol_lookback', 10))
-    
-    df_all['AvgVal5'] = df_all.groupby('code')['trde_val'].rolling(5).mean().reset_index(0, drop=True)
-    df_all['MA_Diff'] = (df_all['MA5'] - df_all['MA20']).abs() / df_all['MA20']
-    df_all['Pos_Diff'] = (df_all['close'] - df_all['MA20']).abs() / df_all['MA20']
-    df_all['VolRatio'] = df_all['volume'] / df_all.groupby('code')['volume'].shift(1)
-    df_all['OSC_Prev'] = df_all.groupby('code')['OSC'].shift(1)
-
-    # [Phase 2] Track A 거래량 분출
-    vol_ratio_a = float(settings.get('vol_ratio', 1.5))
-    df_all['VolBurst_A'] = (df_all['VolRatio'] >= vol_ratio_a) & (df_all['close'] > df_all.groupby('code')['close'].shift(1))
-    df_all['VolBurstActive_A'] = df_all.groupby('code')['VolBurst_A'].rolling(vol_lookback).max().reset_index(0, drop=True)
-
-    # [Phase 2] Track B 전용 거래량 분출 (별도 배율/기간)
-    vol_ratio_b = float(settings.get('sel_b_vol_ratio', vol_ratio_a))
-    vol_lookback_b = int(settings.get('sel_b_vol_lookback', vol_lookback))
-    df_all['VolBurst_B'] = (df_all['VolRatio'] >= vol_ratio_b) & (df_all['close'] > df_all.groupby('code')['close'].shift(1))
-    df_all['VolBurstActive_B'] = df_all.groupby('code')['VolBurst_B'].rolling(vol_lookback_b).max().reset_index(0, drop=True)
-
-    # 공통 필터
-    c1 = df_all['AvgVal5'] >= (min_억 * 100000000)
-    c5 = (df_all['OSC'] > 0)
-    c_ma60 = df_all['MA60'].notna()
-
-    # --- Track A: 눌림목 (MA 수렴 + 낮은 RSI) ---
-    use_a = settings.get('use_sel_track_a', True)
-    c2_a = (df_all['MA_Diff'] <= conv) if use_a else pd.Series(False, index=df_all.index)
-    c3_a = (df_all['RSI'] >= float(settings.get('sel_rsi_min', 35.0))) & \
-           (df_all['RSI'] <= float(settings.get('sel_rsi_max', 70.0)))
-    c4_a = df_all['VolBurstActive_A'] == 1
-    df_all['Valid_A'] = c1 & c4_a & c5 & c_ma60 & c2_a & c3_a
-
-    # Track A 점수 (수렴도 중심)
-    df_all['Score_A'] = (
-        ((1 - (df_all['MA_Diff'] / conv)) * 100).clip(lower=0) * 0.4 +
-        (df_all['RSI'] / 70 * 100).clip(upper=100) * 0.3 +
-        (df_all['AvgVal5'] / 50000000000 * 100).clip(upper=100) * 0.2 +
-        ((1 - (df_all['Pos_Diff'] / 0.03)) * 100).clip(lower=0) * 0.1
-    )
-    df_all.loc[df_all['OSC'] > df_all['OSC_Prev'], 'Score_A'] += 10.0
-
-    # --- Track B: 추세돌파 (정배열 확산 + 높은 RSI) ---
-    use_b = settings.get('use_sel_track_b', True)
-    c2_b = ((df_all['MA20'] > df_all['MA60']) & (df_all['close'] > df_all['MA20'])) if use_b else pd.Series(False, index=df_all.index)
-    # Track B는 별도의 RSI 범위와 거래대금 기준 적용
-    sel_b_rsi_min = float(settings.get('sel_b_rsi_min', 45.0))
-    sel_b_rsi_max = float(settings.get('sel_b_rsi_max', 75.0))
-    sel_b_min_val = float(settings.get('sel_b_min_trde_val', 60.0)) * 100000000
-    c3_b = (df_all['RSI'] >= sel_b_rsi_min) & (df_all['RSI'] <= sel_b_rsi_max)
-    c1_b = df_all['AvgVal5'] >= sel_b_min_val
-    c4_b = df_all['VolBurstActive_B'] == 1
-    df_all['Valid_B'] = c1_b & c2_b & c3_b & c4_b & c5 & c_ma60
-
-    # Track B 점수 (추세 강도 + 모멘텀 중심)
-    trend_strength = ((df_all['close'] / df_all['MA20'] - 1) * 100).clip(lower=0, upper=10) * 10
-    df_all['Score_B'] = (
-        trend_strength * 0.4 +
-        (df_all['RSI'] / 70 * 100).clip(upper=100) * 0.3 +
-        (df_all['AvgVal5'] / 50000000000 * 100).clip(upper=100) * 0.2 +
-        (df_all['OSC'].clip(lower=0) / (df_all['OSC'].abs().max() + 1e-10) * 100) * 0.1
-    )
-    df_all.loc[df_all['OSC'] > df_all['OSC_Prev'], 'Score_B'] += 10.0
-
-    # 기존 호환성: Valid와 Score 유지 (합집합)
-    df_all['Valid'] = df_all['Valid_A'] | df_all['Valid_B']
-    df_all['Score'] = df_all[['Score_A', 'Score_B']].max(axis=1)
+    _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
 
     # 6. 스케줄 생성 (Track A / Track B 분리)
     logger_callback("  [Batch] 날짜별 상위 종목 추출 중 (Track A/B 분리)...")
@@ -876,3 +924,246 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     else:
         logger_callback(f"[Batch] 완료. Track A: {a_days}일, Track B: {b_days}일, 합산: {len(schedule)}일")
     return schedule, schedule_a, schedule_b
+
+
+def diagnose_dynamic_universe_selection_by_trading_day(
+    settings: dict,
+    start_date: Union[str, datetime],
+    end_date: Union[str, datetime],
+    data_manager: Any,
+) -> pd.DataFrame:
+    """
+    `prepare_dynamic_universe`와 동일한 1d 로드·스코어에 대해,
+    **영업일(``get_trading_days``)별**로 (1) KODEX 유니버스 행 수, (2) ``Valid_B``/``Valid_A`` 건수,
+    (3) Track B 부분조건(Dbg_*)을 만족한 행 수(일당 합)를 집계한다.
+    4/10 이후 `schedule`에 없을 때, **'일봉 행 없음'** vs **'Valid_B 전부 False'** 를 구분하는 데 쓴다.
+    """
+    start_s = pd.to_datetime(start_date).strftime("%Y-%m-%d")
+    end_s = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+    trading_days: List[str] = list(data_manager.get_trading_days(start_s, end_s) or [])
+
+    def _log(_: str) -> None:
+        pass
+
+    all_days = pd.date_range(start=start_s, end=end_s, freq="B")
+    duration_days = (all_days[-1] - all_days[0]).days if not all_days.empty else 0
+    union_cache: dict[str, list[str]] = {}
+    union_tickers: set[str] = set()
+
+    def get_monthly_universe(dt: Any) -> list[str]:
+        m_key = pd.Timestamp(dt).strftime("%Y%m")
+        if m_key in union_cache:
+            return union_cache[m_key]
+        try:
+            tickers = load_kodex200_universe_codes(logger_callback=None)
+        except Exception:
+            tickers = []
+        if tickers:
+            union_cache[m_key] = tickers
+        return tickers
+
+    try:
+        if duration_days < 180:
+            union_tickers = set(get_monthly_universe(all_days[0]))
+        else:
+            last_m = ""
+            for d in all_days:
+                curr_m = d.strftime("%Y%m")
+                if curr_m != last_m or not union_tickers:
+                    union_tickers.update(get_monthly_universe(d))
+                    last_m = curr_m
+    except Exception as e:
+        try:
+            logging.warning("diagnose union: %s", e, exc_info=True)
+        except Exception:
+            pass
+        union_tickers = set()
+
+    if not union_tickers:
+        for f_name in ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]:
+            if not os.path.isfile(f_name):
+                continue
+            try:
+                df_k = pd.read_csv(f_name, dtype=str)
+                c_col = "Code" if "Code" in df_k.columns else (
+                    "종목코드" if "종목코드" in df_k.columns else None
+                )
+                if c_col:
+                    union_tickers = set(df_k[c_col].apply(lambda x: str(x).zfill(6)).tolist())
+                    break
+            except Exception:
+                pass
+
+    if not union_tickers:
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "kodex_rows_해당일",
+                "Valid_A_합",
+                "Valid_B_합",
+                "B1_avg5",
+                "B2_정배열",
+                "B3_rsi",
+                "B4_분출B",
+                "C5_osc",
+                "C_ma60",
+                "nonempty_schedule",
+                "비고",
+            ]
+        )
+
+    all_codes = list(union_tickers)
+    fetch_start_dt = pd.to_datetime(start_s) - timedelta(days=120)
+    fetch_start = fetch_start_dt.strftime("%Y-%m-%d")
+    ph = ",".join(["?"] * len(all_codes))
+    q = f"""
+        SELECT code, datetime as time, open, high, low, close, volume
+        FROM bars_1d
+        WHERE code IN ({ph}) AND datetime BETWEEN ? AND ?
+        ORDER BY code, datetime
+    """
+    try:
+        with data_manager._get_connection() as conn:
+            df_all = pd.read_sql_query(q, conn, params=all_codes + [fetch_start, end_s])
+    except Exception as e:
+        try:
+            logging.error("diagnose: bars_1d 조회 실패: %s", e, exc_info=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    if df_all is None or df_all.empty:
+        rows_err = []
+        for d in trading_days:
+            rows_err.append(
+                {
+                    "date": d,
+                    "kodex_rows_해당일": 0,
+                    "Valid_A_합": 0,
+                    "Valid_B_합": 0,
+                    "B1_avg5": 0,
+                    "B2_정배열": 0,
+                    "B3_rsi": 0,
+                    "B4_분출B": 0,
+                    "C5_osc": 0,
+                    "C_ma60": 0,
+                    "nonempty_schedule": 0,
+                    "비고": "bars_1d 비어 있음(유니버스 구간)",
+                }
+            )
+        return pd.DataFrame(rows_err)
+
+    try:
+        df_all["time"] = pd.to_datetime(df_all["time"])
+        if "code" in df_all.columns:
+            df_all["code"] = df_all["code"].astype(str).str.zfill(6)
+    except Exception:
+        pass
+
+    _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=True)
+    df_sim = df_all[df_all["time"] >= pd.to_datetime(start_s)].copy()
+
+    dbg_cols = [
+        "Dbg_B1_avg5_ge_selB",
+        "Dbg_B2_trend_mas",
+        "Dbg_B3_rsi_range",
+        "Dbg_B4_volburst1",
+        "Dbg_C5_osc_pos",
+        "Dbg_C_ma60_ok",
+    ]
+    for c in dbg_cols:
+        if c not in df_sim.columns:
+            df_sim[c] = False
+
+    # ``prepare`` 와 동일: 일자별 top(max_slots) 스케줄 키 존재 여부(중복 `prepare` 호출 없음)
+    schedule: dict[str, list[str]] = {}
+    try:
+        max_s_a = int(settings.get("max_slots_a", 20))
+        max_s_b = int(settings.get("max_slots_b", 10))
+        trading_days_list2 = (
+            df_sim["time"].dt.strftime("%Y-%m-%d").drop_duplicates().sort_values().tolist()
+        )
+        for d_str in trading_days_list2:
+            try:
+                universe2 = all_codes if duration_days < 180 else get_monthly_universe(
+                    pd.to_datetime(d_str)
+                )
+            except Exception:
+                universe2 = all_codes
+            dmask = (df_sim["time"] == pd.to_datetime(d_str)) & (
+                df_sim["code"].astype(str).str.zfill(6).isin(
+                    {str(x).zfill(6) for x in universe2}
+                )
+            )
+            sa = (
+                df_sim.loc[dmask & df_sim["Valid_A"]]
+                .sort_values(by="Score_A", ascending=False)
+                .head(max_s_a)["code"]
+                .tolist()
+            )
+            sb = (
+                df_sim.loc[dmask & df_sim["Valid_B"]]
+                .sort_values(by="Score_B", ascending=False)
+                .head(max_s_b)["code"]
+                .tolist()
+            )
+            comb = list(dict.fromkeys([str(x) for x in (sa or [])] + [str(x) for x in (sb or [])]))
+            if comb:
+                schedule[d_str] = comb
+    except Exception as e:
+        try:
+            logging.warning("diagnose schedule build: %s", e, exc_info=True)
+        except Exception:
+            pass
+        schedule = {}
+
+    out_rows: list[dict[str, Any]] = []
+    for d in trading_days:
+        try:
+            sub = df_sim[df_sim["time"].dt.strftime("%Y-%m-%d") == d]
+        except Exception:
+            sub = pd.DataFrame()
+        n = int(len(sub))
+        try:
+            n_va = int(sub["Valid_A"].sum()) if n and "Valid_A" in sub.columns else 0
+        except Exception:
+            n_va = 0
+        try:
+            n_vb = int(sub["Valid_B"].sum()) if n and "Valid_B" in sub.columns else 0
+        except Exception:
+            n_vb = 0
+        bparts = {c: 0 for c in dbg_cols}
+        if n > 0:
+            for c in dbg_cols:
+                try:
+                    bparts[c] = int(sub[c].astype(bool).sum())
+                except Exception:
+                    bparts[c] = 0
+        in_sched = 1 if bool(schedule.get(d)) else 0
+        note = ""
+        if n == 0:
+            note = "해당 영업일·KODEX·bars_1d에 (code,일) 행 없음"
+        elif n_vb == 0 and n > 0:
+            note = "일봉은 있으나 Valid_B=0(부분조건 열 참고)"
+        else:
+            note = "Valid_B>0 (스케줄 상한은 max_slots_b 등 별도)"
+        rec: dict[str, Any] = {
+            "date": d,
+            "kodex_rows_해당일": n,
+            "Valid_A_합": n_va,
+            "Valid_B_합": n_vb,
+            "B1_avg5": bparts[dbg_cols[0]],
+            "B2_정배열": bparts[dbg_cols[1]],
+            "B3_rsi": bparts[dbg_cols[2]],
+            "B4_분출B": bparts[dbg_cols[3]],
+            "C5_osc": bparts[dbg_cols[4]],
+            "C_ma60": bparts[dbg_cols[5]],
+            "nonempty_schedule": in_sched,
+            "비고": note,
+        }
+        out_rows.append(rec)
+
+    try:
+        return pd.DataFrame(out_rows)
+    except Exception:
+        return pd.DataFrame()

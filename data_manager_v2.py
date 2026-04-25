@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.normalization import normalize_code
-from utils.bar_resample import refresh_resampled_data_at_path
+from utils.bar_resample import (
+    refresh_resampled_data_at_path,
+    aggregate_daily_ohlcv_from_1m_db,
+)
 from utils.server_mode_paths import (
     migrate_legacy_trading_state_db_files,
     state_db_path,
@@ -599,6 +602,14 @@ class DataManagerV2:
         if all_bars:
             log(f"  [Success] {code} {len(all_bars)}개 봉 업데이트 완료")
             self.refresh_resampled_data(code)
+            try:
+                self.rebuild_daily_bars_from_1m(code)
+            except Exception as e:
+                try:
+                    import logging
+                    logging.warning("update_historical_data: rebuild_daily_bars_from_1m %s: %s", code, e, exc_info=True)
+                except Exception:
+                    pass
         else:
             if stop: log(f"  [Info] {code} 이미 모든 구간이 동기화되어 있습니다.")
             else: log(f"  [Info] {code} API 서버에서 반환된 데이터가 없습니다.")
@@ -643,6 +654,37 @@ class DataManagerV2:
                 print(f"[DataManagerV2] refresh_resampled_data {code}: {err}")
             except Exception:
                 pass
+
+    def rebuild_daily_bars_from_1m(self, code: str) -> bool:
+        """
+        bars_1m 전 구간을 일(캘린더) 단위로 집계해 ``bars_1d``에 저장.
+        prepare_dynamic_universe / 선정이 참조하는 일봉 테이블을 분봉 DB와 맞춘다.
+        """
+        try:
+            ncode = normalize_code(code)
+        except Exception:
+            return False
+        try:
+            daily = aggregate_daily_ohlcv_from_1m_db(self.db_path, ncode)
+        except Exception as e:
+            try:
+                import logging
+                logging.warning("rebuild_daily_bars_from_1m 조회/집계 실패 %s: %s", ncode, e, exc_info=True)
+            except Exception:
+                pass
+            return False
+        if daily is None or daily.empty:
+            return False
+        try:
+            self.save_daily_bars(ncode, daily)
+            return True
+        except Exception as e:
+            try:
+                import logging
+                logging.warning("rebuild_daily_bars_from_1m 저장 실패 %s: %s", ncode, e, exc_info=True)
+            except Exception:
+                pass
+            return False
 
 
     def save_active_position(self, code, name, avg_price, qty, stage, invested, entry_time, reason):

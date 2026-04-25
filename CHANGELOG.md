@@ -7,6 +7,12 @@
 
 ---
 
+## 0.4.0 (2026-04-25)
+
+- **동적 유니버스·KODEX200**: KRX/pykrx 의존 제거, `kodex200.csv`·`core/kodex200_universe` 정리. `diagnose_dynamic_universe_selection_by_trading_day`로 일봉·`Valid_B`·스케줄 진단. `prepare_dynamic_universe` 지표·스코어 추출에 `_score_dynamic_universe_daily_ohlcv` 사용.
+- **하베스팅 → 일봉**: `bars_1m`을 일(캘린더) 단위로 집계해 `bars_1d`에 반영(`utils/bar_resample`, `DataManagerV2.rebuild_daily_bars_from_1m`, `harvest_service` 종료 시 일괄 보강). `update_historical_data`에도 동일.
+- **리포트·기본값**: `reporting/trade_report` 종목 누적 수익과 요약·수수료 기준 맞춤, `core/defaults`·선정·전략 관련 주석 정리.
+
 ## 0.3.64 (2026-04-19)
 
 - **일일 결산 요약**: 보유 시세를 포지션 탭과 동일하게 해석(`VirtualTab._resolve_active_holdings_prices` 재사용·폴백). **금일 실현**은 청산일(`exit_date` / `exit_datetime`) 기준. **금일 손익**은 전일 HTML이 아니라 **`eod_equity_snapshots_*.json`** 에 저장된 직전 영업일 EOD 총자산 대비(`reporting/daily_settlement_report.py`, `utils/eod_equity_snapshots.py`).

@@ -396,11 +396,12 @@ def resolve_kodex200_universe(
         return _fallback_fdr_kospi_top(n, log)
 
     try:
+        # KRX·data.krx 비인증 사용 불가 정책: 기본은 로컬 ``kodex200.csv`` 전용
         priority = str(
-            settings.get("kodex200_universe_priority", "etf_api_first") or ""
+            settings.get("kodex200_universe_priority", "csv_only") or ""
         ).strip().lower()
     except Exception:
-        priority = "etf_api_first"
+        priority = "csv_only"
 
     if priority in ("csv_only", "file_only", "local_csv_only", "kodex200_csv_only"):
         try:

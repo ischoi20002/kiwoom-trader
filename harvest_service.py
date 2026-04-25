@@ -245,6 +245,15 @@ class HarvestService:
             self.log(
                 f"[OK] {code} 처리 완료: 신규 1분봉 {total_fetched}개(bars_1m) + 15분봉 테이블 리빌드(bars_15m)"
             )
+            # 1분봉 → 일봉(bars_1d) 집계: 동적 백테·DB 일봉 선정 경로용
+            try:
+                if self.db.rebuild_daily_bars_from_1m(code):
+                    self.log(f"   - {code}: bars_1d(일봉) 1m 집계 반영 완료")
+            except Exception as e:
+                try:
+                    self.log(f"   ⚠️ {code}: bars_1d 집계 실패(무시하고 계속): {e}")
+                except Exception:
+                    pass
         else:
             # [v16.9.1] 개선된 원인별 로그 세분화 (지수/최신/미수집)
             is_idx = (len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11'])
@@ -444,6 +453,24 @@ class HarvestService:
             
             # 종목 간 대기 (서버 부하 분산)
             time.sleep(0.5)
+
+        # 1m 이 이미 있으나 당 루프에서 스킵된 종목 등, bars_1d(일봉) 누락을 막기 위한 일괄 집계
+        self.log("📅 [1m→1d] 주식 유니버스 bars_1d(일봉) 1분봉 집계 일괄 보강…")
+        n_1d_ok = 0
+        for j, code in enumerate(all_codes):
+            if not self.running:
+                break
+            if code in indices:
+                continue
+            try:
+                if self.db.rebuild_daily_bars_from_1m(code):
+                    n_1d_ok += 1
+            except Exception as e:
+                if j < 5:
+                    self.log(f"   ⚠️ [1m→1d] {code}: {e}")
+        self.log(
+            f"   [1m→1d] 집계 반영 종목: {n_1d_ok} (1m 없음·집계 스킵은 정상)"
+        )
 
         # 대량 적재 후 플래너 통계 갱신 (조회 지연 완화에 유리, 락은 짧음)
         self.log("📈 DB ANALYZE 실행 중… (쿼리 플래너 통계 갱신)")

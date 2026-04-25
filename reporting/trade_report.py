@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import logging
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -2085,6 +2086,9 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
 
         group_rows = []
         stock_realized_profit = 0
+        # summary 카드(total_profit) · 분석 통계(temp_inv, 1820행)와 동일: 매수 체인의 (체결액+매수수수료) 누적 후,
+        # 청산(SELL/HOLD) 시 (매도액-매도수수료)에서 빼서 순실현(매수·매도 수수료 전부 반영)
+        round_trip_cost: float = 0.0
         price_df = loader.get_data(code_str, (group['Date'].min() - timedelta(days=5)).strftime('%Y-%m-%d'), 
                                  (group['Date'].max() + timedelta(days=5)).strftime('%Y-%m-%d'), interval=interval)
         
@@ -2125,7 +2129,15 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
             
             action_raw = str(r['Action'])
             if "BUY" in action_raw:
-                pass # Default values OK
+                try:
+                    f_b = float(fee) if not pd.isna(fee) else 0.0
+                    am = float(amt) if not pd.isna(amt) else 0.0
+                    round_trip_cost += am + f_b
+                except (TypeError, ValueError) as e:
+                    try:
+                        logging.warning("종목표 매수 누적액 산정 실패(%s %s): %s", code_str, action_raw, e)
+                    except Exception:
+                        pass
             elif action_raw == 'REJECTED_SIG':
                 action_cls = "action-rejected"
                 ret_str = '<span style="color:var(--dim)">Filtered</span>'
@@ -2135,12 +2147,24 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 cum_profit_str = "-"
             else:
                 ret_val = float(r.get('Return', 0)) if not pd.isna(r.get('Return', 0)) else 0
-                # [v8.0] 실제 매매인 경우에만 누적 수익금 계산
+                # [v8.0] + [v39.1] 청산 행: Return·평단 역산 대신, 요약·스테이지 손익(1823행)과 동일한 순실현
                 if action_raw in ['SELL', 'HOLD', 'PARTIAL_SELL']:
-                    avg_p_rev = r['Price'] / (1 + ret_val/100) if (1 + ret_val/100) != 0 else r['Price']
-                    p_inc = (r['Price'] - avg_p_rev) * r['Qty'] - fee
+                    try:
+                        f_s = float(fee) if not pd.isna(fee) else 0.0
+                        am = float(amt) if not pd.isna(amt) else 0.0
+                        p_inc = (am - f_s) - round_trip_cost
+                    except (TypeError, ValueError) as e:
+                        try:
+                            logging.warning("종목표 청산 순익 산정 실패(%s %s): %s", code_str, action_raw, e)
+                        except Exception:
+                            pass
+                        p_inc = 0.0
                     if not pd.isna(p_inc):
-                        stock_realized_profit += p_inc
+                        stock_realized_profit = float(stock_realized_profit) + p_inc
+                    try:
+                        round_trip_cost = 0.0
+                    except Exception:
+                        pass
                 
                 action_cls = "action-sell"
                 if r['Action'] in ["SELL", "HOLD", "PARTIAL_SELL"]:
@@ -2151,7 +2175,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                         ret_str = f'<span class="{r_cls}">{ret_val:+.2f}% (Held)</span>'
                 
                 p_row_cls = "profit" if stock_realized_profit >= 0 else "loss"
-                p_val_display = int(stock_realized_profit) if not pd.isna(stock_realized_profit) else 0
+                p_val_display = _s_int(stock_realized_profit)
                 cum_profit_str = f'<span class="{p_row_cls}">{p_val_display:+,}</span>'
             
             candle_svg = "-"
