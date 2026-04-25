@@ -7,6 +7,10 @@
 
 ---
 
+## 0.4.4 (2026-04-26)
+
+- **실시간 감시·보유 트리**: 감시 선정 종목이 관심목록에도 있을 때 「관심목록 전용 숨김」 로직이 전체 관심목록 기준으로 동작해 보유·감시 트리에서 빠지거나 틱 갱신이 막히던 문제 수정. **관심목록만**(감시 미선정)에 한해 숨김·스킵하도록 `wl_only` 집합 사용, `signal_engine` 트리 큐잉도 동일 기준 (`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).
+
 ## 0.4.3 (2026-04-26)
 
 - **감시·보유 전략유형(AB 선정)**: 선정 `sel_track` 이 AB인 종목이 실제 S1 매수(TYPE_A/B)로 진입한 뒤에도 「전략 A+B」로 남던 문제 수정. `load_all` 시 `sig_type` 복원, `infer_sig_type_for_ui`·주문 이력(`get_latest_buy_reason_with_sig_type`) 보강, 매수 직후 `monitor_info` 의 `sel_track` 을 A/B 로 좁힘 (`core/portfolio_manager.py`, `data_manager_v2.py`, `ui/tabs/monitor_tab.py`, `core/signal_engine.py`, `core/trading_controller.py`).

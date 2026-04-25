@@ -631,8 +631,9 @@ class SignalEngine:
                     ref_avg=float(_wl_ap),
                 )
 
-            # 8. 트리뷰 업데이트 큐잉 (관심목록에 등록된 종목은 감시 화면에 표시하지 않음, 감시목록과 별개)
-            if not is_in_watchlist:
+            # 8. 트리뷰 업데이트 큐잉 — 관심목록 **전용**(감시 미선정)만 제외.
+            # 감시 선정 종목이 관심목록에도 있으면 is_wl_only=False 이므로 보유·감시 트리에 정상 반영된다.
+            if not is_wl_only:
                 try:
                     np_f = float(now_price)
                 except (TypeError, ValueError):

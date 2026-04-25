@@ -1609,6 +1609,26 @@ class MonitorTab:
         except Exception:
             return set()
 
+    def _watchlist_only_codes_set(self) -> set:
+        """
+        관심목록에만 있고 감시 선정(monitor_codes)에는 없는 코드(6자리).
+        감시 선정 종목이 관심목록에도 있으면 여기에 포함되지 않으므로 상·하단 트리에 정상 표시된다.
+        """
+        try:
+            wl = self._watchlist_codes_set()
+            mc = self._monitor_target_codes_set()
+            out: Set[str] = set()
+            for c in wl:
+                try:
+                    nk = str(c).split("_")[0].zfill(6)
+                except Exception:
+                    continue
+                if nk not in mc:
+                    out.add(nk)
+            return out
+        except Exception:
+            return set()
+
     def _monitor_ratio_direction(self, ratio_val: object) -> str:
         """등락률 표시값 → up / down / stable (줄무늬 행 태그용)."""
         try:
@@ -1744,7 +1764,7 @@ class MonitorTab:
             self._last_monitor_tree_reconcile_ts = now
 
             mi = monitor_info or getattr(self.app, "monitor_info", None) or {}
-            wl = self._watchlist_codes_set()
+            wl_only = self._watchlist_only_codes_set()
             try:
                 vp = (
                     virtual_positions
@@ -1757,19 +1777,19 @@ class MonitorTab:
             expected: set = set()
             for code in mi.keys():
                 nk = str(code).split("_")[0].zfill(6)
-                if nk in wl:
+                if nk in wl_only:
                     continue
                 expected.add(nk)
 
             mc_targets = self._monitor_target_codes_set()
 
-            # 관심목록 전용 숨김: 양쪽 트리에서 제거
+            # 관심목록 전용(감시 미선정) 숨김: 양쪽 트리에서 제거
             for tree in (self.tree_monitor, self.tree_active_monitor):
                 if not tree:
                     continue
                 for iid in list(tree.get_children()):
                     z = str(iid).split("_")[0].zfill(6)
-                    if z in wl and tree.exists(iid):
+                    if z in wl_only and tree.exists(iid):
                         tree.delete(iid)
 
             # 누락 행 복구·보유/감시 트리 오배치 보정 (monitor_info 기준, 고아 강제 삭제는 하지 않음)
@@ -1820,7 +1840,7 @@ class MonitorTab:
             if self.tree_monitor:
                 for iid in list(self.tree_monitor.get_children()):
                     z = str(iid).split("_")[0].zfill(6)
-                    if z in wl or z in mc_targets:
+                    if z in mc_targets or self._virtual_position_is_active(z, vp):
                         continue
                     try:
                         self.tree_monitor.delete(iid)
@@ -1868,10 +1888,10 @@ class MonitorTab:
             if mi is None:
                 mi = getattr(self.app, "monitor_info", None) or {}
             vp = virtual_positions or {}
-            wl = self._watchlist_codes_set()
+            wl_only = self._watchlist_only_codes_set()
             for iid in list(self.tree_active_monitor.get_children()):
                 nk = str(iid).split("_")[0].zfill(6)
-                if nk in wl:
+                if nk in wl_only:
                     continue
                 if self._virtual_position_is_active(iid, vp):
                     continue
@@ -1921,14 +1941,14 @@ class MonitorTab:
             if updates:
                 items = list(updates.items())
                 updates.clear()
-                wl = self._watchlist_codes_set()
+                wl_only = self._watchlist_only_codes_set()
                 mc_targets = self._monitor_target_codes_set()
 
                 for iid_raw, (values, tag, _) in items:
                     # pending 키·monitor_info 키가 3490/003490로 섞여도 트리 iid는 항상 6자리로 통일
                     iid = str(iid_raw).split("_")[0].zfill(6)
                     cid = iid
-                    if cid in wl:
+                    if cid in wl_only:
                         for tree in (self.tree_monitor, self.tree_active_monitor):
                             if tree and tree.exists(iid):
                                 tree.delete(iid)
@@ -2022,7 +2042,7 @@ class MonitorTab:
         
         # [v4.5.7] 가점(Score) 기준 내림차순 정렬하여 초기 삽입
         sorted_items = sorted(monitor_info.items(), key=lambda x: x[1].get('score', 0), reverse=True)
-        wl = self._watchlist_codes_set()
+        wl_only = self._watchlist_only_codes_set()
         mc_tgt = self._monitor_target_codes_set()
         try:
             vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
@@ -2033,7 +2053,7 @@ class MonitorTab:
         idx_watch = 0
         for code, info in sorted_items:
             nk = str(code).split("_")[0].zfill(6)
-            if nk in wl:
+            if nk in wl_only:
                 continue
             ratio_disp = info.get("ratio", "0")
             direction = self._monitor_ratio_direction(ratio_disp)
@@ -2063,9 +2083,9 @@ class MonitorTab:
     def reset_warmup_row_states(self, codes: list) -> None:
         """감시 시작 워밍업 직전: 지정 종목 행을 '대기' 표시로 통일."""
         try:
-            wl = self._watchlist_codes_set()
+            wl_only = self._watchlist_only_codes_set()
             for code in codes:
-                if str(code).zfill(6) in wl:
+                if str(code).zfill(6) in wl_only:
                     continue
                 for tree in (self.tree_monitor, self.tree_active_monitor):
                     if tree and tree.exists(code):
@@ -2089,7 +2109,7 @@ class MonitorTab:
         """종목별 워밍업 진행·성공·실패를 신호상태 열·행 배경으로 구분."""
         try:
             code = str(code).zfill(6)
-            if code in self._watchlist_codes_set():
+            if code in self._watchlist_only_codes_set():
                 return
             if event == "prep_start":
                 st = f"⏳ 데이터 준비 중… ({cur}/{total})"
