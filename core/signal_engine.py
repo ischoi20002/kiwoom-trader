@@ -666,11 +666,15 @@ class SignalEngine:
                     strat_label = format_entry_signal_type_label(
                         pos if isinstance(pos, dict) else None,
                         info.get("sel_track", info.get("SelTrack", "AB")),
+                        code=nk,
+                        app=self.app,
                     )
                 except Exception:
                     strat_label = format_entry_signal_type_label(
                         None,
                         info.get("sel_track", info.get("SelTrack", "AB")),
+                        code=str(code).zfill(6),
+                        app=self.app,
                     )
                 _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
                 if not _session_ok:

@@ -487,7 +487,92 @@ class PortfolioManager:
             return True
         except Exception:
             return False
-        
+
+    def _infer_sig_type_from_entry_reason(self, code: str, reason: Any) -> str:
+        """
+        active_positions.reason 등만 있을 때 TYPE_A / TYPE_B 를 복원합니다.
+        SYNCED·API 문자열 등에는 감시 sel_track·최근 매수 주문 reason 으로 보강합니다.
+        """
+        try:
+            nk = str(code or "").split("_")[0].zfill(6)
+            r = str(reason or "").upper()
+            if "TYPE_B" in r:
+                return "TYPE_B"
+            if "TYPE_A" in r:
+                return "TYPE_A"
+            if "SYNCED" in r or r.strip() == "SYNCED":
+                try:
+                    mi = getattr(self.app, "monitor_info", None) or {}
+                    for k in (nk, str(code or "").strip()):
+                        inf = mi.get(k)
+                        if isinstance(inf, dict):
+                            st = str(
+                                inf.get("sel_track")
+                                or inf.get("SelTrack")
+                                or ""
+                            ).strip().upper()
+                            if st == "B":
+                                return "TYPE_B"
+                            if st == "A":
+                                return "TYPE_A"
+                            break
+                except Exception:
+                    pass
+                try:
+                    rs_hint = self.data_manager.get_latest_buy_reason_with_sig_type(
+                        nk
+                    )
+                    if rs_hint:
+                        br = str(rs_hint).upper()
+                        if "TYPE_B" in br:
+                            return "TYPE_B"
+                        if "TYPE_A" in br:
+                            return "TYPE_A"
+                except Exception:
+                    pass
+                return "TYPE_A"
+        except Exception:
+            pass
+        try:
+            rs_hint = self.data_manager.get_latest_buy_reason_with_sig_type(
+                str(code or "").split("_")[0].zfill(6)
+            )
+            if rs_hint:
+                br = str(rs_hint).upper()
+                if "TYPE_B" in br:
+                    return "TYPE_B"
+                if "TYPE_A" in br:
+                    return "TYPE_A"
+        except Exception:
+            pass
+        return "TYPE_A"
+
+    def infer_sig_type_for_ui(self, code: str, pos: Optional[Dict[str, Any]]) -> str:
+        """
+        감시 트리「전략유형」용: 보유 dict 의 sig_type·reason 우선, 없으면 주문·선정 맥락으로 단일 A/B.
+        """
+        try:
+            if isinstance(pos, dict):
+                st = str(pos.get("sig_type") or "").strip().upper()
+                if st == "TYPE_B" or "TYPE_B" in st:
+                    return "TYPE_B"
+                if st == "TYPE_A" or (st and "TYPE_A" in st):
+                    return "TYPE_A"
+                rsn = str(pos.get("reason") or "").upper()
+                if "TYPE_B" in rsn:
+                    return "TYPE_B"
+                if "TYPE_A" in rsn and "TYPE_B" not in rsn:
+                    return "TYPE_A"
+                return self._infer_sig_type_from_entry_reason(
+                    str(code or "").split("_")[0].zfill(6),
+                    pos.get("reason"),
+                )
+        except Exception:
+            pass
+        return self._infer_sig_type_from_entry_reason(
+            str(code or "").split("_")[0].zfill(6), None
+        )
+
     def load_all(self):
         """DB 및 파일에서 포지션 데이터를 로드합니다."""
         with self.lock:
@@ -537,10 +622,18 @@ class PortfolioManager:
                         for row in active:
                             # row: (code, name, avg_p, qty, stage, invested, time, reason)
                             code = row[0]
+                            try:
+                                _nk = str(code or "").split("_")[0].zfill(6)
+                                _sig = self._infer_sig_type_from_entry_reason(
+                                    _nk, row[7] if len(row) > 7 else None
+                                )
+                            except Exception:
+                                _sig = "TYPE_A"
                             self.virtual_positions[code] = {
                                 "name": row[1], "avg_price": float(row[2]), "qty": int(row[3]),
                                 "stage": int(row[4]), "invested": float(row[5]),
                                 "entry_time": row[6], "reason": row[7],
+                                "sig_type": _sig,
                                 "events": [], "max_now": float(row[2])
                             }
                     else:

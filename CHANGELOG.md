@@ -7,6 +7,11 @@
 
 ---
 
+## 0.4.3 (2026-04-26)
+
+- **감시·보유 전략유형(AB 선정)**: 선정 `sel_track` 이 AB인 종목이 실제 S1 매수(TYPE_A/B)로 진입한 뒤에도 「전략 A+B」로 남던 문제 수정. `load_all` 시 `sig_type` 복원, `infer_sig_type_for_ui`·주문 이력(`get_latest_buy_reason_with_sig_type`) 보강, 매수 직후 `monitor_info` 의 `sel_track` 을 A/B 로 좁힘 (`core/portfolio_manager.py`, `data_manager_v2.py`, `ui/tabs/monitor_tab.py`, `core/signal_engine.py`, `core/trading_controller.py`).
+- **기타**: `monitor_column_widths.json` 반영.
+
 ## 0.4.2 (2026-04-26)
 
 - **포지션 탭 계좌 요약**: 실시간 감시 중 30초 주기는 **보유(ka10085) 정합만** 하고 예수금상세 TR는 생략. **예수금·D+1/D+2**는 매매 체결 후 전체 동기화(및 수동 동기화)에서만 REST 갱신. **주식평가금·총자산**은 보유 행 합계·틱 갱신과 일치하도록 정리 (`k_trader_gui.py`, `core/order_manager.py`, `core/portfolio_manager.py`, `ui/tabs/virtual_tab.py`).

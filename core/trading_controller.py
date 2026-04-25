@@ -533,6 +533,46 @@ class TradingController:
                 "snap_bid_ask": "— / — (—)",
             }
 
+    def _narrow_monitor_sel_track_after_s1_buy(self, code: object, reason: object) -> None:
+        """
+        선정 단계에서 SelTrack 이 AB(또는 A+B)인 종목이 실제 S1 매수(TYPE_A/B)로 나가면
+        감시 메타의 sel_track 을 단일 A 또는 B 로 맞춰 이후 UI·스마트매수 분기와 일치시킵니다.
+        """
+        try:
+            nk = str(code or "").split("_")[0].zfill(6)
+            rs = str(reason or "").upper()
+            if "TYPE_B" in rs:
+                new_tr = "B"
+            elif "TYPE_A" in rs:
+                new_tr = "A"
+            else:
+                return
+
+            def _patch(mi: Any) -> None:
+                if not isinstance(mi, dict):
+                    return
+                for key in list(mi.keys()):
+                    if str(key).split("_")[0].zfill(6) != nk:
+                        continue
+                    ent = mi.get(key)
+                    if not isinstance(ent, dict):
+                        continue
+                    cur = str(
+                        ent.get("sel_track") or ent.get("SelTrack") or ""
+                    ).strip().upper()
+                    if cur not in ("AB", "A+B", ""):
+                        continue
+                    ent["sel_track"] = new_tr
+                    try:
+                        ent["SelTrack"] = new_tr
+                    except Exception:
+                        pass
+
+            _patch(getattr(self.app, "monitor_info", None))
+            _patch(getattr(self, "monitor_info", None))
+        except Exception:
+            pass
+
     def execute_buy_signal(self, code, name, price, reason="TYPE_A") -> bool:
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
         Returns True iff 주문 접수(ord_no) 또는 가상 체결까지 성공 — SignalEngine 쿨타임 갱신용.
@@ -670,6 +710,11 @@ class TradingController:
                 self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
 
         self.log(f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 ({price:,}원, {qty}주)")
+
+        try:
+            self._narrow_monitor_sel_track_after_s1_buy(code, reason)
+        except Exception:
+            pass
 
         # 4. 텔레그램 알림 (비동기)
         import threading

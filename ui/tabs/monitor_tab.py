@@ -126,13 +126,31 @@ def format_strategy_type_label(sel_track: object) -> str:
 
 
 def format_entry_signal_type_label(
-    pos: Optional[Dict[str, Any]], sel_track: object
+    pos: Optional[Dict[str, Any]],
+    sel_track: object,
+    *,
+    code: Optional[str] = None,
+    app: Any = None,
 ) -> str:
     """
     보유 종목: 실제 매수 체결에 쓰인 신호 구분(sig_type TYPE_A/B)을 표시.
     비보유(감시만)·pos 없음: 선정 트랙(sel_track) 기존 문구(전략 A/B/A+B).
+
+    code·app 이 있으면 PortfolioManager.infer_sig_type_for_ui 로 단일 A/B 를
+    (DB 복구 후 sig_type 누락·SYNCED 등) 보강합니다.
     """
     try:
+        # 보유(dict)일 때만 포트폴리오 추정 — 미보유면 과거 매수 reason 으로 오표시될 수 있음
+        if app is not None and code and isinstance(pos, dict):
+            pf = getattr(app, "portfolio", None)
+            if pf is not None and hasattr(pf, "infer_sig_type_for_ui"):
+                eff = pf.infer_sig_type_for_ui(
+                    str(code).split("_")[0].zfill(6), pos
+                )
+                if eff == "TYPE_B":
+                    return "전략 B"
+                if eff == "TYPE_A":
+                    return "전략 A"
         if isinstance(pos, dict):
             st = str(pos.get("sig_type") or "").strip().upper()
             if st == "TYPE_B" or "TYPE_B" in st:
@@ -1640,7 +1658,9 @@ class MonitorTab:
                         break
         except Exception:
             pos_for_strat = None
-        strat = format_entry_signal_type_label(pos_for_strat, sel_tr)
+        strat = format_entry_signal_type_label(
+            pos_for_strat, sel_tr, code=nk, app=self.app
+        )
         ratio_disp = info.get("ratio", "0")
         nm = str(info.get("name", nk) or nk)
         try:

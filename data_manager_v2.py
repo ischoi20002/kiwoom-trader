@@ -1049,6 +1049,51 @@ class DataManagerV2:
                 pass
             return None
 
+    def get_latest_buy_reason_with_sig_type(self, code: str) -> Optional[str]:
+        """
+        매수 이력 중 reason 에 TYPE_A / TYPE_B 가 명시된 가장 최근 건.
+        (kt00007 FILLED 등이 최상단이어도 실제 전략 구분이 있는 행을 찾기 위함)
+        """
+        try:
+            target = self._normalize_order_stock_code(code)
+            if not target:
+                return None
+            with self._get_state_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT reason
+                    FROM order_history
+                    WHERE lower(side) = 'buy'
+                      AND (
+                          upper(result) IN ('SUCCESS', 'FILLED', 'MOCK')
+                          OR result = 'MOCK'
+                      )
+                    ORDER BY timestamp DESC
+                    LIMIT 120
+                    """,
+                )
+                rows = cur.fetchall()
+            for (rs,) in rows:
+                try:
+                    r = str(rs or "").upper()
+                except Exception:
+                    continue
+                if "TYPE_B" in r or "TYPE_A" in r:
+                    return str(rs or "")
+            return None
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] get_latest_buy_reason_with_sig_type 실패: {e}")
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] get_latest_buy_reason_with_sig_type 오류: {e}")
+            except Exception:
+                pass
+            return None
+
     def get_sell_order_meta_by_order_no(self, order_no: str) -> Optional[Dict[str, Any]]:
         """주문번호로 매도 접수 행 조회 — CHE 경로에서 종목명·사유 보강."""
         try:
