@@ -17,6 +17,8 @@ class SettingsTab:
         self.type_b_widgets = []
         self.s2_a_widgets = []
         self.s2_b_widgets = []
+        self.sel_a_v2_widgets: list[tp.Any] = []
+        self.sel_a_legacy_widgets: list[tp.Any] = []
         self.grid_rows = {} 
         self.sizing_rows = []
         self.opt_sync_tasks = [] 
@@ -508,18 +510,226 @@ class SettingsTab:
             '개',
             'Track A 일별 감시·선정 상한 (보유 종목 수 제한 아님)',
         )
-        add_param_row(sel_f, '최소 거래대금', 'min_trde_val', '억', '5일 평균 거래대금 기준')
-        add_param_row(sel_f, '이평선 수렴도 기준', 'ma_convergence', '%', '에너지 응축(Short/Mid) 확인 — Track A 정체성')
-        add_param_row(sel_f, '종목 선정 RSI 하한', 'sel_rsi_min', '', '과매도권/반등 유니버스 확인 (기본값 30)')
-        add_param_row(sel_f, '종목 선정 RSI 상한', 'sel_rsi_max', '', '유니버스 선정 탄성 확인 (기본값 70)')
-        add_param_row(sel_f, '거래량 분출 비율', 'vol_ratio', '배', '전일 대비 분출 시점 포착')
-        add_param_row(sel_f, '분출 확인 기간', 'vol_lookback', '일', '최근 N일 내 분출 이력 확인')
+        add_param_row(sel_f, '최소 거래대금', 'min_trde_val', '억', '5일 평균 거래대금 기준 (v2·레거시 공통)')
+        add_header(sel_f, '── Track A v2: 단기 상대강도·고가대비 되돌림·이평 근접·ATR%·갭 ──')
         add_param_row(
             sel_f,
-            '일봉 MACD(OSC) 필터',
+            'v2 일봉 선정 스택 사용',
             None,
             '',
-            '선정 시 일봉 OSC>0 필수 · MACD 고정 Fast 12 / Slow 26 / Signal 9 (변경 불가) · Track B와 동일',
+            'ON이면 prepare_dynamic_universe·실시간 선정이 동일 v2 필터(교차섹션 분위 포함). OFF면 아래 레거시 블록',
+            toggle_key='sel_a_use_new_stack',
+        )
+        add_param_row(
+            sel_f,
+            'RS 룩백 (거래일)',
+            'sel_a_rs_lookback',
+            '일',
+            '일자별 교차섹션에서 사용할 단기 수익률 기간 N',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            'RS 분위 하한',
+            'sel_a_rs_rank_min',
+            '',
+            '0~1. 하한 미만(너무 약함) 제외',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            'RS 분위 상한',
+            'sel_a_rs_rank_max',
+            '',
+            '0~1. 상한 초과(과열) 제외',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '고가대비 되돌림 룩백',
+            'sel_a_pb_lookback',
+            '일',
+            '최근 N일 고가 대비 종가 되돌림 % 계산 구간',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '되돌림 하한 %',
+            'sel_a_pb_min_pct',
+            '%',
+            '너무 얕은 조정(추격) 제외',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '되돌림 상한 %',
+            'sel_a_pb_max_pct',
+            '%',
+            '과도한 낙폭 제외',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            'MA20 근접 허용(비율)',
+            'sel_a_ma20_near_pct',
+            '',
+            '종가와 MA20 괴리 허용(소수, 예: 0.045≈4.5%)',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '종가 ≥ MA5 필수',
+            None,
+            '',
+            'OFF면 MA20 근접만 요구',
+            toggle_key='sel_a_require_close_ge_ma5',
+            widget_list=self.sel_a_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_f,
+            'MA5 근접 허용(비율)',
+            'sel_a_ma5_eps_pct',
+            '',
+            '위 토글 ON일 때 MA5 통과용 허용 오차(소수)',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            'ATR 기간',
+            'sel_a_atr_period',
+            '봉',
+            'Wilder ATR 기간(일봉)',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            'ATR% 하한',
+            'sel_a_atr_pct_min',
+            '',
+            'ATR/종가 비율 하한(소수, 예: 0.006=0.6%)',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            'ATR% 상한',
+            'sel_a_atr_pct_max',
+            '',
+            'ATR/종가 비율 상한(소수)',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '갭 절대값 상한',
+            'sel_a_gap_abs_max_pct',
+            '%',
+            '전일 종가 대비 당일 시가 갭 % 절대값',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            'OSC>0 필수 (v2)',
+            None,
+            '',
+            '일봉 MACD 히스토그램 양수',
+            toggle_key='sel_a_require_osc_positive',
+            widget_list=self.sel_a_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_f,
+            'MA60 존재 필수',
+            None,
+            '',
+            '60일 이평 계산 가능한 길이',
+            toggle_key='sel_a_require_ma60',
+            widget_list=self.sel_a_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_f,
+            '거래량 분출 필수 (A)',
+            None,
+            '',
+            '레거시 vol_ratio·vol_lookback로 VolBurstActive_A 요구',
+            toggle_key='sel_a_require_vol_burst',
+            widget_list=self.sel_a_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_f,
+            '선정 RSI 밴드 필수',
+            None,
+            '',
+            'ON이면 sel_rsi_min~max도 v2 단계에서 적용',
+            toggle_key='sel_a_require_sel_rsi_band',
+            widget_list=self.sel_a_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_f,
+            '최소 일봉 이력',
+            'sel_a_min_history_bars',
+            '봉',
+            '보조지표 계산에 필요한 최소 바 수',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '일봉 MACD 파라미터',
+            None,
+            '',
+            'Fast/Slow/Signal은 macd_fast_daily 등 전역 키와 동일 (선정·신호 공용)',
+            widget_list=self.sel_a_v2_widgets,
+        )
+        add_header(sel_f, '── Track A 레거시 (v2 끔 또는 v2 오류 폴백 시) ──')
+        add_param_row(
+            sel_f,
+            '이평선 수렴도 기준',
+            'ma_convergence',
+            '%',
+            'MA5·MA20 에너지 응축(Short/Mid)',
+            widget_list=self.sel_a_legacy_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '종목 선정 RSI 하한',
+            'sel_rsi_min',
+            '',
+            '레거시 및 v2(sel_a_require_sel_rsi_band) 공통 키',
+            widget_list=self.sel_a_legacy_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '종목 선정 RSI 상한',
+            'sel_rsi_max',
+            '',
+            '',
+            widget_list=self.sel_a_legacy_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '거래량 분출 비율',
+            'vol_ratio',
+            '배',
+            '전일 대비 분출 + 당일 양봉',
+            widget_list=self.sel_a_legacy_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '분출 확인 기간',
+            'vol_lookback',
+            '일',
+            '최근 N일 내 분출 이력',
+            widget_list=self.sel_a_legacy_widgets,
+        )
+        add_param_row(
+            sel_f,
+            '일봉 MACD(OSC) — 레거시',
+            None,
+            '',
+            '레거시 Track A는 OSC>0 고정. v2는 위 OSC>0 토글',
+            widget_list=self.sel_a_legacy_widgets,
         )
 
         sel_b_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type B — 추세돌파 (Track B 종목 선정) ', padding='15')
@@ -550,6 +760,49 @@ class SettingsTab:
             None,
             '',
             'Track A와 동일: 선정 시 일봉 OSC>0 필수 · MACD 고정 Fast 12 / Slow 26 / Signal 9 (변경 불가)',
+        )
+
+        slot_f = ttk.LabelFrame(
+            _univ_root,
+            text=' 📊 감시 선정: 최소 점수(N 무관) · 개수 상한 · (옵션)순위 밴드 ',
+            padding='15',
+        )
+        slot_f.pack(fill=tk.X, expand=False, pady=(0, 10))
+        add_param_row(
+            slot_f,
+            'Track A 최소 선정 점수',
+            'sel_track_min_score_a',
+            '점',
+            '0=비활성(상위 N만). 0보다 크면 그날 Score_A≥값만 후보, max_slots_a는 개수 상한만',
+        )
+        add_param_row(
+            slot_f,
+            'Track B 최소 선정 점수',
+            'sel_track_min_score_b',
+            '점',
+            '0=비활성. Score_B≥값만 후보, max_slots_b는 상한',
+        )
+        add_param_row(
+            slot_f,
+            '최소점수 미달 시 상위 N으로 억지 채움',
+            None,
+            '',
+            '기본 OFF: 임계 넘는 종목이 없으면 그날 해당 트랙 감시 없음(권장). ON이면 예전처럼 상위 N 폴백',
+            toggle_key='sel_track_min_score_fallback_topn',
+        )
+        add_param_row(
+            slot_f,
+            '상한 경계 점수 상대 밴드',
+            'max_slots_score_rel_pad',
+            '',
+            '최소점수 비활성(0)일 때만 적용. 0=정확히 N종',
+        )
+        add_param_row(
+            slot_f,
+            '밴드 추가 편입 상한',
+            'max_slots_band_extra_cap',
+            '종',
+            '밴드 사용 시 최대 N+이 값(폭주 방지)',
         )
 
         strat_f = ttk.LabelFrame(_sec_parent('s1'), text=' 🎯 [3] 1단계 진입 (S1) — 감시 후 매수 신호 ', padding='15')
@@ -1137,6 +1390,21 @@ class SettingsTab:
         if 'use_sel_track_b' in self.conf_vars:
             self.conf_vars['use_sel_track_b'].trace_add('write', _sync_sel_track_b_to_type_b)
 
+        def _apply_sel_a_stack_ui(*_args: object) -> None:
+            """v2 ON이면 레거시 행 비활성, OFF이면 v2 파라미터 행 비활성."""
+            try:
+                if 'sel_a_use_new_stack' not in self.conf_vars:
+                    return
+                v2_on = bool(self.conf_vars['sel_a_use_new_stack'].get())
+                apply_st(self.sel_a_v2_widgets, v2_on)
+                apply_st(self.sel_a_legacy_widgets, not v2_on)
+            except (tk.TclError, AttributeError, KeyError):
+                pass
+
+        if 'sel_a_use_new_stack' in self.conf_vars:
+            self.conf_vars['sel_a_use_new_stack'].trace_add('write', _apply_sel_a_stack_ui)
+            _apply_sel_a_stack_ui()
+
     def reset_to_defaults(self):
         if messagebox.askyesno('초기화 확인', '모든 파라미터를 초기값으로 복원하시겠습니까?'):
             self.app.settings = self.default_settings.copy()
@@ -1150,6 +1418,7 @@ class SettingsTab:
                 if not v: continue
                 if k in [
                     'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b',
+                    'max_slots_band_extra_cap',
                     'atr_period', 'atr_period_a', 'atr_period_b',
                     'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
                     'gc_window', 'rsi_window',

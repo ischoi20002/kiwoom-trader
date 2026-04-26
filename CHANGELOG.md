@@ -7,6 +7,14 @@
 
 ---
 
+## 0.5.0 (2026-04-26)
+
+- **Track A 일봉 선정 v2**: 단기 상대강도(교차섹션 분위)·고가대비 되돌림·이평 근접·ATR%·갭 등 동일 스택으로 `prepare_dynamic_universe`·`select_monitoring_targets` 정합 (`strategy_selector.py`, `core/defaults.py`).
+- **설정 탭**: Track A v2 키·레거시 구분, 감시 선정 프레임(최소 점수·개수 상한·순위 밴드·폴백 토글) (`ui/tabs/settings_tab.py`, `tools/settings_tab_ui_catalog.py`).
+- **감시 선정 N 비의존**: `sel_track_min_score_a`/`b`로 점수 임계 후보, `max_slots_*`는 상한만. 임계 미달 시 **기본 감시 없음**(`sel_track_min_score_fallback_topn` 기본 OFF). 옵션 `max_slots_score_rel_pad`·`max_slots_band_extra_cap`는 임계 비활성 시 순위 경계 완화 (`strategy_selector.py`).
+- **진단**: `tools/diagnose_selection_forward_returns.py` 스케줄 생성이 동일 `_df_top_by_score_slot_band` 규칙 사용.
+- **기타**: 듀얼트랙 `Valid_B`용 OSC·MA60 보조 변수 보강 등 (`strategy_selector.py`).
+
 ## 0.4.5 (2026-04-26)
 
 - **모니터 코드 집합 SSOT**: 감시 선정·관심목록 전용(wl_only) 판별을 `core/monitor_code_sets.py` 한곳에서 정규화·차집합 처리. `ui/tabs/monitor_tab.py`, `core/signal_engine.py`, `core/watchlist_store.codes_report_exclusion_set` 가 동일 규칙을 사용한다.

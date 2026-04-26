@@ -1,5 +1,6 @@
 import os
 import logging
+import numpy as np
 import pandas as pd
 import FinanceDataReader as fdr
 from datetime import datetime, timedelta
@@ -195,12 +196,192 @@ def _add_vol_burst_ab_columns(df_valid: pd.DataFrame, settings: dict) -> pd.Data
     return df_valid
 
 
+def _settings_bool_sel(settings: dict, key: str, default: bool = False) -> bool:
+    try:
+        v = settings.get(key, default)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return int(v) != 0
+        if isinstance(v, str):
+            t = v.strip().lower()
+            if t in ("true", "1", "yes", "on"):
+                return True
+            if t in ("false", "0", "no", "off", ""):
+                return False
+        return bool(v) if v is not None else default
+    except Exception:
+        return default
+
+
+def _compute_sel_a_aux_from_daily_tail(
+    df_valid: pd.DataFrame,
+    last_row: pd.Series,
+    settings: dict,
+) -> Optional[dict]:
+    """
+    실시간 선정용: 일봉 꼬리에서 Track A v2 지표(상대강도 원시·되돌림·ATR%·갭·이평근접)를 계산한다.
+    교차섹션 순위는 호출부에서 부여한다.
+    """
+    try:
+        min_b = max(30, int(float(settings.get("sel_a_min_history_bars", 65))))
+        if df_valid is None or len(df_valid) < min_b:
+            return None
+        rs_n = max(1, int(float(settings.get("sel_a_rs_lookback", 5))))
+        pb_n = max(5, int(float(settings.get("sel_a_pb_lookback", 20))))
+        atr_w = max(5, int(float(settings.get("sel_a_atr_period", 14))))
+        need = max(rs_n + 2, pb_n + 1, atr_w + 2, min_b)
+        if len(df_valid) < need:
+            return None
+
+        dfv = df_valid.copy()
+        if "high" not in dfv.columns or dfv["high"].isna().all():
+            dfv["high"] = dfv["close"]
+        if "low" not in dfv.columns or dfv["low"].isna().all():
+            dfv["low"] = dfv["close"]
+        if "open" not in dfv.columns:
+            dfv["open"] = dfv["close"]
+
+        lc = float(last_row["close"] or 0)
+        if lc <= 0:
+            return None
+
+        cl_rs = float(dfv["close"].iloc[-(rs_n + 1)])
+        if cl_rs <= 0:
+            return None
+        ret5_raw = (lc / cl_rs - 1.0) * 100.0
+
+        hh = float(dfv["high"].tail(pb_n).max())
+        if hh <= 0:
+            return None
+        pb_pct = (hh - lc) / hh * 100.0
+
+        prev_c = dfv["close"].shift(1)
+        tr = np.maximum(
+            dfv["high"] - dfv["low"],
+            np.maximum((dfv["high"] - prev_c).abs(), (dfv["low"] - prev_c).abs()),
+        )
+        atr = float(tr.tail(atr_w).mean())
+        atr_pct = atr / lc if lc > 0 else 0.0
+
+        o0 = float(last_row.get("open", lc) or lc)
+        pc1 = float(dfv["close"].iloc[-2])
+        gap_pct = ((o0 - pc1) / pc1 * 100.0) if pc1 > 1e-9 else 0.0
+
+        ma5 = float(last_row.get("MA5", 0) or 0)
+        ma20 = float(last_row.get("MA20", 0) or 0)
+        m20n = float(settings.get("sel_a_ma20_near_pct", 0.045))
+        eps = float(settings.get("sel_a_ma5_eps_pct", 0.004))
+        near20 = ma20 > 0 and abs(lc / ma20 - 1.0) <= m20n
+        if _settings_bool_sel(settings, "sel_a_require_close_ge_ma5", True):
+            ge5 = ma5 > 0 and lc >= ma5 * (1.0 - eps)
+            ma_ok = bool(near20 or ge5)
+        else:
+            ma_ok = bool(near20)
+
+        min_억 = float(settings.get("min_trde_val", 40.0)) * 100000000
+        avg5 = float(last_row.get("AvgVal5", 0) or 0)
+        min_liq_ok = avg5 >= min_억
+
+        osc = float(last_row.get("OSC", 0) or 0)
+        osc_ok = (osc > 0) if _settings_bool_sel(settings, "sel_a_require_osc_positive", True) else True
+        ma60 = float(last_row.get("MA60", 0) or 0)
+        ma60_ok = (ma60 > 0) if _settings_bool_sel(settings, "sel_a_require_ma60", True) else True
+
+        vba = bool(last_row.get("VolBurstActive_A", False))
+        burst_ok = (vba) if _settings_bool_sel(settings, "sel_a_require_vol_burst", False) else True
+
+        rsi = float(last_row.get("RSI", 0) or 0)
+        rmin = float(settings.get("sel_rsi_min", 35.0))
+        rmax = float(settings.get("sel_rsi_max", 70.0))
+        rsi_ok = (rmin <= rsi <= rmax) if _settings_bool_sel(
+            settings, "sel_a_require_sel_rsi_band", False
+        ) else True
+
+        return {
+            "_sel_ret5_raw": float(ret5_raw),
+            "_sel_pb_pct": float(pb_pct),
+            "_sel_atr_pct": float(atr_pct),
+            "_sel_gap_pct": float(gap_pct),
+            "_sel_ma_ok": bool(ma_ok),
+            "_sel_min_liq_ok": bool(min_liq_ok),
+            "_sel_osc_ok": bool(osc_ok),
+            "_sel_ma60_ok": bool(ma60_ok),
+            "_sel_burst_ok": bool(burst_ok),
+            "_sel_rsi_ok": bool(rsi_ok),
+        }
+    except Exception:
+        return None
+
+
+def _apply_sel_a_live_cross_section(rows: list, settings: dict) -> list:
+    """
+    유니버스 전체 행에 대해 `_sel_ret5_raw` 교차섹션 분위를 매기고 Valid_A·Score_A 를 확정한다.
+    """
+    if not rows:
+        return rows
+    try:
+        use_stack = _settings_bool_sel(settings, "sel_a_use_new_stack", True)
+        if not use_stack or not _settings_bool_sel(settings, "use_sel_track_a", True):
+            return rows
+        df = pd.DataFrame(rows)
+        if "_sel_ret5_raw" not in df.columns:
+            return rows
+        rk_lo = float(settings.get("sel_a_rs_rank_min", 0.28))
+        rk_hi = float(settings.get("sel_a_rs_rank_max", 0.92))
+        pb_lo = float(settings.get("sel_a_pb_min_pct", 1.5))
+        pb_hi = float(settings.get("sel_a_pb_max_pct", 16.0))
+        atr_lo = float(settings.get("sel_a_atr_pct_min", 0.006))
+        atr_hi = float(settings.get("sel_a_atr_pct_max", 0.085))
+        gap_mx = float(settings.get("sel_a_gap_abs_max_pct", 6.0))
+
+        s = pd.to_numeric(df["_sel_ret5_raw"], errors="coerce")
+        df["_sel_rs_pct"] = s.rank(pct=True, ascending=True)
+        pb = pd.to_numeric(df["_sel_pb_pct"], errors="coerce")
+        atrp = pd.to_numeric(df["_sel_atr_pct"], errors="coerce")
+        gap = pd.to_numeric(df["_sel_gap_pct"], errors="coerce").abs()
+
+        m_rs = s.notna() & df["_sel_rs_pct"].between(rk_lo, rk_hi, inclusive="both")
+        m_pb = pb.notna() & pb.between(pb_lo, pb_hi, inclusive="both")
+        m_atr = atrp.notna() & atrp.between(atr_lo, atr_hi, inclusive="both")
+        m_gap = gap.notna() & (gap <= gap_mx)
+        m_ma = df["_sel_ma_ok"].astype(bool)
+        m_liq = df["_sel_min_liq_ok"].astype(bool)
+        m_osc = df["_sel_osc_ok"].astype(bool)
+        m60 = df["_sel_ma60_ok"].astype(bool)
+        m_br = df["_sel_burst_ok"].astype(bool)
+        m_rsi = df["_sel_rsi_ok"].astype(bool)
+
+        va = m_rs & m_pb & m_atr & m_gap & m_ma & m_liq & m_osc & m60 & m_br & m_rsi
+
+        mid_pb = (pb_lo + pb_hi) / 2.0
+        half_w = max((pb_hi - pb_lo) / 2.0, 1e-6)
+        pb_score = (1.0 - (pb - mid_pb).abs() / half_w).clip(lower=0.0, upper=1.0) * 100.0
+        rs_part = df["_sel_rs_pct"].fillna(0.0) * 55.0
+        pb_part = pb_score * 0.28
+        ma_part = df["_sel_ma_ok"].astype(float) * 18.0
+        liq_raw = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
+        liq_part = (liq_raw / 500.0 * 100.0).clip(upper=100.0) * 0.12
+        osc_bonus = 10.0  # 동적 배치와 유사: 우상향 가점은 일괄 경로에서 생략·단순화
+        sc = (rs_part + pb_part + ma_part + liq_part).fillna(0.0) + osc_bonus
+        sc = sc.clip(lower=0.0, upper=100.0)
+        df["_valid_a"] = va.fillna(False).values
+        df["_score_a"] = np.where(va.fillna(False), np.round(sc, 1), 0.0)
+        return df.to_dict("records")
+    except Exception:
+        return rows
+
+
 def dual_track_selection_metrics(last_row: pd.Series, settings: dict) -> dict:
     """
     일봉 최신 행에 대해 prepare_dynamic_universe 의 Valid_A/B·Score_A/B 와 동일한 판정.
     반환: valid_a, score_a, valid_b, score_b (무효 트랙은 점수 0).
+
+    ``sel_a_use_new_stack`` 가 True 이면 Track A 는 교차섹션 후처리에서만 확정하므로
+    여기서는 valid_a=False·score_a=0 으로 둔다(Track B 는 기존 로직).
     """
     try:
+        use_stack_a = _settings_bool_sel(settings, "sel_a_use_new_stack", True)
         min_억_a = float(settings.get("min_trde_val", 40.0)) * 100000000
         conv = max(float(settings.get("ma_convergence", 3.0)) / 100.0, 1e-9)
         use_a = bool(settings.get("use_sel_track_a", True))
@@ -225,30 +406,37 @@ def dual_track_selection_metrics(last_row: pd.Series, settings: dict) -> dict:
         ma_diff = abs(ma5 - ma20) / ma20 if ma20 > 0 else 1.0
         pos_diff = abs(close - ma20) / ma20 if ma20 > 0 else 1.0
 
-        c1_a = avg5 >= min_억_a
-        c2_a = (ma_diff <= conv) if use_a else False
-        c3_a = (sel_rsi_min <= rsi <= sel_rsi_max)
-        c4_a = vba
+        if use_stack_a and use_a:
+            valid_a = False
+            score_a = 0.0
+        else:
+            c1_a = avg5 >= min_억_a
+            c2_a = (ma_diff <= conv) if use_a else False
+            c3_a = (sel_rsi_min <= rsi <= sel_rsi_max)
+            c4_a = vba
+            c5 = osc > 0
+            c_ma60 = pd.notna(last_row.get("MA60")) and ma60 > 0
+            valid_a = bool(c1_a and c2_a and c3_a and c4_a and c5 and c_ma60)
+
+            score_a = 0.0
+            if valid_a:
+                score_a = (
+                    max(0.0, (1 - (ma_diff / conv)) * 100) * 0.4
+                    + min(100.0, (rsi / 70.0) * 100) * 0.3
+                    + min(100.0, (avg5 / 50000000000.0) * 100) * 0.2
+                    + max(0.0, (1 - (pos_diff / 0.03)) * 100) * 0.1
+                )
+                if osc > osc_prev:
+                    score_a += 10.0
+
         c5 = osc > 0
         c_ma60 = pd.notna(last_row.get("MA60")) and ma60 > 0
-        valid_a = bool(c1_a and c2_a and c3_a and c4_a and c5 and c_ma60)
 
         c1_b = avg5 >= sel_b_min_val
         c2_b = (ma20 > ma60) and (close > ma20) if use_b else False
         c3_b = (sel_b_rsi_min <= rsi <= sel_b_rsi_max)
         c4_b = vbb
         valid_b = bool(c1_b and c2_b and c3_b and c4_b and c5 and c_ma60)
-
-        score_a = 0.0
-        if valid_a:
-            score_a = (
-                max(0.0, (1 - (ma_diff / conv)) * 100) * 0.4
-                + min(100.0, (rsi / 70.0) * 100) * 0.3
-                + min(100.0, (avg5 / 50000000000.0) * 100) * 0.2
-                + max(0.0, (1 - (pos_diff / 0.03)) * 100) * 0.1
-            )
-            if osc > osc_prev:
-                score_a += 10.0
 
         score_b = 0.0
         if valid_b:
@@ -284,6 +472,138 @@ def dual_track_selection_metrics(last_row: pd.Series, settings: dict) -> dict:
         }
 
 
+def _sorted_dict_rows_top_with_slot_band(
+    rows: List[dict],
+    score_key: str,
+    max_n: int,
+    settings: dict,
+    *,
+    min_score_floor: float = 0.0,
+) -> List[dict]:
+    """
+    - ``min_score_floor`` > 0: 해당 점수 이상만 후보(N과 무관), 이후 ``max_n`` 상한만 적용.
+      한 건도 없으면 기본은 빈 목록(그날 해당 트랙 감시 없음). ``sel_track_min_score_fallback_topn`` True면 상위 ``max_n`` 폴백.
+    - ``min_score_floor`` <= 0: 점수 내림차순 상위 ``max_n`` 및 (옵션) 상대 밴드 ``max_slots_score_rel_pad``.
+    """
+    try:
+        max_n = max(0, int(max_n))
+        if max_n <= 0 or not rows:
+            return []
+        mfloor = max(0.0, float(min_score_floor or 0.0))
+
+        def _sk(r: dict) -> tuple[float, str]:
+            try:
+                sc = float(r.get(score_key, 0) or 0)
+            except (TypeError, ValueError):
+                sc = 0.0
+            try:
+                cd = str(r.get("Code", r.get("code", ""))).zfill(6)
+            except Exception:
+                cd = ""
+            return (-sc, cd)
+
+        arr = sorted(rows, key=_sk)
+        if mfloor > 1e-15:
+            pool: List[dict] = []
+            for r in arr:
+                try:
+                    v = float(r.get(score_key, 0) or 0)
+                except (TypeError, ValueError):
+                    v = 0.0
+                if v >= mfloor - 1e-12:
+                    pool.append(r)
+            if not pool and _settings_bool_sel(
+                settings, "sel_track_min_score_fallback_topn", False
+            ):
+                return arr[:max_n]
+            return pool[:max_n]
+
+        pad = max(0.0, float(settings.get("max_slots_score_rel_pad", 0.0) or 0.0))
+        extra_cap = max(0, int(float(settings.get("max_slots_band_extra_cap", 12) or 0)))
+        if len(arr) <= max_n:
+            return arr
+        if pad <= 0:
+            return arr[:max_n]
+        try:
+            cut = float(arr[max_n - 1].get(score_key, 0) or 0)
+        except (TypeError, ValueError, IndexError):
+            cut = 0.0
+        floor = cut * (1.0 - pad)
+        hard = max_n + extra_cap
+        out: List[dict] = []
+        for r in arr:
+            try:
+                v = float(r.get(score_key, 0) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v >= floor - 1e-12:
+                out.append(r)
+            if len(out) >= hard:
+                break
+        return out if out else arr[:max_n]
+    except Exception:
+        try:
+            return sorted(rows, key=lambda x: -float(x.get(score_key, 0) or 0))[: max(0, int(max_n))]
+        except Exception:
+            return []
+
+
+def _df_top_by_score_slot_band(
+    df: pd.DataFrame,
+    *,
+    score_col: str,
+    code_col: str,
+    max_n: int,
+    settings: dict,
+    min_score_floor: float = 0.0,
+) -> pd.DataFrame:
+    """
+    일괄 스케줄용: ``_sorted_dict_rows_top_with_slot_band`` 와 동일 규칙.
+    ``min_score_floor`` > 0 이면 점수 임계 후 ``max_n`` 상한만 적용. 임계 통과 없으면 기본 빈 프레임.
+    """
+    try:
+        max_n = max(0, int(max_n))
+        if max_n <= 0 or df is None or df.empty or score_col not in df.columns:
+            return df.iloc[:0] if df is not None else pd.DataFrame()
+        mfloor = max(0.0, float(min_score_floor or 0.0))
+        cc = code_col if code_col in df.columns else "code"
+        sort_cols = [score_col, cc] if cc in df.columns else [score_col]
+        asc_b = [False, True] if len(sort_cols) == 2 else [False]
+        s = df.sort_values(by=sort_cols, ascending=asc_b, na_position="last").reset_index(drop=True)
+
+        if mfloor > 1e-15:
+            pool = s[s[score_col].astype(float) >= mfloor - 1e-12].copy()
+            if pool.empty and _settings_bool_sel(
+                settings, "sel_track_min_score_fallback_topn", False
+            ):
+                return s.head(max_n).copy()
+            return pool.head(max_n).copy()
+
+        pad = max(0.0, float(settings.get("max_slots_score_rel_pad", 0.0) or 0.0))
+        extra_cap = max(0, int(float(settings.get("max_slots_band_extra_cap", 12) or 0)))
+        if len(s) <= max_n:
+            return s
+        if pad <= 0:
+            return s.head(max_n).copy()
+        try:
+            cut = float(s.iloc[max_n - 1][score_col])
+        except Exception:
+            cut = 0.0
+        floor = cut * (1.0 - pad)
+        hard = max_n + extra_cap
+        cand = s[s[score_col].astype(float) >= floor - 1e-12]
+        return cand.head(hard).copy()
+    except Exception as e:
+        try:
+            logging.warning("_df_top_by_score_slot_band 폴백(head): %s", e)
+        except Exception:
+            pass
+        try:
+            return df.sort_values(by=score_col, ascending=False).head(max(0, int(max_n))).copy()
+        except Exception:
+            return df.iloc[:0]
+
+
 def _merge_dual_track_picks(
     selected_rows: list,
     settings: dict,
@@ -295,12 +615,16 @@ def _merge_dual_track_picks(
     """
     max_a = max(0, int(settings.get("max_slots_a", 20)))
     max_b = max(0, int(settings.get("max_slots_b", 10)))
+    floor_a = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
+    floor_b = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
     cand_a = [d for d in selected_rows if d.get("_valid_a")]
     cand_b = [d for d in selected_rows if d.get("_valid_b")]
-    cand_a.sort(key=lambda x: -float(x.get("_score_a", 0)))
-    cand_b.sort(key=lambda x: -float(x.get("_score_b", 0)))
-    picked_a = cand_a[:max_a]
-    picked_b = cand_b[:max_b]
+    picked_a = _sorted_dict_rows_top_with_slot_band(
+        cand_a, "_score_a", max_a, settings, min_score_floor=floor_a
+    )
+    picked_b = _sorted_dict_rows_top_with_slot_band(
+        cand_b, "_score_b", max_b, settings, min_score_floor=floor_b
+    )
     code_to_sb = {str(d["Code"]).zfill(6): float(d.get("_score_b", 0)) for d in picked_b}
     seen = set()
     final = []
@@ -577,11 +901,27 @@ def select_monitoring_targets(
             df_valid = _add_vol_burst_ab_columns(df_valid, settings)
             last_full = df_valid.iloc[-1]
 
+            use_stack_a = _settings_bool_sel(settings, "sel_a_use_new_stack", True)
+            use_track_a = _settings_bool_sel(settings, "use_sel_track_a", True)
             dm = dual_track_selection_metrics(last_full, settings)
-            valid_a = bool(dm["valid_a"])
             valid_b = bool(dm["valid_b"])
-            if not valid_a and not valid_b:
-                return None, status
+            valid_a_legacy = bool(dm["valid_a"])
+            aux = None
+            if use_stack_a and use_track_a:
+                aux = _compute_sel_a_aux_from_daily_tail(df_valid, last_full, settings)
+            if use_stack_a and use_track_a:
+                valid_a = False
+                score_a_place = 0.0
+            else:
+                valid_a = valid_a_legacy
+                score_a_place = float(dm["score_a"])
+
+            if not use_stack_a or not use_track_a:
+                if not valid_a and not valid_b:
+                    return None, status
+            else:
+                if aux is None and not valid_b:
+                    return None, status
 
             pos_diff = (
                 abs(last_full["close"] - last_full["MA20"]) / last_full["MA20"]
@@ -629,10 +969,12 @@ def select_monitoring_targets(
                 "MABufScale": 1.0,
                 "AvgTrdeVal": int(last_full["AvgVal5"] / 100000000),
                 "_valid_a": valid_a,
-                "_score_a": dm["score_a"],
+                "_score_a": score_a_place,
                 "_valid_b": valid_b,
                 "_score_b": dm["score_b"],
             }
+            if aux:
+                res.update(aux)
             return res, status
         except Exception:
             return None, status
@@ -640,8 +982,18 @@ def select_monitoring_targets(
     # 10개 스레드로 병렬 분석
     with ThreadPoolExecutor(max_workers=10) as executor:
         raw_results = list(executor.map(process_code, [row for _, row in df_top.iterrows()]))
-    
+
     selected = [r[0] for r in raw_results if r[0] is not None]
+    try:
+        if _settings_bool_sel(settings, "sel_a_use_new_stack", True) and _settings_bool_sel(
+            settings, "use_sel_track_a", True
+        ):
+            selected = _apply_sel_a_live_cross_section(selected, settings)
+    except Exception as e:
+        try:
+            logger_callback(f"⚠️ [선정] Track A v2 교차섹션 적용 실패(레거시 유지): {e}")
+        except Exception:
+            pass
 
     # 통계 출력
     stats = {"total": 0, "data": 0, "value": 0, "trend": 0, "rsi": 0, "vol": 0}
@@ -666,6 +1018,154 @@ def select_monitoring_targets(
         f"(Track A·B 분리 상한 적용, 동적 백테 유니버스와 동일 로직)"
     )
     return df_result
+
+
+def _apply_sel_track_a_batch_v2(
+    df_all: pd.DataFrame,
+    settings: dict,
+    min_억: float,
+    conv: float,
+) -> None:
+    """
+    ``prepare_dynamic_universe`` 일괄 패널용 Track A v2.
+    상대강도(일자 교차섹션 분위) + 고가대비 되돌림 + 이평근접 + ATR%·갭 + 대금.
+    """
+    try:
+        g = df_all.groupby("code", sort=False)
+        if "open" not in df_all.columns:
+            df_all["open"] = df_all["close"]
+        for col in ("high", "low"):
+            if col not in df_all.columns:
+                df_all[col] = df_all["close"]
+
+        rs_n = max(1, int(float(settings.get("sel_a_rs_lookback", 5))))
+        clag = g["close"].shift(rs_n)
+        df_all["_sel_ret5_raw"] = (df_all["close"] / clag.replace(0, np.nan) - 1.0) * 100.0
+
+        pb_n = max(5, int(float(settings.get("sel_a_pb_lookback", 20))))
+        hh = g["high"].transform(lambda x: x.rolling(pb_n, min_periods=pb_n).max())
+        df_all["_sel_pb_pct"] = (hh - df_all["close"]) / hh.replace(0, np.nan) * 100.0
+
+        prev_c = g["close"].shift(1)
+        tr = np.maximum(
+            df_all["high"] - df_all["low"],
+            np.maximum((df_all["high"] - prev_c).abs(), (df_all["low"] - prev_c).abs()),
+        )
+        atr_w = max(5, int(float(settings.get("sel_a_atr_period", 14))))
+        df_all["_sel_tr"] = tr
+        atr_roll = g["_sel_tr"].transform(
+            lambda x: x.rolling(atr_w, min_periods=atr_w).mean()
+        )
+        df_all["_sel_atr_pct"] = atr_roll / df_all["close"].replace(0, np.nan)
+
+        o0 = df_all["open"].astype(float)
+        pc = g["close"].shift(1)
+        df_all["_sel_gap_pct"] = ((o0 - pc) / pc.replace(0, np.nan) * 100.0).replace(
+            [np.inf, -np.inf], np.nan
+        )
+
+        ma5 = df_all["MA5"].astype(float)
+        ma20 = df_all["MA20"].astype(float)
+        lc = df_all["close"].astype(float)
+        m20n = float(settings.get("sel_a_ma20_near_pct", 0.045))
+        eps = float(settings.get("sel_a_ma5_eps_pct", 0.004))
+        near20 = ma20 > 0
+        near20 = near20 & ((lc / ma20.replace(0, np.nan) - 1.0).abs() <= m20n)
+        if _settings_bool_sel(settings, "sel_a_require_close_ge_ma5", True):
+            ge5 = (ma5 > 0) & (lc >= ma5 * (1.0 - eps))
+            df_all["_sel_ma_ok"] = near20 | ge5
+        else:
+            df_all["_sel_ma_ok"] = near20
+
+        c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
+        c5 = df_all["OSC"] > 0 if _settings_bool_sel(settings, "sel_a_require_osc_positive", True) else pd.Series(True, index=df_all.index)
+        c_ma60 = df_all["MA60"].notna() & (df_all["MA60"].astype(float) > 0)
+        if not _settings_bool_sel(settings, "sel_a_require_ma60", True):
+            c_ma60 = pd.Series(True, index=df_all.index)
+
+        burst_ok = (df_all["VolBurstActive_A"] == 1) if _settings_bool_sel(
+            settings, "sel_a_require_vol_burst", False
+        ) else pd.Series(True, index=df_all.index)
+
+        rmin = float(settings.get("sel_rsi_min", 35.0))
+        rmax = float(settings.get("sel_rsi_max", 70.0))
+        rsi_ok = (df_all["RSI"] >= rmin) & (df_all["RSI"] <= rmax)
+        if not _settings_bool_sel(settings, "sel_a_require_sel_rsi_band", False):
+            rsi_ok = pd.Series(True, index=df_all.index)
+
+        rk_lo = float(settings.get("sel_a_rs_rank_min", 0.28))
+        rk_hi = float(settings.get("sel_a_rs_rank_max", 0.92))
+        df_all["_sel_rs_pct"] = df_all.groupby("time")["_sel_ret5_raw"].rank(
+            pct=True, ascending=True
+        )
+        pb_lo = float(settings.get("sel_a_pb_min_pct", 1.5))
+        pb_hi = float(settings.get("sel_a_pb_max_pct", 16.0))
+        atr_lo = float(settings.get("sel_a_atr_pct_min", 0.006))
+        atr_hi = float(settings.get("sel_a_atr_pct_max", 0.085))
+        gap_mx = float(settings.get("sel_a_gap_abs_max_pct", 6.0))
+
+        m_rs = df_all["_sel_ret5_raw"].notna() & df_all["_sel_rs_pct"].between(
+            rk_lo, rk_hi, inclusive="both"
+        )
+        m_pb = df_all["_sel_pb_pct"].notna() & df_all["_sel_pb_pct"].between(
+            pb_lo, pb_hi, inclusive="both"
+        )
+        m_atr = df_all["_sel_atr_pct"].notna() & df_all["_sel_atr_pct"].between(
+            atr_lo, atr_hi, inclusive="both"
+        )
+        m_gap = df_all["_sel_gap_pct"].notna() & (df_all["_sel_gap_pct"].abs() <= gap_mx)
+
+        va = (
+            m_rs
+            & m_pb
+            & m_atr
+            & m_gap
+            & df_all["_sel_ma_ok"]
+            & c1
+            & c5
+            & c_ma60
+            & burst_ok
+            & rsi_ok
+        )
+        df_all["Valid_A"] = va.fillna(False)
+
+        mid_pb = (pb_lo + pb_hi) / 2.0
+        half_w = max((pb_hi - pb_lo) / 2.0, 1e-6)
+        pb_score = (
+            (1.0 - (df_all["_sel_pb_pct"] - mid_pb).abs() / half_w).clip(lower=0.0, upper=1.0)
+            * 100.0
+        )
+        rs_part = df_all["_sel_rs_pct"].fillna(0.0) * 55.0
+        pb_part = pb_score * 0.28
+        ma_part = df_all["_sel_ma_ok"].astype(float) * 18.0
+        liq_part = (
+            (df_all["AvgVal5"] / 50000000000.0 * 100.0).clip(upper=100.0) * 0.12
+        )
+        osc_b = (df_all["OSC"] > df_all["OSC_Prev"]).astype(float) * 10.0
+        sc = (rs_part + pb_part + ma_part + liq_part + osc_b).clip(lower=0.0, upper=100.0)
+        df_all["Score_A"] = np.where(df_all["Valid_A"], np.round(sc, 1), 0.0)
+    except Exception as e:
+        try:
+            logging.warning("_apply_sel_track_a_batch_v2 실패, 레거시로 폴백: %s", e, exc_info=True)
+        except Exception:
+            pass
+        c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
+        c5 = df_all["OSC"] > 0
+        c_ma60 = df_all["MA60"].notna()
+        use_a = bool(settings.get("use_sel_track_a", True))
+        c2_a = (df_all["MA_Diff"] <= conv) if use_a else pd.Series(False, index=df_all.index)
+        c3_a = (df_all["RSI"] >= float(settings.get("sel_rsi_min", 35.0))) & (
+            df_all["RSI"] <= float(settings.get("sel_rsi_max", 70.0))
+        )
+        c4_a = df_all["VolBurstActive_A"] == 1
+        df_all["Valid_A"] = c1 & c4_a & c5 & c_ma60 & c2_a & c3_a
+        df_all["Score_A"] = (
+            ((1 - (df_all["MA_Diff"] / conv)) * 100).clip(lower=0) * 0.4
+            + (df_all["RSI"] / 70 * 100).clip(upper=100) * 0.3
+            + (df_all["AvgVal5"] / 50000000000 * 100).clip(upper=100) * 0.2
+            + ((1 - (df_all["Pos_Diff"] / 0.03)) * 100).clip(lower=0) * 0.1
+        )
+        df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_A"] += 10.0
 
 
 def _score_dynamic_universe_daily_ohlcv(
@@ -727,23 +1227,30 @@ def _score_dynamic_universe_daily_ohlcv(
         df_all.groupby("code")["VolBurst_B"].rolling(vol_lookback_b).max().reset_index(0, drop=True)
     )
 
-    c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
+    use_a = bool(settings.get("use_sel_track_a", True))
+    if _settings_bool_sel(settings, "sel_a_use_new_stack", True) and use_a:
+        _apply_sel_track_a_batch_v2(df_all, settings, min_억, conv)
+    else:
+        c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
+        c5 = df_all["OSC"] > 0
+        c_ma60 = df_all["MA60"].notna()
+        c2_a = (df_all["MA_Diff"] <= conv) if use_a else pd.Series(False, index=df_all.index)
+        c3_a = (df_all["RSI"] >= float(settings.get("sel_rsi_min", 35.0))) & (
+            df_all["RSI"] <= float(settings.get("sel_rsi_max", 70.0))
+        )
+        c4_a = df_all["VolBurstActive_A"] == 1
+        df_all["Valid_A"] = c1 & c4_a & c5 & c_ma60 & c2_a & c3_a
+        df_all["Score_A"] = (
+            ((1 - (df_all["MA_Diff"] / conv)) * 100).clip(lower=0) * 0.4
+            + (df_all["RSI"] / 70 * 100).clip(upper=100) * 0.3
+            + (df_all["AvgVal5"] / 50000000000 * 100).clip(upper=100) * 0.2
+            + ((1 - (df_all["Pos_Diff"] / 0.03)) * 100).clip(lower=0) * 0.1
+        )
+        df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_A"] += 10.0
+
+    # Track B·진단 열과 공유: OSC·MA60 (A v2 경로에서는 위 블록 안에서만 쓰였을 수 있음)
     c5 = df_all["OSC"] > 0
     c_ma60 = df_all["MA60"].notna()
-    use_a = settings.get("use_sel_track_a", True)
-    c2_a = (df_all["MA_Diff"] <= conv) if use_a else pd.Series(False, index=df_all.index)
-    c3_a = (df_all["RSI"] >= float(settings.get("sel_rsi_min", 35.0))) & (
-        df_all["RSI"] <= float(settings.get("sel_rsi_max", 70.0))
-    )
-    c4_a = df_all["VolBurstActive_A"] == 1
-    df_all["Valid_A"] = c1 & c4_a & c5 & c_ma60 & c2_a & c3_a
-    df_all["Score_A"] = (
-        ((1 - (df_all["MA_Diff"] / conv)) * 100).clip(lower=0) * 0.4
-        + (df_all["RSI"] / 70 * 100).clip(upper=100) * 0.3
-        + (df_all["AvgVal5"] / 50000000000 * 100).clip(upper=100) * 0.2
-        + ((1 - (df_all["Pos_Diff"] / 0.03)) * 100).clip(lower=0) * 0.1
-    )
-    df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_A"] += 10.0
 
     use_b = settings.get("use_sel_track_b", True)
     c2_b = ((df_all["MA20"] > df_all["MA60"]) & (df_all["close"] > df_all["MA20"])) if use_b else pd.Series(
@@ -890,6 +1397,8 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     schedule = {}  # 기존 호환용 (합집합)
     max_s_a = int(settings.get('max_slots_a', 20))
     max_s_b = int(settings.get('max_slots_b', 10))
+    floor_sa = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
+    floor_sb = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
     df_sim = df_all[df_all['time'] >= pd.to_datetime(start_date)].copy()
     
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
@@ -905,12 +1414,32 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         # Track A 스케줄
         day_a = df_sim[day_mask & df_sim['Valid_A']]
         if not day_a.empty:
-            schedule_a[d_str] = day_a.sort_values(by='Score_A', ascending=False).head(max_s_a)['code'].tolist()
-        
+            schedule_a[d_str] = (
+                _df_top_by_score_slot_band(
+                    day_a,
+                    score_col="Score_A",
+                    code_col="code",
+                    max_n=max_s_a,
+                    settings=settings,
+                    min_score_floor=floor_sa,
+                )["code"]
+                .tolist()
+            )
+
         # Track B 스케줄
         day_b = df_sim[day_mask & df_sim['Valid_B']]
         if not day_b.empty:
-            schedule_b[d_str] = day_b.sort_values(by='Score_B', ascending=False).head(max_s_b)['code'].tolist()
+            schedule_b[d_str] = (
+                _df_top_by_score_slot_band(
+                    day_b,
+                    score_col="Score_B",
+                    code_col="code",
+                    max_n=max_s_b,
+                    settings=settings,
+                    min_score_floor=floor_sb,
+                )["code"]
+                .tolist()
+            )
         
         # 기존 호환 스케줄 (합집합, 중복 제거 — 일별로 이미 A/B 각각 상한 적용됨)
         combined = list(dict.fromkeys(schedule_a.get(d_str, []) + schedule_b.get(d_str, [])))
@@ -1080,6 +1609,8 @@ def diagnose_dynamic_universe_selection_by_trading_day(
     try:
         max_s_a = int(settings.get("max_slots_a", 20))
         max_s_b = int(settings.get("max_slots_b", 10))
+        floor_sa = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
+        floor_sb = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
         trading_days_list2 = (
             df_sim["time"].dt.strftime("%Y-%m-%d").drop_duplicates().sort_values().tolist()
         )
@@ -1096,15 +1627,25 @@ def diagnose_dynamic_universe_selection_by_trading_day(
                 )
             )
             sa = (
-                df_sim.loc[dmask & df_sim["Valid_A"]]
-                .sort_values(by="Score_A", ascending=False)
-                .head(max_s_a)["code"]
+                _df_top_by_score_slot_band(
+                    df_sim.loc[dmask & df_sim["Valid_A"]],
+                    score_col="Score_A",
+                    code_col="code",
+                    max_n=max_s_a,
+                    settings=settings,
+                    min_score_floor=floor_sa,
+                )["code"]
                 .tolist()
             )
             sb = (
-                df_sim.loc[dmask & df_sim["Valid_B"]]
-                .sort_values(by="Score_B", ascending=False)
-                .head(max_s_b)["code"]
+                _df_top_by_score_slot_band(
+                    df_sim.loc[dmask & df_sim["Valid_B"]],
+                    score_col="Score_B",
+                    code_col="code",
+                    max_n=max_s_b,
+                    settings=settings,
+                    min_score_floor=floor_sb,
+                )["code"]
                 .tolist()
             )
             comb = list(dict.fromkeys([str(x) for x in (sa or [])] + [str(x) for x in (sb or [])]))

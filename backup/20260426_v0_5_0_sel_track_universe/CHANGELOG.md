@@ -1,0 +1,401 @@
+# 변경 이력
+
+`core/version.py`의 `APP_VERSION`과 맞춥니다.  
+버전 숫자를 올릴 때 **같은 작업**에서 여기에 해당 버전 섹션을 추가합니다.
+
+**날짜**: 괄호 안은 **그 변경이 저장소에 반영된 날**(버전을 올린 커밋의 날짜, 또는 실제 배포일)을 적습니다. 다른 항목과 줄을 맞추기 위해 임의로 바꾸거나, 대화 세션의 ‘오늘’만 보고 적지 않습니다.
+
+---
+
+## 0.5.0 (2026-04-26)
+
+- **Track A 일봉 선정 v2**: 단기 상대강도(교차섹션 분위)·고가대비 되돌림·이평 근접·ATR%·갭 등 동일 스택으로 `prepare_dynamic_universe`·`select_monitoring_targets` 정합 (`strategy_selector.py`, `core/defaults.py`).
+- **설정 탭**: Track A v2 키·레거시 구분, 감시 선정 프레임(최소 점수·개수 상한·순위 밴드·폴백 토글) (`ui/tabs/settings_tab.py`, `tools/settings_tab_ui_catalog.py`).
+- **감시 선정 N 비의존**: `sel_track_min_score_a`/`b`로 점수 임계 후보, `max_slots_*`는 상한만. 임계 미달 시 **기본 감시 없음**(`sel_track_min_score_fallback_topn` 기본 OFF). 옵션 `max_slots_score_rel_pad`·`max_slots_band_extra_cap`는 임계 비활성 시 순위 경계 완화 (`strategy_selector.py`).
+- **진단**: `tools/diagnose_selection_forward_returns.py` 스케줄 생성이 동일 `_df_top_by_score_slot_band` 규칙 사용.
+- **기타**: 듀얼트랙 `Valid_B`용 OSC·MA60 보조 변수 보강 등 (`strategy_selector.py`).
+
+## 0.4.5 (2026-04-26)
+
+- **모니터 코드 집합 SSOT**: 감시 선정·관심목록 전용(wl_only) 판별을 `core/monitor_code_sets.py` 한곳에서 정규화·차집합 처리. `ui/tabs/monitor_tab.py`, `core/signal_engine.py`, `core/watchlist_store.codes_report_exclusion_set` 가 동일 규칙을 사용한다.
+
+## 0.4.4 (2026-04-26)
+
+- **실시간 감시·보유 트리**: 감시 선정 종목이 관심목록에도 있을 때 「관심목록 전용 숨김」 로직이 전체 관심목록 기준으로 동작해 보유·감시 트리에서 빠지거나 틱 갱신이 막히던 문제 수정. **관심목록만**(감시 미선정)에 한해 숨김·스킵하도록 `wl_only` 집합 사용, `signal_engine` 트리 큐잉도 동일 기준 (`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).
+
+## 0.4.3 (2026-04-26)
+
+- **감시·보유 전략유형(AB 선정)**: 선정 `sel_track` 이 AB인 종목이 실제 S1 매수(TYPE_A/B)로 진입한 뒤에도 「전략 A+B」로 남던 문제 수정. `load_all` 시 `sig_type` 복원, `infer_sig_type_for_ui`·주문 이력(`get_latest_buy_reason_with_sig_type`) 보강, 매수 직후 `monitor_info` 의 `sel_track` 을 A/B 로 좁힘 (`core/portfolio_manager.py`, `data_manager_v2.py`, `ui/tabs/monitor_tab.py`, `core/signal_engine.py`, `core/trading_controller.py`).
+- **기타**: `monitor_column_widths.json` 반영.
+
+## 0.4.2 (2026-04-26)
+
+- **포지션 탭 계좌 요약**: 실시간 감시 중 30초 주기는 **보유(ka10085) 정합만** 하고 예수금상세 TR는 생략. **예수금·D+1/D+2**는 매매 체결 후 전체 동기화(및 수동 동기화)에서만 REST 갱신. **주식평가금·총자산**은 보유 행 합계·틱 갱신과 일치하도록 정리 (`k_trader_gui.py`, `core/order_manager.py`, `core/portfolio_manager.py`, `ui/tabs/virtual_tab.py`).
+- **kt00007 체결 일시**: `YYYYMMDDHHMMSS`(14자리) 및 행의 `cntr_dt`·`ord_dt` 등을 반영해 `order_history`의 표시 일시·`fill_row_key`가 어긋나던 문제 수정 (`core/order_manager.py`).
+- **바·백테스트·설정**: `utils/bar_resample.py`, `backtest_engine.py`, `dynamic_backtest.py`, `core/defaults.py`, `settings.json`, `monitor_column_widths.json` 반영.
+- **도구**: `tools/refresh_all_bars_15m_krx.py`, `tools/verify_1m_15m_alignment.py`, `utils/krx_bars.py` 추가.
+
+## 0.4.1 (2026-04-25)
+
+- **고정밀 백테(보수적 체결가)**: 1분 경로에서 **매도·EXIT 판가·체결 = 1분 저가**, **매수 체결 = 1분 고가** (`dynamic_backtest.py`, `backtest_engine.py` / `SimpleBacktester` 1분 시뮬). 지표 `simulate_intrabar`는 기존처럼 종가·OHLC 흐름.
+- **시장 지표·시장 레짐 전면 비사용**: `use_market_filter`·MSI/VIX·Type A/B 레짐 phase·관련 UI·`MarketDataService`·레짐 모듈·일부 루트 plot 스크립트 제거. 전략·백테·최적화·리포트·대시보드/상단 UI 정리, `settings.json` 키·`core/signal_engine` 구문 수정 등.
+- **기타**: `analyze_hynix` 시장 데이터 제거, `plot_with_vix`/`plot_kospi_*`(MSI) 루트 스크립트 삭제.
+
+## 0.4.0 (2026-04-25)
+
+- **동적 유니버스·KODEX200**: KRX/pykrx 의존 제거, `kodex200.csv`·`core/kodex200_universe` 정리. `diagnose_dynamic_universe_selection_by_trading_day`로 일봉·`Valid_B`·스케줄 진단. `prepare_dynamic_universe` 지표·스코어 추출에 `_score_dynamic_universe_daily_ohlcv` 사용.
+- **하베스팅 → 일봉**: `bars_1m`을 일(캘린더) 단위로 집계해 `bars_1d`에 반영(`utils/bar_resample`, `DataManagerV2.rebuild_daily_bars_from_1m`, `harvest_service` 종료 시 일괄 보강). `update_historical_data`에도 동일.
+- **리포트·기본값**: `reporting/trade_report` 종목 누적 수익과 요약·수수료 기준 맞춤, `core/defaults`·선정·전략 관련 주석 정리.
+
+## 0.3.64 (2026-04-19)
+
+- **일일 결산 요약**: 보유 시세를 포지션 탭과 동일하게 해석(`VirtualTab._resolve_active_holdings_prices` 재사용·폴백). **금일 실현**은 청산일(`exit_date` / `exit_datetime`) 기준. **금일 손익**은 전일 HTML이 아니라 **`eod_equity_snapshots_*.json`** 에 저장된 직전 영업일 EOD 총자산 대비(`reporting/daily_settlement_report.py`, `utils/eod_equity_snapshots.py`).
+- **EOD 스냅샷**: 모의/실전별 JSON 경로(`utils/server_mode_paths.eod_equity_snapshots_path`). 장 마감+버퍼 이후 포지션 탭 갱신 시 자동 기록, 일일 결산 생성 시에도 동일 조건에서 해당 영업일 키로 저장.
+- **포지션 관리 상단**: **미실현(보유)** 와 **금일 손익(전일 EOD)** 를 분리 표시(`ui/tabs/virtual_tab.py`).
+
+## 0.3.63 (2026-04-18)
+
+- **S1 ATR 트레일 표시·청산**: Type A·B 공통으로 **S1**에서 트랙별「ATR 분석 주기」(`use_atr_exit_a` / `use_atr_exit_b`)가 OFF인데도 `use_atr_trailing_stop_*` 기본값 True 때문에 감시·리포트에 **TRL** 이 나오던 현상 수정. 마스터 OFF 시 S1 트레일 비활성, SL만 ATR 토글이 켜진 경우 `SL …` 만 표시 (`backtest_engine.py` — `compute_atr_exit_display_text`, `evaluate_position`, TP 연기 분기).
+
+## 0.3.62 (2026-04-18)
+
+- **감시 트리·가상보유 스텁 현재가**: 선정 CSV에 없는 종목만 감시에 올릴 때(`vp_price_stub`) `last_price` 가 항상 0이던 문제 — 계좌 동기화 스냅(`ka_cur_prc`, 없으면 `ka_evlu_amt`/수량)으로 참고가를 채움. 보유 탭과 동일한 우선순위이며 평단은 넣지 않음 (`core/trading_controller.py`, `k_trader_gui.py`).
+
+## 0.3.61 (2026-04-18)
+
+- **롤백(실시간 감시 UI)**: 0.3.59~0.3.60 에서 넣었던 `monitor_tab.py`·`k_trader_gui.py` 변경(현재가 0 보완·`monitor_info` 참조·ka10004 스캔 등)이 감시 중단·트리뷰 소실 등 부작용을 일으켜, 해당 두 파일을 **0.3.58 직후(워밍업 수정만 반영된 상태)** 로 되돌림. 포지션 탭 현재가는 기존처럼 계좌 스냅·REST 폴백 경로를 사용.
+
+## 0.3.58 (2026-04-18)
+
+- **실시간 워밍업·캘린더 깊이 판정**: `가장 오래된 봉 <= now−N일` 단일 시각 비교는 롤링 보존 직후 봉이 컷오프보다 늦게 찍히는 경우가 많아 **항상 미충족**으로 나올 수 있음 → (오늘−최초 봉 날짜) 일수 ≥ (보존 N일 − 슬랙)으로 판정. 설정 `realtime_warmup_depth_calendar_slack_days`(기본 21) (`core/warmup_service.py`, `core/defaults.py`).
+
+## 0.3.57 (2026-04-18)
+
+- **실시간 워밍업 API**: `캘린더·깊이` 연속조회(`deep_fetch`)는 **과거 N일 미충족(`need_depth`)** 일 때만 사용. 장중 **당일 갭**만 있을 때는 얕은 연속조회로 분리 — 1년치는 이미 있는데도 ka10080이 깊이 모드로 반복되던 현상 완화 (`core/warmup_service.py`).
+
+## 0.3.56 (2026-04-18)
+
+- **실시간 워밍업 깊이 판정**: (1) RT15m DB 보존 구간 `MIN(datetime)` 이 캘린더 컷오프 이전이거나, (2) ka10080 연속조회에서 **next-key 없이 끝난 종목**(브로커·종목 이력상 과거 한계)은 `symbol_meta_rt`에 기록해 동일·더 짧은 보존 일수로 재적재하지 않음. 페이지네이션 루프 내 깊이 조기 종료는 누적 `merged` 기준으로 판정(`core/warmup_service.py`, `core/realtime_monitor_bars_store.py`).
+
+## 0.3.55 (2026-04-18)
+
+- **실시간 워밍업(RT15m DB)**: `ORDER BY datetime DESC LIMIT` 으로만 메모리에 올린 프레임의 `index.min()` 으로는 DB 에 쌓인 **실제 과거 깊이**를 알 수 없어, 재시작 후에도 `과거 N일 미충족`으로 오판하며 ka10080 캘린더·깊이 조회가 반복되던 문제 수정 — RT15m SQLite 에서 `MIN(datetime)` 으로 깊이 판정 (`core/warmup_service.py`, `core/realtime_monitor_bars_store.py`).
+
+## 0.3.54 (2026-04-18)
+
+- **데이터 하베스팅(GUI)**: 시작 안내를 `messagebox` 대신 **2초 후 자동 닫힘** 비모달 창으로 표시(`ui/tabs/backtest_tab.py`).
+- **데이터 하베스팅(콘솔)**: 수집 완료·중단·오류 후 **Enter 대기 제거** — 프로세스가 바로 종료되어 콘솔 창이 닫힘(`harvest_service.py`).
+
+## 0.3.53 (2026-04-18)
+
+- **계좌 동기화와 메인 스레드**: `sync_with_actual_account`(REST·정합·저장)를 **데몬 스레드**에서 실행해 기동·감시 주기·체결 후 재동기화·동기화 버튼이 **UI를 수 초~10초 막지 않도록** 변경. 동시에 두 번 실행되면 꼬일 수 있어 **락으로 직렬화**(이미 동기화 중이면 해당 호출은 생략)(`k_trader_gui.py`).
+
+## 0.3.52 (2026-04-18)
+
+- **UI 반응성**: 포지션 탭 전체 그리기 등 무거운 갱신을 `after(1)`로 한 틱 미루어 이벤트 루프가 탭 클릭 등을 처리할 여지를 둠. 갱신 중에는 하단 **「처리 중: …」** 라벨과 **모래시계 커서**로 표시(`k_trader_gui.py`). `refresh_virtual_tab_full` 동일 패턴.
+
+## 0.3.51 (2026-04-18)
+
+- **기동 로그**: 『계좌 동기화』(ka85) **이후**에 이어지는 작업(로컬 정합·포지션 탭 갱신·kt00007 백그라운드 보강 등)을 **첫 동기화 완료 직후** 요약으로 안내. 인증 직후 긴 요약은 짧은 한 줄로 정리(`k_trader_gui.py`, `core/portfolio_manager.py`).
+
+## 0.3.50 (2026-04-18)
+
+- **기동 로그**: REST 인증 성공 직후 실행되는 백그라운드 작업을 **요약 블록 한 번**으로 안내(`k_trader_gui.py`). 루프마다 로그를 늘리지 않음.
+
+## 0.3.49 (2026-04-18)
+
+- **실시간 감시 탭 세로 분할(sash)**: 기동 직후 다른 탭에 있으면 Paned 높이가 잡히기 전에 복원되던 문제 완화 — **「실시간 감시」탭으로 전환할 때** sash 복원을 다시 예약(`k_trader_gui.py`). 복원 로직에 높이 보완·클램프 강화(`ui/tabs/monitor_tab.py`).
+- **종료 시 터미널 출력**: 감시 레이아웃 저장 안내를 `print`로 중복 찍던 부분 제거 — 앱 로그 경로만 유지(`ui/tabs/monitor_tab.py`).
+
+## 0.3.48 (2026-04-18)
+
+- **포지션 관리 · 수수료반영 토글**: 합계 카드 옆 슬라이드 스위치 — **미반영/반영**에 따라 매입·평가·손익·수익율 및 종목 행(매입·평가·손익·수익율) 정의 일치. **1회 스캔 캐시**로 중복 계산 축소, 토글 클릭 시 **슬라이더는 즉시** 그리고 합계·트리는 **`after(0)`** 로 지연. 고아 행 정리·`Treeview` 순서 안정화·표시 안전 처리(`ui/tabs/virtual_tab.py`).
+
+## 0.3.47 (2026-04-18)
+
+- **포지션 관리 · 실시간 보유**: 보유 **전체 합계**(매입·평가·평가손익·수익율)를 **수수료 미반영**(평단×수량·시장 평가)으로 집계, 종목 트리 **위** 컴팩트 카드로 표시(`ui/tabs/virtual_tab.py`). 제목·부제 제거·여백 축소로 높이 정리, 손익/수익율 색상.
+- **컬럼 폭**: `monitor_column_widths.json` 저장 반영.
+
+## 0.3.46 (2026-04-18)
+
+- **KODEX200 유니버스**: `kodex200_universe_priority`에 **`csv_only`** 추가 — `kodex200.csv`만 사용하고 pykrx·원격 URL·FDR 폴백 없음. 기본값을 **`csv_only`**로 변경(`core/kodex200_universe.py`, `core/defaults.py`, `settings.json`).
+- **기동 로그**: KOSPI200 유니버스 로드 문구에서 「편입종목 확인」 표현 제거(`k_trader_gui.py`).
+- **문서**: `get_kospi_list` 독스트링을 설정 기반 설명으로 정리(`data_manager_v2.py`).
+
+## 0.3.45 (2026-04-17)
+
+- **포지션 관리 탭 레이아웃**: 기동 직후 다른 탭에 있으면 Paned 높이가 잡히기 전에 sash만 복원되는 문제 완화 — **「포지션」탭으로 전환할 때** 세로 분할(sash) 복원을 다시 예약 (`k_trader_gui.py`).
+- **포지션 탭 세로 분할 저장**: `<<PanedWindowMoved>>` 직후 좌표가 밀리는 경우·**Windows에서 가상 이벤트 누락**을 보완하기 위해 짧은 지연 후 비율을 읽어 `virtual_portfolio_ui.json`에 반영. 세시에서 마우스 업 시 `identify`로 판별(Windows는 정수 인덱스) (`ui/tabs/virtual_tab.py`).
+- **저장 비율 없음**: 첫 실행 등 `sash0_rel`이 없을 때 기본 비율 **0.42**로 복원 (`ui/tabs/virtual_tab.py`).
+
+## 0.3.44 (2026-04-17)
+
+- **웹소켓 로그인 실패(8005 등)**: `LOGIN` 거부 시 REST 토큰 **TTL 캐시 무효화** 후 재발급·재접속 — 동일 무효 토큰으로만 무한 재시도하던 현상 완화 (`ui/tabs/monitor_tab.py`). 실패 로그 **스로틀**, 짧은 대기 후 재시도.
+
+## 0.3.43 (2026-04-17)
+
+- **실시간 감시 UI**: 워밍업 `prep_ok` 시 상단 상태를 「데이터 준비 중」으로 덮어 **감시 중** 문구가 사라지던 현상 수정 (`k_trader_gui.py`).
+- **웹소켓 구독 목록**: `_active_stream_codes`만 쓰면 워밍업이 일부만 반영될 때 **한 종목만 REG** 되던 문제 수정 — 감시·관심·보유 합집합에 워밍업 코드 **병합** (`k_trader_gui.py` `stream_subscription_codes`). 구독 목록이 비었을 때 **감시를 끄지 않고** 재시도, `selected_targets.csv` 폴백.
+- **실시간 패킷**: 호가(0D)만 오고 체결가가 없을 때 `price==0`으로 틱이 전부 무시되던 경로 완화 (`ui/tabs/monitor_tab.py`).
+- **워밍업**: 지표 계산은 꼬리 봉만 (`realtime_warmup_indicator_calc_max_rows`, `core/warmup_service.py`). 메인 워밍업은 **항상** 최소·당일만 — 캘린더 깊이(1년)는 **백그라운드 큐만** (`realtime_warmup_quick_then_deep_background` 분기 제거).
+- **포지션 탭**: 세로 Paned **sash 복원** 안전화(높이 미확정·클램프), 보유 트리 **래퍼 프레임**으로 확장 고정 (`ui/tabs/virtual_tab.py`).
+- **설정**: `realtime_warmup_indicator_calc_max_rows` (`core/defaults.py`, `settings.json`).
+- **동일 환경**: 회사 PC는 `SETUP_COMPANY_PC.md`대로 클론 후 `pip install -r requirements.txt` 또는 동일 재현 시 `requirements-lock.txt`(저장소에 동봉).
+
+## 0.3.42 (2026-04-17)
+
+- **실시간 워밍업·RT15m DB 보충(ka10080)**: 기본 **`tic_scope` 15분봉**만 연속조회하고, 1분→15분 리샘플을 하지 않음. 설정 `realtime_warmup_ka10080_tic_scope`(`core/defaults.py`, `settings.json`). `data_manager_v2.fetch_kiwoom_minute_chart_page`에 `tic_scope` 인자 추가 (`core/warmup_service.py`).
+- **일일결산 15분 차트(REST)**: `fetch_15m_bars_for_trading_day_rest_only`도 **ka10080 15분봉**만 받고 1분 리샘플 제거 (`data_manager_v2.py`).
+- **감시 탭 신호상태**: 백그라운드 깊이 보강 완료 시 `prep_ok` 를 다시 보내 **15분봉·검증 완료**로 덮어쓰던 현상 제거 (`core/warmup_service.py`).
+- **배포·재현**: 회사 PC 등 동일 환경용 **`requirements-lock.txt`**(Python 3.12 `pip freeze`), **`SETUP_COMPANY_PC.md`**, **`requirements.txt`** 보강(pykrx·FDR·optuna 등).
+- **`.gitignore`**: 대용량 DB 명시(`realtime_15m*.db`, `KTrader.db`, `trading_state_*.db` 등). `trading_data.db`는 기존과 같이 제외.
+- **KODEX200 유니버스**(`core/kodex200_universe.py`): KRX PDF 직접 호출·HTTP 재시도·`kodex200_constituents_url` 원격 CSV 등(이전 세션 반영분 포함).
+
+## 0.3.41 (2026-04-17)
+
+- **포지션 관리 탭 UI**: 주문·체결 **날짜 네비**를 필터와 **한 줄**에 두고, 구분 세그먼트와 같은 **컴팩트** 스타일(◀·날짜·▶·오늘)로 정리 (`ui/tabs/virtual_tab.py`).
+- **주문 로그 날짜 네비**: 당일에 주문 이력이 없어 DB 캘린더에 없을 때도 **다음(▶)** 으로 **오늘(빈 목록)** 에 도달하도록 수정 (`_order_log_next_date_with_orders`).
+
+## 0.3.40 (2026-04-17)
+
+- **포지션 관리 탭 UI**: 주문·체결 내역 **구분(전체·매수·매도)** 필터를 콤보박스 대신 **세그먼트 컨트롤** 스타일로 표시 (`ui/tabs/virtual_tab.py`).
+
+## 0.3.39 (2026-04-16)
+
+- **실시간 감시 탭 UI**: 상단(보유)·하단(감시목록) **세로 분할 비율**(`sash0_rel`) 저장·복원. `monitor_column_widths.json`을 `{"columns":{…},"sash0_rel":…}` 형식으로 확장하고, 기존 평면 컬럼 dict 도 그대로 읽음 (`ui/tabs/monitor_tab.py`).
+- **포지션 관리 탭 UI**: 보유 트리·주문·체결 트리 **컬럼 폭** 및 보유/주문 영역 **세로 분할** 저장·복원. `virtual_portfolio_ui.json` (`settings.json`과 동일 폴더) (`ui/tabs/virtual_tab.py`).
+
+## 0.3.38 (2026-04-16)
+
+- **KODEX200 유니버스 자동 반영**: `core/kodex200_universe.py` — 기본 `kodex200_universe_priority=etf_api_first` 시 pykrx KODEX200 ETF(069500) 구성을 최우선하고, 실패 시 `kodex200.csv`·FDR 순. `local_csv_first` 로 기존(수동 CSV 우선) 동작 유지. 선택 `kodex200_export_csv_on_etf_success` 로 ETF 성공 시 `kodex200.csv` 자동 갱신. `data_manager_v2.get_kospi_list`, `strategy_selector` 실시간 선정 경로 연동 (`core/defaults.py`, `settings.json`, `k_trader_gui.py`).
+
+## 0.3.37 (2026-04-16)
+
+- **워밍업 UI(신호상태)**: 백그라운드 깊이(ka10080) 조회가 메인 `run()` 종료 후 `is_running` 때문에 조기 종료되고, `prep_progress`만 남아 `(1/41) 분봉 API 1/500…` 에 멈추던 문제 수정. 깊이 보강은 `respect_warmup_lifecycle=False` 로 끝까지 조회, 트리 진행 표시는 `suppress_prep_tree_progress=True` 로 생략, 완료 시 `prep_ok` 로 신호상태 복구. ka10080 진행 알림은 **실제 조회 종목 코드**로 행을 갱신하고 `(i/N)` 은 메인 루프와 같은 종목일 때만 맞춤 (`core/warmup_service.py`).
+
+## 0.3.36 (2026-04-16)
+
+- **실시간 스트림 재등록 로그**: 증분 워밍업으로 구독 시그니처가 매번 달라도, `REG` 전송은 유지하되 대시보드 문구는 **최대 약 25초에 1회**·종목 수 포함으로 스로틀 (`ui/tabs/monitor_tab.py`).
+- **워밍업 API**: `is_running` 해제로 빠지는 **정상 연속조회 중단**은 로그 생략(종목별 스팸 제거). ka10080 진행 로그는 **120페이지 단위**만 출력, 1페이지 단독 로그 제거 (`core/warmup_service.py`).
+
+## 0.3.35 (2026-04-16)
+
+- **워밍업 로그**: `run()` 시작 안내를 한 줄로 통합, 종목별 1차 성공 로그 제거 후 메인 루프 종료 시 요약 한 줄만 출력. ka10080 연속조회 진행 로그 간격 확대·소량 페이지 요약 생략, API 15m 보충·RT15mDB 영속화·깊이보강(백그라운드) 성공 로그 생략, 1m→15m 리샘플 안내는 run당 최대 3회 (`core/warmup_service.py`).
+
+## 0.3.34 (2026-04-16)
+
+- **실시간 감시 웹소켓**: `REG` 재전송 요청이 같은 구독 종목 집합이면 전송·`[시스템] 실시간 스트림 재등록` 로그를 생략해 대시보드 로그 스팸을 줄임. 소켓 연결 시 시그니처 초기화, 로그인 직후 최초 `REG` 시 시그니처 기록 (`ui/tabs/monitor_tab.py`).
+
+## 0.3.33 (2026-04-16)
+
+- **실시간 감시 탭 UI**: 컨트롤 줄 순서를 `상태 | 실시간 감시 시작·중단 | 일일 감시목록 선정`으로 변경. 상태 문구 길이가 바뀔 때 액션 버튼이 옆으로 밀리던 현상 완화 (`ui/tabs/monitor_tab.py`).
+
+## 0.3.32 (2026-04-16)
+
+- **실시간 Smart Buy (Type B)**: 호가 `total_ask`/`total_bid`로 계산한 매도/매수 잔량비를 `info['ask_bid_ratio']`에 넣지 않아, Smart Buy ON 시 `info.get(..., 1.0)` 폴백이 **항상** `smart_buy_ba_ratio`(예: 1.5) 미만으로 처리되던 버그 수정 (`core/signal_engine.py`).
+
+## 0.3.31 (2026-04-15)
+
+- **포트폴리오 `invested`**: 브로커 동기화·가상 신규 시 체결금액에 **매수 수수료**를 더해 S1 on_fill과 맞춤. S2 추매 시 BUY 이벤트 합산 우선, 없으면 기존 `invested`에 추매 다리(가격×수량+수수료) 가산 (`core/portfolio_manager.py`).
+- **미실현 손익 공통화**: `utils/fee_rates.unrealized_at_price_net_of_sell_fee` — 매도 수수료 차감 순입금 − `invested`. 가상 탭·가상 내러티브 리포트·일일 정산 요약에서 동일 식 사용 (`utils/fee_rates.py`, `ui/tabs/virtual_tab.py`, `reporting/virtual_report.py`, `reporting/daily_settlement_report.py`).
+- **설정**: 모의 매도 수수료 `sell_fee_mock` **0.5 → 0.55** (`settings.json`).
+
+## 0.3.30 (2026-04-16)
+
+- **설정·동작**: `use_auto_virtual`(가상 매매 자동화) 토글 제거 — 설정 탭·`defaults`·`settings.json`·리포트 매핑·`trading_controller` 가드 삭제. 실시간 신호에 따른 매수·전략 액션은 항상 진행 (`ui/tabs/settings_tab.py`, `core/defaults.py`, `core/trading_controller.py`, `reporting/trade_report.py`, `tools/settings_tab_ui_catalog.py`).
+
+## 0.3.29 (2026-04-16)
+
+- **하베스팅 UI**: 대시보드 데이터 수집 타일 제거. **최신주가데이타수집** 버튼을 백테스팅 탭 상단 `시세 데이터` 구역으로 이전(설명 문구 없음). 기간·최적화·성과 검증은 `grid` 균등 3열·`기간 · 최적화 · 성과 검증` 프레임으로 정리 (`ui/tabs/backtest_tab.py`, `ui/tabs/dashboard_tab.py`).
+
+## 0.3.28 (2026-04-16)
+
+- **실시간 감시 탭 UI**: 종목 일일 선정을 대시보드에서 이전 — 버튼명 **일일 감시목록 선정**, 오른쪽 묶음 순서(선정 → 감시 시작 → 상태), 두 액션 버튼 동일 `width` (`ui/tabs/monitor_tab.py`, `ui/tabs/dashboard_tab.py`). KODEX 로드 후 활성화·원격 선정은 `monitor_tab` 경로 (`k_trader_gui.py`, `core/remote_commander.py`).
+
+## 0.3.27 (2026-04-16)
+
+- **계좌 REST 주기 동기화**: KRX 장중/장외 구분·보유만으로 타이머 유지 로직을 제거하고, **실시간 감시가 켜져 있을 때만** 약 30초마다 동기화. 감시 중이 아니면 30초 루프 없음 (`k_trader_gui.py`).
+
+## 0.3.26 (2026-04-16)
+
+- **trading_data.db 용량**: PK(`code`,`datetime`)와 동일한 보조 인덱스(`idx_bars_1m_code_dt` 등)가 데이터·키를 이중 저장 — `data_manager_v2` 부트 시 `DROP INDEX IF EXISTS`로 정리, 신규에는 동일 인덱스 미생성. 수동 점검: `python tools/audit_trading_db_size.py`, 인덱스만 드롭: `tools/drop_redundant_candle_indexes.sql`. 파일 크기 축소는 `VACUUM`(시간 소요).
+
+## 0.3.25 (2026-04-16)
+
+- **워밍업 분리**: `realtime_warmup_quick_then_deep_background`(기본 True)일 때 메인 워밍업은 최소 봉·당일 갭만 빠르게 채우고, 캘린더·깊이(1년) ka10080 보강은 데몬 스레드 큐에서 종목별 순차 실행. `bars_data` 갱신은 `RLock`으로 스트림 틱과 동기화 (`k_trader_gui.py`, `core/stream_processor.py`, `core/warmup_service.py`).
+
+## 0.3.24 (2026-04-16)
+
+- **워밍업 UI**: ka10080 연속조회(특히 캘린더·깊이 모드) 중에도 `prep_progress`로 페이지 진행 표시·로그(15·50페이지 단위). 연속조회 루프에서 `is_running` 확인으로 중단 가능 (`core/warmup_service.py`, `ui/tabs/monitor_tab.py`, `k_trader_gui.py`).
+
+## 0.3.23 (2026-04-16)
+
+- **실시간 최소 봉수**: `min_15m_bars_for_signal`만이 아니라 설정 탭 ATR 주기 `atr_period_a`·`atr_period_b`(폴백 `atr_period`)와의 **최댓값**을 `effective_min_15m_bars_for_monitoring()`으로 통일 — 신호 엔진·워밍업 검증 공통 (`core/defaults.py`, `core/signal_engine.py`, `core/warmup_service.py`).
+
+## 0.3.22 (2026-04-16)
+
+- **워밍업 과거 1년(캘린더) 확보**: `realtime_warmup_fetch_calendar_history`(기본 True)일 때 ka10080 를 신호 최소봉만으로 조기 종료하지 않고, 가장 오래된 15분봉이 `realtime_15m_calendar_retention_days` 이전이 될 때까지 연속조회. 상한 `realtime_warmup_ka10080_max_pages_deep`(기본 500). 키움 응답 한도로 1년 미만일 수 있음 (`core/warmup_service.py`, `core/defaults.py`).
+
+## 0.3.21 (2026-04-16)
+
+- **실시간 15분 DB 캘린더 롤링**: `realtime_15m_*.db`는 `realtime_15m_calendar_retention_days`(기본 365) 이전 봉을 종목별 DELETE. 워밍업 배치·확정봉 저장 후 동일 트랜잭션에서 정리. 조회는 `datetime >= cutoff` 필터. `realtime_warmup_15m_query_limit` 기본 7000으로 조정(1년 분량 상한). (`core/realtime_monitor_bars_store.py`, `k_trader_gui.py`, `core/defaults.py`)
+
+## 0.3.20 (2026-04-16)
+
+- **실시간 15분 DB 영속화**: 워밍업 검증 통과 직후 종목별 병합 OHLCV를 `realtime_15m_*.db`에 배치 저장(`bulk_upsert_ohlcv_index_frame`). 저장 상한은 `realtime_warmup_15m_query_limit`과 동일. 설정 `realtime_warmup_persist_to_rt15m_db`(기본 True)로 끌 수 있음 (`core/realtime_monitor_bars_store.py`, `core/warmup_service.py`, `core/defaults.py`).
+
+## 0.3.19 (2026-04-16)
+
+- **실시간 감시 전용 15분 DB**: 하베스팅 `trading_data.db`와 분리된 `realtime_15m_mock.db` / `realtime_15m_live.db`에 확정 15분봉 적재 (`core/realtime_monitor_bars_store.py`, `core/stream_processor.py` 콜백, `k_trader_gui.py`).
+- **워밍업**: `realtime_warmup_ohlcv_source`에 `realtime_15m_db_then_api`(별칭 `rt_15m_db`, `monitor_15m_then_api`) — 실시간 DB 우선 후 API 백필 (`core/warmup_service.py`). 기본·`settings.json` 예시를 해당 모드로 정렬 (`core/defaults.py`).
+- **문서**: `docs/realtime_monitor_bar_and_db_notes.md` 구현 섹션 보강.
+
+## 0.3.18 (2026-04-16)
+
+- **포지션·체결**: 매도 `exit_reason`을 주문 로그(`EXIT_*`)와 동일 문자열로 저장·체결 시 우선 반영 (`core/trading_controller.py`, `core/portfolio_manager.py` `on_fill`).
+- **매매 종료 누락 방지**: 로컬 보유 없이 매도 체결만 온 경우 `order_history` 기반 `record_orphan_sell_close` 보강 (`data_manager_v2.py`, `k_trader_gui.py`).
+- **근본 보강**: 실매도 접수 성공 직후 포지션 전체를 주문번호로 `pending_exit_snapshots`에 저장·`virtual_db` 영속화, 체결 시 스냅샷으로 종료 확정; `on_fill(..., order_no=)` 전달 (`core/portfolio_manager.py`, `k_trader_gui.py`, `core/trading_controller.py`). 락을 `RLock`으로 변경.
+- **비상 매도**: `sell_all`에서 접수 번호가 있으면 동일 스냅샷 등록 (`core/portfolio_manager.py`).
+
+## 0.3.17 (2026-04-15)
+
+- **UI**: 동기화·종합리포트·일일결산·관심목록·서버 전환·모드 배지를 **대시보드** `운영 · 계좌` 영역으로 이전. 포지션 관리 탭 상단에는 안내 문구만 표시 (`ui/tabs/dashboard_tab.py`, `ui/tabs/virtual_tab.py`). 종합리포트 생성 중 버튼 비활성화는 대시보드·기존 로직 겸용.
+
+## 0.3.16 (2026-04-15)
+
+- Plotly `go.Candlestick` 호환: `increasing_fill_color` 등 폐기 속성 제거 → `increasing`/`decreasing` dict(`line`, `fillcolor`)로 지정 (`reporting/daily_settlement_report.py` — 종합·일일 결산 15분 차트 공통)
+
+## 0.3.15 (2026-04-15)
+
+- 종합(가상) 리포트 생성 시 15분 차트용 REST를 **종목·거래일 단위로 한 번만** 호출하도록 동일 리포트 내 `rest_day_cache` 공유 (`reporting/virtual_report.py`). 캐시 히트 시 일자 간 `sleep(0.12)` 생략.
+
+## 0.3.14 (2026-04-15)
+
+- 종합(가상) 리포트 **백테스트 분석 통계**: 실행·신호와 전략·스테이지 실현을 **Type A/B × S1/S2 네 칸 + 합계** 한 표로 통합하고, 청산·세션·스마트 시도 등은 **전역·세션 요약** 표로 분리 (`reporting/trade_report.py`)
+
+## 0.3.13 (2026-04-15)
+
+- 백테스트·가상 종합 리포트 「실행·신호 요약」표에서 **신호 후보 대비 완료 라운드 비중** 행 제거(단위 불일치로 해석이 어려움) (`reporting/trade_report.py`)
+
+## 0.3.12 (2026-04-15)
+
+- 종합(가상) 리포트 **스마트 진입 거절(수급)**: 실시간 감시에서 Smart Buy 미통과 시 세션 이벤트 `smart_buy_blocked`를 남기고(15분봉·종목당 1회), 가상 이력 일자 구간의 `session_events.jsonl`에서 건수를 합산해 표시 (`core/signal_engine.py`, `reporting/trade_report.py`, `reporting/virtual_report.py`)
+
+## 0.3.11 (2026-04-15)
+
+- 일일 결산·종합 리포트 **15분 Plotly 차트**: 한국 시장 관례에 맞춰 **상승 봉·상승 거래량 막대 = 빨강(`#BF616A`)**, **하락 = 파랑(`#5E81AC`, MA선과 구분)** (`reporting/daily_settlement_report.py`; 종합 리포트는 동일 `_build_plotly_15m_section` 사용)
+
+## 0.3.10 (2026-04-15)
+
+- 일일 결산 HTML 생성: `_build_enriched_order_rows` 호출 시 누락되던 **`excl` 정의** 보강(기본 빈 집합·선택 `app.daily_report_exclude_codes`) — `NameError`로 배치 생성이 막히던 문제 수정 (`reporting/daily_settlement_report.py`)
+- 계좌 동기화: **`SYNCED` 유령 제거** 시 “직전 실매도” 판정을 **분 단위**(`sync_ghost_suppress_minutes`, 레거시 시간 키는 상한 변환)로 좁혀 과도한 억제 완화 (`core/portfolio_manager.py`, `core/defaults.py`, `settings.json`)
+- 체결 동기화: REST 선처리 시 주문번호를 **`on_fill` 성공 후에만** `_exchange_fill_order_ids`에 넣도록 변경 — 매도 스킵 뒤 CHE가 `on_fill`을 못 타 **매매종료내역 누락**될 수 있던 순서 버그 수정 (`k_trader_gui.py`); `on_fill`은 스킵 시 `False` 반환 (`core/portfolio_manager.py`)
+- **도구**: `order_history` → `virtual_history` 복구 스크립트 추가 (`tools/recover_missing_history_from_orders.py`)
+
+## 0.3.9 (2026-04-15)
+
+- 실시간 감시 S1 Smart Buy: **`use_smart_buy_a` 기본 `False`**(키 누락 시에도 Type A SB 비활성), **`sel_track`(A/B/AB)과 동일한 SB 스위치** 적용 — 전략 A 표시인데 Type B 수급 필터만 타던 불일치·「수급 대기」 오표시 완화 (`core/signal_engine.py`)
+- 백테스트: Type A Smart Buy 캐시 **`use_sb_a` 기본 `False`**로 `defaults`와 정합 (`backtest_engine.py`)
+
+## 0.3.8 (2026-04-15)
+
+- 포지션 관리·종합 리포트·일일 결산: **관심목록으로 종목을 숨기거나 집계에서 제외하지 않음** — 관심은 신호 테스트 등 전용, 계좌 데이터는 전부 반영 (`virtual_tab.py`, `daily_settlement_report.py`, `watchlist_store.py` 설명 정리)
+
+## 0.3.7 (2026-04-15)
+
+- 실시간 감시: **트리 UI 갱신**만 `after` 주기 완화 (`k_trader_gui.py`의 `REALTIME_TREE_UI_REFRESH_MS`, 기본 280ms). 틱·지표·신호 처리 경로는 0.3.6과 동일 — 발열·CPU는 **표시 루프만** 줄여 관찰
+
+## 0.3.6 (2026-04-13)
+
+- 실시간 감시 탭: 청산으로 보유 트리에서 빠진 종목은 **감시 선정(`monitor_codes`)에 있을 때만** 실시간 감시 목록에 표시; 선정 외 보유만 하던 종목은 감시 목록으로 자동 이동하지 않음 (`monitor_tab.py`)
+
+## 0.3.5 (2026-04-13)
+
+- 실시간 감시 탭 **보유 및 대응 종목** / **실시간 감시 목록**: **거래대금** 컬럼 제거 (`monitor_tab.py`, `signal_engine.py` 트리 갱신 값 정합)
+
+## 0.3.4 (2026-04-13)
+
+- 실시간 감시 탭 **보유 및 대응 종목** / **실시간 감시 목록**: 컬럼 **헤더는 항상 가운데**; **전략유형·신호상태** 셀 **가운데**, **현재가**부터 오른쪽 수치·호가 셀 **오른쪽** 정렬 (`monitor_tab.py`)
+
+## 0.3.3 (2026-04-13)
+
+- **증권사 체결내역 REST (`kt00007`)**: 계좌 동기화 후·주문 로그 날짜 변경 시 백그라운드로 조회해 `order_history`에 병합(실전/모의 state DB 각각, `order_source`·`fill_row_key`로 중복 방지)
+- 설정 **`exchange_fill_sync_lookback_days`** (기본 7일): 동기화 시 병합할 과거 일수
+
+## 0.3.2 (2026-04-13)
+
+- 포지션 관리 탭 **매매 종료 내역** 사유: 진입 TYPE 대신 **`exit_reason`(매도·정리 사유)** 및 청산 이벤트에서 보강 표시
+- **주문 로그** 상태: `FILLED` → 표시 **`성공`**
+
+## 0.3.1 (2026-04-13)
+
+- Smart Exit **가격 하락 임계** (`smart_exit_price_threshold`): 고점 대비 **하락 %(양수)** 로 통일, 음수는 절댓값과 동일 처리 (`TradingStrategy.evaluate_position` 등)
+
+## 0.3.0 (2026-04-13)
+
+- 포지션 관리 탭 **요약 지표 재정의**: `backtest_initial_capital` 제거 — **보유주식 손익(미청산)** 은 미실현 합만, **누적 수익(종료+보유)** 은 매매종료 손익 합 + 보유 미실현 합, %는 **총자산** 분모
+- 보유 **미실현**: 현재가 전량 매도 가정 시 **매도 수수료** 반영(`invested` 원가); 트리 손익금과 상단 합계·틱 요약이 **동일 스냅샷**으로 일치
+- 실시간 보유 / 매매종료 / 주문 로그 Treeview **열 정렬**(진입일시·가격·수익률·VP·사유 등)
+
+## 0.2.10 (2026-04-13)
+
+- 가상 매매 **종합 리포트** 생성: **진행률 표시**(단계별 메시지 + 프로그레스바), **백그라운드 스레드** 처리로 UI 멈춤 완화, 생성 중 **종합리포트** 버튼 비활성·중복 실행 안내
+- `generate_virtual_narrative_report(..., progress_callback=…)` — 통계·종목별 차트·저장 단계에서 `(done, total, msg)` 콜백
+
+## 0.2.9 (2026-04-13)
+
+- 가상 매매 **종합 리포트** 15분 차트: **진입일~청산일(미청산 시 오늘)** 거래일 15분봉을 이어 붙여 표시
+- 동일 차트: **연속 장중** x축(봉 순서)으로 야간·휴장 빈 구간 제거, 호버·눈금에 실제 일시 표시 (`compress_session_gaps`)
+- 일일 결산 15분 Plotly: `max_display_rows`·구간 라벨·제목 보강(가상 리포트와 공용)
+
+## 0.2.8 (2026-04-14)
+
+- 일일 결산 HTML: **세션 이벤트 로그(JSONL 복사본)** 섹션 제거(리포트에서 JSONL 미포함·생성 시 세션 이벤트 미조회)
+
+## 0.2.7 (2026-04-14)
+
+- 포지션(가상) 탭 **주문 로그** 날짜 네비: 주문이 없는 날짜는 건너뛰기, 가장 과거/가장 최근(오늘 이하) 주문일에서는 **이전** / **다음** 비활성 (`get_distinct_order_calendar_dates`)
+
+## 0.2.6 (2026-04-14)
+
+- 실시간 감시: 전략유형 **전략 A/B** 문구 정리, 신호상태에서 **「대기」** 접두 제거
+- 포지션(가상) 탭 실시간 보유: **평가금** 열 양수 앞 `+` 제거
+
+## 0.2.5 (2026-04-14)
+
+- 실시간 감시 **신호상태**: 보유 종목은 S1 합치도 대신 **S2 추매 합치도**(`추매(A|B) N/M`, 2차 진입 완료 시 `추매(S2) 완료`) 표시; 미보유 시 타점 문구가 트리에 반영되도록 순서 정리
+
+## 0.2.4 (2026-04-14)
+
+- 실시간 감시: 감시 트리 `sel_track=B` 인데 포지션에 TYPE_B가 비어 있으면 ATR 기준가는 B로 그려지나 청산만 A 트랙으로 잡히던 불일치 수정 (`evaluate_position`에 `sel_track` 전달·표시와 동일 보정)
+- 실시간: 보유 시 봉 수 부족해도 청산 평가 시도, `evaluate_position`에서 지표 ATR NaN 시 `bars_df` 기반 ATR 보강 (`_curr_atr_resolved`)
+
+## 0.2.3 (2026-04-14)
+
+- 포지션(가상) 탭 상단 요약: **금일 손익** 라벨을 실제 의미에 맞게 **보유주식 손익**으로 변경
+
+## 0.2.2 (2026-04-14)
+
+- 포지션(가상) 탭 **실시간 보유 현황**: Canvas·라벨 그리드 대신 Treeview로 표시 (스크롤·줄무늬·손익 태그와 동일 패턴)
+
+## 0.2.1 (2026-04-14)
+
+- 예수금: 출금가능금액(pymn) 기준 표시, 주문가능·D+2와 분리; `get_withdrawable_deposit()` 추가
+- S1 매수: `invest_amt < 1주 가격`일 때 `max(1,…)`로 한도 초과 매수하던 문제 제거 (D+2 미수 방지)
+- 실시간 감시 ATR 기준가: NaN·`ATR미사용` 보강(ADX 실패 시에도 ATR 계산, TR 근사 폴백, Type B·sel_track·워밍업 시계열 연동)
+- 기타: `strategy/indicators` ADX/ATR 분리, 포지션 동기화 시 `sel_track=B`이면 `sig_type` TYPE_B 등
+
+## 0.2.0 (2026-04-13)
+
+- 가상 매매 종합 리포트: 미청산 보유 종목을 현재가 기준으로 평가, 매도 시 수수료를 반영한 순입금 추정을 종목별·상단 요약에 표시
+- 코어·UI·리포팅·수수료/경로 유틸 등 누적 개선 (실시간 감시, 가상 탭, 일일 결산·거래 리포트 등)
+
+## 0.1.1
+
+- `CHANGELOG.md` 신설: 이후 버전 갱신 시 수정 요약을 누적 기록
+- `core/version.py` 관례에「버전 변경 시 본 파일 반영」문구 보강
+
+## 0.1.0
+
+- 앱 표시 버전을 `0.N.M` 체계로 정리 (`core/version.py`의 `APP_VERSION`, 메인 창 제목 연동)
+- 실전 반영 전 선행 `0`·`N`/`M` 증가 규칙을 `core/version.py` 주석으로 명시
