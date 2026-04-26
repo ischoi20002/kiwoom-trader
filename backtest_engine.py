@@ -1566,6 +1566,11 @@ class SimpleBacktester:
                 'ask_bid_ratio': df['ask_bid_ratio'].values if 'ask_bid_ratio' in df.columns else np.full(len(df), 1.0),
                 'vol_power': df['vol_power'].values if 'vol_power' in df.columns else np.full(len(df), 100.0),
                 'Signal': df['Signal'].values if 'Signal' in df.columns else np.zeros(len(df), dtype=bool),
+                # dynamic_backtest 와 동일: 최소 봉 수 이후에만 S1 신호 평가(고정밀 루프에서 Ready 누락 방지)
+                "Ready": (np.arange(len(df)) >= 19),
+                "S1_Simultaneous_AB": df["S1_Simultaneous_AB"].values
+                if "S1_Simultaneous_AB" in df.columns
+                else np.zeros(len(df), dtype=bool),
                 'MA60': df['MA60'].values if 'MA60' in df.columns else np.zeros(len(df)),
                 "Prev_Day_Vol": df["Prev_Day_Vol"].values if "Prev_Day_Vol" in df.columns else np.zeros(len(df)),
                 "Prev_Day_Vol_B": df["Prev_Day_Vol_B"].values if "Prev_Day_Vol_B" in df.columns else np.zeros(len(df)),
@@ -1893,7 +1898,15 @@ class SimpleBacktester:
             # [v40.0] Incremental Indicator Simulation
             m1_row_data = {'Close': m1_p, 'High': m1_h, 'Low': m1_l, 'bid_ask_ratio': m1_ba_val, 'vol_power': m1_vp_val}
             indicator_to_use = TradingStrategy.simulate_intrabar_indicators(last_15m_dict, m1_row_data, self.settings, hist_df_prices_tail=prices_tail)
-            
+            # 베이스는 직전 15m(i-1) 종가 상태라 Signal 등이 한 봉 밀릴 수 있음. 현재 봉 i의 사전계산 신호로 덮어씀.
+            if indicator_to_use is not None and indicators is not None:
+                try:
+                    for _k in ("Signal", "Ready", "Sig_Type", "S1_Simultaneous_AB"):
+                        if _k in indicators:
+                            indicator_to_use[_k] = indicators[_k][i]
+                except (KeyError, IndexError, TypeError, ValueError):
+                    pass
+
             if indicator_to_use is None:
                 indicator_to_use = {k: v[i] for k, v in indicators.items()}
 

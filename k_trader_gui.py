@@ -221,9 +221,8 @@ class KiwoomApp:
         self.pending_tree_updates = {} # [v4.5.3] UI 지연 업데이트용 큐
         # REST 선체결 vs 웹소켓 CHE 중복 on_fill 방지 (주문번호 기준)
         self._exchange_fill_order_ids: Set[str] = set()
-        # 계좌 REST 주기 동기화 — 실시간 감시 중일 때만 약 30초마다. 감시 중이 아니면 타이머 없음.
+        # (구) 주기 계좌 동기화 타이머 취소용. 자동 동기화는 기동 후 1회만 수행한다.
         self._account_sync_job: Optional[Any] = None
-        self._account_sync_job_running: bool = False
         self._virtual_tab_render_pending: bool = False
         self._virtual_tab_render_last_ts: float = 0.0
         # 웹소켓 틱 → 메인 스레드에서 배치 처리 (종목당 마지막 틱만 유지)
@@ -515,8 +514,8 @@ class KiwoomApp:
         gui_callback 은 PortfolioManager 가 root.after(0) 으로 메인에 넘긴다.
         동시에 두 번 돌면 상태가 꼬일 수 있어 락으로 직렬화(이미 실행 중이면 이번 호출은 생략).
 
-        refresh_cash_deposit=False: ka10085 보유 정합만 하고 예수금상세 등 현금 API는 생략
-        (30초 주기 루프). 예수·D+n·출금가능은 체결 후 동기화 등 refresh_cash_deposit=True 경로에서만.
+        refresh_cash_deposit=False: ka10085 보유 정합만 하고 예수금상세 등 현금 API는 생략.
+        예수·D+n·출금가능은 체결 후 동기화 등 refresh_cash_deposit=True 경로에서만.
         """
         def _worker() -> None:
             acquired = False
@@ -1107,57 +1106,17 @@ class KiwoomApp:
                 pass
         return out
 
-    def _maybe_start_account_sync_timer(self) -> None:
-        """실시간 감시 중일 때만 REST 계좌 주기 타이머(약 30초)를 시작합니다."""
-        try:
-            if self._account_sync_job_running:
-                return
-            if not self.is_monitoring:
-                return
-            self._account_sync_job_running = True
-            self._periodic_account_refresh_loop()
-        except Exception:
-            pass
-
     def _maybe_stop_account_sync_timer(self) -> None:
-        """실시간 감시가 꺼지면 주기 갱신을 중지합니다."""
+        """구버전에서 예약된 주기 동기화(after)가 있으면 취소합니다."""
         try:
-            if self.is_monitoring:
-                return
             if self._account_sync_job is not None:
                 try:
                     self.root.after_cancel(self._account_sync_job)
                 except Exception:
                     pass
                 self._account_sync_job = None
-            self._account_sync_job_running = False
         except Exception:
             pass
-
-    def _periodic_account_refresh_loop(self) -> None:
-        """
-        실시간 감시 중: 약 30초마다 보유(ka10085) 정합만 수행.
-        예수금·D+1/D+2·총자산 REST는 매매 체결 후 동기화에서만 갱신(refresh_cash_deposit=True).
-        """
-        try:
-            if not self.root.winfo_exists():
-                return
-            if self.is_monitoring:
-                self._run_portfolio_sync_in_daemon_thread(
-                    silent=True, force=True, refresh_cash_deposit=False
-                )
-        except Exception:
-            pass
-        try:
-            if self.is_monitoring:
-                self._account_sync_job = self.root.after(
-                    30_000, self._periodic_account_refresh_loop
-                )
-            else:
-                self._account_sync_job = None
-                self._account_sync_job_running = False
-        except Exception:
-            self._account_sync_job_running = False
 
     def request_virtual_tab_realtime_render(self) -> None:
         """
@@ -1302,7 +1261,6 @@ class KiwoomApp:
                 self.monitor_info = dict(self.trading_controller.monitor_info or {})
             except Exception:
                 pass
-            self._maybe_start_account_sync_timer()
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
             if self.lbl_monitor_status: self.lbl_monitor_status.config(text=f"상태: 감시 중 ({data}종목)", foreground=self.colors['success'])
             if self.status_label:
@@ -1520,15 +1478,11 @@ class KiwoomApp:
         전체 리빌드는 무거우므로 한 틱 지연 후 수행하고, 그동안 하단에 처리 중 표시.
         """
         try:
-            self._maybe_start_account_sync_timer()
-            try:
-                self.trading_controller._ensure_virtual_positions_monitor_info()
-            except Exception:
-                pass
-            try:
-                self.monitor_info = dict(self.trading_controller.monitor_info or {})
-            except Exception:
-                pass
+            self.trading_controller._ensure_virtual_positions_monitor_info()
+        except Exception:
+            pass
+        try:
+            self.monitor_info = dict(self.trading_controller.monitor_info or {})
         except Exception:
             pass
         if not hasattr(self, "virtual_tab"):
@@ -1597,15 +1551,11 @@ class KiwoomApp:
     def refresh_virtual_tab_full(self) -> None:
         """주문 로그 반영 등 히스토리·주문 트리까지 전부 다시 그릴 때 사용."""
         try:
-            self._maybe_start_account_sync_timer()
-            try:
-                self.trading_controller._ensure_virtual_positions_monitor_info()
-            except Exception:
-                pass
-            try:
-                self.monitor_info = dict(self.trading_controller.monitor_info or {})
-            except Exception:
-                pass
+            self.trading_controller._ensure_virtual_positions_monitor_info()
+        except Exception:
+            pass
+        try:
+            self.monitor_info = dict(self.trading_controller.monitor_info or {})
         except Exception:
             pass
 

@@ -7,6 +7,13 @@
 
 ---
 
+## 0.6.0 (2026-04-27)
+
+- **최적화(베이지안)**: Optuna import 실패 시 원인·설치 안내 로그, trial 종료 상태별 결과 행 수집, `n_jobs=1` 직렬화로 전역 캐시·스레드 경합 완화, 목적값 NaN/Inf 방지 (`parameter_optimizer.py`).
+- **계좌 동기화**: 자동 **주기**(약 30초) 제거. 자동은 **기동 후 인증 성공 시 1회**만; 수동 동기화·체결 후 경로는 유지 (`k_trader_gui.py`, `ui/tabs/virtual_tab.py`).
+- **전략·선정·설정·백테스트**: `strategy_selector.py`, `ui/tabs/settings_tab.py`, `core/defaults.py`, `strategy/signals.py`, `backtest_engine.py`, `tools/settings_tab_ui_catalog.py`, `settings.json`, `monitor_column_widths.json` 반영.
+- **도구**: `tools/analyze_backtest_holdings.py` 추가.
+
 ## 0.5.0 (2026-04-26)
 
 - **Track A 일봉 선정 v2**: 단기 상대강도(교차섹션 분위)·고가대비 되돌림·이평 근접·ATR%·갭 등 동일 스택으로 `prepare_dynamic_universe`·`select_monitoring_targets` 정합 (`strategy_selector.py`, `core/defaults.py`).

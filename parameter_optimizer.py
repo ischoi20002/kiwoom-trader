@@ -1,17 +1,26 @@
 import pandas as pd
 import os
 import itertools
+import math
+from collections import Counter
 from datetime import datetime, timedelta
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor as TPE, ProcessPoolExecutor as PPE, as_completed
 import backtest_engine as bt
 import random
+OPTUNA_IMPORT_ERROR: str | None = None
 try:
     import optuna
+
     HAS_OPTUNA = True
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-except ImportError:
+except ImportError as _opt_ie:
     HAS_OPTUNA = False
+    OPTUNA_IMPORT_ERROR = str(_opt_ie)
+except Exception as _opt_e:
+    # 의존 패키지 불일치 등으로 import 자체가 실패할 수 있음
+    HAS_OPTUNA = False
+    OPTUNA_IMPORT_ERROR = f"{type(_opt_e).__name__}: {_opt_e}"
 from backtest_engine import SimpleBacktester, TradingStrategy, SIGNAL_CSV, TRADE_CSV, BASE_DIR
 from strategy.data_loader import BacktestDataLoader
 import reporting.trade_report
@@ -19,6 +28,18 @@ import importlib
 importlib.reload(reporting.trade_report)
 from reporting.trade_report import generate_trade_report
 import pickle
+
+
+def _finite_optuna_objective_value(val: object) -> float:
+    """Optuna에 반환할 목적값은 유한한 float 이어야 한다 (NaN/Inf 시 trial FAIL로 줄어듦)."""
+    try:
+        x = float(val)
+        if math.isfinite(x):
+            return x
+    except (TypeError, ValueError):
+        pass
+    return -999.0
+
 
 # [v30.0] 멀티프로세싱 오버헤드 최적화를 위한 전역 변수 (Windows 피클링 방지)
 _G_DATA = {}
@@ -213,7 +234,12 @@ class ParameterOptimizer:
         else:
             # Fallback to random if optuna not available but bayesian requested
             method = 'random'
-            print(f"\nOptuna not available or invalid method. Falling back to Random: {n_trials} trials.")
+            _why = OPTUNA_IMPORT_ERROR or "unknown"
+            print(
+                f"\n  (!) Optuna을(를) 불러올 수 없어 베이지안 대신 **랜덤 탐색**으로 대체합니다 ({n_trials} trials).\n"
+                f"      원인: {_why}\n"
+                f"      조치: GUI와 동일한 Python으로 `pip install optuna>=4.0.0` 실행 (프로젝트 requirements.txt 참고)."
+            )
             for _ in range(n_trials):
                 comb = self.base_settings.copy()
                 for k, v_list in self.param_ranges.items():
@@ -288,48 +314,144 @@ class ParameterOptimizer:
         if method == 'bayesian' and HAS_OPTUNA:
             # Optuna는 자체적으로 병렬화가 가능하지만, 여기서는 기존 run_comb 구조를 유지하며 최적화
             def objective(trial):
-                settings = self.base_settings.copy()
-                for k, v_list in self.param_ranges.items():
-                    if len(v_list) >= 2 and all(isinstance(x, (int, float)) for x in v_list):
-                        vmin, vmax = min(v_list), max(v_list)
-                        if all(isinstance(x, int) for x in v_list):
-                            settings[k] = trial.suggest_int(k, vmin, vmax)
+                try:
+                    settings = self.base_settings.copy()
+                    for k, v_list in self.param_ranges.items():
+                        if len(v_list) >= 2 and all(isinstance(x, (int, float)) for x in v_list):
+                            vmin, vmax = min(v_list), max(v_list)
+                            if all(isinstance(x, int) for x in v_list):
+                                settings[k] = trial.suggest_int(k, vmin, vmax)
+                            else:
+                                settings[k] = trial.suggest_float(k, vmin, vmax)
                         else:
-                            settings[k] = trial.suggest_float(k, vmin, vmax)
-                    else:
-                        settings[k] = trial.suggest_categorical(k, v_list)
-                
-                res = run_single_combination(prepare_args((trial.number, settings)))
-                if res:
-                    # [v35.4] Performance: Strip large lists (history, signal_logs) before storing in user_attrs
-                    # This dramatically reduces Optuna's internal serialization overhead per trial
-                    summary_res = {k: v for k, v in res.items() if k not in ['history', 'signal_logs', 'equity_curve']}
-                    for k, v in summary_res.items():
-                        trial.set_user_attr(k, v)
-                    return res['avg_ret']
-                return -999.0
+                            settings[k] = trial.suggest_categorical(k, v_list)
+
+                    res = run_single_combination(prepare_args((trial.number, settings)))
+                    if res:
+                        # [v35.4] Performance: Strip large lists (history, signal_logs) before storing in user_attrs
+                        # This dramatically reduces Optuna's internal serialization overhead per trial
+                        summary_res = {
+                            k: v for k, v in res.items()
+                            if k not in ['history', 'signal_logs', 'equity_curve']
+                        }
+                        for k, v in summary_res.items():
+                            try:
+                                trial.set_user_attr(k, v)
+                            except Exception as _ua_err:
+                                print(f"  (!) user_attr 설정 실패 ({k}): {_ua_err}")
+                        return _finite_optuna_objective_value(res.get('avg_ret', -999.0))
+                    return -999.0
+                except Exception as _obj_err:
+                    print(f"  (!) Objective trial {trial.number} 오류: {_obj_err}")
+                    return -999.0
+
+            _terminal_states = frozenset({
+                optuna.trial.TrialState.COMPLETE,
+                optuna.trial.TrialState.FAIL,
+                optuna.trial.TrialState.PRUNED,
+            })
 
             def study_callback(study, trial):
-                """[v35.1] Callback running in MAIN THREAD to safely update GUI"""
-                if trial.state == optuna.trial.TrialState.COMPLETE:
-                    # Get the full result stored in user_attrs
-                    res = trial.user_attrs
-                    if res:
-                        all_results.append(res)
-                        if callback:
-                            callback(f"베이지안 최적화 중 ({len(all_results)}/{n_trials})", 50 + (len(all_results)/n_trials)*50)
+                """진행률 갱신: 종료된 trial(COMPLETE/FAIL/PRUNED) 개수 기준 (병렬 시 COMPLETE만 세면 과소)."""
+                try:
+                    if callback:
+                        n_done = sum(1 for t in study.trials if t.state in _terminal_states)
+                        denom = max(int(n_trials), 1)
+                        callback(
+                            f"베이지안 최적화 중 ({n_done}/{n_trials})",
+                            50 + (n_done / denom) * 50,
+                        )
+                except Exception as _cb_err:
+                    print(f"  (!) study_callback 오류: {_cb_err}")
+
+            def rows_from_terminal_trials(study) -> list[dict]:
+                """종료된 trial마다 1행 (COMPLETE / FAIL / PRUNED). FAIL도 n_trials와 행 수 불일치 완화."""
+                rows: list[dict] = []
+                try:
+                    for t in study.get_trials(deepcopy=False):
+                        if t.state not in _terminal_states:
+                            continue
+                        row: dict = {}
+                        try:
+                            if t.state == optuna.trial.TrialState.COMPLETE and t.user_attrs:
+                                row = dict(t.user_attrs)
+                            else:
+                                row = self.base_settings.copy()
+                                try:
+                                    row.update(dict(t.params) if t.params else {})
+                                except Exception as _p_err:
+                                    print(f"  (!) trial.params 병합 오류 (trial {t.number}): {_p_err}")
+                                val = t.value
+                                ar = _finite_optuna_objective_value(
+                                    val if val is not None else -999.0
+                                )
+                                row.update({
+                                    'avg_ret': ar,
+                                    'avg_mdd': 0.0,
+                                    'avg_win': 0.0,
+                                    'total_trades': 0,
+                                    'avg_s2': 0.0,
+                                    'avg_s1_a': 0.0,
+                                    'avg_s1_b': 0.0,
+                                })
+                                if t.state != optuna.trial.TrialState.COMPLETE:
+                                    row['opt_trial_state'] = str(t.state)
+                                    try:
+                                        sa = getattr(t, 'system_attrs', None) or {}
+                                        fr = sa.get('fail_reason') or sa.get('fail_message') or ''
+                                        if fr:
+                                            row['opt_fail_reason'] = str(fr)[:500]
+                                    except Exception as _sa_err:
+                                        print(f"  (!) system_attrs 조회 오류 (trial {t.number}): {_sa_err}")
+                        except Exception as _build_err:
+                            print(f"  (!) trial 행 구성 오류 (trial {getattr(t, 'number', '?')}): {_build_err}")
+                            continue
+                        for pk in keys:
+                            if pk not in row:
+                                try:
+                                    row[pk] = self.base_settings.get(pk)
+                                except Exception:
+                                    row[pk] = None
+                        rows.append(row)
+                except Exception as _row_err:
+                    print(f"  (!) rows_from_terminal_trials 오류: {_row_err}")
+                return rows
 
             sampler = optuna.samplers.TPESampler(seed=seed)
             study = optuna.create_study(direction='maximize', sampler=sampler)
-            
-            # [v35.6] Stable Worker Count (Avoid Overload)
-            num_workers = min(os.cpu_count() or 4, 12) 
-            
-            def robust_objective(trial):
-                if not _G_DATA: init_worker(tmp_cache_path)
-                return objective(trial)
 
-            study.optimize(robust_objective, n_trials=n_trials, n_jobs=num_workers, callbacks=[study_callback])
+            # Optuna n_jobs>1 은 스레드 병렬이라, 전역 _G_DATA/_G_IND_CACHE·백테스트를 동시에 돌리면
+            # trial FAIL·목적값 비정상으로 COMPLETE만 모을 때 행 수가 크게 줄어든다. 직렬이 안전.
+            num_workers = 1
+
+            def robust_objective(trial):
+                try:
+                    if not _G_DATA:
+                        init_worker(tmp_cache_path)
+                    return objective(trial)
+                except Exception as _rob_err:
+                    print(f"  (!) robust_objective trial {trial.number} 오류: {_rob_err}")
+                    return -999.0
+
+            try:
+                study.optimize(
+                    robust_objective,
+                    n_trials=n_trials,
+                    n_jobs=num_workers,
+                    callbacks=[study_callback],
+                    catch=(Exception,),
+                )
+            except Exception as _opt_err:
+                print(f"  (!) study.optimize 중단/오류 (부분 결과만 사용): {_opt_err}")
+            try:
+                state_counts = Counter(str(t.state) for t in study.get_trials(deepcopy=False))
+                print(
+                    f"  [Opt] trial 종료 요약: {dict(state_counts)} "
+                    f"(총 {len(study.trials)}개, 요청 n_trials={n_trials})"
+                )
+            except Exception as _cnt_err:
+                print(f"  (!) trial 상태 요약 출력 실패: {_cnt_err}")
+            all_results = rows_from_terminal_trials(study)
         else:
             # [v23.0] 일반 Grid Search의 경우 모든 코어 동원
             # [v31.0] 마찬가지로 하드코딩 리미트(12) 해제

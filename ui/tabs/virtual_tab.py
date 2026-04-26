@@ -94,10 +94,6 @@ class VirtualTab:
             self.app.monitor_info = dict(self.app.trading_controller.monitor_info or {})
         except Exception:
             pass
-        try:
-            self.app._maybe_start_account_sync_timer()
-        except Exception:
-            pass
 
     def _setup_ui(self):
         """[v3.9] 수직 레이아웃: 보유 + 주문·체결(필터로 매도·체결 시 종료 매도와 동일 뷰)."""

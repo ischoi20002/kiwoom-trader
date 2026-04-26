@@ -19,6 +19,8 @@ class SettingsTab:
         self.s2_b_widgets = []
         self.sel_a_v2_widgets: list[tp.Any] = []
         self.sel_a_legacy_widgets: list[tp.Any] = []
+        self.sel_b_v2_widgets: list[tp.Any] = []
+        self.sel_b_legacy_widgets: list[tp.Any] = []
         self.grid_rows = {} 
         self.sizing_rows = []
         self.opt_sync_tasks = [] 
@@ -749,17 +751,215 @@ class SettingsTab:
             '개',
             'Track B 일별 감시·선정 상한 (보유 종목 수 제한 아님)',
         )
-        add_param_row(sel_b_f, '최소 거래대금 (B)', 'sel_b_min_trde_val', '억', 'Track B 전용 거래대금 기준 (기본값 60억)')
-        add_param_row(sel_b_f, '종목 선정 RSI 하한 (B)', 'sel_b_rsi_min', '', '추세·모멘텀 하한 (기본값 45) — Track B 정체성')
-        add_param_row(sel_b_f, '종목 선정 RSI 상한 (B)', 'sel_b_rsi_max', '', '과열 방지 상한 (기본값 75)')
-        add_param_row(sel_b_f, '거래량 분출 비율 (B)', 'sel_b_vol_ratio', '배', 'Track B 전용 거래량 분출 배수 (기본값 1.5)')
-        add_param_row(sel_b_f, '분출 확인 기간 (B)', 'sel_b_vol_lookback', '일', 'Track B 전용 분출 이력 확인 기간 (기본값 10일)')
         add_param_row(
             sel_b_f,
-            '일봉 MACD(OSC) 필터',
+            '최소 거래대금 (B)',
+            'sel_b_min_trde_val',
+            '억',
+            'v2·레거시 공통: 5일 평균 거래대금 하한',
+        )
+        add_param_row(
+            sel_b_f,
+            '종목 선정 RSI 하한 (B)',
+            'sel_b_rsi_min',
+            '',
+            'v2·레거시 공통 (v2에서 sel_b_require_sel_rsi_band ON일 때만 강제)',
+        )
+        add_param_row(sel_b_f, '종목 선정 RSI 상한 (B)', 'sel_b_rsi_max', '', '과열 방지 상한')
+        add_param_row(sel_b_f, '거래량 분출 비율 (B)', 'sel_b_vol_ratio', '배', 'VolBurstActive_B 산출용 (v2·레거시 공통)')
+        add_param_row(sel_b_f, '분출 확인 기간 (B)', 'sel_b_vol_lookback', '일', '분출 이력 룩백')
+        add_header(sel_b_f, '── Track B v2: 단기 RS·고가대비 종가·MA20 기울기·ATR%·갭 ──')
+        add_param_row(
+            sel_b_f,
+            'v2 일봉 선정 스택 사용',
             None,
             '',
-            'Track A와 동일: 선정 시 일봉 OSC>0 필수 · MACD 고정 Fast 12 / Slow 26 / Signal 9 (변경 불가)',
+            'ON이면 prepare_dynamic_universe·실시간이 동일 v2(교차섹션 분위). OFF면 아래 레거시 규칙만',
+            toggle_key='sel_b_use_new_stack',
+        )
+        add_param_row(
+            sel_b_f,
+            'RS 룩백 (거래일)',
+            'sel_b_rs_lookback',
+            '일',
+            '일자별 교차섹션 단기 수익률 N',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'RS 분위 하한',
+            'sel_b_rs_rank_min',
+            '',
+            '0~1',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'RS 분위 상한',
+            'sel_b_rs_rank_max',
+            '',
+            '0~1',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            '고가 대비 종가 룩백',
+            'sel_b_hi_lookback',
+            '일',
+            '최근 N일 고가 대비 종가 위치(%)',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            '고가대비 종가 하한 %',
+            'sel_b_hi_min_pct',
+            '%',
+            '너무 약한 종가 위치 제외',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            '고가대비 종가 상한 %',
+            'sel_b_hi_max_pct',
+            '%',
+            '과도하게 고가에 붙은 경우 제외',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'MA20 기울기 룩백',
+            'sel_b_ma20_slope_lookback',
+            '일',
+            'MA20 변화율 계산 간격',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'MA20 기울기 최소(비율)',
+            'sel_b_ma20_slope_min',
+            '',
+            '예: 0.001 = 0.1% 상승 기울기',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            '종가 ≥ MA5 필수',
+            None,
+            '',
+            'ON이면 정배열에 MA5 지지 조건 추가',
+            toggle_key='sel_b_require_close_ge_ma5',
+            widget_list=self.sel_b_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_b_f,
+            'MA5 근접 허용(비율)',
+            'sel_b_ma5_eps_pct',
+            '',
+            '위 토글 ON일 때 허용 오차(소수)',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'ATR 기간',
+            'sel_b_atr_period',
+            '봉',
+            '일봉 ATR 기간',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'ATR% 하한',
+            'sel_b_atr_pct_min',
+            '',
+            'ATR/종가 비율 하한(소수)',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'ATR% 상한',
+            'sel_b_atr_pct_max',
+            '',
+            'ATR/종가 비율 상한(소수)',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            '갭 절대값 상한',
+            'sel_b_gap_abs_max_pct',
+            '%',
+            '전일 종가 대비 당일 시가 갭',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'OSC>0 필수 (B v2)',
+            None,
+            '',
+            '일봉 MACD 히스토그램 양수',
+            toggle_key='sel_b_require_osc_positive',
+            widget_list=self.sel_b_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_b_f,
+            'OSC 전봉 대비 상승 필수',
+            None,
+            '',
+            '우상향 추가 조건',
+            toggle_key='sel_b_require_osc_rising',
+            widget_list=self.sel_b_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_b_f,
+            'MA60 존재 필수 (B)',
+            None,
+            '',
+            '60일 이평 유효',
+            toggle_key='sel_b_require_ma60',
+            widget_list=self.sel_b_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_b_f,
+            '거래량 분출 필수 (B v2)',
+            None,
+            '',
+            'VolBurstActive_B 요구',
+            toggle_key='sel_b_require_vol_burst',
+            widget_list=self.sel_b_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_b_f,
+            '선정 RSI 밴드 필수 (B)',
+            None,
+            '',
+            'ON이면 위 RSI 하한·상한을 v2 단계에서 적용',
+            toggle_key='sel_b_require_sel_rsi_band',
+            widget_list=self.sel_b_v2_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(
+            sel_b_f,
+            '최소 일봉 이력 (B)',
+            'sel_b_min_history_bars',
+            '봉',
+            '실시간 보조지표 계산 최소 길이',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            '일봉 MACD 파라미터 (B)',
+            None,
+            '',
+            'Fast/Slow/Signal은 macd_fast_daily 등 전역 키와 동일',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_header(
+            sel_b_f,
+            '── Track B 레거시 (v2 끔 또는 폴백): MA정배열·동일 대금/RSI/분출/OSC — RS·고가밴드 없음 ──',
         )
 
         slot_f = ttk.LabelFrame(
@@ -1404,6 +1604,21 @@ class SettingsTab:
         if 'sel_a_use_new_stack' in self.conf_vars:
             self.conf_vars['sel_a_use_new_stack'].trace_add('write', _apply_sel_a_stack_ui)
             _apply_sel_a_stack_ui()
+
+        def _apply_sel_b_stack_ui(*_args: object) -> None:
+            """B v2 ON이면 v2 파라미터 행 활성, OFF이면 비활성."""
+            try:
+                if 'sel_b_use_new_stack' not in self.conf_vars:
+                    return
+                v2_on = bool(self.conf_vars['sel_b_use_new_stack'].get())
+                apply_st(self.sel_b_v2_widgets, v2_on)
+                apply_st(self.sel_b_legacy_widgets, not v2_on)
+            except (tk.TclError, AttributeError, KeyError):
+                pass
+
+        if 'sel_b_use_new_stack' in self.conf_vars:
+            self.conf_vars['sel_b_use_new_stack'].trace_add('write', _apply_sel_b_stack_ui)
+            _apply_sel_b_stack_ui()
 
     def reset_to_defaults(self):
         if messagebox.askyesno('초기화 확인', '모든 파라미터를 초기값으로 복원하시겠습니까?'):

@@ -174,6 +174,9 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if settings.get('use_macd_gc_b', True): signal_b &= cond_macd_gc
     if settings.get('use_trend_aligned_b', True): signal_b &= cond_trend_aligned
     if use_rsi_sig_filter: signal_b &= cond_rsi_sig
+    # Type A의 use_vol_surge와 대칭: 돌파 거래량(vol_surge_b)이 실제 진입 신호에 반영되어야 함
+    if _settings_bool(settings, "use_type_b_vol", True):
+        signal_b &= cond_vol_b
 
     # 7. 최종 신호 및 공통 필터
     signal = signal_a | signal_b
