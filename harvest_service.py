@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import config
 from data_manager_v2 import DataManagerV2
+from utils.normalization import normalize_code
 from kiwoom_rest_api.auth.token import TokenManager
 from core.auth_manager import AuthManager
 import sys
@@ -67,12 +68,6 @@ class HarvestService:
         print(f"[{now}] {msg}", flush=True)
 
     def _fetch_minute_data(self, code, token, next_key=""):
-        # [v16.9.1] 지수 및 시장 지표는 1분봉 대신 일봉(Daily/FDR) 수집이 주 목적이므로
-        # 1분봉 REST 수집은 생략하되, harvest_code에서 일봉 동기화 및 범위 출력을 수행합니다.
-        is_index = len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11']
-        if is_index:
-            return None, "" 
-
         url = f"{config.URL}/api/dostk/chart"
         headers = {
             "Content-Type": "application/json;charset=UTF-8",
@@ -132,21 +127,6 @@ class HarvestService:
 
     def harvest_code(self, code, token):
         """한 종목의 부족한 데이터를 모두 수집 (v6.6: 증분 즉시 저장 모델)"""
-        # [v16.9.5] 시장 지수 특수 처리 (일봉 전용 수집 및 범위 출력)
-        is_index = len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11']
-        if is_index:
-            self.log(f"📊 [MARKET INDEX] {code} 일봉 동기화 시작...")
-            self.db.update_daily_data(code)
-            
-            # DB에서 수집된 범위 확인 및 로그 출력
-            df_daily = self.db.get_daily_bars(code)
-            if not df_daily.empty:
-                start_d = df_daily['time'].min().strftime('%Y-%m-%d')
-                end_d = df_daily['time'].max().strftime('%Y-%m-%d')
-                self.log(f"✅ [MARKET INDEX] {code} 수집 완료: {start_d} ~ {end_d} ({len(df_daily)}일분)")
-                self.db.set_sync_status(code, "COMPLETE")
-            return
-
         if self.is_data_complete(code):
             self.log(f"[SKIP] {code}: 이미 모든 데이터가 충분하고 구멍이 없습니다.")
             return
@@ -240,6 +220,12 @@ class HarvestService:
             time.sleep(0.3)
             
         if total_fetched > 0:
+            try:
+                _nk = normalize_code(code)
+            except Exception:
+                _nk = str(code).strip()
+            self._codes_1m_updated.add(_nk)
+
             self.log(f"   - {code}: 1분봉 적재 완료 → bars_15m 리샘플(1m→15m) 갱신 중...")
             self.db.refresh_resampled_data(code)
             self.log(
@@ -249,19 +235,15 @@ class HarvestService:
             try:
                 if self.db.rebuild_daily_bars_from_1m(code):
                     self.log(f"   - {code}: bars_1d(일봉) 1m 집계 반영 완료")
+                    self._codes_1d_rebuilt_inline.add(_nk)
             except Exception as e:
                 try:
                     self.log(f"   ⚠️ {code}: bars_1d 집계 실패(무시하고 계속): {e}")
                 except Exception:
                     pass
         else:
-            # [v16.9.1] 개선된 원인별 로그 세분화 (지수/최신/미수집)
-            is_idx = (len(code) <= 3 or code in ['KS11', 'KQ11', '^VIX', '^KQ11', '^KS11'])
-            
             if last_sync and last_raw_top and last_raw_top <= last_sync:
                 self.log(f"[OK] {code} 처리 완료: 이미 최신 상태입니다.")
-            elif is_idx:
-                self.log(f"[OK] {code} 처리 완료: 지수 데이터(Daily Sync) 유효성 확인됨")
             else:
                 self.log(f"[OK] {code} 처리 완료: 서버에서 가져온 데이터가 없습니다.")
 
@@ -395,15 +377,9 @@ class HarvestService:
             except Exception as e:
                 self.log(f"[WARN] KODEX 200 보강 로드 실패: {e}")
 
-        # 3. 합집합 (지수 + 주식 + [선택] K200)
+        # 3. 합집합 (주식 + [선택] K200). 시장지수·VIX는 수집하지 않음.
         all_codes = []
         seen = set()
-
-        indices = ["001", "101", "^VIX"]
-        for c in indices:
-            if c not in seen:
-                all_codes.append(c)
-                seen.add(c)
 
         for c in codes_stocks + codes_k200:
             if c not in seen:
@@ -413,7 +389,7 @@ class HarvestService:
         _k200_note = f" + K200보강 {len(codes_k200)}" if codes_k200 else ""
         self.log(
             f"🚀 [START] 하베스팅 유니버스 총 {len(all_codes)}개 종목 "
-            f"(지수 3 + 주식 {len(codes_stocks)}{_k200_note})"
+            f"(주식 {len(codes_stocks)}{_k200_note}, 지수/VIX 제외)"
         )
         
         token = self.token_manager.get_auth_token()
@@ -433,6 +409,10 @@ class HarvestService:
         except Exception:
             pass
 
+        # 이번 런에서 1m가 실제로 쌓인 종목 / harvest_code 안에서 이미 1d까지 재집계한 종목
+        self._codes_1m_updated: set[str] = set()
+        self._codes_1d_rebuilt_inline: set[str] = set()
+
         for idx, code in enumerate(all_codes):
             if not self.running: break
             
@@ -440,10 +420,6 @@ class HarvestService:
             try:
                 # [v7.0] 수집 전 무결성/입수 완료 여부 판단하여 스킵
                 if self.is_data_complete(code):
-                    # 지수 종목은 스킵 로그 대신 범위 출력 (harvest_code 내부에서 처리됨)
-                    if code in indices:
-                        self.harvest_code(code, token)
-                        continue
                     self.log(f"   >> {code}: 이미 모든 구간이 동기화되어 있습니다. 건너뜁니다.")
                     continue
 
@@ -454,13 +430,27 @@ class HarvestService:
             # 종목 간 대기 (서버 부하 분산)
             time.sleep(0.5)
 
-        # 1m 이 이미 있으나 당 루프에서 스킵된 종목 등, bars_1d(일봉) 누락을 막기 위한 일괄 집계
-        self.log("📅 [1m→1d] 주식 유니버스 bars_1d(일봉) 1분봉 집계 일괄 보강…")
+        # 1m 대비 bars_1d 누락·인라인 집계 실패분만 보강 (매 런 전 유니버스 전체 리빌드는 생략)
+        self.log("📅 [1m→1d] 주식 유니버스 bars_1d 조건부 보강(누락·이번 런 1m 미반영분)…")
         n_1d_ok = 0
+        n_1d_skip = 0
         for j, code in enumerate(all_codes):
             if not self.running:
                 break
-            if code in indices:
+            try:
+                ncode = normalize_code(code)
+            except Exception:
+                ncode = str(code).strip()
+            try:
+                behind = self.db.is_daily_bars_behind_1m(code)
+            except Exception:
+                behind = True
+            need = behind or (
+                ncode in self._codes_1m_updated
+                and ncode not in self._codes_1d_rebuilt_inline
+            )
+            if not need:
+                n_1d_skip += 1
                 continue
             try:
                 if self.db.rebuild_daily_bars_from_1m(code):
@@ -469,7 +459,7 @@ class HarvestService:
                 if j < 5:
                     self.log(f"   ⚠️ [1m→1d] {code}: {e}")
         self.log(
-            f"   [1m→1d] 집계 반영 종목: {n_1d_ok} (1m 없음·집계 스킵은 정상)"
+            f"   [1m→1d] 집계 반영 종목: {n_1d_ok}, 스킵(이미 최신): {n_1d_skip}"
         )
 
         # 대량 적재 후 플래너 통계 갱신 (조회 지연 완화에 유리, 락은 짧음)

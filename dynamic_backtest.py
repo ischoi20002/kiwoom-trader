@@ -258,7 +258,7 @@ class DynamicBacktester:
         callback: Optional[Callable[[str, Any], None]],
     ) -> bool:
         """
-        영업일 캘린더(001 bars_1d)·유니버스·15분 캐시 로드. 시장 지표·VIX·레짐은 사용하지 않는다.
+        영업일 캘린더(KRX)·유니버스·15분 캐시 로드. 시장 지표·VIX·레짐은 사용하지 않는다.
         """
         if callback:
             callback("영업일 캘린더 로드 중...", 2)
@@ -275,8 +275,8 @@ class DynamicBacktester:
                 continue
         if not trading_days:
             print(
-                "[Error] [Dynamic] 해당 기간에 영업일(001 bars_1d)이 없습니다. "
-                "DB에 시장지수 001 일봉이 수집되어 있는지 확인하세요."
+                "[Error] [Dynamic] 해당 기간에 영업일이 없습니다. "
+                "기간·pandas_market_calendars(XKRX) 설치를 확인하세요."
             )
             return False
         print(f"[Dynamic] 백테스트 시작: {start_date} ~ {end_date} ({len(trading_days)} 영업일)")
@@ -663,8 +663,24 @@ class DynamicBacktester:
                                     indicator_row=d_df.loc[curr_time],
                                 )
 
-            # 2-5. 일일 정산
-            current_equity = self.cash + sum(h['qty'] * day_data[c]['Close'].iloc[-1] for c, h in self.holdings.items() if c in day_data)
+            # 2-5. 일일 정산 (당일 분봉이 없어도 보유는 평단으로 평가 — 공백일 누락으로 자산 괴리 방지)
+            holdings_mv = 0.0
+            for c, h in self.holdings.items():
+                try:
+                    if c in day_data and not day_data[c].empty:
+                        holdings_mv += float(h["qty"]) * float(
+                            day_data[c]["Close"].iloc[-1]
+                        )
+                    else:
+                        holdings_mv += float(h["qty"]) * float(
+                            h.get("avg_p", 0) or 0
+                        )
+                except (TypeError, ValueError, KeyError):
+                    try:
+                        holdings_mv += float(h["qty"]) * float(h.get("avg_p", 0) or 0)
+                    except (TypeError, ValueError, KeyError):
+                        pass
+            current_equity = self.cash + holdings_mv
             self.daily_equity.append({'date': current_day, 'equity': current_equity, 'cash': self.cash, 'holdings_n': len(self.holdings)})
             
             # [Perf] 매매 CSV 버퍼 일괄 flush (하루 단위로 디스크 I/O 감소)

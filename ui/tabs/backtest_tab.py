@@ -604,13 +604,6 @@ class BacktestTab:
         self.btn_start_optimize.config(state=tk.DISABLED)
         self.lbl_bt_status.config(text="최적화 중... (수 분 소요될 수 있음)", foreground="#BF616A")
         
-        if hasattr(self.app, 'settings_tab'):
-            try:
-                self.app.settings_tab.save_settings(sync_to_backtest=False)
-                self.app.log("ℹ️ 백테스트 시작 전 설정 탭의 값을 자동으로 동기화했습니다.")
-            except Exception as _err:
-                print(f"[DEBUG] Settings sync error: {_err}")
-        
         try:
             raw_start = self.backtest_entries['start_date'].get().strip()
             raw_end = self.backtest_entries['end_date'].get().strip()

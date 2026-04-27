@@ -577,6 +577,10 @@ def _legacy_track_b_valid_and_score(last_row: pd.Series, settings: dict, *, use_
         vbb = bool(last_row.get("VolBurstActive_B", False))
         c1_b = avg5 >= sel_b_min_val
         c2_b = (ma20 > ma60) and (close > ma20)
+        if _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
+            ma5_lr = float(last_row.get("MA5", 0) or 0)
+            eps_lr = float(settings.get("sel_b_ma5_eps_pct", 0.005))
+            c2_b = c2_b and (ma5_lr > 0) and (close >= ma5_lr * (1.0 - eps_lr))
         c3_b = sel_b_rsi_min <= rsi <= sel_b_rsi_max
         c4_b = vbb
         c5 = osc > 0
@@ -666,6 +670,10 @@ def dual_track_selection_metrics(last_row: pd.Series, settings: dict) -> dict:
         else:
             c1_b = avg5 >= sel_b_min_val
             c2_b = (ma20 > ma60) and (close > ma20) if use_b else False
+            if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
+                eps_dm = float(settings.get("sel_b_ma5_eps_pct", 0.005))
+                ma5_ok_dm = (ma5 > 0) and (close >= ma5 * (1.0 - eps_dm))
+                c2_b = bool(c2_b and ma5_ok_dm)
             c3_b = (sel_b_rsi_min <= rsi <= sel_b_rsi_max)
             c4_b = vbb
             valid_b = bool(c1_b and c2_b and c3_b and c4_b and c5 and c_ma60)
@@ -1701,6 +1709,12 @@ def _score_dynamic_universe_daily_ohlcv(
         c2_b = ((df_all["MA20"] > df_all["MA60"]) & (df_all["close"] > df_all["MA20"])) if use_b else pd.Series(
             False, index=df_all.index
         )
+        if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
+            eps_leg = float(settings.get("sel_b_ma5_eps_pct", 0.005))
+            ma5_leg = df_all["MA5"].astype(float)
+            lc_leg = df_all["close"].astype(float)
+            ge5_leg = (ma5_leg > 0) & (lc_leg >= ma5_leg * (1.0 - eps_leg))
+            c2_b = c2_b & ge5_leg
         sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
         sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))
         sel_b_min_val = float(settings.get("sel_b_min_trde_val", 60.0)) * 100000000

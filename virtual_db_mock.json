@@ -1959,6 +1959,57 @@
             "exit_time": "14:10:22",
             "exit_datetime": "2026-04-24 14:10:22",
             "code": "443060"
+        },
+        {
+            "name": "제일기획",
+            "avg_price": 19837.0,
+            "qty": 98,
+            "stage": 1,
+            "invested": 1950830.091,
+            "entry_time": "2026-04-23T11:58:53.738121",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-04-27 09:09:21",
+                    "action": "SELL",
+                    "price": 19690.0,
+                    "qty": 98,
+                    "snapshot": {
+                        "time": "2026-04-27 09:09:21",
+                        "price": 19690.0,
+                        "market_trend": "N/A",
+                        "vol_power": 16.28,
+                        "reason": "EXIT_ATR_SL",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 5.08
+                    }
+                }
+            ],
+            "max_now": 19890.0,
+            "ka_cur_prc": 19850.0,
+            "ka_evlu_amt": 1945300.0,
+            "ka_evlu_pfls_amt": 1230.0,
+            "ka_prft_rt": 0.06326932672177442,
+            "ka_pur_amt": 1944070.0,
+            "ka_sync_iso": "2026-04-27T08:49:05.453414",
+            "max_p": 19890.0,
+            "max_price": 19890.0,
+            "current_price": 19750,
+            "exit_pending": true,
+            "exit_reason": "EXIT_ATR_SL",
+            "pending_exit_ord_no": "0021153",
+            "final_pnl_pct": -1.6312543643248496,
+            "realized_pnl_amt": -31823.00099999993,
+            "exit_price": 19690.0,
+            "exit_date": "2026-04-27",
+            "exit_time": "09:09:21",
+            "exit_datetime": "2026-04-27 09:09:21",
+            "code": "030000"
         }
     ],
     "pending_exit_snapshots": {}

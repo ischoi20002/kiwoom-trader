@@ -7,6 +7,13 @@
 
 ---
 
+## 0.6.2 (2026-04-27)
+
+- **Track B 선정**: `sel_b_require_close_ge_ma5`(종가≥MA5)를 B v2 비활성·일괄 레거시·`dual_track_selection_metrics` 레거시 경로에도 동일 적용 (`strategy_selector.py`).
+- **백테스트 탭**: 파라미터 최적화 시작 시 설정 탭 자동 `save_settings` 제거 — 동적 백테와 같이 **「설정 저장 및 즉시 적용」**으로 확정된 값만 엔진에 반영 (`ui/tabs/backtest_tab.py`).
+- **데이터·하베스트·동적 백테**: 시장지수/VIX 바 정리·거래일 보강, 일봉 대비 1분 갱신 진단 등 (`data_manager_v2.py`, `harvest_service.py`, `dynamic_backtest.py`).
+- **기타**: `settings.json`, `monitor_column_widths.json`, `virtual_db_mock.json` 반영.
+
 ## 0.6.1 (2026-04-27)
 
 - **예수금·D+1/D+2 UI**: 계좌 동기화 후 `refresh_portfolio_light` 경로에서 상단 라벨이 0으로 남던 문제 — `_update_summary_after_tick`에서 `portfolio`의 예수·D+n을 반영 (`ui/tabs/virtual_tab.py`).

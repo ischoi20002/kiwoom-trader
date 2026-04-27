@@ -5,6 +5,26 @@ from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.normalization import normalize_code
+
+# 시장지수·VIX 등 — 하베스팅/메인 DB에서 제외·정리 대상 코드 (bars_* / sync_meta)
+MARKET_INDEX_BAR_CODES: Tuple[str, ...] = (
+    "001",
+    "101",
+    "^VIX",
+    "KS11",
+    "KQ11",
+    "^KS11",
+    "^KQ11",
+)
+
+# 영업일 캘린더용 기준 종목(지수 대신). 하베스팅 유니버스에 자주 포함되는 대형주 순.
+_CALENDAR_REFERENCE_STOCK_CODES: Tuple[str, ...] = (
+    "005930",
+    "000660",
+    "005380",
+    "035420",
+    "051910",
+)
 from utils.bar_resample import (
     refresh_resampled_data_at_path,
     aggregate_daily_ohlcv_from_1m_db,
@@ -232,6 +252,16 @@ class DataManagerV2:
                 )
             """)
             conn.commit()
+        # 지수·VIX 등 레거니 봉/ sync_meta 정리(멱등). 영업일은 get_trading_days → KRX 캘린더.
+        try:
+            purged = self.purge_market_index_bars_from_main_db()
+            if any(purged.values()):
+                try:
+                    print(f"[DataManagerV2] 시장지수·VIX 레거니 행 정리: {purged}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _ensure_state_schema_at_path(self, abs_path: str) -> None:
         """주문·활성포지션 등 상태 테이블 스키마를 지정 파일에 생성."""
@@ -686,6 +716,61 @@ class DataManagerV2:
                 pass
             return False
 
+    def is_daily_bars_behind_1m(self, code: str) -> bool:
+        """
+        bars_1d의 마지막 일자가 bars_1m 최종 분봉이 속한 영업일보다 오래되면 True.
+        (1분봉만 갱신되고 일봉 집계가 누락된 경우 일괄 보강 대상)
+        """
+        try:
+            ncode = normalize_code(code)
+        except Exception:
+            return True
+        try:
+            with self._get_connection() as conn:
+                row_1m = conn.execute(
+                    "SELECT MAX(datetime) FROM bars_1m WHERE code = ?",
+                    (ncode,),
+                ).fetchone()
+                row_1d = conn.execute(
+                    "SELECT MAX(datetime) FROM bars_1d WHERE code = ?",
+                    (ncode,),
+                ).fetchone()
+        except sqlite3.Error as e:
+            try:
+                import logging
+
+                logging.warning(
+                    "is_daily_bars_behind_1m 조회 실패 %s: %s", ncode, e, exc_info=True
+                )
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            try:
+                import logging
+
+                logging.warning(
+                    "is_daily_bars_behind_1m 오류 %s: %s", ncode, e, exc_info=True
+                )
+            except Exception:
+                pass
+            return True
+
+        max_1m = row_1m[0] if row_1m else None
+        max_1d = row_1d[0] if row_1d else None
+        if not max_1m:
+            return False
+        try:
+            d_1m = datetime.strptime(str(max_1m).strip()[:10], "%Y-%m-%d").date()
+        except Exception:
+            return True
+        if not max_1d:
+            return True
+        try:
+            d_1d = datetime.strptime(str(max_1d).strip()[:10], "%Y-%m-%d").date()
+        except Exception:
+            return True
+        return d_1d < d_1m
 
     def save_active_position(self, code, name, avg_price, qty, stage, invested, entry_time, reason):
         with self._lock, self._get_state_connection() as conn:
@@ -1323,6 +1408,8 @@ class DataManagerV2:
     def update_daily_data(self, code, start_date="2020-01-01"):
         import FinanceDataReader as fdr
         kiwoom_code = normalize_code(code)
+        if kiwoom_code in MARKET_INDEX_BAR_CODES:
+            return False
         mapping = {'001': 'KS11', '101': 'KQ11', 'KS11': 'KS11', 'KQ11': 'KQ11', '^VIX': '^VIX'}
         fdr_code = mapping.get(kiwoom_code, kiwoom_code)
         last_sync = self.get_last_daily_sync(kiwoom_code)
@@ -1374,19 +1461,16 @@ class DataManagerV2:
 
     def get_latest_daily_bar_date_in_db(self) -> Optional[date]:
         """
-        bars_1d에 저장된 일봉 중 가장 최근 영업일.
-        코스피 지수(001) 우선, 없으면 전체 MAX(datetime).
+        bars_1d에 저장된 일봉 중 가장 최근 일자(시장지수·VIX 코드 제외).
         """
         try:
+            ph = ",".join("?" * len(MARKET_INDEX_BAR_CODES))
             with self._get_connection() as conn:
                 row = conn.execute(
-                    "SELECT MAX(datetime) FROM bars_1d WHERE code = ?",
-                    ("001",),
+                    f"SELECT MAX(datetime) FROM bars_1d WHERE code NOT IN ({ph})",
+                    MARKET_INDEX_BAR_CODES,
                 ).fetchone()
                 s = row[0] if row and row[0] else None
-                if not s:
-                    row2 = conn.execute("SELECT MAX(datetime) FROM bars_1d").fetchone()
-                    s = row2[0] if row2 and row2[0] else None
             if not s:
                 return None
             return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
@@ -1439,10 +1523,221 @@ class DataManagerV2:
                 f"일봉 최신일 확인 중 오류: {e}",
             )
 
-    def get_trading_days(self, start_date, end_date):
-        query = "SELECT DISTINCT datetime FROM bars_1d WHERE code = '001' AND datetime BETWEEN ? AND ? ORDER BY datetime ASC"
-        with self._get_connection() as conn:
-            return [row[0] for row in conn.execute(query, (start_date, end_date)).fetchall()]
+    def vacuum_main_db(self) -> bool:
+        """
+        메인 DB 파일을 재작성해 DELETE로 비운 페이지(freelist)를 OS에 반환한다.
+        대용량 DB는 수 분 걸릴 수 있으며, 실행 중 짧게 배타 락이 걸린다.
+        """
+        try:
+            try:
+                print(
+                    "[DataManagerV2] VACUUM 실행 중… (파일 크기 반영, 완료까지 시간이 걸릴 수 있음)"
+                )
+            except Exception:
+                pass
+            with self._lock, self._get_connection() as conn:
+                conn.execute("VACUUM")
+            try:
+                print("[DataManagerV2] VACUUM 완료")
+            except Exception:
+                pass
+            return True
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] VACUUM 실패: {e}")
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] VACUUM 오류: {e}")
+            except Exception:
+                pass
+            return False
+
+    def purge_market_index_bars_from_main_db(
+        self, *, run_vacuum_if_deleted: bool = False
+    ) -> Dict[str, int]:
+        """
+        시장지수·코스닥 지수·VIX 등 레거니 시계열을 trading_data.db(메인)에서 삭제한다.
+        bars_1m / bars_15m / bars_1d / sync_meta 만 대상. 멱등 호출 가능.
+
+        SQLite는 DELETE만으로 파일 크기가 줄지 않는다. 디스크 반환은 ``vacuum_main_db()`` 또는
+        ``run_vacuum_if_deleted=True`` 로 VACUUM 실행(대용량 DB는 수십 분·기동 시 자동 호출 비권장).
+
+        기본값 ``run_vacuum_if_deleted=False`` — 삭제만 하고, 필요 시 수동으로 VACUUM 한다.
+        """
+        out: Dict[str, int] = {
+            "bars_1m": 0,
+            "bars_15m": 0,
+            "bars_1d": 0,
+            "sync_meta": 0,
+        }
+        ph = ",".join("?" * len(MARKET_INDEX_BAR_CODES))
+        try:
+            with self._lock, self._get_connection() as conn:
+                for tbl in ("bars_1m", "bars_15m", "bars_1d"):
+                    try:
+                        cur = conn.execute(
+                            f"DELETE FROM {tbl} WHERE code IN ({ph})",
+                            MARKET_INDEX_BAR_CODES,
+                        )
+                        out[str(tbl)] = int(cur.rowcount or 0)
+                    except sqlite3.Error as e:
+                        try:
+                            print(
+                                f"[DataManagerV2] purge_market_index: {tbl} DELETE 실패: {e}"
+                            )
+                        except Exception:
+                            pass
+                try:
+                    cur2 = conn.execute(
+                        f"DELETE FROM sync_meta WHERE code IN ({ph})",
+                        MARKET_INDEX_BAR_CODES,
+                    )
+                    out["sync_meta"] = int(cur2.rowcount or 0)
+                except sqlite3.Error as e:
+                    try:
+                        print(
+                            f"[DataManagerV2] purge_market_index: sync_meta DELETE 실패: {e}"
+                        )
+                    except Exception:
+                        pass
+                conn.commit()
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] purge_market_index_bars_from_main_db 실패: {e}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] purge_market_index_bars_from_main_db 오류: {e}")
+            except Exception:
+                pass
+            return out
+
+        n_del = sum(out.values())
+        if n_del > 0 and not run_vacuum_if_deleted:
+            try:
+                print(
+                    "[DataManagerV2] 지수/VIX 행이 삭제되었습니다. "
+                    "파일 크기는 VACUUM 전까지 거의 변하지 않을 수 있습니다. "
+                    "여유 있을 때 DataManagerV2().vacuum_main_db() 를 실행하세요."
+                )
+            except Exception:
+                pass
+        if run_vacuum_if_deleted and n_del > 0:
+            self.vacuum_main_db()
+        return out
+
+    def _distinct_bars_1d_dates_for_code(
+        self, code: str, start_date: str, end_date: str
+    ) -> List[str]:
+        """한 종목의 bars_1d 에 실제로 있는 거래일 문자열 목록."""
+        try:
+            nc = normalize_code(code)
+        except Exception:
+            nc = str(code).strip().zfill(6)
+        s, e = str(start_date)[:10], str(end_date)[:10]
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT datetime FROM bars_1d
+                    WHERE code = ? AND datetime BETWEEN ? AND ?
+                    ORDER BY datetime ASC
+                    """,
+                    (nc, s, e),
+                ).fetchall()
+            return [str(row[0])[:10] for row in rows if row and row[0]]
+        except sqlite3.Error as e:
+            try:
+                import logging
+
+                logging.warning(
+                    "distinct_bars_1d_dates_for_code 실패 %s: %s", nc, e, exc_info=True
+                )
+            except Exception:
+                pass
+            return []
+        except Exception:
+            return []
+
+    def _trading_days_from_reference_equity_bars_1d(
+        self, start_date: str, end_date: str
+    ) -> List[str]:
+        """기준 종목 중 첫 번째로 일봉이 있는 종목의 거래일 집합(구 001 일봉 역할 대체)."""
+        for raw in _CALENDAR_REFERENCE_STOCK_CODES:
+            got = self._distinct_bars_1d_dates_for_code(raw, start_date, end_date)
+            if got:
+                return got
+        return []
+
+    def get_trading_days(self, start_date: str, end_date: str) -> List[str]:
+        """
+        기간 내 백테·유니버스용 거래일(YYYY-MM-DD).
+
+        - 예전에는 001 지수 일봉 날짜에 맞췄고, 지수 제거 후에는 KRX만 쓰면
+          DB에 분봉이 없는 날까지 루프가 돌아 일별 자산·체결이 깨질 수 있다.
+        - 따라서 **KRX 영업일 ∩ 기준 종목(005930 등) bars_1d 실제 일자** 교집합을 우선 사용한다.
+        """
+        s, e = str(start_date)[:10], str(end_date)[:10]
+        krx_list: List[str] = []
+        try:
+            from reporting.krx_trading_calendar import trading_days_inclusive
+
+            krx_list = [d.strftime("%Y-%m-%d") for d in trading_days_inclusive(s, e)]
+        except Exception as e:
+            try:
+                import logging
+
+                logging.warning(
+                    "get_trading_days: KRX 캘린더 실패 — %s", e, exc_info=True
+                )
+            except Exception:
+                pass
+
+        db_ref = self._trading_days_from_reference_equity_bars_1d(s, e)
+        if krx_list and db_ref:
+            krx_set = set(krx_list)
+            merged = sorted(krx_set.intersection(db_ref))
+            if merged:
+                return merged
+
+        if db_ref:
+            return sorted(db_ref)
+
+        if krx_list:
+            try:
+                import logging
+
+                logging.warning(
+                    "get_trading_days: 기준 종목 일봉 없음 — KRX 일자만 사용(데이터 공백일 가능)"
+                )
+            except Exception:
+                pass
+            return krx_list
+
+        try:
+            ph = ",".join("?" * len(MARKET_INDEX_BAR_CODES))
+            q = (
+                f"SELECT DISTINCT datetime FROM bars_1d WHERE datetime BETWEEN ? AND ? "
+                f"AND code NOT IN ({ph}) ORDER BY datetime ASC"
+            )
+            params: Tuple[Any, ...] = (s, e, *MARKET_INDEX_BAR_CODES)
+            with self._get_connection() as conn:
+                rows = conn.execute(q, params).fetchall()
+            return [str(row[0])[:10] for row in rows if row and row[0]]
+        except sqlite3.Error as e:
+            try:
+                import logging
+
+                logging.warning("get_trading_days: DB DISTINCT 폴백 실패 — %s", e, exc_info=True)
+            except Exception:
+                pass
+            return []
+        except Exception:
+            return []
 
     def set_sync_status(self, code, status):
         code = normalize_code(code)
