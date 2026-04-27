@@ -10,7 +10,7 @@
 
 from typing import Any, Mapping, Optional
 
-# 주력 전략 기본 파라미터 (settings.json + tools/sync_defaults_from_settings.py 동기화, 수수료·bt·mock 은 수동 병합)
+# 주력 전략 기본 파라미터 (settings.json + tools/sync_defaults_from_settings.py 동기화, skip 키는 기존 파일 값 유지)
 DEFAULT_SETTINGS = {
     "backtest_initial_capital": 10000000,
     "buy_fee_live": 0.015,
