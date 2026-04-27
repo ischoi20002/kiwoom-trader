@@ -469,6 +469,43 @@ class OrderManager:
         except Exception:
             return (combined if combined > 0 else api_tot, d1, d2)
 
+    def _kiwoom_single_record_dict(self, data: Any) -> Optional[dict]:
+        """
+        키움 REST 단건(예수금상세 등) 응답에서 레코드 dict 한 개를 꺼낸다.
+        ``output`` 만 dict 인 줄 알고 파싱하면 ``output1`` 리스트 형태일 때 전부 실패해 D+1/D+2가 0으로 남을 수 있다.
+        """
+        try:
+            if not isinstance(data, dict):
+                return None
+            for key in ("output", "output1", "output2", "data", "acnt_bal"):
+                ob = data.get(key)
+                if isinstance(ob, dict) and ob:
+                    return dict(ob)
+                if isinstance(ob, list) and ob:
+                    first = ob[0]
+                    if isinstance(first, dict) and first:
+                        return dict(first)
+            if any(
+                k in data
+                for k in (
+                    "d1_entra",
+                    "d2_entra",
+                    "d1_entra_amt",
+                    "d2_entra_amt",
+                    "d1_samt",
+                    "d2_samt",
+                    "pymn_alow_amt",
+                    "ord_alow_amt",
+                )
+            ):
+                return dict(data)
+        except Exception as e:
+            try:
+                self.logger.debug("_kiwoom_single_record_dict 오류: %s", e)
+            except Exception:
+                pass
+        return None
+
     def _summarize_holdings_qty_positive(self, holdings: list) -> tuple[int, str]:
         """
         ka10085 acnt_prft_rt 중 잔고수량>0인 행만 모아 (종목 수, 로그용 요약 문자열) 반환.
@@ -700,13 +737,27 @@ class OrderManager:
                 res = requests.post(
                     url, headers=headers, json={"qry_tp": qry_tp}, timeout=12
                 )
-                data = res.json()
-                out_body = data.get("output", data.get("data", data))
-                if not isinstance(out_body, dict):
+                if res.status_code != 200:
                     continue
-                rc = data.get("return_code", out_body.get("return_code", 0))
+                try:
+                    data = res.json()
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                rc = data.get("return_code", data.get("rt_cd", data.get("return_cd")))
                 try:
                     if rc is not None and int(str(rc).strip()) != 0:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+                out_body = self._kiwoom_single_record_dict(data)
+                if not isinstance(out_body, dict) or not out_body:
+                    continue
+                rc2 = out_body.get("return_code", out_body.get("rt_cd"))
+                try:
+                    if rc2 is not None and int(str(rc2).strip()) != 0:
                         continue
                 except (TypeError, ValueError):
                     pass
@@ -718,11 +769,28 @@ class OrderManager:
                             return self._safe_float(v)
                     return 0.0
 
-                d1 = _pick("d1_entra", "d1_samt", "entr_d1")
-                d2 = _pick("d2_entra", "d2_samt", "entr_d2", "d2entra")
+                d1 = _pick(
+                    "d1_entra",
+                    "d1_entra_amt",
+                    "d1_samt",
+                    "entr_d1",
+                    "d1_entr",
+                )
+                d2 = _pick(
+                    "d2_entra",
+                    "d2_entra_amt",
+                    "d2_samt",
+                    "entr_d2",
+                    "d2_entr",
+                    "d2entra",
+                )
                 entr = _pick("entr")
-                ord_alow = _pick("ord_alow_amt", "nstd_re_ib_amt")
-                pymn = _pick("pymn_alow_amt")
+                ord_alow = _pick(
+                    "ord_alow_amt",
+                    "ord_alow_amt_entr",
+                    "nstd_re_ib_amt",
+                )
+                pymn = _pick("pymn_alow_amt", "pymn_alow_amt_entr", "pymn_alow")
 
                 # return_code 정상이면 반환 (D+2 추정예수가 음수인 경우도 있음 — any(x>0)로 두면 조회 실패로 떨어져 ka10085 잔여값이 남음)
                 return {
@@ -734,8 +802,18 @@ class OrderManager:
                     "qry_tp_used": qry_tp,
                 }
             except Exception as e:
-                self.logger.debug("예수금상세 qry_tp=%s 실패: %s", qry_tp, e)
+                try:
+                    self.logger.debug("예수금상세 qry_tp=%s 실패: %s", qry_tp, e)
+                except Exception:
+                    pass
                 continue
+        try:
+            self.app.log(
+                "⚠️ [계좌] 예수금상세(ka10001/kt00001) 파싱 실패 — 응답 형식이 바뀌었거나 output이 비어 있습니다. "
+                "D+1/D+2·출금가능이 0으로 보일 수 있습니다."
+            )
+        except Exception:
+            pass
         return None
 
     def get_withdrawable_deposit(self) -> Optional[int]:

@@ -7,6 +7,15 @@
 
 ---
 
+## 0.6.1 (2026-04-27)
+
+- **예수금·D+1/D+2 UI**: 계좌 동기화 후 `refresh_portfolio_light` 경로에서 상단 라벨이 0으로 남던 문제 — `_update_summary_after_tick`에서 `portfolio`의 예수·D+n을 반영 (`ui/tabs/virtual_tab.py`).
+- **예수금상세 REST**: `ka10001`/`kt00001` 응답 본문을 `output`/`output1` 리스트 등에서 안정적으로 추출, 필드 후보 확장 (`core/order_manager.py`).
+- **대시보드 동기화**: `refresh_cash_deposit=True`·`wait_for_lock=True` 명시 (`k_trader_gui.py`).
+- **체결 후 계좌 동기화**: 단일 2.5초 지연 대신 디바운스 + 1차(약 4.2s)·2차(약 7s) 추격, `wait_for_lock`으로 락 스킵 완화 (`k_trader_gui.py`).
+- **로그 스로틀**: D+2 한도 축소 안내·「1주도 살 수 없음」Skip 메시지를 동일 조건에서 3분에 1회로 제한 (`core/portfolio_manager.py`, `core/trading_controller.py`). `session_logger` 기록은 유지.
+- **기타**: `monitor_column_widths.json` 반영.
+
 ## 0.6.0 (2026-04-27)
 
 - **최적화(베이지안)**: Optuna import 실패 시 원인·설치 안내 로그, trial 종료 상태별 결과 행 수집, `n_jobs=1` 직렬화로 전역 캐시·스레드 경합 완화, 목적값 NaN/Inf 방지 (`parameter_optimizer.py`).

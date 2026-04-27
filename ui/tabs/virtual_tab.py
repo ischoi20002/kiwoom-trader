@@ -2288,8 +2288,10 @@ class VirtualTab:
 
     def _update_summary_after_tick(self) -> None:
         """
-        틱 직후 상단 요약 중 주식평가금·총자산·손익만 재계산합니다.
-        예수금·D+1/D+2는 REST(매매 체결 후 동기화)에서만 바뀌므로 여기서는 갱신하지 않습니다.
+        틱·경량(refresh_portfolio_light) 직후 상단 요약을 갱신합니다.
+        주식평가·총자산·손익은 틱 기준이고, 예수금·D+1/D+2는 **메모리의 portfolio 필드**를 반영합니다
+        (REST를 다시 호출하지 않음). 동기화 후 구조 시그니처가 같으면 경량 경로만 타는데,
+        그때 이 필드를 갱신하지 않으면 예수·D+n이 0으로 남는 버그가 있었음.
         """
         try:
             def _set_if_diff(key: str, text: str) -> None:
@@ -2379,6 +2381,18 @@ class VirtualTab:
 
             _set_if_diff("total", f"{total_assets:,.0f}")
             _set_if_diff("stock", f"{stock_eval:,.0f}")
+            try:
+                cash_v = float(getattr(portfolio, "actual_deposit", 0) or 0)
+                d1_v = float(getattr(portfolio, "d1_deposit", 0) or 0)
+                d2_v = float(getattr(portfolio, "d2_deposit", 0) or 0)
+                _set_if_diff("cash", f"{cash_v:,.0f}")
+                _set_if_diff("d1_cash", f"{d1_v:,.0f}")
+                _set_if_diff("d2_cash", f"{d2_v:,.0f}")
+            except (TypeError, ValueError) as _cash_err:
+                try:
+                    print(f"[UI Error] 요약 예수/D+n 반영: {_cash_err}")
+                except Exception:
+                    pass
             _set_if_diff("open_ur", open_ur_txt)
             _set_if_diff("day", day_pnl_txt)
             _set_if_diff("cum", f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")

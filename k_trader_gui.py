@@ -236,6 +236,9 @@ class KiwoomApp:
         self.lbl_ui_reactivity: Optional[ttk.Label] = None
         # sync_with_actual_account 는 REST·DB·정합으로 수 초 걸릴 수 있음 — 백그라운드에서 한 번에 하나만
         self._portfolio_sync_thread_lock: threading.Lock = threading.Lock()
+        # 체결 후 계좌 동기화: 연속 체결 시 after 예약이 겹치지 않도록 디바운스 + 2차 추격
+        self._post_fill_sync_job: Optional[Any] = None
+        self._post_fill_sync_followup: Optional[Any] = None
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
@@ -507,12 +510,16 @@ class KiwoomApp:
         force: bool = False,
         log_boot_summary: bool = False,
         refresh_cash_deposit: bool = True,
+        wait_for_lock: bool = False,
     ) -> None:
         """
         계좌 동기화는 REST(ka85·예수 등)·정합·JSON 저장으로 메인 스레드에서 실행 시
         탭 전환·클릭이 수 초~10초 이상 막힐 수 있어 워커 스레드에서 실행한다.
         gui_callback 은 PortfolioManager 가 root.after(0) 으로 메인에 넘긴다.
-        동시에 두 번 돌면 상태가 꼬일 수 있어 락으로 직렬화(이미 실행 중이면 이번 호출은 생략).
+        동시에 두 번 돌면 상태가 꼬일 수 있어 락으로 직렬화.
+
+        wait_for_lock=False: 이미 동기화 중이면 이번 호출 생략(기동·체결 후 등).
+        wait_for_lock=True: 최대 약 120초 대기 후 실행(대시보드「동기화」등 사용자 명시).
 
         refresh_cash_deposit=False: ka10085 보유 정합만 하고 예수금상세 등 현금 API는 생략.
         예수·D+n·출금가능은 체결 후 동기화 등 refresh_cash_deposit=True 경로에서만.
@@ -520,8 +527,19 @@ class KiwoomApp:
         def _worker() -> None:
             acquired = False
             try:
-                acquired = self._portfolio_sync_thread_lock.acquire(blocking=False)
+                if wait_for_lock:
+                    acquired = self._portfolio_sync_thread_lock.acquire(timeout=120.0)
+                else:
+                    acquired = self._portfolio_sync_thread_lock.acquire(blocking=False)
                 if not acquired:
+                    try:
+                        if not silent:
+                            self.log(
+                                "⏳ [Sync] 다른 계좌 동기화가 진행 중입니다. "
+                                "잠시 후 다시 시도하거나, 완료될 때까지 기다려 주세요."
+                            )
+                    except Exception:
+                        pass
                     return
                 self.portfolio.sync_with_actual_account(
                     silent=silent,
@@ -895,19 +913,92 @@ class KiwoomApp:
         except Exception as e:
             self.log(f"⚠️ [체결 동기화] 실패: {e}")
 
-    def _schedule_account_sync_after_fill(self) -> None:
-        """체결 후 키움 계좌 REST(총자산·예수금)를 한 번 더 맞춥니다."""
+    def _cancel_post_fill_sync_jobs(self) -> None:
+        """체결 후 동기화 예약(1차·2차)을 취소합니다. 연속 체결 디바운스 시 사용."""
         try:
             r = getattr(self, "root", None)
-            if r is not None:
-                r.after(
-                    2500,
-                    lambda: self._run_portfolio_sync_in_daemon_thread(
-                        silent=True, force=True
-                    ),
-                )
+            if r is None:
+                return
+            for attr in ("_post_fill_sync_job", "_post_fill_sync_followup"):
+                try:
+                    jid = getattr(self, attr, None)
+                    if jid is not None:
+                        try:
+                            r.after_cancel(jid)
+                        except Exception:
+                            pass
+                        setattr(self, attr, None)
+                except Exception:
+                    pass
         except Exception:
             pass
+
+    def _schedule_account_sync_after_fill(self) -> None:
+        """
+        체결 후 키움 잔고·예수 REST를 맞춥니다.
+
+        - 2.5초 단일 지연은 증권사 반영이 늦을 때 **이전 잔고**가 오는 경우가 있어,
+          첫 동기화는 약 4.2초 뒤, 그다음 **약 7초 뒤 2차**로 한 번 더 맞춥니다.
+        - 연속 체결 시마다 after가 쌓이면 락 경쟁으로 스킵되기 쉬우므로 **마지막 체결 기준으로 디바운스**합니다.
+        - 동기화 스레드는 ``wait_for_lock=True`` 로 이전 동기화가 끝날 때까지 대기합니다.
+        """
+        try:
+            r = getattr(self, "root", None)
+            if r is None:
+                return
+            self._cancel_post_fill_sync_jobs()
+
+            # ms: 기동 직후와 동시에 오가면 너무 길면 부담 — 필요 시 settings 키로만 조정 예정
+            first_ms = 4200
+            follow_ms = 7000
+
+            def _first() -> None:
+                try:
+                    self._post_fill_sync_job = None
+                    self._run_portfolio_sync_in_daemon_thread(
+                        silent=True,
+                        force=True,
+                        refresh_cash_deposit=True,
+                        wait_for_lock=True,
+                    )
+                except Exception as e1:
+                    try:
+                        self.log(f"⚠️ [체결 동기화] 1차 실행 예외: {e1}")
+                    except Exception:
+                        pass
+                try:
+                    r2 = getattr(self, "root", None)
+                    if r2 is None:
+                        return
+
+                    def _second() -> None:
+                        try:
+                            self._post_fill_sync_followup = None
+                            self._run_portfolio_sync_in_daemon_thread(
+                                silent=True,
+                                force=True,
+                                refresh_cash_deposit=True,
+                                wait_for_lock=True,
+                            )
+                        except Exception as e2:
+                            try:
+                                self.log(f"⚠️ [체결 동기화] 2차 실행 예외: {e2}")
+                            except Exception:
+                                pass
+
+                    self._post_fill_sync_followup = r2.after(follow_ms, _second)
+                except Exception as e3:
+                    try:
+                        self.log(f"⚠️ [체결 동기화] 2차 예약 실패: {e3}")
+                    except Exception:
+                        pass
+
+            self._post_fill_sync_job = r.after(first_ms, _first)
+        except Exception as e0:
+            try:
+                self.log(f"⚠️ [체결 동기화] 예약 실패: {e0}")
+            except Exception:
+                pass
 
     def _on_execution_received(self, code, order_no, qty, price, side):
         try:
@@ -1326,6 +1417,10 @@ class KiwoomApp:
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")
         try:
+            self._cancel_post_fill_sync_jobs()
+        except Exception:
+            pass
+        try:
             mt = getattr(self, "monitor_tab", None)
             if mt is not None and hasattr(mt, "flush_monitor_ui_before_quit"):
                 mt.flush_monitor_ui_before_quit()
@@ -1619,8 +1714,13 @@ class KiwoomApp:
         )
 
     def _sync_account_deposit(self) -> None:
-        # [v4.9.0] 전체 계좌 동기화 — 버튼 클릭 시 API 스로틀을 우회(force)
-        self._run_portfolio_sync_in_daemon_thread(silent=False, force=True)
+        # [v4.9.0] 전체 계좌 동기화 — 버튼 클릭 시 API 스로틀을 우회(force), 예수·D+1/D+2 REST 반드시 포함
+        self._run_portfolio_sync_in_daemon_thread(
+            silent=False,
+            force=True,
+            refresh_cash_deposit=True,
+            wait_for_lock=True,
+        )
     def _sell_all_virtual(self):
         if messagebox.askyesno("🚨 비상 청산", "모든 보유 종목을 즉시 시장가로 매도하시겠습니까?"):
             self.portfolio.sell_all()

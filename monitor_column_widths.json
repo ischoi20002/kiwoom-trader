@@ -3,9 +3,9 @@
     "Score": 49,
     "Code": 77,
     "Name": 131,
-    "StratType": 117,
+    "StratType": 92,
     "Price": 103,
-    "AtrExit": 101,
+    "AtrExit": 153,
     "VsPrev": 85,
     "Ratio": 94,
     "Status": 249,
@@ -13,5 +13,5 @@
     "BidAsk": 132,
     "Volume": 126
   },
-  "sash0_rel": 0.4098124098124098
+  "sash0_rel": 0.2968299711815562
 }

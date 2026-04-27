@@ -59,6 +59,8 @@ class TradingController:
         self._limit_order_meta: Dict[str, Dict[str, Any]] = {}
         # S1 매수 접수 후 체결 전 — 동일 종목 중복 매수 방지
         self._s1_buy_order_pending_codes: Set[str] = set()
+        # D+2로 1주도 못 살 때 Skip 로그 — 틱 반복 방지( epoch 마지막 출력 시각 )
+        self._buy_skip_d2_one_lot_log_at: Dict[str, float] = {}
         # _run_start_sequence 가 백그라운드에서 도는 동안 중복 start() 방지
         self._run_start_sequence_active: bool = False
         # stop() 호출 시 워밍업 직후 단계(WS 기동 등)를 건너뛰기 위함
@@ -641,12 +643,29 @@ class TradingController:
                 d2v = float(getattr(self.app.portfolio, "d2_deposit", 0) or 0)
             except (TypeError, ValueError):
                 d2v = 0.0
-            self.log(
-                f"⚠️ [Skip] {name}({code}) S1 매수 생략: D+2 현금 한도로 "
-                f"지정가 기준 1주({adj_price:,}원)도 살 수 없음 "
-                f"(투자원금 상한 {invest_amt:,}원, D+2≈{d2v:,.0f}원). "
-                f"고가주·잔고 부족 시 발생합니다."
-            )
+            try:
+                try:
+                    nc_key = str(code).zfill(6)
+                except Exception:
+                    nc_key = "000000"
+                lk = f"{nc_key}:d2_one_lot"
+                _now = time.time()
+                _last = float(self._buy_skip_d2_one_lot_log_at.get(lk, 0.0) or 0.0)
+                if _now - _last >= 180.0:
+                    self._buy_skip_d2_one_lot_log_at[lk] = _now
+                    self.log(
+                        f"⚠️ [Skip] {name}({code}) S1 매수 생략: D+2 현금 한도로 "
+                        f"지정가 기준 1주({adj_price:,}원)도 살 수 없음 "
+                        f"(투자원금 상한 {invest_amt:,}원, D+2≈{d2v:,.0f}원). "
+                        f"고가주·잔고 부족 시 발생합니다."
+                    )
+            except Exception as _log_e:
+                try:
+                    self.log(
+                        f"⚠️ [Skip] {name}({code}) S1 매수 생략(D+2 한도, 1주 불가) — 로그 처리 오류: {_log_e}"
+                    )
+                except Exception:
+                    pass
             try:
                 sl = getattr(self.app, "session_logger", None)
                 if sl:

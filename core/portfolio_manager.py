@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -49,6 +50,9 @@ class PortfolioManager:
         self._orphan_sell_order_ids: Set[str] = set()
         # 매도 주문 접수 직후 포지션 전체 스냅샷(주문번호 키) — 동기화로 로컬 보유가 먼저 사라져도 체결 시 종료 확정
         self._pending_exit_snapshots: Dict[str, Dict[str, Any]] = {}
+        # D+2 축소 안내 로그 스로틀(틱마다 동일 메시지 반복 방지)
+        self._d2_shrink_log_ts: float = 0.0
+        self._d2_shrink_log_sig: Optional[Tuple[int, int]] = None
 
     def _virtual_db_path(self) -> str:
         """종료내역 JSON — config.USE_MOCK 에 따라 virtual_db_mock.json / virtual_db_live.json."""
@@ -1160,10 +1164,19 @@ class PortfolioManager:
                 before_amt = int(invest_amt)
                 invest_amt = min(int(invest_amt), cap)
                 if before_amt > invest_amt > 0:
-                    self.log(
-                        f"ℹ️ [Risk] 투자금액을 D+2 현금 한도로 축소합니다: "
-                        f"{before_amt:,} → {invest_amt:,}원 (매수대금+매수수수료 ≤ D+2)"
-                    )
+                    sig: Tuple[int, int] = (before_amt, int(invest_amt))
+                    now = time.time()
+                    if (
+                        sig != getattr(self, "_d2_shrink_log_sig", None)
+                        or now - float(getattr(self, "_d2_shrink_log_ts", 0.0) or 0.0)
+                        >= 180.0
+                    ):
+                        self._d2_shrink_log_sig = sig
+                        self._d2_shrink_log_ts = now
+                        self.log(
+                            f"ℹ️ [Risk] 투자금액을 D+2 현금 한도로 축소합니다: "
+                            f"{before_amt:,} → {invest_amt:,}원 (매수대금+매수수수료 ≤ D+2)"
+                        )
             except Exception:
                 pass
         return invest_amt
