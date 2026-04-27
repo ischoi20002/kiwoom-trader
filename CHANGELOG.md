@@ -7,6 +7,11 @@
 
 ---
 
+## 0.6.3 (2026-04-28)
+
+- **기본값**: `settings.json`(설정 탭 저장분)과 `tools/sync_defaults_from_settings.py`로 `core/defaults.py`의 `DEFAULT_SETTINGS` 동기화. 수수료·백테 기간·모의 계좌 등 `skip` 키는 **이전 defaults.py** 값을 유지하고, 없을 때만 `settings.json`으로 채움.
+- **도구**: `sync_defaults_from_settings.py`가 `skip` 키를 빠뜨리던 문제 수정(`ast.literal_eval`로 기존 dict 보존).
+
 ## 0.6.2 (2026-04-27)
 
 - **Track B 선정**: `sel_b_require_close_ge_ma5`(종가≥MA5)를 B v2 비활성·일괄 레거시·`dual_track_selection_metrics` 레거시 경로에도 동일 적용 (`strategy_selector.py`).

@@ -214,6 +214,23 @@ def _settings_bool_sel(settings: dict, key: str, default: bool = False) -> bool:
         return default
 
 
+def _sel_b_ma5_close_mult(settings: dict) -> float:
+    """
+    Track B ``종가 ≥ MA5`` 토글 ON일 때 ``lc >= MA5 * 반환값`` 에 쓰는 배율.
+    ``(1 - sel_b_ma5_eps_pct) + sel_b_ma5_min_excess_ratio`` — 후자가 0이면 기존과 동일.
+    (v2 다른 필터만으로는 이미 MA5 근처 조건이 충족되는 경우가 많아, 추가 이격으로 체감 가능.)
+    """
+    try:
+        eps = float(settings.get("sel_b_ma5_eps_pct", 0.005))
+        ex = float(settings.get("sel_b_ma5_min_excess_ratio", 0.0))
+    except (TypeError, ValueError):
+        eps, ex = 0.005, 0.0
+    try:
+        return max(1e-9, (1.0 - eps) + ex)
+    except Exception:
+        return max(1e-9, 1.0 - 0.005)
+
+
 def _compute_sel_a_aux_from_daily_tail(
     df_valid: pd.DataFrame,
     last_row: pd.Series,
@@ -442,8 +459,8 @@ def _compute_sel_b_aux_from_daily_tail(
         slope_ok = slope >= slope_min
 
         if _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
-            eps = float(settings.get("sel_b_ma5_eps_pct", 0.005))
-            ma5_ok = ma5 > 0 and lc >= ma5 * (1.0 - eps)
+            mult = _sel_b_ma5_close_mult(settings)
+            ma5_ok = ma5 > 0 and lc >= ma5 * mult
             trend_ok = bool(trend_ok and ma5_ok)
 
         sel_b_min_val = float(settings.get("sel_b_min_trde_val", 45.0)) * 100000000
@@ -579,8 +596,8 @@ def _legacy_track_b_valid_and_score(last_row: pd.Series, settings: dict, *, use_
         c2_b = (ma20 > ma60) and (close > ma20)
         if _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
             ma5_lr = float(last_row.get("MA5", 0) or 0)
-            eps_lr = float(settings.get("sel_b_ma5_eps_pct", 0.005))
-            c2_b = c2_b and (ma5_lr > 0) and (close >= ma5_lr * (1.0 - eps_lr))
+            mult_lr = _sel_b_ma5_close_mult(settings)
+            c2_b = c2_b and (ma5_lr > 0) and (close >= ma5_lr * mult_lr)
         c3_b = sel_b_rsi_min <= rsi <= sel_b_rsi_max
         c4_b = vbb
         c5 = osc > 0
@@ -671,8 +688,8 @@ def dual_track_selection_metrics(last_row: pd.Series, settings: dict) -> dict:
             c1_b = avg5 >= sel_b_min_val
             c2_b = (ma20 > ma60) and (close > ma20) if use_b else False
             if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
-                eps_dm = float(settings.get("sel_b_ma5_eps_pct", 0.005))
-                ma5_ok_dm = (ma5 > 0) and (close >= ma5 * (1.0 - eps_dm))
+                mult_dm = _sel_b_ma5_close_mult(settings)
+                ma5_ok_dm = (ma5 > 0) and (close >= ma5 * mult_dm)
                 c2_b = bool(c2_b and ma5_ok_dm)
             c3_b = (sel_b_rsi_min <= rsi <= sel_b_rsi_max)
             c4_b = vbb
@@ -1496,8 +1513,8 @@ def _apply_sel_track_b_batch_v2(
         ma5 = df_all["MA5"].astype(float)
         df_all["_sel_b_trend_ok"] = (ma20 > ma60) & (lc > ma20) & (ma20 > 0) & (ma60 > 0)
         if _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
-            eps = float(settings.get("sel_b_ma5_eps_pct", 0.005))
-            ge5 = (ma5 > 0) & (lc >= ma5 * (1.0 - eps))
+            mult_b2 = _sel_b_ma5_close_mult(settings)
+            ge5 = (ma5 > 0) & (lc >= ma5 * mult_b2)
             df_all["_sel_b_trend_ok"] = df_all["_sel_b_trend_ok"] & ge5
 
         sel_b_min_val = float(settings.get("sel_b_min_trde_val", 45.0)) * 100000000
@@ -1599,6 +1616,11 @@ def _apply_sel_track_b_batch_v2(
         c2_b = ((df_all["MA20"] > df_all["MA60"]) & (df_all["close"] > df_all["MA20"])) if use_b else pd.Series(
             False, index=df_all.index
         )
+        if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
+            mult_fb = _sel_b_ma5_close_mult(settings)
+            m5f = df_all["MA5"].astype(float)
+            lcf = df_all["close"].astype(float)
+            c2_b = c2_b & (m5f > 0) & (lcf >= m5f * mult_fb)
         sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
         sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))
         sel_b_min_val = float(settings.get("sel_b_min_trde_val", 60.0)) * 100000000
@@ -1710,10 +1732,10 @@ def _score_dynamic_universe_daily_ohlcv(
             False, index=df_all.index
         )
         if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
-            eps_leg = float(settings.get("sel_b_ma5_eps_pct", 0.005))
+            mult_leg = _sel_b_ma5_close_mult(settings)
             ma5_leg = df_all["MA5"].astype(float)
             lc_leg = df_all["close"].astype(float)
-            ge5_leg = (ma5_leg > 0) & (lc_leg >= ma5_leg * (1.0 - eps_leg))
+            ge5_leg = (ma5_leg > 0) & (lc_leg >= ma5_leg * mult_leg)
             c2_b = c2_b & ge5_leg
         sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
         sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))

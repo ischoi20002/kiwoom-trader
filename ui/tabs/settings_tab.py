@@ -846,7 +846,7 @@ class SettingsTab:
             '종가 ≥ MA5 필수',
             None,
             '',
-            'ON이면 정배열에 MA5 지지 조건 추가',
+            'ON이면 정배열에 MA5 하한(아래 ε·추가 이격) 적용. v2 다른 조건과 겹치면 토글만으로 스케줄이 안 바뀔 수 있음',
             toggle_key='sel_b_require_close_ge_ma5',
             widget_list=self.sel_b_v2_widgets,
             group_toggle_widgets=True,
@@ -856,7 +856,15 @@ class SettingsTab:
             'MA5 근접 허용(비율)',
             'sel_b_ma5_eps_pct',
             '',
-            '위 토글 ON일 때 허용 오차(소수)',
+            '토글 ON일 때 종가/MA5 하한 (1−ε). 소수(0.005=0.5% 아래까지 허용)',
+            widget_list=self.sel_b_v2_widgets,
+        )
+        add_param_row(
+            sel_b_f,
+            'MA5 추가 이격(비율)',
+            'sel_b_ma5_min_excess_ratio',
+            '',
+            '0이면 기존과 동일. 0.01이면 (1−ε)+0.01 배율까지 5일선 위 추가 요구(체감 필터)',
             widget_list=self.sel_b_v2_widgets,
         )
         add_param_row(

@@ -450,6 +450,14 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "sel_b_ma5_eps_pct",
     ),
     SettingUiRow(
+        21275,
+        "② 유니버스 · 종목선정",
+        "Type B — 추세돌파 (Track B 종목 선정)",
+        "Track B v2: 단기 RS·고가대비 종가·기울기·ATR%·갭",
+        "MA5 추가 이격(비율)",
+        "sel_b_ma5_min_excess_ratio",
+    ),
+    SettingUiRow(
         2128,
         "② 유니버스 · 종목선정",
         "Type B — 추세돌파 (Track B 종목 선정)",

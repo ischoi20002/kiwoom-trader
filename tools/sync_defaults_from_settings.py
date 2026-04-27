@@ -2,6 +2,7 @@
 """settings.json → core/defaults.py 의 DEFAULT_SETTINGS 동기화(일회성·재실행 가능)."""
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -41,6 +42,13 @@ def main() -> None:
     tail = text[zpos:]  # \n\n# [Zombie Parameter Prevention]...
 
     block = text[start + len("DEFAULT_SETTINGS = ") : zpos]
+    try:
+        old_settings = ast.literal_eval(block.strip())
+    except (ValueError, SyntaxError, MemoryError):
+        old_settings = {}
+    if not isinstance(old_settings, dict):
+        old_settings = {}
+
     keys_order = re.findall(r'"([a-z0-9_]+)"\s*:', block)
     seen: set[str] = set()
     ordered: list[str] = []
@@ -53,12 +61,25 @@ def main() -> None:
             continue
         ordered.append(k)
         seen.add(k)
+    for k in sorted(skip):
+        if k in old_settings and k not in seen:
+            ordered.append(k)
+            seen.add(k)
 
     inner_lines = ["{"]
     for k in ordered:
-        if k in skip or k not in sj:
+        if k in skip:
+            if k in old_settings:
+                val = old_settings[k]
+            elif k in sj:
+                val = sj[k]
+            else:
+                continue
+        elif k not in sj:
             continue
-        inner_lines.append(f"    {json.dumps(k, ensure_ascii=False)}: {py_repr(sj[k])},")
+        else:
+            val = sj[k]
+        inner_lines.append(f"    {json.dumps(k, ensure_ascii=False)}: {py_repr(val)},")
     inner_lines.append("}")
 
     new_text = before + "\n".join(inner_lines) + tail
