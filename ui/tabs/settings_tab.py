@@ -1041,6 +1041,13 @@ class SettingsTab:
             'RSI(14) vs 시그널(9봉 단순이평) 등 — 지표 주기 UI 비노출·고정 14/9',
             toggle_key='use_rsi_sig_filter',
         )
+        add_param_row(
+            strat_f,
+            '동일 종목 S1 재매수 쿨다운',
+            's1_buy_signal_cooldown_sec',
+            '초',
+            '직전 S1 매수 성공 시각 기준 최소 간격(틱 중복·연속 주문 방지). 기본 1800=30분',
+        )
 
         # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지
         add_header(strat_f, '── Type A: 눌림목 진입 조건 ──')

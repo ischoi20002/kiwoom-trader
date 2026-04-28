@@ -19,6 +19,18 @@ class SignalEngine:
         self._wl_buy_last_tm = {}
         self._wl_sell_last_tm = {}
 
+    def _s1_buy_signal_cooldown_sec(self) -> float:
+        """
+        동일 종목 S1 매수가 성공한 직후부터, 같은 종목에 다시 S1 매수를 허용하기까지 최소 대기(초).
+        틱 단위 중복 신호·연속 주문 방지. 설정 `s1_buy_signal_cooldown_sec` (기본 1800=30분).
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            v = float(st.get("s1_buy_signal_cooldown_sec", 1800))
+        except (TypeError, ValueError):
+            v = 1800.0
+        return float(max(10.0, min(v, 86400.0)))
+
     def _to_scalar(self, val, default=0):
         """[v4.5.9] 헬퍼: Series/DF/Numpy 등 어떤 형태에서든 안전하게 단일 스칼라 값 추출"""
         if val is None: return default
@@ -479,9 +491,10 @@ class SignalEngine:
                         is_buy = False
 
                     # 쿨타임 및 중복 진입 방지
+                    _cool_sec = self._s1_buy_signal_cooldown_sec()
                     is_cool = True
                     if code in self.last_buy_sig_time:
-                        if (datetime.now() - self.last_buy_sig_time[code]).total_seconds() < 180:
+                        if (datetime.now() - self.last_buy_sig_time[code]).total_seconds() < _cool_sec:
                             is_cool = False
                 
                     if is_buy and is_cool and (not is_wl_only) and code not in self.app.virtual_positions:
@@ -521,7 +534,7 @@ class SignalEngine:
                     # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
                     if is_wl_only and is_buy and is_cool and not has_wl_avg:
                         _t_wb = self._wl_buy_last_tm.get(code)
-                        if _t_wb is None or (datetime.now() - _t_wb).total_seconds() >= 180:
+                        if _t_wb is None or (datetime.now() - _t_wb).total_seconds() >= _cool_sec:
                             self._wl_buy_last_tm[code] = datetime.now()
                             try:
                                 _nm = self.app.watchlist_store.get_display_name(code)

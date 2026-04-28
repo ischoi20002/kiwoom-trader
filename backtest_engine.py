@@ -876,10 +876,81 @@ class TradingStrategy:
         return TradingStrategy._approx_atr_from_true_range(bars_df)
 
     @staticmethod
-    def _peak_high_from_bars_df(bars_df: Any) -> Optional[float]:
+    def _peak_anchor_timestamp_for_bars(pos: Optional[dict]) -> Optional[pd.Timestamp]:
         """
-        재시작 직후 pos[max_p] 가 비어 있을 때, 당일 15분(등) 봉 High 로
-        '이미 목표 익절%를 넘긴 고점'을 복원해 ATR 트레일 무장 표시·판정을 맞춘다.
+        봉 High 로 max_p 를 보강할 때 사용할 기준 시각(진입 또는 마지막 매수 체결).
+        - S1: entry_time 등
+        - S2: DB·포지션은 entry_time 이 S1 과 동일하게 남는 경우가 많음 → events 의 마지막 BUY 시각 우선
+        """
+        if not pos:
+            return None
+        raw: Any = None
+        try:
+            st = int(pos.get("stage", pos.get("entry_n", 1)) or 1)
+        except (TypeError, ValueError):
+            st = 1
+        if st >= 2:
+            try:
+                ev = pos.get("events") or []
+                if isinstance(ev, list):
+                    for e in reversed(ev):
+                        if not isinstance(e, dict):
+                            continue
+                        act = str(e.get("action") or "").upper()
+                        if "BUY" in act:
+                            raw = e.get("time") or e.get("timestamp")
+                            break
+            except Exception:
+                raw = None
+        if raw is None or raw == "":
+            raw = (
+                pos.get("entry_time")
+                or pos.get("entry_datetime")
+                or pos.get("entry_date")
+            )
+        if raw is None or raw == "":
+            return None
+        try:
+            ts = pd.Timestamp(raw)
+        except Exception:
+            return None
+        try:
+            if pd.isna(ts):
+                return None
+        except Exception:
+            return None
+        try:
+            from zoneinfo import ZoneInfo
+
+            seoul = ZoneInfo("Asia/Seoul")
+            if ts.tzinfo is None:
+                ts = ts.tz_localize(
+                    seoul, ambiguous="NaT", nonexistent="shift_forward"
+                )
+            else:
+                ts = ts.tz_convert(seoul)
+        except Exception:
+            pass
+        try:
+            if pd.isna(ts):
+                return None
+        except Exception:
+            pass
+        return ts
+
+    @staticmethod
+    def _peak_high_from_bars_df(
+        bars_df: Any,
+        since: Optional[Any] = None,
+        bar_minutes: int = 15,
+    ) -> Optional[float]:
+        """
+        당일 15분(등) 봉 High 로 고가를 복원할 때 사용한다.
+        `since`(진입·추매 시각)가 있으면 **해당 시각 이전에 시작된 봉은 제외**한다.
+        (같은 15분 봉 안에서 진입 전에 형성된 wick 이 Flash/ATR 고점에 섞이지 않도록)
+
+        인덱스는 `StreamProcessor` 기준 **봉 종료(슬롯) 시각**이므로
+        bar_start = index - bar_minutes 로 시작 시각을 복원한다.
         """
         try:
             if bars_df is None or getattr(bars_df, "empty", True):
@@ -896,27 +967,61 @@ class TradingStrategy:
 
                     seoul = ZoneInfo("Asia/Seoul")
                     today = pd.Timestamp.now(tz=seoul).date()
+
+                    since_ts: Optional[pd.Timestamp] = None
+                    if since is not None:
+                        try:
+                            since_ts = pd.Timestamp(since)
+                            if since_ts.tzinfo is None:
+                                since_ts = since_ts.tz_localize(
+                                    seoul,
+                                    ambiguous="NaT",
+                                    nonexistent="shift_forward",
+                                )
+                            else:
+                                since_ts = since_ts.tz_convert(seoul)
+                            if pd.isna(since_ts):
+                                since_ts = None
+                        except Exception:
+                            since_ts = None
+
+                    try:
+                        step = pd.Timedelta(minutes=max(1, int(bar_minutes)))
+                    except (TypeError, ValueError):
+                        step = pd.Timedelta(minutes=15)
+
                     sel = []
+                    post_entry = []
                     for ts in idx:
                         try:
-                            t = pd.Timestamp(ts)
-                            if t.tzinfo is None:
-                                t = t.tz_localize(
+                            t_end = pd.Timestamp(ts)
+                            if t_end.tzinfo is None:
+                                t_end = t_end.tz_localize(
                                     seoul, ambiguous="NaT", nonexistent="shift_forward"
                                 )
                             else:
-                                t = t.tz_convert(seoul)
-                            sel.append(t.date() == today)
+                                t_end = t_end.tz_convert(seoul)
+                            sel.append(t_end.date() == today)
+                            if since_ts is not None:
+                                t_start = t_end - step
+                                post_entry.append(t_start >= since_ts)
+                            else:
+                                post_entry.append(True)
                         except Exception:
                             sel.append(True)
+                            post_entry.append(True)
                     if any(sel):
                         arr = hi.to_numpy(dtype=float, copy=False)
-                        m = np.array(sel, dtype=bool)
-                        picked = arr[m & ~np.isnan(arr)]
+                        m_today = np.array(sel, dtype=bool)
+                        m_post = np.array(post_entry, dtype=bool)
+                        picked = arr[m_today & m_post & ~np.isnan(arr)]
                         if picked.size > 0:
                             return float(np.max(picked))
                 except Exception:
                     pass
+            # since 가 있는데 인덱스로 필터할 수 없으면(레거시 DF 등) 당일 전체 max 사용 금지
+            if since is not None:
+                return None
             tail = hi.dropna().tail(96)
             if tail.empty:
                 return None
@@ -935,7 +1040,8 @@ class TradingStrategy:
         계좌/DB 동기화 포지션은 max_p·max_price 키가 없을 수 있음 — 이 경우에도
         evaluate_position 매 틱 pos 에 써 넣지 않으면 고가가 유지되지 않아
         'TRL 무장전'이 잘못 표시된다. max_now(구 스키마)는 동일 의미로 병합.
-        bars_peak_high: 로컬 15m 등에서 복원한 당일(또는 최근) 봉 고가 상한.
+        bars_peak_high: `_peak_high_from_bars_df(..., since=진입시각)`로
+        매수(·추매) 이후에 **시작된 봉**의 High 만 반영한 상한(실시간).
         """
         try:
             nw = float(now_price)
@@ -1005,7 +1111,8 @@ class TradingStrategy:
             avg_p = float(pos.get("avg_p", pos.get("avg_price", now_price)) or now_price)
             if avg_p <= 0:
                 avg_p = float(now_price)
-            bh = TradingStrategy._peak_high_from_bars_df(bars_df)
+            _anchor_disp = TradingStrategy._peak_anchor_timestamp_for_bars(pos)
+            bh = TradingStrategy._peak_high_from_bars_df(bars_df, since=_anchor_disp)
             max_p = float(
                 TradingStrategy._peak_price_from_position(
                     pos, float(now_price), bars_peak_high=bh
@@ -1151,8 +1258,10 @@ class TradingStrategy:
         bars_peak = None
         if kwargs:
             try:
+                _anchor = TradingStrategy._peak_anchor_timestamp_for_bars(pos)
                 bars_peak = TradingStrategy._peak_high_from_bars_df(
-                    kwargs.get("bars_df")
+                    kwargs.get("bars_df"),
+                    since=_anchor,
                 )
             except Exception:
                 bars_peak = None

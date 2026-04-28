@@ -7,6 +7,11 @@
 
 ---
 
+## 0.6.4 (2026-04-28)
+
+- **실시간 Flash·고점(`max_p`)**: `_peak_high_from_bars_df`가 **매수(·추매) 시각 이후에 시작된 15분봉**의 High만 반영. 진입 전 같은 봉의 고가가 Flash/표시에 섞이지 않도록 (`backtest_engine.py`).
+- **S1 중복 매수 방지**: 동일 종목 재매수 최소 간격을 설정 `s1_buy_signal_cooldown_sec`로 분리, 기본 **1800초(30분)**. 관심목록 매수 알림 간격도 동일 (`core/signal_engine.py`, `core/defaults.py`, `settings.json`, `ui/tabs/settings_tab.py`, `tools/settings_tab_ui_catalog.py`).
+
 ## 0.6.3 (2026-04-28)
 
 - **기본값**: `settings.json`(설정 탭 저장분)과 `tools/sync_defaults_from_settings.py`로 `core/defaults.py`의 `DEFAULT_SETTINGS` 동기화. 수수료·백테 기간·모의 계좌 등 `skip` 키는 **이전 defaults.py** 값을 유지하고, 없을 때만 `settings.json`으로 채움.

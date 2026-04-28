@@ -611,6 +611,14 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "use_rsi_sig_filter",
     ),
     SettingUiRow(
+        3032,
+        "③ Stage 1 진입 (공통/A/B)",
+        "[3] 1단계 진입 (S1) — 감시 후 매수 신호",
+        "단계 공통 필수 필터 (A/B 모두 적용)",
+        "동일 종목 S1 재매수 쿨다운(초)",
+        "s1_buy_signal_cooldown_sec",
+    ),
+    SettingUiRow(
         3040,
         "③ Stage 1 진입 (공통/A/B)",
         "[3] 1단계 진입 (S1) — 감시 후 매수 신호",
