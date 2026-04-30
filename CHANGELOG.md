@@ -7,6 +7,11 @@
 
 ---
 
+## 0.6.5 (2026-04-30)
+
+- **실시간 봉 정합성(0D 차단)**: 호가(0D) 이벤트가 15분봉(OHLCV) 업데이트 경로를 타지 않도록 분리. 체결(0B)만 봉 갱신을 수행하도록 `_orderbook_only` 플래그를 도입해 `SignalEngine`에서 봉 업데이트를 건너뛰도록 수정 (`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).
+- **진단 스크립트 추가**: 실시간 15분 DB와 백테스트 DB의 슬롯별 OHLCV·신호 차이를 비교하는 점검 스크립트 추가 (`_diag_compare_rt15m_vs_td.py`, `_diag_rt_bt_mismatch.py`).
+
 ## 0.6.4 (2026-04-28)
 
 - **실시간 Flash·고점(`max_p`)**: `_peak_high_from_bars_df`가 **매수(·추매) 시각 이후에 시작된 15분봉**의 High만 반영. 진입 전 같은 봉의 고가가 Flash/표시에 섞이지 않도록 (`backtest_engine.py`).

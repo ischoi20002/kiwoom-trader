@@ -263,12 +263,18 @@ class SignalEngine:
                 _wl_ap = None
             has_wl_avg = _wl_ap is not None and float(_wl_ap) > 0
 
+            # 0D(호가) 전용 패킷은 봉 업데이트를 건너뛰고 수급 필드만 반영합니다.
+            is_orderbook_only = bool(kwargs.get("_orderbook_only", False))
+
             # Update additional fields from kwargs (vol_power, total_ask, total_bid 등)
             for k, v in kwargs.items():
+                if k == "_orderbook_only":
+                    continue
                 info[k] = v
-            
+
             # 1. 지표 재계산 및 봉 데이터 업데이트
-            self._update_realtime_bar(code, now_price, volume)
+            if not is_orderbook_only:
+                self._update_realtime_bar(code, now_price, volume)
             
             # 2. 실시간 지표 추출 (RSI, MACD 등)
             rsi_val = self._calculate_realtime_rsi(code)
@@ -341,9 +347,8 @@ class SignalEngine:
 
             # [v35.7] 자가 학습형 합성 모델 보정 (Adaptive Calibration)
             
-            # 5. 지표 및 시그널 계산 주기 관리 (100틱마다 또는 분봉 변경 시)
-            info['tick_count'] = info.get('tick_count', 0) + 1
-            last_bar_count = info.get('last_bar_count', 0)
+            # 5. S1 지표·신호: 워밍업(bars_ready) 후에는 매 체결마다 재계산한다.
+            # 과거 100틱 스로틀은 조건 충족 시점이 최대 한 15분 슬롯만큼 밀리는 원인이었다.
             try:
                 _min_sig_bars = effective_min_15m_bars_for_monitoring(
                     self.app.settings
@@ -362,27 +367,24 @@ class SignalEngine:
                 and current_bar_count >= _min_sig_bars
             )
 
-            should_recalc = (current_bar_count > last_bar_count) or (info['tick_count'] % 100 == 1)
-
             is_buy = False
             last_row = None
             if bars_ready:
-                if should_recalc or 'last_detailed_sig' not in info:
-                    df_with_ind = TradingStrategy.calculate_indicators(self.app.bars_data[code], self.app.settings)
-                    try:
-                        info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(
-                            df_with_ind, self.app.settings, "UP"
+                df_with_ind = TradingStrategy.calculate_indicators(self.app.bars_data[code], self.app.settings)
+                try:
+                    info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(
+                        df_with_ind, self.app.settings, "UP"
+                    )
+                    info['last_bar_count'] = current_bar_count
+                    info['last_row_cache'] = df_with_ind.iloc[-1].to_dict()
+                except Exception as exc_sig:
+                    # 시그널/지표 계산 실패 시 캐시가 없으면 아래 분기에서 안내 문구 표시
+                    if self._last_realtime_err != str(exc_sig):
+                        self._last_realtime_err = str(exc_sig)
+                        print(
+                            f"[SignalEngine] get_buy_signals_detailed 실패 ({code}): {exc_sig}"
                         )
-                        info['last_bar_count'] = current_bar_count
-                        info['last_row_cache'] = df_with_ind.iloc[-1].to_dict()
-                    except Exception as exc_sig:
-                        # 시그널/지표 계산 실패 시 캐시가 없으면 아래 분기에서 안내 문구 표시
-                        if self._last_realtime_err != str(exc_sig):
-                            self._last_realtime_err = str(exc_sig)
-                            print(
-                                f"[SignalEngine] get_buy_signals_detailed 실패 ({code}): {exc_sig}"
-                            )
-                            traceback.print_exc()
+                        traceback.print_exc()
                 
                 if "last_detailed_sig" not in info:
                     info["confluence"] = "시그널 계산 실패(봉·지표 확인)"

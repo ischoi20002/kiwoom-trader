@@ -1522,6 +1522,8 @@ class MonitorTab:
                         lp = 0
                     if lp <= 0:
                         continue
+                    # [정합성] 호가(0D)는 봉(OHLCV) 업데이트를 유발하면 안 됩니다.
+                    # 체결(0B) 경로만 봉을 갱신하고, 0D는 수급/호가 정보만 전달합니다.
                     self.app._on_realtime_data_received(
                         code,
                         lp,
@@ -1529,6 +1531,7 @@ class MonitorTab:
                         info.get("trde_val", 0),
                         total_ask=total_ask,
                         total_bid=total_bid,
+                        _orderbook_only=True,
                     )
                 mkt = item_data.get('market', item_data.get('mkt', ''))
                 if mkt == 'NXT' or '_nx' in full_code.lower():
