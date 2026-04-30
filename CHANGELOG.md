@@ -7,6 +7,12 @@
 
 ---
 
+## 0.6.6 (2026-05-01)
+
+- **체결 후 동기화**: 1·2차 전체 동기화에 더해 **약 22초 뒤 3차** 예약 — 증권사 D+2·예수금상세 반영 지연 흡수 (`k_trader_gui.py`).
+- **포지션 탭·수수료**: 반영 ON 시 매입은 `invested`(매수 수수료 포함), 평가·미실현은 매도 수수료 차감 순매각 기준으로 정합 (`utils/fee_rates.py`, `ui/tabs/virtual_tab.py`, `reporting/virtual_report.py`).
+- **총자산**: D+2와 동일 출처인 **`holdings_stocks_mv_api`**(보유 액면 평가 합)를 주식 평가·총자산 합산에 우선 — 계좌 정합 (`ui/tabs/virtual_tab.py`).
+
 ## 0.6.5 (2026-04-30)
 
 - **실시간 봉 정합성(0D 차단)**: 호가(0D) 이벤트가 15분봉(OHLCV) 업데이트 경로를 타지 않도록 분리. 체결(0B)만 봉 갱신을 수행하도록 `_orderbook_only` 플래그를 도입해 `SignalEngine`에서 봉 업데이트를 건너뛰도록 수정 (`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).

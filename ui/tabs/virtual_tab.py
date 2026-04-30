@@ -1314,8 +1314,8 @@ class VirtualTab:
         avg_price: float,
     ) -> float:
         """
-        현재가(전량 매도 가정 단가)로 청산한다고 할 때 **매도 수수료를 차감한** 미실현 손익(원).
-        원가는 청산 실현과 동일하게 `invested`(매수 수수료 포함)를 우선 사용합니다.
+        현재가(전량 매도 가정) 기준 미실현 손익(원).
+        **순매각(매도 수수료 차감) − invested(매수 수수료 포함)**. 평가열은 invested+미실현=순매각.
         """
         try:
             return float(
@@ -1654,7 +1654,7 @@ class VirtualTab:
         self,
     ) -> List[Tuple[str, Dict[str, Any], Dict[str, Any], Tuple[float, int, float, float, int], float]]:
         """
-        보유 1회 스캔: 시세 resolve + 미실현(수수료포함)만 계산.
+        보유 1회 스캔: 시세 resolve + 미실현(매도수수료 반영)만 계산.
         토글 시 합계·트리에서 동일 값을 재사용해 중복 연산을 줄인다.
         """
         mi = getattr(self.app, "monitor_info", None) or {}
@@ -1680,7 +1680,7 @@ class VirtualTab:
         return out
 
     def _update_holdings_aggregate_fee_excluded(self) -> None:
-        """보유 합계 카드: 매입·평가·손익·수익율. 토글 OFF=수수료 제외, ON=수수료 반영."""
+        """보유 합계 카드: OFF=수수료 미반영, ON=매입 invested·평가 순매각(매도수수료만 차감)."""
         try:
             fee_on = self._holdings_agg_fee_reflect_on()
 
@@ -1719,7 +1719,6 @@ class VirtualTab:
                     except (TypeError, ValueError):
                         ur = 0.0
                     s_pnl += ur
-                    # 평가금액: 전량 매도·매도수수료 차감 후 순매각대금(행 합계 = 매입+미실현)
                     s_eval += inv + ur
 
             self._apply_holdings_aggregate_display(s_den, s_eval, s_pnl)
@@ -1858,7 +1857,7 @@ class VirtualTab:
         ----
         (vals, tags, profit_pct_for_tag, unrealized_for_tag, eval_amt_gross_for_weight, unrealized_fee_included)
             - ``hold_agg_fee_reflect`` OFF: 매입=평단×수량, 평가=시장평가액, 손익·% = 수수료 미반영.
-            - ON: 매입=invested, 평가=순매각대금(invested+미실현), 손익·% = 매도수수료·매입원 반영.
+            - ON: 매입=invested(매수수수료 포함), 평가=순매각(매도수수료만 차감), 손익·% = invested 대비.
             ``eval_amt_gross_for_weight``: 보유비중 분모용(항상 시장 평가액 합 기준).
             ``unrealized_fee_included``: 상단 계좌 요약 합산용(변경 없음).
         `total_eval_for_weight`: 보유비중(%) 분모. None이면 해당 열은 '—'.
@@ -1902,7 +1901,7 @@ class VirtualTab:
             if inv > 1e-6:
                 profit_pct_row = (unrealized_row / inv) * 100.0
             elif cost_ex > 1e-6:
-                profit_pct_row = (unrealized_row / cost_ex) * 100.0
+                profit_pct_row = (unrealized_row / float(cost_ex)) * 100.0
             elif ap > 0 and float(curr_p) > 0:
                 profit_pct_row = (float(curr_p) / float(ap) - 1.0) * 100.0
             else:
@@ -2187,13 +2186,15 @@ class VirtualTab:
         except Exception:
             total_closed_pnl = 0.0
 
-        # 3. 요약: 예수금·D+n은 포트폴리오(체결/수동 동기화 시 REST). 주식평가·총자산은 보유행 합계 기준.
+        # 3. 요약: 예수금·D+n은 포트폴리오(체결/수동 동기화 시 REST). 주식평가·총자산은
+        # ka10085 보유평가합(holdings_stocks_mv_api) 우선 — D+2와 동일 배치라 계좌 총자산과 맞춤.
         portfolio = self.app.portfolio
         current_cash = getattr(portfolio, "actual_deposit", 0)
         try:
             stock_eval = float(total_eval)
         except (TypeError, ValueError):
             stock_eval = 0.0
+        stock_eval = self._resolve_stock_eval_for_account(portfolio, stock_eval)
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
         # 미실현(보유): 수수료·매입 반영 미실현 합(트리와 동일). %는 invested 합 대비.
@@ -2339,6 +2340,7 @@ class VirtualTab:
                 stock_eval = float(total_eval)
             except (TypeError, ValueError):
                 stock_eval = 0.0
+            stock_eval = self._resolve_stock_eval_for_account(portfolio, stock_eval)
             total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
             try:
@@ -2417,10 +2419,31 @@ class VirtualTab:
                 return 0.0
 
     @staticmethod
+    def _resolve_stock_eval_for_account(portfolio: Any, local_gross_sum: float) -> float:
+        """
+        상단 「주식 평가금」·총자산 합산용 주식 평가액.
+
+        D+2 예수는 동기화 시점에 매수 수수료가 반영된 현금이므로, 같은 REST(ka10085)에서 온
+        ``holdings_stocks_mv_api``(보유 액면 평가 합)가 있으면 이를 우선해 **계좌 총자산과 정합**합니다.
+        없으면 틱 기준 로컬 합(``local_gross_sum``)을 씁니다.
+        """
+        try:
+            api_mv = float(getattr(portfolio, "holdings_stocks_mv_api", 0) or 0)
+        except (TypeError, ValueError):
+            api_mv = 0.0
+        if api_mv > 1e-6:
+            return float(api_mv)
+        try:
+            return float(local_gross_sum or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
     def _compute_virtual_tab_total_assets(portfolio: Any, _stock_eval: float) -> float:
         """
-        포지션 관리 탭 '총 자산': D+2 예수 + 화면과 동일한 주식평가(stock_eval) 합이 기준.
-        last_tot_evlu_amt(ka10085 단일 총평가)는 D+2 보정 전 값일 수 있어, 합계와 ±2.5% 안에서만 동일 처리.
+        포지션 관리 탭 「총 자산」: **D+2 예수 + 주식 평가**(``_resolve_stock_eval_for_account`` 권장).
+
+        ``last_tot_evlu_amt``(ka10085 단일 총평가)는 합산과 ±2.5% 이내면 증권사 표시와 동일시합니다.
         """
         try:
             d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)

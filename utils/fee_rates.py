@@ -68,10 +68,12 @@ def unrealized_at_price_net_of_sell_fee(
     settings: Mapping[str, Any],
 ) -> float:
     """
-    전량 매도 가정 시 **매도 수수료를 뺀 매수대(invested 우선)** 대비 미실현 손익(원).
+    전량 매도 가정 시 미실현 손익(원).
 
-    포지션 관리 탭(`VirtualTab._unrealized_at_price_net_of_sell_fee`)과 동일 식 —
-    종합 리포트 등 다른 모듈에서도 재사용합니다.
+    - **매도**: 현재가×수량에서 매도 수수료만 차감한 **순매각대금**.
+    - **매수 비용**: ``invested``(매수대금+매수수수료)를 원가로 사용. 없으면 평단×수량.
+
+    포지션 탭(평가열=순매각, 매입열=invested)·일일 결산·가상 리포트와 동일 식입니다.
     """
     try:
         q = int(qty or 0)

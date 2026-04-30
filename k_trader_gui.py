@@ -236,9 +236,10 @@ class KiwoomApp:
         self.lbl_ui_reactivity: Optional[ttk.Label] = None
         # sync_with_actual_account 는 REST·DB·정합으로 수 초 걸릴 수 있음 — 백그라운드에서 한 번에 하나만
         self._portfolio_sync_thread_lock: threading.Lock = threading.Lock()
-        # 체결 후 계좌 동기화: 연속 체결 시 after 예약이 겹치지 않도록 디바운스 + 2차 추격
+        # 체결 후 계좌 동기화: 연속 체결 시 after 예약이 겹치지 않도록 디바운스 + 2·3차 추격
         self._post_fill_sync_job: Optional[Any] = None
         self._post_fill_sync_followup: Optional[Any] = None
+        self._post_fill_sync_followup2: Optional[Any] = None
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
@@ -914,12 +915,16 @@ class KiwoomApp:
             self.log(f"⚠️ [체결 동기화] 실패: {e}")
 
     def _cancel_post_fill_sync_jobs(self) -> None:
-        """체결 후 동기화 예약(1차·2차)을 취소합니다. 연속 체결 디바운스 시 사용."""
+        """체결 후 동기화 예약(1·2·3차)을 취소합니다. 연속 체결 디바운스 시 사용."""
         try:
             r = getattr(self, "root", None)
             if r is None:
                 return
-            for attr in ("_post_fill_sync_job", "_post_fill_sync_followup"):
+            for attr in (
+                "_post_fill_sync_job",
+                "_post_fill_sync_followup",
+                "_post_fill_sync_followup2",
+            ):
                 try:
                     jid = getattr(self, attr, None)
                     if jid is not None:
@@ -938,7 +943,7 @@ class KiwoomApp:
         체결 후 키움 잔고·예수 REST를 맞춥니다.
 
         - 2.5초 단일 지연은 증권사 반영이 늦을 때 **이전 잔고**가 오는 경우가 있어,
-          첫 동기화는 약 4.2초 뒤, 그다음 **약 7초 뒤 2차**로 한 번 더 맞춥니다.
+          첫 동기화는 약 4.2초 뒤, **약 7초 뒤 2차**, 이후 **약 22초 뒤 3차**로 D+2·예수 반영 지연을 흡수합니다.
         - 연속 체결 시마다 after가 쌓이면 락 경쟁으로 스킵되기 쉬우므로 **마지막 체결 기준으로 디바운스**합니다.
         - 동기화 스레드는 ``wait_for_lock=True`` 로 이전 동기화가 끝날 때까지 대기합니다.
         """
@@ -951,6 +956,8 @@ class KiwoomApp:
             # ms: 기동 직후와 동시에 오가면 너무 길면 부담 — 필요 시 settings 키로만 조정 예정
             first_ms = 4200
             follow_ms = 7000
+            # 2차 실행 시점 기준 추가 대기(증권사 예수금상세·D+2 백엔드 지연)
+            third_after_second_ms = 22000
 
             def _first() -> None:
                 try:
@@ -983,6 +990,36 @@ class KiwoomApp:
                         except Exception as e2:
                             try:
                                 self.log(f"⚠️ [체결 동기화] 2차 실행 예외: {e2}")
+                            except Exception:
+                                pass
+                        try:
+                            r3 = getattr(self, "root", None)
+                            if r3 is None:
+                                return
+
+                            def _third() -> None:
+                                try:
+                                    self._post_fill_sync_followup2 = None
+                                    self._run_portfolio_sync_in_daemon_thread(
+                                        silent=True,
+                                        force=True,
+                                        refresh_cash_deposit=True,
+                                        wait_for_lock=True,
+                                    )
+                                except Exception as e3b:
+                                    try:
+                                        self.log(
+                                            f"⚠️ [체결 동기화] 3차 실행 예외: {e3b}"
+                                        )
+                                    except Exception:
+                                        pass
+
+                            self._post_fill_sync_followup2 = r3.after(
+                                third_after_second_ms, _third
+                            )
+                        except Exception as e3a:
+                            try:
+                                self.log(f"⚠️ [체결 동기화] 3차 예약 실패: {e3a}")
                             except Exception:
                                 pass
 

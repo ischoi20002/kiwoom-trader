@@ -174,7 +174,7 @@ def _open_mtm_pct_and_krw(
 ) -> Tuple[Optional[float], float]:
     """
     보유 건의 현재가 기준 수익률(%) 및 미실현 손익(원).
-    포지션 탭과 동일: 매도 수수료 차감 순입금 − invested(매수비용 우선).
+    포지션 탭과 동일: 매도 수수료 차감 순매각 − invested(매수비용).
     current_price 가 유효하지 않으면 (None, 0.0).
     """
     try:

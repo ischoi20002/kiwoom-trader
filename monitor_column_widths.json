@@ -4,14 +4,14 @@
     "Code": 77,
     "Name": 131,
     "StratType": 92,
-    "Price": 103,
+    "Price": 87,
     "AtrExit": 153,
     "VsPrev": 85,
     "Ratio": 94,
-    "Status": 249,
+    "Status": 241,
     "VolPower": 62,
     "BidAsk": 132,
     "Volume": 126
   },
-  "sash0_rel": 0.2564841498559078
+  "sash0_rel": 0.06
 }
