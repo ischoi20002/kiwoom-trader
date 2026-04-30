@@ -1220,6 +1220,18 @@ class VirtualTab:
                 if v > 0:
                     self._fallback_quote_cache[nk] = (now_m, v)
                     return v
+            # 호가 실패 시 전일 종가(ka10001·stkinfo) — 장 전·호가 비어 있을 때 표시용
+            fn_pc = getattr(om, "fetch_stock_prev_close_ka10001", None) if om is not None else None
+            if callable(fn_pc):
+                try:
+                    pc = fn_pc(nk, silent=True)
+                    if pc is not None:
+                        v2 = float(pc)
+                        if v2 > 0:
+                            self._fallback_quote_cache[nk] = (now_m, v2)
+                            return v2
+                except Exception:
+                    pass
         except Exception:
             pass
         return 0.0
@@ -1247,7 +1259,18 @@ class VirtualTab:
                     return v
         except (TypeError, ValueError):
             pass
-        if not stub_flag:
+        # 보유 전용 스텁(vp_price_stub): 틱이 없을 때 last_price 에 시드한 참고가(ka·전일·REST)를 반드시 사용.
+        # (기존에는 stub 이면 last_price 를 건너뛰어 시드가 화면에 반영되지 않음)
+        if stub_flag:
+            try:
+                raw_lp = info.get("last_price")
+                if raw_lp not in (None, "", 0):
+                    v = float(raw_lp)
+                    if v > 0:
+                        return v
+            except (TypeError, ValueError):
+                pass
+        else:
             try:
                 raw_lp = info.get("last_price")
                 if raw_lp not in (None, "", 0):

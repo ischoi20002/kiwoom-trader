@@ -7,6 +7,14 @@
 
 ---
 
+## 0.6.7 (2026-05-01)
+
+- **전일 종가 REST**: 주식 기본정보 `ka10001`을 **`POST /api/dostk/stkinfo`** 로 호출하도록 수정. `mrkcond`(호가) URL 혼용 시 HTTP 200이어도 전일가 필드가 비던 문제를 제거 (`core/order_manager.py`).
+- **보유 스텁 시세**: `vp_price_stub` 인 경우에도 `monitor_info['last_price']`에 시드한 참고가를 **현재가 표시에 반영** (`ui/tabs/virtual_tab.py`).
+- **REST 폴백**: 호가(ka10004) 실패 시 **전일 종가( stkinfo )** 로 보조 (`ui/tabs/virtual_tab.py`).
+- **기동 시 참고가**: 인증 성공 **약 0.4초 후** 토큰 준비 타이밍을 두고 보유 스텁 `last_price`를 재시드, `app`·`TradingController`의 `monitor_info` 동기화 (`k_trader_gui.py`).
+- **참고가 우선순위**: 계좌 스냅 외에 REST **전일 종가 → 현재가** 순 폴백 (`core/trading_controller.py`).
+
 ## 0.6.6 (2026-05-01)
 
 - **체결 후 동기화**: 1·2차 전체 동기화에 더해 **약 22초 뒤 3차** 예약 — 증권사 D+2·예수금상세 반영 지연 흡수 (`k_trader_gui.py`).

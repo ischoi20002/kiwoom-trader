@@ -698,6 +698,10 @@ class KiwoomApp:
                 pass
             self.portfolio.load_all()
             self.remote_commander.start()
+            try:
+                self._schedule_vp_stub_price_refresh_after_auth()
+            except Exception:
+                pass
             self.root.after(
                 2000,
                 lambda: self._run_portfolio_sync_in_daemon_thread(
@@ -1289,6 +1293,86 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def _schedule_vp_stub_price_refresh_after_auth(self) -> None:
+        """인증 직후 토큰·REST 준비 타이밍을 두고 보유 전용 스텁 last_price 를 재시드합니다."""
+        try:
+            r = getattr(self, "root", None)
+            if r is not None:
+                r.after(400, self._refresh_vp_price_stubs_after_auth_safe)
+        except Exception:
+            pass
+
+    def _refresh_vp_price_stubs_after_auth_safe(self) -> None:
+        try:
+            self._refresh_vp_price_stubs_after_auth()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [기동] 보유 참고가(스텁) 지연 갱신 실패: {e}")
+            except Exception:
+                pass
+
+    def _refresh_vp_price_stubs_after_auth(self) -> None:
+        """
+        첫 렌더에서 토큰이 없어 last_price=0 이었던 vp_price_stub 행을 REST로 다시 채웁니다.
+        """
+        om = getattr(self, "order_manager", None)
+        if om is None:
+            return
+        try:
+            tok = getattr(getattr(self, "auth_manager", None), "get_auth_token", None)
+            if not callable(tok) or not tok():
+                return
+        except Exception:
+            return
+        try:
+            vp = getattr(self.portfolio, "virtual_positions", None) or {}
+        except Exception:
+            vp = {}
+        if not vp:
+            return
+        mi = getattr(self, "monitor_info", None)
+        if not isinstance(mi, dict):
+            return
+        updated = False
+        for c_raw, pos in list(vp.items()):
+            try:
+                if not isinstance(pos, dict):
+                    continue
+                c = str(c_raw).zfill(6)
+                row = mi.get(c)
+                if not isinstance(row, dict) or not row.get("vp_price_stub"):
+                    continue
+                try:
+                    lp = float(row.get("last_price") or 0)
+                except (TypeError, ValueError):
+                    lp = 0.0
+                if lp > 0:
+                    continue
+                ref_p = float(
+                    virtual_position_reference_price_for_monitor(
+                        pos,
+                        order_manager=om,
+                        code=c,
+                    )
+                )
+                if ref_p <= 0:
+                    continue
+                row = dict(row)
+                row["last_price"] = ref_p
+                mi[c] = row
+                try:
+                    self.trading_controller.monitor_info[c] = dict(row)
+                except Exception:
+                    pass
+                updated = True
+            except Exception:
+                continue
+        if updated and hasattr(self, "virtual_tab"):
+            try:
+                self.virtual_tab._render_virtual_positions()
+            except Exception:
+                pass
+
     def _ensure_vp_monitor_stub(self, code: str) -> None:
         """보유만 있고 감시에 없던 종목에 monitor_info 스텁을 넣고 스트림 재등록을 요청합니다."""
         try:
@@ -1302,7 +1386,13 @@ class KiwoomApp:
             nm = pos.get("name") or nk
             ap = float(pos.get("avg_price", 0) or 0)
             try:
-                ref_p = float(virtual_position_reference_price_for_monitor(pos))
+                ref_p = float(
+                    virtual_position_reference_price_for_monitor(
+                        pos,
+                        order_manager=getattr(self, "order_manager", None),
+                        code=nk,
+                    )
+                )
             except Exception:
                 ref_p = 0.0
             stub = {

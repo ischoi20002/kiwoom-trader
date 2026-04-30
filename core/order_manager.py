@@ -2,7 +2,7 @@ import requests
 import json
 import logging
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import config
 from utils.normalization import get_tick_size, normalize_code
@@ -370,6 +370,175 @@ class OrderManager:
             except Exception:
                 pass
         return None
+
+    def _dostk_stk_cd_try_list(self, stk_cd: str) -> List[str]:
+        """REST ``stk_cd`` 파라미터 후보(6자리·앞자리 0 제거 등)."""
+        try:
+            c = str(stk_cd or "").strip().zfill(6)
+        except Exception:
+            return []
+        if not c or c == "000000":
+            return []
+        out: List[str] = []
+        for x in (c, c.lstrip("0") or c):
+            if x and x not in out:
+                out.append(x)
+        return out or [c]
+
+    def _extract_prev_clpr_deep(self, root: Any) -> Optional[float]:
+        """
+        ``/api/dostk/*`` JSON 전체(dict/list)에서 전일 종가·기준가 필드를 순회해 숫자로 반환합니다.
+        ka10001(stkinfo)·호가 응답 등 키 이름이 달라 후보를 넓게 둡니다.
+        """
+        seen: Set[int] = set()
+        pkeys = (
+            "pred_close_pric",
+            "prdy_clpr",
+            "bfdy_clpr",
+            "yst_clpr",
+            "stck_prdy_clpr",
+            "base_pric",
+            "bss_cls_pric",
+            "p_clpr",
+            "mprv_clpr",
+        )
+
+        def _vis(x: Any) -> Optional[float]:
+            if x is None:
+                return None
+            if isinstance(x, (dict, list)):
+                xid = id(x)
+                if xid in seen:
+                    return None
+                seen.add(xid)
+                if isinstance(x, dict):
+                    for k in pkeys:
+                        if k in x:
+                            try:
+                                v = self._safe_float(x.get(k), 0.0)
+                                if v > 0:
+                                    return float(v)
+                            except Exception:
+                                pass
+                    for v in x.values():
+                        r = _vis(v)
+                        if r is not None and r > 0:
+                            return r
+                    return None
+                for it in x:
+                    r = _vis(it)
+                    if r is not None and r > 0:
+                        return r
+                return None
+            return None
+
+        try:
+            return _vis(root)
+        except Exception:
+            return None
+
+    def fetch_stock_prev_close_ka10001(
+        self, stk_cd: str, *, silent: bool = False
+    ) -> Optional[float]:
+        """
+        키움 REST ``ka10001``(주식기본정보)로 **전일 종가**를 조회합니다.
+        호가(``/api/dostk/mrkcond``, ka10004)와 달리 본 TR은 **``POST /api/dostk/stkinfo``** 를 써야 합니다.
+        ``kt10001`` 은 매도 주문 TR이므로 전일가 조회에 사용하지 않습니다.
+        """
+        try:
+            code = str(stk_cd or "").strip().zfill(6)
+        except Exception:
+            return None
+        if not code or code == "000000":
+            return None
+        try:
+            use_mock = getattr(config, "USE_MOCK", False)
+            host = config.MOCK_URL if use_mock else config.URL
+            token = self.app.auth_manager.get_auth_token()
+            if not token:
+                if not silent:
+                    try:
+                        lf = getattr(self.app, "log", None)
+                        if callable(lf):
+                            lf(f"⚠️ [전일종가] {code} — 액세스 토큰 없음")
+                    except Exception:
+                        pass
+                return None
+            url_stkinfo = f"{host}/api/dostk/stkinfo"
+            last_http: int = 0
+            last_hint: str = ""
+            headers = {
+                "Content-Type": "application/json;charset=UTF-8",
+                "authorization": f"Bearer {token}",
+                "api-id": "ka10001",
+            }
+            for param in self._dostk_stk_cd_try_list(code):
+                try:
+                    res = requests.post(
+                        url_stkinfo,
+                        headers=headers,
+                        json={"stk_cd": param},
+                        timeout=8,
+                    )
+                except requests.RequestException as rqe:
+                    last_hint = f"네트워크:{rqe}"
+                    continue
+                last_http = int(res.status_code or 0)
+                if res.status_code != 200:
+                    last_hint = f"HTTP:{last_http}"
+                    continue
+                try:
+                    data = res.json()
+                except Exception:
+                    last_hint = "JSON파싱실패"
+                    continue
+                if not isinstance(data, dict):
+                    last_hint = "응답(dict아님)"
+                    continue
+                try:
+                    rc = data.get("return_code", data.get("rt_cd", 0))
+                    if rc is not None and str(rc).strip() not in ("", "0", "None"):
+                        try:
+                            ri = int(rc)
+                            if ri != 0:
+                                msg = str(data.get("return_msg", "") or "")[:120]
+                                last_hint = f"API오류 rc={rc} {msg}"
+                                continue
+                        except (TypeError, ValueError):
+                            last_hint = f"API오류 rc={rc}"
+                            continue
+                except Exception:
+                    pass
+                pv = self._extract_prev_clpr_deep(data)
+                if pv is not None and pv > 0:
+                    try:
+                        if not silent:
+                            log_fn = getattr(self.app, "log", None)
+                            if callable(log_fn):
+                                log_fn(
+                                    f"📌 [전일종가] {code} stk_cd={param!r} → {float(pv):,.0f}원"
+                                )
+                    except Exception:
+                        pass
+                    return float(pv)
+                last_hint = "전일필드없음"
+            if not silent:
+                try:
+                    log_fn = getattr(self.app, "log", None)
+                    if callable(log_fn):
+                        log_fn(
+                            f"⚠️ [전일종가] {code} 조회 실패 "
+                            f"(마지막 HTTP={last_http}, 사유≈{last_hint or '알수없음'})"
+                        )
+                except Exception:
+                    pass
+            return None
+        except Exception as e:
+            try:
+                self.logger.debug("fetch_stock_prev_close_ka10001 예외: %s", e)
+            except Exception:
+                pass
+            return None
 
     def _sum_holdings_market_value(self, holdings: list) -> float:
         """

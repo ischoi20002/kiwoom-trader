@@ -10,13 +10,19 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
 
-def virtual_position_reference_price_for_monitor(pos: Dict[str, Any]) -> float:
+def virtual_position_reference_price_for_monitor(
+    pos: Dict[str, Any],
+    *,
+    order_manager: Optional[Any] = None,
+    code: Optional[str] = None,
+) -> float:
     """
     가상보유 포지션 dict에서 감시 트리·monitor_info 표시용 참고 현재가를 꺼냅니다.
 
     보유 탭(`virtual_tab`)과 동일하게 **계좌 동기화(ka10085) 스냅**을 우선합니다.
     웹소켓 틱 전이라도 `ka_cur_prc` 또는 평가금액/수량으로 복원 가능하면 0 대신 표시합니다.
 
+    그 다음 **REST 전일종가(ka10001·stkinfo)** → **REST 현재가(ka10004)** 순으로 폴백합니다.
     평균단가(`avg_price`)는 넣지 않습니다. 평단을 현재가처럼 쓰면 등락·미실현 표시가 오해를 부를 수 있습니다.
 
     Returns:
@@ -34,6 +40,28 @@ def virtual_position_reference_price_for_monitor(pos: Dict[str, Any]) -> float:
             return float(ka_ev) / float(qty)
     except (TypeError, ValueError, ZeroDivisionError):
         pass
+    if order_manager is not None and code:
+        try:
+            cod = str(code).strip().zfill(6)
+            if cod and cod != "000000":
+                fn_pc = getattr(order_manager, "fetch_stock_prev_close_ka10001", None)
+                if callable(fn_pc):
+                    try:
+                        pc = fn_pc(cod, silent=True)
+                        if pc is not None and float(pc) > 0:
+                            return float(pc)
+                    except Exception:
+                        pass
+                fn_cur = getattr(order_manager, "fetch_stock_cur_prc_rest", None)
+                if callable(fn_cur):
+                    try:
+                        cp = fn_cur(cod)
+                        if cp is not None and float(cp) > 0:
+                            return float(cp)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     return 0.0
 
 
@@ -211,7 +239,11 @@ class TradingController:
                     continue
                 nm = pos.get("name") or c
                 ap = float(pos.get("avg_price", 0) or 0)
-                ref_p = virtual_position_reference_price_for_monitor(pos)
+                ref_p = virtual_position_reference_price_for_monitor(
+                    pos,
+                    order_manager=getattr(self.app, "order_manager", None),
+                    code=c,
+                )
                 self.monitor_info[c] = {
                     "name": nm,
                     "ma20": 0.0,
