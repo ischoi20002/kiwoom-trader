@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-금일 손익용 **기준 총자산** 은 ``fetch_stock_prev_close_ka10001``(직전 장마감 시세) × 보유수량과
-현재 ``portfolio``의 D+2 예수 골격으로 **매번 합성**한다. (``compute_day_pnl_vs_eod_store``)
+금일 손익용 **기준 총자산** 은 보유별 직전 장마감가로 **순매각 기준** 주식 평가
+( ``invested`` + 매도 수수료 차감 미실현, ``utils.fee_rates`` )를 합산한 뒤
+현재 ``portfolio``의 D+2 예수와 함께 포지션 탭과 동일한 ``_compute_virtual_tab_total_assets`` 규칙으로 합성한다.
 
 로컬 JSON(``eod_equity_snapshots_*.json``) 읽기/쓰기 함수는 **과거 호환·수동 점검용**으로만 남긴다.
 금일 손익·일일 리포트 요약은 EOD 파일을 **쓰지도 읽지도 않는다**.
@@ -15,6 +16,7 @@ from datetime import date, datetime
 from typing import Any, Dict, Optional, Tuple
 
 from reporting.krx_trading_calendar import previous_trading_day
+from utils.fee_rates import unrealized_at_price_net_of_sell_fee
 from utils.server_mode_paths import eod_equity_snapshots_path
 
 
@@ -57,8 +59,9 @@ def _portfolio_total_assets_like_virtual_tab_for_synthetic(
 
 def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[float]:
     """
-    보유 종목별 ``fetch_stock_prev_close_ka10001``(직전 장마감 시세) × 수량 합과
-    현재 ``portfolio``의 D+2 예수 등으로 **금일 손익 분모용 기준 총자산**을 추정한다.
+    보유 종목별 직전 장마감가( ``fetch_stock_prev_close_ka10001`` )로
+    **포지션 탭과 동일한 순매각 주식 합**( ``invested`` + 매도 수수료 차감 미실현 )을 구하고,
+    ``VirtualTab._compute_virtual_tab_total_assets`` 로 D+2·증권사 총평가 정합까지 맞춘 **기준 총자산**을 반환한다.
     """
     try:
         om = getattr(app, "order_manager", None)
@@ -71,11 +74,15 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
         if portfolio is None:
             return None
         try:
+            settings = dict(getattr(app, "settings", None) or {})
+        except Exception:
+            settings = {}
+        try:
             with portfolio.lock:
                 vp = dict(getattr(portfolio, "virtual_positions", None) or {})
         except Exception:
             vp = dict(getattr(portfolio, "virtual_positions", None) or {})
-        stock_eval_prev = 0.0
+        stock_liquid_prev = 0.0
         for c_raw, pos in vp.items():
             try:
                 if not isinstance(pos, dict):
@@ -83,6 +90,10 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
                 qty = int(pos.get("qty", 0) or 0)
                 if qty <= 0:
                     continue
+                try:
+                    ap = float(pos.get("avg_price", 0) or 0)
+                except (TypeError, ValueError):
+                    ap = 0.0
                 code = str(c_raw).split("_")[0].zfill(6)
                 pc: Optional[float] = None
                 try:
@@ -90,19 +101,29 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
                 except Exception:
                     pc = None
                 if pc is None or float(pc) <= 0:
-                    try:
-                        ap = float(pos.get("avg_price", 0) or 0)
-                    except (TypeError, ValueError):
-                        ap = 0.0
                     if ap > 0:
                         pc = ap
                 if pc is not None and float(pc) > 0:
-                    stock_eval_prev += float(qty) * float(pc)
+                    try:
+                        inv = float(pos.get("invested", 0) or 0)
+                    except (TypeError, ValueError):
+                        inv = 0.0
+                    ur = unrealized_at_price_net_of_sell_fee(
+                        pos, float(pc), qty, ap, settings
+                    )
+                    stock_liquid_prev += inv + ur
             except Exception:
                 continue
-        total = _portfolio_total_assets_like_virtual_tab_for_synthetic(
-            portfolio, stock_eval_prev
-        )
+        try:
+            from ui.tabs.virtual_tab import VirtualTab
+
+            total = VirtualTab._compute_virtual_tab_total_assets(
+                portfolio, stock_liquid_prev
+            )
+        except Exception:
+            total = _portfolio_total_assets_like_virtual_tab_for_synthetic(
+                portfolio, stock_liquid_prev
+            )
         if total > 0 and math.isfinite(total):
             return float(total)
         return None

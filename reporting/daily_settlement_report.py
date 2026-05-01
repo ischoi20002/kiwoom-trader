@@ -758,13 +758,12 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
     total_assets = _compute_total_assets_for_daily_report(portfolio, stock_eval)
 
     prev_close_assets: Optional[float] = None
+    day_pnl_total: Optional[float] = None
+    day_pnl_pct: Optional[float] = None
     try:
         prev_close_assets = compute_synthetic_prior_total_assets_at_prev_close(app)
     except Exception:
         prev_close_assets = None
-
-    day_pnl_total: Optional[float] = None
-    day_pnl_pct: Optional[float] = None
     if prev_close_assets is not None and prev_close_assets > 0:
         try:
             d_amt = float(total_assets) - float(prev_close_assets)

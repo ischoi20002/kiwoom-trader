@@ -7,6 +7,11 @@
 
 ---
 
+## 0.6.13 (2026-05-01)
+
+- **금일 손익·기준 총자산 합성**: 직전 장마감가 기준 주식 평가를 **액면(가격×수량)** 이 아니라 포지션 탭과 동일한 **순매각 합**( ``invested`` + ``unrealized_at_price_net_of_sell_fee`` )으로 계산. 합성 총자산은 ``VirtualTab._compute_virtual_tab_total_assets`` 와 동일 규칙 적용 — 휴장일 등 시세 변동이 없을 때 수수료 정의 불일치로 인한 허위 손익 완화 (`utils/eod_equity_snapshots.py`).
+- **휴장일 금일 손익 0 고정** 제거: KRX 비거래일에도 **합성 기준 대비 실제 차이**를 표시 (`utils/eod_equity_snapshots.py`, `reporting/daily_settlement_report.py`).
+
 ## 0.6.12 (2026-05-01)
 
 - **금일 손익**: 로컬 EOD JSON **읽기/자동 기록을 폐기**. 기준 총자산은 **매번** ``fetch_stock_prev_close_ka10001`` × 보유 + D+2 예수 **합성**만 사용 (`utils/eod_equity_snapshots.py`, `ui/tabs/virtual_tab.py`, `reporting/daily_settlement_report.py`). ``maybe_record_eod_after_session``·일일 리포트 EOD ``write`` 는 무시/제거.
