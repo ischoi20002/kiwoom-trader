@@ -29,7 +29,7 @@ from reporting.krx_trading_calendar import (
     trading_days_inclusive,
 )
 from reporting.plotly_deferred_chart_js import PLOTLY_DEFERRED_CHART_IIFE
-from utils.eod_equity_snapshots import read_prev_eod_total_assets_for_calendar_day
+from utils.eod_equity_snapshots import compute_synthetic_prior_total_assets_at_prev_close
 from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
 
 
@@ -691,7 +691,7 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
     일일 결산 요약.
 
     - ``realized_today``: 당일 **청산 완료**된 가상 이력의 실현손익 합(청산일 기준).
-    - ``day_pnl_amt`` / ``day_pnl_pct``: 당일 총자산 − 직전 영업일 ``eod_equity_snapshots_*.json`` EOD 스냅샷.
+    - ``day_pnl_amt`` / ``day_pnl_pct``: 당일 총자산 − **직전 장마감 시세 합성** 기준 총자산(``compute_synthetic_prior_total_assets_at_prev_close``).
       스냅샷이 없으면 None → HTML 에서 '—' 표시.
     - ``unrealized``: 보유분 누적 미실현(당일 변동분이 아님).
     """
@@ -759,11 +759,7 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
 
     prev_close_assets: Optional[float] = None
     try:
-        cal = datetime.strptime(today_str, "%Y-%m-%d").date()
-    except ValueError:
-        cal = datetime.now().date()
-    try:
-        prev_close_assets = read_prev_eod_total_assets_for_calendar_day(cal)
+        prev_close_assets = compute_synthetic_prior_total_assets_at_prev_close(app)
     except Exception:
         prev_close_assets = None
 
@@ -1339,17 +1335,6 @@ def generate_daily_settlement_report_ex(
         orders = []
 
     summary = _compute_summary_from_app(app, day)
-    try:
-        from utils.eod_equity_snapshots import write_eod_total_assets_for_day
-
-        gen_now = datetime.now()
-        if gen_now >= _session_end_local(day, buffer_minutes):
-            write_eod_total_assets_for_day(day, float(summary["total_assets"]))
-    except (TypeError, ValueError, KeyError):
-        pass
-    except Exception:
-        pass
-
     # 가상 청산 이력 매칭 시 제외할 종목(예: 지수·더미). 미설정 시 빈 집합.
     try:
         raw_excl = getattr(app, "daily_report_exclude_codes", None)
@@ -1535,14 +1520,14 @@ def generate_daily_settlement_report_ex(
         except (TypeError, ValueError):
             ref_note = ""
         day_pnl_html = (
-            f'<tr><td>금일 손익 (전 영업일 EOD 총자산 대비)</td>'
+            f'<tr><td>금일 손익 (직전 장마감 시세 기준 추정 총자산 대비)</td>'
             f'<td class="num">{float(_dpa):+,.0f} 원 ({float(_dpp):+.2f}%){ref_note}</td></tr>'
         )
     else:
         day_pnl_html = (
-            "<tr><td>금일 손익 (전 영업일 EOD 총자산 대비)</td>"
+            "<tr><td>금일 손익 (직전 장마감 시세 기준 추정 총자산 대비)</td>"
             '<td class="num">— <span class="muted">'
-            "직전 영업일 EOD 스냅샷(eod_equity_snapshots_*.json)이 없습니다. "
+            "직전 장마감 시세(stkinfo) 합성 기준 총자산을 계산할 수 없습니다. 인증·보유 동기화 후 다시 시도하세요."
             "장 마감 이후 포지션 탭이 갱신되거나 일일 결산을 생성하면 당일 스냅이 저장되며, "
             "그 다음 거래일부터 금일 손익이 계산됩니다."
             "</span></td></tr>"

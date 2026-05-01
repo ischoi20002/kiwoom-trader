@@ -1,21 +1,113 @@
 # -*- coding: utf-8 -*-
 """
-영업일 종료 시점 총자산 스냅샷(로컬 JSON).
+금일 손익용 **기준 총자산** 은 ``fetch_stock_prev_close_ka10001``(직전 장마감 시세) × 보유수량과
+현재 ``portfolio``의 D+2 예수 골격으로 **매번 합성**한다. (``compute_day_pnl_vs_eod_store``)
 
-- 모의/실전은 ``eod_equity_snapshots_mock.json`` / ``eod_equity_snapshots_live.json`` 으로 분리됩니다.
-- **금일 손익** = 현재 총자산 − 직전 영업일에 저장된 EOD 총자산 (일일 리포트·포지션 탭 공통).
-- 직전 영업일 스냅이 없으면 금일 손익은 계산 불가(None)이며, 장 마감+버퍼 이후 자동 기록으로 채워집니다.
+로컬 JSON(``eod_equity_snapshots_*.json``) 읽기/쓰기 함수는 **과거 호환·수동 점검용**으로만 남긴다.
+금일 손익·일일 리포트 요약은 EOD 파일을 **쓰지도 읽지도 않는다**.
 """
 from __future__ import annotations
 
 import json
 import math
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any, Dict, Optional, Tuple
 
-from reporting.krx_trading_calendar import is_trading_day, previous_trading_day
+from reporting.krx_trading_calendar import previous_trading_day
 from utils.server_mode_paths import eod_equity_snapshots_path
+
+
+def _portfolio_total_assets_like_virtual_tab_for_synthetic(
+    portfolio: Any, stock_eval: float
+) -> float:
+    """
+    포지션 탭 총자산과 동일한 **D+2 예수 + 주식 평가** 골격만 쓴다.
+    직전 장마감가 합성 시에는 ``last_tot_evlu_amt`` 와의 ±2.5% 정합 분기를 **쓰지 않는다**
+    (당일 증권사 총평가가 기준에 섞이지 않도록).
+    """
+    try:
+        d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)
+        try:
+            se = float(stock_eval or 0)
+        except (TypeError, ValueError):
+            se = 0.0
+        combined = d2 + se
+        if abs(combined) > 1e-6 or se > 0 or abs(d2) > 1e-6:
+            return float(combined)
+        raw_te = float(getattr(portfolio, "last_tot_evlu_amt", 0) or 0)
+        if raw_te > 0:
+            return float(raw_te)
+        pte = float(getattr(portfolio, "total_equity", 0) or 0)
+        if pte > 0:
+            return float(pte)
+        cash = float(getattr(portfolio, "actual_deposit", 0) or 0)
+        if cash > 0:
+            return float(cash)
+        api_mv = float(getattr(portfolio, "holdings_stocks_mv_api", 0) or 0)
+        if api_mv > 0:
+            return float(api_mv)
+        return 0.0
+    except Exception:
+        try:
+            return float(getattr(portfolio, "total_equity", 0) or 0)
+        except Exception:
+            return 0.0
+
+
+def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[float]:
+    """
+    보유 종목별 ``fetch_stock_prev_close_ka10001``(직전 장마감 시세) × 수량 합과
+    현재 ``portfolio``의 D+2 예수 등으로 **금일 손익 분모용 기준 총자산**을 추정한다.
+    """
+    try:
+        om = getattr(app, "order_manager", None)
+        if om is None:
+            return None
+        fn = getattr(om, "fetch_stock_prev_close_ka10001", None)
+        if not callable(fn):
+            return None
+        portfolio = getattr(app, "portfolio", None)
+        if portfolio is None:
+            return None
+        try:
+            with portfolio.lock:
+                vp = dict(getattr(portfolio, "virtual_positions", None) or {})
+        except Exception:
+            vp = dict(getattr(portfolio, "virtual_positions", None) or {})
+        stock_eval_prev = 0.0
+        for c_raw, pos in vp.items():
+            try:
+                if not isinstance(pos, dict):
+                    continue
+                qty = int(pos.get("qty", 0) or 0)
+                if qty <= 0:
+                    continue
+                code = str(c_raw).split("_")[0].zfill(6)
+                pc: Optional[float] = None
+                try:
+                    pc = fn(code, silent=True)
+                except Exception:
+                    pc = None
+                if pc is None or float(pc) <= 0:
+                    try:
+                        ap = float(pos.get("avg_price", 0) or 0)
+                    except (TypeError, ValueError):
+                        ap = 0.0
+                    if ap > 0:
+                        pc = ap
+                if pc is not None and float(pc) > 0:
+                    stock_eval_prev += float(qty) * float(pc)
+            except Exception:
+                continue
+        total = _portfolio_total_assets_like_virtual_tab_for_synthetic(
+            portfolio, stock_eval_prev
+        )
+        if total > 0 and math.isfinite(total):
+            return float(total)
+        return None
+    except Exception:
+        return None
 
 
 def _load_store() -> Dict[str, Any]:
@@ -66,7 +158,7 @@ def _save_store(data: Dict[str, Any]) -> None:
 
 
 def read_eod_total_assets_for_day(trading_day_yyyy_mm_dd: str) -> Optional[float]:
-    """특정 영업일 키(YYYY-MM-DD)에 저장된 EOD 총자산. 없거나 비정상이면 None."""
+    """[레거시·점검용] 로컬 JSON ``by_date`` 에서만 조회. 금일 손익 계산에는 쓰지 않는다."""
     try:
         key = str(trading_day_yyyy_mm_dd)[:10]
     except (TypeError, ValueError, AttributeError):
@@ -86,7 +178,7 @@ def read_eod_total_assets_for_day(trading_day_yyyy_mm_dd: str) -> Optional[float
 
 
 def write_eod_total_assets_for_day(trading_day_yyyy_mm_dd: str, total_assets: float) -> None:
-    """해당 영업일의 EOD 총자산을 기록(덮어쓰기)."""
+    """[레거시] 로컬 JSON에 기록. 앱 자동 경로에서는 더 이상 호출하지 않는다."""
     try:
         key = str(trading_day_yyyy_mm_dd)[:10]
         v = float(total_assets)
@@ -106,9 +198,11 @@ def write_eod_total_assets_for_day(trading_day_yyyy_mm_dd: str, total_assets: fl
 
 def read_prev_eod_total_assets_for_calendar_day(cal: date) -> Optional[float]:
     """
-    ``cal`` 달력일 기준 **직전 영업일**에 저장된 EOD 총자산.
+    ``cal`` 기준 직전 영업일 EOD JSON 만 조회한다.
 
-    예: 월요일이면 직전 금요일 스냅샷.
+    .. note::
+        금일 손익 계산은 본 함수를 **사용하지 않는다** (직전 장마감 시세 합성만 사용).
+        스크립트·점검용으로만 유지한다.
     """
     try:
         prev = previous_trading_day(cal)
@@ -126,12 +220,15 @@ def compute_day_pnl_vs_eod_store(
     current_total_assets: float,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
     """
-    금일 손익(원), 전일 대비(%), 분모로 사용한 전일 EOD 총자산, 전일 키(YYYY-MM-DD).
+    금일 손익(원), 대비(%), 분모 **기준 총자산**(직전 장마감 시세 합성), 직전 영업일 키.
+
+    기준 총자산은 **EOD JSON을 읽지 않고**, 매 호출 ``compute_synthetic_prior_total_assets_at_prev_close`` 로만 취한다.
+    (함수 이름은 호환을 위해 유지.)
 
     Parameters
     ----------
     current_total_assets :
-        이미 계산된 현재 총자산(포지션 탭·일일 결산과 동일 규칙). 중복 ``_compute_summary`` 호출 방지.
+        이미 계산된 현재 총자산(포지션 탭·일일 결산과 동일 규칙).
     """
     try:
         prev = previous_trading_day(calendar_day)
@@ -141,7 +238,7 @@ def compute_day_pnl_vs_eod_store(
         return None, None, None, None
     prev_key = prev.strftime("%Y-%m-%d")
     try:
-        prev_assets = read_eod_total_assets_for_day(prev_key)
+        prev_assets = compute_synthetic_prior_total_assets_at_prev_close(app)
     except Exception:
         prev_assets = None
     if prev_assets is None or prev_assets <= 0:
@@ -164,14 +261,6 @@ def compute_day_pnl_vs_eod_store(
         return None, None, float(prev_assets), prev_key
 
 
-def _session_end_local(report_day: str, buffer_minutes: int) -> datetime:
-    """KST 로컬 기준 장 마감(15:30) + 버퍼."""
-    d = datetime.strptime(str(report_day)[:10], "%Y-%m-%d")
-    return d.replace(hour=15, minute=30, second=0, microsecond=0) + timedelta(
-        minutes=max(0, int(buffer_minutes))
-    )
-
-
 def maybe_record_eod_after_session(
     app: Any,
     total_assets: float,
@@ -179,21 +268,7 @@ def maybe_record_eod_after_session(
     now: Optional[datetime] = None,
 ) -> None:
     """
-    거래일이고 (장 마감 + ``daily_report_session_buffer_minutes``) 이후면
-    **당일** 키로 총자산 스냅샷을 저장합니다.
+    [폐기] 과거 EOD JSON 자동 기록용이었으나, 금일 손익이 EOD를 쓰지 않으므로 **아무 것도 하지 않는다**.
+    호출부·시그니처 호환만 유지.
     """
-    try:
-        t = now or datetime.now()
-        d = t.date()
-        if not is_trading_day(d):
-            return
-        try:
-            buf = int((getattr(app, "settings", None) or {}).get("daily_report_session_buffer_minutes", 10))
-        except (TypeError, ValueError, AttributeError):
-            buf = 10
-        buf = max(0, min(buf, 24 * 60))
-        if t < _session_end_local(d.strftime("%Y-%m-%d"), buf):
-            return
-        write_eod_total_assets_for_day(d.strftime("%Y-%m-%d"), float(total_assets))
-    except Exception:
-        pass
+    return

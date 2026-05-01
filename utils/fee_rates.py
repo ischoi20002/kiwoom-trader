@@ -113,6 +113,51 @@ def unrealized_at_price_net_of_sell_fee(
     return float(net_proceeds - inv)
 
 
+def unrealized_at_price_cost_ex_buy_net_of_sell_fee(
+    curr_p: float,
+    qty: int,
+    avg_price: float,
+    settings: Mapping[str, Any],
+) -> float:
+    """
+    전량 매도 가정 미실현 손익(원): **순매각(매도 수수료 차감) − 평단×수량**.
+
+    매수 수수료는 원가(cost)에서 제외합니다(계좌 요약 「미실현 손익」용).
+    `unrealized_at_price_net_of_sell_fee`와 달리 ``invested``(매입+매입수수료)를 빼지 않습니다.
+    """
+    try:
+        q = int(qty or 0)
+    except (TypeError, ValueError):
+        q = 0
+    try:
+        px = float(curr_p)
+    except (TypeError, ValueError):
+        px = 0.0
+    if q <= 0 or px <= 0:
+        return 0.0
+    try:
+        _, sell_r = fee_decimal_rates_live_trading(settings)
+        sr = float(sell_r)
+    except Exception:
+        try:
+            _, sell_r = fee_decimal_rates_live_trading({})
+            sr = float(sell_r)
+        except Exception:
+            sr = 0.005
+    try:
+        sr = max(0.0, min(float(sr), 0.5))
+    except Exception:
+        sr = 0.005
+    try:
+        ap = float(avg_price or 0.0)
+    except (TypeError, ValueError):
+        ap = 0.0
+    cost_ex = max(0.0, float(ap) * float(q))
+    gross = px * float(q)
+    net_proceeds = gross * (1.0 - sr)
+    return float(net_proceeds - cost_ex)
+
+
 def fee_decimal_rates_backtest(settings: Mapping[str, Any]) -> Tuple[float, float]:
     """백테스트(SimpleBacktester, DynamicBacktester): buy_fee_bt, sell_fee_bt."""
     try:

@@ -7,6 +7,11 @@
 
 ---
 
+## 0.6.12 (2026-05-01)
+
+- **금일 손익**: 로컬 EOD JSON **읽기/자동 기록을 폐기**. 기준 총자산은 **매번** ``fetch_stock_prev_close_ka10001`` × 보유 + D+2 예수 **합성**만 사용 (`utils/eod_equity_snapshots.py`, `ui/tabs/virtual_tab.py`, `reporting/daily_settlement_report.py`). ``maybe_record_eod_after_session``·일일 리포트 EOD ``write`` 는 무시/제거.
+- **계좌 「미실현 손익」**(구 미실현(보유)): **순매각(매도 수수료 차감) − 평단×수량** 합계·손익률 분모 Σ(평단×수량) — 매입수수료는 매입 원가(cost)에서 제외. 상단 「누적 수익」보유 분도 동일 정의 (`utils/fee_rates.py`, `ui/tabs/virtual_tab.py`).
+
 ## 0.6.11 (2026-05-01)
 
 - **포지션 탭·계좌 「주식 평가금」**: 전량 매도 가정 **순매각**(설정 매도 수수료율 차감) 합계 — `Σ invested + Σ 미실현(매도 차감)`으로 표시. 잔고 API `holdings_stocks_mv_api`/행 `evlu_amt`만으로 덮어쓰지 않음 (`ui/tabs/virtual_tab.py`).

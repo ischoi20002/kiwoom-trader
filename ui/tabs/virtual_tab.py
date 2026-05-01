@@ -9,8 +9,12 @@ from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import config
-from utils.eod_equity_snapshots import compute_day_pnl_vs_eod_store, maybe_record_eod_after_session
-from utils.fee_rates import fee_decimal_rates_live_trading, unrealized_at_price_net_of_sell_fee
+from utils.eod_equity_snapshots import compute_day_pnl_vs_eod_store
+from utils.fee_rates import (
+    fee_decimal_rates_live_trading,
+    unrealized_at_price_cost_ex_buy_net_of_sell_fee,
+    unrealized_at_price_net_of_sell_fee,
+)
 
 # 포지션 탭 트리 컬럼 기본 폭(px). 사용자 조절·세로 분할은 virtual_portfolio_ui.json 에 저장합니다.
 _DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS: Dict[str, int] = {
@@ -132,8 +136,8 @@ class VirtualTab:
             ("D+1 예상", "d1_cash", self.app.colors['primary']),
             ("D+2 예상", "d2_cash", self.app.colors['primary']),
             ("주식 평가금", "stock", None),
-            ("미실현 (보유)", "open_ur", "#88C0D0"),
-            ("금일 손익 (전일 EOD)", "day", "#EBCB8B"),
+            ("미실현 손익", "open_ur", "#88C0D0"),
+            ("금일 손익 (전일 기준)", "day", "#EBCB8B"),
             ("누적 수익(종료+보유)", "cum", "#A3BE8C")
         ]:
             f = ttk.Frame(summary_f)
@@ -1332,6 +1336,24 @@ class VirtualTab:
             pass
         return False
 
+    def _unrealized_vs_cost_ex_buy_at_price(
+        self, curr_p: float, qty: int, avg_price: float
+    ) -> float:
+        """
+        계좌 「미실현 손익」용: 순매각 − (평단×수량). 매입수수료는 매입 원가(cost)에서 제외.
+        """
+        try:
+            return float(
+                unrealized_at_price_cost_ex_buy_net_of_sell_fee(
+                    float(curr_p),
+                    int(qty),
+                    float(avg_price),
+                    self.app.settings,
+                )
+            )
+        except Exception:
+            return 0.0
+
     def _unrealized_at_price_net_of_sell_fee(
         self,
         pos: Dict[str, Any],
@@ -2163,7 +2185,9 @@ class VirtualTab:
         # 1. 보유 종목
         total_invested = 0
         total_unrealized_pnl = 0
-        
+        total_unrealized_account = 0.0
+        total_cost_ex_open_den = 0.0
+
         merged_vp = self._vp_items_by_normalized()
         active_list = self._sorted_active_holdings()
         skip_orphan_delete = False
@@ -2201,6 +2225,15 @@ class VirtualTab:
             )
             total_invested += float(pos.get("invested", 0) or 0)
             total_unrealized_pnl += ur_net
+            try:
+                ap_r, qr, crp, _, _ = self._resolve_active_holdings_prices(nk, pos, info)
+                u_acc = self._unrealized_vs_cost_ex_buy_at_price(
+                    float(crp), int(qr), float(ap_r)
+                )
+                total_unrealized_account += self._finite_tree_float(float(u_acc))
+                total_cost_ex_open_den += self._holding_cost_ex_fee(float(ap_r), int(qr))
+            except Exception:
+                pass
 
             updated_nks.add(nk)
             if self._active_tree_ready():
@@ -2236,17 +2269,18 @@ class VirtualTab:
         stock_eval = self._resolve_stock_eval_for_account(portfolio, stock_liquid)
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
-        # 미실현(보유): 전량 매도 가정 순매각−invested 기준 미실현(매도수수료 반영)(트리 「미실현」과 동일). % 분모 invested.
+        # 미실현 손익: 순매각(매도 수수료 차감) − (평단×수량) 합계. 매입수수료는 매입 원가(cost)에서 제외.
+        # 손익률 분모는 Σ(평단×수량).
         try:
-            open_ur_amt = float(total_unrealized_pnl)
+            open_ur_amt = float(total_unrealized_account)
         except (TypeError, ValueError):
             open_ur_amt = 0.0
         try:
-            inv_den = float(total_invested)
+            cxd_den = float(total_cost_ex_open_den)
         except (TypeError, ValueError):
-            inv_den = 0.0
-        if inv_den > 1e-6:
-            open_ur_pct = (open_ur_amt / inv_den) * 100.0
+            cxd_den = 0.0
+        if cxd_den > 1e-6:
+            open_ur_pct = (open_ur_amt / cxd_den) * 100.0
         else:
             open_ur_pct = 0.0
         try:
@@ -2254,11 +2288,7 @@ class VirtualTab:
         except (TypeError, ValueError):
             ta = 0.0
 
-        # 금일 손익: 전 영업일 EOD 스냅샷 대비( eod_equity_snapshots_*.json ).
-        try:
-            maybe_record_eod_after_session(self.app, float(total_assets))
-        except Exception:
-            pass
+        # 금일 손익: 직전 장마감 시세(stkinfo) × 보유 + D+2 예수 골격으로 합성한 기준 총자산 대비.
         try:
             d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
                 self.app,
@@ -2270,12 +2300,12 @@ class VirtualTab:
         if d_amt is not None and d_pct is not None:
             day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
         else:
-            day_pnl_txt = "— (전일 EOD 없음)"
+            day_pnl_txt = "— (전일 기준 없음)"
         open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
 
-        # 누적 수익(종료+보유): 매매종료 손익금 합 + 실시간 보유 손익금(미실현) 합.
+        # 누적 수익(종료+보유): 매매종료 손익 합 + 보유 「미실현 손익」(계좌 요약 정의와 동일).
         # % 분모는 총자산(백테스트 초기자본은 실시간 요약에 사용하지 않음).
-        cum_pnl_amt = float(total_closed_pnl) + float(total_unrealized_pnl)
+        cum_pnl_amt = float(total_closed_pnl) + float(total_unrealized_account)
         if ta > 1e-6:
             cum_pnl_pct = (cum_pnl_amt / ta) * 100.0
         else:
@@ -2361,6 +2391,8 @@ class VirtualTab:
                 total_eval_weight = 0.0
             total_unrealized_pnl = 0.0
             total_invested_open = 0.0
+            total_unrealized_account = 0.0
+            total_cost_ex_open_den = 0.0
             for idx, (nk, pos) in enumerate(holdings):
                 info = mi.get(nk, {}) or {}
                 _v, _t, _p, _ur_ex, _ev_row, ur_net = self._active_row_vals_and_tags(
@@ -2370,6 +2402,15 @@ class VirtualTab:
                 try:
                     total_invested_open += float(pos.get("invested", 0) or 0)
                 except (TypeError, ValueError):
+                    pass
+                try:
+                    ap_r, qr, crp, _, _ = self._resolve_active_holdings_prices(nk, pos, info)
+                    u_acc = self._unrealized_vs_cost_ex_buy_at_price(
+                        float(crp), int(qr), float(ap_r)
+                    )
+                    total_unrealized_account += self._finite_tree_float(float(u_acc))
+                    total_cost_ex_open_den += self._holding_cost_ex_fee(float(ap_r), int(qr))
+                except Exception:
                     pass
 
             portfolio = self.app.portfolio
@@ -2381,11 +2422,15 @@ class VirtualTab:
             total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
 
             try:
-                open_ur_amt = float(total_unrealized_pnl)
+                open_ur_amt = float(total_unrealized_account)
             except (TypeError, ValueError):
                 open_ur_amt = 0.0
-            if total_invested_open > 1e-6:
-                open_ur_pct = (open_ur_amt / total_invested_open) * 100.0
+            try:
+                cxd_den = float(total_cost_ex_open_den)
+            except (TypeError, ValueError):
+                cxd_den = 0.0
+            if cxd_den > 1e-6:
+                open_ur_pct = (open_ur_amt / cxd_den) * 100.0
             else:
                 open_ur_pct = 0.0
             try:
@@ -2393,10 +2438,6 @@ class VirtualTab:
             except (TypeError, ValueError):
                 ta = 0.0
 
-            try:
-                maybe_record_eod_after_session(self.app, float(total_assets))
-            except Exception:
-                pass
             try:
                 d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
                     self.app,
@@ -2408,11 +2449,11 @@ class VirtualTab:
             if d_amt is not None and d_pct is not None:
                 day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
             else:
-                day_pnl_txt = "— (전일 EOD 없음)"
+                day_pnl_txt = "— (전일 기준 없음)"
             open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
 
             closed_h = self._sum_visible_history_realized_pnl()
-            cum_pnl_amt = float(closed_h) + float(total_unrealized_pnl)
+            cum_pnl_amt = float(closed_h) + float(total_unrealized_account)
             if ta > 1e-6:
                 cum_pnl_pct = (cum_pnl_amt / ta) * 100.0
             else:
