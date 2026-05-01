@@ -67,6 +67,18 @@ def eod_equity_snapshots_path() -> str:
     return os.path.join(base, name)
 
 
+def equity_snapshots_root_dir() -> str:
+    """
+    운영용 포트폴리오 자산 추이 스냅샷 디렉토리.
+
+    - 그래프 원천 데이터로 쓰기 때문에 스키마는 고정(일자별 json 파일)
+    - daily_settlement / trading_data.db 비의존
+    """
+    base = project_root()
+    name = "equity_snapshots_mock" if is_mock_mode() else "equity_snapshots_live"
+    return os.path.join(base, name)
+
+
 def realtime_monitor_15m_db_path() -> str:
     """
     실시간 감시 전용 15분봉 SQLite (하베스팅 trading_data.db 와 분리).

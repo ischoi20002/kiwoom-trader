@@ -22,6 +22,7 @@ import importlib.util
 import webbrowser
 import subprocess
 from typing import Any, Dict, List, Optional, Set, Tuple
+from datetime import datetime, timedelta, time as dtime, date
 
 from backtest_engine import TradingStrategy
 from data_manager_v2 import DataManagerV2 as DataManager
@@ -215,6 +216,12 @@ class KiwoomApp:
         self.nordic_style = NordicStyle(self.root)
 
         self.is_monitoring = False
+        # [EOD Equity Snapshot] 스냅샷 스케줄러(장중 토글과 무관하게 마감+버퍼 시점 기준 1회 저장)
+        self._equity_snapshot_after_id: Optional[Any] = None
+        self._equity_snapshot_pending_date: Optional[str] = None  # job 스폰용
+        self._equity_snapshot_last_saved_date: Optional[str] = None  # 성공 저장된 날짜(YYYY-MM-DD)
+        self._equity_snapshot_job_in_progress: bool = False
+        self._equity_snapshot_cancelled: bool = False
 
         self.notebook = None
         self.status_label = None
@@ -367,6 +374,11 @@ class KiwoomApp:
 
         self._setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # EOD 스냅샷 자동 저장 시작(15:30 + buffer 분)
+        try:
+            self._start_eod_equity_snapshot_scheduler()
+        except Exception:
+            pass
         
         self.root.after(5000, self.remote_commander.start)
         if self.auto_start:
@@ -1577,6 +1589,11 @@ class KiwoomApp:
                 self.monitor_info = dict(self.trading_controller.monitor_info or {})
             except Exception:
                 pass
+            # EOD 스냅샷 스케줄러가 멈췄거나(예: UI 재초기화) 비정상 상태면 재시작합니다.
+            try:
+                self._start_eod_equity_snapshot_scheduler()
+            except Exception:
+                pass
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
             if self.lbl_monitor_status: self.lbl_monitor_status.config(text=f"상태: 감시 중 ({data}종목)", foreground=self.colors['success'])
             if self.status_label:
@@ -1642,6 +1659,15 @@ class KiwoomApp:
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")
         try:
+            self._equity_snapshot_cancelled = True
+            try:
+                if self._equity_snapshot_after_id is not None:
+                    self.root.after_cancel(self._equity_snapshot_after_id)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
             self._cancel_post_fill_sync_jobs()
         except Exception:
             pass
@@ -1656,6 +1682,182 @@ class KiwoomApp:
                 pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()
         self.root.destroy()
+
+    def _start_eod_equity_snapshot_scheduler(self) -> None:
+        """
+        매일(거래일 기준) 15:30 + buffer 이후 딱 1회 스냅샷을 저장합니다.
+        같은 날짜 중복/덮어쓰기는 파일(YYYY-MM-DD.json) override로 처리합니다.
+        """
+        try:
+            # 이미 예약이 있으면 중복 예약 방지
+            if self._equity_snapshot_after_id is not None:
+                try:
+                    self.root.after_cancel(self._equity_snapshot_after_id)
+                except Exception:
+                    pass
+                self._equity_snapshot_after_id = None
+        except Exception:
+            pass
+
+        self._equity_snapshot_cancelled = False
+        self._schedule_eod_equity_snapshot_tick()
+
+    def _schedule_eod_equity_snapshot_tick(self) -> None:
+        try:
+            if getattr(self, "root", None) is None:
+                return
+            self._equity_snapshot_after_id = self.root.after(30000, self._eod_equity_snapshot_tick)
+        except Exception:
+            self._equity_snapshot_after_id = None
+
+    def _eod_equity_snapshot_tick(self) -> None:
+        """
+        30초마다 체크:
+        - 오늘이 거래일이면 snap_date=today
+        - 휴장일이면 snap_date=previous_trading_day
+        - 현재 시각이 15:30 + buffer 이후면 스냅샷 저장 job 스폰
+        """
+        try:
+            if self._equity_snapshot_cancelled:
+                return
+            now = datetime.now()
+            buffer_minutes = 10
+            try:
+                buffer_minutes = int(float(self.settings.get("daily_report_session_buffer_minutes", 10)))
+            except Exception:
+                buffer_minutes = 10
+
+            # 거래일 판정은 KRX 캘린더(폴백 포함) 사용
+            try:
+                from reporting.krx_trading_calendar import is_trading_day, previous_trading_day
+            except Exception:
+                is_trading_day = None
+                previous_trading_day = None
+
+            today_d = now.date()
+
+            def _end_of_day_due(day_d: date) -> datetime:
+                return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(
+                    minutes=max(0, int(buffer_minutes))
+                )
+
+            # (복구 포함) "이미 due가 지난 가장 최근 거래일"을 스냅샷 대상으로 선택
+            snap_date: Optional[date] = None
+            if callable(is_trading_day) and callable(previous_trading_day):
+                try:
+                    # 오늘이 휴장이라면 마지막 거래일로 우선 스냅샷 후보
+                    last_trading_day = today_d if is_trading_day(today_d) else previous_trading_day(today_d)
+                    # 마지막 거래일의 due가 아직 안 지났으면, 한 거래일 전으로 내려가 복구
+                    due1 = _end_of_day_due(last_trading_day)
+                    if now >= due1:
+                        snap_date = last_trading_day
+                    else:
+                        snap_date = previous_trading_day(last_trading_day)
+                except Exception:
+                    snap_date = today_d
+            else:
+                # 예외 상황: 주말만 휴장 처리
+                if today_d.weekday() < 5:
+                    last_trading_day = today_d
+                else:
+                    last_trading_day = today_d - timedelta(days=1)
+                if now >= _end_of_day_due(last_trading_day):
+                    snap_date = last_trading_day
+                else:
+                    snap_date = last_trading_day - timedelta(days=1)
+
+            if snap_date is None:
+                return
+
+            snap_date_str = str(snap_date)[:10]
+
+            # 같은 날짜는 성공 저장된 것만 1회 스킵
+            if self._equity_snapshot_last_saved_date == snap_date_str:
+                return
+            if self._equity_snapshot_pending_date == snap_date_str:
+                return
+            if self._equity_snapshot_job_in_progress:
+                return
+
+            self._equity_snapshot_pending_date = snap_date_str
+            self._equity_snapshot_job_in_progress = True
+
+            threading.Thread(
+                target=self._job_save_eod_equity_snapshot,
+                args=(snap_date_str,),
+                daemon=True,
+            ).start()
+        except Exception:
+            # 체크 실패는 다음 tick에서 재시도
+            pass
+        finally:
+            self._schedule_eod_equity_snapshot_tick()
+
+    def _job_save_eod_equity_snapshot(self, snap_date_str: str) -> None:
+        """
+        백그라운드 작업:
+        - (가능하면) 계좌 동기화 1회 force(refresh_cash_deposit=True)
+        - 포트폴리오 total_assets(=d2_deposit + holdings_stocks_mv_api) 스냅샷 저장
+        """
+        saved_ok = False
+        try:
+            if self._equity_snapshot_cancelled:
+                return
+
+            # 스냅샷 직전 계좌 동기화(최소 1회)로 D+2/평가를 맞춥니다.
+            try:
+                self.portfolio.sync_with_actual_account(
+                    silent=True,
+                    force=True,
+                    refresh_cash_deposit=True,
+                )
+            except Exception as sync_ex:
+                # 동기화 실패해도 스냅샷을 남겨 디버깅 가능(다만 값 신뢰도는 낮을 수 있음)
+                try:
+                    self.log(f"⚠️ [EOD Snapshot] 동기화 실패: {sync_ex}")
+                except Exception:
+                    pass
+
+            d2 = 0.0
+            stock_eval = 0.0
+            d1 = 0.0
+            total_equity = 0.0
+            with self.portfolio.lock:
+                d2 = float(getattr(self.portfolio, "d2_deposit", 0) or 0)
+                d1 = float(getattr(self.portfolio, "d1_deposit", 0) or 0)
+                stock_eval = float(getattr(self.portfolio, "holdings_stocks_mv_api", 0.0) or 0.0)
+                total_equity = float(getattr(self.portfolio, "total_equity", d2 + stock_eval) or 0.0)
+
+            total_assets = d2 + stock_eval
+
+            record = {
+                "date": snap_date_str,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "d2_deposit": d2,
+                "d1_deposit": d1,
+                "stock_eval": stock_eval,
+                "total_assets": total_assets,
+                "total_equity": total_equity,
+            }
+
+            from utils.equity_snapshots_store import upsert_equity_snapshot
+
+            path = upsert_equity_snapshot(snap_date_str, record)
+            if path:
+                saved_ok = True
+        except Exception as e:
+            try:
+                self.log(f"❌ [EOD Snapshot] 저장 실패({snap_date_str}): {e}")
+            except Exception:
+                pass
+        finally:
+            try:
+                self._equity_snapshot_job_in_progress = False
+                self._equity_snapshot_pending_date = None
+                if saved_ok:
+                    self._equity_snapshot_last_saved_date = snap_date_str
+            except Exception:
+                pass
 
     def _calculate_buy_amt(self, stage=1, is_simulation=False):
         return self.portfolio.calculate_order_quantity(stage, is_simulation)

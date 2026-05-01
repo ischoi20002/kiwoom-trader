@@ -10,10 +10,21 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import config
 from utils.eod_equity_snapshots import compute_day_pnl_vs_eod_store
+from utils.equity_snapshots_store import (
+    equity_snapshots_root_candidates,
+    read_equity_snapshot_from_root,
+)
 from utils.fee_rates import (
     fee_decimal_rates_live_trading,
     unrealized_at_price_cost_ex_buy_net_of_sell_fee,
     unrealized_at_price_net_of_sell_fee,
+)
+from utils.plotly_cdn import plotly_cdn_script_tag
+from reporting.krx_trading_calendar import (
+    is_trading_day,
+    next_trading_day,
+    previous_trading_day,
+    trading_days_inclusive,
 )
 
 # 포지션 탭 트리 컬럼 기본 폭(px). 사용자 조절·세로 분할은 virtual_portfolio_ui.json 에 저장합니다.
@@ -91,6 +102,11 @@ class VirtualTab:
         # 수수료 토글: UI(슬라이더) 즉시 반응 후 합계·트리는 after 로 지연
         self._hold_fee_toggle_after_id: Optional[Any] = None
 
+        # [EOD Equity Snapshot] 자산추이/비중 분석(운영 스냅샷 기반)
+        self._equity_trend_html_path: str = os.path.abspath("virtual_equity_trend.html")
+        self._equity_trend_last_end_day: Optional[date] = None  # 프리셋 기준일(=마지막 스냅샷)
+        self._equity_trend_status_var: tk.StringVar = tk.StringVar(value="스냅샷 데이터 준비 필요")
+
         self._setup_ui()
         self._render_virtual_positions()
         try:
@@ -158,6 +174,85 @@ class VirtualTab:
             foreground="#787c99",
         ).pack(side=tk.RIGHT, padx=(8, 0), pady=(12, 0))
 
+        # --- 포트폴리오 자산 추이(운영용 EOD 스냅샷 기반) ---
+        trend_frame = ttk.LabelFrame(
+            main_container,
+            text=" 📈 포트폴리오 자산 추이 · 비중(현금=D+2 포함) ",
+            padding=(10, 8),
+        )
+        trend_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 8))
+
+        # 기간 선택 (프리셋 버튼 + 커스텀 입력을 같은 줄에 배치)
+        ctrl_row = ttk.Frame(trend_frame)
+        ctrl_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+
+        preset_lf = ttk.Frame(ctrl_row)
+        preset_lf.pack(side=tk.LEFT, fill=tk.X)
+
+        ttk.Label(
+            preset_lf,
+            text="기간:",
+            font=("Malgun Gothic", 9, "bold"),
+            foreground=self.app.colors["fg"],
+        ).pack(side=tk.LEFT)
+
+        btn_row = ttk.Frame(preset_lf)
+        btn_row.pack(side=tk.LEFT, padx=6)
+
+        def _mk_preset_handler(code: str) -> Callable[[], None]:
+            return lambda: self._on_equity_trend_select_preset(code)
+
+        ttk.Button(btn_row, text="1주일", width=8, command=_mk_preset_handler("1w")).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(btn_row, text="1달", width=8, command=_mk_preset_handler("1m")).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(btn_row, text="6개월", width=8, command=_mk_preset_handler("6m")).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(btn_row, text="1년", width=8, command=_mk_preset_handler("1y")).pack(
+            side=tk.LEFT
+        )
+
+        # 커스텀 기간 (캘린더 팝업: CustomDatePicker) — 프리셋과 같은 줄
+        custom_lf = ttk.Frame(ctrl_row)
+        custom_lf.pack(side=tk.LEFT, fill=tk.X, padx=(10, 0))
+
+        ttk.Label(custom_lf, text="커스텀:", font=("Malgun Gothic", 9, "bold")).pack(
+            side=tk.LEFT
+        )
+
+        self._equity_trend_start_entry = ttk.Entry(custom_lf, width=12)
+        self._equity_trend_start_entry.pack(side=tk.LEFT, padx=(6, 4))
+        ttk.Button(
+            custom_lf,
+            text="📅",
+            width=3,
+            command=lambda: self._show_equity_trend_picker("start"),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        self._equity_trend_end_entry = ttk.Entry(custom_lf, width=12)
+        self._equity_trend_end_entry.pack(side=tk.LEFT, padx=(6, 4))
+        ttk.Button(
+            custom_lf,
+            text="📅",
+            width=3,
+            command=lambda: self._show_equity_trend_picker("end"),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        self._equity_trend_apply_btn = ttk.Button(
+            custom_lf, text="그래프 새로고침", width=16, command=self._on_equity_trend_refresh
+        )
+        self._equity_trend_apply_btn.pack(side=tk.LEFT)
+
+        ttk.Label(
+            trend_frame,
+            textvariable=self._equity_trend_status_var,
+            font=("Malgun Gothic", 9),
+            foreground="#EBCB8B",
+        ).pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
+
         # --- [2] 메인 레이아웃 (보유 + 주문·체결 2단) ---
         v_paned = ttk.PanedWindow(main_container, orient=tk.VERTICAL)
         v_paned.pack(fill=tk.BOTH, expand=True)
@@ -192,6 +287,334 @@ class VirtualTab:
 
         self._setup_styles()
         self._schedule_restore_virtual_sash()
+
+        # 초기(가능하면) 커스텀 입력값 세팅
+        try:
+            self._equity_trend_init_default_dates()
+        except Exception:
+            pass
+
+    def _equity_trend_init_default_dates(self) -> None:
+        """
+        커스텀 start/end 엔트리에 기본값을 채웁니다.
+        - end: 마지막 스냅샷 날짜
+        - start: end 직전 30일(달력 기준) → 거래일 스냅
+        """
+        end_day = self._equity_trend_get_last_snapshot_day()
+        if end_day is None:
+            return
+
+        start_guess = end_day - timedelta(days=30)
+        start_day = self._equity_trend_snap_to_nearest_trading_day(start_guess)
+        if start_day is None:
+            start_day = end_day
+
+        self._equity_trend_last_end_day = end_day
+        self._equity_trend_start_entry.delete(0, tk.END)
+        self._equity_trend_start_entry.insert(0, start_day.isoformat())
+        self._equity_trend_end_entry.delete(0, tk.END)
+        self._equity_trend_end_entry.insert(0, end_day.isoformat())
+
+    def _equity_trend_get_last_snapshot_day(self) -> Optional[date]:
+        try:
+            roots = equity_snapshots_root_candidates()
+            days: List[date] = []
+            for root in roots:
+                if not os.path.isdir(root):
+                    continue
+                for fn in os.listdir(root):
+                    if not fn.endswith(".json"):
+                        continue
+                    d = fn[:10]
+                    try:
+                        days.append(datetime.strptime(d, "%Y-%m-%d").date())
+                    except Exception:
+                        continue
+            return max(days) if days else None
+        except Exception:
+            return None
+
+    def _equity_trend_snap_to_nearest_trading_day(self, d: date) -> Optional[date]:
+        try:
+            if is_trading_day(d):
+                return d
+            prev = previous_trading_day(d)
+            nxt = next_trading_day(d)
+            if prev is None and nxt is None:
+                return None
+            if prev is None:
+                return nxt
+            if nxt is None:
+                return prev
+            return prev if abs((d - prev).days) <= abs((nxt - d).days) else nxt
+        except Exception:
+            return d
+
+    def _show_equity_trend_picker(self, which: str) -> None:
+        try:
+            from ui.gui_utils import CustomDatePicker
+
+            if which == "start":
+                entry = self._equity_trend_start_entry
+                init = entry.get().strip() if entry.get().strip() else None
+            else:
+                entry = self._equity_trend_end_entry
+                init = entry.get().strip() if entry.get().strip() else None
+
+            CustomDatePicker(self.parent, entry, initial_date=init, colors=self.app.colors)
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", str(e))
+            except Exception:
+                pass
+
+    def _on_equity_trend_select_preset(self, preset: str) -> None:
+        end_day = self._equity_trend_get_last_snapshot_day()
+        if end_day is None:
+            self._equity_trend_status_var.set("스냅샷 데이터 없음: equity_snapshots_* 폴더 확인 필요")
+            return
+
+        self._equity_trend_last_end_day = end_day
+        delta_days = 7 if preset == "1w" else 30 if preset == "1m" else 183 if preset == "6m" else 365
+        start_guess = end_day - timedelta(days=delta_days)
+        start_day = self._equity_trend_snap_to_nearest_trading_day(start_guess) or start_guess
+
+        self._equity_trend_start_entry.delete(0, tk.END)
+        self._equity_trend_start_entry.insert(0, start_day.isoformat())
+        self._equity_trend_end_entry.delete(0, tk.END)
+        self._equity_trend_end_entry.insert(0, end_day.isoformat())
+
+        self._on_equity_trend_refresh()
+
+    def _on_equity_trend_refresh(self) -> None:
+        """
+        선택된 기간(start/end)을:
+        - 비거래일이면 KRX 거래일로 스냅
+        - end는 마지막 스냅샷 날짜를 넘지 않도록 클램프
+        로 처리 후 Plotly HTML을 생성합니다.
+        """
+        try:
+            end_last = self._equity_trend_get_last_snapshot_day()
+            if end_last is None:
+                self._equity_trend_status_var.set("스냅샷 데이터 없음: 자동 EOD 스냅샷을 먼저 생성하세요.")
+                return
+
+            raw_start = self._equity_trend_start_entry.get().strip()
+            raw_end = self._equity_trend_end_entry.get().strip()
+            if not raw_start or not raw_end:
+                self._equity_trend_status_var.set("커스텀 start/end 값을 입력하세요.")
+                return
+
+            start_day = datetime.strptime(raw_start[:10], "%Y-%m-%d").date()
+            end_day = datetime.strptime(raw_end[:10], "%Y-%m-%d").date()
+            if start_day > end_day:
+                start_day, end_day = end_day, start_day
+
+            start_day = self._equity_trend_snap_to_nearest_trading_day(start_day) or start_day
+            end_day = self._equity_trend_snap_to_nearest_trading_day(end_day) or end_day
+
+            # 프리셋 요구사항: end는 last snapshot 기준
+            if end_day > end_last:
+                end_day = end_last
+
+            daily_equity = self._equity_trend_build_daily_equity(start_day, end_day)
+            if not daily_equity:
+                self._equity_trend_status_var.set("선택 기간에 스냅샷 데이터가 없습니다.")
+                return
+
+            self._render_equity_trend_html(daily_equity, start_day, end_day)
+            self._equity_trend_status_var.set(
+                f"표시: {start_day.isoformat()} ~ {end_day.isoformat()} (points={len(daily_equity)})"
+            )
+
+            # HTML 생성 후 기본 브라우저로 열기 (탭 내 embed 라이브러리 부재)
+            try:
+                import webbrowser
+
+                webbrowser.open(f"file://{self._equity_trend_html_path}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", f"자산 추이 그래프 생성 실패: {e}")
+            except Exception:
+                pass
+
+    def _equity_trend_build_daily_equity(self, start_day: date, end_day: date) -> List[Dict[str, Any]]:
+        """
+        Plotly에 넣을 daily_equity 리스트를 구성합니다.
+        - daily_equity item 키: date, equity(=total_assets), cash(=d2_deposit)
+        """
+        trading_days = trading_days_inclusive(start_day, end_day)
+        if not trading_days:
+            return []
+
+        out: List[Optional[Dict[str, Any]]] = []
+        last_filled: Optional[Dict[str, Any]] = None
+        first_valid_idx: Optional[int] = None
+
+        roots = equity_snapshots_root_candidates()
+
+        for d in trading_days:
+            ds = d.isoformat()
+            rec = None
+            for root in roots:
+                rec = read_equity_snapshot_from_root(root, ds)
+                if rec is not None:
+                    break
+            if rec is None:
+                if last_filled is None:
+                    # 구간 시작부가 스냅샷 공백이면 일단 placeholder
+                    out.append(None)
+                    continue
+                # 스냅샷이 비어있는 날은 직전 스냅샷 값으로 forward-fill
+                rec = dict(last_filled)
+                rec["date"] = ds
+
+            last_filled = rec
+            if first_valid_idx is None:
+                first_valid_idx = len(out)
+
+            cash = float(rec.get("d2_deposit", 0) or 0)
+            stock_eval = float(rec.get("stock_eval", 0) or 0)
+            equity = float(cash + stock_eval)
+
+            out.append({"date": ds, "equity": equity, "cash": cash})
+
+        if not out:
+            return []
+        if all(v is None for v in out):
+            return []
+
+        # 구간 시작부가 스냅샷 공백이면, 첫 유효 스냅샷 값을 back-fill하여 라인이 보이게 합니다.
+        if first_valid_idx is not None and first_valid_idx > 0:
+            first_rec = out[first_valid_idx]
+            if isinstance(first_rec, dict):
+                for i in range(0, first_valid_idx):
+                    if out[i] is None:
+                        cloned = dict(first_rec)
+                        cloned["date"] = trading_days[i].isoformat()
+                        out[i] = cloned
+
+        return [v for v in out if isinstance(v, dict)]
+
+    def _render_equity_trend_html(
+        self, daily_equity: List[Dict[str, Any]], start_day: date, end_day: date
+    ) -> None:
+        """
+        Plotly HTML을 단일 파일로 생성합니다(파일 덮어쓰기).
+        """
+        try:
+            daily_equity = sorted(daily_equity, key=lambda x: x["date"])
+            dates = [d["date"] for d in daily_equity]
+            equities = [float(d["equity"]) for d in daily_equity]
+            cashes = [float(d["cash"]) for d in daily_equity]
+            holdings = [max(0.0, float(e) - float(c)) for e, c in zip(equities, cashes)]
+
+            # 최대값은 y 스케일을 안정화하기 위해 완충
+            max_val = max(equities) * 1.05 if equities else 1.0
+
+            html_cdn = plotly_cdn_script_tag()
+
+            html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  {html_cdn}
+  <style>
+    body {{
+      margin: 0;
+      background: #2E3440;
+      color: #ECEFF4;
+      font-family: "Malgun Gothic", Segoe UI, Arial, sans-serif;
+    }}
+    .wrap {{
+      padding: 16px 18px;
+    }}
+    h3 {{
+      margin: 0 0 12px 0;
+      font-size: 1.15rem;
+      border-bottom: 1px solid #334155;
+      padding-bottom: 10px;
+      color: #88C0D0;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h3>📈 포트폴리오 자산 추이 및 비중 분석</h3>
+    <div style="margin-bottom:8px;color:#A3BE8C;font-size:0.92rem;">
+      {start_day.isoformat()} ~ {end_day.isoformat()}
+    </div>
+    <div id="equity-chart" style="height:520px; width:100%; min-height:520px;"></div>
+  </div>
+  <script>
+    const traceEquity = {{
+      x: {json.dumps(dates)},
+      y: {json.dumps(equities)},
+      name: '총 자본 (평가액)',
+      type: 'scatter',
+      mode: 'lines+markers',
+      line: {{ color: '#f43f5e', width: 3 }},
+      marker: {{ size: 8, color: '#f43f5e' }},
+      yaxis: 'y2'
+    }};
+    const traceCash = {{
+      x: {json.dumps(dates)},
+      y: {json.dumps(cashes)},
+      name: '현금 잔고 (D+2)',
+      type: 'scatter',
+      mode: 'none',
+      fill: 'tozeroy',
+      fillcolor: 'rgba(56, 189, 248, 0.2)',
+      stackgroup: 'one'
+    }};
+    const traceHoldings = {{
+      x: {json.dumps(dates)},
+      y: {json.dumps(holdings)},
+      name: '주식 보유금액',
+      type: 'scatter',
+      mode: 'none',
+      fill: 'tonexty',
+      fillcolor: 'rgba(245, 158, 11, 0.4)',
+      stackgroup: 'one'
+    }};
+    const layout = {{
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      margin: {{ t: 10, b: 40, l: 60, r: 60 }},
+      legend: {{ orientation: 'h', x: 0.5, xanchor: 'center', y: 1.1, font: {{ color: '#ccc' }} }},
+      xaxis: {{ gridcolor: '#333', tickfont: {{ color: '#888' }} }},
+      yaxis: {{
+        gridcolor: '#333',
+        tickfont: {{ color: '#888' }},
+        title: '자산 구성 (원)',
+        side: 'left',
+        range: [0, {max_val}]
+      }},
+      yaxis2: {{
+        overlaying: 'y',
+        side: 'right',
+        showgrid: false,
+        tickfont: {{ color: '#f43f5e' }},
+        title: '총 자산 (원)',
+        range: [0, {max_val}]
+      }},
+      hovermode: 'x unified'
+    }};
+    Plotly.newPlot('equity-chart', [traceCash, traceHoldings, traceEquity], layout, {{ responsive: true, displayModeBar: false }});
+  </script>
+</body>
+</html>"""
+
+            with open(self._equity_trend_html_path, "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as e:
+            try:
+                self._equity_trend_status_var.set(f"HTML 생성 실패: {e}")
+            except Exception:
+                pass
 
     def _virtual_ui_json_path(self) -> str:
         """settings.json 과 같은 폴더에 포지션 탭 UI 상태를 둡니다."""

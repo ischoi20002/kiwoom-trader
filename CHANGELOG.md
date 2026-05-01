@@ -12,6 +12,12 @@
 - 실시간 감시 ATR 기준가(`AtrExit`) 표시: `SL%` / `ATR SL` / `ATR TRL` / `FLASH` 후보 중 **도달시 매도 기준가로 환산된 최댓값 1개만** 라벨+금액으로 표시하도록 정리, 헤더도 `도달시 매도 기준가`로 변경 (`backtest_engine.py`, `ui/tabs/monitor_tab.py`).
 - 실시간 감시 탭 Paned 세시(sash) 복원: 탭 전환 직후 높이 0 고정/오복원 판정 케이스를 보정하고, `보유 및 대응종목` 상단 영역은 약 5줄 높이로 유지하도록 클램프 강화 (`ui/tabs/monitor_tab.py`).
 
+## 0.6.21 (2026-05-02)
+
+- 운영용 포지션관리 탭 자산 추이 그래프 원천: `equity_snapshots_*` 스냅샷 디렉토리 저장/덮어쓰기 유틸(`utils/equity_snapshots_store.py`)과 운영/모의 분리 경로(`utils/server_mode_paths.py`) 추가.
+- `k_trader_gui.py`에서 매일(15:30+buffer) EOD 총자산 스냅샷 자동 저장(동일 날짜 override) 및 복구 로직 추가.
+- `ui/tabs/virtual_tab.py`에 1주일/1달/6개월/1년/커스텀 기간 선택 UI와 Plotly 자산 추이/비중(현금=D+2 포함) 차트 생성 연결.
+
 ## 0.6.19 (2026-05-01)
 
 - **실시간 감시 탭 상단 높이 유지(세션 내)**: 탭 전환 시 매번 강제 복원하던 동작을 막고, 최초 1회 복원 이후에는 사용자가 드래그한 보유/대응 종목 영역 높이를 유지하도록 조정 (`ui/tabs/monitor_tab.py`).
