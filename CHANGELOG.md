@@ -7,6 +7,11 @@
 
 ---
 
+## 0.6.14 (2026-05-01)
+
+- **금일 손익 분모·분자 정합**: 직전 장마감 합성과 당일 비교 시 모두 **D+2 예수 + 보유 순매각 합** 만 사용. ``last_tot_evlu_amt`` ±2.5% 치환은 **표시용 총자산**에만 두고, 금일 손익에는 ``skip_broker_te_reconcile=True`` 로 치환을 끄어 시세 변동이 없을 때 허위 손익(수수료·정의 불일치 꼴) 방지 (`ui/tabs/virtual_tab.py`, `utils/eod_equity_snapshots.py`, `reporting/daily_settlement_report.py`).
+- **직전 장마감 합성 보유 집계**: ``virtual_positions`` 를 포지션 탭과 같이 **6자리 종목코드 기준 첫 항목만** 합산(이중 키 방지) (`utils/eod_equity_snapshots.py`).
+
 ## 0.6.13 (2026-05-01)
 
 - **금일 손익·기준 총자산 합성**: 직전 장마감가 기준 주식 평가를 **액면(가격×수량)** 이 아니라 포지션 탭과 동일한 **순매각 합**( ``invested`` + ``unrealized_at_price_net_of_sell_fee`` )으로 계산. 합성 총자산은 ``VirtualTab._compute_virtual_tab_total_assets`` 와 동일 규칙 적용 — 휴장일 등 시세 변동이 없을 때 수수료 정의 불일치로 인한 허위 손익 완화 (`utils/eod_equity_snapshots.py`).

@@ -471,10 +471,16 @@ def _normalize_total_assets_display(
         return float(total_assets)
 
 
-def _compute_total_assets_for_daily_report(portfolio: Any, stock_eval: float) -> float:
+def _compute_total_assets_for_daily_report(
+    portfolio: Any,
+    stock_eval: float,
+    *,
+    skip_broker_te_reconcile: bool = False,
+) -> float:
     """
     일일 결산·포지션 관리 탭과 동일: D+2 예수 + 주식평가(stock_eval).
     tot_evlu_amt는 합계와 ±2.5% 이내면 증권사 단일값으로 정합.
+    금일 손익 비교 시에는 ``skip_broker_te_reconcile=True`` 로 **합산값만** 사용한다.
     """
     try:
         d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)
@@ -484,7 +490,10 @@ def _compute_total_assets_for_daily_report(portfolio: Any, stock_eval: float) ->
         raw_te = float(getattr(portfolio, "last_tot_evlu_amt", 0) or 0)
         pte = float(getattr(portfolio, "total_equity", 0) or 0)
         if abs(combined) > 1e-6 or se > 0 or d2 != 0:
-            if raw_te > 0:
+            if (
+                not skip_broker_te_reconcile
+                and raw_te > 0
+            ):
                 den = max(abs(raw_te), abs(combined), 1.0)
                 if abs(raw_te - combined) / den <= 0.025:
                     return float(raw_te)
@@ -691,8 +700,7 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
     일일 결산 요약.
 
     - ``realized_today``: 당일 **청산 완료**된 가상 이력의 실현손익 합(청산일 기준).
-    - ``day_pnl_amt`` / ``day_pnl_pct``: 당일 총자산 − **직전 장마감 시세 합성** 기준 총자산(``compute_synthetic_prior_total_assets_at_prev_close``).
-      스냅샷이 없으면 None → HTML 에서 '—' 표시.
+    - ``day_pnl_amt`` / ``day_pnl_pct``: 당일 **D+2+순매각 합산 총자산**(증권사 총평가 치환 없음) − 직전 장마감 시세 합성과 동일 규칙. 스냅샷이 없으면 None → HTML 에서 '—' 표시.
     - ``unrealized``: 보유분 누적 미실현(당일 변동분이 아님).
     """
     portfolio = app.portfolio
@@ -756,6 +764,9 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
     api_mv = float(getattr(portfolio, "holdings_stocks_mv_api", 0) or 0)
     stock_eval = api_mv if api_mv > 0 else total_eval
     total_assets = _compute_total_assets_for_daily_report(portfolio, stock_eval)
+    total_assets_day_pnl = _compute_total_assets_for_daily_report(
+        portfolio, stock_eval, skip_broker_te_reconcile=True
+    )
 
     prev_close_assets: Optional[float] = None
     day_pnl_total: Optional[float] = None
@@ -764,9 +775,10 @@ def _compute_summary_from_app(app: Any, report_day: str) -> Dict[str, Any]:
         prev_close_assets = compute_synthetic_prior_total_assets_at_prev_close(app)
     except Exception:
         prev_close_assets = None
+
     if prev_close_assets is not None and prev_close_assets > 0:
         try:
-            d_amt = float(total_assets) - float(prev_close_assets)
+            d_amt = float(total_assets_day_pnl) - float(prev_close_assets)
             if math.isfinite(d_amt):
                 day_pnl_total = float(d_amt)
                 day_pnl_pct = (day_pnl_total / float(prev_close_assets)) * 100.0

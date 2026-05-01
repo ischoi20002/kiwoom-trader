@@ -2268,6 +2268,9 @@ class VirtualTab:
             stock_liquid = 0.0
         stock_eval = self._resolve_stock_eval_for_account(portfolio, stock_liquid)
         total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
+        total_assets_day_pnl = self._compute_virtual_tab_total_assets(
+            portfolio, stock_eval, skip_broker_te_reconcile=True
+        )
 
         # 미실현 손익: 순매각(매도 수수료 차감) − (평단×수량) 합계. 매입수수료는 매입 원가(cost)에서 제외.
         # 손익률 분모는 Σ(평단×수량).
@@ -2288,12 +2291,12 @@ class VirtualTab:
         except (TypeError, ValueError):
             ta = 0.0
 
-        # 금일 손익: 직전 장마감 시세(stkinfo) × 보유 + D+2 예수 골격으로 합성한 기준 총자산 대비.
+        # 금일 손익: 직전 장마감 시세 합성 분모와 동일하게 **D+2+순매각 합**(증권사 총평가 치환 없음)을 분자로 사용.
         try:
             d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
                 self.app,
                 calendar_day=datetime.now().date(),
-                current_total_assets=float(total_assets),
+                current_total_assets=float(total_assets_day_pnl),
             )
         except Exception:
             d_amt, d_pct = None, None
@@ -2420,6 +2423,9 @@ class VirtualTab:
                 stock_liquid = 0.0
             stock_eval = self._resolve_stock_eval_for_account(portfolio, stock_liquid)
             total_assets = self._compute_virtual_tab_total_assets(portfolio, stock_eval)
+            total_assets_day_pnl = self._compute_virtual_tab_total_assets(
+                portfolio, stock_eval, skip_broker_te_reconcile=True
+            )
 
             try:
                 open_ur_amt = float(total_unrealized_account)
@@ -2442,7 +2448,7 @@ class VirtualTab:
                 d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
                     self.app,
                     calendar_day=datetime.now().date(),
-                    current_total_assets=float(total_assets),
+                    current_total_assets=float(total_assets_day_pnl),
                 )
             except Exception:
                 d_amt, d_pct = None, None
@@ -2507,11 +2513,18 @@ class VirtualTab:
             return 0.0
 
     @staticmethod
-    def _compute_virtual_tab_total_assets(portfolio: Any, _stock_eval: float) -> float:
+    def _compute_virtual_tab_total_assets(
+        portfolio: Any,
+        _stock_eval: float,
+        *,
+        skip_broker_te_reconcile: bool = False,
+    ) -> float:
         """
         포지션 관리 탭 「총 자산」: **D+2 예수 + 주식 순매각 합**(``_resolve_stock_eval_for_account``: 매도 수수료만 반영).
 
         ``last_tot_evlu_amt``(ka10085 단일 총평가)는 합산과 ±2.5% 이내면 증권사 표시와 동일시합니다.
+        금일 손익(직전 장마감 대비)은 분모·분자 정합을 위해 ``skip_broker_te_reconcile=True`` 로
+        **항상 D+2+순매각 합** 만 씁니다.
         """
         try:
             d2 = float(getattr(portfolio, "d2_deposit", 0) or 0)
@@ -2525,7 +2538,10 @@ class VirtualTab:
             raw_te = float(getattr(portfolio, "last_tot_evlu_amt", 0) or 0)
             pte = float(getattr(portfolio, "total_equity", 0) or 0)
             if abs(combined) > 1e-6 or se > 0 or d2 != 0:
-                if raw_te > 0:
+                if (
+                    not skip_broker_te_reconcile
+                    and raw_te > 0
+                ):
                     den = max(abs(raw_te), abs(combined), 1.0)
                     if abs(raw_te - combined) / den <= 0.025:
                         return float(raw_te)

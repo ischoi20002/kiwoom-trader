@@ -2,7 +2,8 @@
 """
 금일 손익용 **기준 총자산** 은 보유별 직전 장마감가로 **순매각 기준** 주식 평가
 ( ``invested`` + 매도 수수료 차감 미실현, ``utils.fee_rates`` )를 합산한 뒤
-현재 ``portfolio``의 D+2 예수와 함께 포지션 탭과 동일한 ``_compute_virtual_tab_total_assets`` 규칙으로 합성한다.
+현재 ``portfolio``의 D+2 예수와 함께 포지션 탭과 동일한 ``_compute_virtual_tab_total_assets`` 골격으로 합성한다.
+금일 손익 비교 시에는 증권사 단일 총평가(±2.5% 치환)를 **쓰지 않고** ``D+2 + 주식 순매각 합`` 만 사용한다.
 
 로컬 JSON(``eod_equity_snapshots_*.json``) 읽기/쓰기 함수는 **과거 호환·수동 점검용**으로만 남긴다.
 금일 손익·일일 리포트 요약은 EOD 파일을 **쓰지도 읽지도 않는다**.
@@ -61,7 +62,8 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
     """
     보유 종목별 직전 장마감가( ``fetch_stock_prev_close_ka10001`` )로
     **포지션 탭과 동일한 순매각 주식 합**( ``invested`` + 매도 수수료 차감 미실현 )을 구하고,
-    ``VirtualTab._compute_virtual_tab_total_assets`` 로 D+2·증권사 총평가 정합까지 맞춘 **기준 총자산**을 반환한다.
+    ``VirtualTab._compute_virtual_tab_total_assets(..., skip_broker_te_reconcile=True)`` 로
+    **D+2 + 순매각 합** 만 반영한 기준 총자산을 반환한다(금일 손익 분모와 동일 정의).
     """
     try:
         om = getattr(app, "order_manager", None)
@@ -82,8 +84,18 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
                 vp = dict(getattr(portfolio, "virtual_positions", None) or {})
         except Exception:
             vp = dict(getattr(portfolio, "virtual_positions", None) or {})
+        # 포지션 탭과 동일: 6자리 코드 기준 첫 항목만 집계 (3490 / 003490 이중 키 방지).
+        merged_vp: Dict[str, Dict[str, Any]] = {}
+        for k_raw, p0 in vp.items():
+            try:
+                nk = str(k_raw).split("_")[0].zfill(6)
+                if nk not in merged_vp:
+                    merged_vp[nk] = p0
+            except Exception:
+                continue
+
         stock_liquid_prev = 0.0
-        for c_raw, pos in vp.items():
+        for _nk, pos in merged_vp.items():
             try:
                 if not isinstance(pos, dict):
                     continue
@@ -94,7 +106,7 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
                     ap = float(pos.get("avg_price", 0) or 0)
                 except (TypeError, ValueError):
                     ap = 0.0
-                code = str(c_raw).split("_")[0].zfill(6)
+                code = str(_nk).zfill(6)
                 pc: Optional[float] = None
                 try:
                     pc = fn(code, silent=True)
@@ -118,7 +130,9 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
             from ui.tabs.virtual_tab import VirtualTab
 
             total = VirtualTab._compute_virtual_tab_total_assets(
-                portfolio, stock_liquid_prev
+                portfolio,
+                stock_liquid_prev,
+                skip_broker_te_reconcile=True,
             )
         except Exception:
             total = _portfolio_total_assets_like_virtual_tab_for_synthetic(
@@ -249,7 +263,7 @@ def compute_day_pnl_vs_eod_store(
     Parameters
     ----------
     current_total_assets :
-        이미 계산된 현재 총자산(포지션 탭·일일 결산과 동일 규칙).
+        당일 기준 총자산. **금일 손익 정합**을 위해 ``VirtualTab._compute_virtual_tab_total_assets(..., skip_broker_te_reconcile=True)`` 로 구한 값을 넘긴다.
     """
     try:
         prev = previous_trading_day(calendar_day)
