@@ -590,9 +590,10 @@ class OrderManager:
 
     def _sum_holdings_market_value(self, holdings: list) -> float:
         """
-        ka10085 acnt_prft_rt 행별 주식 평가금액 합산.
-        모의/실전 API에 따라 evlu·시세 필드가 비는 응답이 섞이면 총자산이 예수금만으로 떨어지므로
-        매입가(평단)×수량까지 폴백합니다.
+        ka10085 acnt_prft_rt 행별 주식 순수 평가(현재가×수량) 합산.
+        ``evlu_amt`` 등은 증권사/필드에 따라 매입·제비용 정의 차이가 있어,
+        현재가 필드가 있으면 우선 현재가×수량만 사용합니다(매입수수료 미반영).
+        현재가·평가액 모두 없을 때만 평단×수량으로 폴백합니다.
         """
         s = 0.0
         for row in holdings:
@@ -604,12 +605,6 @@ class OrderManager:
                 )
                 if qty <= 0:
                     continue
-                ev = self._safe_float(
-                    row.get("evlu_amt") or row.get("stk_evlu_amt") or 0
-                )
-                if ev > 0:
-                    s += ev
-                    continue
                 cur = self._safe_float(
                     row.get("cur_prc")
                     or row.get("prpr")
@@ -619,6 +614,12 @@ class OrderManager:
                 )
                 if cur > 0:
                     s += cur * qty
+                    continue
+                ev = self._safe_float(
+                    row.get("evlu_amt") or row.get("stk_evlu_amt") or 0
+                )
+                if ev > 0:
+                    s += ev
                     continue
                 avg = self._safe_float(
                     row.get("pchs_avg_pric")

@@ -7,6 +7,13 @@
 
 ---
 
+## 0.6.11 (2026-05-01)
+
+- **포지션 탭·계좌 「주식 평가금」**: 전량 매도 가정 **순매각**(설정 매도 수수료율 차감) 합계 — `Σ invested + Σ 미실현(매도 차감)`으로 표시. 잔고 API `holdings_stocks_mv_api`/행 `evlu_amt`만으로 덮어쓰지 않음 (`ui/tabs/virtual_tab.py`).
+- **보유 평가액 표시 규칙**: 잔고 스냅 경로에서 **현재가×수량**이 살 있으면 `ka_ev`(평가금액)보다 우선 — 필드 정의 혼선 시 액면 시가 표시 안정화 (`ui/tabs/virtual_tab.py`).
+- **총자산 계산용 주식분**: 표시와 동일하게 로컬 순매각 합만 사용(잔고 평가합으로 대체하지 않음) (`ui/tabs/virtual_tab.py`).
+- **ka10085 평가 합산**: 행별 **현재가×수량**을 `evlu_amt`보다 우선해 합산(내부 `stocks_market_value`), 매입수수료·필드 정의 차 최소화 (`core/order_manager.py`).
+
 ## 0.6.10 (2026-05-01)
 
 - **보유 현재가**: 잔고 스냅(`use_ka`)일 때도 **`_monitor_live_price`(호가·stkinfo·스텁)** 를 **`ka_cur_prc`보다 우선** — 전일 단가만 온 스냅이 현재가 열을 덮지 않도록 (`ui/tabs/virtual_tab.py`).
