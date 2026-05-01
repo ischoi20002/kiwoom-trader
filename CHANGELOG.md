@@ -7,6 +7,10 @@
 
 ---
 
+## 0.6.18 (2026-05-01)
+
+- **금일 손익 기준자산 합성 안전화**: 직전 장마감가(`ka10001`)를 보유 종목 중 하나라도 조회하지 못하면 평단 대체를 금지하고 기준자산 합성을 중단(`None`)해 금일 손익을 `—`로 표시. 재시작/응답 편차 시 허위 손익(+/-) 노출을 차단 (`utils/eod_equity_snapshots.py`).
+
 ## 0.6.17 (2026-05-01)
 
 - **일일결산·가상 종합리포트 15분봉**: `trading_data.db` 의 `bars_15m`·`bars_1m` 리샘플 우선, 없을 때만 키움 REST 폴백. 가상 리포트는 REST 일자 간 대기를 실제 REST 폴백 시에만 수행 (`data_manager_v2.py`, `reporting/daily_settlement_report.py`, `reporting/virtual_report.py`).

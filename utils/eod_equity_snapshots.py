@@ -64,6 +64,10 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
     **포지션 탭과 동일한 순매각 주식 합**( ``invested`` + 매도 수수료 차감 미실현 )을 구하고,
     ``VirtualTab._compute_virtual_tab_total_assets(..., skip_broker_te_reconcile=True)`` 로
     **D+2 + 순매각 합** 만 반영한 기준 총자산을 반환한다(금일 손익 분모와 동일 정의).
+
+    안전 규칙:
+    - 보유 종목 중 하나라도 직전 장마감가 조회에 실패하면(0/None), 평단으로 대체하지 않고 ``None`` 반환.
+      (부분 폴백으로 허위 금일손익이 생성되는 것을 방지)
     """
     try:
         om = getattr(app, "order_manager", None)
@@ -112,18 +116,17 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
                     pc = fn(code, silent=True)
                 except Exception:
                     pc = None
+                # 직전 종가 미조회 시 부분 합성 금지: 허위 금일손익 방지(분모 None 처리)
                 if pc is None or float(pc) <= 0:
-                    if ap > 0:
-                        pc = ap
-                if pc is not None and float(pc) > 0:
-                    try:
-                        inv = float(pos.get("invested", 0) or 0)
-                    except (TypeError, ValueError):
-                        inv = 0.0
-                    ur = unrealized_at_price_net_of_sell_fee(
-                        pos, float(pc), qty, ap, settings
-                    )
-                    stock_liquid_prev += inv + ur
+                    return None
+                try:
+                    inv = float(pos.get("invested", 0) or 0)
+                except (TypeError, ValueError):
+                    inv = 0.0
+                ur = unrealized_at_price_net_of_sell_fee(
+                    pos, float(pc), qty, ap, settings
+                )
+                stock_liquid_prev += inv + ur
             except Exception:
                 continue
         try:
