@@ -10,6 +10,18 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
 
+def _implied_price_too_close_to_avg(
+    px: float, avg: float, *, tol: float = 0.501
+) -> bool:
+    """브로커 스냅이 평단과 사실상 같으면 '현재가'로 쓰지 않기 위한 판별."""
+    try:
+        if px <= 0 or avg <= 0:
+            return False
+        return abs(float(px) - float(avg)) < float(tol)
+    except (TypeError, ValueError):
+        return False
+
+
 def virtual_position_reference_price_for_monitor(
     pos: Dict[str, Any],
     *,
@@ -20,10 +32,13 @@ def virtual_position_reference_price_for_monitor(
     가상보유 포지션 dict에서 감시 트리·monitor_info 표시용 참고 현재가를 꺼냅니다.
 
     보유 탭(`virtual_tab`)과 동일하게 **계좌 동기화(ka10085) 스냅**을 우선합니다.
-    웹소켓 틱 전이라도 `ka_cur_prc` 또는 평가금액/수량으로 복원 가능하면 0 대신 표시합니다.
+    다만 `ka_cur_prc`·`평가금액/수량`이 **평균단가와 동일(또는 토클)** 하면 실시간 시세가
+    아닌 '평단 복제'인 경우가 많아 **무시**하고 REST로 넘어갑니다.
 
-    그 다음 **REST 전일종가(ka10001·stkinfo)** → **REST 현재가(ka10004)** 순으로 폴백합니다.
-    평균단가(`avg_price`)는 넣지 않습니다. 평단을 현재가처럼 쓰면 등락·미실현 표시가 오해를 부를 수 있습니다.
+    그 다음 **REST 호가 현재가(ka10004)** 를 먼저 쓰고, 실패 시에만 **stkinfo(ka10001)**
+    (``cur_prc`` 우선·전일 필드 폴백) 으로 둡니다. (역순이면 전일·지연 필드가 ``last_price``
+    시드로 들어가 보유 탭 **현재가** 가 어제·그제 종가처럼 보이는 버그가 난다.)
+    평균단가(`avg_price`)는 직접 반환하지 않습니다.
 
     Returns:
         0.0 초과 시 참고가, 없으면 0.0
@@ -31,33 +46,42 @@ def virtual_position_reference_price_for_monitor(
     try:
         if not isinstance(pos, dict):
             return 0.0
+        try:
+            avg = float(pos.get("avg_price", 0) or 0)
+        except (TypeError, ValueError):
+            avg = 0.0
         ka_cur = float(pos.get("ka_cur_prc") or 0)
-        if ka_cur > 0:
+        if ka_cur > 0 and not _implied_price_too_close_to_avg(ka_cur, avg):
             return ka_cur
         qty = int(pos.get("qty", 0) or 0)
         ka_ev = float(pos.get("ka_evlu_amt") or 0)
         if ka_ev > 0 and qty > 0:
-            return float(ka_ev) / float(qty)
+            try:
+                impl = float(ka_ev) / float(qty)
+            except (TypeError, ValueError, ZeroDivisionError):
+                impl = 0.0
+            if impl > 0 and not _implied_price_too_close_to_avg(impl, avg):
+                return impl
     except (TypeError, ValueError, ZeroDivisionError):
         pass
     if order_manager is not None and code:
         try:
             cod = str(code).strip().zfill(6)
             if cod and cod != "000000":
-                fn_pc = getattr(order_manager, "fetch_stock_prev_close_ka10001", None)
-                if callable(fn_pc):
-                    try:
-                        pc = fn_pc(cod, silent=True)
-                        if pc is not None and float(pc) > 0:
-                            return float(pc)
-                    except Exception:
-                        pass
                 fn_cur = getattr(order_manager, "fetch_stock_cur_prc_rest", None)
                 if callable(fn_cur):
                     try:
                         cp = fn_cur(cod)
                         if cp is not None and float(cp) > 0:
                             return float(cp)
+                    except Exception:
+                        pass
+                fn_pc = getattr(order_manager, "fetch_stock_prev_close_ka10001", None)
+                if callable(fn_pc):
+                    try:
+                        pc = fn_pc(cod, silent=True)
+                        if pc is not None and float(pc) > 0:
+                            return float(pc)
                     except Exception:
                         pass
         except Exception:

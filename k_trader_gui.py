@@ -1314,6 +1314,8 @@ class KiwoomApp:
     def _refresh_vp_price_stubs_after_auth(self) -> None:
         """
         첫 렌더에서 토큰이 없어 last_price=0 이었던 vp_price_stub 행을 REST로 다시 채웁니다.
+        또한 **실시간 틱 price 가 아직 없을 때** 잘못 시드된 last_price(예: 역순 REST로
+        들어간 전일 값)도 인증 직후 한 번 교정합니다.
         """
         om = getattr(self, "order_manager", None)
         if om is None:
@@ -1342,12 +1344,15 @@ class KiwoomApp:
                 row = mi.get(c)
                 if not isinstance(row, dict) or not row.get("vp_price_stub"):
                     continue
+                # 실시간 체결가가 이미 오면 last_price 는 건드리지 않음
                 try:
-                    lp = float(row.get("last_price") or 0)
+                    raw_p = row.get("price")
+                    if raw_p not in (None, "", 0):
+                        v = float(raw_p)
+                        if v > 0:
+                            continue
                 except (TypeError, ValueError):
-                    lp = 0.0
-                if lp > 0:
-                    continue
+                    pass
                 ref_p = float(
                     virtual_position_reference_price_for_monitor(
                         pos,
@@ -1356,6 +1361,12 @@ class KiwoomApp:
                     )
                 )
                 if ref_p <= 0:
+                    continue
+                try:
+                    lp = float(row.get("last_price") or 0)
+                except (TypeError, ValueError):
+                    lp = 0.0
+                if lp > 0 and abs(ref_p - lp) < 0.501:
                     continue
                 row = dict(row)
                 row["last_price"] = ref_p

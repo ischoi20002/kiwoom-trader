@@ -1239,7 +1239,7 @@ class VirtualTab:
     def _monitor_live_price(self, nk: str, pos: Dict[str, Any]) -> float:
         """
         6자리 종목코드 기준 현재가(청산 가정 시 단가).
-        틱의 price → (스텁이 아닐 때) last_price → 키움 REST 현재가(ka10004) → 평단 순으로 폴백합니다.
+        틱 ``price`` → ``last_price``(평단 미러 제외) → REST 호가·전일 순. **평단 폴백 없음.**
         """
         try:
             mi = getattr(self.app, "monitor_info", None) or {}
@@ -1259,15 +1259,22 @@ class VirtualTab:
                     return v
         except (TypeError, ValueError):
             pass
-        # 보유 전용 스텁(vp_price_stub): 틱이 없을 때 last_price 에 시드한 참고가(ka·전일·REST)를 반드시 사용.
-        # (기존에는 stub 이면 last_price 를 건너뛰어 시드가 화면에 반영되지 않음)
+        # 보유 전용 스텁(vp_price_stub): 틱이 없을 때 last_price 시드 우선.
+        # 다만 시드값이 평단과 동일하면(또는 브로커가 평단만 준 경우) 현재가로 취급하지 않음.
         if stub_flag:
             try:
                 raw_lp = info.get("last_price")
                 if raw_lp not in (None, "", 0):
                     v = float(raw_lp)
                     if v > 0:
-                        return v
+                        if (
+                            ap > 0
+                            and abs(v - ap) < 0.501
+                            and "price" not in info
+                        ):
+                            pass
+                        else:
+                            return v
             except (TypeError, ValueError):
                 pass
         else:
@@ -1279,7 +1286,7 @@ class VirtualTab:
                         # 구버전 스텁: last만 평단이고 틱 캐시 price 없음 → 실시간으로 보지 않음
                         if (
                             ap > 0
-                            and abs(v - ap) < 1e-6
+                            and abs(v - ap) < 0.501
                             and "price" not in info
                         ):
                             pass
@@ -1290,11 +1297,7 @@ class VirtualTab:
         api_px = self._rest_quote_fallback_close(nk)
         if api_px > 0:
             return api_px
-        try:
-            if ap > 0:
-                return ap
-        except (TypeError, ValueError):
-            pass
+        # 평단은 '현재가'로 쓰지 않음(미시세·스텁과 구분 불가 → 동일 숫자 오해)
         return 0.0
 
     def _has_live_tick_price(self, nk: str) -> bool:
@@ -1481,7 +1484,7 @@ class VirtualTab:
         try:
             live_p = float(self._monitor_live_price(nk, pos))
         except (TypeError, ValueError):
-            live_p = float(pos.get("avg_price", 0) or 0)
+            live_p = 0.0
         try:
             ap = float(pos.get("avg_price", 0) or 0)
         except (TypeError, ValueError):
@@ -1504,12 +1507,22 @@ class VirtualTab:
                 ka_pur = float(pos.get("ka_pur_amt") or 0)
             except (TypeError, ValueError):
                 ka_cur = ka_ev = ka_pur = 0.0
-            if ka_cur > 0:
+            # 잔고 스냅만 있고 감시 틱이 없을 때: ka_cur 는 전일 종가만 주는 경우가 많아
+            # _monitor_live_price(호가·stkinfo·스텭 last_price)가 있으면 표시용 현재가는 그쪽을 우선한다.
+            curr_p = 0.0
+            if live_p > 0:
+                curr_p = live_p
+            if curr_p <= 0 and ka_cur > 0 and (ap <= 0 or abs(ka_cur - ap) >= 0.501):
                 curr_p = ka_cur
-            elif ka_ev > 0 and qty > 0:
-                curr_p = ka_ev / float(qty)
-            else:
-                curr_p = live_p if live_p > 0 else ap
+            if curr_p <= 0 and ka_ev > 0 and qty > 0:
+                try:
+                    impl = ka_ev / float(qty)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    impl = 0.0
+                if impl > 0 and (ap <= 0 or abs(impl - ap) >= 0.501):
+                    curr_p = impl
+            if curr_p <= 0:
+                curr_p = live_p if live_p > 0 else 0.0
             if ka_ev > 0:
                 eval_amt = ka_ev
             else:
@@ -1973,7 +1986,7 @@ class VirtualTab:
             p_str,
             f"{eval_disp:,}",
             f"{buy_disp:,}",
-            f"{curr_p:,.0f}",
+            f"{curr_p:,.0f}" if float(curr_p) > 1e-9 else "—",
             f"{ap:,.0f}",
             day_chg_disp,
             wt_disp,

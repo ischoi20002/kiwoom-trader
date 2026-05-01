@@ -347,7 +347,8 @@ class OrderManager:
                 ):
                     if k not in obj:
                         continue
-                    pv = self._safe_float(obj.get(k), 0.0)
+                    # cur_prc 등은 등락 부호가 붙어 음수 문자열로 올 수 있음 → 절댓값
+                    pv = abs(self._safe_float(obj.get(k), 0.0))
                     if pv > 0:
                         return float(pv)
                 return None
@@ -385,22 +386,94 @@ class OrderManager:
                 out.append(x)
         return out or [c]
 
+    def _pick_prev_close_from_flat_stkinfo_row(
+        self, row: Any
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """
+        ka10001(stkinfo) 한 행에서 **직전 장마감 시세(현재가 필드)** 를 우선하고,
+        없거나 0이면 명세상 전일 종가 필드를 봅니다.
+
+        - ``cur_prc``: **최우선**. 직전 장마감 기준 시세(값 앞 ``+``/``-`` 는 등락 표시,
+          ``abs``로 가격만 취함). 일부 종목에서 ``prdy_clpr`` 계열이 하루 이상 밀리는
+          경우가 있어 기본 표시·기동 시 참고가는 여기를 믿는다.
+        - ``pred_close_pric`` / ``prdy_clpr`` / ``stck_prdy_clpr``: ``cur_prc`` 로
+          채울 수 없을 때만 사용.
+
+        ``base_pric``(기준가)·``bfdy_clpr``(전전일 등)·``yst_clpr`` 는 실제 장마감일과
+        어긋나는 사례가 있어 **쓰지 않습니다.**
+        """
+        if not isinstance(row, dict):
+            return None, None
+        try:
+            if "cur_prc" in row:
+                v = abs(self._safe_float(row.get("cur_prc"), 0.0))
+                if v > 0:
+                    return float(v), "cur_prc"
+        except Exception:
+            pass
+        for k in (
+            "pred_close_pric",
+            "prdy_clpr",
+            "stck_prdy_clpr",
+        ):
+            if k not in row:
+                continue
+            try:
+                v = self._safe_float(row.get(k), 0.0)
+                if v > 0:
+                    return float(v), k
+            except Exception:
+                pass
+        return None, None
+
+    def _pick_prev_close_from_ka10001_response(
+        self, data: dict
+    ) -> Tuple[Optional[float], Optional[str], Optional[dict]]:
+        """
+        stkinfo 응답: ``output`` / ``output1`` / ``output2`` 블록을 **루트 본문보다 먼저** 본다.
+        일부 실전 응답에서 루트에만 지연·오래된 ``prdy_clpr`` 가 깔리고, 실제 시세 행은
+        ``output`` 에 있어 2거래일 전 종가가 선택되는 사례가 있어 순서를 바꾼다.
+        루트 평탄 JSON(모의 등)은 ``output`` 이 없으면 마지막에 루트만 조회된다.
+        """
+        if not isinstance(data, dict):
+            return None, None, None
+        try:
+            chunks: List[Any] = []
+            for key in ("output", "output1", "output2"):
+                blk = data.get(key)
+                if isinstance(blk, dict):
+                    chunks.append(blk)
+                elif isinstance(blk, list):
+                    for it in blk[:20]:
+                        if isinstance(it, dict):
+                            chunks.append(it)
+            chunks.append(data)
+            for ch in chunks:
+                hit, pk = self._pick_prev_close_from_flat_stkinfo_row(ch)
+                if hit is not None:
+                    return hit, pk, ch
+                try:
+                    for v in ch.values():
+                        if isinstance(v, dict):
+                            hit2, pk2 = self._pick_prev_close_from_flat_stkinfo_row(v)
+                            if hit2 is not None:
+                                return hit2, pk2, v
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None, None, None
+
     def _extract_prev_clpr_deep(self, root: Any) -> Optional[float]:
         """
-        ``/api/dostk/*`` JSON 전체(dict/list)에서 전일 종가·기준가 필드를 순회해 숫자로 반환합니다.
-        ka10001(stkinfo)·호가 응답 등 키 이름이 달라 후보를 넓게 둡니다.
+        비정형 래핑 시 dict마다 ``cur_prc``(절댓값) 우선, 이후 전일 전용 키만 순회합니다.
+        기준가·전전일·기타 필드는 제외합니다.
         """
         seen: Set[int] = set()
         pkeys = (
             "pred_close_pric",
             "prdy_clpr",
-            "bfdy_clpr",
-            "yst_clpr",
             "stck_prdy_clpr",
-            "base_pric",
-            "bss_cls_pric",
-            "p_clpr",
-            "mprv_clpr",
         )
 
         def _vis(x: Any) -> Optional[float]:
@@ -412,6 +485,13 @@ class OrderManager:
                     return None
                 seen.add(xid)
                 if isinstance(x, dict):
+                    try:
+                        if "cur_prc" in x:
+                            vcp = abs(self._safe_float(x.get("cur_prc"), 0.0))
+                            if vcp > 0:
+                                return float(vcp)
+                    except Exception:
+                        pass
                     for k in pkeys:
                         if k in x:
                             try:
@@ -441,7 +521,10 @@ class OrderManager:
         self, stk_cd: str, *, silent: bool = False
     ) -> Optional[float]:
         """
-        키움 REST ``ka10001``(주식기본정보)로 **전일 종가**를 조회합니다.
+        키움 REST ``ka10001``(주식기본정보)로 **직전 장마감 시세** 를 조회합니다.
+        응답 행에서 ``cur_prc`` 절댓값을 **최우선**(기동·가상보유 참고가· 일부 종목의 지연된
+        ``prdy_clpr`` 회피), 없을 때만 ``pred_close_pric``·``prdy_clpr``·``stck_prdy_clpr``.
+        ``base_pric`` 등 기준가·전전일 전용으로 오인되기 쉬운 필드는 쓰지 않습니다.
         호가(``/api/dostk/mrkcond``, ka10004)와 달리 본 TR은 **``POST /api/dostk/stkinfo``** 를 써야 합니다.
         ``kt10001`` 은 매도 주문 TR이므로 전일가 조회에 사용하지 않습니다.
         """
@@ -456,17 +539,8 @@ class OrderManager:
             host = config.MOCK_URL if use_mock else config.URL
             token = self.app.auth_manager.get_auth_token()
             if not token:
-                if not silent:
-                    try:
-                        lf = getattr(self.app, "log", None)
-                        if callable(lf):
-                            lf(f"⚠️ [전일종가] {code} — 액세스 토큰 없음")
-                    except Exception:
-                        pass
                 return None
             url_stkinfo = f"{host}/api/dostk/stkinfo"
-            last_http: int = 0
-            last_hint: str = ""
             headers = {
                 "Content-Type": "application/json;charset=UTF-8",
                 "authorization": f"Bearer {token}",
@@ -480,20 +554,15 @@ class OrderManager:
                         json={"stk_cd": param},
                         timeout=8,
                     )
-                except requests.RequestException as rqe:
-                    last_hint = f"네트워크:{rqe}"
+                except requests.RequestException:
                     continue
-                last_http = int(res.status_code or 0)
                 if res.status_code != 200:
-                    last_hint = f"HTTP:{last_http}"
                     continue
                 try:
                     data = res.json()
                 except Exception:
-                    last_hint = "JSON파싱실패"
                     continue
                 if not isinstance(data, dict):
-                    last_hint = "응답(dict아님)"
                     continue
                 try:
                     rc = data.get("return_code", data.get("rt_cd", 0))
@@ -501,37 +570,16 @@ class OrderManager:
                         try:
                             ri = int(rc)
                             if ri != 0:
-                                msg = str(data.get("return_msg", "") or "")[:120]
-                                last_hint = f"API오류 rc={rc} {msg}"
                                 continue
                         except (TypeError, ValueError):
-                            last_hint = f"API오류 rc={rc}"
                             continue
                 except Exception:
                     pass
-                pv = self._extract_prev_clpr_deep(data)
+                pv, _, _ = self._pick_prev_close_from_ka10001_response(data)
+                if pv is None:
+                    pv = self._extract_prev_clpr_deep(data)
                 if pv is not None and pv > 0:
-                    try:
-                        if not silent:
-                            log_fn = getattr(self.app, "log", None)
-                            if callable(log_fn):
-                                log_fn(
-                                    f"📌 [전일종가] {code} stk_cd={param!r} → {float(pv):,.0f}원"
-                                )
-                    except Exception:
-                        pass
                     return float(pv)
-                last_hint = "전일필드없음"
-            if not silent:
-                try:
-                    log_fn = getattr(self.app, "log", None)
-                    if callable(log_fn):
-                        log_fn(
-                            f"⚠️ [전일종가] {code} 조회 실패 "
-                            f"(마지막 HTTP={last_http}, 사유≈{last_hint or '알수없음'})"
-                        )
-                except Exception:
-                    pass
             return None
         except Exception as e:
             try:

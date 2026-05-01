@@ -7,6 +7,23 @@
 
 ---
 
+## 0.6.10 (2026-05-01)
+
+- **보유 현재가**: 잔고 스냅(`use_ka`)일 때도 **`_monitor_live_price`(호가·stkinfo·스텁)** 를 **`ka_cur_prc`보다 우선** — 전일 단가만 온 스냅이 현재가 열을 덮지 않도록 (`ui/tabs/virtual_tab.py`).
+- **참고가 시드**: `virtual_position_reference_price_for_monitor` 에서 **ka10004(호가) → stkinfo** 순 호출 (역순 시 잘못된 전일값이 `last_price`에 들어가던 문제) (`core/trading_controller.py`).
+- **stkinfo**: 응답에서 **`output` 블록을 루트보다 먼저** 파싱, **호가 TR** 은 부호 있는 `cur_prc` 를 **절댓값**으로 인식 (`core/order_manager.py`).
+- **스텁 재시드**: 인증 직후 **실시간 `price`가 없으면** `last_price`를 다시 채워 잘못 시드가 남지 않게 (`k_trader_gui.py`).
+- **진단 출력**: `📌 [직전장마감]` 콘솔·GUI 로그·info 로깅 제거 (필요 시 로거 debug만) (`core/trading_controller.py`, `core/order_manager.py`).
+
+## 0.6.9 (2026-05-01)
+
+- **보유·스텁 현재가**: `ka_cur_prc`·`평가금/수량`이 **평단과 동일(≈0.5원 이내)** 이면 실시간 시세가 아닌 복제로 보고 무시, REST 전일·호가로 시드 (`core/trading_controller.py`).
+- **포지션 탭**: `vp_price_stub` 도 `last_price` 가 평단과 같고 틱이 없으면 **현재가로 쓰지 않음** — 호가·전일 폴백 후 평단 (`ui/tabs/virtual_tab.py`). `last_price` vs 평단 비교를 **0.501원** 허용으로 통일.
+
+## 0.6.8 (2026-05-01)
+
+- **전일종가(ka10001)**: `stkinfo` 응답에서 **`output`/`output1` 우선**, 필드는 **`prdy_clpr` 등 전일 전용 → `pred_close_pric` 순**. 루트·타 블록 깊이 탐색이 잘못된 노드(기준가·구버전 전일)를 먼저 잡아 **하루 밀림**이 나던 문제를 완화 (`core/order_manager.py`). 광역 탐색에서 `base_pric`·`bss_cls_pric` 제외.
+
 ## 0.6.7 (2026-05-01)
 
 - **전일 종가 REST**: 주식 기본정보 `ka10001`을 **`POST /api/dostk/stkinfo`** 로 호출하도록 수정. `mrkcond`(호가) URL 혼용 시 HTTP 200이어도 전일가 필드가 비던 문제를 제거 (`core/order_manager.py`).
