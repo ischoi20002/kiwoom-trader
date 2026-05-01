@@ -518,14 +518,6 @@ class SettingsTab:
         add_header(sel_f, '── Track A v2: 단기 상대강도·고가대비 되돌림·이평 근접·ATR%·갭 ──')
         add_param_row(
             sel_f,
-            'v2 일봉 선정 스택 사용',
-            None,
-            '',
-            'ON이면 prepare_dynamic_universe·실시간 선정이 동일 v2 필터(교차섹션 분위 포함). OFF면 아래 레거시 블록',
-            toggle_key='sel_a_use_new_stack',
-        )
-        add_param_row(
-            sel_f,
             'RS 룩백 (거래일)',
             'sel_a_rs_lookback',
             '일',
@@ -686,55 +678,6 @@ class SettingsTab:
             'Fast/Slow/Signal은 macd_fast_daily 등 전역 키와 동일 (선정·신호 공용)',
             widget_list=self.sel_a_v2_widgets,
         )
-        add_header(sel_f, '── Track A 레거시 (v2 끔 또는 v2 오류 폴백 시) ──')
-        add_param_row(
-            sel_f,
-            '이평선 수렴도 기준',
-            'ma_convergence',
-            '%',
-            'MA5·MA20 에너지 응축(Short/Mid)',
-            widget_list=self.sel_a_legacy_widgets,
-        )
-        add_param_row(
-            sel_f,
-            '종목 선정 RSI 하한',
-            'sel_rsi_min',
-            '',
-            '레거시 및 v2(sel_a_require_sel_rsi_band) 공통 키',
-            widget_list=self.sel_a_legacy_widgets,
-        )
-        add_param_row(
-            sel_f,
-            '종목 선정 RSI 상한',
-            'sel_rsi_max',
-            '',
-            '',
-            widget_list=self.sel_a_legacy_widgets,
-        )
-        add_param_row(
-            sel_f,
-            '거래량 분출 비율',
-            'vol_ratio',
-            '배',
-            '전일 대비 분출 + 당일 양봉',
-            widget_list=self.sel_a_legacy_widgets,
-        )
-        add_param_row(
-            sel_f,
-            '분출 확인 기간',
-            'vol_lookback',
-            '일',
-            '최근 N일 내 분출 이력',
-            widget_list=self.sel_a_legacy_widgets,
-        )
-        add_param_row(
-            sel_f,
-            '일봉 MACD(OSC) — 레거시',
-            None,
-            '',
-            '레거시 Track A는 OSC>0 고정. v2는 위 OSC>0 토글',
-            widget_list=self.sel_a_legacy_widgets,
-        )
 
         sel_b_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type B — 추세돌파 (Track B 종목 선정) ', padding='15')
         sel_b_f.pack(fill=tk.X, expand=False, pady=(0, 10))
@@ -776,8 +719,7 @@ class SettingsTab:
             'v2 일봉 선정 스택 사용',
             None,
             '',
-            'ON이면 prepare_dynamic_universe·실시간이 동일 v2(교차섹션 분위). OFF면 아래 레거시 규칙만',
-            toggle_key='sel_b_use_new_stack',
+            '레거시 모드 미사용(항상 v2 기준)',
         )
         add_param_row(
             sel_b_f,
@@ -967,11 +909,6 @@ class SettingsTab:
             'Fast/Slow/Signal은 macd_fast_daily 등 전역 키와 동일',
             widget_list=self.sel_b_v2_widgets,
         )
-        add_header(
-            sel_b_f,
-            '── Track B 레거시 (v2 끔 또는 폴백): MA정배열·동일 대금/RSI/분출/OSC — RS·고가밴드 없음 ──',
-        )
-
         slot_f = ttk.LabelFrame(
             _univ_root,
             text=' 📊 감시 선정: 최소 점수(N 무관) · 개수 상한 · (옵션)순위 밴드 ',
@@ -1607,35 +1544,8 @@ class SettingsTab:
         if 'use_sel_track_b' in self.conf_vars:
             self.conf_vars['use_sel_track_b'].trace_add('write', _sync_sel_track_b_to_type_b)
 
-        def _apply_sel_a_stack_ui(*_args: object) -> None:
-            """v2 ON이면 레거시 행 비활성, OFF이면 v2 파라미터 행 비활성."""
-            try:
-                if 'sel_a_use_new_stack' not in self.conf_vars:
-                    return
-                v2_on = bool(self.conf_vars['sel_a_use_new_stack'].get())
-                apply_st(self.sel_a_v2_widgets, v2_on)
-                apply_st(self.sel_a_legacy_widgets, not v2_on)
-            except (tk.TclError, AttributeError, KeyError):
-                pass
-
-        if 'sel_a_use_new_stack' in self.conf_vars:
-            self.conf_vars['sel_a_use_new_stack'].trace_add('write', _apply_sel_a_stack_ui)
-            _apply_sel_a_stack_ui()
-
-        def _apply_sel_b_stack_ui(*_args: object) -> None:
-            """B v2 ON이면 v2 파라미터 행 활성, OFF이면 비활성."""
-            try:
-                if 'sel_b_use_new_stack' not in self.conf_vars:
-                    return
-                v2_on = bool(self.conf_vars['sel_b_use_new_stack'].get())
-                apply_st(self.sel_b_v2_widgets, v2_on)
-                apply_st(self.sel_b_legacy_widgets, not v2_on)
-            except (tk.TclError, AttributeError, KeyError):
-                pass
-
-        if 'sel_b_use_new_stack' in self.conf_vars:
-            self.conf_vars['sel_b_use_new_stack'].trace_add('write', _apply_sel_b_stack_ui)
-            _apply_sel_b_stack_ui()
+        # [v] 레거시 미사용 정책: sel_a_use_new_stack / sel_b_use_new_stack 토글은 제거되며,
+        # v2 위젯만 활성화합니다.
 
     def reset_to_defaults(self):
         if messagebox.askyesno('초기화 확인', '모든 파라미터를 초기값으로 복원하시겠습니까?'):

@@ -338,8 +338,7 @@ def _apply_sel_a_live_cross_section(rows: list, settings: dict) -> list:
     if not rows:
         return rows
     try:
-        use_stack = _settings_bool_sel(settings, "sel_a_use_new_stack", True)
-        if not use_stack or not _settings_bool_sel(settings, "use_sel_track_a", True):
+        if not _settings_bool_sel(settings, "use_sel_track_a", True):
             return rows
         df = pd.DataFrame(rows)
         if "_sel_ret5_raw" not in df.columns:
@@ -510,8 +509,7 @@ def _apply_sel_b_live_cross_section(rows: list, settings: dict) -> list:
     if not rows:
         return rows
     try:
-        use_stack = _settings_bool_sel(settings, "sel_b_use_new_stack", True)
-        if not use_stack or not _settings_bool_sel(settings, "use_sel_track_b", True):
+        if not _settings_bool_sel(settings, "use_sel_track_b", True):
             return rows
         df = pd.DataFrame(rows)
         if "_sel_b_ret_raw" not in df.columns:
@@ -574,159 +572,6 @@ def _apply_sel_b_live_cross_section(rows: list, settings: dict) -> list:
         return df.to_dict("records")
     except Exception:
         return rows
-
-
-def _legacy_track_b_valid_and_score(last_row: pd.Series, settings: dict, *, use_b: bool) -> tuple[bool, float]:
-    """``sel_b_use_new_stack`` 가 꺼져 있을 때만 쓰는 레거시 Track B 판정."""
-    try:
-        if not use_b:
-            return False, 0.0
-        sel_b_min_val = float(settings.get("sel_b_min_trde_val", 60.0)) * 100000000
-        sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
-        sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))
-        avg5 = float(last_row.get("AvgVal5", 0) or 0)
-        ma20 = float(last_row.get("MA20", 0) or 0)
-        ma60 = float(last_row.get("MA60", 0) or 0)
-        close = float(last_row.get("close", 0) or 0)
-        rsi = float(last_row.get("RSI", 0) or 0)
-        osc = float(last_row.get("OSC", 0) or 0)
-        osc_prev = float(last_row.get("OSC_Prev", osc) or 0)
-        vbb = bool(last_row.get("VolBurstActive_B", False))
-        c1_b = avg5 >= sel_b_min_val
-        c2_b = (ma20 > ma60) and (close > ma20)
-        if _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
-            ma5_lr = float(last_row.get("MA5", 0) or 0)
-            mult_lr = _sel_b_ma5_close_mult(settings)
-            c2_b = c2_b and (ma5_lr > 0) and (close >= ma5_lr * mult_lr)
-        c3_b = sel_b_rsi_min <= rsi <= sel_b_rsi_max
-        c4_b = vbb
-        c5 = osc > 0
-        c_ma60 = pd.notna(last_row.get("MA60")) and ma60 > 0
-        valid_b = bool(c1_b and c2_b and c3_b and c4_b and c5 and c_ma60)
-        score_b = 0.0
-        if valid_b:
-            trend_strength = min(10.0, max(0.0, (close / ma20 - 1.0) * 100)) * 10.0
-            osc_term = min(100.0, max(0.0, osc) / (abs(osc) + 1e-10) * 100.0) * 0.1
-            score_b = (
-                trend_strength * 0.4
-                + min(100.0, (rsi / 70.0) * 100) * 0.3
-                + min(100.0, (avg5 / 50000000000.0) * 100) * 0.2
-                + osc_term
-            )
-            if osc > osc_prev:
-                score_b += 10.0
-        return valid_b, round(float(score_b), 1)
-    except Exception:
-        return False, 0.0
-
-
-def dual_track_selection_metrics(last_row: pd.Series, settings: dict) -> dict:
-    """
-    일봉 최신 행에 대해 prepare_dynamic_universe 의 Valid_A/B·Score_A/B 와 동일한 판정.
-    반환: valid_a, score_a, valid_b, score_b (무효 트랙은 점수 0).
-
-    ``sel_a_use_new_stack`` 가 True 이면 Track A 는 교차섹션 후처리에서만 확정.
-    ``sel_b_use_new_stack`` 가 True 이면 Track B 도 동일.
-    """
-    try:
-        use_stack_a = _settings_bool_sel(settings, "sel_a_use_new_stack", True)
-        min_억_a = float(settings.get("min_trde_val", 40.0)) * 100000000
-        conv = max(float(settings.get("ma_convergence", 3.0)) / 100.0, 1e-9)
-        use_a = bool(settings.get("use_sel_track_a", True))
-        use_b = bool(settings.get("use_sel_track_b", True))
-        sel_rsi_min = float(settings.get("sel_rsi_min", 35.0))
-        sel_rsi_max = float(settings.get("sel_rsi_max", 70.0))
-        sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
-        sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))
-        sel_b_min_val = float(settings.get("sel_b_min_trde_val", 60.0)) * 100000000
-
-        avg5 = float(last_row.get("AvgVal5", 0) or 0)
-        ma5 = float(last_row.get("MA5", 0) or 0)
-        ma20 = float(last_row.get("MA20", 0) or 0)
-        ma60 = float(last_row.get("MA60", 0) or 0)
-        close = float(last_row.get("close", 0) or 0)
-        rsi = float(last_row.get("RSI", 0) or 0)
-        osc = float(last_row.get("OSC", 0) or 0)
-        osc_prev = float(last_row.get("OSC_Prev", osc) or 0)
-        vba = bool(last_row.get("VolBurstActive_A", False))
-        vbb = bool(last_row.get("VolBurstActive_B", False))
-
-        ma_diff = abs(ma5 - ma20) / ma20 if ma20 > 0 else 1.0
-        pos_diff = abs(close - ma20) / ma20 if ma20 > 0 else 1.0
-
-        if use_stack_a and use_a:
-            valid_a = False
-            score_a = 0.0
-        else:
-            c1_a = avg5 >= min_억_a
-            c2_a = (ma_diff <= conv) if use_a else False
-            c3_a = (sel_rsi_min <= rsi <= sel_rsi_max)
-            c4_a = vba
-            c5 = osc > 0
-            c_ma60 = pd.notna(last_row.get("MA60")) and ma60 > 0
-            valid_a = bool(c1_a and c2_a and c3_a and c4_a and c5 and c_ma60)
-
-            score_a = 0.0
-            if valid_a:
-                score_a = (
-                    max(0.0, (1 - (ma_diff / conv)) * 100) * 0.4
-                    + min(100.0, (rsi / 70.0) * 100) * 0.3
-                    + min(100.0, (avg5 / 50000000000.0) * 100) * 0.2
-                    + max(0.0, (1 - (pos_diff / 0.03)) * 100) * 0.1
-                )
-                if osc > osc_prev:
-                    score_a += 10.0
-
-        c5 = osc > 0
-        c_ma60 = pd.notna(last_row.get("MA60")) and ma60 > 0
-
-        use_stack_b = _settings_bool_sel(settings, "sel_b_use_new_stack", True)
-        if use_stack_b and use_b:
-            valid_b = False
-            score_b = 0.0
-        else:
-            c1_b = avg5 >= sel_b_min_val
-            c2_b = (ma20 > ma60) and (close > ma20) if use_b else False
-            if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
-                mult_dm = _sel_b_ma5_close_mult(settings)
-                ma5_ok_dm = (ma5 > 0) and (close >= ma5 * mult_dm)
-                c2_b = bool(c2_b and ma5_ok_dm)
-            c3_b = (sel_b_rsi_min <= rsi <= sel_b_rsi_max)
-            c4_b = vbb
-            valid_b = bool(c1_b and c2_b and c3_b and c4_b and c5 and c_ma60)
-
-            score_b = 0.0
-            if valid_b:
-                trend_strength = min(10.0, max(0.0, (close / ma20 - 1.0) * 100)) * 10.0
-                osc_term = (
-                    min(
-                        100.0,
-                        max(0.0, osc) / (abs(osc) + 1e-10) * 100.0,
-                    )
-                    * 0.1
-                )
-                score_b = (
-                    trend_strength * 0.4
-                    + min(100.0, (rsi / 70.0) * 100) * 0.3
-                    + min(100.0, (avg5 / 50000000000.0) * 100) * 0.2
-                    + osc_term
-                )
-                if osc > osc_prev:
-                    score_b += 10.0
-
-        return {
-            "valid_a": valid_a,
-            "score_a": round(float(score_a), 1),
-            "valid_b": valid_b,
-            "score_b": round(float(score_b), 1),
-        }
-    except Exception:
-        return {
-            "valid_a": False,
-            "score_a": 0.0,
-            "valid_b": False,
-            "score_b": 0.0,
-        }
 
 
 def _sorted_dict_rows_top_with_slot_band(
@@ -1158,40 +1003,26 @@ def select_monitoring_targets(
             df_valid = _add_vol_burst_ab_columns(df_valid, settings)
             last_full = df_valid.iloc[-1]
 
-            use_stack_a = _settings_bool_sel(settings, "sel_a_use_new_stack", True)
+            # 레거시 선택 로직(Track A/B v2 OFF)을 제거: 항상 v2 기준으로 판정합니다.
             use_track_a = _settings_bool_sel(settings, "use_sel_track_a", True)
-            use_stack_b = _settings_bool_sel(settings, "sel_b_use_new_stack", True)
             use_track_b = _settings_bool_sel(settings, "use_sel_track_b", True)
-            dm = dual_track_selection_metrics(last_full, settings)
-            valid_a_legacy = bool(dm["valid_a"])
-            vb_leg, sb_leg = _legacy_track_b_valid_and_score(
-                last_full, settings, use_b=use_track_b
-            )
+
             aux = None
             aux_b = None
-            if use_stack_a and use_track_a:
+            if use_track_a:
                 aux = _compute_sel_a_aux_from_daily_tail(df_valid, last_full, settings)
-            if use_stack_b and use_track_b:
+            if use_track_b:
                 aux_b = _compute_sel_b_aux_from_daily_tail(df_valid, last_full, settings)
-            if use_stack_a and use_track_a:
-                valid_a = False
-                score_a_place = 0.0
-            else:
-                valid_a = valid_a_legacy
-                score_a_place = float(dm["score_a"])
 
-            if use_stack_b and use_track_b:
-                valid_b_place = False
-                score_b_place = 0.0
-            else:
-                valid_b_place = vb_leg
-                score_b_place = sb_leg
+            # v2 경로에서는 _valid_a/_valid_b 컬럼이 의미 없으므로 0으로 고정
+            valid_a = False
+            score_a_place = 0.0
+            valid_b_place = False
+            score_b_place = 0.0
 
-            has_a = use_stack_a and use_track_a
-            has_b = use_stack_b and use_track_b
-            ok_row = (has_a and aux is not None) or (has_b and aux_b is not None) or (
-                (not has_a) and valid_a
-            ) or ((not has_b) and vb_leg)
+            has_a = use_track_a
+            has_b = use_track_b
+            ok_row = (has_a and aux is not None) or (has_b and aux_b is not None)
             if not ok_row:
                 return None, status
 
@@ -1260,23 +1091,19 @@ def select_monitoring_targets(
 
     selected = [r[0] for r in raw_results if r[0] is not None]
     try:
-        if _settings_bool_sel(settings, "sel_a_use_new_stack", True) and _settings_bool_sel(
-            settings, "use_sel_track_a", True
-        ):
+        if _settings_bool_sel(settings, "use_sel_track_a", True):
             selected = _apply_sel_a_live_cross_section(selected, settings)
     except Exception as e:
         try:
-            logger_callback(f"⚠️ [선정] Track A v2 교차섹션 적용 실패(레거시 유지): {e}")
+            logger_callback(f"⚠️ [선정] Track A v2 교차섹션 적용 실패: {e}")
         except Exception:
             pass
     try:
-        if _settings_bool_sel(settings, "sel_b_use_new_stack", True) and _settings_bool_sel(
-            settings, "use_sel_track_b", True
-        ):
+        if _settings_bool_sel(settings, "use_sel_track_b", True):
             selected = _apply_sel_b_live_cross_section(selected, settings)
     except Exception as e:
         try:
-            logger_callback(f"⚠️ [선정] Track B v2 교차섹션 적용 실패(레거시 유지): {e}")
+            logger_callback(f"⚠️ [선정] Track B v2 교차섹션 적용 실패: {e}")
         except Exception:
             pass
 
@@ -1700,65 +1527,23 @@ def _score_dynamic_universe_daily_ohlcv(
     )
 
     use_a = bool(settings.get("use_sel_track_a", True))
-    if _settings_bool_sel(settings, "sel_a_use_new_stack", True) and use_a:
+    if use_a:
         _apply_sel_track_a_batch_v2(df_all, settings, min_억, conv)
     else:
-        c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
-        c5 = df_all["OSC"] > 0
-        c_ma60 = df_all["MA60"].notna()
-        c2_a = (df_all["MA_Diff"] <= conv) if use_a else pd.Series(False, index=df_all.index)
-        c3_a = (df_all["RSI"] >= float(settings.get("sel_rsi_min", 35.0))) & (
-            df_all["RSI"] <= float(settings.get("sel_rsi_max", 70.0))
-        )
-        c4_a = df_all["VolBurstActive_A"] == 1
-        df_all["Valid_A"] = c1 & c4_a & c5 & c_ma60 & c2_a & c3_a
-        df_all["Score_A"] = (
-            ((1 - (df_all["MA_Diff"] / conv)) * 100).clip(lower=0) * 0.4
-            + (df_all["RSI"] / 70 * 100).clip(upper=100) * 0.3
-            + (df_all["AvgVal5"] / 50000000000 * 100).clip(upper=100) * 0.2
-            + ((1 - (df_all["Pos_Diff"] / 0.03)) * 100).clip(lower=0) * 0.1
-        )
-        df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_A"] += 10.0
+        # use_a=False 여도 아래 Track B union에서 column 존재가 필요합니다.
+        df_all["Valid_A"] = pd.Series(False, index=df_all.index)
+        df_all["Score_A"] = pd.Series(0.0, index=df_all.index)
 
     # Track B·진단 열과 공유: OSC·MA60 (A v2 경로에서는 위 블록 안에서만 쓰였을 수 있음)
     c5 = df_all["OSC"] > 0
     c_ma60 = df_all["MA60"].notna()
 
     use_b = bool(settings.get("use_sel_track_b", True))
-    if _settings_bool_sel(settings, "sel_b_use_new_stack", True) and use_b:
+    if use_b:
         _apply_sel_track_b_batch_v2(df_all, settings, with_b_debug=with_b_debug)
     else:
-        c2_b = ((df_all["MA20"] > df_all["MA60"]) & (df_all["close"] > df_all["MA20"])) if use_b else pd.Series(
-            False, index=df_all.index
-        )
-        if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
-            mult_leg = _sel_b_ma5_close_mult(settings)
-            ma5_leg = df_all["MA5"].astype(float)
-            lc_leg = df_all["close"].astype(float)
-            ge5_leg = (ma5_leg > 0) & (lc_leg >= ma5_leg * mult_leg)
-            c2_b = c2_b & ge5_leg
-        sel_b_rsi_min = float(settings.get("sel_b_rsi_min", 45.0))
-        sel_b_rsi_max = float(settings.get("sel_b_rsi_max", 75.0))
-        sel_b_min_val = float(settings.get("sel_b_min_trde_val", 60.0)) * 100000000
-        c3_b = (df_all["RSI"] >= sel_b_rsi_min) & (df_all["RSI"] <= sel_b_rsi_max)
-        c1_b = df_all["AvgVal5"] >= sel_b_min_val
-        c4_b = df_all["VolBurstActive_B"] == 1
-        if with_b_debug:
-            df_all["Dbg_B1_avg5_ge_selB"] = c1_b.astype(bool)
-            df_all["Dbg_B2_trend_mas"] = c2_b.astype(bool)
-            df_all["Dbg_B3_rsi_range"] = c3_b.astype(bool)
-            df_all["Dbg_B4_volburst1"] = c4_b.astype(bool)
-            df_all["Dbg_C5_osc_pos"] = c5.astype(bool)
-            df_all["Dbg_C_ma60_ok"] = c_ma60.astype(bool)
-        df_all["Valid_B"] = c1_b & c2_b & c3_b & c4_b & c5 & c_ma60
-        trend_strength = ((df_all["close"] / df_all["MA20"] - 1) * 100).clip(lower=0, upper=10) * 10
-        df_all["Score_B"] = (
-            trend_strength * 0.4
-            + (df_all["RSI"] / 70 * 100).clip(upper=100) * 0.3
-            + (df_all["AvgVal5"] / 50000000000 * 100).clip(upper=100) * 0.2
-            + (df_all["OSC"].clip(lower=0) / (df_all["OSC"].abs().max() + 1e-10) * 100) * 0.1
-        )
-        df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_B"] += 10.0
+        df_all["Valid_B"] = pd.Series(False, index=df_all.index)
+        df_all["Score_B"] = pd.Series(0.0, index=df_all.index)
     df_all["Valid"] = df_all["Valid_A"] | df_all["Valid_B"]
     df_all["Score"] = df_all[["Score_A", "Score_B"]].max(axis=1)
 

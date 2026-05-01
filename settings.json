@@ -262,7 +262,7 @@
     "smart_exit_bid_ratio": 1.5,
     "limit_order_unfilled_timeout_sec": 5.0,
     "exchange_fill_sync_lookback_days": 7,
-    "bt_start_date": "2026-04-30",
+    "bt_start_date": "2026-04-01",
     "bt_end_date": "2026-04-30",
     "mock_account_id": "81220142",
     "opt_s1_equity_pct": false,

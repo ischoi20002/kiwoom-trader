@@ -97,14 +97,6 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "min_trde_val",
     ),
     SettingUiRow(
-        2021,
-        "② 유니버스 · 종목선정",
-        "Type A — 눌림목 (Track A 종목 선정)",
-        "Track A v2: 단기 상대강도·되돌림·이평·ATR%·갭",
-        "v2 일봉 선정 스택 사용 — 토글",
-        "sel_a_use_new_stack",
-    ),
-    SettingUiRow(
         2022,
         "② 유니버스 · 종목선정",
         "Type A — 눌림목 (Track A 종목 선정)",
@@ -344,14 +336,6 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "Track B 공통 (v2·레거시)",
         "분출 확인 기간 (B)",
         "sel_b_vol_lookback",
-    ),
-    SettingUiRow(
-        2117,
-        "② 유니버스 · 종목선정",
-        "Type B — 추세돌파 (Track B 종목 선정)",
-        "Track B v2: 단기 RS·고가대비 종가·기울기·ATR%·갭",
-        "v2 일봉 선정 스택 사용 — 토글",
-        "sel_b_use_new_stack",
     ),
     SettingUiRow(
         2118,
