@@ -730,8 +730,9 @@ def _concat_15m_bars_for_trading_days(
     rest_day_cache: Optional[Dict[Tuple[str, str], Any]] = None,
 ) -> Any:
     """
-    거래일별 REST 15분봉을 순회해 이어붙인 DataFrame (없으면 None).
-    API 부하 완화를 위해 **실제 REST를 호출한 뒤에만** 일자 간 짧은 대기.
+    거래일별 15분봉을 순회해 이어붙인 DataFrame (없으면 None).
+    데이터는 ``fetch_15m_bars_for_trading_day`` 시 DB 우선이며,
+    **REST 폴백이 실제로 쓰인 뒤에만** 일자 간 짧은 대기(API 부하).
 
     Parameters
     ----------
@@ -743,7 +744,9 @@ def _concat_15m_bars_for_trading_days(
 
     import pandas as pd
 
-    fn = getattr(data_manager, "fetch_15m_bars_for_trading_day_rest_only", None)
+    fn = getattr(data_manager, "fetch_15m_bars_for_trading_day", None)
+    if not callable(fn):
+        fn = getattr(data_manager, "fetch_15m_bars_for_trading_day_rest_only", None)
     if not callable(fn):
         return None
     if not trading_days:
@@ -758,13 +761,15 @@ def _concat_15m_bars_for_trading_days(
         day_s = d.strftime("%Y-%m-%d")
         key = (n_code, day_s)
         chunk: Any = None
-        did_rest = False
+        used_rest = False
         if rest_day_cache is not None and key in rest_day_cache:
             chunk = rest_day_cache[key]
         else:
             try:
                 chunk = fn(code_str, day_s, logger=None)
-                did_rest = True
+                used_rest = (
+                    getattr(data_manager, "_last_report_15m_source", "") == "rest"
+                )
                 if rest_day_cache is not None:
                     try:
                         rest_day_cache[key] = chunk
@@ -774,7 +779,7 @@ def _concat_15m_bars_for_trading_days(
                 chunk = None
         if chunk is not None and not getattr(chunk, "empty", True):
             parts.append(chunk)
-        if i + 1 < n and did_rest:
+        if i + 1 < n and used_rest:
             try:
                 time.sleep(0.12)
             except Exception:
@@ -868,7 +873,7 @@ def _build_virtual_chart_section_html(
     toolbar_hint = (
         f"15분봉 · 주문 시각 (진입~{'현재' if is_open else '청산'} · "
         f"{_esc(entry_day)} ~ {_esc(end_day)}, 거래일 {len(tdays)}일분 · "
-        f"동일 리포트 내 종목·일자 REST 캐시)"
+        f"동일 리포트 내 종목·일자 데이터 캐시(DB·REST))"
     )
     return f"""
         <div class="vr-stock-chart-toolbar">

@@ -234,6 +234,8 @@ class KiwoomApp:
         # 포지션 탭 무거운 렌더 중 사용자에게 피드백(하단 라벨·커서)
         self._ui_busy: bool = False
         self.lbl_ui_reactivity: Optional[ttk.Label] = None
+        # 대시보드 기동 프로그레스바: 첫 인증 워커 완료 후 숨김
+        self._boot_progress_finished: bool = False
         # sync_with_actual_account 는 REST·DB·정합으로 수 초 걸릴 수 있음 — 백그라운드에서 한 번에 하나만
         self._portfolio_sync_thread_lock: threading.Lock = threading.Lock()
         # 체결 후 계좌 동기화: 연속 체결 시 after 예약이 겹치지 않도록 디바운스 + 2·3차 추격
@@ -432,9 +434,9 @@ class KiwoomApp:
         
         self.notebook.add(self._tab_frames['dashboard'], text=" 대시보드 ")
         self.notebook.add(self._tab_frames['monitor'], text=" 실시간 감시 ")
-        self.notebook.add(self._tab_frames['virtual'], text=" 포지션 관리 ") 
-        self.notebook.add(self._tab_frames['backtest'], text=" 백테스팅 ")
+        self.notebook.add(self._tab_frames['virtual'], text=" 포지션 관리 ")
         self.notebook.add(self._tab_frames['settings'], text=" 전략 설정 ")
+        self.notebook.add(self._tab_frames['backtest'], text=" 전략검증 ")
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -463,7 +465,7 @@ class KiwoomApp:
 
     def _on_tab_changed(self, event):
         tab_text = self.notebook.tab(self.notebook.select(), "text")
-        if "백테스팅" in tab_text and hasattr(self, 'backtest_tab'):
+        if "전략검증" in tab_text and hasattr(self, "backtest_tab"):
             # [v26.1] 탭 전환 시 현재 선택된 최적화 항목만 컬럼으로 표시하도록 즉시 리프레시
             self.backtest_tab._refresh_columns_from_settings()
         # 포지션 탭은 기동 직후에는 Notebook 에 안 그려져 Paned 높이가 0 — 아침 첫 진입 시 sash 복원 필요
@@ -478,6 +480,86 @@ class KiwoomApp:
                 self.monitor_tab._schedule_restore_monitor_sash()
             except Exception:
                 pass
+
+    def _boot_progress_set_message(self, message: str) -> None:
+        """대시보드 기동 프로그레스 아래 짧은 안내(메인 스레드에서만 위젯 갱신)."""
+        def _apply() -> None:
+            try:
+                if getattr(self, "_boot_progress_finished", False):
+                    return
+                dt = getattr(self, "dashboard_tab", None)
+                lbl = getattr(dt, "boot_progress_label", None)
+                if lbl is not None and lbl.winfo_exists():
+                    lbl.config(text=str(message))
+            except Exception:
+                pass
+
+        try:
+            r = getattr(self, "root", None)
+            if r is not None and r.winfo_exists():
+                r.after(0, _apply)
+            else:
+                _apply()
+        except Exception:
+            pass
+
+    def _boot_progress_finish(self, *, ok: bool = True) -> None:
+        """기동 인디터미네이트 바 종료 후 잠시 뒤 영역을 접습니다."""
+        if getattr(self, "_boot_progress_finished", False):
+            return
+        self._boot_progress_finished = True
+
+        def _apply() -> None:
+            try:
+                dt = getattr(self, "dashboard_tab", None)
+                if dt is None:
+                    return
+                pb = getattr(dt, "boot_progress", None)
+                fr = getattr(dt, "boot_progress_frame", None)
+                lbl = getattr(dt, "boot_progress_label", None)
+                if pb is not None and pb.winfo_exists():
+                    try:
+                        pb.stop()
+                    except (tk.TclError, Exception):
+                        pass
+                    try:
+                        pb.configure(mode="determinate", maximum=100, value=100)
+                    except (tk.TclError, Exception):
+                        pass
+                if lbl is not None and lbl.winfo_exists():
+                    try:
+                        lbl.config(
+                            text=(
+                                "기동 완료"
+                                if ok
+                                else "기동 완료 — 인증 실패(로그 확인)"
+                            )
+                        )
+                    except (tk.TclError, Exception):
+                        pass
+
+                def _hide_frame() -> None:
+                    try:
+                        if fr is not None and fr.winfo_exists():
+                            fr.pack_forget()
+                    except (tk.TclError, Exception):
+                        pass
+
+                try:
+                    self.root.after(900, _hide_frame)
+                except (tk.TclError, Exception):
+                    pass
+            except Exception:
+                pass
+
+        try:
+            r = getattr(self, "root", None)
+            if r is not None and r.winfo_exists():
+                r.after(0, _apply)
+            else:
+                _apply()
+        except Exception:
+            pass
 
     def log(self, message): self.gui_utils.log(message)
 
@@ -509,7 +591,6 @@ class KiwoomApp:
         *,
         silent: bool = True,
         force: bool = False,
-        log_boot_summary: bool = False,
         refresh_cash_deposit: bool = True,
         wait_for_lock: bool = False,
     ) -> None:
@@ -545,7 +626,6 @@ class KiwoomApp:
                 self.portfolio.sync_with_actual_account(
                     silent=silent,
                     force=force,
-                    log_boot_summary=log_boot_summary,
                     refresh_cash_deposit=refresh_cash_deposit,
                 )
             except Exception as e:
@@ -611,6 +691,8 @@ class KiwoomApp:
         except Exception:
             err_fg, ok_fg = "#BF616A", "#A3BE8C"
 
+        self._boot_progress_set_message("키움 REST 인증 연결 중…")
+
         for attempt in range(1, max_attempts + 1):
             try:
                 if attempt > 1:
@@ -671,6 +753,7 @@ class KiwoomApp:
                 )
             except Exception:
                 pass
+            self._boot_progress_finish(ok=False)
             return
 
         try:
@@ -686,6 +769,8 @@ class KiwoomApp:
             )
         except Exception:
             pass
+
+        self._boot_progress_set_message("계좌·시장 데이터 준비 중…")
 
         try:
             # 상세 요약은 첫 계좌 동기화(REST)가 끝난 뒤 `PortfolioManager` 에서 한 번만 출력한다.
@@ -705,17 +790,19 @@ class KiwoomApp:
             self.root.after(
                 2000,
                 lambda: self._run_portfolio_sync_in_daemon_thread(
-                    silent=True, force=True, log_boot_summary=True
+                    silent=True, force=True
                 ),
             )
             threading.Thread(
                 target=lambda: self.get_kospi_200(force=True), daemon=True
             ).start()
+            self._boot_progress_finish(ok=True)
         except Exception as post_ex:
             try:
                 self.log(f"❌ [Auth] 인증 후 초기화 중 오류: {post_ex}")
             except Exception:
                 pass
+            self._boot_progress_finish(ok=False)
 
     def get_kospi_200(self, force=False):
         self.log("[Data] KOSPI200 유니버스 로드(kodex200.csv·설정 kodex200_universe_priority)...")
@@ -1840,14 +1927,12 @@ class KiwoomApp:
         silent: bool = False,
         force: bool = False,
         *,
-        log_boot_summary: bool = False,
         refresh_cash_deposit: bool = True,
     ) -> None:
         """UI에서 호출되는 계좌 동기화 — 메인 스레드를 막지 않도록 백그라운드로 위임."""
         self._run_portfolio_sync_in_daemon_thread(
             silent=silent,
             force=force,
-            log_boot_summary=log_boot_summary,
             refresh_cash_deposit=refresh_cash_deposit,
         )
 

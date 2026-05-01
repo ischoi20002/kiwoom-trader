@@ -1828,6 +1828,115 @@ class DataManagerV2:
                 return None, ""
         return None, ""
 
+    def fetch_15m_bars_for_trading_day(
+        self,
+        code: str,
+        day_yyyy_mm_dd: str,
+        *,
+        logger: Optional[Any] = None,
+        max_pages: int = 80,
+    ) -> Any:
+        """
+        일일결산·가상 종합리포트용 15분봉.
+
+        1) ``trading_data.db`` 의 ``bars_15m`` 구간 조회
+        2) 비어 있으면 동일 일자 ``bars_1m`` 를 15분봉으로 리샘플
+        3) 그래도 없으면 :meth:`fetch_15m_bars_for_trading_day_rest_only` (키움 REST)
+
+        반환 형식은 :meth:`get_bars` 15m 과 동일(time, Open, High, Low, Close, Volume).
+        가상 리포트 스레드에서 REST pacing 판별용으로 ``_last_report_15m_source`` 에
+        ``db15`` / ``db1m`` / ``rest`` 를 설정합니다.
+        """
+        def _log(msg: str) -> None:
+            if logger is not None:
+                try:
+                    logger(msg)
+                except Exception:
+                    pass
+
+        # pacing 판별용(캐시 미스 시 호출 직후 조회). 실패·조기 반환 시 빈 문자열.
+        self._last_report_15m_source = ""
+
+        try:
+            n_code = normalize_code(str(code).strip())
+        except Exception:
+            n_code = str(code).strip().zfill(6)
+        day = str(day_yyyy_mm_dd).strip()[:10]
+        day_start = f"{day} 00:00:00"
+        day_end = f"{day} 23:59:59"
+
+        df15: Optional[pd.DataFrame] = None
+        try:
+            df15 = self.get_bars(
+                n_code, start_dt=day_start, end_dt=day_end, interval="15m"
+            )
+        except Exception as e:
+            _log(f"[리포트15m] {n_code} {day} DB bars_15m 조회 예외: {e}")
+            df15 = None
+
+        if df15 is not None and not df15.empty:
+            try:
+                nrows = len(df15)
+            except Exception:
+                nrows = -1
+            self._last_report_15m_source = "db15"
+            _log(f"[리포트15m] {n_code} {day} trading_data.db bars_15m {nrows}건")
+            return df15
+
+        df1: Optional[pd.DataFrame] = None
+        try:
+            df1 = self.get_bars(
+                n_code, start_dt=day_start, end_dt=day_end, interval="1m"
+            )
+        except Exception as e:
+            _log(f"[리포트15m] {n_code} {day} DB bars_1m 조회 예외: {e}")
+            df1 = None
+
+        if df1 is not None and not df1.empty:
+            try:
+                w = df1.copy()
+                w["time"] = pd.to_datetime(w["time"], errors="coerce")
+                w = w.dropna(subset=["time"])
+                if w.empty:
+                    raise ValueError("time 파싱 후 비어 있음")
+                w = w.set_index("time").sort_index()
+                agg = {
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum",
+                }
+                miss = [k for k in agg if k not in w.columns]
+                if miss:
+                    raise ValueError(f"필수 열 없음: {miss}")
+                rs = (
+                    w.resample("15min", closed="right", label="right")
+                    .agg(agg)
+                    .dropna(how="any")
+                )
+                rs = rs.reset_index()
+                if rs.empty:
+                    raise ValueError("리샘플 결과 없음")
+                self._last_report_15m_source = "db1m"
+                _log(
+                    f"[리포트15m] {n_code} {day} trading_data.db bars_1m→15m "
+                    f"{len(rs)}건"
+                )
+                return rs
+            except Exception as e:
+                _log(f"[리포트15m] {n_code} {day} bars_1m→15m 리샘플 실패: {e}")
+
+        self._last_report_15m_source = "rest"
+        _log(f"[리포트15m] {n_code} {day} DB에 해당일 봉 없음 → REST 폴백")
+        try:
+            return self.fetch_15m_bars_for_trading_day_rest_only(
+                code, day, logger=logger, max_pages=max_pages
+            )
+        except Exception as e:
+            _log(f"[리포트15m] {n_code} {day} REST 폴백 예외: {e}")
+            return pd.DataFrame()
+
     def fetch_15m_bars_for_trading_day_rest_only(
         self,
         code: str,
@@ -1837,9 +1946,10 @@ class DataManagerV2:
         max_pages: int = 80,
     ) -> Any:
         """
-        일일결산 리포트 전용: trading_data.db 를 읽거나 쓰지 않고,
+        리포트용 **REST 전용** 폴백: trading_data.db 를 읽지 않습니다.
         키움 ka10080 을 **15분봉(tic_scope=15)** 연속조회만으로 해당 일자(00:00~23:59) 구간을 채웁니다.
         반환 형식은 get_bars(..., interval='15m') 와 유사(time, Open, High, Low, Close, Volume).
+        일반적으로는 :meth:`fetch_15m_bars_for_trading_day` 가 DB 우선으로 이 메서드를 호출합니다.
         """
         import pandas as pd
         from kiwoom_rest_api.auth.token import TokenManager

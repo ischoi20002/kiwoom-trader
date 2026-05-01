@@ -10,8 +10,6 @@ class DashboardTab:
         self.app = app
         self.lbl_mode_badge: Optional[tk.Label] = None
         self.btn_sync: Optional[ttk.Button] = None
-        self.btn_narrative_report: Optional[ttk.Button] = None
-        self.btn_daily_settlement: Optional[ttk.Button] = None
         self.btn_watchlist: Optional[ttk.Button] = None
         self.btn_server_switch: Optional[ttk.Button] = None
         self._setup_ui()
@@ -39,7 +37,7 @@ class DashboardTab:
                 pass
 
     def _setup_ui(self):
-        """대시보드: 운영 메뉴 + 로그 (시세 수집은 백테스팅 탭)"""
+        """대시보드: 운영 메뉴 + 로그 (시세·가상 리포트는 전략검증 탭)"""
         db_main_frame = ttk.Frame(self.parent, padding="20")
         db_main_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -70,7 +68,7 @@ class DashboardTab:
 
         ttk.Label(
             ops_top,
-            text="동기화 · 종합리포트 · 일일결산 · 관심목록 · 서버(모의/실전) 전환",
+            text="동기화 · 관심목록 · 서버(모의/실전) 전환",
             font=("Malgun Gothic", 9),
             foreground=self.app.colors.get("secondary", "#787c99"),
         ).pack(side=tk.LEFT, padx=(14, 8))
@@ -85,22 +83,6 @@ class DashboardTab:
             command=self.app._sync_account_deposit,
         )
         self.btn_sync.pack(side=tk.LEFT, padx=(0, 4))
-
-        self.btn_narrative_report = ttk.Button(
-            ops_btns,
-            text="종합리포트",
-            width=11,
-            command=lambda: self._call_virtual_tab("generate_report"),
-        )
-        self.btn_narrative_report.pack(side=tk.LEFT, padx=4)
-
-        self.btn_daily_settlement = ttk.Button(
-            ops_btns,
-            text="일일결산",
-            width=11,
-            command=lambda: self._call_virtual_tab("generate_daily_settlement"),
-        )
-        self.btn_daily_settlement.pack(side=tk.LEFT, padx=4)
 
         self.btn_watchlist = ttk.Button(
             ops_btns,
@@ -124,6 +106,30 @@ class DashboardTab:
         self.app.status_label = ttk.Label(status_info_frame, text="⚡ 시스템 엔진 가동 중...", 
                                         font=("Malgun Gothic", 10), foreground=self.app.colors['primary'])
         self.app.status_label.pack(side=tk.LEFT)
+
+        # 첫 기동: REST 인증 대기 동안 인디터미네이트 바 (완료 후 자동 숨김)
+        self.boot_progress_frame = ttk.Frame(db_main_frame)
+        self.boot_progress_label: Optional[ttk.Label] = None
+        self.boot_progress: Optional[ttk.Progressbar] = None
+        if not getattr(self.app, "_boot_progress_finished", False):
+            self.boot_progress_frame.pack(fill=tk.X, pady=(0, 10))
+            self.boot_progress_label = ttk.Label(
+                self.boot_progress_frame,
+                text="기동 준비 중(인증·동기화 대기)…",
+                font=("Malgun Gothic", 9),
+                foreground=self.app.colors.get("secondary", "#787c99"),
+            )
+            self.boot_progress_label.pack(anchor=tk.W, pady=(0, 4))
+            self.boot_progress = ttk.Progressbar(
+                self.boot_progress_frame,
+                mode="indeterminate",
+                maximum=100,
+            )
+            self.boot_progress.pack(fill=tk.X)
+            try:
+                self.boot_progress.start(12)
+            except (tk.TclError, Exception):
+                pass
 
         # [v5.0] 노르딕 스타일 로그 영역 (Soft Slate-Blue)
         self.app.log_area = scrolledtext.ScrolledText(db_main_frame, height=12, 

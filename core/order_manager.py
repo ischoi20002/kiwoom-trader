@@ -855,7 +855,7 @@ class OrderManager:
                     except Exception:
                         pass
 
-                n_hold, hold_detail = self._summarize_holdings_qty_positive(holdings)
+                n_hold, _hold_detail = self._summarize_holdings_qty_positive(holdings)
 
                 if refresh_cash_deposit:
                     # 주문가능(ord)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
@@ -884,7 +884,6 @@ class OrderManager:
                         self.app.log(
                             f"✅ [{mode_str}] 계좌 동기화 | 총자산 {total_equity:,.0f}원 | "
                             f"{dep_seg} | 실질 보유 {n_hold}종목"
-                            f"\n   └ 보유: {hold_detail}"
                         )
                     except Exception as le:
                         try:
@@ -896,7 +895,6 @@ class OrderManager:
                         self.app.log(
                             f"✅ [{mode_str}] 보유 정합(주기) | 실질 보유 {n_hold}종목 | "
                             f"예수금·D+1/D+2·총자산 REST는 생략(매매 체결 시 반영)"
-                            f"\n   └ 보유: {hold_detail}"
                         )
                     except Exception as le:
                         try:

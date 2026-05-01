@@ -150,10 +150,10 @@ class VirtualTab:
         self.lbl_mock_result = ttk.Label(summary_f, text="", font=("Malgun Gothic", 9), foreground="#A3BE8C")
         self.lbl_mock_result.pack(side=tk.LEFT, padx=10, pady=(15, 0))
 
-        # 동기화·리포트·서버 전환 등은 대시보드 탭 「운영 · 계좌」로 이전했습니다.
+        # 동기화·서버 전환 등은 대시보드 「운영 · 계좌」, 종합리포트·일일결산은 전략검증 탭으로 두었습니다.
         ttk.Label(
             header_f,
-            text="계좌 동기화·종합리포트·일일결산·관심목록·서버 전환 → 대시보드 탭",
+            text="동기화·관심목록·서버 전환 → 대시보드 · 종합리포트·일일결산 → 전략검증 탭",
             font=("Malgun Gothic", 8),
             foreground="#787c99",
         ).pack(side=tk.RIGHT, padx=(8, 0), pady=(12, 0))
@@ -2858,7 +2858,7 @@ class VirtualTab:
                 pass
 
     def _narrative_report_buttons(self) -> List[Any]:
-        """종합 리포트 생성 중 비활성화할 버튼(포지션 탭·대시보드)."""
+        """종합 리포트 생성 중 비활성화할 버튼(포지션 탭·전략검증 탭)."""
         out: List[Any] = []
         try:
             if self.btn_narrative_report is not None:
@@ -2866,8 +2866,8 @@ class VirtualTab:
         except Exception:
             pass
         try:
-            _db = getattr(self.app, "dashboard_tab", None)
-            _b = getattr(_db, "btn_narrative_report", None) if _db is not None else None
+            _bt = getattr(self.app, "backtest_tab", None)
+            _b = getattr(_bt, "btn_narrative_report", None) if _bt is not None else None
             if _b is not None:
                 out.append(_b)
         except Exception:

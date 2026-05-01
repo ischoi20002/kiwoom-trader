@@ -7,6 +7,18 @@
 
 ---
 
+## 0.6.17 (2026-05-01)
+
+- **일일결산·가상 종합리포트 15분봉**: `trading_data.db` 의 `bars_15m`·`bars_1m` 리샘플 우선, 없을 때만 키움 REST 폴백. 가상 리포트는 REST 일자 간 대기를 실제 REST 폴백 시에만 수행 (`data_manager_v2.py`, `reporting/daily_settlement_report.py`, `reporting/virtual_report.py`).
+- **전략검증 탭**: 노트북 라벨 **전략검증**, 순서를 전략 설정 다음·맨 끝으로 조정. **종합리포트·일일결산**을 대시보드에서 이전하고 **시세 수집 · 리포트 생성** 구역에서 **최신주가데이타수집**과 나란히 `Action.TButton` 스타일로 배치 (`k_trader_gui.py`, `ui/tabs/backtest_tab.py`, `ui/tabs/dashboard_tab.py`, `ui/tabs/virtual_tab.py`).
+- **대시보드 기동 UX**: 첫 REST 인증 대기 중 **인디터미네이트 프로그레스바**·단계 문구, 완료 후 짧은 뒤 영역 숨김 (`k_trader_gui.py`, `ui/tabs/dashboard_tab.py`).
+- **동기화 로그 간소화**: 계좌 요약에서 종목별 `└ 보유:` 나열 제거, 기동 후 장문의 ka85 후속 처리 설명 로그 제거. 사용하지 않는 `log_boot_summary` 인자 제거 (`core/order_manager.py`, `core/portfolio_manager.py`, `k_trader_gui.py`).
+
+## 0.6.16 (2026-05-01)
+
+- **실시간 감시 탭 상단 높이 고정**: 보유/대응 종목 영역이 재시작 후 1줄로 축소되는 이슈를 피하기 위해 상단 패널을 **약 5종목 표시 높이**로 강제 복원하도록 변경 (`ui/tabs/monitor_tab.py`).
+- **세시 복원 안전화**: rowheight 기반 목표 픽셀 계산 + 최소/최대 클램프로 창 크기 변화 시에도 상단 패널 붕괴를 방지 (`ui/tabs/monitor_tab.py`).
+
 ## 0.6.15 (2026-05-01)
 
 - **실시간 감시 탭 상·하단 분할 기억**: 보유/대응 종목과 감시 목록 사이 세시(sash) 이동 시 `monitor_column_widths.json` 의 ``sash0_rel`` 에 저장되도록 **Paned `<Configure>` 로 세시 픽셀 변화 감지**, 복원 중 오탐 방지 플래그, Paned 직접 ``ButtonRelease`` 시 동기 추가 (`ui/tabs/monitor_tab.py`).

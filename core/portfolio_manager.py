@@ -672,7 +672,6 @@ class PortfolioManager:
         silent: bool = False,
         force: bool = False,
         *,
-        log_boot_summary: bool = False,
         refresh_cash_deposit: bool = True,
     ) -> None:
         """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 포지션을 동기화 (Reconciliation)"""
@@ -1037,33 +1036,6 @@ class PortfolioManager:
                     self.log(f"⚠️ [동기화] 체결내역 스케줄 실패: {e}")
                 except Exception:
                     pass
-
-        # 『계좌 동기화』요약 로그는 get_holdings(ka10085) 안에서 먼저 찍힌 뒤, 여기까지 오면
-        # 로컬 정합·DB·GUI·체결내역 백그라운드 보강이 이어진다. 기동 후 첫 동기화에서만 요약.
-        try:
-            if log_boot_summary and not getattr(
-                self, "_boot_sync_summary_logged", False
-            ):
-                self._boot_sync_summary_logged = True
-                _auto = ""
-                try:
-                    if getattr(self.app, "auto_start", False):
-                        _auto = "\n  · [Auto] 약 8초 후 실시간 감시 시작 예약"
-                except Exception:
-                    pass
-                self.log(
-                    "[기동 요약·동기화 직후] ka85 응답 로그 다음에 이어지는 처리:\n"
-                    "  · 로컬 포지션 정합·가상매매 JSON 저장(save_db)\n"
-                    "  · 포지션 탭 전체 갱신 예약(gui_callback, 메인 스레드) — 하단에 "
-                    "「처리 중: 보유·주문 화면…」표시·모래시계 커서로 반응 지연 안내\n"
-                    "  · 증권 체결내역(kt00007)으로 주문 로그 DB 보강 — 백그라운드 "
-                    "(기간·건수에 따라 수 초 이상)\n"
-                    "  · 보강 끝나면 주문 영역만 추가 리프레시\n"
-                    "  · (병행) 시장 지수·원격 폴링·KOSPI200 로드 등은 이미 다른 스레드에서 동작 중"
-                    + _auto
-                )
-        except Exception:
-            pass
 
         # 총자산·예수·보유 상세는 OrderManager 요약 1회에 포함됨. 자동 동기화(silent) 시 로그 중복 방지.
         if not silent:

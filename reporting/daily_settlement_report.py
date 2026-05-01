@@ -2,7 +2,7 @@
 """
 실시간 감시 '일일 결산' HTML 리포트.
 - 거래일별 갭 채우기, 메타데이터(완료/부분), Plotly 15분봉(캔들)+주문 오버레이
-- 15분 차트는 trading_data.db 없이 키움 ka10080(1분) REST만 사용 (실패 시 부분 리포트)
+- 15분 차트: ``trading_data.db`` 의 bars_15m(또는 bars_1m 리샘플) 우선, 없을 때만 키움 ka10080 REST
 """
 from __future__ import annotations
 
@@ -1419,15 +1419,17 @@ def generate_daily_settlement_report_ex(
         nm = by_code[code][0].get("name", "") if by_code[code] else ""
         df_15 = None
         try:
-            fetch_fn = getattr(dm, "fetch_15m_bars_for_trading_day_rest_only", None)
+            fetch_fn = getattr(dm, "fetch_15m_bars_for_trading_day", None)
+            if not callable(fetch_fn):
+                fetch_fn = getattr(dm, "fetch_15m_bars_for_trading_day_rest_only", None)
             if callable(fetch_fn):
                 df_15 = fetch_fn(code, day, logger=_log)
             else:
                 warnings.append(
-                    f"{code_str} DataManager.fetch_15m_bars_for_trading_day_rest_only 없음"
+                    f"{code_str} DataManager.fetch_15m_bars_for_trading_day 없음"
                 )
         except Exception as e:
-            warnings.append(f"{code_str} REST 15분봉 조회 실패: {e}")
+            warnings.append(f"{code_str} 15분봉 조회 실패: {e}")
             overall_status = "partial"
             df_15 = None
         if df_15 is None or getattr(df_15, "empty", True):
@@ -1440,7 +1442,7 @@ def generate_daily_settlement_report_ex(
 
     if chart_failures:
         warnings.append(
-            f"15분 차트(REST 분봉) 없음·실패(스킵): {', '.join(chart_failures)}"
+            f"15분 차트(DB·REST) 없음·실패(스킵): {', '.join(chart_failures)}"
         )
 
     enriched_by_code = _build_enriched_order_rows(by_code, app.settings, app.portfolio, excl, day)

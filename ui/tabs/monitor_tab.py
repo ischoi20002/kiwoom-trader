@@ -194,6 +194,8 @@ class MonitorTab:
         # 세시(sash) 픽셀 추적 — Configure 로 드래그 종료 감지(ttk.ButtonRelease 가 세시에 안 붙는 경우 대비)
         self._monitor_prev_sash_pixel: Optional[int] = None
         self._monitor_restoring_sash: bool = False
+        # [고정 모드] 보유/대응 종목 패널 높이를 항상 N줄 기준으로 복원
+        self._monitor_fix_active_rows: int = 5
         self._monitor_tree_columns: Tuple[str, ...] = tuple()
         # 실시간 틱 경로: 계좌 동기화 1프레임 등으로 VP에만 없으면 보유→감시 트리로 잘못 옮기는 깜빡임 방지
         self._vp_ui_inactive_streak: Dict[str, int] = {}
@@ -504,7 +506,6 @@ class MonitorTab:
 
             def _try(attempt: int = 0) -> None:
                 try:
-                    rel = getattr(self, "_monitor_saved_sash_rel", None)
                     p = self._monitor_paned
                     if p is None:
                         return
@@ -530,16 +531,25 @@ class MonitorTab:
                     if h < 160 and attempt < 24:
                         root.after(100, lambda a=attempt + 1: _try(a))
                         return
-                    # 저장 없음: 상단이 접히는 환경 대비 기본 비율(약 22%)
-                    if rel is None:
-                        rel = 0.22
+                    # 저장 안정성 이슈가 반복되어 상단(보유/대응) 높이를 5줄 기준으로 고정한다.
+                    fixed_rows = max(3, int(getattr(self, "_monitor_fix_active_rows", 5)))
+                    row_h = 22
+                    header_pad = 34
+                    try:
+                        tr = getattr(self, "tree_active_monitor", None)
+                        if tr is not None:
+                            tr.update_idletasks()
+                            rh_raw = tr.tk.call("ttk::style", "lookup", tr.cget("style"), "-rowheight")
+                            row_h = int(float(rh_raw)) if str(rh_raw).strip() else 22
+                    except Exception:
+                        row_h = 22
+                    target_top = int(header_pad + (row_h * fixed_rows))
                     min_top = 96
                     min_bot = 120
                     if h < 300:
                         min_top = 72
                         min_bot = 96
-                    raw = float(rel) * float(h)
-                    pos = int(round(raw))
+                    pos = int(target_top)
                     pos = max(min_top, min(pos, h - min_bot))
                     if pos >= h - 8:
                         pos = max(min_top, h // 2)

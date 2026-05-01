@@ -9,12 +9,15 @@ import importlib.util
 import webbrowser
 from datetime import datetime, timedelta
 import traceback
+from typing import Optional
 
 class BacktestTab:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
         self.gui_queue = queue.Queue() # [v35.2] Thread-safe GUI update queue
+        self.btn_narrative_report: Optional[ttk.Button] = None
+        self.btn_daily_settlement: Optional[ttk.Button] = None
         self.last_opt_df = None  # [v25.2] 최적합 파라미터 저장용
         self._init_vars()
         self._setup_ui()
@@ -160,21 +163,73 @@ class BacktestTab:
         finally:
             self.parent.after(100, self._poll_queue)
 
+    def _call_virtual_tab(self, method_name: str) -> None:
+        """포지션 관리 탭에 구현된 동작을 그대로 호출합니다."""
+        try:
+            vt = getattr(self.app, "virtual_tab", None)
+            if vt is None:
+                messagebox.showerror(
+                    "오류",
+                    "포지션 관리 탭이 아직 초기화되지 않았습니다.",
+                    parent=self.parent,
+                )
+                return
+            fn = getattr(vt, method_name, None)
+            if not callable(fn):
+                messagebox.showerror("오류", f"기능을 찾을 수 없습니다: {method_name}")
+                return
+            fn()
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", str(e), parent=self.parent)
+            except Exception:
+                pass
+
     def _setup_ui(self):
-        """백테스팅 탭 레이아웃: 시세 수집 → 기간·최적화·검증 → 진행·결과."""
-        # --- 시세 DB (선행 작업): 대시보드에서 이전, 설명 문구 없음 ---
-        data_strip = ttk.LabelFrame(self.parent, text=" 📥 시세 데이터 ", padding=(12, 8))
-        data_strip.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(10, 4))
-        data_row = ttk.Frame(data_strip)
-        data_row.pack(fill=tk.X)
+        """전략검증 탭 레이아웃: 시세·리포트 → 기간·최적화·검증 → 진행·결과."""
+        # --- 시세 하베스팅 + 가상 매매 리포트 (한 줄 도구 모음) ---
+        tools_lf = ttk.LabelFrame(
+            self.parent,
+            text=" 시세 수집 · 리포트 생성 ",
+            padding=(12, 8),
+        )
+        tools_lf.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(10, 4))
+        tools_row = ttk.Frame(tools_lf)
+        tools_row.pack(fill=tk.X)
+        ttk.Label(
+            tools_row,
+            text="DB 하베스팅·포지션·주문 기반 HTML (개발 검증)",
+            font=("Malgun Gothic", 8),
+            foreground=self.app.colors.get("secondary", "#787c99"),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        btn_cluster = ttk.Frame(tools_row)
+        btn_cluster.pack(side=tk.RIGHT)
+        _rep_style = "Action.TButton"
+        _rep_w = 14
+        self.btn_narrative_report = ttk.Button(
+            btn_cluster,
+            text="종합리포트",
+            style=_rep_style,
+            width=_rep_w,
+            command=lambda: self._call_virtual_tab("generate_report"),
+        )
+        self.btn_narrative_report.pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_daily_settlement = ttk.Button(
+            btn_cluster,
+            text="일일결산",
+            style=_rep_style,
+            width=_rep_w,
+            command=lambda: self._call_virtual_tab("generate_daily_settlement"),
+        )
+        self.btn_daily_settlement.pack(side=tk.LEFT, padx=(0, 4))
         self.btn_harvest_prices = ttk.Button(
-            data_row,
+            btn_cluster,
             text="최신주가데이타수집",
-            style="Action.TButton",
+            style=_rep_style,
             width=22,
             command=self._on_harvest_latest_prices,
         )
-        self.btn_harvest_prices.pack(side=tk.RIGHT)
+        self.btn_harvest_prices.pack(side=tk.LEFT, padx=(4, 0))
 
         # --- 워크플로: 기간 → 최적화 → 성과 검증 (3열 동일 비중) ---
         workflow = ttk.LabelFrame(
