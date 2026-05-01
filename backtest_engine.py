@@ -1185,19 +1185,13 @@ class TradingStrategy:
             run_atr_exit = bool(_rx["use_atr_exit"]) or (
                 curr_atr > 0 and (use_sl_atr or use_trail_atr)
             )
-            # NaN: (nan <= 0)은 False라 여기서 걸리지 않아 TRL nan 이 됨 — not (curr_atr > 0) 로 통일
-            if not run_atr_exit or not (curr_atr > 0):
-                return "ATR미사용"
+            entry_atr: float = 0.0
+            sl_mult: float = 0.0
+            trail_mult: float = 0.0
 
-            entry_atr = float(TradingStrategy._entry_atr_for_atr_sl(pos, curr_atr))
-            sl_mult = float(s.get(f"atr_multiplier_sl{suff}", 2.5))
-            trail_mult = float(s.get(f"atr_multiplier_trail{suff}", 4.0))
-
-            _trail_only_after_tp = TradingStrategy._use_atr_trail_only_after_tp_for_stage(
-                s, is_type_b, stage
-            )
-            trail_armed = True
-            if _trail_only_after_tp and use_trail_atr:
+            # TP 도달 여부로 TRL 후보를 결정(사용자 규칙: 미도달이면 후보에서 제외)
+            trail_armed = False
+            if use_trail_atr and avg_p > 0:
                 tp_arm_pct = float(
                     s.get(
                         _exit_key(
@@ -1215,24 +1209,102 @@ class TradingStrategy:
                     peak_pct = 0.0
                 trail_armed = peak_pct >= tp_arm_pct
 
-            parts = []
-            if use_sl_atr:
-                sl_px = avg_p - (sl_mult * entry_atr)
-                if np.isfinite(sl_px):
-                    parts.append(f"SL {sl_px:,.0f}")
-                else:
-                    parts.append("SL —")
-            if use_trail_atr:
-                if trail_armed:
+            def _fixed_sl_keys_for_display() -> tuple[bool, float]:
+                """고정 SL(% 기준) 토글/퍼센트(%)를 단계/타입별로 resolve합니다."""
+                try:
+                    if stage == 2:
+                        if is_type_b:
+                            return bool(s.get("use_s2_b_stop_loss", True)), float(
+                                s.get("s2_b_stop_loss", 2.0)
+                            )
+                        return bool(s.get("use_s2_stop_loss", True)), float(
+                            s.get("s2_stop_loss", 2.0)
+                        )
+                    # stage == 1
+                    if is_type_b:
+                        return bool(s.get("use_s1_b_stop_loss", True)), float(
+                            s.get("s1_b_stop_loss", 3.0)
+                        )
+                    return bool(s.get("use_s1_a_stop_loss", True)), float(
+                        s.get("s1_a_stop_loss", 3.0)
+                    )
+                except Exception:
+                    return False, 0.0
+
+            # 후보들 중 "가장 높은 가격(=가장 먼저 도달하는 하방 기준가)" 1개만 표시합니다.
+            candidates: list[tuple[str, float]] = []
+
+            # 1) SL% vs ATR SL (둘 중 하나만)
+            atr_sl_px: Optional[float] = None
+            if run_atr_exit and use_sl_atr and curr_atr > 0:
+                try:
+                    entry_atr = float(TradingStrategy._entry_atr_for_atr_sl(pos, curr_atr))
+                    sl_mult = float(s.get(f"atr_multiplier_sl{suff}", 2.5))
+                    sl_px = avg_p - (sl_mult * entry_atr)
+                    if np.isfinite(sl_px):
+                        atr_sl_px = float(sl_px)
+                except Exception:
+                    atr_sl_px = None
+
+            if atr_sl_px is not None:
+                candidates.append(("ATR SL", atr_sl_px))
+            else:
+                fixed_on, fixed_sl_pct = _fixed_sl_keys_for_display()
+                if fixed_on and fixed_sl_pct > 0 and avg_p > 0:
+                    try:
+                        sl_px = avg_p * (1.0 - fixed_sl_pct / 100.0)
+                        if np.isfinite(sl_px):
+                            candidates.append(("SL%", float(sl_px)))
+                    except Exception:
+                        pass
+
+            # 2) ATR TRL (TP 미도달이면 후보 제외)
+            if run_atr_exit and use_trail_atr and trail_armed and curr_atr > 0:
+                try:
+                    trail_mult = float(s.get(f"atr_multiplier_trail{suff}", 4.0))
                     tr_px = max_p - (trail_mult * curr_atr)
                     if np.isfinite(tr_px) and np.isfinite(max_p):
-                        parts.append(f"TRL {tr_px:,.0f}")
-                    else:
-                        parts.append("TRL —")
-                else:
-                    parts.append("TRL 무장전")
+                        candidates.append(("ATR TRL", float(tr_px)))
+                except Exception:
+                    pass
 
-            return " · ".join(parts) if parts else "—"
+            # 3) FLASH Exit 기준가
+            try:
+                use_flash = bool(
+                    s.get(
+                        _exit_key(
+                            "use_s1_a_flash_exit",
+                            "use_s1_b_flash_exit",
+                            "use_s2_flash_exit",
+                            "use_s2_b_flash_exit",
+                        ),
+                        True,
+                    )
+                )
+                flash_pct = float(
+                    s.get(
+                        _exit_key(
+                            "s1_a_flash_exit_pct",
+                            "s1_b_flash_exit_pct",
+                            "s2_flash_exit_pct",
+                            "s2_b_flash_exit_pct",
+                        ),
+                        3.0,
+                    )
+                )
+                if use_flash and flash_pct > 0 and max_p > 0:
+                    flash_px = max_p * (1.0 - flash_pct / 100.0)
+                    if np.isfinite(flash_px):
+                        candidates.append(("FLASH", float(flash_px)))
+            except Exception:
+                pass
+
+            if not candidates:
+                return "—"
+
+            # 가장 높은 기준가 선택
+            label, px = max(candidates, key=lambda x: x[1])
+            return f"{label} {px:,.0f}"
         except Exception:
             return "—"
 

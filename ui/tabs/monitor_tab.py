@@ -509,8 +509,12 @@ class MonitorTab:
             if p is not None and self._monitor_sash_initialized:
                 # 이미 한 번 정상 복원되었으면, 탭 전환 재진입에서는 사용자가 드래그한 높이를 유지한다.
                 try:
-                    if int(p.winfo_height()) >= 160:
-                        self._monitor_prev_sash_pixel = int(p.sashpos(0))
+                    # "정상 복원"을 winfo_height만으로 판단하면,
+                    # 상단 pane이 0으로 접힌 상태에서도 True로 마킹될 수 있습니다.
+                    # 따라서 sashpos(0)가 어느 정도 이상인 경우에만 스킵합니다.
+                    sp = int(p.sashpos(0))
+                    if int(p.winfo_height()) >= 160 and sp >= 60:
+                        self._monitor_prev_sash_pixel = sp
                         return
                 except (tk.TclError, TypeError, ValueError):
                     pass
@@ -538,8 +542,11 @@ class MonitorTab:
                                 h = max(h, int(par.winfo_height()))
                         except (tk.TclError, TypeError, ValueError):
                             pass
-                    # 레이아웃 미확정 시 대기 — 작은 h 에서 sashpos 하면 한쪽 패인이 사실상 사라진 것처럼 보임
-                    if h < 160 and attempt < 24:
+                    # 레이아웃 미확정 시 대기
+                    # 기존의 160 임계값은 탭 전환 직후/특정 플랫폼에서 h==0이 계속되는 경우,
+                    # 복원 시도가 너무 오래 지연되거나(혹은 마지막 시도에서 강제로 pos를 찍어) 레이아웃이 고정될 수 있습니다.
+                    # 여기서는 "정말 0에 가까운 경우"만 대기하고, 최소한의 높이가 잡히면 sashpos를 진행합니다.
+                    if h < 30 and attempt < 24:
                         root.after(100, lambda a=attempt + 1: _try(a))
                         return
                     # 저장 안정성 이슈가 반복되어 상단(보유/대응) 높이를 5줄 기준으로 고정한다.
@@ -555,15 +562,16 @@ class MonitorTab:
                     except Exception:
                         row_h = 22
                     target_top = int(header_pad + (row_h * fixed_rows))
-                    min_top = 96
-                    min_bot = 120
-                    if h < 300:
-                        min_top = 72
-                        min_bot = 96
+                    # 상단 패널은 "고정 5줄" 느낌으로 최소 높이를 강하게 보장하고,
+                    # 하단 패널(실시간 감시)은 남는 높이를 쓰도록 sashpos 클램프를 보수적으로 잡습니다.
+                    min_top = max(140, int(target_top))
+                    min_bot = 80
                     pos = int(target_top)
+                    # h - min_bot 을 상단 최대치로 보되, 상단이 최소 높이(min_top)보다 작아지지 않게 보정
                     pos = max(min_top, min(pos, h - min_bot))
-                    if pos >= h - 8:
-                        pos = max(min_top, h // 2)
+                    # 창이 너무 작으면 하단이 소멸할 수 있으므로 하단 최소를 우선 확보
+                    if h - min_bot <= 0:
+                        pos = min_top
                     if pos < min_top:
                         pos = min_top
                     try:
@@ -575,12 +583,22 @@ class MonitorTab:
                         self._monitor_prev_sash_pixel = int(p.sashpos(0))
                     except (tk.TclError, TypeError, ValueError):
                         pass
-                    self._monitor_sash_initialized = True
+                    # 실제로 높이가 잡힌 경우에만 초기화 완료로 마킹(높이 0 고정이면 다음 복원 시도도 허용)
+                    try:
+                        sp_now = int(p.sashpos(0))
+                        if sp_now >= 60:
+                            self._monitor_sash_initialized = True
+                    except Exception:
+                        pass
                 except Exception:
                     if attempt < 24:
                         root.after(100, lambda a=attempt + 1: _try(a))
 
-            root.after(120, lambda: _try(0))
+            # 탭 전환 직후에는 winfo_height 가 아직 0 으로 잡히는 경우가 있어,
+            # after_idle 로 레이아웃 계산이 끝난 뒤 1회 실행하고,
+            # 안전장치로 약간 뒤(클릭 직후 관찰 타이밍 보정) 추가 1회 실행합니다.
+            root.after_idle(lambda: _try(0))
+            root.after(350, lambda: _try(0))
         except Exception:
             pass
 
@@ -813,7 +831,8 @@ class MonitorTab:
         watchlist_frame = ttk.LabelFrame(paned, text=" 👁️ 실시간 감시 목록 (Watchlist) ", padding="5")
         paned.add(watchlist_frame, weight=3)
         try:
-            paned.paneconfigure(active_frame, minsize=96)
+            # "보유 및 대응"은 대략 5종목 정도가 보이도록 최소 높이를 보강합니다.
+            paned.paneconfigure(active_frame, minsize=140)
         except (tk.TclError, AttributeError):
             pass
         
@@ -839,7 +858,7 @@ class MonitorTab:
             "Name": "종목명",
             "StratType": "전략유형",
             "Price": "현재가",
-            "AtrExit": "ATR기준가",
+            "AtrExit": "도달시 매도 기준가",
             "VsPrev": "대비",
             "Ratio": "등락률",
             "Status": "신호상태",
