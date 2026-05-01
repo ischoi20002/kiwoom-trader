@@ -194,6 +194,8 @@ class MonitorTab:
         # 세시(sash) 픽셀 추적 — Configure 로 드래그 종료 감지(ttk.ButtonRelease 가 세시에 안 붙는 경우 대비)
         self._monitor_prev_sash_pixel: Optional[int] = None
         self._monitor_restoring_sash: bool = False
+        # 탭 재진입 시 매번 강제 복원하지 않도록, 최초 1회 복원 완료 여부를 기록
+        self._monitor_sash_initialized: bool = False
         # [고정 모드] 보유/대응 종목 패널 높이를 항상 N줄 기준으로 복원
         self._monitor_fix_active_rows: int = 5
         self._monitor_tree_columns: Tuple[str, ...] = tuple()
@@ -503,6 +505,15 @@ class MonitorTab:
             root = getattr(self.app, "root", None)
             if root is None:
                 return
+            p = self._monitor_paned
+            if p is not None and self._monitor_sash_initialized:
+                # 이미 한 번 정상 복원되었으면, 탭 전환 재진입에서는 사용자가 드래그한 높이를 유지한다.
+                try:
+                    if int(p.winfo_height()) >= 160:
+                        self._monitor_prev_sash_pixel = int(p.sashpos(0))
+                        return
+                except (tk.TclError, TypeError, ValueError):
+                    pass
 
             def _try(attempt: int = 0) -> None:
                 try:
@@ -564,6 +575,7 @@ class MonitorTab:
                         self._monitor_prev_sash_pixel = int(p.sashpos(0))
                     except (tk.TclError, TypeError, ValueError):
                         pass
+                    self._monitor_sash_initialized = True
                 except Exception:
                     if attempt < 24:
                         root.after(100, lambda a=attempt + 1: _try(a))
