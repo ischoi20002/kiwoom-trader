@@ -239,14 +239,6 @@ class DynamicBacktester:
         )
         self.use_type_b = s.get('use_type_b', False)
         self.gap_down_lmt = float(s.get("gap_down_limit_a", s.get("gap_down_limit", -5.0)))
-    def _type_balance_allows_new_s1(self, sig_type: str) -> bool:
-        """
-        신규 S1(Type A/B) 진입 허용 여부. 보유 **종목 수**로 A/B를 세고,
-        목표 비율(settings: type_balance_a_pct % vs (100−A)%)에 비해 과다인 타입의 신규만 차단한다.
-        (로직 본문은 TradingStrategy.type_balance_allows_new_s1 에 단일화)
-        """
-        return TradingStrategy.type_balance_allows_new_s1(self.settings, sig_type, self.holdings)
-
     def _effective_s1_sig_type_for_buy(self, row: Any) -> str:
         """15분 행·1분 indicator dict 등에서 Sig_Type 확정(동시신호+보유 A/B 동점 시 B 우선)."""
         return TradingStrategy.effective_s1_sig_type_for_buy(self.settings, row, self.holdings)
@@ -765,32 +757,6 @@ class DynamicBacktester:
 
         if h_info is None:
             sig_type = str(sig_res.get("Sig_Type", "TYPE_A"))
-            if not self._type_balance_allows_new_s1(str(sig_type)):
-                try:
-                    lab = "TYPE_B" if "TYPE_B" in str(sig_type).upper() else "TYPE_A"
-                    na = sum(
-                        1
-                        for h in self.holdings.values()
-                        if "TYPE_B" not in str(h.get("sig_type", "") or "").upper()
-                    )
-                    nb = sum(
-                        1
-                        for h in self.holdings.values()
-                        if "TYPE_B" in str(h.get("sig_type", "") or "").upper()
-                    )
-                    try:
-                        _tp = float(self.settings.get("type_balance_a_pct", 50.0))
-                    except (TypeError, ValueError):
-                        _tp = 50.0
-                    reason_rej = (
-                        f"TypeBalanceGate|목표A:{_tp:.1f}% B:{100.0 - _tp:.1f}%|보유A:{na} B:{nb}|{lab}신규차단"
-                    )
-                    self._log_trade_to_csv(
-                        curr_time, code, "REJECTED_BALANCE", float(price), 0, reason_rej, sig_type=lab
-                    )
-                except Exception:
-                    pass
-                return False
             if self.cash < s1_amt * 0.5:
                 return False
             target_amt = s1_amt

@@ -161,12 +161,6 @@ class SettingsTab:
         style.configure('Dimmed.TEntry', foreground='#666666')
         style.map('Dimmed.TEntry', fieldbackground=[('disabled', '#3B4252')])
 
-        # ── 하단 버튼 (먼저 pack → 상단 본문이 남은 공간 채움) ──
-        btn_frame = ttk.Frame(self.parent, padding='20')
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        ttk.Button(btn_frame, text='💾 설정 저장 및 즉시 적용', command=self.save_settings, width=30, style='Action.TButton').pack(side=tk.RIGHT, padx=10)
-        ttk.Button(btn_frame, text='🔄 공장 초기화', command=self.reset_to_defaults, width=20).pack(side=tk.RIGHT, padx=10)
-
         # ── 헤더 ──
         header_sticky = ttk.Frame(self.parent, padding=(25, 12, 25, 8))
         header_sticky.pack(side=tk.TOP, fill=tk.X)
@@ -181,7 +175,30 @@ class SettingsTab:
             foreground=secondary_col,
         ).pack(side=tk.LEFT)
 
-        ttk.Button(header_sticky, text='🧹 최적화 전체 해제', width=18, command=self.clear_all_optimization).pack(side=tk.LEFT, padx=10)
+        # [UI] 상단 버튼: 오른쪽 정렬 + 나란히 배치
+        top_btn_frame = ttk.Frame(header_sticky)
+        top_btn_frame.pack(side=tk.RIGHT)
+
+        # pack(side=RIGHT) 특성상 시각적 좌→우 순서를 맞추려면 역순으로 pack
+        ttk.Button(
+            top_btn_frame,
+            text='💾 설정 저장 및 즉시 적용',
+            command=self.save_settings,
+            width=30,
+            style='Action.TButton',
+        ).pack(side=tk.RIGHT, padx=10)
+        ttk.Button(
+            top_btn_frame,
+            text='🔄 공장 초기화',
+            command=self.reset_to_defaults,
+            width=20,
+        ).pack(side=tk.RIGHT, padx=10)
+        ttk.Button(
+            top_btn_frame,
+            text='🧹 최적화 전체 해제',
+            command=self.clear_all_optimization,
+            width=20,
+        ).pack(side=tk.RIGHT, padx=10)
 
         self.status_label = ttk.Label(header_sticky, text='', font=('Malgun Gothic', 10), foreground=secondary_col)
         self.status_label.pack(side=tk.RIGHT)
@@ -470,21 +487,6 @@ class SettingsTab:
             'SimpleBacktester·DynamicBacktester·파라미터 최적화',
         )
         add_param_row(cap_f, '백테 — 매도', 'sell_fee_bt', '%', '')
-        add_param_row(
-            cap_f,
-            '동적백테 A/B 수 균형(신규 S1)',
-            None,
-            '',
-            '보유 종목 수 비율이 목표를 넘는 타입의 신규 S1만 차단(동률이면 허용). 매수금액 불변. A·B 둘 다 켤 때만 적용',
-            toggle_key='use_type_balance_gate',
-        )
-        add_param_row(
-            cap_f,
-            '  └ Type A 목표 비중',
-            'type_balance_a_pct',
-            '%',
-            'Type B 목표 = (100 − A)%. 예: 60이면 A 60%·B 40%에 가깝게 유지',
-        )
         add_param_row(
             cap_f,
             '선정 시 거래정지 종목 제외',

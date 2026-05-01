@@ -71,22 +71,6 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "2단계(본대) 비중 — 단위(원/%)",
         "s2_sizing_unit",
     ),
-    SettingUiRow(
-        1070,
-        "① 자금 · 사이징",
-        "[1] 자금 및 계좌 관리",
-        "",
-        "동적백테 A/B 수 균형(신규 S1) — 토글",
-        "use_type_balance_gate",
-    ),
-    SettingUiRow(
-        1080,
-        "① 자금 · 사이징",
-        "[1] 자금 및 계좌 관리",
-        "",
-        "Type A 목표 비중(%)",
-        "type_balance_a_pct",
-    ),
     # ─── ② 유니버스 · 종목선정 — Track A ───
     SettingUiRow(
         2000,

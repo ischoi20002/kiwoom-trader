@@ -29,8 +29,7 @@ DEFAULT_SETTINGS = {
     "use_type_balance_gate": False,
     "type_balance_a_pct": 40.0,
     "min_15m_bars_for_signal": 60,
-    # S1 매수 성공 후 동일 종목 재매수 최소 간격(초). 틱 중복·연속 주문 방지(기본 30분).
-    "s1_buy_signal_cooldown_sec": 1800,
+    "s1_buy_signal_cooldown_sec": 1800.0,
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,
     "realtime_15m_calendar_retention_days": 365,

@@ -343,7 +343,7 @@ class KiwoomApp:
         self.opt_params_vars = {}
         # 최적화 대상(○/●): tools/optimization_params_audit.xlsx 사용자 표시(2026-04) 기준 72키
         opt_keys = [
-            'stage1_amt', 's1_equity_pct', 'stage2_amt', 's2_equity_pct', 'type_balance_a_pct',
+            'stage1_amt', 's1_equity_pct', 'stage2_amt', 's2_equity_pct',
             'buy_rsi_min', 'buy_rsi_max_a', 'gc_window', 'rsi_window', 'ma60_min', 'ma60_max',
             'vol_surge', 'prev_vol_lookback_s1_a',
             'buy_rsi_max_b', 'vol_surge_b', 'prev_vol_lookback_s1_b',

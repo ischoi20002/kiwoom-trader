@@ -105,7 +105,6 @@ SIGNAL_ONLY_PARAMS = frozenset({
     'use_s2_b_profit', 'use_s2_b_delay',
     'use_atr_stop_loss_s2_b', 'use_atr_trailing_stop_s2_b',
     'use_macd_signal',
-    'use_type_balance_gate', 'type_balance_a_pct',
     'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
 })
 

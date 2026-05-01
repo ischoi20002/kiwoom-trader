@@ -596,55 +596,6 @@ class TradingStrategy:
             return False
 
     @staticmethod
-    def type_balance_allows_new_s1(settings: dict, sig_type: str, holdings: dict) -> bool:
-        """
-        신규 S1(Type A/B) 진입 허용 여부. 보유 종목 수로 A/B를 세고 type_balance_a_pct 와 비교.
-        DynamicBacktester._type_balance_allows_new_s1 과 동일 (실시간 virtual_positions 에도 공통 적용).
-        """
-        try:
-            s = settings or {}
-            if not bool(s.get("use_type_balance_gate", True)):
-                return True
-            use_a = bool(s.get("use_type_a", True))
-            use_b = bool(s.get("use_type_b", False))
-            if use_a and not use_b:
-                return True
-            if use_b and not use_a:
-                return True
-            if not use_a and not use_b:
-                return False
-            n_a = 0
-            n_b = 0
-            for h in (holdings or {}).values():
-                try:
-                    if "TYPE_B" in str(h.get("sig_type", "") or "").upper():
-                        n_b += 1
-                    else:
-                        n_a += 1
-                except Exception:
-                    continue
-            want_b = "TYPE_B" in str(sig_type or "").upper()
-            try:
-                pct_a = float(s.get("type_balance_a_pct", 50.0))
-            except (TypeError, ValueError):
-                pct_a = 50.0
-            pct_a = max(0.1, min(99.9, pct_a))
-            t = pct_a / 100.0
-            tb = 1.0 - t
-            total = n_a + n_b
-            if total <= 0:
-                return True
-            if want_b:
-                if (n_b * t) > (n_a * tb):
-                    return False
-            else:
-                if (n_a * tb) > (n_b * t):
-                    return False
-            return True
-        except Exception:
-            return True
-
-    @staticmethod
     def _s1_sig_type_simultaneous_balance_tie_b(
         settings: dict, sig_type: str, simultaneous_ab: bool, holdings: dict
     ) -> str:

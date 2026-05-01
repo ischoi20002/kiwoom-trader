@@ -31,7 +31,6 @@ class SignalCallbacksService:
 
         DynamicBacktester 와 동일:
         - 확정 Sig_Type
-        - TypeBalanceGate
         - (선택) 선정 트랙(sel_track) 교차 검증 후 주문
         """
         try:
@@ -73,26 +72,6 @@ class SignalCallbacksService:
             if tr == "A" and sig_type == "TYPE_B":
                 return False
             if tr == "B" and sig_type == "TYPE_A":
-                return False
-
-            if not TradingStrategy.type_balance_allows_new_s1(
-                self.app.settings, sig_type, self.app.portfolio.virtual_positions
-            ):
-                self.log(f"⚠️ [Skip] {name}({code}) TypeBalanceGate (A/B 비중)")
-                try:
-                    sl = getattr(self.app, "session_logger", None)
-                    if sl:
-                        sl.log(
-                            "signal_buy_skipped",
-                            {
-                                "code": code,
-                                "name": name,
-                                "reason": "type_balance_gate",
-                                "sig_type": sig_type,
-                            },
-                        )
-                except Exception:
-                    pass
                 return False
 
             try:

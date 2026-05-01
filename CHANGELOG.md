@@ -7,6 +7,10 @@
 
 ---
 
+## 0.6.23 (2026-05-02)
+
+- 설정탭에서 동적백테 A/B 수 균형(신규 S1) 옵션을 제거하고, 관련 로직/최적화 타겟을 함께 삭제(`ui/tabs/settings_tab.py`, `dynamic_backtest.py`, `backtest_engine.py`, `core/signal_callbacks_service.py`, `parameter_optimizer.py`, `ui/tabs/backtest_tab.py`, `k_trader_gui.py`, `tools/settings_tab_ui_catalog.py`).
+
 ## 0.6.20 (2026-05-01)
 
 - 실시간 감시 ATR 기준가(`AtrExit`) 표시: `SL%` / `ATR SL` / `ATR TRL` / `FLASH` 후보 중 **도달시 매도 기준가로 환산된 최댓값 1개만** 라벨+금액으로 표시하도록 정리, 헤더도 `도달시 매도 기준가`로 변경 (`backtest_engine.py`, `ui/tabs/monitor_tab.py`).
