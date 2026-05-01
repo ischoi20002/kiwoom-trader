@@ -7,6 +7,11 @@
 
 ---
 
+## 0.6.15 (2026-05-01)
+
+- **실시간 감시 탭 상·하단 분할 기억**: 보유/대응 종목과 감시 목록 사이 세시(sash) 이동 시 `monitor_column_widths.json` 의 ``sash0_rel`` 에 저장되도록 **Paned `<Configure>` 로 세시 픽셀 변화 감지**, 복원 중 오탐 방지 플래그, Paned 직접 ``ButtonRelease`` 시 동기 추가 (`ui/tabs/monitor_tab.py`).
+- **보유 트리 최소 높이**: 상단 Treeview 의 ``height=3`` 고정 제거 — 패널이 1~2줄만 보이던 현상 완화 (`ui/tabs/monitor_tab.py`).
+
 ## 0.6.14 (2026-05-01)
 
 - **금일 손익 분모·분자 정합**: 직전 장마감 합성과 당일 비교 시 모두 **D+2 예수 + 보유 순매각 합** 만 사용. ``last_tot_evlu_amt`` ±2.5% 치환은 **표시용 총자산**에만 두고, 금일 손익에는 ``skip_broker_te_reconcile=True`` 로 치환을 끄어 시세 변동이 없을 때 허위 손익(수수료·정의 불일치 꼴) 방지 (`ui/tabs/virtual_tab.py`, `utils/eod_equity_snapshots.py`, `reporting/daily_settlement_report.py`).

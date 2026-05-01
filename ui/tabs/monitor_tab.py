@@ -191,6 +191,9 @@ class MonitorTab:
         self._monitor_width_source_tree: Optional[ttk.Treeview] = None
         self._monitor_paned: Optional[ttk.PanedWindow] = None
         self._monitor_saved_sash_rel: Optional[float] = None  # _load_saved_monitor_col_widths 에서 채움
+        # 세시(sash) 픽셀 추적 — Configure 로 드래그 종료 감지(ttk.ButtonRelease 가 세시에 안 붙는 경우 대비)
+        self._monitor_prev_sash_pixel: Optional[int] = None
+        self._monitor_restoring_sash: bool = False
         self._monitor_tree_columns: Tuple[str, ...] = tuple()
         # 실시간 틱 경로: 계좌 동기화 1프레임 등으로 VP에만 없으면 보유→감시 트리로 잘못 옮기는 깜빡임 방지
         self._vp_ui_inactive_streak: Dict[str, int] = {}
@@ -454,11 +457,35 @@ class MonitorTab:
 
     def _on_monitor_paned_mouse_release(self, event: Any) -> None:
         try:
-            if not self._release_is_on_monitor_paned_sash(event):
+            if getattr(event, "widget", None) is self._monitor_paned:
+                self._request_monitor_sash_sync()
                 return
-            self._request_monitor_sash_sync()
+            if self._release_is_on_monitor_paned_sash(event):
+                self._request_monitor_sash_sync()
         except Exception:
             pass
+
+    def _on_monitor_paned_configure(self, event: Optional[tk.Event] = None) -> None:
+        """Paned 높이·세시 배치가 바뀔 때 호출. 세시 픽셀 변화 시에만 저장 예약."""
+        try:
+            if getattr(self, "_monitor_restoring_sash", False):
+                return
+            p = self._monitor_paned
+            if p is None:
+                return
+            if event is not None and getattr(event, "widget", None) is not p:
+                return
+            if int(p.winfo_height()) < 24:
+                return
+            sp = int(p.sashpos(0))
+            prev = self._monitor_prev_sash_pixel
+            if prev is not None and abs(sp - prev) > 1:
+                self._request_monitor_sash_sync()
+            self._monitor_prev_sash_pixel = sp
+        except (tk.TclError, TypeError, ValueError):
+            return
+        except Exception:
+            return
 
     def _on_monitor_paned_moved(self, _event: Any = None) -> None:
         """상·하단 분할 변경 시 저장 예약."""
@@ -518,7 +545,15 @@ class MonitorTab:
                         pos = max(min_top, h // 2)
                     if pos < min_top:
                         pos = min_top
-                    p.sashpos(0, pos)
+                    try:
+                        self._monitor_restoring_sash = True
+                        p.sashpos(0, pos)
+                    finally:
+                        self._monitor_restoring_sash = False
+                    try:
+                        self._monitor_prev_sash_pixel = int(p.sashpos(0))
+                    except (tk.TclError, TypeError, ValueError):
+                        pass
                 except Exception:
                     if attempt < 24:
                         root.after(100, lambda a=attempt + 1: _try(a))
@@ -740,6 +775,11 @@ class MonitorTab:
             paned.bind("<ButtonRelease-1>", self._on_monitor_paned_mouse_release, add="+")
         except Exception:
             pass
+        # 세시 이동 시 Tk 가 Paned 자체가 아닌 내부 경로로 이벤트를 처리하면 Moved/Release 만으로 저장이 빠질 수 있음.
+        try:
+            paned.bind("<Configure>", self._on_monitor_paned_configure, add="+")
+        except Exception:
+            pass
 
         # [상단] 보유 종목 창 (세로폭 축소)
         # weight=0 은 일부 Windows/ttk에서 상단 패널 높이가 0에 가깝게 붙어 트리가 안 보이는 사례가 있어
@@ -825,8 +865,9 @@ class MonitorTab:
                 return tk.E
             return tk.CENTER
 
+        # height 고정 시 요청 높이가 과소해 상단 패널이 1~2줄만 보이는 현상 유발 → 부모 확장에 맡김(가상 탭과 동일).
         self.tree_active_monitor = ttk.Treeview(
-            active_inner, columns=columns, show="headings", selectmode="browse", height=3
+            active_inner, columns=columns, show="headings", selectmode="browse"
         )
         for col in columns:
             anchor = _monitor_col_anchor(col)
