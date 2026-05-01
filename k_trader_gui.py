@@ -48,9 +48,17 @@ from core.remote_commander import RemoteCommander
 from core.trading_controller import TradingController, virtual_position_reference_price_for_monitor
 from core.strategy_engine import StrategyEngine
 from core.selection_service import SelectionService
+from core.post_fill_account_sync_service import PostFillAccountSyncService
+from core.realtime_tick_dispatch_service import RealtimeTickDispatchService
+from core.eod_equity_snapshot_service import EodEquitySnapshotService
+from core.rest_auth_retry_service import RestAuthRetryService
+from core.fill_reconciliation_service import FillReconciliationService
 from core.defaults import DEFAULT_SETTINGS, get_allowed_keys
 from core.version import APP_VERSION
 from core.supply_display import capture_supply_snapshot
+from core.signal_callbacks_service import SignalCallbacksService
+from core.ui_trading_status_service import UiTradingStatusService
+from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
 
 from kiwoom_rest_api.auth.token import TokenManager
 
@@ -223,6 +231,11 @@ class KiwoomApp:
         self._equity_snapshot_job_in_progress: bool = False
         self._equity_snapshot_cancelled: bool = False
 
+        # [EOD Equity Snapshot] 스케줄러/저장 서비스 추출
+        self.eod_equity_snapshot_service = EodEquitySnapshotService(
+            self, log_func=self.log
+        )
+
         self.notebook = None
         self.status_label = None
         self.pending_tree_updates = {} # [v4.5.3] UI 지연 업데이트용 큐
@@ -232,9 +245,7 @@ class KiwoomApp:
         self._account_sync_job: Optional[Any] = None
         self._virtual_tab_render_pending: bool = False
         self._virtual_tab_render_last_ts: float = 0.0
-        # 웹소켓 틱 → 메인 스레드에서 배치 처리 (종목당 마지막 틱만 유지)
-        self._rt_tick_latest: dict = {}
-        self._tick_flush_after_id: Optional[Any] = None
+        # (실시간 틱 배치 디스패치는 RealtimeTickDispatchService로 위임)
         # REST 인증 자동 재시도: 동시에 하나의 워커만 실행
         self._auth_worker_lock = threading.Lock()
         self._auth_worker_running = False
@@ -249,6 +260,11 @@ class KiwoomApp:
         self._post_fill_sync_job: Optional[Any] = None
         self._post_fill_sync_followup: Optional[Any] = None
         self._post_fill_sync_followup2: Optional[Any] = None
+
+        # 체결 후 계좌 동기화(after 1/2/3차) 서비스 추출
+        self.post_fill_account_sync_service = PostFillAccountSyncService(
+            self, log_func=self.log
+        )
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         
@@ -302,6 +318,15 @@ class KiwoomApp:
         self.order_manager = OrderManager(self)
         self.signal_engine = SignalEngine(self)
 
+        # SignalEngine/StrategyEngine 콜백 처리 서비스(판정 로직 분리)
+        self.signal_callbacks_service = SignalCallbacksService(
+            self, log_func=self.log
+        )
+        # 실시간 틱 배치 디스패치 서비스(메인 스레드 after 예약 포함)
+        self.tick_dispatch_service = RealtimeTickDispatchService(
+            self, self.signal_engine, log_func=self.log
+        )
+
         # [v3.8] Core 매니저 통합 (Service Layer 중심)
         self.portfolio = PortfolioManager(
             self,
@@ -348,15 +373,38 @@ class KiwoomApp:
             log_func=self.log
         )
         self.trading_controller = TradingController(
-            self, 
-            status_callback=self._on_trading_status_changed,
+            self,
+            status_callback=None,  # 서비스에서 바인딩
             log_func=self.log
+        )
+
+        # TradingController status 이벤트를 UI 갱신 서비스로 위임
+        self.ui_trading_status_service = UiTradingStatusService(
+            self, log_func=self.log
+        )
+        self.trading_controller.status_cb = (
+            self.ui_trading_status_service.on_trading_status_changed
+        )
+
+        # REST 인증/재시도 워커 서비스 추출
+        self.rest_auth_retry_service = RestAuthRetryService(
+            self, log_func=self.log
+        )
+
+        # 체결 동기화(REST/WS) 서비스 추출
+        self.fill_reconciliation_service = FillReconciliationService(
+            self, log_func=self.log
+        )
+
+        # Warmup 워커별 종목 준비 상태 UI 브리지 서비스
+        self.warmup_stock_prep_ui_service = WarmupStockPrepUiService(
+            self, log_func=self.log
         )
         from core.warmup_service import WarmupService
         self.warmup_service = WarmupService(
             self,
             logger_callback=self.log,
-            stock_prep_callback=self._on_warmup_stock_prep,
+            stock_prep_callback=self.warmup_stock_prep_ui_service.on_warmup_stock_prep,
         )
         self.strategy_engine = StrategyEngine(self)
         self.selection_service = SelectionService(self, logger_callback=self.log)
@@ -668,153 +716,19 @@ class KiwoomApp:
                 pass
 
     def get_auth_token(self) -> None:
-        """
-        REST 토큰 발급 및 초기 동기화(포트폴리오·시장·원격·계좌·유니버스).
-        실패 시 백그라운드에서 지수 백오프로 자동 재시도하며, UI 스레드는 막지 않습니다.
-        """
-        with self._auth_worker_lock:
-            if self._auth_worker_running:
-                try:
-                    self.log("ℹ️ [Auth] 인증·연결 갱신이 이미 진행 중입니다.")
-                except Exception:
-                    pass
-                return
-            self._auth_worker_running = True
-
-        def worker() -> None:
-            try:
-                self._run_auth_token_with_retries()
-            finally:
-                with self._auth_worker_lock:
-                    self._auth_worker_running = False
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _run_auth_token_with_retries(self) -> None:
-        """백그라운드 전용: 토큰 발급 재시도 후 성공 시에만 부가 초기화 수행."""
-        max_attempts = 12
-        delay_sec = 3.0
-        max_delay = 45.0
-        backoff_mult = 1.25
-        token: Optional[str] = None
+        """REST 토큰 발급을 서비스에 위임합니다."""
         try:
-            err_fg = self.colors.get("error", "#BF616A")
-            ok_fg = self.colors.get("success", "#A3BE8C")
-        except Exception:
-            err_fg, ok_fg = "#BF616A", "#A3BE8C"
-
-        self._boot_progress_set_message("키움 REST 인증 연결 중…")
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if attempt > 1:
-                    try:
-                        self.auth_manager.invalidate_cached_token()
-                    except Exception:
-                        pass
-                    try:
-                        self.log(
-                            f"🔁 [Auth] {attempt}/{max_attempts}차 인증 시도 "
-                            f"({delay_sec:.1f}초 대기 후)..."
-                        )
-                    except Exception:
-                        pass
-                    time.sleep(delay_sec)
-                    delay_sec = min(delay_sec * backoff_mult, max_delay)
-
-                try:
-                    token = self.auth_manager.get_auth_token()
-                except Exception as ex:
-                    token = None
-                    try:
-                        self.log(f"⚠️ [Auth] {attempt}/{max_attempts}차 예외: {ex}")
-                    except Exception:
-                        pass
-
-                if token:
-                    if attempt > 1:
-                        try:
-                            self.log(f"✅ [Auth] {attempt}회차에서 인증 성공")
-                        except Exception:
-                            pass
-                    break
-            except Exception as loop_ex:
-                try:
-                    self.log(f"⚠️ [Auth] 재시도 루프 오류: {loop_ex}")
-                except Exception:
-                    pass
-
-        if not token:
-            try:
-                self.log(
-                    f"❌ [Auth] {max_attempts}회 시도 후에도 인증에 실패했습니다. "
-                    "네트워크·키움 API 상태를 확인하거나 잠시 뒤 앱을 다시 시작해 주세요."
-                )
-            except Exception:
-                pass
-            try:
-                self.root.after(
-                    0,
-                    lambda c=err_fg: (
-                        self.status_label.config(
-                            text="상태: 인증 실패 — 연결 확인", foreground=c
-                        )
-                        if self.status_label
-                        else None
-                    ),
-                )
-            except Exception:
-                pass
-            self._boot_progress_finish(ok=False)
-            return
-
-        try:
-            self.root.after(
-                0,
-                lambda c=ok_fg: (
-                    self.status_label.config(
-                        text="상태: 로그인 완료", foreground=c
-                    )
-                    if self.status_label
-                    else None
-                ),
-            )
+            self.rest_auth_retry_service.start()
         except Exception:
             pass
 
-        self._boot_progress_set_message("계좌·시장 데이터 준비 중…")
-
+    def _run_auth_token_with_retries(self) -> None:
+        """백그라운드 전용: 토큰 발급 재시도 후 성공 시에만 부가 초기화 수행."""
+        # 서비스 구현으로 위임(호환용; 외부 호출 가능성 대비 유지)
         try:
-            # 상세 요약은 첫 계좌 동기화(REST)가 끝난 뒤 `PortfolioManager` 에서 한 번만 출력한다.
-            try:
-                self.log(
-                    "[기동] 인증 완료 → 약 2초 후 첫 계좌 동기화(백그라운드). "
-                    "그동안 탭 전환 가능. 로그는 동기화가 끝나는 대로 올라옵니다."
-                )
-            except Exception:
-                pass
-            self.portfolio.load_all()
-            self.remote_commander.start()
-            try:
-                self._schedule_vp_stub_price_refresh_after_auth()
-            except Exception:
-                pass
-            self.root.after(
-                2000,
-                lambda: self._run_portfolio_sync_in_daemon_thread(
-                    silent=True, force=True
-                ),
-            )
-            threading.Thread(
-                target=lambda: self.get_kospi_200(force=True), daemon=True
-            ).start()
-            self._boot_progress_finish(ok=True)
-        except Exception as post_ex:
-            try:
-                self.log(f"❌ [Auth] 인증 후 초기화 중 오류: {post_ex}")
-            except Exception:
-                pass
-            self._boot_progress_finish(ok=False)
+            self.rest_auth_retry_service._run_auth_token_with_retries()
+        except Exception:
+            pass
 
     def get_kospi_200(self, force=False):
         self.log("[Data] KOSPI200 유니버스 로드(kodex200.csv·설정 kodex200_universe_priority)...")
@@ -836,15 +750,9 @@ class KiwoomApp:
         SignalEngine·monitor_info 갱신은 메인 루프에서만 수행하고, 동일 종목은 한 프레임당 마지막 틱만 반영.
         """
         try:
-            kw = dict(kwargs)
-            r = getattr(self, "root", None)
-            if r is None:
-                self.signal_engine.on_tick_received(code, now_price, volume, trde_val, **kw)
-                return
-            key = str(code).zfill(6)
-            self._rt_tick_latest[key] = (code, now_price, volume, trde_val, kw)
-            if self._tick_flush_after_id is None:
-                self._tick_flush_after_id = r.after(16, self._flush_realtime_tick_batch_on_main)
+            self.tick_dispatch_service.on_tick_received(
+                code, now_price, volume, trde_val, **kwargs
+            )
         except Exception:
             try:
                 self.signal_engine.on_tick_received(
@@ -855,31 +763,11 @@ class KiwoomApp:
 
     def _flush_realtime_tick_batch_on_main(self) -> None:
         """누적된 실시간 틱을 메인 스레드에서 일괄 처리."""
+        # 기존 after 체인 핸들러가 남아 있을 수 있어, 서비스로 위임합니다.
         try:
-            batch = dict(self._rt_tick_latest)
-            self._rt_tick_latest.clear()
-            for _k, tup in batch.items():
-                try:
-                    c, np0, vol, tv, kw = tup
-                    self.signal_engine.on_tick_received(c, np0, vol, tv, **kw)
-                except Exception as e:
-                    try:
-                        self.log(f"⚠️ [Tick] 처리 예외: {e}")
-                    except Exception:
-                        pass
+            self.tick_dispatch_service.flush_on_main()
         except Exception:
             pass
-        finally:
-            try:
-                self._tick_flush_after_id = None
-                if self._rt_tick_latest:
-                    r2 = getattr(self, "root", None)
-                    if r2 is not None:
-                        self._tick_flush_after_id = r2.after(
-                            16, self._flush_realtime_tick_batch_on_main
-                        )
-            except Exception:
-                self._tick_flush_after_id = None
 
     def _resolve_fill_snapshot_reason(
         self,
@@ -935,109 +823,26 @@ class KiwoomApp:
         name: str = "",
         reason: str = "",
     ) -> None:
-        """
-        REST 주문 접수 성공 직후 웹소켓 CHE가 오지 않을 때도 DB 체결가·포지션을 맞춥니다.
-        CHE가 나중에 오면 동일 주문번호로 on_fill은 생략하고 체결가만 보정합니다.
-        """
         try:
-            oid = str(order_no or "").strip()
-            # CHE가 먼저 처리된 경우 참고가로 덮어쓰지 않음
-            if oid and oid in self._exchange_fill_order_ids:
-                return
-            try:
-                try:
-                    _fs = capture_supply_snapshot(self, code)
-                except Exception:
-                    _fs = {"vol_power": None, "bid_ask_text": ""}
-                self.data_manager.update_order_status(
-                    code,
-                    order_no,
-                    "FILLED",
-                    filled_price=int(fill_price),
-                    filled_qty=int(qty),
-                    fill_snap_vol_power=_fs.get("vol_power"),
-                    fill_snap_bid_ask=_fs.get("bid_ask_text") or "— / — (—)",
-                )
-            except Exception as ue:
-                self.log(f"⚠️ [체결 동기화] DB 갱신 실패: {ue}")
-            snap_reason = self._resolve_fill_snapshot_reason(
-                code, side, reason, channel="REST"
+            self.fill_reconciliation_service.reconcile_exchange_fill_after_order_accept(
+                code=code,
+                order_no=order_no,
+                side=side,
+                qty=qty,
+                fill_price=fill_price,
+                name=name,
+                reason=reason,
             )
-            snapshot = self.portfolio.capture_snapshot(code, fill_price, reason=snap_reason)
-            applied = self.portfolio.on_fill(
-                code,
-                side,
-                fill_price,
-                qty,
-                name=name or None,
-                reason=reason or None,
-                snapshot=snapshot,
-                fill_channel="exchange",
-                order_no=str(order_no or "").strip() or None,
-            )
-            # 로컬 보유가 없어 on_fill 이 스킵된 매도: 주문 로그는 있는데 종료내역만 누락되는 경우 보강
-            if (
-                not applied
-                and str(side or "").lower() == "sell"
-            ):
-                try:
-                    applied = self.portfolio.record_orphan_sell_close(
-                        code,
-                        float(fill_price),
-                        int(qty),
-                        str(name or ""),
-                        str(reason or ""),
-                        str(order_no or ""),
-                        snapshot,
-                        "exchange",
-                    )
-                except Exception as oe:
-                    self.log(f"⚠️ [체결 동기화] 종료내역 보강 실패: {oe}")
-            # on_fill이 매도 스킵(False)인데 여기서 oid를 먼저 넣으면, 뒤따른 CHE가 on_fill을 영원히 못 타
-            # 매매종료내역 누락으로 이어질 수 있음 — 실제 반영(True)일 때만 중복 마킹
-            if oid and applied:
-                self._exchange_fill_order_ids.add(oid)
-            if applied:
-                self.log(
-                    f"✅ [체결 동기화] REST 접수 직후 가상체결 {code} "
-                    f"{'매수' if side == 'buy' else '매도'} {qty}주 ({int(fill_price):,}원)"
-                )
-            elif str(side or "").lower() == "sell":
-                self.log(
-                    f"⚠️ [체결 동기화] REST 매도 체결은 포트폴리오에 미반영({code}) "
-                    f"— 로컬 보유 없음·종료내역 보강도 실패. 주문 로그와 DB를 확인하세요."
-                )
+        except Exception:
             try:
-                tc = getattr(self, "trading_controller", None)
-                if tc and oid:
-                    tc.clear_limit_order_watch(oid)
+                self.log("⚠️ [체결 동기화] 위임 실패")
             except Exception:
                 pass
-            self._schedule_account_sync_after_fill()
-        except Exception as e:
-            self.log(f"⚠️ [체결 동기화] 실패: {e}")
 
     def _cancel_post_fill_sync_jobs(self) -> None:
         """체결 후 동기화 예약(1·2·3차)을 취소합니다. 연속 체결 디바운스 시 사용."""
         try:
-            r = getattr(self, "root", None)
-            if r is None:
-                return
-            for attr in (
-                "_post_fill_sync_job",
-                "_post_fill_sync_followup",
-                "_post_fill_sync_followup2",
-            ):
-                try:
-                    jid = getattr(self, attr, None)
-                    if jid is not None:
-                        try:
-                            r.after_cancel(jid)
-                        except Exception:
-                            pass
-                        setattr(self, attr, None)
-                except Exception:
-                    pass
+            self.post_fill_account_sync_service.cancel_jobs()
         except Exception:
             pass
 
@@ -1051,194 +856,27 @@ class KiwoomApp:
         - 동기화 스레드는 ``wait_for_lock=True`` 로 이전 동기화가 끝날 때까지 대기합니다.
         """
         try:
-            r = getattr(self, "root", None)
-            if r is None:
-                return
-            self._cancel_post_fill_sync_jobs()
-
-            # ms: 기동 직후와 동시에 오가면 너무 길면 부담 — 필요 시 settings 키로만 조정 예정
-            first_ms = 4200
-            follow_ms = 7000
-            # 2차 실행 시점 기준 추가 대기(증권사 예수금상세·D+2 백엔드 지연)
-            third_after_second_ms = 22000
-
-            def _first() -> None:
-                try:
-                    self._post_fill_sync_job = None
-                    self._run_portfolio_sync_in_daemon_thread(
-                        silent=True,
-                        force=True,
-                        refresh_cash_deposit=True,
-                        wait_for_lock=True,
-                    )
-                except Exception as e1:
-                    try:
-                        self.log(f"⚠️ [체결 동기화] 1차 실행 예외: {e1}")
-                    except Exception:
-                        pass
-                try:
-                    r2 = getattr(self, "root", None)
-                    if r2 is None:
-                        return
-
-                    def _second() -> None:
-                        try:
-                            self._post_fill_sync_followup = None
-                            self._run_portfolio_sync_in_daemon_thread(
-                                silent=True,
-                                force=True,
-                                refresh_cash_deposit=True,
-                                wait_for_lock=True,
-                            )
-                        except Exception as e2:
-                            try:
-                                self.log(f"⚠️ [체결 동기화] 2차 실행 예외: {e2}")
-                            except Exception:
-                                pass
-                        try:
-                            r3 = getattr(self, "root", None)
-                            if r3 is None:
-                                return
-
-                            def _third() -> None:
-                                try:
-                                    self._post_fill_sync_followup2 = None
-                                    self._run_portfolio_sync_in_daemon_thread(
-                                        silent=True,
-                                        force=True,
-                                        refresh_cash_deposit=True,
-                                        wait_for_lock=True,
-                                    )
-                                except Exception as e3b:
-                                    try:
-                                        self.log(
-                                            f"⚠️ [체결 동기화] 3차 실행 예외: {e3b}"
-                                        )
-                                    except Exception:
-                                        pass
-
-                            self._post_fill_sync_followup2 = r3.after(
-                                third_after_second_ms, _third
-                            )
-                        except Exception as e3a:
-                            try:
-                                self.log(f"⚠️ [체결 동기화] 3차 예약 실패: {e3a}")
-                            except Exception:
-                                pass
-
-                    self._post_fill_sync_followup = r2.after(follow_ms, _second)
-                except Exception as e3:
-                    try:
-                        self.log(f"⚠️ [체결 동기화] 2차 예약 실패: {e3}")
-                    except Exception:
-                        pass
-
-            self._post_fill_sync_job = r.after(first_ms, _first)
-        except Exception as e0:
+            self.post_fill_account_sync_service.schedule_after_fill()
+        except Exception as e:
             try:
-                self.log(f"⚠️ [체결 동기화] 예약 실패: {e0}")
+                self.log(f"⚠️ [체결 동기화] 예약 실패: {e}")
             except Exception:
                 pass
 
     def _on_execution_received(self, code, order_no, qty, price, side):
         try:
-            oid = str(order_no or "").strip()
-            if oid and oid in self._exchange_fill_order_ids:
-                try:
-                    try:
-                        _fs = capture_supply_snapshot(self, code)
-                    except Exception:
-                        _fs = {"vol_power": None, "bid_ask_text": ""}
-                    self.data_manager.update_order_status(
-                        code,
-                        order_no,
-                        "FILLED",
-                        filled_price=price,
-                        filled_qty=qty,
-                        fill_snap_vol_power=_fs.get("vol_power"),
-                        fill_snap_bid_ask=_fs.get("bid_ask_text") or "— / — (—)",
-                    )
-                except Exception as ue:
-                    self.log(f"⚠️ [체결 보정] DB 갱신 실패: {ue}")
-                self.log(f"ℹ️ [체결 보정] CHE 체결가 반영 {code} {price:,}원 (주문번호 {oid})")
-                self._schedule_account_sync_after_fill()
-                return
-            try:
-                try:
-                    _fs = capture_supply_snapshot(self, code)
-                except Exception:
-                    _fs = {"vol_power": None, "bid_ask_text": ""}
-                self.data_manager.update_order_status(
-                    code,
-                    order_no,
-                    "FILLED",
-                    filled_price=price,
-                    filled_qty=qty,
-                    fill_snap_vol_power=_fs.get("vol_power"),
-                    fill_snap_bid_ask=_fs.get("bid_ask_text") or "— / — (—)",
-                )
-            except Exception as ue:
-                self.log(f"⚠️ [체결] DB 갱신 실패: {ue}")
-            snap_reason = self._resolve_fill_snapshot_reason(
-                code, side, None, channel="EXEC"
+            self.fill_reconciliation_service.on_execution_received(
+                code=code,
+                order_no=order_no,
+                qty=qty,
+                price=price,
+                side=side,
             )
-            snapshot = self.portfolio.capture_snapshot(code, price, reason=snap_reason)
-            applied = self.portfolio.on_fill(
-                code,
-                side,
-                price,
-                qty,
-                snapshot=snapshot,
-                fill_channel="exchange",
-                order_no=oid or None,
-            )
-            if (
-                not applied
-                and str(side or "").lower() == "sell"
-            ):
-                meta: Optional[Dict[str, Any]] = None
-                try:
-                    meta = self.data_manager.get_sell_order_meta_by_order_no(oid)
-                except Exception:
-                    meta = None
-                try:
-                    nm = str((meta or {}).get("name") or "")
-                    rs = str((meta or {}).get("reason") or "")
-                except Exception:
-                    nm, rs = "", ""
-                try:
-                    applied = self.portfolio.record_orphan_sell_close(
-                        code,
-                        float(price),
-                        int(qty),
-                        nm,
-                        rs,
-                        oid,
-                        snapshot,
-                        "exchange",
-                    )
-                except Exception as oe:
-                    self.log(f"⚠️ [체결] 종료내역 보강 실패: {oe}")
-            if applied:
-                self.log(
-                    f"✅ [체결] {code} {'매수' if side == 'buy' else '매도'} {qty}주 완료 ({price:,}원)"
-                )
-            elif str(side or "").lower() == "sell":
-                self.log(
-                    f"⚠️ [체결] CHE 매도는 포트폴리오에 미반영({code}) "
-                    f"— 로컬 보유 없음·종료내역 보강도 실패. 주문 로그를 확인하세요."
-                )
-            if oid and applied:
-                self._exchange_fill_order_ids.add(oid)
+        except Exception:
             try:
-                tc = getattr(self, "trading_controller", None)
-                if tc and oid:
-                    tc.clear_limit_order_watch(oid)
+                self.log("⚠️ [체결] 위임 실패")
             except Exception:
                 pass
-            self._schedule_account_sync_after_fill()
-        except Exception as e:
-            self.log(f"⚠️ [체결] 처리 실패: {e}")
 
     def _render_tree_updates(self) -> None:
         """
@@ -1611,51 +1249,6 @@ class KiwoomApp:
             if self.status_label:
                 self.status_label.config(text="상태: 대기 중", foreground=self.colors["primary"])
 
-    def _on_warmup_stock_prep(
-        self, event: str, cur: int, total: int, name: str, code: str, reason: str = ""
-    ) -> None:
-        """워커 스레드 → 메인 스레드: 종목별 워밍업 상태(트리·라벨)."""
-
-        def update() -> None:
-            try:
-                if hasattr(self, "monitor_tab"):
-                    self.monitor_tab.update_warmup_stock_prep(
-                        event, cur, total, name, code, reason
-                    )
-                # prep_ok 는 종목 행(update_warmup_stock_prep)만 갱신 — 상단은 건드리지 않음.
-                # (그렇지 않으면 STARTED 로 이미 "감시 중"이 된 뒤에도 매 종목마다
-                #  "데이터 준비 중"으로 덮여 감시가 안 된 것처럼 보임.)
-                if hasattr(self, "lbl_monitor_status"):
-                    if event == "prep_ok":
-                        pass
-                    elif event == "prep_progress" and (reason or "").strip():
-                        line = f"상태: ({cur}/{total}) {name} — {reason.strip()}"
-                        self.lbl_monitor_status.config(
-                            text=line,
-                            foreground=self.colors["primary"],
-                        )
-                    else:
-                        line = f"상태: 데이터 준비 중 ({cur}/{total}) {name}"
-                        self.lbl_monitor_status.config(
-                            text=line,
-                            foreground=self.colors["primary"],
-                        )
-                if self.status_label:
-                    if event == "prep_ok":
-                        pass
-                    elif event == "prep_progress" and (reason or "").strip():
-                        self.status_label.config(
-                            text=f"상태: ({cur}/{total}) {name} — {reason.strip()}"
-                        )
-                    else:
-                        self.status_label.config(
-                            text=f"상태: 데이터 준비 ({cur}/{total}) {name}"
-                        )
-            except Exception as e:
-                self.log(f"⚠️ [UI] 워밍업 표시 갱신 실패: {e}")
-
-        self.root.after(0, update)
-
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")
         try:
@@ -1684,180 +1277,37 @@ class KiwoomApp:
         self.root.destroy()
 
     def _start_eod_equity_snapshot_scheduler(self) -> None:
-        """
-        매일(거래일 기준) 15:30 + buffer 이후 딱 1회 스냅샷을 저장합니다.
-        같은 날짜 중복/덮어쓰기는 파일(YYYY-MM-DD.json) override로 처리합니다.
-        """
+        # 기존 구현을 서비스로 위임
         try:
-            # 이미 예약이 있으면 중복 예약 방지
-            if self._equity_snapshot_after_id is not None:
-                try:
-                    self.root.after_cancel(self._equity_snapshot_after_id)
-                except Exception:
-                    pass
-                self._equity_snapshot_after_id = None
+            self.eod_equity_snapshot_service.start()
         except Exception:
             pass
-
-        self._equity_snapshot_cancelled = False
-        self._schedule_eod_equity_snapshot_tick()
 
     def _schedule_eod_equity_snapshot_tick(self) -> None:
+        # 서비스가 after 예약을 담당합니다.
+        # (호환용) 과거 코드 호출 경로가 남아있으면 서비스 tick()으로 위임합니다.
         try:
-            if getattr(self, "root", None) is None:
-                return
-            self._equity_snapshot_after_id = self.root.after(30000, self._eod_equity_snapshot_tick)
+            self.eod_equity_snapshot_service.tick()
         except Exception:
-            self._equity_snapshot_after_id = None
+            pass
 
     def _eod_equity_snapshot_tick(self) -> None:
-        """
-        30초마다 체크:
-        - 오늘이 거래일이면 snap_date=today
-        - 휴장일이면 snap_date=previous_trading_day
-        - 현재 시각이 15:30 + buffer 이후면 스냅샷 저장 job 스폰
-        """
+        # 서비스 tick()으로 위임
         try:
-            if self._equity_snapshot_cancelled:
-                return
-            now = datetime.now()
-            buffer_minutes = 10
-            try:
-                buffer_minutes = int(float(self.settings.get("daily_report_session_buffer_minutes", 10)))
-            except Exception:
-                buffer_minutes = 10
-
-            # 거래일 판정은 KRX 캘린더(폴백 포함) 사용
-            try:
-                from reporting.krx_trading_calendar import is_trading_day, previous_trading_day
-            except Exception:
-                is_trading_day = None
-                previous_trading_day = None
-
-            today_d = now.date()
-
-            def _end_of_day_due(day_d: date) -> datetime:
-                return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(
-                    minutes=max(0, int(buffer_minutes))
-                )
-
-            # (복구 포함) "이미 due가 지난 가장 최근 거래일"을 스냅샷 대상으로 선택
-            snap_date: Optional[date] = None
-            if callable(is_trading_day) and callable(previous_trading_day):
-                try:
-                    # 오늘이 휴장이라면 마지막 거래일로 우선 스냅샷 후보
-                    last_trading_day = today_d if is_trading_day(today_d) else previous_trading_day(today_d)
-                    # 마지막 거래일의 due가 아직 안 지났으면, 한 거래일 전으로 내려가 복구
-                    due1 = _end_of_day_due(last_trading_day)
-                    if now >= due1:
-                        snap_date = last_trading_day
-                    else:
-                        snap_date = previous_trading_day(last_trading_day)
-                except Exception:
-                    snap_date = today_d
-            else:
-                # 예외 상황: 주말만 휴장 처리
-                if today_d.weekday() < 5:
-                    last_trading_day = today_d
-                else:
-                    last_trading_day = today_d - timedelta(days=1)
-                if now >= _end_of_day_due(last_trading_day):
-                    snap_date = last_trading_day
-                else:
-                    snap_date = last_trading_day - timedelta(days=1)
-
-            if snap_date is None:
-                return
-
-            snap_date_str = str(snap_date)[:10]
-
-            # 같은 날짜는 성공 저장된 것만 1회 스킵
-            if self._equity_snapshot_last_saved_date == snap_date_str:
-                return
-            if self._equity_snapshot_pending_date == snap_date_str:
-                return
-            if self._equity_snapshot_job_in_progress:
-                return
-
-            self._equity_snapshot_pending_date = snap_date_str
-            self._equity_snapshot_job_in_progress = True
-
-            threading.Thread(
-                target=self._job_save_eod_equity_snapshot,
-                args=(snap_date_str,),
-                daemon=True,
-            ).start()
+            self.eod_equity_snapshot_service.tick()
         except Exception:
-            # 체크 실패는 다음 tick에서 재시도
             pass
-        finally:
-            self._schedule_eod_equity_snapshot_tick()
 
     def _job_save_eod_equity_snapshot(self, snap_date_str: str) -> None:
-        """
-        백그라운드 작업:
-        - (가능하면) 계좌 동기화 1회 force(refresh_cash_deposit=True)
-        - 포트폴리오 total_assets(=d2_deposit + holdings_stocks_mv_api) 스냅샷 저장
-        """
-        saved_ok = False
+        # 기존 구현을 서비스로 위임
         try:
-            if self._equity_snapshot_cancelled:
-                return
-
-            # 스냅샷 직전 계좌 동기화(최소 1회)로 D+2/평가를 맞춥니다.
-            try:
-                self.portfolio.sync_with_actual_account(
-                    silent=True,
-                    force=True,
-                    refresh_cash_deposit=True,
-                )
-            except Exception as sync_ex:
-                # 동기화 실패해도 스냅샷을 남겨 디버깅 가능(다만 값 신뢰도는 낮을 수 있음)
-                try:
-                    self.log(f"⚠️ [EOD Snapshot] 동기화 실패: {sync_ex}")
-                except Exception:
-                    pass
-
-            d2 = 0.0
-            stock_eval = 0.0
-            d1 = 0.0
-            total_equity = 0.0
-            with self.portfolio.lock:
-                d2 = float(getattr(self.portfolio, "d2_deposit", 0) or 0)
-                d1 = float(getattr(self.portfolio, "d1_deposit", 0) or 0)
-                stock_eval = float(getattr(self.portfolio, "holdings_stocks_mv_api", 0.0) or 0.0)
-                total_equity = float(getattr(self.portfolio, "total_equity", d2 + stock_eval) or 0.0)
-
-            total_assets = d2 + stock_eval
-
-            record = {
-                "date": snap_date_str,
-                "generated_at": datetime.now().isoformat(timespec="seconds"),
-                "d2_deposit": d2,
-                "d1_deposit": d1,
-                "stock_eval": stock_eval,
-                "total_assets": total_assets,
-                "total_equity": total_equity,
-            }
-
-            from utils.equity_snapshots_store import upsert_equity_snapshot
-
-            path = upsert_equity_snapshot(snap_date_str, record)
-            if path:
-                saved_ok = True
-        except Exception as e:
-            try:
-                self.log(f"❌ [EOD Snapshot] 저장 실패({snap_date_str}): {e}")
-            except Exception:
-                pass
-        finally:
-            try:
-                self._equity_snapshot_job_in_progress = False
-                self._equity_snapshot_pending_date = None
-                if saved_ok:
-                    self._equity_snapshot_last_saved_date = snap_date_str
-            except Exception:
-                pass
+            # 서비스의 tick() 경로가 job을 직접 스폰하지만,
+            # 호환 목적의 호출이 남아있을 수 있어 직접 위임합니다.
+            self.eod_equity_snapshot_service._job_save_eod_equity_snapshot(
+                snap_date_str
+            )
+        except Exception:
+            pass
 
     def _calculate_buy_amt(self, stage=1, is_simulation=False):
         return self.portfolio.calculate_order_quantity(stage, is_simulation)
@@ -1874,95 +1324,26 @@ class KiwoomApp:
         osc_val: float,
         ma60_ratio: float,
     ) -> bool:
-        """
-        SignalEngine 1차 매수 포착 콜백.
-        DynamicBacktester 와 동일하게: 확정 Sig_Type(동시신호·동점 B우선), TypeBalanceGate,
-        (선택) 선정 트랙(sel_track) 교차 검증 후 주문.
-        True: 주문 접수·가상체결 성공 — SignalEngine 매수 쿨타임 갱신에만 사용.
-        """
+        # 판정/주문 로직은 SignalCallbacksService로 위임
         try:
-            code = str(code).zfill(6)
-            mi = getattr(self, "monitor_info", None) or {}
-            info = mi.get(code, {})
-            name = str(info.get("name", "Unknown"))
-            detailed = info.get("last_detailed_sig")
-            if detailed is None or getattr(detailed, "empty", True):
-                self.log(f"⚠️ [Skip] {code} 신호 캐시 없음")
-                try:
-                    self.session_logger.log(
-                        "signal_buy_skipped",
-                        {"code": code, "name": name, "reason": "no_signal_cache"},
-                    )
-                except Exception:
-                    pass
-                return False
-            last_sig = detailed.iloc[-1]
-            row = last_sig.to_dict() if hasattr(last_sig, "to_dict") else dict(last_sig)
-            sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
-                self.settings, row, self.portfolio.virtual_positions
+            return self.signal_callbacks_service.on_buy_signal_received(
+                code=code,
+                now_price=now_price,
+                rsi_sig=rsi_sig,
+                macd_val=macd_val,
+                osc_val=osc_val,
+                ma60_ratio=ma60_ratio,
             )
-            # CSV/선정 단계에서 SelTrack(A/B/AB)을 넣은 경우에만 백테 트랙 검증과 동일
-            tr = str(
-                info.get("sel_track", info.get("SelTrack", info.get("seltrack", "AB")))
-            ).strip().upper()
-            # 선정 트랙과 확정 신호 타입 불일치: 의도적 무시 (백테와 동일). 로그·세션 기록 생략.
-            if tr == "A" and sig_type == "TYPE_B":
-                return False
-            if tr == "B" and sig_type == "TYPE_A":
-                return False
-            if not TradingStrategy.type_balance_allows_new_s1(
-                self.settings, sig_type, self.portfolio.virtual_positions
-            ):
-                self.log(f"⚠️ [Skip] {name}({code}) TypeBalanceGate (A/B 비중)")
-                try:
-                    self.session_logger.log(
-                        "signal_buy_skipped",
-                        {
-                            "code": code,
-                            "name": name,
-                            "reason": "type_balance_gate",
-                            "sig_type": sig_type,
-                        },
-                    )
-                except Exception:
-                    pass
-                return False
-            try:
-                self.session_logger.log(
-                    "signal_buy_accepted",
-                    {
-                        "code": code,
-                        "name": name,
-                        "price": float(now_price),
-                        "sig_type": sig_type,
-                        "sel_track": tr,
-                        "rsi_sig": float(rsi_sig),
-                        "macd": float(macd_val),
-                        "osc": float(osc_val),
-                        "ma60_ratio": float(ma60_ratio),
-                    },
-                )
-            except Exception:
-                pass
-            return self.trading_controller.execute_buy_signal(
-                code, name, now_price, reason=sig_type
-            )
-        except Exception as e:
-            self.log(f"❌ [BuySignal] {code} 처리 실패: {e}")
-            try:
-                self.session_logger.log(
-                    "signal_buy_error", {"code": code, "error": str(e)}
-                )
-            except Exception:
-                pass
-            try:
-                traceback.print_exc()
-            except Exception:
-                pass
+        except Exception:
             return False
 
     def _on_strategy_action_needed(self, code, action, reason, **kwargs):
-        return self.trading_controller.handle_strategy_action(code, action, reason, **kwargs)
+        try:
+            return self.signal_callbacks_service.on_strategy_action_needed(
+                code=code, action=action, reason=reason, **kwargs
+            )
+        except Exception:
+            return None
 
     def _recalculate_all_indicators(self, code):
         return self.strategy_engine.recalculate_indicators(code, self.bars_data, self.settings)

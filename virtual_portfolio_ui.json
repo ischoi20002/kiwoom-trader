@@ -1,0 +1,31 @@
+{
+  "columns_active": {
+    "Entry": 148,
+    "Code": 72,
+    "Name": 137,
+    "Qty": 63,
+    "PnL": 108,
+    "PnLPct": 80,
+    "Eval": 116,
+    "BuyIn": 108,
+    "CurP": 101,
+    "AvgP": 100,
+    "DayChg": 91,
+    "WtPct": 79
+  },
+  "columns_orders": {
+    "Time": 146,
+    "Code": 88,
+    "Name": 124,
+    "Side": 88,
+    "Qty": 88,
+    "FQty": 72,
+    "OrderP": 114,
+    "FilledP": 104,
+    "VPOrd": 85,
+    "BAOrd": 177,
+    "Status": 126,
+    "Reason": 126
+  },
+  "sash0_rel": 0.3691460055096419
+}

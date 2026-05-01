@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.normalization import normalize_code
+from utils.telegram_sender import send_telegram_message
 
 # 시장지수·VIX 등 — 하베스팅/메인 DB에서 제외·정리 대상 코드 (bars_* / sync_meta)
 MARKET_INDEX_BAR_CODES: Tuple[str, ...] = (
@@ -2220,44 +2221,19 @@ class DataManagerV2:
                 return {c: pd.DataFrame(recs) for c, recs in cache.items()}
         except: return {}
 
-    def send_telegram_message(self, message: str, parse_mode: Optional[str] = "HTML") -> bool:
+    def send_telegram_message(
+        self, message: str, parse_mode: Optional[str] = "HTML"
+    ) -> bool:
         """
-        텔레그램 Bot API로 메시지 전송.
-        parse_mode 가 None 이면 HTML 파싱 없음(종목명 특수문자·긴 목록에 안전).
-        Returns
-        -------
-        bool
-            전송 성공 True, 스킵/실패 False
+        텔레그램 Bot API로 메시지 전송 (DB 로직과 분리된 공용 유틸 위임).
         """
-        token = getattr(config, "TELEGRAM_BOT_TOKEN", "") or ""
-        cid = getattr(config, "TELEGRAM_CHAT_ID", "") or ""
-        if not token or not cid or "발급" in token:
-            try:
-                print("[Telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 를 config.py 에 설정하세요.")
-            except Exception:
-                pass
-            return False
         try:
-            payload: Dict[str, Any] = {"chat_id": cid, "text": message}
-            if parse_mode:
-                payload["parse_mode"] = parse_mode
-            res = requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json=payload,
-                timeout=10,
+            return send_telegram_message(
+                message,
+                parse_mode=parse_mode,
+                log_func=print,
             )
-            if res.status_code != 200:
-                try:
-                    print(f"[Telegram Error] HTTP {res.status_code}: {res.text[:500]}")
-                except Exception:
-                    pass
-                return False
-            return True
-        except Exception as e:
-            try:
-                print(f"[Telegram Exception] {e}")
-            except Exception:
-                pass
+        except Exception:
             return False
 
     def get_active_positions(self):

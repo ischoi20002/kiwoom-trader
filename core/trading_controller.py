@@ -9,6 +9,10 @@ import config
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
+from core.limit_order_watch_service import LimitOrderWatchService
+from core.warmup_stream_prep_service import WarmupStreamPrepService
+from core.websocket_worker_service import WebsocketWorkerService
+
 
 def _implied_price_too_close_to_avg(
     px: float, avg: float, *, tol: float = 0.501
@@ -107,16 +111,31 @@ class TradingController:
         
         # Threads
         self._stop_event = threading.Event()
-        # 지정가 미체결 타임아웃: ord_no -> {after_id, code, kind, qty}
-        self._limit_order_meta: Dict[str, Dict[str, Any]] = {}
-        # S1 매수 접수 후 체결 전 — 동일 종목 중복 매수 방지
-        self._s1_buy_order_pending_codes: Set[str] = set()
+        # 지정가 미체결 타임아웃 감시/취소/플래그 정리를 서비스로 위임
+        self.limit_order_watch_service = LimitOrderWatchService(
+            self.app, log_func=self.log
+        )
+        # 기존 코드 호환용 alias (execute_buy_signal 내부 중복매수 방지)
+        self._limit_order_meta = self.limit_order_watch_service.limit_order_meta
+        self._s1_buy_order_pending_codes = (
+            self.limit_order_watch_service.s1_buy_pending_codes
+        )
         # D+2로 1주도 못 살 때 Skip 로그 — 틱 반복 방지( epoch 마지막 출력 시각 )
         self._buy_skip_d2_one_lot_log_at: Dict[str, float] = {}
         # _run_start_sequence 가 백그라운드에서 도는 동안 중복 start() 방지
         self._run_start_sequence_active: bool = False
         # stop() 호출 시 워밍업 직후 단계(WS 기동 등)를 건너뛰기 위함
         self._abort_monitor_start: bool = False
+
+        # 워밍업/스트림 준비를 담당하는 서비스 추출
+        self.warmup_stream_prep_service = WarmupStreamPrepService(
+            self, log_func=self.log
+        )
+
+        # 웹소켓 워커 래퍼 서비스 추출
+        self.websocket_worker_service = WebsocketWorkerService(
+            self.app, log_func=self.log
+        )
 
     def toggle(self):
         """감시 상태를 토글합니다."""
@@ -380,7 +399,7 @@ class TradingController:
                 ):
                     self._stop_event.clear()
                     self.monitor_thread = threading.Thread(
-                        target=self._ws_worker_loop, daemon=True
+                        target=self.websocket_worker_service.worker_loop, daemon=True
                     )
                     self.monitor_thread.start()
 
@@ -391,183 +410,19 @@ class TradingController:
             self.log(f"⚠️ [System] 준비 종목 스트림 반영 실패: {e}")
 
     def _run_start_sequence(self):
-        """워밍업부터 웹소켓 연결까지 마스터 시퀀스"""
+        """워밍업부터 웹소켓 연결까지 마스터 시퀀스 (서비스 위임)."""
         try:
-            self._abort_monitor_start = False
-            self.app._active_stream_codes = []
-            self._incremental_stream_bootstrapped = False
-            merged = self._merged_warmup_codes()
-            self._ensure_watchlist_monitor_info()
-            self._ensure_virtual_positions_monitor_info()
-
-            require_full = bool(
-                self.app.settings.get("require_full_warmup_for_monitoring", False)
-            )
-            # require_full 여부와 무관: 준비 완료 종목부터 스트림(실패 시 require_full 분기에서 감시 중단)
-            incremental_stream = bool(
-                self.app.settings.get("incremental_warmup_stream", True)
-            )
-
-            # [Step 1] Warmup: 전 종목 15분봉·장중 구간 검증 통과 시에만 감시 진행
-            if self.status_cb:
-                self.status_cb(
-                    "STATUS_TEXT",
-                    f"상태: 분석 중 (감시 {len(self.monitor_codes)} + 스트림 합계 {len(merged)})",
-                )
-            if self.status_cb:
-                self.status_cb("WARMUP_BEGIN", list(merged))
-
-            on_ready = (
-                self._schedule_warmup_stock_ready if incremental_stream else None
-            )
-            results = self.app.warmup_service.run(
-                merged,
-                self.monitor_info,
-                self.app.bars_data,
-                on_stock_ready=on_ready,
-            )
-            if self._abort_monitor_start:
-                self.log(
-                    "ℹ️ [System] 감시 중단 요청으로 워밍업 이후(접속·등록) 단계를 생략합니다."
-                )
-                return
-            failed = [c for c in merged if not results.get(c, {}).get("ok")]
-            if failed:
-                if require_full:
-                    # 점진 스트림으로 이미 WS가 켜진 경우: 전부 실패 처리 전 감시 중단
-                    if getattr(self, "_incremental_stream_bootstrapped", False):
-                        try:
-                            self.stop()
-                        except Exception as se:
-                            self.log(f"⚠️ [System] 워밍업 실패 시 감시 중단 처리 오류: {se}")
-                    for c in merged:
-                        try:
-                            self.app.bars_data.pop(c, None)
-                        except Exception:
-                            pass
-                    if self.status_cb:
-                        self.status_cb(
-                            "WARMUP_FAILED",
-                            {"results": results, "failed": failed},
-                        )
-                    if self.status_cb:
-                        self.status_cb(
-                            "STATUS_TEXT",
-                            "상태: 워밍업 실패 — 감시 미시작 (신호상태 열 참고)",
-                        )
-                    self.log(
-                        "❌ [System] 워밍업 미달 종목이 있어 실시간 감시를 시작하지 않습니다."
-                    )
-                    return
-                # 완화 모드: 실패 종목만 제외 (미권장)
-                for c in failed:
-                    try:
-                        self.app.bars_data.pop(c, None)
-                    except Exception:
-                        pass
-                    try:
-                        self.monitor_info.pop(c, None)
-                    except Exception:
-                        pass
-                self.monitor_codes = [
-                    c for c in self.monitor_codes if c not in failed
-                ]
-                if not [
-                    c for c in merged if results.get(c, {}).get("ok")
-                ]:
-                    if self.status_cb:
-                        self.status_cb(
-                            "WARMUP_FAILED",
-                            {"results": results, "failed": failed},
-                        )
-                    if self.status_cb:
-                        self.status_cb(
-                            "STATUS_TEXT",
-                            "상태: 워밍업 실패 — 감시 대상 없음",
-                        )
-                    self.log("❌ [System] 워밍업 실패로 감시 가능 종목이 없습니다.")
-                    return
-                self.log(
-                    f"⚠️ [System] 워밍업 실패 {len(failed)}종목 제외 후 감시 진행 "
-                    f"(require_full_warmup_for_monitoring=False)"
-                )
-                if self.status_cb:
-                    self.status_cb(
-                        "MONITOR_CODES_FILTERED",
-                        {
-                            "codes": list(self.monitor_codes),
-                            "dropped": failed,
-                            "results": results,
-                        },
-                    )
-
-            successful = [c for c in merged if results.get(c, {}).get("ok")]
-            self.app._active_stream_codes = successful
-
-            def _notify_started_and_reg_refresh() -> None:
-                self._status_cb_on_main("STARTED", len(successful))
-                mt = getattr(self.app, "monitor_tab", None)
-                if mt is not None:
-                    mt._pending_reg_refresh = True
-
-            # 메인 스레드의 _apply 가 WS를 띄우기 전에 워커가 여기까지 도달할 수 있음 → 중복 소켓 방지
-            ws_already_running = (
-                self.monitor_thread is not None and self.monitor_thread.is_alive()
-            )
-            # bootstrapped 만 True이고 WS 스레드는 이미 죽은 경우(빈 구독·연결 실패 등) 재기동하지 않고
-            # return 하면 UI 만 '감시 중'이 되어 틱이 영원히 안 옴 → 살아 있는 스레드만 '준비 완료'로 본다.
-            incremental_ws_ready = incremental_stream and ws_already_running
-
-            if incremental_ws_ready:
-                self.log(
-                    "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 구독 목록을 최종 동기화합니다."
-                )
-                # _ws_client_loop 가 while self.app.is_monitoring 이므로, after(0) STARTED 보다 먼저 동기 반영
-                self.is_monitoring = True
-                try:
-                    self.app.is_monitoring = True
-                except Exception:
-                    pass
-                _notify_started_and_reg_refresh()
-                return
-
-            self.log(
-                "✅ [System] 전 종목 15분봉 워밍업 검증 완료. 실시간 모니터링을 시작합니다."
-            )
-
-            self.is_monitoring = True
-            try:
-                self.app.is_monitoring = True
-            except Exception:
-                pass
-            _notify_started_and_reg_refresh()
-
-            # [Step 2] 가상 실천 엔진(WS Worker) 구동 (이미 살아 있으면 재시작하지 않음)
-            if ws_already_running:
-                self.log(
-                    "ℹ️ [System] 웹소켓 워커가 이미 동작 중이어서 추가 기동을 건너뜁니다."
-                )
-                return
-
-            self._stop_event.clear()
-            self.monitor_thread = threading.Thread(
-                target=self._ws_worker_loop, daemon=True
-            )
-            self.monitor_thread.start()
-
+            self.warmup_stream_prep_service.run()
         except Exception as e:
             self.log(f"❌ [Error] 시작 시퀀스 실패: {e}")
             self.stop()
 
     def _ws_worker_loop(self):
-        """웹소켓 비동기 루프 래퍼"""
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
+        """(호환) 기존 동작을 유지하되 websocket_worker_service 위임."""
         try:
-            # MonitorTab에 구현된 웹소켓 루프 호출 (Bridge 역할)
-            new_loop.run_until_complete(self.app.monitor_tab._ws_client_loop())
-        except Exception as e:
-            self.log(f"⚠️ [System] 웹소켓 워커 종료: {e}")
+            self.websocket_worker_service.worker_loop()
+        except Exception:
+            pass
 
     def _supply_log_fields(self, code: object) -> Dict[str, Any]:
         """일일 JSONL(order/fill)용: 감시 화면과 동일한 체결강도·호가 스냅샷."""
@@ -1017,50 +872,19 @@ class TradingController:
                     ).start()
 
     def _limit_order_timeout_ms(self) -> int:
-        """settings.json `limit_order_unfilled_timeout_sec` — 짧은 지정가 미체결 대기(초)."""
+        """settings.json `limit_order_unfilled_timeout_sec` — 서비스에서 사용."""
         try:
-            sec = float(
-                (self.app.settings or {}).get("limit_order_unfilled_timeout_sec", 5.0)
-            )
-        except (TypeError, ValueError):
-            sec = 5.0
-        sec = max(2.0, min(sec, 120.0))
-        return int(sec * 1000)
+            return self.limit_order_watch_service._get_timeout_ms()
+        except Exception:
+            return 5000
 
     def clear_limit_order_watch(self, order_no: Optional[str]) -> None:
         """체결 등으로 주문이 종료되면 타이머·대기 플래그를 정리합니다."""
-        if not order_no:
-            return
-        oid = str(order_no).strip()
-        if not oid:
-            return
-        meta = self._limit_order_meta.pop(oid, None)
-        if meta is None:
-            return
-        root = getattr(self.app, "root", None)
-        aid = meta.get("after_id")
-        if root is not None and aid is not None:
-            try:
-                root.after_cancel(aid)
-            except Exception:
-                pass
-        kind = meta.get("kind")
-        code = meta.get("code")
         try:
-            nc = str(code).zfill(6) if code else ""
+            self.limit_order_watch_service.clear(order_no)
         except Exception:
-            nc = ""
-        if kind == "s1_buy" and nc:
-            self._s1_buy_order_pending_codes.discard(nc)
-        if kind == "s2_buy" and nc:
-            try:
-                with self.app.portfolio.lock:
-                    p2 = self.app.portfolio.virtual_positions.get(nc)
-                    if p2:
-                        p2.pop("s2_limit_order_pending", None)
-                        p2.pop("s2_pending_ord_no", None)
-            except Exception:
-                pass
+            # 컨트롤러 호출은 UI/체결 이벤트에서 발생 가능 → 전체 중단 방지
+            pass
 
     def _register_limit_order_watch(
         self,
@@ -1070,91 +894,19 @@ class TradingController:
         qty: int = 0,
     ) -> None:
         """지정가 접수 후 미체결 타임아웃 시 취소 API 및 상태 정리(재판정 가능)."""
-        oid = str(order_no or "").strip()
-        nc = str(code).zfill(6)
-        if not oid or not nc:
-            return
-        self.clear_limit_order_watch(oid)
-        root = getattr(self.app, "root", None)
-        if root is None:
-            return
-        ms = self._limit_order_timeout_ms()
-
-        def _cb() -> None:
+        try:
+            self.limit_order_watch_service.register(
+                order_no=order_no, code=code, kind=kind, qty=qty
+            )
+        except Exception as e:
             try:
-                self._handle_limit_order_timeout(oid)
-            except Exception as e:
-                self.log(f"⚠️ [미체결타임아웃] 처리 오류: {e}")
-
-        self.log(
-            f"⏱️ [지정가] 미체결 감시 등록 ({kind}) {nc} ord={oid} / {ms // 1000}초"
-        )
-        after_id = root.after(ms, _cb)
-        self._limit_order_meta[oid] = {
-            "code": nc,
-            "kind": kind,
-            "after_id": after_id,
-            "qty": int(qty),
-        }
-        if kind == "s1_buy":
-            self._s1_buy_order_pending_codes.add(nc)
+                self.log(f"⚠️ [지정가] 미체결 감시 등록 실패: {e}")
+            except Exception:
+                pass
 
     def _handle_limit_order_timeout(self, order_no: str) -> None:
-        """미체결 타임아웃: 취소 API 호출 후 대기 플래그 해제(횟수 제한 없이 재신호 가능)."""
-        oid = str(order_no or "").strip()
-        meta = self._limit_order_meta.pop(oid, None)
-        if meta is None:
-            return
-        code = meta.get("code")
-        kind = meta.get("kind")
-        nc = str(code or "").zfill(6)
-        if not nc:
-            return
-        ok = False
+        """미체결 타임아웃: 서비스 위임(취소 API 호출 후 플래그 해제)."""
         try:
-            ok = bool(self.app.order_manager.cancel_order(oid, nc, "0"))
-        except Exception as e:
-            self.log(f"⚠️ [미체결타임아웃] 취소 API 예외: {e}")
-        try:
-            sl = getattr(self.app, "session_logger", None)
-            if sl:
-                sl.log(
-                    "limit_order_unfilled_timeout",
-                    {
-                        "ord_no": oid,
-                        "code": nc,
-                        "kind": kind,
-                        "cancel_ok": ok,
-                    },
-                )
+            self.limit_order_watch_service.timeout(order_no)
         except Exception:
             pass
-        if kind == "exit_sell":
-            try:
-                with self.app.portfolio.lock:
-                    p = self.app.portfolio.virtual_positions.get(nc)
-                    if p:
-                        p["exit_pending"] = False
-                        p.pop("pending_exit_ord_no", None)
-            except Exception:
-                pass
-            self.log(
-                f"⏱️ [미체결타임아웃] 매도 취소 시도({ok}) — 종목 {nc} 전략 재평가 가능"
-            )
-        elif kind == "s1_buy":
-            self._s1_buy_order_pending_codes.discard(nc)
-            self.log(
-                f"⏱️ [미체결타임아웃] S1 매수 취소 시도({ok}) — 종목 {nc} 재신호 가능"
-            )
-        elif kind == "s2_buy":
-            try:
-                with self.app.portfolio.lock:
-                    p = self.app.portfolio.virtual_positions.get(nc)
-                    if p:
-                        p.pop("s2_limit_order_pending", None)
-                        p.pop("s2_pending_ord_no", None)
-            except Exception:
-                pass
-            self.log(
-                f"⏱️ [미체결타임아웃] S2 매수 취소 시도({ok}) — 종목 {nc} 재조건 시 재추매 가능"
-            )

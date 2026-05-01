@@ -18,6 +18,10 @@
 - `k_trader_gui.py`에서 매일(15:30+buffer) EOD 총자산 스냅샷 자동 저장(동일 날짜 override) 및 복구 로직 추가.
 - `ui/tabs/virtual_tab.py`에 1주일/1달/6개월/1년/커스텀 기간 선택 UI와 Plotly 자산 추이/비중(현금=D+2 포함) 차트 생성 연결.
 
+## 0.6.22 (2026-05-02)
+
+- `k_trader_gui.py` 워커→메인 UI 브리지의 `warmup_stock_prep` 처리 로직을 `WarmupStockPrepUiService`로 서비스화하고, GUI 내 `_on_warmup_stock_prep()` 중복을 제거.
+
 ## 0.6.19 (2026-05-01)
 
 - **실시간 감시 탭 상단 높이 유지(세션 내)**: 탭 전환 시 매번 강제 복원하던 동작을 막고, 최초 1회 복원 이후에는 사용자가 드래그한 보유/대응 종목 영역 높이를 유지하도록 조정 (`ui/tabs/monitor_tab.py`).
