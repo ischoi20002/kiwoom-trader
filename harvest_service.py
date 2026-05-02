@@ -4,6 +4,7 @@ import json
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
+from typing import Optional
 import config
 from data_manager_v2 import DataManagerV2
 from utils.normalization import normalize_code
@@ -49,6 +50,14 @@ class HarvestService:
 
         self.target_list_path = target_list_path
         self.running = True
+        # 성능 최적화: sync_meta를 run()에서 한 번에 적재해서
+        # is_data_complete()에서 종목당 DB 왕복(3~4회)을 제거합니다.
+        self._sync_meta_cache: dict[str, dict[str, str]] = {}
+        # 성능 최적화: 1분봉 상한(cap)도 run()에서 1회만 계산합니다.
+        self._cap_dt_once: Optional[str] = None
+        # 성능/정확성: 캘린더 대신 DB에서 '직전 마감' 기준을 구합니다.
+        # (휴장일/특수일 때문에 previous_trading_day가 어긋나는 경우 대비)
+        self._prev_close_dt_once: Optional[datetime] = None
 
         self.log(f"🔍 [Info] 하베스팅 모드: 실전투자 서버 (데이터 무결성 우선)")
 
@@ -125,15 +134,23 @@ class HarvestService:
             })
         return parsed
 
-    def harvest_code(self, code, token):
+    def harvest_code(self, code: str, token: str) -> bool:
         """한 종목의 부족한 데이터를 모두 수집 (v6.6: 증분 즉시 저장 모델)"""
         if self.is_data_complete(code):
             self.log(f"[SKIP] {code}: 이미 모든 데이터가 충분하고 구멍이 없습니다.")
-            return
+            return False
 
         initial_last_sync = self.db.get_last_sync_time(code)
         last_sync = initial_last_sync  # For logging/legacy checks
         earliest_sync = self.db.get_earliest_sync_time(code)
+        # 장중 상한(cap)보다 최신 데이터는 DB에 저장하지 않으므로,
+        # API가 "다음 페이지 없음"을 반환했을 때도 last_sync가 cap 이상이면 COMPLETE로 마킹합니다.
+        try:
+            from reporting.krx_trading_calendar import minute_harvest_datetime_cap_iso
+
+            cap_dt_once = minute_harvest_datetime_cap_iso()
+        except Exception:
+            cap_dt_once = None
         self.log(
             f"[SYNC] {code} 시작 — 키움 1분봉(ka10080) 수집 → bars_1m 저장, 이후 15분 리샘플로 bars_15m 갱신 "
             f"(DB 1m 범위: {earliest_sync or '미상'} ~ {initial_last_sync or '없음'})"
@@ -153,19 +170,16 @@ class HarvestService:
             if not bars:
                 break
 
-            try:
-                from reporting.krx_trading_calendar import minute_harvest_datetime_cap_iso
-
-                cap_dt = minute_harvest_datetime_cap_iso()
-            except Exception:
-                cap_dt = None
-
             raw_top = bars[0]["time"]
             raw_bottom = bars[-1]["time"]
             last_raw_top = raw_top
             last_raw_bottom = raw_bottom
 
-            filtered = [b for b in bars if not cap_dt or b["time"] <= cap_dt] if cap_dt else bars
+            filtered = (
+                [b for b in bars if not cap_dt_once or b["time"] <= cap_dt_once]
+                if cap_dt_once
+                else bars
+            )
 
             # [v16.9] [Fixed] 이미 최신 데이터가 있더라도, 과거 데이터가 부족(COMPLETE 아님)하면 중단하지 않고 과거로 계속 내려갑니다.
             if total_fetched == 0 and initial_last_sync and raw_top <= initial_last_sync:
@@ -213,13 +227,31 @@ class HarvestService:
             
             if not next_key:
                 # [v6.8] API 바닥 — 장중 필터로 마지막 청크가 전부 스킵된 경우 COMPLETE 오표 방지
-                if cap_dt is None or filtered:
-                    self.db.set_sync_status(code, "COMPLETE")
+                try:
+                    if cap_dt_once is None or bool(filtered) or (
+                        cap_dt_once and last_sync and str(last_sync) >= str(cap_dt_once)
+                    ):
+                        self.db.set_sync_status(code, "COMPLETE")
+                except Exception:
+                    pass
                 break
             
             time.sleep(0.3)
             
-        if total_fetched > 0:
+        # total_fetched는 "API가 준 청크 중 필터 통과 건수"라 중복(INSERT OR IGNORE)일 수 있습니다.
+        # 실제로 1m 범위가 확장되었을 때만 15m 리샘플/1d 집계를 수행해 시간을 줄입니다.
+        try:
+            new_last_sync = self.db.get_last_sync_time(code)
+            new_earliest_sync = self.db.get_earliest_sync_time(code)
+        except Exception:
+            new_last_sync = initial_last_sync
+            new_earliest_sync = earliest_sync
+
+        inserted_new_range = (new_last_sync != initial_last_sync) or (
+            new_earliest_sync != earliest_sync
+        )
+
+        if inserted_new_range and total_fetched > 0:
             try:
                 _nk = normalize_code(code)
             except Exception:
@@ -245,45 +277,153 @@ class HarvestService:
             if last_sync and last_raw_top and last_raw_top <= last_sync:
                 self.log(f"[OK] {code} 처리 완료: 이미 최신 상태입니다.")
             else:
-                self.log(f"[OK] {code} 처리 완료: 서버에서 가져온 데이터가 없습니다.")
+                if not inserted_new_range:
+                    self.log(f"[OK] {code} 처리 완료: 가져왔지만 DB 범위 확장 없음(중복/캡 스킵).")
+                else:
+                    self.log(f"[OK] {code} 처리 완료: 서버에서 가져온 데이터가 없습니다.")
 
-    def is_data_complete(self, code):
+        # API 응답은 받았지만(혹은 첫 페이지에서) 실제로 저장된 1m 데이터가 0건이면
+        # 장기간 미갱신 종목은 다음 런에서 불필요하게 다시 SYNC를 돌리지 않도록 상태를 보강합니다.
+        # (거래정지/상장폐지/데이터 공백 등으로 새 데이터가 장기간 없을 때 반복 호출 방지)
+        if total_fetched == 0:
+            try:
+                if last_sync:
+                    last_dt = datetime.strptime(str(last_sync), "%Y-%m-%d %H:%M:%S")
+                    days_old = (datetime.now() - last_dt).days
+                    if days_old >= 14:
+                        # 2주 이상 미갱신인데도 계속 SYNC가 뜨는 종목은 사실상 업데이트 대상이 아닐 가능성이 큼.
+                        # 다만 '일시적 거래정지'도 있을 수 있으니, NO_DATA를 영구 스킵이 아니라
+                        # TTL(재시도 기간)형으로 저장합니다.
+                        # - status 값 예: NO_DATA|2026-05-03
+                        mark_dt = datetime.now().strftime("%Y-%m-%d")
+                        try:
+                            self.db.set_sync_status(code, f"NO_DATA|{mark_dt}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        return bool(inserted_new_range and total_fetched > 0)
+
+    def _preload_sync_meta_cache(self, codes: list[str]) -> None:
+        """run() 시작 시 sync_meta를 한 번에 적재해 is_data_complete() 성능을 개선합니다."""
+        if not codes:
+            self._sync_meta_cache = {}
+            return
+        try:
+            norm_codes = [normalize_code(c) for c in codes]
+            out: dict[str, dict[str, str]] = {}
+            # SQLite 변수 개수 제한을 고려해 청크 처리
+            chunk_size = 500
+            for i in range(0, len(norm_codes), chunk_size):
+                sub = norm_codes[i : i + chunk_size]
+                placeholders = ",".join(["?"] * len(sub))
+                sql = (
+                    "SELECT code, last_sync_dt, earliest_sync_dt, status "
+                    f"FROM sync_meta WHERE code IN ({placeholders})"
+                )
+                with self.db._get_connection() as conn:
+                    rows = conn.execute(sql, sub).fetchall()
+                for r in rows:
+                    code, last_sync_dt, earliest_sync_dt, status = r
+                    out[str(code)] = {
+                        "last_sync_dt": str(last_sync_dt) if last_sync_dt else "",
+                        "earliest_sync_dt": str(earliest_sync_dt) if earliest_sync_dt else "",
+                        "status": str(status) if status else "",
+                    }
+            self._sync_meta_cache = out
+        except Exception:
+            # 캐시 실패 시 기존 DB 조회 로직으로 폴백하도록
+            self._sync_meta_cache = {}
+
+    def is_data_complete(self, code: str) -> bool:
         """데이터의 충분성 및 구멍 유무를 판단 (v6.8: 종목별 한계 및 전역 경계 기준)"""
         try:
-            # 1. DB의 수집 범위 및 상태 확인
-            last_sync = self.db.get_last_sync_time(code)
-            earliest_sync = self.db.get_earliest_sync_time(code)
-            status = self.db.get_sync_status(code) # (DataManagerV2에서 로드)
+            # 1. DB의 수집 범위 및 상태 확인 (캐시 사용)
+            meta = self._sync_meta_cache.get(normalize_code(code))
+            if meta:
+                last_sync = meta.get("last_sync_dt") or None
+                earliest_sync = meta.get("earliest_sync_dt") or None
+                status = meta.get("status") or None
+            else:
+                # 캐시가 없는 경우에만 DB 왕복
+                last_sync = self.db.get_last_sync_time(code)
+                earliest_sync = self.db.get_earliest_sync_time(code)
+                status = self.db.get_sync_status(code)  # (DataManagerV2에서 로드)
             
             if not last_sync:
                 return False
 
             now = datetime.now()
+
+            # 문자열 last_sync_dt 파싱은 아래 판정들에서 반복되므로 여기서 1회만 합니다.
+            try:
+                last_dt = datetime.strptime(last_sync, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return False
             
             # [v16.9] 'COMPLETE' 상태이면 역사적으로 완료된 것으로 간주
+            # 'NO_DATA'는 장기간 API가 유효한 1m 데이터를 주지 않는 종목 스킵용입니다.
+            # 단, 일시적 거래정지 가능성을 고려해 TTL(재시도 기간) 후 다시 SYNC를 허용합니다.
+            now_dt = datetime.now()
+            if isinstance(status, str) and status.startswith("NO_DATA|"):
+                # TTL: NO_DATA 마킹 이후 N일이 지나면 재시도(=완결 아님)합니다.
+                # (너무 짧게 잡으면 SYNC가 다시 많이 뜨고, 너무 길면 재개 반영이 느립니다.)
+                retry_after_days = 5
+                try:
+                    mark_str = status.split("|", 1)[1]
+                    mark_dt = datetime.strptime(mark_str, "%Y-%m-%d")
+                    if (now_dt - mark_dt).days < retry_after_days:
+                        return True
+                except Exception:
+                    # 파싱 실패 시 안전하게 폴백(스킵하지 않음)
+                    return False
+
+            if status == "NO_DATA":
+                return True
+
             is_historically_complete = (status == "COMPLETE")
-            
+
+            # 장 개시 전(09:00 이전)에는 오늘 당장 필요한 범위가 "직전 마감까지"이므로,
+            # sync_meta.status가 COMPLETE로 아직 반영되지 않았더라도(last_sync_dt 기준으로) 스킵이 가능합니다.
+            # 특히 휴장/특수일에 status 플래그가 느리게 맞춰지는 종목에서 SYNC가 남는 문제를 완화합니다.
+            if now.hour < 9:
+                if self._prev_close_dt_once is not None:
+                    if last_dt >= self._prev_close_dt_once:
+                        return True
+                else:
+                    # 폴백: 캘린더 이전 거래일(15:30) 기준
+                    try:
+                        from reporting.krx_trading_calendar import previous_trading_day
+
+                        prev_d = previous_trading_day(now.date())
+                        if prev_d is not None:
+                            prev_close = datetime(
+                                prev_d.year, prev_d.month, prev_d.day, 15, 30, 0
+                            )
+                            if last_dt >= prev_close:
+                                return True
+                    except Exception:
+                        pass
+
             if not is_historically_complete:
-                return False # 과거 데이터가 더 필요함 (바닥까지 가야함)
+                return False  # 과거 데이터가 더 필요함 (바닥까지 가야함)
 
             # [v16.9.8] 장중(1분 상한 모드): 직전 거래일 장마감(cap)까지 이미 있고 당일 분봉은 아직 안 넣어도 되는 경우 → API 호출 생략
             try:
-                from reporting.krx_trading_calendar import minute_harvest_datetime_cap_iso
-
-                cap = minute_harvest_datetime_cap_iso(now)
+                cap = self._cap_dt_once
                 if cap and last_sync >= cap and last_sync[:10] < now.strftime("%Y-%m-%d"):
                     return True
             except Exception:
                 pass
             
-            # [Smart Check 2] 보충(Daily Sync) 확인: 오늘 날짜의 데이터가 있는지 확인
-            last_dt = datetime.strptime(last_sync, "%Y-%m-%d %H:%M:%S")
-            
             # [Fix] 오늘 장 개시 전(09:00 이전)이라면, 어제 장마감 데이터까지만 있어도 완료로 간주
             if now.hour < 9:
-                # 어제(또는 가장 최근 평일) 데이터가 있다면 통과
-                # (now - timedelta).replace(...) 형식으로 datetime 객체의 replace를 호출해야 함
-                yesterday_limit = (now - timedelta(days=1)).replace(hour=15, minute=30, second=0, microsecond=0)
+                # 위에서 '직전 마감 시각'을 기준으로 이미 스킵 가능했던 케이스가 여기로 오지 않습니다.
+                # 여기까지 왔다면 sync_meta.status가 COMPLETE이거나, 이전 시각 판정에 실패한 케이스입니다.
+                # 최후 폴백(캘린더 어제 15:30): 데이터 불일치 완화 목적.
+                yesterday_limit = (now - timedelta(days=1)).replace(
+                    hour=15, minute=30, second=0, microsecond=0
+                )
                 if last_dt >= yesterday_limit:
                     return True
             
@@ -402,12 +542,51 @@ class HarvestService:
 
             _cap0 = minute_harvest_datetime_cap_iso()
             if _cap0:
+                self._cap_dt_once = _cap0
                 self.log(
                     f"⏸ [장중] 1분봉은 '{_cap0}' 이하만 DB 저장합니다(당일 장중 봉 제외). "
                     f"장 마감 후 실행 시 당일 분봉까지 반영됩니다."
                 )
         except Exception:
             pass
+
+        # now.hour < 9(장 개시 전)에서 '직전 마감 시각' 컷오프를 캘린더가 아니라
+        # DB의 기준 종목(예: 첫 번째 코드)에서 실측으로 잡습니다.
+        # 이렇게 하면 휴장일/특수일로 인해 이전 거래일 판정이 어긋나는 문제를 제거합니다.
+        try:
+            ref_code = all_codes[0] if all_codes else None
+            if ref_code:
+                now_dt = datetime.now()
+                cutoff_dt = datetime(
+                    now_dt.year, now_dt.month, now_dt.day, 9, 0, 0
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                with self.db._get_connection() as conn:
+                    row = conn.execute(
+                        "SELECT MAX(datetime) FROM bars_1m WHERE code = ? AND datetime < ?",
+                        (normalize_code(ref_code), cutoff_dt),
+                    ).fetchone()
+                raw_max = row[0] if row else None
+                if raw_max:
+                    self._prev_close_dt_once = datetime.strptime(
+                        str(raw_max), "%Y-%m-%d %H:%M:%S"
+                    )
+                else:
+                    with self.db._get_connection() as conn:
+                        row2 = conn.execute(
+                            "SELECT MAX(datetime) FROM bars_1d WHERE code = ? AND datetime < ?",
+                            (normalize_code(ref_code), cutoff_dt[:10]),
+                        ).fetchone()
+                    raw_max2 = row2[0] if row2 else None
+                    if raw_max2:
+                        # bars_1d의 datetime은 YYYY-MM-DD
+                        self._prev_close_dt_once = datetime.strptime(
+                            str(raw_max2)[:10] + " 15:30:00", "%Y-%m-%d %H:%M:%S"
+                        )
+        except Exception:
+            self._prev_close_dt_once = None
+
+        # 종목별 sync_meta를 한 번에 적재해 is_data_complete()의 DB 왕복을 제거합니다.
+        self._preload_sync_meta_cache(all_codes)
 
         # 이번 런에서 1m가 실제로 쌓인 종목 / harvest_code 안에서 이미 1d까지 재집계한 종목
         self._codes_1m_updated: set[str] = set()
@@ -417,18 +596,23 @@ class HarvestService:
             if not self.running: break
             
             self.log(f"[{idx+1}/{len(all_codes)}] 종목 분석 중 ({code})...")
+            harvested = False
             try:
                 # [v7.0] 수집 전 무결성/입수 완료 여부 판단하여 스킵
                 if self.is_data_complete(code):
                     self.log(f"   >> {code}: 이미 모든 구간이 동기화되어 있습니다. 건너뜁니다.")
                     continue
 
-                self.harvest_code(code, token)
+                harvested = self.harvest_code(code, token)
             except Exception as e:
                 self.log(f"[ERROR] {code} 처리 중 치명적 오류: {e}")
             
             # 종목 간 대기 (서버 부하 분산)
-            time.sleep(0.5)
+            if harvested:
+                time.sleep(0.5)
+            else:
+                # 이미 최신이거나(보통 continue로 여기까지 오지 않지만) DB 범위 확장 없음이면 대기 최소화
+                time.sleep(0.02)
 
         # 1m 대비 bars_1d 누락·인라인 집계 실패분만 보강 (매 런 전 유니버스 전체 리빌드는 생략)
         self.log("📅 [1m→1d] 주식 유니버스 bars_1d 조건부 보강(누락·이번 런 1m 미반영분)…")
