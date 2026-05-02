@@ -20,6 +20,10 @@
 - 텔레그램 매수/매도 체결 메시지를 `포지션관리탭 주문·체결 내역` 필드 순서로 재정의하고, 매수/매도는 `order_no` 기준 1회만 전송하도록 중앙화(`core/fill_reconciliation_service.py`, `data_manager_v2.py`).
 - 실시간 감시 시작 시 계좌 요약 텔레그램 1회 전송, 주문 후 계좌 동기화 완료 직후 추가 1회 전송 로직 추가(`k_trader_gui.py`, `core/order_manager.py`).
 
+## 0.6.26 (2026-05-02)
+
+- EOD 스냅샷 저장 직전의 계좌 동기화가 기동 직후 초기 동기화와 겹쳐 2회 실행되는 문제를 완화하기 위해 최근 동기화 시점 기준으로 중복 sync를 스킵(`core/eod_equity_snapshot_service.py`).
+
 ## 0.6.20 (2026-05-01)
 
 - 실시간 감시 ATR 기준가(`AtrExit`) 표시: `SL%` / `ATR SL` / `ATR TRL` / `FLASH` 후보 중 **도달시 매도 기준가로 환산된 최댓값 1개만** 라벨+금액으로 표시하도록 정리, 헤더도 `도달시 매도 기준가`로 변경 (`backtest_engine.py`, `ui/tabs/monitor_tab.py`).

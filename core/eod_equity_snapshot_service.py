@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import threading
+import time
 from datetime import date, datetime, timedelta, time as dtime
 from typing import Any, Optional
 
@@ -156,11 +157,24 @@ class EodEquitySnapshotService:
 
             # 스냅샷 직전 계좌 동기화(최소 1회)로 D+2/평가를 맞춥니다.
             try:
-                self.app.portfolio.sync_with_actual_account(
-                    silent=True,
-                    force=True,
-                    refresh_cash_deposit=True,
+                # 기동 직후 이미 계좌 동기화를 1회 수행했는데,
+                # 서비스가 시작된 뒤 첫 tick(약 30초)이 due로 판정되면
+                # 스냅샷 저장 직전에 sync를 한번 더 호출하게 됩니다.
+                # 이중 호출을 줄이기 위해 최근 sync가 충분히 가까우면 생략합니다.
+                last_sync_ts = float(
+                    getattr(getattr(self.app, "portfolio", None), "last_sync_time", 0.0)
+                    or 0.0
                 )
+                now_ts = time.time()
+                if last_sync_ts <= 0 or (now_ts - last_sync_ts) >= 60.0:
+                    self.app.portfolio.sync_with_actual_account(
+                        silent=True,
+                        force=True,
+                        refresh_cash_deposit=True,
+                    )
+                else:
+                    # 최근 동기화 직후라서 중복 REST 호출/로그를 피합니다.
+                    pass
             except Exception as sync_ex:
                 try:
                     self.log(f"⚠️ [EOD Snapshot] 동기화 실패: {sync_ex}")
