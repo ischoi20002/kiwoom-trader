@@ -7,6 +7,10 @@
 
 ---
 
+## 0.6.27 (2026-05-03)
+
+- 데이터 하베스팅에서 `sync_meta` 캐시/직전 마감 컷오프 보정으로 최신성 판정 비용 및 `SYNC` 중복을 줄이고, 1m→15m/1d 리샘플·일괄 집계는 실제 DB 범위 확장 시에만 수행하도록 최적화(`harvest_service.py`).
+
 ## 0.6.23 (2026-05-02)
 
 - 설정탭에서 동적백테 A/B 수 균형(신규 S1) 옵션을 제거하고, 관련 로직/최적화 타겟을 함께 삭제(`ui/tabs/settings_tab.py`, `dynamic_backtest.py`, `backtest_engine.py`, `core/signal_callbacks_service.py`, `parameter_optimizer.py`, `ui/tabs/backtest_tab.py`, `k_trader_gui.py`, `tools/settings_tab_ui_catalog.py`).
@@ -23,10 +27,6 @@
 ## 0.6.26 (2026-05-02)
 
 - EOD 스냅샷 저장 직전의 계좌 동기화가 기동 직후 초기 동기화와 겹쳐 2회 실행되는 문제를 완화하기 위해 최근 동기화 시점 기준으로 중복 sync를 스킵(`core/eod_equity_snapshot_service.py`).
-
-## 0.6.27 (2026-05-03)
-
-- 데이터 하베스팅에서 `sync_meta` 캐시/직전 마감 컷오프 보정으로 최신성 판정 비용 및 `SYNC` 중복을 줄이고, 1m→15m/1d 리샘플·일괄 집계는 실제 DB 범위 확장 시에만 수행하도록 최적화(`harvest_service.py`).
 
 ## 0.6.20 (2026-05-01)
 
