@@ -211,11 +211,24 @@ class OrderManager:
                 except Exception as sync_e:
                     self.logger.warning("체결 동기화 스케줄 실패: %s", sync_e)
 
-                # 텔레그램 알림
-                side_kr = "매수" if side == "buy" else "매도"
-                msg = f"<b>🚀 [주문 성공]</b>\n종목: {code}({name})\n구분: {side_kr}\n가격: {adj_price:,}원 / 수량: {qty}주\n번호: {ord_no}"
-                import threading
-                threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
+                # 텔레그램 알림은 체결 확정 시점(포지션관리탭 주문·체결 내역 row 기준)으로만 발송합니다.
+                # (주문 성공 시점 메시지로 인해 매수/매도 1회 전송 요구 조건이 깨질 수 있음)
+
+                # 하지만 별도로 요청된 “계좌요약 텔레그램”은 주문 발송(매수/매도 acceptance) 이후 1800초 지연 후
+                # 계좌 동기화 결과로 1회 추가 전송합니다.
+                try:
+                    sched = getattr(
+                        self.app,
+                        "schedule_account_summary_telegram_after_trade",
+                        None,
+                    )
+                    if callable(sched):
+                        # 체결 후 계좌 동기화(PostFillAccountSyncService 1/2/3차 after 체인)
+                        # 총 대기시간: 약 33.2초(4.2s + 7s + 22s) → 완료 직후 목적의 버퍼 포함
+                        # 동기화 체인 완료(약 33.2초) 이후, 약 40초로 버퍼를 둬서 텔레그램 발송
+                        sched(delay_sec=40)
+                except Exception:
+                    pass
                 return ord_no
             else:
                 self.app.log(f"❌ [{mode_str}] 주문 거부: {ret_msg} (ErrorCode: {ret_code})")

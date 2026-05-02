@@ -15,6 +15,11 @@
 
 - 설정탭/종목선정에서 legacy(레거시) 분기(Track A/B 전환 토글 및 레거시 입력)를 제거하고, v2 기반 로직만 사용하도록 정리(`ui/tabs/settings_tab.py`, `strategy_selector.py`, `tools/settings_tab_ui_catalog.py`, `settings.json`).
 
+## 0.6.25 (2026-05-02)
+
+- 텔레그램 매수/매도 체결 메시지를 `포지션관리탭 주문·체결 내역` 필드 순서로 재정의하고, 매수/매도는 `order_no` 기준 1회만 전송하도록 중앙화(`core/fill_reconciliation_service.py`, `data_manager_v2.py`).
+- 실시간 감시 시작 시 계좌 요약 텔레그램 1회 전송, 주문 후 계좌 동기화 완료 직후 추가 1회 전송 로직 추가(`k_trader_gui.py`, `core/order_manager.py`).
+
 ## 0.6.20 (2026-05-01)
 
 - 실시간 감시 ATR 기준가(`AtrExit`) 표시: `SL%` / `ATR SL` / `ATR TRL` / `FLASH` 후보 중 **도달시 매도 기준가로 환산된 최댓값 1개만** 라벨+금액으로 표시하도록 정리, 헤더도 `도달시 매도 기준가`로 변경 (`backtest_engine.py`, `ui/tabs/monitor_tab.py`).

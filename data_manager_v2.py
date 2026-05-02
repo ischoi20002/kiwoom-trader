@@ -1221,6 +1221,62 @@ class DataManagerV2:
                 pass
             return None
 
+    def get_order_history_row_for_telegram(
+        self, code: str, order_no: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        텔레그램 주문/체결 메시지를 '포지션관리탭 주문·체결 내역' 컬럼과 동일한 값으로 만들기 위한 조회.
+
+        반환 Dict 필드(대략):
+        - timestamp, side, name, reason
+        - price(주문가), filled_price(체결가), filled_qty(체결수량)
+        - snap_vol_power(VP), snap_bid_ask(호가)
+        """
+        try:
+            ncode = normalize_code(str(code or "").strip())
+            oid = str(order_no or "").strip()
+            if not ncode or not oid:
+                return None
+
+            with self._get_state_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        timestamp,
+                        side,
+                        name,
+                        reason,
+                        price,
+                        filled_price,
+                        filled_qty,
+                        snap_vol_power,
+                        snap_bid_ask
+                    FROM order_history
+                    WHERE code = ?
+                      AND order_no = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (ncode, oid),
+                ).fetchone()
+
+            if not row:
+                return None
+
+            return {
+                "timestamp": row[0],
+                "side": row[1],
+                "name": row[2],
+                "reason": row[3],
+                "price": row[4],
+                "filled_price": row[5],
+                "filled_qty": row[6],
+                "snap_vol_power": row[7],
+                "snap_bid_ask": row[8],
+            }
+        except Exception:
+            return None
+
     def update_order_status(
         self,
         code,

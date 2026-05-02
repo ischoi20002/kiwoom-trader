@@ -1373,13 +1373,8 @@ class PortfolioManager:
         except Exception:
             pass
         self.log(f"[Portfolio] {pos['name']}({code}) 최종 청산 완료 ({pnl_pct:+.2f}%)")
-        if self.telegram_callback:
-            msg = (
-                f"<b>🚨 [매도완료/{exit_reason}]</b>\n종목: {pos['name']}({code})\n"
-                f"최종수익: {pnl_pct:+.1f}%\n수익금: {int(pnl_amt):,}원\n"
-                f"시간: {pos.get('exit_datetime', _ex.strftime('%Y-%m-%d %H:%M:%S'))}"
-            )
-            threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
+        # 텔레그램은 FillReconciliationService에서 '포지션관리탭 주문·체결 내역 row' 기준으로
+        # 매수/매도 1회 전송 정책에 맞춰 발송됩니다.
 
     def on_fill(
         self,
@@ -1460,9 +1455,7 @@ class PortfolioManager:
                     )
                     self.data_manager.save_active_position(code, reg_name, fp, iq, 1, total_invested, datetime.now().isoformat(), reg_reason)
                     self.log(f"[Portfolio] {reg_name}({code}) 신규 진입 등록 ({price:,}원)")
-                    if self.telegram_callback:
-                        msg = f"<b>✅ [가상체결/1차]</b>\n종목: {reg_name}({code})\n가: {price:,}원 / 수: {qty}주\n등급: {reg_reason}\n시간: {now_str}"
-                        threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
+                    # 텔레그램 발송은 체결 DB(row) 확정 시점으로 중앙화되어 있습니다.
                 else:
                     # 추가 매수 (Stage 2)
                     pos = self.virtual_positions[code]
@@ -1505,9 +1498,7 @@ class PortfolioManager:
                     # DB 동기화
                     self.data_manager.save_active_position(code, pos['name'], pos['avg_price'], new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
                     self.log(f"[Portfolio] {pos['name']}({code}) 2차 수량 업데이트 (평단: {int(new_avg_price):,}원)")
-                    if self.telegram_callback:
-                        msg = f"<b>🔥 [추매체결/2차]</b>\n종목: {pos['name']}({code})\n추가: {price:,}원 / {qty}주\n평단: {int(new_avg_price):,}원\n시간: {now_str}"
-                        threading.Thread(target=self.telegram_callback, args=(msg,), daemon=True).start()
+                    # 텔레그램 발송은 체결 DB(row) 확정 시점으로 중앙화되어 있습니다.
             
             elif side == "sell":
                 # 청산 — 보유 dict 우선, 없으면 매도 접수 시 저장한 스냅샷(주문번호)

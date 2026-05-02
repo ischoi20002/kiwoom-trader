@@ -15,6 +15,94 @@ class FillReconciliationService:
         self.app = app
         self.log = log_func or print
 
+    @staticmethod
+    def _order_side_to_kr(side: str) -> str:
+        try:
+            s = str(side or "").strip().lower()
+        except Exception:
+            s = ""
+        if s == "buy":
+            return "매수"
+        if s == "sell":
+            return "매도"
+        return "?"
+
+    @staticmethod
+    def _fmt_int_comma(v: Any) -> str:
+        try:
+            iv = int(v or 0)
+            return f"{iv:,}" if iv > 0 else "-"
+        except Exception:
+            return "-"
+
+    @staticmethod
+    def _fmt_price_comma(v: Any) -> str:
+        try:
+            pv = float(v or 0)
+            return f"{pv:,.0f}" if pv > 0 else "-"
+        except Exception:
+            return "-"
+
+    @staticmethod
+    def _fmt_vp_cell(v: Any) -> str:
+        """포지션관리탭 VP 셀과 동일하게 소수 1자리 %."""
+        try:
+            if v is None:
+                return "-"
+            return f"{float(v):.1f}%"
+        except Exception:
+            return "-"
+
+    @staticmethod
+    def _fmt_ba_cell(v: Any) -> str:
+        try:
+            return (str(v or "").strip() or "-")
+        except Exception:
+            return "-"
+
+    def _maybe_send_buy_sell_telegram(self, code: str, order_no: str, side: str) -> None:
+        """
+        체결 DB(row) 기준으로 '매수/매도' 텔레그램을 1회만 보냅니다.
+        (주문번호 + 중복 방지 set을 이미 처리하고 있는 호출부만 이 함수를 호출)
+        """
+        try:
+            if not getattr(self.app, "send_telegram_message", None):
+                return
+        except Exception:
+            return
+
+        try:
+            row = self.app.data_manager.get_order_history_row_for_telegram(code, order_no)
+            if not row:
+                return
+
+            side_kr = self._order_side_to_kr(row.get("side"))
+            msg = (
+                f"📌 <b>[매수/매도 체결]</b>\n"
+                f"매수/매도: {side_kr}\n"
+                f"종목명: {row.get('name') or '-'}\n"
+                f"주문가: {self._fmt_price_comma(row.get('price'))}원\n"
+                f"체결가: {self._fmt_price_comma(row.get('filled_price'))}원\n"
+                f"체결수량: {self._fmt_int_comma(row.get('filled_qty'))}주\n"
+                f"VP: {self._fmt_vp_cell(row.get('snap_vol_power'))}\n"
+                f"호가: {self._fmt_ba_cell(row.get('snap_bid_ask'))}\n"
+                f"사유: {row.get('reason') or '-'}\n"
+                f"일시: {str(row.get('timestamp') or '').strip() or '-'}"
+            )
+
+            import threading
+
+            threading.Thread(
+                target=self.app.send_telegram_message,
+                args=(msg,),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Telegram] 메시지 생성 실패: {e}")
+            except Exception:
+                pass
+
     def reconcile_exchange_fill_after_order_accept(
         self,
         code: str,
@@ -95,6 +183,9 @@ class FillReconciliationService:
                 self.app._exchange_fill_order_ids.add(oid)
 
             if applied:
+                if oid and str(side or "").lower() in ("buy", "sell"):
+                    self._maybe_send_buy_sell_telegram(code, oid, side)
+
                 self.log(
                     f"✅ [체결 동기화] REST 접수 직후 가상체결 {code} "
                     f"{'매수' if side == 'buy' else '매도'} {qty}주 ({int(fill_price):,}원)"
@@ -223,6 +314,13 @@ class FillReconciliationService:
                     self.log(f"⚠️ [체결] 종료내역 보강 실패: {oe}")
 
             if applied:
+                # 텔레그램 전송 전에 중복 방지 set에 oid를 먼저 넣어
+                # REST/WS 경로가 엇갈리는 극단 케이스에서 2회 전송 레이스를 제거합니다.
+                if oid and applied:
+                    self.app._exchange_fill_order_ids.add(oid)
+                if oid and str(side or "").lower() in ("buy", "sell"):
+                    self._maybe_send_buy_sell_telegram(code, oid, side)
+
                 self.log(
                     f"✅ [체결] {code} {'매수' if side == 'buy' else '매도'} {qty}주 완료 ({price:,}원)"
                 )
@@ -232,8 +330,7 @@ class FillReconciliationService:
                     f"— 로컬 보유 없음·종료내역 보강도 실패. 주문 로그를 확인하세요."
                 )
 
-            if oid and applied:
-                self.app._exchange_fill_order_ids.add(oid)
+            # 위에서 already add
 
             try:
                 tc = getattr(self.app, "trading_controller", None)

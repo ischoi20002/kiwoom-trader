@@ -245,6 +245,11 @@ class KiwoomApp:
         self._account_sync_job: Optional[Any] = None
         self._virtual_tab_render_pending: bool = False
         self._virtual_tab_render_last_ts: float = 0.0
+
+        # 실시간 감시/계좌정보 텔레그램 스로틀
+        self._telegram_sent_on_monitor_start: bool = False
+        self._account_summary_after_trade_job_id: Optional[Any] = None
+        self._account_summary_after_trade_seq: int = 0
         # (실시간 틱 배치 디스패치는 RealtimeTickDispatchService로 위임)
         # REST 인증 자동 재시도: 동시에 하나의 워커만 실행
         self._auth_worker_lock = threading.Lock()
@@ -1240,10 +1245,20 @@ class KiwoomApp:
                     foreground=self.colors["success"],
                 )
             self._render_tree_updates()
+
+            # 실시간 감시 시작 시 계좌정보 텔레그램 1회
+            if not self._telegram_sent_on_monitor_start:
+                self._telegram_sent_on_monitor_start = True
+                self._start_account_summary_telegram_worker(
+                    header="실시간감시가 시작되었습니다 +",
+                    seq=0,
+                )
         elif status == "STOPPED":
             self.is_monitoring = False
             self._active_stream_codes = []
             self._maybe_stop_account_sync_timer()
+            # 다음 감시 시작 시 다시 1회 발송되도록 리셋
+            self._telegram_sent_on_monitor_start = False
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="▶️ 실시간 감시 시작", style="Accent.TButton")
             if self.lbl_monitor_status: self.lbl_monitor_status.config(text="상태: 대기 중", foreground=self.colors['primary'])
             if self.status_label:
@@ -1355,6 +1370,152 @@ class KiwoomApp:
                 self.log("⚠️ [Telegram] 전송 실패 또는 미설정 — config.py 의 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 를 확인하세요.")
         except Exception as e:
             self.log(f"⚠️ [Telegram] 예외: {e}")
+
+    def _build_account_summary_telegram_message(self, header: str) -> Optional[str]:
+        """
+        포지션관리 상단 계좌 요약(virtual_tab vars)을 동일 항목으로 텔레그램에 전송합니다.
+
+        포함 항목:
+        - 총자산
+        - D+2예수금
+        - 주식평가금
+        - 미실현 손익
+        - 금일손익
+        """
+        try:
+            vt = getattr(self, "virtual_tab", None)
+            if vt is None:
+                return None
+
+            # virtual_tab 상단 요약 vars 키는 UI에서 고정
+            total = str((vt.vars.get("total").get() if vt.vars.get("total") else "") or "").strip()
+            d2_cash = str((vt.vars.get("d2_cash").get() if vt.vars.get("d2_cash") else "") or "").strip()
+            stock = str((vt.vars.get("stock").get() if vt.vars.get("stock") else "") or "").strip()
+            open_ur = str((vt.vars.get("open_ur").get() if vt.vars.get("open_ur") else "") or "").strip()
+            day = str((vt.vars.get("day").get() if vt.vars.get("day") else "") or "").strip()
+
+            if not any([total, d2_cash, stock, open_ur, day]):
+                return None
+
+            msg = (
+                f"📌 <b>[계좌요약]</b>\n{header}\n"
+                f"총자산: {total}\n"
+                f"D+2예수금: {d2_cash}\n"
+                f"주식평가금: {stock}\n"
+                f"미실현 손익: {open_ur}\n"
+                f"금일손익: {day}"
+            )
+            return msg
+        except Exception:
+            return None
+
+    def _start_account_summary_telegram_worker(self, *, header: str, seq: int) -> None:
+        """
+        계좌 동기화(REST 포함) 후, UI 요약을 다시 읽어 텔레그램을 발송합니다.
+
+        seq는 타이머 중복 실행 시 최신 요청만 처리하기 위한 용도입니다.
+        """
+        try:
+            root = getattr(self, "root", None)
+            if root is None:
+                return
+        except Exception:
+            return
+
+        def _worker() -> None:
+            acquired = False
+            try:
+                acquired = self._portfolio_sync_thread_lock.acquire(timeout=120.0)
+                if not acquired:
+                    return
+                # silent=True: UI/터미널 로그 스팸 방지
+                self.portfolio.sync_with_actual_account(
+                    silent=True,
+                    force=False,
+                    refresh_cash_deposit=True,
+                )
+            except Exception:
+                pass
+            finally:
+                if acquired:
+                    try:
+                        self._portfolio_sync_thread_lock.release()
+                    except Exception:
+                        pass
+
+            def _after() -> None:
+                try:
+                    # 상단 요약 값 갱신 후 읽기
+                    if hasattr(self, "virtual_tab"):
+                        self.virtual_tab.refresh_portfolio_light()
+                except Exception:
+                    pass
+
+                msg = self._build_account_summary_telegram_message(header=header)
+                if msg:
+                    self.send_telegram_message(msg, parse_mode="HTML")
+
+            try:
+                root.after(0, _after)
+            except Exception:
+                pass
+
+        try:
+            import threading
+
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception:
+            pass
+
+    def schedule_account_summary_telegram_after_trade(self, *, delay_sec: int = 40) -> None:
+        """
+        매수/매도 발송 이후 delay_sec(기본 약 40초) 지연 후
+        계좌 동기화 완료 결과로 계좌요약 텔레그램을 1회 추가 전송합니다.
+
+        연속 주문이 들어오면 최신 주문 기준으로 이전 타이머는 취소(최종 1회만 발송).
+        """
+        try:
+            root = getattr(self, "root", None)
+            if root is None:
+                return
+        except Exception:
+            return
+
+        try:
+            delay_ms = max(0, int(delay_sec * 1000))
+        except Exception:
+            delay_ms = 1800 * 1000
+
+        self._account_summary_after_trade_seq += 1
+        seq = self._account_summary_after_trade_seq
+
+        try:
+            if self._account_summary_after_trade_job_id is not None:
+                try:
+                    root.after_cancel(self._account_summary_after_trade_job_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        def _job() -> None:
+            try:
+                # 최신 seq만 처리
+                if seq != self._account_summary_after_trade_seq:
+                    return
+                self._start_account_summary_telegram_worker(
+                    header="주문 후 계좌정보 동기화 완료 +",
+                    seq=seq,
+                )
+            except Exception:
+                pass
+
+        try:
+            self._account_summary_after_trade_job_id = root.after(
+                delay_ms, _job
+            )
+        except Exception:
+            pass
     def _vp_structure_signature(self) -> Tuple[Any, ...]:
         """
         virtual_positions 구조 + 종료 이력 건수.
