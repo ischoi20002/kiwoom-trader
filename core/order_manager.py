@@ -998,17 +998,30 @@ class OrderManager:
                             return self._safe_float(v)
                     return 0.0
 
-                d1 = _pick(
+                def _pick_with_key(*keys: str) -> Tuple[float, str]:
+                    """
+                    키우선순위에 따라 첫 유효값을 선택합니다.
+                    - float value와 함께 선택된 키를 반환해, 덮어쓰기 오류 원인 추적에 도움을 줍니다.
+                    """
+                    for k in keys:
+                        v = out_body.get(k)
+                        if v is not None and str(v).strip() not in ("", "-"):
+                            return self._safe_float(v), k
+                    return 0.0, ""
+
+                # [중요] d1/d2에서 *_entra는 "추정 유입(증분/예상)" 성격일 수 있어,
+                # UI의 "D+1/D+2 예상 예수금(총액)"에는 *_samt(현재 잔액/총액) 우선이 안전합니다.
+                d1, d1_src = _pick_with_key(
+                    "d1_samt",
                     "d1_entra",
                     "d1_entra_amt",
-                    "d1_samt",
                     "entr_d1",
                     "d1_entr",
                 )
-                d2 = _pick(
+                d2, d2_src = _pick_with_key(
+                    "d2_samt",
                     "d2_entra",
                     "d2_entra_amt",
-                    "d2_samt",
                     "entr_d2",
                     "d2_entr",
                     "d2entra",
@@ -1022,6 +1035,7 @@ class OrderManager:
                 pymn = _pick("pymn_alow_amt", "pymn_alow_amt_entr", "pymn_alow")
 
                 # return_code 정상이면 반환 (D+2 추정예수가 음수인 경우도 있음 — any(x>0)로 두면 조회 실패로 떨어져 ka10085 잔여값이 남음)
+                # 선택 키까지 반환(호출부는 관심 없으면 무시해도 됩니다).
                 return {
                     "d1": d1,
                     "d2": d2,
@@ -1029,6 +1043,8 @@ class OrderManager:
                     "ord_alow": ord_alow,
                     "pymn_alow": pymn,
                     "qry_tp_used": qry_tp,
+                    "d1_src": d1_src,
+                    "d2_src": d2_src,
                 }
             except Exception as e:
                 try:
