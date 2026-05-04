@@ -6,16 +6,22 @@
 **날짜**: 괄호 안은 **그 변경이 저장소에 반영된 날**(버전을 올린 커밋의 날짜, 또는 실제 배포일)을 적습니다. 다른 항목과 줄을 맞추기 위해 임의로 바꾸거나, 대화 세션의 ‘오늘’만 보고 적지 않습니다.
 
 ---
+정렬 규칙
+----------
+버전 섹션은 **항상 내림차순(최신 → 이전)** 으로 정렬하며, **최신 버전 블록이 최상단**에 오도록 유지한다.
+즉, 새 버전이 추가되면 파일 상단 기준으로 **재정렬(삽입)** 한다.
+
+---
+
+## 0.6.29 (2026-05-04)
+
+- 하베스팅 성능: 신규/증분 1분봉 적재 시 `bars_15m`/`bars_1d`를 전체 재빌드하지 않고 변경된 날짜 구간만 부분 리샘플/집계하도록 최적화(`harvest_service.py`, `utils/bar_resample.py`, `data_manager_v2.py`).
 
 ## 0.6.28 (2026-05-04)
 
 - 실시간 감시: 보유 키 접미(`443060_1` 등)와 6자리 종목코드 정규화 정합 — 워밍업 병합·`monitor_info`·VP 가격 보정·스트림 구독 목록·가상보유 판별(`core/trading_controller.py`, `k_trader_gui.py`, `core/signal_engine.py`).
 - Kiwoom WS `REG`: 종목 수가 많을 때 `data` 다중 대신 **청크별 `grp_no` 순차 전송**(`ui/tabs/monitor_tab.py`); 설정 `ws_reg_max_codes_per_chunk` 연동 유지(`core/defaults.py`, `settings.json`).
 - 신호상태 열: 워밍업 문구를 `monitor_info.status_text`에 동기화, 틱 처리에서 합치도 플레이스홀더일 때 기존 문구 유지 및 표시값을 `status_text` 우선으로 통일(`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).
-
-## 0.6.29 (2026-05-04)
-
-- 하베스팅 성능: 신규/증분 1분봉 적재 시 `bars_15m`/`bars_1d`를 전체 재빌드하지 않고 변경된 날짜 구간만 부분 리샘플/집계하도록 최적화(`harvest_service.py`, `utils/bar_resample.py`, `data_manager_v2.py`).
 
 ## 0.6.27 (2026-05-03)
 
