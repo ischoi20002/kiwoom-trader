@@ -7,31 +7,36 @@
 
 ---
 
+## 0.6.28 (2026-05-04)
+
+- 실시간 감시: 보유 키 접미(`443060_1` 등)와 6자리 종목코드 정규화 정합 — 워밍업 병합·`monitor_info`·VP 가격 보정·스트림 구독 목록·가상보유 판별(`core/trading_controller.py`, `k_trader_gui.py`, `core/signal_engine.py`).
+- Kiwoom WS `REG`: 종목 수가 많을 때 `data` 다중 대신 **청크별 `grp_no` 순차 전송**(`ui/tabs/monitor_tab.py`); 설정 `ws_reg_max_codes_per_chunk` 연동 유지(`core/defaults.py`, `settings.json`).
+- 신호상태 열: 워밍업 문구를 `monitor_info.status_text`에 동기화, 틱 처리에서 합치도 플레이스홀더일 때 기존 문구 유지 및 표시값을 `status_text` 우선으로 통일(`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).
+
 ## 0.6.27 (2026-05-03)
 
 - 데이터 하베스팅에서 `sync_meta` 캐시/직전 마감 컷오프 보정으로 최신성 판정 비용 및 `SYNC` 중복을 줄이고, 1m→15m/1d 리샘플·일괄 집계는 실제 DB 범위 확장 시에만 수행하도록 최적화(`harvest_service.py`).
 
-## 0.6.23 (2026-05-02)
+## 0.6.26 (2026-05-02)
 
-- 설정탭에서 동적백테 A/B 수 균형(신규 S1) 옵션을 제거하고, 관련 로직/최적화 타겟을 함께 삭제(`ui/tabs/settings_tab.py`, `dynamic_backtest.py`, `backtest_engine.py`, `core/signal_callbacks_service.py`, `parameter_optimizer.py`, `ui/tabs/backtest_tab.py`, `k_trader_gui.py`, `tools/settings_tab_ui_catalog.py`).
-
-## 0.6.24 (2026-05-02)
-
-- 설정탭/종목선정에서 legacy(레거시) 분기(Track A/B 전환 토글 및 레거시 입력)를 제거하고, v2 기반 로직만 사용하도록 정리(`ui/tabs/settings_tab.py`, `strategy_selector.py`, `tools/settings_tab_ui_catalog.py`, `settings.json`).
+- EOD 스냅샷 저장 직전의 계좌 동기화가 기동 직후 초기 동기화와 겹쳐 2회 실행되는 문제를 완화하기 위해 최근 동기화 시점 기준으로 중복 sync를 스킵(`core/eod_equity_snapshot_service.py`).
 
 ## 0.6.25 (2026-05-02)
 
 - 텔레그램 매수/매도 체결 메시지를 `포지션관리탭 주문·체결 내역` 필드 순서로 재정의하고, 매수/매도는 `order_no` 기준 1회만 전송하도록 중앙화(`core/fill_reconciliation_service.py`, `data_manager_v2.py`).
 - 실시간 감시 시작 시 계좌 요약 텔레그램 1회 전송, 주문 후 계좌 동기화 완료 직후 추가 1회 전송 로직 추가(`k_trader_gui.py`, `core/order_manager.py`).
 
-## 0.6.26 (2026-05-02)
+## 0.6.24 (2026-05-02)
 
-- EOD 스냅샷 저장 직전의 계좌 동기화가 기동 직후 초기 동기화와 겹쳐 2회 실행되는 문제를 완화하기 위해 최근 동기화 시점 기준으로 중복 sync를 스킵(`core/eod_equity_snapshot_service.py`).
+- 설정탭/종목선정에서 legacy(레거시) 분기(Track A/B 전환 토글 및 레거시 입력)를 제거하고, v2 기반 로직만 사용하도록 정리(`ui/tabs/settings_tab.py`, `strategy_selector.py`, `tools/settings_tab_ui_catalog.py`, `settings.json`).
 
-## 0.6.20 (2026-05-01)
+## 0.6.23 (2026-05-02)
 
-- 실시간 감시 ATR 기준가(`AtrExit`) 표시: `SL%` / `ATR SL` / `ATR TRL` / `FLASH` 후보 중 **도달시 매도 기준가로 환산된 최댓값 1개만** 라벨+금액으로 표시하도록 정리, 헤더도 `도달시 매도 기준가`로 변경 (`backtest_engine.py`, `ui/tabs/monitor_tab.py`).
-- 실시간 감시 탭 Paned 세시(sash) 복원: 탭 전환 직후 높이 0 고정/오복원 판정 케이스를 보정하고, `보유 및 대응종목` 상단 영역은 약 5줄 높이로 유지하도록 클램프 강화 (`ui/tabs/monitor_tab.py`).
+- 설정탭에서 동적백테 A/B 수 균형(신규 S1) 옵션을 제거하고, 관련 로직/최적화 타겟을 함께 삭제(`ui/tabs/settings_tab.py`, `dynamic_backtest.py`, `backtest_engine.py`, `core/signal_callbacks_service.py`, `parameter_optimizer.py`, `ui/tabs/backtest_tab.py`, `k_trader_gui.py`, `tools/settings_tab_ui_catalog.py`).
+
+## 0.6.22 (2026-05-02)
+
+- `k_trader_gui.py` 워커→메인 UI 브리지의 `warmup_stock_prep` 처리 로직을 `WarmupStockPrepUiService`로 서비스화하고, GUI 내 `_on_warmup_stock_prep()` 중복을 제거.
 
 ## 0.6.21 (2026-05-02)
 
@@ -39,9 +44,10 @@
 - `k_trader_gui.py`에서 매일(15:30+buffer) EOD 총자산 스냅샷 자동 저장(동일 날짜 override) 및 복구 로직 추가.
 - `ui/tabs/virtual_tab.py`에 1주일/1달/6개월/1년/커스텀 기간 선택 UI와 Plotly 자산 추이/비중(현금=D+2 포함) 차트 생성 연결.
 
-## 0.6.22 (2026-05-02)
+## 0.6.20 (2026-05-01)
 
-- `k_trader_gui.py` 워커→메인 UI 브리지의 `warmup_stock_prep` 처리 로직을 `WarmupStockPrepUiService`로 서비스화하고, GUI 내 `_on_warmup_stock_prep()` 중복을 제거.
+- 실시간 감시 ATR 기준가(`AtrExit`) 표시: `SL%` / `ATR SL` / `ATR TRL` / `FLASH` 후보 중 **도달시 매도 기준가로 환산된 최댓값 1개만** 라벨+금액으로 표시하도록 정리, 헤더도 `도달시 매도 기준가`로 변경 (`backtest_engine.py`, `ui/tabs/monitor_tab.py`).
+- 실시간 감시 탭 Paned 세시(sash) 복원: 탭 전환 직후 높이 0 고정/오복원 판정 케이스를 보정하고, `보유 및 대응종목` 상단 영역은 약 5줄 높이로 유지하도록 클램프 강화 (`ui/tabs/monitor_tab.py`).
 
 ## 0.6.19 (2026-05-01)
 

@@ -141,10 +141,13 @@ class UiTradingStatusService:
                         )
                     except Exception:
                         pass
-                self._safe_call(self.app._render_tree_updates)
+                self._safe_call(
+                    lambda: self.app.ensure_monitor_tree_refresh_scheduled(immediate=True)
+                )
             elif status == "STOPPED":
                 self.app.is_monitoring = False
                 self.app._active_stream_codes = []
+                self._safe_call(self.app._cancel_tick_main_poller)
                 self._safe_call(self.app._maybe_stop_account_sync_timer)
                 if getattr(self.app, "btn_monitor_toggle", None):
                     try:

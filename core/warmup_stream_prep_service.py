@@ -2,6 +2,8 @@
 import threading
 from typing import Any, Optional
 
+from core.terminal_trace import terminal_trace
+
 
 class WarmupStreamPrepService:
     """
@@ -9,6 +11,8 @@ class WarmupStreamPrepService:
 
     - 기존 `TradingController._run_start_sequence()`의 구현을 옮겨 책임을 분리
     - TradingController는 중복/경로 제어(가드 래퍼)만 유지
+    - **증분 스트림**(종목별로 워밍업 직후 WS·틱을 켜는 모드)은 비활성화하고,
+      전 종목 워밍업이 끝난 뒤 웹소켓을 한 번 기동해 틱을 **일괄** 수신합니다(UI·메인스레드 안정화).
     """
 
     def __init__(self, controller: Any, *, log_func: Optional[Any] = None) -> None:
@@ -18,6 +22,15 @@ class WarmupStreamPrepService:
     def run(self) -> None:
         c = self.controller
         try:
+            try:
+                terminal_trace(
+                    "WarmupStreamPrepService.run() 진입 "
+                    f"(thread={threading.current_thread().name!r})",
+                    app=c.app,
+                    component="WarmupPrep",
+                )
+            except Exception:
+                pass
             c._abort_monitor_start = False
             c.app._active_stream_codes = []
             c._incremental_stream_bootstrapped = False
@@ -29,27 +42,44 @@ class WarmupStreamPrepService:
             require_full = bool(
                 c.app.settings.get("require_full_warmup_for_monitoring", False)
             )
-            incremental_stream = bool(
-                c.app.settings.get("incremental_warmup_stream", True)
-            )
+            # 설정 incremental_warmup_stream 과 무관하게 증분 WS/틱은 끔(전체 완료 후 일괄).
+            incremental_stream = False
+            on_ready = None
 
-            if c.status_cb:
-                c.status_cb(
-                    "STATUS_TEXT",
-                    f"상태: 분석 중 (감시 {len(c.monitor_codes)} + 스트림 합계 {len(merged)})",
+            # status_cb 는 Tk 위젯 갱신을 포함할 수 있어 반드시 메인 스레드로 위임합니다.
+            c._status_cb_on_main(
+                "STATUS_TEXT",
+                f"상태: 분석 중 (감시 {len(c.monitor_codes)} + 스트림 합계 {len(merged)})",
+            )
+            c._status_cb_on_main("WARMUP_BEGIN", list(merged))
+            try:
+                c.log(
+                    "ℹ️ [System] 워밍업: 전 종목 검증이 끝난 뒤 웹소켓·틱을 일괄 시작합니다 "
+                    "(증분 스트림 비활성)."
                 )
-            if c.status_cb:
-                c.status_cb("WARMUP_BEGIN", list(merged))
+            except Exception:
+                pass
 
-            on_ready = (
-                c._schedule_warmup_stock_ready if incremental_stream else None
-            )
             results = c.app.warmup_service.run(
                 merged,
                 c.monitor_info,
                 c.app.bars_data,
                 on_stock_ready=on_ready,
             )
+            try:
+                n_ok = sum(
+                    1
+                    for cc in merged
+                    if isinstance(results.get(cc), dict) and results[cc].get("ok")
+                )
+                terminal_trace(
+                    f"warmup_service.run() 반환 merged={len(merged)} 성공={n_ok} "
+                    f"incremental={incremental_stream}",
+                    app=c.app,
+                    component="WarmupPrep",
+                )
+            except Exception:
+                pass
 
             if c._abort_monitor_start:
                 c.log(
@@ -73,16 +103,14 @@ class WarmupStreamPrepService:
                             c.app.bars_data.pop(cc, None)
                         except Exception:
                             pass
-                    if c.status_cb:
-                        c.status_cb(
-                            "WARMUP_FAILED",
-                            {"results": results, "failed": failed},
-                        )
-                    if c.status_cb:
-                        c.status_cb(
-                            "STATUS_TEXT",
-                            "상태: 워밍업 실패 — 감시 미시작 (신호상태 열 참고)",
-                        )
+                    c._status_cb_on_main(
+                        "WARMUP_FAILED",
+                        {"results": results, "failed": failed},
+                    )
+                    c._status_cb_on_main(
+                        "STATUS_TEXT",
+                        "상태: 워밍업 실패 — 감시 미시작 (신호상태 열 참고)",
+                    )
                     c.log(
                         "❌ [System] 워밍업 미달 종목이 있어 실시간 감시를 시작하지 않습니다."
                     )
@@ -100,16 +128,14 @@ class WarmupStreamPrepService:
                         pass
                 c.monitor_codes = [cc for cc in c.monitor_codes if cc not in failed]
                 if not [cc for cc in merged if results.get(cc, {}).get("ok")]:
-                    if c.status_cb:
-                        c.status_cb(
-                            "WARMUP_FAILED",
-                            {"results": results, "failed": failed},
-                        )
-                    if c.status_cb:
-                        c.status_cb(
-                            "STATUS_TEXT",
-                            "상태: 워밍업 실패 — 감시 대상 없음",
-                        )
+                    c._status_cb_on_main(
+                        "WARMUP_FAILED",
+                        {"results": results, "failed": failed},
+                    )
+                    c._status_cb_on_main(
+                        "STATUS_TEXT",
+                        "상태: 워밍업 실패 — 감시 대상 없음",
+                    )
                     c.log("❌ [System] 워밍업 실패로 감시 가능 종목이 없습니다.")
                     return
 
@@ -117,15 +143,14 @@ class WarmupStreamPrepService:
                     f"⚠️ [System] 워밍업 실패 {len(failed)}종목 제외 후 감시 진행 "
                     f"(require_full_warmup_for_monitoring=False)"
                 )
-                if c.status_cb:
-                    c.status_cb(
-                        "MONITOR_CODES_FILTERED",
-                        {
-                            "codes": list(c.monitor_codes),
-                            "dropped": failed,
-                            "results": results,
-                        },
-                    )
+                c._status_cb_on_main(
+                    "MONITOR_CODES_FILTERED",
+                    {
+                        "codes": list(c.monitor_codes),
+                        "dropped": failed,
+                        "results": results,
+                    },
+                )
 
             successful = [cc for cc in merged if results.get(cc, {}).get("ok")]
             c.app._active_stream_codes = successful
@@ -176,6 +201,15 @@ class WarmupStreamPrepService:
             c.monitor_thread = threading.Thread(
                 target=c.websocket_worker_service.worker_loop, daemon=True
             )
+            try:
+                terminal_trace(
+                    "웹소켓 worker_thread.start() 직전 "
+                    f"(ws_already_running={ws_already_running})",
+                    app=c.app,
+                    component="WarmupPrep",
+                )
+            except Exception:
+                pass
             c.monitor_thread.start()
 
         except Exception as e:

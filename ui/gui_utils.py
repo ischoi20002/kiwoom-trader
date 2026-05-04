@@ -1,74 +1,214 @@
 # -*- coding: utf-8 -*-
+import queue
 import tkinter as tk
 import sys
 import threading
 import calendar
 from datetime import datetime
+from typing import Any, List, Optional, Union
 
 class GuiUtils:
     """GUI 관련 유틸리티 및 전용 로깅 클래스"""
+    # after 한 건당 ScrolledText 에 몇 줄까지 한꺼번에 붙일지 (Tk 메인루프 점유 완화)
+    _LOG_DRAIN_MAX_LINES: int = 200
+    # 첫 로그 이후 UI에 반영하기까지 최대 대기(ms) — 너무 짧으면 after 폭주, 너무 길면 체감 지연
+    _LOG_DEBOUNCE_MS: int = 90
+    # 꼬리 처리만 할 때 추가 스케줄 간격(ms)
+    _LOG_TAIL_POLL_MS: int = 40
+
     def __init__(self, log_area=None, root=None):
         self.log_area = log_area
         self.root = root
         self._log_msg_count = 0
+        self._log_q: "queue.SimpleQueue[str]" = queue.SimpleQueue()
+        self._log_flush_after_id: Optional[Union[str, int]] = None
+        self._icons_strip = (
+            "🚀",
+            "🔍",
+            "✅",
+            "❌",
+            "⚠️",
+            "📊",
+            "ℹ️",
+            "🎯",
+            "🔎",
+            "⏹️",
+            "⚙️",
+            "📡",
+            "🔄",
+            "🛡️",
+            "📦",
+            "📥",
+            "🔥",
+            "🚨",
+            "🔔",
+            "💿",
+            "💰",
+            "📈",
+            "👁️",
+            "📅",
+            "🟢",
+            "⚪",
+        )
+        self._icon_triggers = ("🔍", "❌", "⚠️", "📊", "✅", "🚀", "ℹ️", "🎯")
 
-    def log(self, message):
-        """방대해진 로그를 처리하기 위한 고성능 스레드 안전 로깅"""
-        if threading.current_thread() is not threading.main_thread():
-            if self.root:
-                self.root.after(0, lambda: self._do_log_safe(message))
-        else:
-            self._do_log_safe(message)
+    def log(self, message: Any) -> None:
+        """
+        스레드 안전 로깅.
 
-    def _do_log_safe(self, message):
-        if not self.log_area or not self.log_area.winfo_exists():
+        기존: 비메인 스레드마다 root.after(0, insert 1줄) → 실시간 틱 시 after 폭주로
+        탭 전환·클릭이 한동안 먹지 않는 현상 발생.
+        개선: 메시지는 큐에 쌓고, 메인 스레드에서 일정 간격으로 묶어서 insert (see 1회).
+        """
+        try:
+            self._log_q.put(str(message))
+        except Exception:
             try:
                 print(message)
-            except UnicodeEncodeError:
-                safe_msg = message.replace("🔍", "[DEBUG]").replace("❌", "[ERROR]").replace("⚠️", "[WARN]").replace("📊", "[STATS]").replace("✅", "[OK]")
-                try: print(safe_msg.encode(sys.stdout.encoding, errors='ignore').decode(sys.stdout.encoding))
-                except: print(message.encode('ascii', errors='ignore').decode('ascii'))
+            except Exception:
+                pass
             return
-        
+        self._request_log_flush()
+
+    def _request_log_flush(self) -> None:
+        """Tk 메인 루프에 로그 배출 작업을 한 건만 예약합니다."""
         try:
-            # [v3.6] 타임스탬프 및 메시지 정돈 (이모지 제거 포함)
-            now = datetime.now().strftime("%H:%M:%S")
-            prefix = ""
-            msg_str = str(message)
-            if msg_str.startswith("\n"):
-                prefix = "\n"
-                msg_str = msg_str.lstrip("\n")
-            
-            # 이모지 및 특수 기호 제거 (텍스트형으로 변환 / 사용자 요청으로 대폭 확장)
-            icons = ["🚀", "🔍", "✅", "❌", "⚠️", "📊", "ℹ️", "🎯", "🔎", "⏹️", "⚙️", 
-                     "📡", "🔄", "🛡️", "📦", "📥", "🔥", "🚨", "🔔", "💿", "💰", "📈", "👁️", "📅", "🟢", "⚪"]
-            for icon in icons:
-                msg_str = msg_str.replace(icon, "").strip()
-            
-            clean_msg = f"{prefix}[{now}] {msg_str}"
-            
-            self.log_area.insert(tk.END, f"{clean_msg}\n")
-            
-            # 중요 디버그 메시지는 터미널에도 출력
-            icon_triggers = ["🔍", "❌", "⚠️", "📊", "✅", "🚀", "ℹ️", "🎯"]
-            if any(icon in message for icon in icon_triggers):
+            r = self.root
+            if r is None:
+                self._drain_log_queue_sync()
+                return
+            try:
+                if not r.winfo_exists():
+                    self._drain_log_queue_sync()
+                    return
+            except Exception:
+                self._drain_log_queue_sync()
+                return
+            if self._log_flush_after_id is not None:
+                return
+            self._log_flush_after_id = r.after(
+                self._LOG_DEBOUNCE_MS, self._drain_log_queue_on_main
+            )
+        except Exception:
+            try:
+                self._drain_log_queue_sync()
+            except Exception:
+                pass
+
+    def _drain_log_queue_on_main(self) -> None:
+        """메인 스레드: 큐에서 최대 N건 꺼내 한 번에 위젯에 반영 후, 남으면 짧게 재예약."""
+        self._log_flush_after_id = None
+        try:
+            raw_batch: List[str] = []
+            for _ in range(self._LOG_DRAIN_MAX_LINES):
                 try:
-                    print(message)
+                    raw_batch.append(self._log_q.get_nowait())
+                except queue.Empty:
+                    break
+            if not raw_batch:
+                return
+            self._apply_log_batch(raw_batch)
+        except Exception as e:
+            try:
+                print(f"[GuiUtils] 로그 배출 실패: {e}")
+            except Exception:
+                pass
+        try:
+            if self._log_q.empty():
+                return
+            r = self.root
+            if r is not None:
+                try:
+                    if r.winfo_exists() and self._log_flush_after_id is None:
+                        self._log_flush_after_id = r.after(
+                            self._LOG_TAIL_POLL_MS, self._drain_log_queue_on_main
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _drain_log_queue_sync(self) -> None:
+        """root 없음/종료 시: 큐를 콘솔로만 비웁니다."""
+        while True:
+            try:
+                m = self._log_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                print(m)
+            except Exception:
+                pass
+
+    def _format_log_line(self, message: str) -> str:
+        """타임스탬프·이모지 제거 등 한 줄 포맷(위젯 삽입용)."""
+        now = datetime.now().strftime("%H:%M:%S")
+        prefix = ""
+        msg_str = str(message)
+        if msg_str.startswith("\n"):
+            prefix = "\n"
+            msg_str = msg_str.lstrip("\n")
+        for icon in self._icons_strip:
+            msg_str = msg_str.replace(icon, "").strip()
+        return f"{prefix}[{now}] {msg_str}\n"
+
+    def _maybe_mirror_to_console(self, raw: str) -> None:
+        try:
+            if any(icon in raw for icon in self._icon_triggers):
+                try:
+                    print(raw)
                 except UnicodeEncodeError:
-                    # 유니코드 에러 시 대체 출력
-                    safe_msg = message.replace("🔍", "[DEBUG]").replace("❌", "[ERROR]").replace("⚠️", "[WARN]").replace("📊", "[STATS]").replace("✅", "[OK]")
-                    print(safe_msg.encode('ascii', 'ignore').decode('ascii'))
-            
-            # 성능: 대략 50건마다 길이 체크
-            self._log_msg_count += 1
-            if self._log_msg_count % 50 == 0:
-                last_line = int(self.log_area.index('end-1c').split('.')[0])
+                    safe_msg = (
+                        raw.replace("🔍", "[DEBUG]")
+                        .replace("❌", "[ERROR]")
+                        .replace("⚠️", "[WARN]")
+                        .replace("📊", "[STATS]")
+                        .replace("✅", "[OK]")
+                    )
+                    print(safe_msg.encode("ascii", "ignore").decode("ascii"))
+        except Exception:
+            pass
+
+    def _apply_log_batch(self, raw_batch: List[str]) -> None:
+        """포맷된 여러 줄을 한 번의 insert 로 반영하고, 길이 상한 시 상단 삭제."""
+        if not self.log_area or not self.log_area.winfo_exists():
+            for raw in raw_batch:
+                self._maybe_mirror_to_console(raw)
+                try:
+                    print(self._format_log_line(raw).rstrip("\n"))
+                except Exception:
+                    try:
+                        print(raw)
+                    except Exception:
+                        pass
+            return
+        try:
+            block = "".join(self._format_log_line(m) for m in raw_batch)
+            self.log_area.insert(tk.END, block)
+            for raw in raw_batch:
+                self._maybe_mirror_to_console(raw)
+
+            self._log_msg_count += len(raw_batch)
+            # 줄 수가 많아지면 상단 삭제(배치마다 검사 — index 조회는 가벼운 편)
+            try:
+                last_line = int(self.log_area.index("end-1c").split(".")[0])
                 if last_line > 2000:
                     self.log_area.delete("1.0", "500.0")
-            
+            except Exception:
+                pass
             self.log_area.see(tk.END)
-        except:
-            print(message)
+        except Exception:
+            for raw in raw_batch:
+                try:
+                    print(raw)
+                except Exception:
+                    pass
+
+    def _do_log_safe(self, message: str) -> None:
+        """
+        레거시·직접 호출 호환: 단일 메시지 즉시 반영(가능하면 log() 경유 권장).
+        """
+        self._apply_log_batch([str(message)])
 
     def get_criteria_text(self, settings, format_type="ui"):
         s = settings

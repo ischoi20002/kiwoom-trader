@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backtest_engine import TradingStrategy
 from core.defaults import effective_min_15m_bars_for_monitoring
+from core.terminal_trace import terminal_trace
 
 
 def _bar_slot_hhmm(ts: Any) -> str:
@@ -56,6 +57,13 @@ class WarmupService:
         self._deep_history_worker_started: bool = False
         # run() 한 번당 1m→15m 리샘플 안내 로그 상한(대시보드 스팸 방지)
         self._warmup_resample_hint_count: int = 0
+
+    def _tt(self, msg: str) -> None:
+        """터미널(stderr) 전용 — GUI 로그 배치와 무관하게 막힘 구간 확인용."""
+        try:
+            terminal_trace(msg, app=self.app, component="Warmup")
+        except Exception:
+            pass
 
     def _warmup_query_limit(self) -> int:
         try:
@@ -464,14 +472,15 @@ class WarmupService:
         except (TypeError, ValueError):
             max_pages = 500 if deep_fetch else 40
         try:
+            # 기본값은 과도한 대기 없이 API 과부하만 피하는 쪽(느린 체감 완화)
             dmin = float(
-                self.app.settings.get("realtime_warmup_ka10080_page_delay_min", 0.2)
+                self.app.settings.get("realtime_warmup_ka10080_page_delay_min", 0.08)
             )
             dmax = float(
-                self.app.settings.get("realtime_warmup_ka10080_page_delay_max", 0.55)
+                self.app.settings.get("realtime_warmup_ka10080_page_delay_max", 0.22)
             )
         except (TypeError, ValueError):
-            dmin, dmax = 0.2, 0.55
+            dmin, dmax = 0.08, 0.22
         if dmax < dmin:
             dmin, dmax = dmax, dmin
 
@@ -480,24 +489,55 @@ class WarmupService:
         nk: str = ""
         pages = 0
         early_stop = False
+        # 빈 리스트 + 동일 next-key 가 반복되면(브로커/일시 오류) 무의미한 연속조회를 끊습니다.
+        empty_same_key_streak = 0
+        try:
+            prog_iv = int(
+                float(
+                    self.app.settings.get(
+                        "realtime_warmup_ka10080_prep_progress_every_n_pages", 3
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            prog_iv = 3
+        prog_iv = max(1, min(prog_iv, 50))
         # ka10080 응답에 next-key 가 없으면 브로커 과거 한계(또는 해당 종목 이력 끝)
         ka10080_terminal_no_next = False
+        self._tt(
+            f"ka10080 루프 시작 {name}({code}) max_pages={max_pages} need={need} "
+            f"deep={deep_fetch} tic_scope={tic_scope!r} suppress_prog={suppress_prep_tree_progress}"
+        )
 
         for _ in range(max_pages):
             if respect_warmup_lifecycle and (not self.is_running):
                 # 메인 워밍업만 중단 시 루프 종료.백그라운드 깊이 조회는 respect_warmup_lifecycle=False.
                 break
+            nk_req = (nk or "").strip()
             try:
                 raw_list, nk = self.data_manager.fetch_kiwoom_minute_chart_page(
-                    code, token, nk, tic_scope=tic_scope
+                    code, token, nk_req, tic_scope=tic_scope
                 )
             except Exception as e:
                 self.log(f"⚠️ [Warmup-API] {name}({code}) 페이지 조회 예외: {e}")
+                self._tt(f"ka10080 {code} fetch_kiwoom_minute_chart_page 예외: {e!r}")
                 break
 
             pages += 1
+            nk_out = (nk or "").strip()
+            try:
+                rl_n = len(raw_list) if raw_list is not None else -1
+            except Exception:
+                rl_n = -1
+            if pages <= 3 or pages % 5 == 0 or pages >= max_pages:
+                self._tt(
+                    f"ka10080 {code} page={pages}/{max_pages} raw_n={rl_n} "
+                    f"nk_out={(nk_out or '')[:40]!r} uniq_tm={len(by_tm)}"
+                )
             if (not suppress_prep_tree_progress) and (
-                pages == 1 or (pages % 40 == 0)
+                pages == 1
+                or pages % prog_iv == 0
+                or pages >= max_pages
             ):
                 self._notify_ka10080_page_progress(
                     pages,
@@ -519,13 +559,36 @@ class WarmupService:
                 self.log(
                     f"⚠️ [Warmup-API] {name}({code}) 페이지 {pages} 응답 없음(오류)"
                 )
+                self._tt(f"ka10080 {code} page={pages} raw_list=None (HTTP/파싱 오류)")
                 break
             if not raw_list:
-                if not (nk or "").strip():
+                if not nk_out:
                     ka10080_terminal_no_next = True
                     break
+                # 동일 next-key 로 빈 본문이 반복되면 진행이 없으므로 조기 종료
+                if nk_out == nk_req and nk_req:
+                    empty_same_key_streak += 1
+                else:
+                    empty_same_key_streak = 0
+                if empty_same_key_streak >= 3:
+                    try:
+                        self.log(
+                            f"⚠️ [Warmup-API] {name}({code}) 빈 응답+동일 next-key "
+                            f"{empty_same_key_streak}회 — 연속조회 중단(p{pages}/{max_pages})"
+                        )
+                    except Exception:
+                        pass
+                    self._tt(
+                        f"ka10080 {code} 빈응답+동일next-key 중단 p={pages} nk={nk_out!r}"
+                    )
+                    break
+                # 과도한 연속 호출(429·서버 부하) 방지 — 기존에는 sleep 없이 continue 했음
+                if respect_warmup_lifecycle and (not self.is_running):
+                    break
+                time.sleep(random.uniform(dmin, dmax))
                 continue
 
+            empty_same_key_streak = 0
             for item in raw_list:
                 k = self._api_minute_row_key(item)
                 if k:
@@ -556,7 +619,7 @@ class WarmupService:
             except Exception as e:
                 self.log(f"⚠️ [Warmup-API] {name}({code}) 중간 병합 검사 오류: {e}")
 
-            nk = (nk or "").strip()
+            nk = nk_out
             if not nk:
                 ka10080_terminal_no_next = True
                 break
@@ -564,6 +627,10 @@ class WarmupService:
                 break
             time.sleep(random.uniform(dmin, dmax))
 
+        self._tt(
+            f"ka10080 종료 {code} pages={pages} early_stop={early_stop} "
+            f"terminal_no_next={ka10080_terminal_no_next} uniq_tm={len(by_tm)}"
+        )
         if (
             deep_fetch
             and ka10080_terminal_no_next
@@ -883,25 +950,78 @@ class WarmupService:
         반환: (성공 여부, 실패 사유 또는 빈 문자열, 검증 시점 15m 봉 수 또는 성공 시 스트림 봉 수)
         """
         try:
+            self._tt(
+                f"_execute_one begin code={code} name={name!r} token_present={bool(token)}"
+            )
             # 감시 시작 조건: 최소 봉·장중 당일 갭만 — 캘린더 1년 깊이는 기다리지 않음(백그라운드 큐).
             base = self._load_15m_ohlcv_frame(code)
-            base = self._maybe_api_backfill_15m(
-                code, name, base, token, quick_only=True
-            )
-            time.sleep(random.uniform(0.25, 0.75))
+            try:
+                n0 = len(base) if base is not None and not base.empty else 0
+            except Exception:
+                n0 = 0
+            self._tt(f"_execute_one {code} _load_15m_ohlcv_frame rows={n0}")
+            # DB만으로 이미 검증되면 ka10080 호출·페이지 대기 전체를 생략(42종목 시 누적 체감 큼)
+            ok_skip_api, _rs = self._validate_warmup_base(base)
+            if ok_skip_api:
+                try:
+                    ctx = getattr(self, "_warmup_prep_ui", None)
+                    if ctx:
+                        self._notify_stock_prep(
+                            "prep_progress",
+                            int(ctx["cur"]),
+                            int(ctx["total"]),
+                            name,
+                            code,
+                            "DB만으로 검증 통과(API 생략)",
+                        )
+                except Exception:
+                    pass
+            else:
+                self._tt(
+                    f"_execute_one {code} ka10080 경로 진입(quick API 보충) "
+                    f"pre_rows={n0} token={bool(token)}"
+                )
+                base = self._maybe_api_backfill_15m(
+                    code, name, base, token, quick_only=True
+                )
+                try:
+                    n1 = len(base) if base is not None and not base.empty else 0
+                except Exception:
+                    n1 = 0
+                self._tt(f"_execute_one {code} ka10080 경로 종료 rows={n1}")
+            # 레거시 고정 sleep 제거: 필요 시에만 아주 짧은 양보(기본 0)
+            try:
+                mx = float(
+                    self.app.settings.get(
+                        "realtime_warmup_pre_validate_pause_max_sec", 0.0
+                    )
+                )
+            except (TypeError, ValueError):
+                mx = 0.0
+            if mx > 0:
+                time.sleep(random.uniform(0.0, min(mx, 2.0)))
 
             ok, reason = self._validate_warmup_base(base)
             nbar = len(base) if base is not None and not base.empty else 0
             if not ok:
+                self._tt(
+                    f"_execute_one {code} _validate_warmup_base 실패 nbar={nbar} "
+                    f"reason={reason!r}"
+                )
                 try:
                     bars_data.pop(code, None)
                 except Exception:
                     pass
                 return False, reason, nbar
 
+            self._tt(f"_execute_one {code} validate OK nbar={nbar} → persist/지표")
             self._persist_warmup_base_to_rt15m_db(code, base)
 
             df_slice = self._indicator_calc_input_tail(base)
+            self._tt(
+                f"_execute_one {code} calculate_indicators 입력 rows="
+                f"{len(df_slice) if df_slice is not None and not getattr(df_slice, 'empty', True) else 0}"
+            )
             df_ind = TradingStrategy.calculate_indicators(df_slice, self.app.settings)
             fin = self._finalize_bars_for_stream(df_ind)
             lk = getattr(self.app, "_bars_data_lock", None)
@@ -910,10 +1030,12 @@ class WarmupService:
                 bars_data[code] = fin
             n_ok = len(bars_data[code]) if bars_data.get(code) is not None else 0
             if on_stock_ready is not None:
+                self._tt(f"_execute_one {code} on_stock_ready 콜백 호출")
                 try:
                     on_stock_ready(code)
                 except Exception as cb_e:
                     self.log(f"⚠️ [Warmup] on_stock_ready 콜백 오류 ({code}): {cb_e}")
+                    self._tt(f"_execute_one {code} on_stock_ready 예외: {cb_e!r}")
             if self._warmup_fetch_calendar_history_enabled():
                 self._enqueue_deep_history_backfill(code, name)
             return True, "", n_ok
@@ -1114,10 +1236,15 @@ class WarmupService:
             )
         except Exception:
             pass
+        self._tt(
+            f"run() 시작 merged={total} 재시도≤{retry_max} delay={retry_delay}s "
+            f"출처={_src} thread={threading.current_thread().name!r}"
+        )
         for i, code in enumerate(monitor_codes):
             if not self.is_running:
                 break
             name = monitor_info.get(code, {}).get("name", "Unknown")
+            self._tt(f"[{i + 1}/{total}] 종목 루프 진입 code={code} name={name!r}")
             self._warmup_prep_ui = {
                 "cur": i + 1,
                 "total": total,
@@ -1133,9 +1260,26 @@ class WarmupService:
                 for attempt in range(max_attempts):
                     if not self.is_running:
                         break
+                    self._tt(
+                        f"[{i + 1}/{total}] attempt {attempt + 1}/{max_attempts} "
+                        f"code={code} → get_auth_token 호출"
+                    )
                     token = self.auth_manager.get_auth_token()
+                    self._tt(
+                        f"[{i + 1}/{total}] attempt {attempt + 1} "
+                        f"code={code} token_ok={bool(token)}"
+                    )
+                    self._tt(
+                        f"[{i + 1}/{total}] attempt {attempt + 1} "
+                        f"code={code} → _execute_warmup_one_code 진입"
+                    )
                     ok, reason, nbar = self._execute_warmup_one_code(
                         code, name, token, bars_data, on_stock_ready
+                    )
+                    self._tt(
+                        f"[{i + 1}/{total}] attempt {attempt + 1} "
+                        f"code={code} _execute 종료 ok={ok} nbar={nbar} "
+                        f"reason={(reason or '')[:160]!r}"
                     )
                     if ok:
                         results[code] = {
@@ -1175,6 +1319,21 @@ class WarmupService:
                         self._notify_stock_prep(
                             "prep_fail", i + 1, total, name, code, final_reason
                         )
+                # 재시도 루프 중 stop() 등으로 중단되면 results 가 비어 있을 수 있음
+                if code not in results and not self.is_running:
+                    results[code] = {
+                        "ok": False,
+                        "reason": "워밍업 중단(재시도 중)",
+                        "bars": 0,
+                    }
+                    self._notify_stock_prep(
+                        "prep_fail",
+                        i + 1,
+                        total,
+                        name,
+                        code,
+                        "워밍업 중단(재시도 중)",
+                    )
             finally:
                 self._warmup_prep_ui = None
 
@@ -1195,6 +1354,11 @@ class WarmupService:
                 )
 
         self.is_running = False
+        try:
+            nres = len(results)
+        except Exception:
+            nres = 0
+        self._tt(f"run() 종료 thread={threading.current_thread().name!r} results={nres}건")
         if total > 0:
             try:
                 n_ok = sum(

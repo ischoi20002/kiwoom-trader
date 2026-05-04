@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import threading
 from datetime import datetime
+import time
 import traceback
 from backtest_engine import TradingStrategy
 from core.defaults import effective_min_15m_bars_for_monitoring
@@ -18,6 +19,104 @@ class SignalEngine:
         self.last_buy_sig_time = {} # [v1.0] 중복 시그널 방지용 쿨타임 관리
         self._wl_buy_last_tm = {}
         self._wl_sell_last_tm = {}
+
+        # RSI는 틱마다(특히 메인 스레드에서) 계산하면 Pandas rolling 비용으로 UI가 멈출 수 있어,
+        # 최소 재계산 간격을 둬서 틱당 연산량을 줄인다.
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            self._realtime_rsi_calc_min_interval_sec: float = float(
+                st.get("realtime_rsi_calc_min_interval_sec", 1.0)
+            )
+        except Exception:
+            self._realtime_rsi_calc_min_interval_sec = 1.0
+        self._realtime_rsi_calc_min_interval_sec = max(
+            0.05, min(self._realtime_rsi_calc_min_interval_sec, 10.0)
+        )
+        self._rsi_calc_last_ts: dict[str, float] = {}
+        self._rsi_calc_last_val: dict[str, float] = {}
+
+        # 매 틱마다 Pandas 기반 지표/시그널을 모두 재계산하면 Tk 메인스레드가 장시간 점유될 수 있어
+        # 종목별 "풀 계산" 및 "포지션 평가" 호출을 강하게 스로틀한다.
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            self._realtime_s1_full_calc_min_interval_sec: float = float(
+                st.get("realtime_s1_full_calc_min_interval_sec", 1.0)
+            )
+            self._realtime_eval_position_min_interval_sec: float = float(
+                st.get("realtime_eval_position_min_interval_sec", 1.0)
+            )
+            self._realtime_exit_indicator_min_interval_sec: float = float(
+                st.get("realtime_exit_indicator_min_interval_sec", 1.0)
+            )
+        except Exception:
+            self._realtime_s1_full_calc_min_interval_sec = 1.0
+            self._realtime_eval_position_min_interval_sec = 1.0
+            self._realtime_exit_indicator_min_interval_sec = 1.0
+
+        self._realtime_s1_full_calc_min_interval_sec = max(
+            0.05, min(self._realtime_s1_full_calc_min_interval_sec, 10.0)
+        )
+        self._realtime_eval_position_min_interval_sec = max(
+            0.05, min(self._realtime_eval_position_min_interval_sec, 10.0)
+        )
+        self._realtime_exit_indicator_min_interval_sec = max(
+            0.05, min(self._realtime_exit_indicator_min_interval_sec, 10.0)
+        )
+
+        self._s1_full_calc_last_ts: dict[str, float] = {}
+        self._eval_position_last_ts: dict[str, float] = {}
+        self._exit_indicator_last_ts: dict[str, float] = {}
+
+        # 15분봉 DF 갱신: 틱마다 df.at 호출은 Tk 메인스레드에서 비용이 크므로 시간·가격 변화 기반 스로틀
+        try:
+            st2 = getattr(self.app, "settings", None) or {}
+            self._realtime_bar_update_min_interval_sec: float = float(
+                st2.get("realtime_bar_update_min_interval_sec", 0.12)
+            )
+            self._realtime_bar_update_force_move_pct: float = float(
+                st2.get("realtime_bar_update_force_move_pct", 0.0003)
+            )
+            self._realtime_monitor_atr_display_min_interval_sec: float = float(
+                st2.get("realtime_monitor_atr_display_min_interval_sec", 0.5)
+            )
+        except Exception:
+            self._realtime_bar_update_min_interval_sec = 0.12
+            self._realtime_bar_update_force_move_pct = 0.0003
+            self._realtime_monitor_atr_display_min_interval_sec = 0.5
+        self._realtime_bar_update_min_interval_sec = max(
+            0.02, min(self._realtime_bar_update_min_interval_sec, 2.0)
+        )
+        self._realtime_bar_update_force_move_pct = max(
+            0.0, min(self._realtime_bar_update_force_move_pct, 0.05)
+        )
+        self._realtime_monitor_atr_display_min_interval_sec = max(
+            0.05, min(self._realtime_monitor_atr_display_min_interval_sec, 5.0)
+        )
+        self._bar_update_last_ts: dict[str, float] = {}
+        self._bar_update_anchor_price: dict[str, float] = {}
+        self._monitor_atr_cache_ts: dict[str, float] = {}
+
+    def _should_throttle_bar_update(
+        self, code: str, price: float, now_ts: float
+    ) -> bool:
+        """
+        True 이면 이번 틱에서 15분봉 스트림 갱신(_update_realtime_bar)을 생략합니다.
+        최소 간격 내이면서 마지막 갱신가 대비 가격 변동이 force_move_pct 미만일 때만 생략합니다.
+        """
+        try:
+            min_iv = float(self._realtime_bar_update_min_interval_sec)
+            last_ts = float(self._bar_update_last_ts.get(code, 0.0) or 0.0)
+            if (now_ts - last_ts) >= min_iv:
+                return False
+            anchor = float(self._bar_update_anchor_price.get(code, 0.0) or 0.0)
+            if anchor <= 0:
+                return False
+            move = abs(float(price) - anchor) / anchor
+            if move >= float(self._realtime_bar_update_force_move_pct):
+                return False
+            return True
+        except Exception:
+            return False
 
     def _s1_buy_signal_cooldown_sec(self) -> float:
         """
@@ -221,14 +320,31 @@ class SignalEngine:
             if nk in vp or code in vp:
                 return True
             for k in vp:
-                if str(k).zfill(6) == nk:
-                    return True
+                try:
+                    if str(k).split("_")[0].zfill(6) == nk:
+                        return True
+                except Exception:
+                    continue
         except Exception:
             pass
         return False
 
-    def on_tick_received(self, code, now_price, volume, _trde_val, **kwargs):
-        """실시간 체결 데이터(Tick) 처리 본체. `_trde_val` 은 호출 규격 유지용(감시 트리 대금 열 제거)."""
+    def on_tick_received(
+        self,
+        code,
+        now_price,
+        volume,
+        _trde_val,
+        *,
+        defer_main_callbacks: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """
+        실시간 체결 데이터(Tick) 처리 본체. `_trde_val` 은 호출 규격 유지용(감시 트리 대금 열 제거).
+
+        defer_main_callbacks=True:
+            매수·전략 액션·Tk 트리/가상탭 예약은 메인 스레드 큐로만 넘깁니다(워커 스레드 전용).
+        """
         try:
             if now_price <= 0: return # [v2.2] 유효하지 않은 가격 데이터 로직 진입 차단
             code = str(code).split("_")[0].zfill(6)
@@ -272,9 +388,23 @@ class SignalEngine:
                     continue
                 info[k] = v
 
-            # 1. 지표 재계산 및 봉 데이터 업데이트
+            # 1. 봉 데이터 업데이트(15분 슬롯 DF) — 틱 폭주 시 스로틀, 의미 있는 가격 변동 시 즉시 반영
             if not is_orderbook_only:
-                self._update_realtime_bar(code, now_price, volume)
+                try:
+                    _now_ts_bar = time.time()
+                    if not self._should_throttle_bar_update(
+                        code, float(now_price), _now_ts_bar
+                    ):
+                        self._update_realtime_bar(code, now_price, volume)
+                        self._bar_update_last_ts[code] = _now_ts_bar
+                        self._bar_update_anchor_price[code] = float(now_price)
+                except Exception:
+                    try:
+                        self._update_realtime_bar(code, now_price, volume)
+                        self._bar_update_last_ts[code] = time.time()
+                        self._bar_update_anchor_price[code] = float(now_price)
+                    except Exception:
+                        pass
             
             # 2. 실시간 지표 추출 (RSI, MACD 등)
             rsi_val = self._calculate_realtime_rsi(code)
@@ -370,48 +500,119 @@ class SignalEngine:
             is_buy = False
             last_row = None
             if bars_ready:
-                df_with_ind = TradingStrategy.calculate_indicators(self.app.bars_data[code], self.app.settings)
-                try:
-                    info['last_detailed_sig'] = TradingStrategy.get_buy_signals_detailed(
-                        df_with_ind, self.app.settings, "UP"
+                now_ts = time.time()
+                last_calc_ts = float(self._s1_full_calc_last_ts.get(code, 0.0) or 0.0)
+                cached_last_row = info.get("last_row_cache")
+                cached_last_sig_cache = info.get("last_sig_cache")
+
+                need_full_calc = (
+                    cached_last_row is None
+                    or cached_last_sig_cache is None
+                    or (now_ts - last_calc_ts) >= self._realtime_s1_full_calc_min_interval_sec
+                )
+
+                last_sig: dict = {}
+                last_row = cached_last_row
+
+                if need_full_calc:
+                    df_with_ind = TradingStrategy.calculate_indicators(
+                        self.app.bars_data[code], self.app.settings
                     )
-                    info['last_bar_count'] = current_bar_count
-                    info['last_row_cache'] = df_with_ind.iloc[-1].to_dict()
-                except Exception as exc_sig:
-                    # 시그널/지표 계산 실패 시 캐시가 없으면 아래 분기에서 안내 문구 표시
-                    if self._last_realtime_err != str(exc_sig):
-                        self._last_realtime_err = str(exc_sig)
-                        print(
-                            f"[SignalEngine] get_buy_signals_detailed 실패 ({code}): {exc_sig}"
+                    try:
+                        info["last_detailed_sig"] = TradingStrategy.get_buy_signals_detailed(
+                            df_with_ind, self.app.settings, "UP"
                         )
-                        traceback.print_exc()
-                
-                if "last_detailed_sig" not in info:
-                    info["confluence"] = "시그널 계산 실패(봉·지표 확인)"
-                    info["met_ratio"] = 0.0
-                    is_buy = False
-                    last_row = None
+                        info["last_bar_count"] = current_bar_count
+                        info["last_row_cache"] = df_with_ind.iloc[-1].to_dict()
+
+                        detailed_signals = info["last_detailed_sig"]
+                        last_ser = detailed_signals.iloc[-1]
+                        last_sig = (
+                            last_ser.to_dict()
+                            if hasattr(last_ser, "to_dict")
+                            else dict(last_ser)
+                        )
+                        info["last_sig_cache"] = last_sig
+                    except Exception as exc_sig:
+                        # 시그널/지표 계산 실패 시 캐시가 있으면 아래 분기에서 안내 없이 재사용
+                        if self._last_realtime_err != str(exc_sig):
+                            self._last_realtime_err = str(exc_sig)
+                            try:
+                                print(
+                                    f"[SignalEngine] get_buy_signals_detailed 실패 ({code}): {exc_sig}"
+                                )
+                            except Exception:
+                                pass
+                            traceback.print_exc()
+
+                    # 풀 계산이 성공했는지(캐시 갱신 확인)
+                    if info.get("last_row_cache") is None or info.get("last_sig_cache") is None:
+                        info["confluence"] = "시그널 계산 실패(봉·지표 확인)"
+                        info["met_ratio"] = 0.0
+                        is_buy = False
+                        last_row = None
+                        rsi_sig = 0.0
+                        macd_val = 0.0
+                        osc_val = 0.0
+                        ma60_scalar = 0.0
+                        ma60_ratio = 0.0
+                    else:
+                        self._s1_full_calc_last_ts[code] = now_ts
+                        last_sig = info["last_sig_cache"]
+                        last_row = info["last_row_cache"]
+                        # [v4.5.9] 전방위적 스칼라 쉴드 적용
+                        is_buy = bool(self._to_scalar(last_sig.get("Signal"), False))
+                        _sel_tr = str(
+                            info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                        ).strip().upper()
+                        info["confluence"] = self._format_s1_confluence_status_line(
+                            last_sig, _sel_tr
+                        )
+                        info["met_ratio"] = float(
+                            self._to_scalar(last_sig.get("Met_Ratio"), 0.0)
+                        )
+
+                        rsi_sig = float(self._to_scalar(last_row.get("RSI_Sig", 0), 0.0))
+                        macd_val = float(self._to_scalar(last_row.get("MACD", 0), 0.0))
+                        osc_val = float(self._to_scalar(last_row.get("OSC", 0), 0.0))
+
+                        ma60_scalar = float(self._to_scalar(last_row.get("MA60"), 0.0))
+                        ma60_ratio = (
+                            (now_price / ma60_scalar) * 100.0 if ma60_scalar > 0 else 0.0
+                        )
                 else:
-                    detailed_signals = info['last_detailed_sig']
-                    last_sig = detailed_signals.iloc[-1]
-                
-                    # [v4.5.9] 전방위적 스칼라 쉴드 적용
-                    is_buy = bool(self._to_scalar(last_sig['Signal'], False))
-                    _sel_tr = str(
-                        info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
-                    ).strip().upper()
-                    info['confluence'] = self._format_s1_confluence_status_line(
-                        last_sig, _sel_tr
-                    )
-                    info['met_ratio'] = float(self._to_scalar(last_sig['Met_Ratio'], 0.0))
-                
-                    last_row = info['last_row_cache']
-                    rsi_sig = float(self._to_scalar(last_row.get('RSI_Sig', 0), 0.0))
-                    macd_val = float(self._to_scalar(last_row.get('MACD', 0), 0.0))
-                    osc_val = float(self._to_scalar(last_row.get('OSC', 0), 0.0))
-                
-                    ma60_scalar = float(self._to_scalar(last_row['MA60'], 0.0))
-                    ma60_ratio = (now_price / ma60_scalar) * 100 if ma60_scalar > 0 else 0.0
+                    # 캐시 재사용 경로
+                    last_sig = cached_last_sig_cache if isinstance(cached_last_sig_cache, dict) else {}
+                    last_row = cached_last_row
+                    if last_sig and isinstance(last_row, dict):
+                        is_buy = bool(self._to_scalar(last_sig.get("Signal"), False))
+                        _sel_tr = str(
+                            info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                        ).strip().upper()
+                        info["confluence"] = self._format_s1_confluence_status_line(
+                            last_sig, _sel_tr
+                        )
+                        info["met_ratio"] = float(
+                            self._to_scalar(last_sig.get("Met_Ratio"), 0.0)
+                        )
+
+                        rsi_sig = float(self._to_scalar(last_row.get("RSI_Sig", 0), 0.0))
+                        macd_val = float(self._to_scalar(last_row.get("MACD", 0), 0.0))
+                        osc_val = float(self._to_scalar(last_row.get("OSC", 0), 0.0))
+                        ma60_scalar = float(self._to_scalar(last_row.get("MA60"), 0.0))
+                        ma60_ratio = (
+                            (now_price / ma60_scalar) * 100.0 if ma60_scalar > 0 else 0.0
+                        )
+                    else:
+                        info["confluence"] = "시그널 계산 대기(캐시 확인)"
+                        info["met_ratio"] = 0.0
+                        is_buy = False
+                        last_row = None
+                        rsi_sig = 0.0
+                        macd_val = 0.0
+                        osc_val = 0.0
+                        ma60_scalar = 0.0
+                        ma60_ratio = 0.0
                 
                     if is_buy:
                         sig_type = str(
@@ -517,21 +718,40 @@ class SignalEngine:
                                 )
                         except Exception:
                             pass
-                        try:
-                            buy_ok = bool(
-                                self.app._on_buy_signal_received(
-                                    code,
-                                    now_price,
-                                    rsi_sig,
-                                    macd_val,
-                                    osc_val,
-                                    ma60_ratio,
+                        buy_ok = False
+                        if defer_main_callbacks:
+                            try:
+                                # 메인 처리 전 동일 종목이 연속 큐 적재되는 것을 막기 위해 쿨타임 앵커를 먼저 둡니다.
+                                self.last_buy_sig_time[code] = datetime.now()
+                                self.app.enqueue_tick_main_action(
+                                    "buy_signal",
+                                    (
+                                        str(code).zfill(6),
+                                        float(now_price),
+                                        float(rsi_sig),
+                                        float(macd_val),
+                                        float(osc_val),
+                                        float(ma60_ratio),
+                                    ),
                                 )
-                            )
-                        except Exception:
-                            buy_ok = False
-                        if buy_ok:
-                            self.last_buy_sig_time[code] = datetime.now()
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                buy_ok = bool(
+                                    self.app._on_buy_signal_received(
+                                        code,
+                                        now_price,
+                                        rsi_sig,
+                                        macd_val,
+                                        osc_val,
+                                        ma60_ratio,
+                                    )
+                                )
+                            except Exception:
+                                buy_ok = False
+                            if buy_ok:
+                                self.last_buy_sig_time[code] = datetime.now()
 
                     # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
                     if is_wl_only and is_buy and is_cool and not has_wl_avg:
@@ -566,7 +786,19 @@ class SignalEngine:
             if bars_ready:
                 eval_ind = last_row
             elif self._has_open_position(code):
-                eval_ind = self._indicator_last_row_for_exit(code)
+                now_ts = time.time()
+                last_exit_ts = float(self._exit_indicator_last_ts.get(code, 0.0) or 0.0)
+                cached_exit_row = info.get("exit_last_row_cache")
+                if (
+                    cached_exit_row is not None
+                    and (now_ts - last_exit_ts) < self._realtime_exit_indicator_min_interval_sec
+                ):
+                    eval_ind = cached_exit_row
+                else:
+                    eval_ind = self._indicator_last_row_for_exit(code)
+                    if eval_ind is not None:
+                        info["exit_last_row_cache"] = eval_ind
+                        self._exit_indicator_last_ts[code] = now_ts
 
             # 보유 중이면 신호상태는 S1 합치도 대신 S2 추매 합치도
             if self._code_in_virtual_positions(code) and eval_ind is not None:
@@ -608,24 +840,47 @@ class SignalEngine:
             vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
 
             if eval_ind is not None and not is_wl_only and _session_ok:
-                res = self.app.strategy_engine.evaluate_position(
-                    code,
-                    now_price,
-                    ind=eval_ind,
-                    is_power_exhausted=is_power_exhausted,
-                    bid_ask_ratio=bid_ask_ratio,
-                    ask_bid_ratio=ask_bid_ratio,
-                    vol_power=vol_power,
-                    sel_track=info.get("sel_track") or info.get("SelTrack"),
-                )
-                if res["action"] != "HOLD":
-                    self.app._on_strategy_action_needed(
+                now_ts = time.time()
+                last_eval_ts = float(self._eval_position_last_ts.get(code, 0.0) or 0.0)
+                if (now_ts - last_eval_ts) >= self._realtime_eval_position_min_interval_sec:
+                    self._eval_position_last_ts[code] = now_ts
+                    res = self.app.strategy_engine.evaluate_position(
                         code,
-                        res["action"],
-                        res["reason"],
-                        now_price=now_price,
-                        profit_ratio=res.get("profit_ratio", 0),
+                        now_price,
+                        ind=eval_ind,
+                        is_power_exhausted=is_power_exhausted,
+                        bid_ask_ratio=bid_ask_ratio,
+                        ask_bid_ratio=ask_bid_ratio,
+                        vol_power=vol_power,
+                        sel_track=info.get("sel_track") or info.get("SelTrack"),
                     )
+                    if res.get("action") != "HOLD":
+                        if defer_main_callbacks:
+                            try:
+                                self.app.enqueue_tick_main_action(
+                                    "strategy_action",
+                                    (
+                                        str(code).zfill(6),
+                                        str(res.get("action") or ""),
+                                        str(res.get("reason") or ""),
+                                        {
+                                            "now_price": float(now_price),
+                                            "profit_ratio": float(
+                                                res.get("profit_ratio", 0) or 0
+                                            ),
+                                        },
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            self.app._on_strategy_action_needed(
+                                code,
+                                res.get("action"),
+                                res.get("reason"),
+                                now_price=now_price,
+                                profit_ratio=res.get("profit_ratio", 0),
+                            )
 
             # 관심목록 전용: 평단(기준가) 등록 시에만 S2-B 매도 신호 텔레그램 (미등록 시 매수만)
             if (
@@ -696,8 +951,14 @@ class SignalEngine:
                 _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
                 if not _session_ok:
                     _vp_str = "—"
+                # 신호상태 열은 monitor_tab 과 동일하게 status_text 단일 소스.
+                # 합치도가 아직 '-' 등 플레이스홀더일 때 매 틱 덮어쓰면 워밍업 '검증 완료' 문구가 사라져 '대기'로 보임.
                 try:
-                    info["status_text"] = str(info.get("confluence", "대기"))
+                    conf_s = str(info.get("confluence", "")).strip()
+                    if conf_s and conf_s not in ("-", "—"):
+                        info["status_text"] = conf_s
+                    elif not str(info.get("status_text", "")).strip():
+                        info["status_text"] = "대기"
                 except Exception:
                     pass
                 try:
@@ -718,10 +979,32 @@ class SignalEngine:
                                 _bd_atr is not None
                                 and not getattr(_bd_atr, "empty", True)
                             ):
-                                df_i = TradingStrategy.calculate_indicators(
-                                    _bd_atr, self.app.settings
+                                _now_atr = time.time()
+                                _atr_iv = float(
+                                    self._realtime_monitor_atr_display_min_interval_sec
                                 )
-                                row_for_atr = df_i.iloc[-1].to_dict()
+                                _last_atr = float(
+                                    self._monitor_atr_cache_ts.get(code, 0.0) or 0.0
+                                )
+                                _cached_atr = info.get("_monitor_atr_row_cache")
+                                if (
+                                    isinstance(_cached_atr, dict)
+                                    and (_now_atr - _last_atr) < _atr_iv
+                                ):
+                                    row_for_atr = _cached_atr
+                                else:
+                                    try:
+                                        df_i = TradingStrategy.calculate_indicators(
+                                            _bd_atr, self.app.settings
+                                        )
+                                        row_for_atr = df_i.iloc[-1].to_dict()
+                                        try:
+                                            info["_monitor_atr_row_cache"] = row_for_atr
+                                        except Exception:
+                                            pass
+                                        self._monitor_atr_cache_ts[code] = _now_atr
+                                    except Exception:
+                                        row_for_atr = None
                         if row_for_atr is not None:
                             atr_cell = TradingStrategy.compute_atr_exit_display_text(
                                 pos,
@@ -750,7 +1033,7 @@ class SignalEngine:
                     atr_cell,
                     self._format_monitor_vs_prev_cell(info),
                     ratio_cell,
-                    str(info.get("confluence", "-")),
+                    str(info.get("status_text") or info.get("confluence") or "대기"),
                     _vp_str,
                     self._format_monitor_bid_ask_cell(info),
                     f"{int(volume):,}",
@@ -772,16 +1055,34 @@ class SignalEngine:
                     
                 # [v27.9] is_blink 플래그를 항상 False로 전달
                 self.app.pending_tree_updates[code] = (full_values, tuple(final_tags), False)
-                if not self.app._update_timer_active:
-                    self.app._update_timer_active = True
-                    self.app.root.after(100, self.app._render_tree_updates)
+                if defer_main_callbacks:
+                    try:
+                        self.app.mark_tick_worker_ui_dirty()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        self.app.ensure_monitor_tree_refresh_scheduled(immediate=False)
+                    except Exception:
+                        try:
+                            if not self.app._update_timer_active:
+                                self.app._update_timer_active = True
+                                self.app.root.after(100, self.app._render_tree_updates)
+                        except Exception:
+                            pass
 
             # 보유 종목이 있으면 포지션 관리 탭 실시간 평가·요약 갱신 (스로틀은 앱 쪽)
             if self._code_in_virtual_positions(code):
-                try:
-                    self.app.request_virtual_tab_realtime_render()
-                except Exception:
-                    pass
+                if defer_main_callbacks:
+                    try:
+                        self.app.mark_tick_worker_virtual_dirty()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        self.app.request_virtual_tab_realtime_render()
+                    except Exception:
+                        pass
 
         except Exception as e:
             if not self._last_realtime_err == str(e):
@@ -921,6 +1222,15 @@ class SignalEngine:
 
     def _calculate_realtime_rsi(self, code):
         """[v15.0] 실시간 봉 데이터를 기반으로 즉시 RSI 산출"""
+        # 틱마다 RSI를 rolling 계산하면 메인 스레드가 과점유되므로 캐시/스로틀링 적용
+        try:
+            now_ts = time.time()
+            last_ts = float(self._rsi_calc_last_ts.get(code, 0.0) or 0.0)
+            if now_ts - last_ts < self._realtime_rsi_calc_min_interval_sec:
+                return float(self._rsi_calc_last_val.get(code, 0.0) or 0.0)
+        except Exception:
+            pass
+
         if code not in self.app.bars_data: return 0.0
         df = self.app.bars_data[code]
         if len(df) < 15: return 0.0
@@ -931,4 +1241,10 @@ class SignalEngine:
         
         rs = gain / (loss + 1e-10)
         rsi = 100 - (100 / (1 + rs))
-        return rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 0.0
+        val = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 0.0
+        try:
+            self._rsi_calc_last_ts[code] = time.time()
+            self._rsi_calc_last_val[code] = float(val) if val is not None else 0.0
+        except Exception:
+            pass
+        return float(val) if val is not None else 0.0

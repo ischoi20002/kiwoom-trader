@@ -21,6 +21,7 @@ import itertools
 import importlib.util
 import webbrowser
 import subprocess
+import queue
 from typing import Any, Dict, List, Optional, Set, Tuple
 from datetime import datetime, timedelta, time as dtime, date
 
@@ -96,8 +97,13 @@ try:
 except:
     pass
 
-# 실시간 감시 탭 트리 UI 갱신 주기(ms). 틱·지표 계산은 그대로 — 발열이 불편하면 220~400 사이에서만 조정.
-REALTIME_TREE_UI_REFRESH_MS: int = 280
+# 실시간 감시 탭 트리 UI 갱신 주기(ms). 초당 약 2.9회 — UI 부하 완화 시 320~450 권장.
+REALTIME_TREE_UI_REFRESH_MS: int = 340
+
+# 실시간 틱(감시 대상) 배치 flush 주기(ms).
+# Tk 메인스레드에서 틱 배치 처리(SignalEngine)가 실행되므로,
+# 너무 촘촘하면 탭 전환/화면 갱신이 멈춘 것처럼 느려질 수 있습니다.
+REALTIME_TICK_DISPATCH_FLUSH_MS: int = 150
 
 
 class AuthManager:
@@ -272,6 +278,12 @@ class KiwoomApp:
         )
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        # Tick dispatch 주기는 SignalEngine이 메인 스레드를 과점유할 때 UI가 멎는 문제를 직접 줄이므로,
+        # 애플리케이션 인스턴스에 모듈 상수값을 그대로 심어둔다.
+        try:
+            self.REALTIME_TICK_DISPATCH_FLUSH_MS = int(REALTIME_TICK_DISPATCH_FLUSH_MS)
+        except Exception:
+            self.REALTIME_TICK_DISPATCH_FLUSH_MS = 150
         
         self.bars_data = self.config_handler.load_bars_cache()
         self._bars_data_lock = threading.RLock()
@@ -331,6 +343,12 @@ class KiwoomApp:
         self.tick_dispatch_service = RealtimeTickDispatchService(
             self, self.signal_engine, log_func=self.log
         )
+        # 틱 워커 스레드가 넣은 매수·청산·UI 갱신 요청을 메인에서만 처리
+        self._tick_main_actions_queue: "queue.SimpleQueue[tuple]" = queue.SimpleQueue()
+        self._tick_worker_ui_dirty: bool = False
+        self._tick_worker_virtual_dirty: bool = False
+        self._tick_main_poller_after_id: Optional[Any] = None
+        self._tick_main_poller_lock = threading.Lock()
 
         # [v3.8] Core 매니저 통합 (Service Layer 중심)
         self.portfolio = PortfolioManager(
@@ -774,6 +792,167 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def enqueue_tick_main_action(self, kind: str, payload: Any) -> None:
+        """워커 스레드에서 호출: 메인 스레드에서만 처리할 틱 후속 작업을 큐에 넣습니다."""
+        try:
+            self._tick_main_actions_queue.put((str(kind), payload))
+        except Exception:
+            pass
+
+    def mark_tick_worker_ui_dirty(self) -> None:
+        """워커가 감시 트리 갱신이 필요함을 표시합니다."""
+        try:
+            self._tick_worker_ui_dirty = True
+        except Exception:
+            pass
+
+    def mark_tick_worker_virtual_dirty(self) -> None:
+        """워커가 포지션 탭 실시간 갱신이 필요함을 표시합니다."""
+        try:
+            self._tick_worker_virtual_dirty = True
+        except Exception:
+            pass
+
+    def _cancel_tick_main_poller(self) -> None:
+        """감시 중단·종료 시 메인 큐 폴링 after 를 취소합니다."""
+        try:
+            jid = getattr(self, "_tick_main_poller_after_id", None)
+            r = getattr(self, "root", None)
+            if jid is not None and r is not None:
+                try:
+                    r.after_cancel(jid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._tick_main_poller_after_id = None
+        except Exception:
+            pass
+
+    def _ensure_tick_main_action_poller(self) -> None:
+        """메인 스레드에서 틱 후속 큐를 비우도록 after(0) 1건만 예약합니다."""
+        try:
+            r = getattr(self, "root", None)
+            if r is None:
+                return
+            with self._tick_main_poller_lock:
+                if self._tick_main_poller_after_id is not None:
+                    return
+                self._tick_main_poller_after_id = r.after(
+                    0, self._drain_tick_worker_main_queue
+                )
+        except Exception:
+            pass
+
+    def _drain_tick_worker_main_queue(self) -> None:
+        """
+        메인 스레드 전용: 워커가 넣은 매수·청산 큐를 처리하고 UI 더티 플래그를 반영합니다.
+        한 프레임에 처리 건수를 제한해 탭 전환 반응을 유지합니다.
+        """
+        try:
+            with self._tick_main_poller_lock:
+                self._tick_main_poller_after_id = None
+        except Exception:
+            pass
+        monitoring = bool(self.is_monitoring) or bool(
+            getattr(self.trading_controller, "is_monitoring", False)
+        )
+        processed = 0
+        try:
+            max_burst = 48
+            try:
+                st = getattr(self, "settings", None) or {}
+                max_burst = int(float(st.get("realtime_tick_main_queue_burst", 48)))
+            except (TypeError, ValueError):
+                max_burst = 48
+            max_burst = max(4, min(max_burst, 200))
+            while processed < max_burst:
+                try:
+                    kind, payload = self._tick_main_actions_queue.get_nowait()
+                except queue.Empty:
+                    break
+                processed += 1
+                try:
+                    if kind == "buy_signal" and isinstance(payload, tuple):
+                        (
+                            bcode,
+                            npv,
+                            rsi_sig,
+                            macd_val,
+                            osc_val,
+                            ma60_ratio,
+                        ) = payload
+                        buy_ok = bool(
+                            self._on_buy_signal_received(
+                                bcode,
+                                float(npv),
+                                float(rsi_sig),
+                                float(macd_val),
+                                float(osc_val),
+                                float(ma60_ratio),
+                            )
+                        )
+                        if buy_ok:
+                            try:
+                                self.signal_engine.last_buy_sig_time[bcode] = (
+                                    datetime.now()
+                                )
+                            except Exception:
+                                pass
+                    elif kind == "strategy_action" and isinstance(payload, tuple):
+                        scode, sact, sreason, skw = payload[0], payload[1], payload[2], (
+                            payload[3] if len(payload) > 3 else {}
+                        )
+                        if not isinstance(skw, dict):
+                            skw = {}
+                        self._on_strategy_action_needed(
+                            scode,
+                            sact,
+                            sreason,
+                            **skw,
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_tick_worker_ui_dirty", False):
+                self._tick_worker_ui_dirty = False
+                self.ensure_monitor_tree_refresh_scheduled(immediate=False)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_tick_worker_virtual_dirty", False):
+                self._tick_worker_virtual_dirty = False
+                self.request_virtual_tab_realtime_render()
+        except Exception:
+            pass
+        try:
+            busy = (
+                not self._tick_main_actions_queue.empty()
+                or getattr(self, "_tick_worker_ui_dirty", False)
+                or getattr(self, "_tick_worker_virtual_dirty", False)
+            )
+            if monitoring and busy:
+                with self._tick_main_poller_lock:
+                    r2 = getattr(self, "root", None)
+                    if r2 is not None:
+                        delay = 16
+                        try:
+                            st2 = getattr(self, "settings", None) or {}
+                            delay = int(
+                                float(st2.get("realtime_tick_main_poller_ms", 16))
+                            )
+                        except (TypeError, ValueError):
+                            delay = 16
+                        delay = max(8, min(delay, 120))
+                        self._tick_main_poller_after_id = r2.after(
+                            delay, self._drain_tick_worker_main_queue
+                        )
+        except Exception:
+            pass
+
     def _resolve_fill_snapshot_reason(
         self,
         code: str,
@@ -883,6 +1062,36 @@ class KiwoomApp:
             except Exception:
                 pass
 
+    def ensure_monitor_tree_refresh_scheduled(self, *, immediate: bool = False) -> None:
+        """
+        감시 트리 갱신 타이머를 1회만 예약합니다(틱마다 after 폭주 방지).
+        immediate=True 이면 다음 이벤트 루프에서 곧바로 _render_tree_updates 실행.
+        """
+        try:
+            if self._update_timer_active:
+                return
+            r = getattr(self, "root", None)
+            if r is None:
+                return
+            self._update_timer_active = True
+            delay_ms = 48
+            try:
+                delay_ms = int(
+                    float((self.settings or {}).get("realtime_tree_first_refresh_delay_ms", 48))
+                )
+            except (TypeError, ValueError):
+                delay_ms = 48
+            delay_ms = max(0, min(delay_ms, 800))
+            if immediate:
+                r.after(0, self._render_tree_updates)
+            else:
+                r.after(delay_ms, self._render_tree_updates)
+        except Exception:
+            try:
+                self._update_timer_active = False
+            except Exception:
+                pass
+
     def _render_tree_updates(self) -> None:
         """
         감시 트리 실시간 갱신. 틱이 STARTED 콜백보다 먼저 올 수 있어
@@ -947,7 +1156,10 @@ class KiwoomApp:
         base = [str(c).zfill(6) for c in list(mc) + list(wl)]
         try:
             for c in (getattr(self.portfolio, "virtual_positions", None) or {}).keys():
-                base.append(str(c).zfill(6))
+                try:
+                    base.append(str(c).split("_")[0].zfill(6))
+                except Exception:
+                    continue
         except Exception:
             pass
         seen: Set[str] = set()
@@ -1014,10 +1226,10 @@ class KiwoomApp:
             if not hasattr(self, "virtual_tab"):
                 return
             now = time.time()
-            if now - self._virtual_tab_render_last_ts < 0.12:
+            if now - self._virtual_tab_render_last_ts < 0.2:
                 if not self._virtual_tab_render_pending:
                     self._virtual_tab_render_pending = True
-                    self.root.after(120, self._flush_virtual_tab_realtime_render)
+                    self.root.after(180, self._flush_virtual_tab_realtime_render)
                 return
             self._virtual_tab_render_last_ts = now
             self.virtual_tab._render_real_data()
@@ -1082,8 +1294,8 @@ class KiwoomApp:
             try:
                 if not isinstance(pos, dict):
                     continue
-                c = str(c_raw).zfill(6)
-                row = mi.get(c)
+                nk = str(c_raw).split("_")[0].zfill(6)
+                row = mi.get(nk)
                 if not isinstance(row, dict) or not row.get("vp_price_stub"):
                     continue
                 # 실시간 체결가가 이미 오면 last_price 는 건드리지 않음
@@ -1099,7 +1311,7 @@ class KiwoomApp:
                     virtual_position_reference_price_for_monitor(
                         pos,
                         order_manager=om,
-                        code=c,
+                        code=nk,
                     )
                 )
                 if ref_p <= 0:
@@ -1112,9 +1324,9 @@ class KiwoomApp:
                     continue
                 row = dict(row)
                 row["last_price"] = ref_p
-                mi[c] = row
+                mi[nk] = row
                 try:
-                    self.trading_controller.monitor_info[c] = dict(row)
+                    self.trading_controller.monitor_info[nk] = dict(row)
                 except Exception:
                     pass
                 updated = True
@@ -1244,7 +1456,7 @@ class KiwoomApp:
                     text=f"상태: 감시 중 ({data}종목)",
                     foreground=self.colors["success"],
                 )
-            self._render_tree_updates()
+            self.ensure_monitor_tree_refresh_scheduled(immediate=True)
 
             # 실시간 감시 시작 시 계좌정보 텔레그램 1회
             if not self._telegram_sent_on_monitor_start:
@@ -1288,6 +1500,15 @@ class KiwoomApp:
                 self.log(f"⚠️ [UI] 감시 탭 레이아웃 저장 실패: {e}")
             except Exception:
                 pass
+        try:
+            self._cancel_tick_main_poller()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "tick_dispatch_service"):
+                self.tick_dispatch_service.shutdown()
+        except Exception:
+            pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()
         self.root.destroy()
 

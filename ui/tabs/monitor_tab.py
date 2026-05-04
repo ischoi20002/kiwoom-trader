@@ -19,6 +19,7 @@ from core.monitor_code_sets import (
     monitor_selection_codes_set,
     watchlist_only_codes_set,
 )
+from core.terminal_trace import terminal_trace
 from backtest_engine import TradingStrategy
 from kiwoom_rest_api.auth.token import TokenManager
 
@@ -205,7 +206,98 @@ class MonitorTab:
         self._vp_ever_in_holdings: Dict[str, bool] = {}
         # 틱이 끊긴 종목도 monitor_info 기준으로 트리에 유지 (봉 마감·무거래 구간)
         self._last_monitor_tree_reconcile_ts: float = 0.0
+        # stream_subscription_codes() 결과 캐시 — 틱마다 전체 목록 재계산 방지
+        self._stream_sub_cache_set: Optional[Set[str]] = None
+        self._stream_sub_cache_ts: float = 0.0
+        # WS recv 타임아웃 누적(실시간 패킷 부재 시 막힘처럼 보일 때 터미널 추적용)
+        self._ws_idle_recv_count: int = 0
         self._setup_ui()
+
+    def _ws_reg_max_codes_per_chunk(self) -> int:
+        """
+        REG 한 그룹당 최대 종목 수.
+        단일 item 배열에 수백 종목을 넣으면 서버가 일부만 구독 처리해 틱이 안 오는 경우가 있어 분할합니다.
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            n = int(float(st.get("ws_reg_max_codes_per_chunk", 80)))
+        except (TypeError, ValueError):
+            n = 80
+        return max(20, min(n, 200))
+
+    def _build_reg_chunks(self, codes: List[str]) -> Tuple[List[str], List[List[str]]]:
+        """
+        Kiwoom WS REG용 종목 정규화 및 청크 분할.
+        (정규화된 코드 리스트, 청크별 item 리스트) 반환.
+        """
+        max_c = self._ws_reg_max_codes_per_chunk()
+        seen: Set[str] = set()
+        norm: List[str] = []
+        for x in codes or []:
+            try:
+                nk = str(x).split("_")[0].zfill(6)
+            except Exception:
+                continue
+            if nk not in seen:
+                seen.add(nk)
+                norm.append(nk)
+        if not norm:
+            return [], []
+        chunks: List[List[str]] = []
+        i = 0
+        while i < len(norm):
+            chunks.append(norm[i : i + max_c])
+            i += max_c
+        return norm, chunks
+
+    async def _websocket_send_reg_subscribe(
+        self, ws: Any, codes: List[str], *, log_tag: str
+    ) -> None:
+        """
+        실시간 REG 전송.
+        한 패킷에 data 항목을 여러 개 넣으면 브로커가 뒤쪽을 무시하는 경우가 있어,
+        청크마다 grp_no 를 달리 해 순차 전송합니다.
+        """
+        norm, chunks = self._build_reg_chunks(codes)
+        if not chunks:
+            return
+
+        nchunk = len(chunks)
+        for idx, ch in enumerate(chunks):
+            reg_packet: Dict[str, Any] = {
+                "trnm": "REG",
+                "grp_no": str(idx + 1),
+                "refresh": "1",
+                "market": "AL",
+                "data": [{"item": ch, "type": ["0B", "0D"]}],
+            }
+            await ws.send(json.dumps(reg_packet))
+            if nchunk > 1 and idx + 1 < nchunk:
+                try:
+                    await asyncio.sleep(0.06)
+                except Exception:
+                    pass
+        try:
+            terminal_trace(
+                f"WS: {log_tag} 전송 종목={len(norm)} REG패킷={nchunk} "
+                f"chunk≤{self._ws_reg_max_codes_per_chunk()} grp_no=1..{nchunk}",
+                app=self.app,
+                component="WS",
+            )
+        except Exception:
+            pass
+        if nchunk > 1:
+            try:
+                self.app.root.after(
+                    0,
+                    lambda: self.app.log(
+                        f"📡 [시스템] 실시간 구독 분할: 총 {len(norm)}종목 → "
+                        f"{nchunk}회 순차 REG(grp_no 1~{nchunk}, 청크당 최대 "
+                        f"{self._ws_reg_max_codes_per_chunk()}종목)"
+                    ),
+                )
+            except Exception:
+                pass
 
     @staticmethod
     def _subscription_codes_signature(codes: Any) -> Tuple[str, ...]:
@@ -1314,10 +1406,20 @@ class MonitorTab:
         """키움 REST API 방식 웹소켓 루프 (자동 재연결 및 안정성 강화)"""
         while self.app.is_monitoring:
             try:
+                terminal_trace(
+                    "_ws_client_loop 바깥 루프 is_monitoring=True → 접속 시도",
+                    app=self.app,
+                    component="WS",
+                )
                 self.app.root.after(0, self.app.log, "📡 [시스템] 실시간 서버 접속 시도...")
                 
                 access_token = self.app.auth_manager.get_auth_token()
                 if not access_token:
+                    terminal_trace(
+                        "WS: get_auth_token 실패 → 10초 sleep 후 재시도",
+                        app=self.app,
+                        component="WS",
+                    )
                     self.app.root.after(0, self.app.log, "⏳ [시스템] 거래 서버 점검 또는 인증 대기 중... (10초 후 재시도)")
                     await asyncio.sleep(10)
                     continue
@@ -1327,6 +1429,12 @@ class MonitorTab:
                     stream_codes = self.app.stream_subscription_codes()
                 except Exception:
                     stream_codes = list(getattr(self.app.trading_controller, "monitor_codes", []) or [])
+                terminal_trace(
+                    f"WS: stream_subscription_codes 개수={len(stream_codes)} "
+                    f"앞10개={stream_codes[:10]!r}",
+                    app=self.app,
+                    component="WS",
+                )
                 if not stream_codes:
                     # 일시적으로 목록이 비면 감시를 끄면 UI·틱이 영구 정지한 것처럼 보임 → 재시도만 함
                     self.app.root.after(
@@ -1342,11 +1450,19 @@ class MonitorTab:
                     ws_url = 'wss://mockapi.kiwoom.com:10000/api/dostk/websocket'
                 else:
                     ws_url = 'wss://api.kiwoom.com:10000/api/dostk/websocket'
+                terminal_trace(f"WS: connect → {ws_url!r}", app=self.app, component="WS")
                 
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
+                    self._ws_idle_recv_count = 0
+                    self._ws_real_trace_count = 0
                     # 새 소켓마다 시그니처 초기화 — 재연결 직후 이전 세션과 비교하면 안 됨
                     self._last_stream_reg_sig = None
                     self._last_stream_reg_user_log_ts = 0.0
+                    terminal_trace(
+                        "WS: TCP 연결 완료, LOGIN 패킷 전송",
+                        app=self.app,
+                        component="WS",
+                    )
                     self.app.root.after(0, self.app.log, "✅ [시스템] 서버 연결 성공. 로그인 시도...")
                     
                     login_packet = {'trnm': 'LOGIN', 'token': access_token}
@@ -1374,14 +1490,21 @@ class MonitorTab:
                                             else:
                                                 self._pending_reg_refresh = False
                                                 self._last_stream_reg_ts = now_ts
-                                                reg_packet = {
-                                                    "trnm": "REG",
-                                                    "grp_no": "1",
-                                                    "refresh": "1",
-                                                    "market": "AL",
-                                                    "data": [{"item": _sc, "type": ["0B", "0D"]}],
-                                                }
-                                                await ws.send(json.dumps(reg_packet))
+                                                await self._websocket_send_reg_subscribe(
+                                                    ws, list(_sc), log_tag="REG 재전송"
+                                                )
+                                                try:
+                                                    terminal_trace(
+                                                        f"WS: REG 재전송 n={len(sig)} sig_head={list(sig)[:8]!r}",
+                                                        app=self.app,
+                                                        component="WS",
+                                                    )
+                                                except Exception:
+                                                    pass
+                                                try:
+                                                    self._invalidate_stream_sub_cache()
+                                                except Exception:
+                                                    pass
                                                 self._last_stream_reg_sig = sig
                                                 # 구독 목록이 종목마다 조금씩 늘어나도 시그니처가 매번 달라
                                                 # 동일 시그니처 스킵만으로는 로그가 과다함 → 시간 스로틀
@@ -1418,11 +1541,33 @@ class MonitorTab:
                                             f"⚠️ [시스템] 스트림 재등록 실패: {re}",
                                         )
                             msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                            self._ws_idle_recv_count = 0
                             raw_data = json.loads(msg)
                             data_list = raw_data if isinstance(raw_data, list) else [raw_data]
                             
                             for packet in data_list:
                                 trnm = packet.get('trnm')
+                                if trnm not in ("PING", "REAL"):
+                                    try:
+                                        terminal_trace(
+                                            f"WS: 수신 trnm={trnm!r} return_code={packet.get('return_code')!r}",
+                                            app=self.app,
+                                            component="WS",
+                                        )
+                                    except Exception:
+                                        pass
+                                elif trnm == "REAL":
+                                    try:
+                                        rc = int(getattr(self, "_ws_real_trace_count", 0))
+                                        if rc < 8:
+                                            self._ws_real_trace_count = rc + 1
+                                            terminal_trace(
+                                                f"WS: REAL 수신 ({rc + 1}/8 샘플)",
+                                                app=self.app,
+                                                component="WS",
+                                            )
+                                    except Exception:
+                                        pass
                                 if trnm == 'LOGIN':
                                     if packet.get('return_code') == 0:
                                         self._ws_login_fail_streak = 0
@@ -1440,11 +1585,18 @@ class MonitorTab:
                                         self.app.log(
                                             f"✅ [시스템] 로그인 성공. 종목 등록 ({len(_sc)}개)..."
                                         )
-                                        reg_packet = {
-                                            'trnm': 'REG', 'grp_no': '1', 'refresh': '1', 'market': 'AL',
-                                            'data': [{'item': _sc, 'type': ['0B', '0D']}]
-                                        }
-                                        await ws.send(json.dumps(reg_packet))
+                                        await self._websocket_send_reg_subscribe(
+                                            ws, list(_sc), log_tag="LOGIN 후 REG"
+                                        )
+                                        terminal_trace(
+                                            f"WS: LOGIN 성공 후 REG 전송 n={len(_sc)}",
+                                            app=self.app,
+                                            component="WS",
+                                        )
+                                        try:
+                                            self._invalidate_stream_sub_cache()
+                                        except Exception:
+                                            pass
                                         try:
                                             self._last_stream_reg_sig = (
                                                 self._subscription_codes_signature(_sc)
@@ -1520,6 +1672,18 @@ class MonitorTab:
                                 elif trnm in ['REAL', 'CHE'] or ('values' in packet and ('item' in packet or 'stk_cd' in packet)):
                                     self._process_realtime_packet(packet)
                         except asyncio.TimeoutError:
+                            try:
+                                self._ws_idle_recv_count = int(self._ws_idle_recv_count) + 1
+                            except Exception:
+                                self._ws_idle_recv_count = 1
+                            nidle = self._ws_idle_recv_count
+                            if nidle in (1, 2, 4, 8, 16, 32, 64) or (nidle % 128 == 0):
+                                terminal_trace(
+                                    f"WS: ws.recv 5초 타임아웃 누적 {nidle}회 "
+                                    f"(서버 패킷 없음·대기 중일 수 있음)",
+                                    app=self.app,
+                                    component="WS",
+                                )
                             continue
                         except Exception as e:
                             self.app.log(f"⚠️ [시스템] 수신 에러: {e}")
@@ -1539,6 +1703,99 @@ class MonitorTab:
             finally:
                 if not self.app.is_monitoring:
                     self.app.root.after(0, self.app.stop_monitoring)
+
+    def _invalidate_stream_sub_cache(self) -> None:
+        """REG 갱신 후 구독 집합 캐시를 비웁니다."""
+        try:
+            self._stream_sub_cache_set = None
+            self._stream_sub_cache_ts = 0.0
+        except Exception:
+            pass
+
+    def _stream_subscription_zfilled_set(self) -> Set[str]:
+        """현재 웹소켓에 올릴 구독 코드(6자리) 집합. 짧은 TTL 캐시."""
+        try:
+            now = time.time()
+            ttl = 5.0
+            cs = getattr(self, "_stream_sub_cache_set", None)
+            ts = float(getattr(self, "_stream_sub_cache_ts", 0.0))
+            if cs is not None and (now - ts) < ttl:
+                return cs
+        except Exception:
+            pass
+        try:
+            sc = self.app.stream_subscription_codes()
+        except Exception:
+            sc = []
+        try:
+            out: Set[str] = set()
+            for x in sc:
+                try:
+                    out.add(str(x).split("_")[0].zfill(6))
+                except Exception:
+                    continue
+            self._stream_sub_cache_set = out
+            self._stream_sub_cache_ts = time.time()
+            return out
+        except Exception:
+            return set()
+
+    def _resolve_monitor_info_key(self, nk: str) -> Optional[str]:
+        """
+        WS 종목코드(nk, 6자리)에 대응하는 monitor_info 딕셔너리 키.
+        키가 '3490' 등 비표준일 때도 매칭합니다.
+        """
+        try:
+            mi = getattr(self.app, "monitor_info", None) or {}
+            if nk in mi:
+                return nk
+            for k in mi:
+                try:
+                    if str(k).split("_")[0].zfill(6) == nk:
+                        return str(k)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _ensure_monitor_info_stub_for_stream(self, nk: str) -> None:
+        """
+        REG 구독 목록에는 있는데 monitor_info 에 행이 없을 때 틱이 전부 버려지는 문제 방지.
+        """
+        try:
+            if not isinstance(getattr(self.app, "monitor_info", None), dict):
+                self.app.monitor_info = {}
+            mi = self.app.monitor_info
+            if nk in mi:
+                return
+            nm = nk
+            try:
+                ws = getattr(self.app, "watchlist_store", None)
+                if ws is not None:
+                    nm = str(ws.get_display_name(nk))
+            except Exception:
+                nm = nk
+            stub: Dict[str, Any] = {
+                "name": nm or nk,
+                "ma20": 0.0,
+                "ma60": 0.0,
+                "prev_vol": 0.0,
+                "score": 0.0,
+                "ma_buffer_scale": 1.0,
+                "open": 0.0,
+                "last_price": 0.0,
+                "sel_track": "B",
+                "stream_stub": True,
+            }
+            mi[nk] = stub
+            tc = getattr(self.app, "trading_controller", None)
+            if tc is not None:
+                if not isinstance(getattr(tc, "monitor_info", None), dict):
+                    tc.monitor_info = {}
+                tc.monitor_info[nk] = dict(stub)
+        except Exception:
+            pass
 
     def _process_realtime_packet(self, packet):
         """실시간 패킷 처리 로직 분리"""
@@ -1563,61 +1820,73 @@ class MonitorTab:
                 self.app._on_execution_received(code, order_no, cntg_qty, cntg_unpr, side)
                 continue
 
-            if code in self.app.monitor_info:
-                info = self.app.monitor_info[code]
-                vals = item_data.get('values', {})
-                p_type = item_data.get('type', '0B')
-                
-                def get_val(fid, default=0):
-                    v = vals.get(str(fid))
-                    if v is None or v == "": return default
-                    try: return float(str(v).replace('+', '').replace('-', '').strip())
-                    except: return default
+            mkey = self._resolve_monitor_info_key(code)
+            if mkey is None:
+                if code in self._stream_subscription_zfilled_set():
+                    self._ensure_monitor_info_stub_for_stream(code)
+                    mkey = self._resolve_monitor_info_key(code)
+            if mkey is None:
+                continue
+            mi = getattr(self.app, "monitor_info", None) or {}
+            if mkey not in mi:
+                continue
+            info = mi[mkey]
+            vals = item_data.get('values', {})
+            p_type = item_data.get('type', '0B')
 
-                if p_type == '0B':
-                    now_price = int(get_val(10))
-                    # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
-                    # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
-                    if now_price == 0:
-                        continue
-                    volume = int(get_val(13))
-                    trde_val = int(get_val(26) // 1000)
-                    ratio_val = vals.get('12', '0')
-                    diff_val = vals.get('11', '0')
-                    vol_power = get_val(228)
-                    info['price'] = now_price
-                    info['ratio'] = ratio_val
-                    info['diff'] = diff_val
-                    info['volume'] = volume
-                    info['trde_val'] = trde_val
-                    info['vol_power'] = vol_power
-                    self.app._on_realtime_data_received(code, now_price, volume, trde_val, vol_power=vol_power)
-                elif p_type == '0D':
-                    total_ask = int(get_val(121))
-                    total_bid = int(get_val(125))
-                    info['total_ask'] = total_ask
-                    info['total_bid'] = total_bid
-                    # 체결(0B) 전에 호가만 오면 price 가 0 → 틱 콜백이 전부 차단되는 것처럼 보일 수 있음
-                    try:
-                        lp = int(info.get("price") or 0)
-                    except (TypeError, ValueError):
-                        lp = 0
-                    if lp <= 0:
-                        continue
-                    # [정합성] 호가(0D)는 봉(OHLCV) 업데이트를 유발하면 안 됩니다.
-                    # 체결(0B) 경로만 봉을 갱신하고, 0D는 수급/호가 정보만 전달합니다.
-                    self.app._on_realtime_data_received(
-                        code,
-                        lp,
-                        info.get("volume", 0),
-                        info.get("trde_val", 0),
-                        total_ask=total_ask,
-                        total_bid=total_bid,
-                        _orderbook_only=True,
-                    )
-                mkt = item_data.get('market', item_data.get('mkt', ''))
-                if mkt == 'NXT' or '_nx' in full_code.lower():
-                    info['is_nxt'] = True
+            def get_val(fid, default=0):
+                v = vals.get(str(fid))
+                if v is None or v == "":
+                    return default
+                try:
+                    return float(str(v).replace("+", "").replace("-", "").strip())
+                except Exception:
+                    return default
+
+            if p_type == '0B':
+                now_price = int(get_val(10))
+                # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
+                # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
+                if now_price == 0:
+                    continue
+                volume = int(get_val(13))
+                trde_val = int(get_val(26) // 1000)
+                ratio_val = vals.get('12', '0')
+                diff_val = vals.get('11', '0')
+                vol_power = get_val(228)
+                info['price'] = now_price
+                info['ratio'] = ratio_val
+                info['diff'] = diff_val
+                info['volume'] = volume
+                info['trde_val'] = trde_val
+                info['vol_power'] = vol_power
+                self.app._on_realtime_data_received(code, now_price, volume, trde_val, vol_power=vol_power)
+            elif p_type == '0D':
+                total_ask = int(get_val(121))
+                total_bid = int(get_val(125))
+                info['total_ask'] = total_ask
+                info['total_bid'] = total_bid
+                # 체결(0B) 전에 호가만 오면 price 가 0 → 틱 콜백이 전부 차단되는 것처럼 보일 수 있음
+                try:
+                    lp = int(info.get("price") or 0)
+                except (TypeError, ValueError):
+                    lp = 0
+                if lp <= 0:
+                    continue
+                # [정합성] 호가(0D)는 봉(OHLCV) 업데이트를 유발하면 안 됩니다.
+                # 체결(0B) 경로만 봉을 갱신하고, 0D는 수급/호가 정보만 전달합니다.
+                self.app._on_realtime_data_received(
+                    code,
+                    lp,
+                    info.get("volume", 0),
+                    info.get("trde_val", 0),
+                    total_ask=total_ask,
+                    total_bid=total_bid,
+                    _orderbook_only=True,
+                )
+            mkt = item_data.get('market', item_data.get('mkt', ''))
+            if mkt == 'NXT' or '_nx' in full_code.lower():
+                info['is_nxt'] = True
 
     def _apply_default_monitor_theme(self) -> None:
         """시장 레짐 비사용: 노르딕 기본(UP과 동일) 팔레트로 고정."""
@@ -1736,6 +2005,46 @@ class MonitorTab:
         except Exception:
             pass
         return {}
+
+    def _patch_monitor_info_status_text(self, nk: str, text: str) -> None:
+        """
+        신호상태 열은 `_compose_monitor_row_values` 가 `status_text` 없으면 '대기'를 씁니다.
+        워밍업은 트리만 직접 갱신하면 이후 `update_watchlist` 등으로 행이 다시 그려질 때
+        monitor_info 에 값이 없어 보유 종목만 영구히 '대기'로 보이므로, 여기서 동기화합니다.
+        """
+        try:
+            mi = getattr(self.app, "monitor_info", None)
+            if not isinstance(mi, dict):
+                return
+            tree_iid = str(nk).split("_")[0].zfill(6)
+            key: Optional[str] = None
+            if tree_iid in mi:
+                key = tree_iid
+            else:
+                for k in mi:
+                    try:
+                        if str(k).split("_")[0].zfill(6) == tree_iid:
+                            key = str(k)
+                            break
+                    except Exception:
+                        continue
+            if key is None:
+                return
+            ent = mi.get(key)
+            if isinstance(ent, dict):
+                ent["status_text"] = str(text)
+            # app.monitor_info 와 trading_controller.monitor_info 가 얕은 복사로 갈라진 경우 동기화
+            try:
+                tc = getattr(self.app, "trading_controller", None)
+                tmi = getattr(tc, "monitor_info", None) if tc is not None else None
+                if isinstance(tmi, dict) and tmi is not mi:
+                    te = tmi.get(key)
+                    if isinstance(te, dict):
+                        te["status_text"] = str(text)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _compose_monitor_row_values(self, nk: str, info: Dict[str, Any]) -> Tuple[Any, ...]:
         """감시·보유 트리 한 행 values (컬럼 순서는 _setup_ui 와 동일)."""
@@ -2166,15 +2475,20 @@ class MonitorTab:
         try:
             wl_only = self._watchlist_only_codes_set()
             for code in codes:
-                if str(code).zfill(6) in wl_only:
+                try:
+                    tree_iid = str(code).split("_")[0].zfill(6)
+                except Exception:
                     continue
+                if tree_iid in wl_only:
+                    continue
+                self._patch_monitor_info_status_text(tree_iid, "⏳ 워밍업 대기…")
                 for tree in (self.tree_monitor, self.tree_active_monitor):
-                    if tree and tree.exists(code):
-                        vals = list(tree.item(code, "values"))
+                    if tree and tree.exists(tree_iid):
+                        vals = list(tree.item(tree_iid, "values"))
                         si = getattr(self, "_monitor_status_value_index", 8)
                         if len(vals) > si:
                             vals[si] = "⏳ 워밍업 대기…"
-                        tree.item(code, values=tuple(vals), tags=("warmup_pending",))
+                        tree.item(tree_iid, values=tuple(vals), tags=("warmup_pending",))
         except Exception as e:
             print(f"[UI Error] reset_warmup_row_states: {e}")
 
@@ -2189,8 +2503,8 @@ class MonitorTab:
     ) -> None:
         """종목별 워밍업 진행·성공·실패를 신호상태 열·행 배경으로 구분."""
         try:
-            code = str(code).zfill(6)
-            if code in self._watchlist_only_codes_set():
+            tree_iid = str(code).split("_")[0].zfill(6)
+            if tree_iid in self._watchlist_only_codes_set():
                 return
             if event == "prep_start":
                 st = f"⏳ 데이터 준비 중… ({cur}/{total})"
@@ -2209,13 +2523,14 @@ class MonitorTab:
                 short = (reason or "실패")[:120]
                 st = f"❌ 워밍업 실패: {short}"
                 tag = "warmup_fail_row"
+            self._patch_monitor_info_status_text(tree_iid, st)
             for tree in (self.tree_monitor, self.tree_active_monitor):
-                if not tree or not tree.exists(code):
+                if not tree or not tree.exists(tree_iid):
                     continue
-                vals = list(tree.item(code, "values"))
+                vals = list(tree.item(tree_iid, "values"))
                 si = getattr(self, "_monitor_status_value_index", 8)
                 if len(vals) > si:
                     vals[si] = st
-                tree.item(code, values=tuple(vals), tags=(tag,))
+                tree.item(tree_iid, values=tuple(vals), tags=(tag,))
         except Exception as e:
             print(f"[UI Error] update_warmup_stock_prep: {e}")

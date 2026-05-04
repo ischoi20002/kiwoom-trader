@@ -7,9 +7,10 @@ import pandas as pd
 import os
 import config
 from datetime import datetime
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from core.limit_order_watch_service import LimitOrderWatchService
+from core.terminal_trace import terminal_trace
 from core.warmup_stream_prep_service import WarmupStreamPrepService
 from core.websocket_worker_service import WebsocketWorkerService
 
@@ -175,6 +176,14 @@ class TradingController:
             
             # 2. 시작 시퀀스 (별도 스레드에서 수행 - UI 프리징 방지)
             self._run_start_sequence_active = True
+            try:
+                terminal_trace(
+                    "감시 start() → 백그라운드 스레드 spawn (_run_start_sequence_guarded)",
+                    app=self.app,
+                    component="StartSeq",
+                )
+            except Exception:
+                pass
             threading.Thread(
                 target=self._run_start_sequence_guarded, daemon=True
             ).start()
@@ -187,6 +196,13 @@ class TradingController:
         """실시간 감시 엔진을 중단합니다."""
         self.is_monitoring = False
         self._abort_monitor_start = True
+        # 워밍업·감시 외 구간에서 틱 워커가 bars_data 를 건드리지 않도록 먼저 정지합니다.
+        try:
+            tds = getattr(self.app, "tick_dispatch_service", None)
+            if tds is not None:
+                tds.shutdown()
+        except Exception:
+            pass
         try:
             ws = getattr(self.app, "warmup_service", None)
             if ws is not None and getattr(ws, "is_running", False):
@@ -206,13 +222,37 @@ class TradingController:
     def _run_start_sequence_guarded(self) -> None:
         """_run_start_sequence 예외·정상 종료 후 중복 시작 플래그를 반드시 해제합니다."""
         try:
+            try:
+                terminal_trace(
+                    "_run_start_sequence_guarded 진입 (warmup_stream_prep_service.run)",
+                    app=self.app,
+                    component="StartSeq",
+                )
+            except Exception:
+                pass
             self._run_start_sequence()
         except Exception as e:
             try:
                 self.log(f"❌ [Error] 시작 시퀀스(보호 래퍼) 실패: {e}")
             except Exception:
                 pass
+            try:
+                terminal_trace(
+                    f"_run_start_sequence_guarded 예외: {e!r}",
+                    app=self.app,
+                    component="StartSeq",
+                )
+            except Exception:
+                pass
         finally:
+            try:
+                terminal_trace(
+                    "_run_start_sequence_guarded finally → _run_start_sequence_active=False",
+                    app=self.app,
+                    component="StartSeq",
+                )
+            except Exception:
+                pass
             self._run_start_sequence_active = False
 
     def set_monitor_targets(self, df):
@@ -261,10 +301,18 @@ class TradingController:
             wl = [str(c).zfill(6) for c in self.app.watchlist_store.get_codes()]
         except Exception:
             wl = []
-        vp: list = []
+        vp: List[str] = []
         try:
             vpd = getattr(self.app.portfolio, "virtual_positions", None) or {}
-            vp = [str(c).zfill(6) for c in vpd.keys()]
+            # 보유 키가 443060_2 처럼 접미사가 있으면 zfill(6)만으로는 정규화되지 않아
+            # 워밍업 API·트리 iid(6자리)와 불일치 → 검증 UI·틱 경로가 어긋남
+            for c_raw in vpd.keys():
+                try:
+                    nk = str(c_raw).split("_")[0].zfill(6)
+                except Exception:
+                    continue
+                if nk not in vp:
+                    vp.append(nk)
         except Exception:
             vp = []
         return list(dict.fromkeys(mc + wl + vp))
@@ -277,17 +325,18 @@ class TradingController:
             vpd = {}
         for c_raw, pos in list(vpd.items()):
             try:
-                c = str(c_raw).zfill(6)
-                if c in self.monitor_info:
+                # 트리 iid·REG·워밍업은 항상 6자리 종목코드 — VP 키 접미(443060_2)는 베이스만 사용
+                nk = str(c_raw).split("_")[0].zfill(6)
+                if nk in self.monitor_info:
                     continue
-                nm = pos.get("name") or c
+                nm = pos.get("name") or nk
                 ap = float(pos.get("avg_price", 0) or 0)
                 ref_p = virtual_position_reference_price_for_monitor(
                     pos,
                     order_manager=getattr(self.app, "order_manager", None),
-                    code=c,
+                    code=nk,
                 )
-                self.monitor_info[c] = {
+                self.monitor_info[nk] = {
                     "name": nm,
                     "ma20": 0.0,
                     "ma60": 0.0,
@@ -388,6 +437,15 @@ class TradingController:
             n_ready = len(ac)
 
             self.is_monitoring = True
+            try:
+                terminal_trace(
+                    f"_apply_warmup_ready_stock code={code} n_ready={n_ready} "
+                    f"→ status_cb STARTED",
+                    app=self.app,
+                    component="StartSeq",
+                )
+            except Exception:
+                pass
             if self.status_cb:
                 self.status_cb("STARTED", n_ready)
 
