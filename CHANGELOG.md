@@ -13,6 +13,10 @@
 - Kiwoom WS `REG`: 종목 수가 많을 때 `data` 다중 대신 **청크별 `grp_no` 순차 전송**(`ui/tabs/monitor_tab.py`); 설정 `ws_reg_max_codes_per_chunk` 연동 유지(`core/defaults.py`, `settings.json`).
 - 신호상태 열: 워밍업 문구를 `monitor_info.status_text`에 동기화, 틱 처리에서 합치도 플레이스홀더일 때 기존 문구 유지 및 표시값을 `status_text` 우선으로 통일(`ui/tabs/monitor_tab.py`, `core/signal_engine.py`).
 
+## 0.6.29 (2026-05-04)
+
+- 하베스팅 성능: 신규/증분 1분봉 적재 시 `bars_15m`/`bars_1d`를 전체 재빌드하지 않고 변경된 날짜 구간만 부분 리샘플/집계하도록 최적화(`harvest_service.py`, `utils/bar_resample.py`, `data_manager_v2.py`).
+
 ## 0.6.27 (2026-05-03)
 
 - 데이터 하베스팅에서 `sync_meta` 캐시/직전 마감 컷오프 보정으로 최신성 판정 비용 및 `SYNC` 중복을 줄이고, 1m→15m/1d 리샘플·일괄 집계는 실제 DB 범위 확장 시에만 수행하도록 최적화(`harvest_service.py`).

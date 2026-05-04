@@ -258,14 +258,40 @@ class HarvestService:
                 _nk = str(code).strip()
             self._codes_1m_updated.add(_nk)
 
-            self.log(f"   - {code}: 1분봉 적재 완료 → bars_15m 리샘플(1m→15m) 갱신 중...")
-            self.db.refresh_resampled_data(code)
+            # 변경된 구간만 재계산(대개는 '최신 1~2일'만 달라짐)
+            start_src = (
+                new_earliest_sync
+                if new_earliest_sync and new_earliest_sync != earliest_sync
+                else initial_last_sync
+            )
+            end_src = new_last_sync or initial_last_sync
+            try:
+                start_day = str(start_src)[:10]
+                end_day = str(end_src)[:10]
+            except Exception:
+                start_day = ""
+                end_day = ""
+
+            if start_day and end_day:
+                self.log(
+                    f"   - {code}: 1분봉 적재 완료 → bars_15m 리샘플(1m→15m) [{start_day}~{end_day}] 갱신 중..."
+                )
+                self.db.refresh_resampled_data_range(code, start_day, end_day)
+            else:
+                self.log(
+                    f"   - {code}: 1분봉 적재 완료 → bars_15m 리샘플(1m→15m) 전체 재빌드(범위 판정 실패)"
+                )
+                self.db.refresh_resampled_data(code)
             self.log(
-                f"[OK] {code} 처리 완료: 신규 1분봉 {total_fetched}개(bars_1m) + 15분봉 테이블 리빌드(bars_15m)"
+                f"[OK] {code} 처리 완료: 신규 1분봉 {total_fetched}개(bars_1m) + 15분봉 테이블 갱신(bars_15m)"
             )
             # 1분봉 → 일봉(bars_1d) 집계: 동적 백테·DB 일봉 선정 경로용
             try:
-                if self.db.rebuild_daily_bars_from_1m(code):
+                if start_day and end_day:
+                    ok = self.db.rebuild_daily_bars_from_1m_range(code, start_day, end_day)
+                else:
+                    ok = self.db.rebuild_daily_bars_from_1m(code)
+                if ok:
                     self.log(f"   - {code}: bars_1d(일봉) 1m 집계 반영 완료")
                     self._codes_1d_rebuilt_inline.add(_nk)
             except Exception as e:

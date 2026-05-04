@@ -29,6 +29,8 @@ _CALENDAR_REFERENCE_STOCK_CODES: Tuple[str, ...] = (
 from utils.bar_resample import (
     refresh_resampled_data_at_path,
     aggregate_daily_ohlcv_from_1m_db,
+    refresh_resampled_data_at_path_range,
+    aggregate_daily_ohlcv_from_1m_db_range,
 )
 from utils.server_mode_paths import (
     migrate_legacy_trading_state_db_files,
@@ -686,6 +688,24 @@ class DataManagerV2:
             except Exception:
                 pass
 
+    def refresh_resampled_data_range(
+        self,
+        code: str,
+        start_day: str,
+        end_day: str,
+    ) -> None:
+        """
+        bars_1m 기준으로 해당 종목의 bars_15m을 날짜 범위(start_day~end_day)에 대해서만 재생성합니다.
+        """
+        err = refresh_resampled_data_at_path_range(
+            self.db_path, code, start_day=start_day, end_day=end_day
+        )
+        if err:
+            try:
+                print(f"[DataManagerV2] refresh_resampled_data_range {code}: {err}")
+            except Exception:
+                pass
+
     def rebuild_daily_bars_from_1m(self, code: str) -> bool:
         """
         bars_1m 전 구간을 일(캘린더) 단위로 집계해 ``bars_1d``에 저장.
@@ -693,6 +713,39 @@ class DataManagerV2:
         """
         try:
             ncode = normalize_code(code)
+        except Exception:
+            return False
+
+    def rebuild_daily_bars_from_1m_range(
+        self,
+        code: str,
+        start_day: str,
+        end_day: str,
+    ) -> bool:
+        """
+        bars_1m 중 날짜 범위(start_day~end_day)만 읽어 bars_1d를 부분 갱신합니다.
+        """
+        try:
+            ncode = normalize_code(code)
+        except Exception:
+            return False
+
+        try:
+            daily = aggregate_daily_ohlcv_from_1m_db_range(
+                self.db_path,
+                ncode,
+                start_day=start_day,
+                end_day=end_day,
+            )
+        except Exception:
+            return False
+
+        if daily is None or daily.empty:
+            return False
+
+        try:
+            self.save_daily_bars(ncode, daily)
+            return True
         except Exception:
             return False
         try:
