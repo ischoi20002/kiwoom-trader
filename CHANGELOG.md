@@ -13,6 +13,11 @@
 
 ---
 
+## 0.6.31 (2026-05-06)
+
+- 실시간 감시: WS 수신 디버그 로그(과도 출력) 스팸을 줄이고, `LOGIN` 실패 원인(`return_msg/return_code`)을 `realtime_session_logs` JSONL로도 남겨 스크롤 없이 원인 추적 가능하도록 개선(`ui/tabs/monitor_tab.py`, `reporting/realtime_session_logger.py`).
+- 실시간 감시/관심목록: `kodex200.csv`를 앱 시작 시 `watchlist_store`에 선적재하여, `KRX_ID/KRX_PW` 미설정 환경에서도 실시간 화면명 표시를 위해 `pykrx` 호출이 발생하는 문제를 완화(`k_trader_gui.py`, `core/watchlist_store.py`).
+
 ## 0.6.30 (2026-05-05)
 
 - 실시간 감시/매매 체결 후 D+2 예수금 표시 안정화: 예수금상세(ka10001/kt00001) 파싱 시 `d1/d2` 선택 우선순위를 `*_samt`(현재 잔액/총액 성격)로 먼저 두고 `*_entra`(증분/추정 성격)를 후순위로 적용(`core/order_manager.py`).

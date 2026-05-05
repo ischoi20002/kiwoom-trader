@@ -34,6 +34,7 @@ from strategy_selector import (  # noqa: E402
     _df_top_by_score_slot_band,
     _score_dynamic_universe_daily_ohlcv,
     load_kodex200_universe_codes,
+    load_kospi_universe_codes,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,14 +58,26 @@ def _load_merged_settings(path: Optional[str]) -> dict[str, Any]:
     return s
 
 
-def _resolve_union_tickers(start_s: str, end_s: str) -> Tuple[List[str], int]:
+def _resolve_union_tickers(
+    start_s: str,
+    end_s: str,
+    universe_index_choice: str,
+    kospi_top_n: int,
+) -> Tuple[List[str], int]:
     """`prepare_dynamic_universe` 와 동일한 유니버스 누적 범위(Lean vs 월별)."""
     all_days = pd.date_range(start=start_s, end=end_s, freq="B")
     duration_days = int((all_days[-1] - all_days[0]).days) if len(all_days) > 1 else 0
     union_tickers: set[str] = set()
+    idx_choice = str(universe_index_choice).strip().upper()
+    if idx_choice not in ("KODEX200", "KOSPI200"):
+        idx_choice = "KODEX200"
     if duration_days < 180:
         try:
-            tickers = load_kodex200_universe_codes(logger_callback=None) or []
+            tickers = (
+                load_kospi_universe_codes(logger_callback=None, top_n=int(kospi_top_n))
+                if idx_choice == "KOSPI200"
+                else load_kodex200_universe_codes(logger_callback=None)
+            ) or []
         except Exception:
             tickers = []
         union_tickers = {str(t).zfill(6) for t in tickers}
@@ -74,13 +87,24 @@ def _resolve_union_tickers(start_s: str, end_s: str) -> Tuple[List[str], int]:
             curr_m = d.strftime("%Y%m")
             if curr_m != last_m or not union_tickers:
                 try:
-                    tickers = load_kodex200_universe_codes(logger_callback=None) or []
+                    tickers = (
+                        load_kospi_universe_codes(
+                            logger_callback=None,
+                            top_n=int(kospi_top_n),
+                        )
+                        if idx_choice == "KOSPI200"
+                        else load_kodex200_universe_codes(logger_callback=None)
+                    ) or []
                 except Exception:
                     tickers = []
                 union_tickers.update(str(t).zfill(6) for t in tickers)
                 last_m = curr_m
     if not union_tickers:
-        for f_name in ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]:
+        candidate_files = ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]
+        if idx_choice == "KOSPI200":
+            candidate_files = ["kospi_universe.csv", "kospi_top_500.csv"]
+
+        for f_name in candidate_files:
             fp = os.path.join(_ABS_ROOT, f_name)
             if not os.path.isfile(fp):
                 continue
@@ -102,12 +126,24 @@ def _resolve_union_tickers(start_s: str, end_s: str) -> Tuple[List[str], int]:
 
 
 def _get_monthly_universe(
-    dt: pd.Timestamp, cache: Dict[str, frozenset[str]]
+    dt: pd.Timestamp,
+    cache: Dict[str, frozenset[str]],
+    universe_index_choice: str,
 ) -> frozenset[str]:
     mk = pd.Timestamp(dt).strftime("%Y%m")
     if mk not in cache:
+        idx_choice = str(universe_index_choice).strip().upper()
+        if idx_choice not in ("KODEX200", "KOSPI200"):
+            idx_choice = "KODEX200"
         try:
-            tlist = load_kodex200_universe_codes(logger_callback=None) or []
+            tlist = (
+                load_kospi_universe_codes(
+                    logger_callback=None,
+                    top_n=int(settings.get("kospi_top_n", 200)),
+                )
+                if idx_choice == "KOSPI200"
+                else load_kodex200_universe_codes(logger_callback=None)
+            ) or []
         except Exception:
             tlist = []
         cache[mk] = frozenset(str(t).zfill(6) for t in tlist)
@@ -132,7 +168,12 @@ def load_scored_panel(
     """
     start_s = pd.to_datetime(start_date).strftime("%Y-%m-%d")
     end_s = pd.to_datetime(end_date).strftime("%Y-%m-%d")
-    all_codes, duration_days = _resolve_union_tickers(start_s, end_s)
+    all_codes, duration_days = _resolve_union_tickers(
+        start_s,
+        end_s,
+        settings.get("universe_index_choice", "KODEX200"),
+        int(settings.get("kospi_top_n", 200)),
+    )
     if not all_codes:
         raise RuntimeError("유니버스 종목이 비었습니다. kodex200.csv 등을 확인하세요.")
 
@@ -318,6 +359,9 @@ def run_diagnosis(
     random_draws: int,
     seed: int,
 ) -> None:
+    idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+    if idx_choice not in ("KODEX200", "KOSPI200"):
+        idx_choice = "KODEX200"
     dm = DataManagerV2()
     df_sim, all_codes, duration_days = load_scored_panel(
         settings, start_date, end_date, dm
@@ -328,9 +372,9 @@ def run_diagnosis(
     if duration_days >= 180:
         mk = df_sim["time"].dt.strftime("%Y%m")
         for mkey in mk.unique():
-            _get_monthly_universe(pd.Timestamp(mkey + "01"), univ_cache)
+            _get_monthly_universe(pd.Timestamp(mkey + "01"), univ_cache, idx_choice)
         df_sim["_in_univ"] = [
-            str(c).zfill(6) in _get_monthly_universe(t, univ_cache)
+            str(c).zfill(6) in _get_monthly_universe(t, univ_cache, idx_choice)
             for c, t in zip(df_sim["code"], df_sim["time"])
         ]
     else:

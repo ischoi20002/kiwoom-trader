@@ -330,6 +330,13 @@ class KiwoomApp:
         from core.watchlist_store import WatchlistStore
         from core.signal_engine import SignalEngine
         self.watchlist_store = WatchlistStore(logger_callback=self.log)
+        # [옵션 A] 실시간 감시 시작 직후 종목명 표시를 위해 kodex200.csv에서 Code/Name 선적재
+        try:
+            _added = self.watchlist_store.preload_from_kodex200_csv(logger_callback=self.log)
+            if _added > 0:
+                self.log(f"[Watchlist] kodex200.csv 선적재 완료: { _added }개")
+        except Exception:
+            pass
         self.watchlist_synth_state = {}
         self._active_stream_codes = []
         self.order_manager = OrderManager(self)
@@ -754,7 +761,11 @@ class KiwoomApp:
             pass
 
     def get_kospi_200(self, force=False):
-        self.log("[Data] KOSPI200 유니버스 로드(kodex200.csv·설정 kodex200_universe_priority)...")
+        try:
+            idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+        except Exception:
+            idx_choice = "KODEX200"
+        self.log(f"[Data] 유니버스({idx_choice}) 로드(kodex200.csv/kospi_universe.csv)...")
         df_200 = self.data_manager.get_kospi_list(
             count=200,
             force=force,

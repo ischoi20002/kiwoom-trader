@@ -86,6 +86,92 @@ class WatchlistStore:
         with self._lock:
             return [x["code"] for x in self._items]
 
+    def preload_from_kodex200_csv(
+        self,
+        csv_path: Optional[str] = None,
+        *,
+        logger_callback: Optional[Callable[[str], None]] = None,
+    ) -> int:
+        """
+        `kodex200.csv`에서 Code/Name을 읽어 watchlist_store에 선적재합니다.
+
+        목적:
+        실시간 감시에서 종목명 표시를 위해 `pykrx`를 호출하지 않게 하여
+        (특히) `KRX_ID/KRX_PW` 환경변수가 없을 때의 인증 실패 로그를 줄입니다.
+        """
+        log = logger_callback or self._log
+        path = csv_path or os.path.join(os.getcwd(), "kodex200.csv")
+
+        try:
+            if not os.path.isfile(path):
+                return 0
+
+            # 프로젝트 내 pandas 사용을 전제로, 동적 import로 의존 지점을 제한합니다.
+            import pandas as pd  # type: ignore
+
+            df = pd.read_csv(path, dtype=str)
+        except Exception as e:
+            try:
+                log(f"[Watchlist] kodex200.csv 선적재 실패: {e}")
+            except Exception:
+                pass
+            return 0
+
+        code_col: Optional[str] = None
+        name_col: Optional[str] = None
+        if "종목코드" in df.columns and "종목명" in df.columns:
+            code_col, name_col = "종목코드", "종목명"
+        elif "Code" in df.columns:
+            if "Name" in df.columns:
+                code_col, name_col = "Code", "Name"
+            elif "종목명" in df.columns:
+                code_col, name_col = "Code", "종목명"
+
+        if not code_col or not name_col:
+            return 0
+
+        try:
+            existing = self.codes_set()
+            added = 0
+            sub = df[[code_col, name_col]].copy()
+
+            for _, row in sub.iterrows():
+                try:
+                    raw_code = row.get(code_col)
+                    raw_name = row.get(name_col)
+                    if raw_code is None:
+                        continue
+
+                    c = str(raw_code).strip()
+                    if not c or not c.isdigit():
+                        continue
+                    c = c.zfill(6)
+                    if c in existing:
+                        continue
+
+                    nm = "" if raw_name is None else str(raw_name).strip()
+                    if not nm:
+                        nm = c
+
+                    if self.add(c, nm, avg_price=None):
+                        existing.add(c)
+                        added += 1
+                except Exception:
+                    continue
+
+            if added > 0:
+                try:
+                    log(f"[Watchlist] kodex200.csv 선적재: {added}개 추가됨")
+                except Exception:
+                    pass
+            return added
+        except Exception as e:
+            try:
+                log(f"[Watchlist] kodex200.csv 선적재 처리 실패: {e}")
+            except Exception:
+                pass
+            return 0
+
     def codes_set(self) -> set:
         """정규화된 6자리 코드 집합 (감시 화면·포지션 관리 탭에서 숨길 때 사용)."""
         with self._lock:
@@ -125,6 +211,14 @@ class WatchlistStore:
     def _resolve_name_from_market(self, code: str) -> str:
         """코드만 있을 때 시장 표지명 조회 (pykrx). 실패 시 코드 반환."""
         try:
+            # pykrx의 일부 경로(시장 정보 스크래핑/인증)는 KRX_ID/KRX_PW 환경변수를 요구합니다.
+            # 실시간 감시는 시작 즉시 많은 종목에 대해 이름이 필요할 수 있으므로,
+            # 환경변수가 없으면 즉시 스킵(종목코드 그대로 반환)해서 불필요한 인증 실패 로그를 줄입니다.
+            krx_id = os.environ.get("KRX_ID", "").strip()
+            krx_pw = os.environ.get("KRX_PW", "").strip()
+            if not krx_id or not krx_pw:
+                return code
+
             from pykrx import stock
 
             n = stock.get_market_ticker_name(code)

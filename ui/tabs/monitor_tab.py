@@ -22,6 +22,7 @@ from core.monitor_code_sets import (
 from core.terminal_trace import terminal_trace
 from backtest_engine import TradingStrategy
 from kiwoom_rest_api.auth.token import TokenManager
+from reporting.realtime_session_logger import RealtimeSessionLogger
 
 # 텔레그램 단일 메시지 최대 길이(일반 텍스트 기준 여유)
 _TELEGRAM_MAX_CHARS = 4000
@@ -186,6 +187,10 @@ class MonitorTab:
         # 웹소켓 LOGIN 실패(8005 등) 로그 스팸 방지·재시도 카운트
         self._ws_login_fail_streak: int = 0
         self._last_ws_login_fail_log_ts: float = 0.0
+        # LOGIN 실패 원인( return_msg 등 )을 콘솔 스크롤 없이 찾기 위해 JSONL에 누적
+        self._realtime_session_logger: RealtimeSessionLogger = RealtimeSessionLogger()
+        # 최신 접속 url(모의/실전)에 대한 참고용(로그 payload에 포함)
+        self._last_ws_url: str = ""
         # 감시 트리 열 폭·세로 Paned 비율 저장(구분선 / sash 드래그 후 디바운스)
         self._monitor_col_width_save_job: Optional[Any] = None
         self._monitor_sash_sync_job: Optional[Any] = None  # 세시 드래그 직후 sashpos 지연 읽기
@@ -1450,6 +1455,7 @@ class MonitorTab:
                     ws_url = 'wss://mockapi.kiwoom.com:10000/api/dostk/websocket'
                 else:
                     ws_url = 'wss://api.kiwoom.com:10000/api/dostk/websocket'
+                self._last_ws_url = ws_url
                 terminal_trace(f"WS: connect → {ws_url!r}", app=self.app, component="WS")
                 
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
@@ -1547,7 +1553,9 @@ class MonitorTab:
                             
                             for packet in data_list:
                                 trnm = packet.get('trnm')
-                                if trnm not in ("PING", "REAL"):
+                                # 디버그 로그가 과도하게 많아지는 것을 방지하기 위해
+                                # 수신 트레이스는 'LOGIN/REG' 같이 문제 원인 추적에 필요한 케이스만 남깁니다.
+                                if trnm in ("LOGIN", "REG"):
                                     try:
                                         terminal_trace(
                                             f"WS: 수신 trnm={trnm!r} return_code={packet.get('return_code')!r}",
@@ -1607,6 +1615,21 @@ class MonitorTab:
                                     else:
                                         # CODE=8005 등: REST TTL 캐시 토큰과 WS 요구가 어긋나 동일 문자열로 무한 실패할 수 있음 → 캐시 무효화 후 재발급
                                         self._ws_login_fail_streak += 1
+                                        try:
+                                            # 콘솔 스팸과 무관하게, 로그인 실패 원인을 JSONL로 축적해 나중에 정확히 검색 가능
+                                            self._realtime_session_logger.log(
+                                                "ws_login_failed",
+                                                {
+                                                    "return_code": packet.get("return_code"),
+                                                    "return_msg": packet.get("return_msg"),
+                                                    "login_fail_streak": self._ws_login_fail_streak,
+                                                    "use_mock": getattr(config, "USE_MOCK", True),
+                                                    "ws_url": getattr(self, "_last_ws_url", ""),
+                                                },
+                                            )
+                                        except Exception:
+                                            # 로깅 실패는 매매/실시간 흐름을 막지 않도록 삼킵니다.
+                                            pass
                                         try:
                                             am = getattr(
                                                 self.app, "auth_manager", None

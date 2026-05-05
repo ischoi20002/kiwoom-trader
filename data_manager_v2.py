@@ -2354,10 +2354,14 @@ class DataManagerV2:
 
     def get_kospi_list(self, count=200, force=False, settings=None, universe_log=None):
         """
-        KODEX 200 유니버스 확보.
+        KODEX200/KOSPI200 유니버스 확보.
 
         count<=200: ``core.kodex200_universe.resolve_kodex200_universe`` —
         ``kodex200_universe_priority`` (예: ``csv_only``=kodex200.csv 전용, ``etf_api_first`` 등).
+        단, settings['universe_index_choice']=='KOSPI200' 이면 ``kospi_universe.csv``를 사용합니다.
+        - ``kospi_universe.csv``는 상위 큰 리스트(예: top 400)를 저장
+        - 반환 시에는 ``min(count, kospi_top_n)`` 또는 기존 count 파라미터를 head로 슬라이스
+
         count>200: FDR 코스피 시총 상위 ``count`` (기존과 동일).
         """
         import os
@@ -2365,7 +2369,25 @@ class DataManagerV2:
         import FinanceDataReader as fdr
         import pandas as pd
 
-        cache_file = "kodex_200.csv" if count <= 200 else f"kospi_top_{count}.csv"
+        idx_choice = "KODEX200"
+        if isinstance(settings, dict):
+            idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+        if idx_choice not in ("KODEX200", "KOSPI200"):
+            idx_choice = "KODEX200"
+
+        kospi_top_n = 200
+        effective_count = int(count)
+        try:
+            if isinstance(settings, dict):
+                kospi_top_n = int(settings.get("kospi_top_n", 200))
+        except Exception:
+            kospi_top_n = 200
+        if idx_choice == "KOSPI200":
+            effective_count = min(effective_count, kospi_top_n)
+
+        cache_file = (
+            "kospi_universe.csv" if (count <= 200 and idx_choice == "KOSPI200") else "kodex_200.csv"
+        ) if count <= 200 else f"kospi_top_{count}.csv"
 
         def _ulog(msg: str) -> None:
             try:
@@ -2378,6 +2400,48 @@ class DataManagerV2:
 
         try:
             if count <= 200:
+                if idx_choice == "KOSPI200":
+                    # 1) kospi_universe.csv 우선 로드
+                    try:
+                        if os.path.exists(cache_file) and (os.path.getsize(cache_file) > 10) and not force:
+                            df = pd.read_csv(cache_file, dtype=str)
+                            if "종목코드" in df.columns and "Code" not in df.columns:
+                                df.rename(columns={"종목코드": "Code", "종목명": "Name"}, inplace=True)
+                            if "Code" not in df.columns:
+                                return pd.DataFrame()
+                            if "Name" not in df.columns:
+                                df["Name"] = df["Code"]
+                            df["Code"] = df["Code"].astype(str).str.zfill(6)
+                            df_out = df[["Code", "Name"]].head(effective_count).copy()
+                            return df_out
+                    except Exception:
+                        pass
+
+                    # 2) kospi_universe.csv 없으면 strategy_selector 로더를 호출해 생성
+                    try:
+                        from strategy_selector import _maybe_generate_kospi_universe_csv
+                        _maybe_generate_kospi_universe_csv(
+                            logger_callback=_ulog if universe_log is not None else None,
+                            kospi_universe_path=cache_file,
+                            target_n=max(400, effective_count),
+                            force_refresh=force,
+                        )
+                        if os.path.exists(cache_file):
+                            df = pd.read_csv(cache_file, dtype=str)
+                            if "종목코드" in df.columns and "Code" not in df.columns:
+                                df.rename(columns={"종목코드": "Code", "종목명": "Name"}, inplace=True)
+                            if "Code" not in df.columns:
+                                return pd.DataFrame()
+                            if "Name" not in df.columns:
+                                df["Name"] = df["Code"]
+                            df["Code"] = df["Code"].astype(str).str.zfill(6)
+                            return df[["Code", "Name"]].head(effective_count).copy()
+                    except Exception:
+                        return pd.DataFrame()
+
+                    return pd.DataFrame()
+
+                # KODEX200: 기존 resolve_kodex200_universe 로딩 유지
                 merged: dict = {}
                 try:
                     from core.defaults import DEFAULT_SETTINGS
@@ -2406,7 +2470,7 @@ class DataManagerV2:
             df = fdr.StockListing("KOSPI")
             df = df[df["Code"].astype(str).str.endswith("0")].sort_values(
                 by="Marcap", ascending=False
-            ).head(int(count))[["Code", "Name"]]
+            ).head(effective_count)[["Code", "Name"]]
             if df is not None and not getattr(df, "empty", True):
                 df.to_csv(cache_file, index=False, encoding="utf-8-sig")
             return df

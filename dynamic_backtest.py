@@ -318,7 +318,8 @@ class DynamicBacktester:
         self.start_date = start_date
         self.end_date = end_date
         self._cache_run_hot_settings()
-        self.stock_name_map = TradingStrategy.get_stock_name_map()
+        idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+        self.stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         if callback:
             callback("진단: 백테스트와 동일 컨텍스트 로드 중...", 0)
         if not self._bootstrap_portfolio_data(start_date, end_date, callback):
@@ -392,7 +393,8 @@ class DynamicBacktester:
         self.end_date = end_date
         
         self._cache_run_hot_settings()
-        self.stock_name_map = TradingStrategy.get_stock_name_map()
+        idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+        self.stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         
         if callback: callback("백테스트 준비 중...", 0)
         
@@ -699,7 +701,7 @@ class DynamicBacktester:
                         ret=ret, fee=sell_fee, sig_type=h_info.get("sig_type", "TYPE_A"),
                     )
                     self.trades_history.append({
-                        'Date': last_time, 'Code': code, 'Name': TradingStrategy.get_stock_name_map().get(code, code), 
+                        'Date': last_time, 'Code': code, 'Name': self.stock_name_map.get(code, code),
                         'Action': 'HOLD', 'Price': last_price, 'Qty': h_info['qty'], 'Amount': h_info['qty'] * last_price, 
                         'Return': ret, 'Reason': reason, 'Cash': self.cash, 'Fee': sell_fee,
                         'Sig_Type': h_info.get('sig_type', 'TYPE_A')

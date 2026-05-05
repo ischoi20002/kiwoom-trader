@@ -149,41 +149,73 @@ def _run_single_backtest_task(args):
 
 class TradingStrategy:
     """[v6.4] 실시간 감시와 백테스팅이 공유하는 매매 전략 엔진"""
-    _name_map = None
+    # 유니버스 인덱스 소스별( KODEX200 / KOSPI200 ) 코드->이름 맵 캐시
+    _name_map_by_choice: dict[str, dict[str, str]] = {}
     
     @staticmethod
-    def get_stock_name_map():
-        """종목코드 -> 종목명 맵핑 로드 (v6.3)"""
-        if TradingStrategy._name_map is not None:
-            return TradingStrategy._name_map
-            
-        csv_path = "kodex200.csv"  # [v30.5 Fixed] kospi_top_500.csv -> kodex200.csv
+    def get_stock_name_map(universe_index_choice: str = "KODEX200"):
+        """종목코드 -> 종목명 맵핑 로드.
+
+        Parameters
+        ----------
+        universe_index_choice:
+            - 'KODEX200': kodex200.csv
+            - 'KOSPI200': kospi_universe.csv
+        """
+        try:
+            choice = str(universe_index_choice).strip().upper()
+        except Exception:
+            choice = "KODEX200"
+        if choice not in ("KODEX200", "KOSPI200"):
+            choice = "KODEX200"
+
+        cached = TradingStrategy._name_map_by_choice.get(choice)
+        if cached is not None:
+            return cached
+
+        csv_path = "kodex200.csv"
+        if choice == "KOSPI200":
+            csv_path = "kospi_universe.csv"
+
         try:
             if not os.path.exists(csv_path):
-                # 다른 kodex_*.csv/kodex*.csv 또는 kospi_*.csv 파일이 있는지 확인
+                # 다른 kodex_*.csv/kodex*.csv 또는 kospi_universe/*.csv 파일이 있는지 확인
                 import glob
-                files = glob.glob("kodex*.csv") + glob.glob("kospi_*.csv")
+                if choice == "KOSPI200":
+                    files = glob.glob("kospi_universe*.csv") + glob.glob("kospi_*.csv") + glob.glob("kospi200*.csv")
+                else:
+                    files = glob.glob("kodex*.csv") + glob.glob("kospi_*.csv")
                 if files:
                     csv_path = files[0]
                 else:
-                    TradingStrategy._name_map = {}
+                    TradingStrategy._name_map_by_choice[choice] = {}
                     return {}
             
             if os.path.exists(csv_path):
-                df_name = pd.read_csv(csv_path, dtype={'종목코드': str, 'Code': str}, encoding='utf-8')
-                # 한글 헤더 처리 (v31.0)
+                # 기존 kodex200.csv 포맷(종목코드/종목명)과 kospi200.csv 포맷(Code/Name) 모두 허용
+                df_name = pd.read_csv(csv_path, dtype=str, encoding='utf-8-sig')
+
                 if '종목코드' in df_name.columns:
                     df_name.rename(columns={'종목코드': 'Code', '종목명': 'Name'}, inplace=True)
+                elif '종목명' in df_name.columns and 'Name' not in df_name.columns:
+                    df_name.rename(columns={'종목명': 'Name'}, inplace=True)
                 
                 # 종목코드가 6자리가 되도록 패딩 (예: 660 -> 000660)
+                if 'Code' not in df_name.columns:
+                    TradingStrategy._name_map_by_choice[choice] = {}
+                    return {}
+                if 'Name' not in df_name.columns:
+                    df_name['Name'] = df_name['Code']
+
                 df_name['Code'] = df_name['Code'].apply(lambda x: str(x).zfill(6))
-                TradingStrategy._name_map = dict(zip(df_name['Code'], df_name['Name']))
+
+                TradingStrategy._name_map_by_choice[choice] = dict(zip(df_name['Code'], df_name['Name']))
             else:
-                TradingStrategy._name_map = {}
+                TradingStrategy._name_map_by_choice[choice] = {}
         except Exception as e:
             print(f"  (!) Name Map Load Error (Path: {csv_path}): {e}")
-            TradingStrategy._name_map = {}
-        return TradingStrategy._name_map
+            TradingStrategy._name_map_by_choice[choice] = {}
+        return TradingStrategy._name_map_by_choice[choice]
 
     @staticmethod
     def calculate_buy_indicators(df, settings):
@@ -1841,7 +1873,8 @@ class SimpleBacktester:
 
         self.buy_f_rate, self.sell_f_rate = fee_decimal_rates_backtest(self.settings)
         
-        stock_name_map = TradingStrategy.get_stock_name_map()
+        idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+        stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         stock_name = stock_name_map.get(code, code)
 
         # [Perf] Cache Smart Filter & Exit settings to avoid repeated dictionary lookups in hot loops

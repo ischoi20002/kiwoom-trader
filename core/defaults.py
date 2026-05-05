@@ -66,6 +66,10 @@ DEFAULT_SETTINGS = {
     "realtime_bar_update_min_interval_sec": 0.12,
     "realtime_bar_update_force_move_pct": 0.0003,
     "realtime_monitor_atr_display_min_interval_sec": 0.5,
+    # 유니버스 인덱스 소스: KODEX200(기존 kodex200.csv) 또는 KOSPI200(신규 kospi_universe.csv + topN 슬라이스)
+    "universe_index_choice": "KODEX200",
+    # KOSPI200 모드에서 사용할 상위 종목 N (kospi_universe.csv head(N) 슬라이스)
+    "kospi_top_n": 200,
     "kodex200_universe_priority": "csv_only",
     "kodex200_export_csv_on_etf_success": False,
     "kodex200_constituents_url": "",

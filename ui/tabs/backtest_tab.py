@@ -739,9 +739,10 @@ class BacktestTab:
     def _run_optimize_thread(self, start, end, space, high_precision=False, n_trials=50):
         try:
             import parameter_optimizer as opt_mod
-            # [v31.0] Derive optimization targets from KODEX 200 universe
+            # [v31.0] Derive optimization targets from selected universe index
             from backtest_engine import TradingStrategy
-            name_map = TradingStrategy.get_stock_name_map()
+            idx_choice = self.app.settings.get("universe_index_choice", "KODEX200")
+            name_map = TradingStrategy.get_stock_name_map(idx_choice)
             opt_codes = list(name_map.keys())[:10] if name_map else ['005930', '000660', '005380', '055550', '051910', '012450', '035420', '015760', '028260', '009150']
             
             optimizer = opt_mod.ParameterOptimizer(opt_codes, space, self.app.settings)

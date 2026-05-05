@@ -497,6 +497,79 @@ class SettingsTab:
         )
 
         _univ_root = _sec_parent('univ')
+
+        # ── 유니버스 인덱스 소스 선택 (KODEX200 vs KOSPI200) ──
+        # settings['universe_index_choice'] 값에 따라 종목선정/백테스트 유니버스가 분기됩니다.
+        univ_source_f = ttk.LabelFrame(
+            _univ_root,
+            text=' 🔎 유니버스 인덱스 소스 ',
+            padding='15',
+        )
+        univ_source_f.pack(fill=tk.X, expand=False, pady=(0, 12))
+
+        try:
+            if 'universe_index_choice' not in self.conf_vars:
+                init_val = self.app.settings.get(
+                    'universe_index_choice',
+                    self.default_settings.get('universe_index_choice', 'KODEX200'),
+                )
+                self.conf_vars['universe_index_choice'] = tk.StringVar(value=str(init_val))
+        except Exception:
+            # UI 로딩 실패 시에도 나머지 섹션은 유지되도록 방어
+            self.conf_vars['universe_index_choice'] = tk.StringVar(value='KODEX200')
+
+        ttk.Label(
+            univ_source_f,
+            text='선택',
+            font=('Malgun Gothic', 10),
+            foreground=txt_col,
+        ).grid(row=0, column=0, sticky='w', padx=(5, 10))
+
+        univ_cmb = ttk.Combobox(
+            univ_source_f,
+            textvariable=self.conf_vars['universe_index_choice'],
+            values=['KODEX200', 'KOSPI200'],
+            state='readonly',
+            width=10,
+        )
+        univ_cmb.grid(row=0, column=1, sticky='w', padx=(5, 10))
+
+        # 저장 단계에서는 conf_vars의 .get() 값을 settings에 반영합니다.
+        # (save_settings()에서 self.conf_vars 순회)
+        ttk.Label(
+            univ_source_f,
+            text='(고정 200종목 기준)',
+            font=('Malgun Gothic', 9),
+            foreground=primary_col,
+        ).grid(row=0, column=2, sticky='w', padx=(10, 5))
+
+        # KOSPI200 선택 시 kospi_universe.csv에서 head(top_n) 슬라이스에 사용합니다.
+        try:
+            if 'kospi_top_n' not in self.conf_vars:
+                init_topn = self.app.settings.get(
+                    'kospi_top_n',
+                    self.default_settings.get('kospi_top_n', 200),
+                )
+                self.conf_vars['kospi_top_n'] = tk.StringVar(value=str(init_topn))
+        except Exception:
+            self.conf_vars['kospi_top_n'] = tk.StringVar(value='200')
+
+        ttk.Label(
+            univ_source_f,
+            text='상위 N(150/200/250/300)',
+            font=('Malgun Gothic', 9),
+            foreground=primary_col,
+        ).grid(row=1, column=0, sticky='w', padx=(5, 10), pady=(4, 0))
+
+        kospi_n_cmb = ttk.Combobox(
+            univ_source_f,
+            textvariable=self.conf_vars['kospi_top_n'],
+            values=['150', '200', '250', '300'],
+            state='readonly',
+            width=10,
+        )
+        kospi_n_cmb.grid(row=1, column=1, sticky='w', padx=(5, 10), pady=(4, 0))
+
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')
         sel_f.pack(fill=tk.X, expand=False, pady=(0, 12))
         add_param_row(
