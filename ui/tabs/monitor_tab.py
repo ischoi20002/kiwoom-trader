@@ -1998,7 +1998,15 @@ class MonitorTab:
         try:
             wl = self._watchlist_codes_set()
             mc = getattr(self.app.trading_controller, "monitor_codes", None) or []
-            return watchlist_only_codes_set(wl, mc)
+            # 가상 보유(virtual_positions)는 화면상 "보유 및 대응"에 항상 보여야 합니다.
+            # watchlist_store 선적재로 인해 wl_only에 포함되더라도, update_view()에서 wl_only면
+            # 두 트리 모두 삭제되기 때문에(우선순위 버그) virtual_positions 코드는 감시 선정으로 간주해 제외합니다.
+            try:
+                vpd = getattr(self.app.portfolio, "virtual_positions", None) or {}
+                vp_codes = [str(k).split("_")[0].zfill(6) for k in vpd.keys()]
+            except Exception:
+                vp_codes = []
+            return watchlist_only_codes_set(wl, list(mc) + vp_codes)
         except Exception:
             return set()
 

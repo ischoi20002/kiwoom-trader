@@ -334,7 +334,7 @@ class KiwoomApp:
         try:
             _added = self.watchlist_store.preload_from_kodex200_csv(logger_callback=self.log)
             if _added > 0:
-                self.log(f"[Watchlist] kodex200.csv 선적재 완료: { _added }개")
+                self.log(f"[Watchlist] kodex200.csv 이름 캐시 선적재 완료: { _added }개")
         except Exception:
             pass
         self.watchlist_synth_state = {}

@@ -41,6 +41,10 @@ class WatchlistStore:
         self._log = logger_callback or (lambda _m: None)
         self._lock = threading.Lock()
         self._items: List[Dict[str, str]] = []
+        # 코드명(이름) 조회를 위한 별도 캐시.
+        # 주의: 이 캐시는 get_codes()/codes_set()에 영향을 주지 않으며,
+        # 실시간 감시/워밍업 대상 종목 집합을 오염시키지 않기 위해 _items에 넣지 않습니다.
+        self._name_cache: Dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -102,75 +106,55 @@ class WatchlistStore:
         log = logger_callback or self._log
         path = csv_path or os.path.join(os.getcwd(), "kodex200.csv")
 
+        import csv
+
         try:
             if not os.path.isfile(path):
                 return 0
-
-            # 프로젝트 내 pandas 사용을 전제로, 동적 import로 의존 지점을 제한합니다.
-            import pandas as pd  # type: ignore
-
-            df = pd.read_csv(path, dtype=str)
-        except Exception as e:
-            try:
-                log(f"[Watchlist] kodex200.csv 선적재 실패: {e}")
-            except Exception:
-                pass
+        except Exception:
             return 0
 
-        code_col: Optional[str] = None
-        name_col: Optional[str] = None
-        if "종목코드" in df.columns and "종목명" in df.columns:
-            code_col, name_col = "종목코드", "종목명"
-        elif "Code" in df.columns:
-            if "Name" in df.columns:
-                code_col, name_col = "Code", "Name"
-            elif "종목명" in df.columns:
-                code_col, name_col = "Code", "종목명"
-
-        if not code_col or not name_col:
-            return 0
-
+        added = 0
         try:
-            existing = self.codes_set()
-            added = 0
-            sub = df[[code_col, name_col]].copy()
-
-            for _, row in sub.iterrows():
-                try:
-                    raw_code = row.get(code_col)
-                    raw_name = row.get(name_col)
+            # 파일 인코딩이 환경마다 달라, utf-8-sig + errors='ignore'로 최대 호환.
+            with open(path, "r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    # 최소: [Code, Name, ...]
+                    if not row or len(row) < 2:
+                        continue
+                    raw_code = row[0]
+                    raw_name = row[1]
                     if raw_code is None:
                         continue
 
                     c = str(raw_code).strip()
+                    # 헤더가 들어오면 skip (code가 숫자가 아니면 제외)
                     if not c or not c.isdigit():
                         continue
                     c = c.zfill(6)
-                    if c in existing:
-                        continue
 
-                    nm = "" if raw_name is None else str(raw_name).strip()
+                    nm = str(raw_name or "").strip()
                     if not nm:
                         nm = c
 
-                    if self.add(c, nm, avg_price=None):
-                        existing.add(c)
-                        added += 1
-                except Exception:
-                    continue
-
-            if added > 0:
-                try:
-                    log(f"[Watchlist] kodex200.csv 선적재: {added}개 추가됨")
-                except Exception:
-                    pass
-            return added
+                    if self._name_cache.get(c) == nm:
+                        continue
+                    self._name_cache[c] = nm
+                    added += 1
         except Exception as e:
             try:
-                log(f"[Watchlist] kodex200.csv 선적재 처리 실패: {e}")
+                log(f"[Watchlist] kodex200.csv 이름 캐시 선적재 처리 실패: {e}")
             except Exception:
                 pass
             return 0
+
+        if added > 0:
+            try:
+                log(f"[Watchlist] kodex200.csv 이름 캐시 선적재: {added}개")
+            except Exception:
+                pass
+        return added
 
     def codes_set(self) -> set:
         """정규화된 6자리 코드 집합 (감시 화면·포지션 관리 탭에서 숨길 때 사용)."""
@@ -193,10 +177,18 @@ class WatchlistStore:
 
     def get_name(self, code: str) -> str:
         c = str(code).strip().zfill(6)
+        # 1) watchlist_favorites.json의 name 우선
         with self._lock:
             for it in self._items:
                 if it["code"] == c:
                     return it.get("name", c)
+        # 2) kodex200.csv 기반 이름 캐시
+        try:
+            nm = self._name_cache.get(c)
+            if nm:
+                return nm
+        except Exception:
+            pass
         return c
 
     def get_avg_price(self, code: str) -> Optional[float]:

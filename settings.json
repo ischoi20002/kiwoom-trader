@@ -282,7 +282,7 @@
     "bt_start_date": "2024-04-01",
     "bt_end_date": "2024-12-31",
     "mock_account_id": "81220142",
-    "debug_terminal_trace": true,
+    "debug_terminal_trace": false,
     "realtime_warmup_pre_validate_pause_max_sec": 0.0,
     "opt_s1_equity_pct": false,
     "opt_s2_equity_pct": false,

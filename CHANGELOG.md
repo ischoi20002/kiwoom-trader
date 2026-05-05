@@ -13,6 +13,11 @@
 
 ---
 
+## 0.6.32 (2026-05-06)
+
+- 실시간 감시: `kodex200.csv`를 이름 표시 캐시로만 사용하도록 조정해, `watchlist_store.get_codes()`에 섞이던 문제로 인해 워밍업/WS 대상 종목 수가 과도하게 커지는 현상을 완화(`core/watchlist_store.py`, `k_trader_gui.py`).
+- 실시간 감시 UI: `wl_only`(관심목록 전용) 계산에서 `virtual_positions` 종목을 제외해, 보유 및 대응 트리에서 보유 종목이 사라지는 우선순위 충돌을 추가 완화(`ui/tabs/monitor_tab.py`).
+
 ## 0.6.31 (2026-05-06)
 
 - 실시간 감시: WS 수신 디버그 로그(과도 출력) 스팸을 줄이고, `LOGIN` 실패 원인(`return_msg/return_code`)을 `realtime_session_logs` JSONL로도 남겨 스크롤 없이 원인 추적 가능하도록 개선(`ui/tabs/monitor_tab.py`, `reporting/realtime_session_logger.py`).
