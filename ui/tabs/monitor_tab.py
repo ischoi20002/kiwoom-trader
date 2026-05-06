@@ -216,6 +216,18 @@ class MonitorTab:
         self._stream_sub_cache_ts: float = 0.0
         # WS recv 타임아웃 누적(실시간 패킷 부재 시 막힘처럼 보일 때 터미널 추적용)
         self._ws_idle_recv_count: int = 0
+        # 로그를 너무 많이 만들지 않기 위한 최소 관측용 플래그
+        self._ws_logged_first_real: bool = False
+        self._ws_logged_idle_once: bool = False
+        # REAL(0B)에서 fid 10(now_price)이 0으로 파싱되어 틱이 continue 되는 케이스를
+        # 소수 코드에만 1회 관측(키 타입/존재 여부 확인용)
+        self._real_now_price_zero_debug_codes: Set[str] = set()
+        # REAL(0B) 수신 관측용(해당 코드만 주기적 기록): GUI 멈춤 상황에서도 JSONL로 확인
+        self._real_0b_seen_last_ts: Dict[str, float] = {}
+        # monitor_tab.update_view에서 pending_tree_updates가 실제 렌더/삭제되는지 추적(해당 코드만 throttling)
+        self._render_debug_last_ts: Dict[str, float] = {}
+        # update_view가 너무 오래 걸려 UI가 멈춘 것처럼 보이는 케이스 기록(쿨다운/로그 폭주 방지용)
+        self._update_view_slow_last_ts: float = 0.0
         self._setup_ui()
 
     def _ws_reg_max_codes_per_chunk(self) -> int:
@@ -1576,6 +1588,12 @@ class MonitorTab:
                                             )
                                     except Exception:
                                         pass
+                                    if not self._ws_logged_first_real:
+                                        self._ws_logged_first_real = True
+                                        try:
+                                            self.app.log("✅ [WS] REAL 틱이 처음 수신되었습니다.")
+                                        except Exception:
+                                            pass
                                 if trnm == 'LOGIN':
                                     if packet.get('return_code') == 0:
                                         self._ws_login_fail_streak = 0
@@ -1700,6 +1718,16 @@ class MonitorTab:
                             except Exception:
                                 self._ws_idle_recv_count = 1
                             nidle = self._ws_idle_recv_count
+                            # debug_terminal_trace가 꺼져도 "REAL 수신이 끊긴 것 같은지" 확인할 수 있도록
+                            # 일정 횟수 이상일 때만 1줄 앱 로그로 남깁니다.
+                            if (not self._ws_logged_idle_once) and nidle >= 6:
+                                self._ws_logged_idle_once = True
+                                try:
+                                    self.app.log(
+                                        f"⏳ [WS] ws.recv 타임아웃 누적 {nidle}회 (REAL 수신 없음 가능)"
+                                    )
+                                except Exception:
+                                    pass
                             if nidle in (1, 2, 4, 8, 16, 32, 64) or (nidle % 128 == 0):
                                 terminal_trace(
                                     f"WS: ws.recv 5초 타임아웃 누적 {nidle}회 "
@@ -1870,13 +1898,77 @@ class MonitorTab:
                 now_price = int(get_val(10))
                 # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
                 # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
+                debug_codes = {"267250", "454910", "016360", "042700"}
                 if now_price == 0:
+                    try:
+                        if code in debug_codes:
+                            # 1) now_price==0 최초 관측(키/values 타입 확인용)
+                            if code not in self._real_now_price_zero_debug_codes:
+                                self._real_now_price_zero_debug_codes.add(code)
+                            # 키가 문자열인지/정수인지 파악용 샘플
+                            try:
+                                keys_sample = list(vals.keys())[:25]
+                            except Exception:
+                                keys_sample = []
+                            # fid 10이 어떤 형태로 들어오는지(문자열/정수) 확인
+                            v10_str = None
+                            v10_int = None
+                            try:
+                                v10_str = vals.get("10")
+                            except Exception:
+                                pass
+                            try:
+                                v10_int = vals.get(10)
+                            except Exception:
+                                pass
+                            try:
+                                self._realtime_session_logger.log(
+                                    "ws_real_0b_now_price_zero_seen",
+                                    {
+                                        "code": code,
+                                        "fid10_str": v10_str,
+                                        "fid10_int": v10_int,
+                                        "keys_sample": keys_sample,
+                                        "trnm": "REAL",
+                                        "p_type": p_type,
+                                    },
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # 주기적(최소 5초)으로라도 수신 자체가 있는지 기록
+                    try:
+                        if code in debug_codes:
+                            last_ts = float(self._real_0b_seen_last_ts.get(code, 0.0) or 0.0)
+                            import time as _t
+                            if _t.time() - last_ts >= 5.0:
+                                self._real_0b_seen_last_ts[code] = _t.time()
+                                self._realtime_session_logger.log(
+                                    "ws_real_0b_seen_periodic",
+                                    {"code": code, "now_price": now_price, "volume": int(get_val(13)), "p_type": p_type},
+                                )
+                    except Exception:
+                        pass
                     continue
                 volume = int(get_val(13))
                 trde_val = int(get_val(26) // 1000)
                 ratio_val = vals.get('12', '0')
                 diff_val = vals.get('11', '0')
                 vol_power = get_val(228)
+                # 수신 자체를 GUI 멈춤 상황에서도 추적(해당 코드만 주기적 기록)
+                try:
+                    if code in debug_codes:
+                        last_ts = float(self._real_0b_seen_last_ts.get(code, 0.0) or 0.0)
+                        import time as _t
+                        if _t.time() - last_ts >= 5.0:
+                            self._real_0b_seen_last_ts[code] = _t.time()
+                            self._realtime_session_logger.log(
+                                "ws_real_0b_seen_periodic",
+                                {"code": code, "now_price": now_price, "volume": volume, "p_type": p_type},
+                            )
+                except Exception:
+                    pass
                 info['price'] = now_price
                 info['ratio'] = ratio_val
                 info['diff'] = diff_val
@@ -2170,12 +2262,14 @@ class MonitorTab:
         self,
         monitor_info: Optional[Dict[str, Any]],
         virtual_positions: Any,
-        min_interval_s: float = 3.0,
+        min_interval_s: float = 10.0,
     ) -> None:
         """
         monitor_info 에 있어야 할 종목이 틱 부재로 트리에서 빠진 경우 복구.
         (15:30 봉 마감 등 체결이 없는 종목은 pending_tree_updates 에 안 올라와 행이 사라질 수 있음)
         """
+        import time as _t
+        t0 = _t.perf_counter()
         try:
             if not self.tree_monitor or not self.tree_active_monitor:
                 return
@@ -2272,6 +2366,23 @@ class MonitorTab:
                 print(f"[UI Error] maybe_reconcile_monitor_trees: {e}")
             except Exception:
                 pass
+        finally:
+            try:
+                dt = _t.perf_counter() - t0
+                # UI가 멈춘 것처럼 보이는 구간을 더 잘 연결하기 위한 slow log
+                if dt >= 0.50:
+                    sl = getattr(self, "_realtime_session_logger", None)
+                    if sl is not None:
+                        sl.log(
+                            "monitor_tab_maybe_reconcile_monitor_trees_slow",
+                            {
+                                "dt_sec": float(dt),
+                                "min_interval_s": float(min_interval_s),
+                                "pending_size_hint": None,
+                            },
+                        )
+            except Exception:
+                pass
 
     def _virtual_position_is_active(self, iid: str, virtual_positions: Any) -> bool:
         """
@@ -2360,29 +2471,180 @@ class MonitorTab:
         
         try:
             if updates:
+                t0 = time.perf_counter()
                 items = list(updates.items())
                 updates.clear()
                 wl_only = self._watchlist_only_codes_set()
                 mc_targets = self._monitor_target_codes_set()
+                debug_seen = False
+                try:
+                    st_dbg = getattr(self.app, "settings", None) or {}
+                    debug_trace_enabled = bool(
+                        st_dbg.get("enable_ui_update_step_debug", False)
+                    )
+                except Exception:
+                    debug_trace_enabled = False
+                # UI가 멈출 정도로 관측 로그가 폭주하면 Tk 메인스레드가 더 오래 점유될 수 있습니다.
+                # 따라서 step 로그는 디버그 대상 종목을 1개로 제한합니다.
+                debug_codes = (
+                    {"267250", "454910", "016360", "042700"}
+                    if debug_trace_enabled
+                    else set()
+                )
+                # Tk 호출 직전/직후 위치 추적용.
+                # - "5초 throttle 통과한 경우에만 step을 기록"하면 UI가 그 전에 멈출 때 로그가 0건이 될 수 있어,
+                #   debug_codes 포함이면 step 기록을 항상 시도하되, step 자체를 1초 throttle로 제한합니다.
+                debug_enable_by_code: Dict[str, bool] = {}
+                debug_step_last_ts: Dict[Tuple[str, str], float] = {}
+                # step별로 너무 촘촘한 로그를 남기지 않기 위한 허용 목록
+                allowed_steps: Set[str] = {
+                    "item_start",
+                    "vp_active_check_start",
+                    "other_tree_exists_check_start",
+                    "target_tree_exists_check_start",
+                    "target_tree_item_update_call",
+                    "target_tree_item_values_update_done",
+                    "target_tree_item_tags_update_skipped",
+                    "target_tree_item_tags_update_done",
+                    "target_tree_item_update_exception",
+                }
+                # 디버그 코드가 아닌 항목에서 먼저 Tk가 멈출 수도 있으므로,
+                # items 루프의 직전 "마지막으로 처리 시작한 코드"를 공통 로그로 1초 throttle 남깁니다.
+                debug_any_last_ts: float = 0.0
+
+                # 한 번 렌더에 너무 많은 항목을 처리하면 Tk 메인 이벤트 루프가 오래 점유되어
+                # "전체 UI 멈춤"처럼 보일 수 있습니다. 나머지는 pending updates에 다시 넣고 다음 프레임에 처리합니다.
+                max_items = 25
+                try:
+                    st = getattr(self.app, "settings", None) or {}
+                    max_items = int(float(st.get("realtime_monitor_max_items_per_render", 25)))
+                except Exception:
+                    max_items = 25
+                max_items = max(5, min(max_items, 200))
+                # 큐가 많이 밀린 프레임은 처리량을 동적으로 높여 "표시 지연"을 줄입니다.
+                try:
+                    st = getattr(self.app, "settings", None) or {}
+                    busy_threshold = int(
+                        float(st.get("realtime_monitor_max_items_busy_threshold", 70))
+                    )
+                    busy_max_items = int(
+                        float(st.get("realtime_monitor_max_items_per_render_busy", 60))
+                    )
+                except Exception:
+                    busy_threshold = 70
+                    busy_max_items = 60
+                busy_threshold = max(10, min(busy_threshold, 1000))
+                busy_max_items = max(max_items, min(busy_max_items, 250))
+                if len(items) >= busy_threshold:
+                    max_items = busy_max_items
+                if len(items) > max_items:
+                    remain = items[max_items:]
+                    items = items[:max_items]
+                    try:
+                        updates.update({k: v for k, v in remain})
+                    except Exception:
+                        # 재삽입이 실패해도 최소한 현재 프레임 렌더는 수행합니다.
+                        pass
+                    # 디버그 코드에서만 확인용으로 1회 로그
+                    if debug_trace_enabled:
+                        try:
+                            sl = getattr(self, "_realtime_session_logger", None)
+                            if sl is not None:
+                                sl.log(
+                                    "monitor_tab_update_view_chunked",
+                                    {"processed": max_items, "remain": len(remain)},
+                                )
+                        except Exception:
+                            pass
 
                 for iid_raw, (values, tag, _) in items:
                     # pending 키·monitor_info 키가 3490/003490로 섞여도 트리 iid는 항상 6자리로 통일
                     iid = str(iid_raw).split("_")[0].zfill(6)
                     cid = iid
+                    if debug_trace_enabled:
+                        try:
+                            now_ts = time.time()
+                            if now_ts - debug_any_last_ts >= 1.0:
+                                debug_any_last_ts = now_ts
+                                self._realtime_session_logger.log(
+                                    "monitor_tab_update_view_any_item_start",
+                                    {"code": cid, "tag": str(tag)},
+                                )
+                        except Exception:
+                            pass
+                    try:
+                        if cid in debug_codes:
+                            debug_seen = True
+                            # cid가 디버그 대상이면 step 로깅은 throttle과 무관하게 활성화합니다.
+                            # (item_seen 로그만 throttle 하고, tk_step은 hang 직전까지 최대한 남기기 위함)
+                            debug_enable_by_code[cid] = True
+                            now_t = time.time()
+                            last_t = float(self._render_debug_last_ts.get(cid, 0.0) or 0.0)
+                            if now_t - last_t >= 5.0:
+                                self._render_debug_last_ts[cid] = now_t
+                                self._realtime_session_logger.log(
+                                    "monitor_tab_update_view_item_seen",
+                                    {
+                                        "code": cid,
+                                        "tag": str(tag),
+                                        "wl_only": cid in wl_only,
+                                        "values_price": values[4] if isinstance(values, (list, tuple)) and len(values) > 4 else None,
+                                    },
+                                )
+                        else:
+                            debug_enable_by_code[cid] = False
+                    except Exception:
+                        pass
+
+                    def _step_log(step: str, extra: Optional[Dict[str, Any]] = None) -> None:
+                        """debug_enable_by_code 된 코드에 대해서만 단계 로그를 남깁니다."""
+                        try:
+                            if not debug_trace_enabled:
+                                return
+                            if not debug_enable_by_code.get(cid, False):
+                                return
+                            if step not in allowed_steps:
+                                return
+                            now_ts = time.time()
+                            last_ts = debug_step_last_ts.get((cid, step), 0.0) or 0.0
+                            # step별 최소 간격: 5초
+                            if now_ts - last_ts < 5.0:
+                                return
+                            debug_step_last_ts[(cid, step)] = now_ts
+                            payload: Dict[str, Any] = {"code": cid, "step": step}
+                            if extra:
+                                payload.update(extra)
+                            self._realtime_session_logger.log(
+                                "monitor_tab_update_view_tk_step",
+                                payload,
+                            )
+                        except Exception:
+                            pass
+
+                    # 이 로그 이후에 Tk 호출에서 멈추면, "step 직전" 로그가 마지막으로 남습니다.
+                    _step_log("item_start", {"tag": str(tag), "price": values[4] if isinstance(values, (list, tuple)) and len(values) > 4 else None})
                     if cid in wl_only:
+                        _step_log("wl_only_delete_loop_start")
                         for tree in (self.tree_monitor, self.tree_active_monitor):
                             if tree and tree.exists(iid):
+                                _step_log(
+                                    "wl_only_tree_delete_call",
+                                    {"tree": "monitor" if tree is self.tree_monitor else "active"},
+                                )
                                 tree.delete(iid)
                         try:
                             self._vp_ui_inactive_streak.pop(iid, None)
                             self._vp_ever_in_holdings.pop(iid, None)
                         except Exception:
                             pass
+                        _step_log("wl_only_continue_end")
                         continue
                     # 보유 여부에 따라 타겟 트리 결정
+                    _step_log("vp_active_check_start")
                     is_active_raw = self._virtual_position_is_active(
                         iid, virtual_positions
                     )
+                    _step_log("vp_active_check_done", {"is_active_raw": bool(is_active_raw)})
                     # 동기화·API 지연으로 VP에서 한 번만 빠지면 보유↔감시가 깜빡일 수 있어,
                     # '실제 보유 경험이 있는 종목'에 한해 비보유 2틱 연속일 때만 감시 트리로 내린다.
                     # (streak<2 만으로는 미보유 종목 첫 틱이 보유 트리로 잡혀 워밍업 중 유령 행이 뜸)
@@ -2404,8 +2666,13 @@ class MonitorTab:
                         is_active = is_active_raw
                     # 청산 후 비보유: 감시 선정 종목만 실시간 감시 목록에 표시
                     if not is_active and iid not in mc_targets:
+                        _step_log("not_active_and_not_in_targets_delete_loop_start")
                         for tr in (self.tree_active_monitor, self.tree_monitor):
                             if tr and tr.exists(iid):
+                                _step_log(
+                                    "not_active_delete_call",
+                                    {"tree": "active" if tr is self.tree_active_monitor else "monitor"},
+                                )
                                 try:
                                     tr.delete(iid)
                                 except Exception:
@@ -2415,19 +2682,25 @@ class MonitorTab:
                             self._vp_ever_in_holdings.pop(iid, None)
                         except Exception:
                             pass
+                        _step_log("not_active_and_not_in_targets_continue_end")
                         continue
                     target_tree = self.tree_active_monitor if is_active else self.tree_monitor
                     other_tree = self.tree_monitor if is_active else self.tree_active_monitor
                     
                     # 반대편 트리에 있으면 삭제 (이동 효과)
+                    _step_log("other_tree_exists_check_start", {"target": "active" if target_tree is self.tree_active_monitor else "monitor"})
                     if other_tree.exists(iid):
+                        _step_log("other_tree_delete_call")
                         other_tree.delete(iid)
                         
                     # [v4.5.42] 행의 인덱스와 기본 태그 정의 (안전한 index 추출)
+                    _step_log("target_tree_exists_check_start")
                     if not target_tree.exists(iid):
+                        _step_log("target_tree_insert_call")
                         target_tree.insert("", tk.END, iid=iid, values=values)
                     
                     # [Composite Tag Selection] v4.6.5
+                    _step_log("target_tree_index_call")
                     idx = target_tree.index(iid)
                     is_even = (idx % 2 == 0)
                     row_type = "even" if is_even else "odd"
@@ -2444,11 +2717,72 @@ class MonitorTab:
                         final_tag = f"{direction}_{row_type}"
                     
                     # 데이터와 태그가 변경된 경우에만 업데이트
+                    _step_log("target_tree_item_read_call")
                     curr = target_tree.item(iid)
-                    if curr['values'] != values or final_tag not in curr['tags']:
-                        target_tree.item(iid, values=values, tags=(final_tag,))
+                    _step_log("target_tree_item_compare_call", {"curr_values_len": len(curr.get("values", ())) if isinstance(curr, dict) else None})
+                    curr_values = curr.get("values", ()) if isinstance(curr, dict) else ()
+                    curr_tags = curr.get("tags", ()) if isinstance(curr, dict) else ()
+                    if curr_values != values or final_tag not in curr_tags:
+                        _step_log("target_tree_item_update_call", {"final_tag": str(final_tag)})
+                        # Tk Treeview item 업데이트는 일부 케이스에서 호출이 멈추는 현상이 있어,
+                        # tags를 한 번에 같이 넣지 않고 values/tags를 분리 갱신합니다.
+                        try:
+                            # 1) values 먼저 갱신(표시 가격/수급이 핵심)
+                            if curr_values != values:
+                                target_tree.item(iid, values=values)
+                                _step_log("target_tree_item_values_update_done", {"final_tag": str(final_tag)})
+                            # 2) tags는 색상 코딩 핵심이므로 기본 활성화.
+                            #    필요 시 settings.json에서만 비활성화(enable_monitor_row_tag_update=false)
+                            need_tag_update = final_tag not in curr_tags
+                            if need_tag_update:
+                                try:
+                                    st_tag = getattr(self.app, "settings", None) or {}
+                                    tag_update_enabled = bool(
+                                        st_tag.get("enable_monitor_row_tag_update", True)
+                                    )
+                                except Exception:
+                                    tag_update_enabled = True
+                                if tag_update_enabled:
+                                    target_tree.item(iid, tags=(final_tag,))
+                                    _step_log("target_tree_item_tags_update_done", {"final_tag": str(final_tag)})
+                                else:
+                                    _step_log("target_tree_item_tags_update_skipped", {"final_tag": str(final_tag)})
+                        except Exception:
+                            # 업데이트 실패는 UI만 깨질 뿐 틱 흐름은 막지 않습니다.
+                            try:
+                                _step_log("target_tree_item_update_exception", {"final_tag": str(final_tag)})
+                            except Exception:
+                                pass
+                # update_view 본문이 너무 오래 걸리면 Tk 이벤트 루프가 막혀 화면이 멈춘 것처럼 보일 수 있음
+                try:
+                    dt = time.perf_counter() - t0
+                    if dt >= 0.50 and debug_seen:
+                        now_ts = time.time()
+                        if now_ts - self._update_view_slow_last_ts >= 20.0:
+                            self._update_view_slow_last_ts = now_ts
+                            self._realtime_session_logger.log(
+                                "monitor_tab_update_view_slow",
+                                {
+                                    "dt_sec": float(dt),
+                                    "items_count": len(items),
+                                },
+                            )
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"[UI Error] MonitorTab Render Error: {e}")
+            try:
+                print(f"[UI Error] MonitorTab Render Error: {e}")
+            except Exception:
+                pass
+            try:
+                self._realtime_session_logger.log(
+                    "monitor_tab_update_view_exception",
+                    {
+                        "error": str(e),
+                    },
+                )
+            except Exception:
+                pass
 
     def update_watchlist(self, monitor_info):
         """[v4.5.3] 감시 종목 리스트 초기화 렌더링"""

@@ -123,6 +123,9 @@ class TradingController:
         )
         # D+2로 1주도 못 살 때 Skip 로그 — 틱 반복 방지( epoch 마지막 출력 시각 )
         self._buy_skip_d2_one_lot_log_at: Dict[str, float] = {}
+        # EXIT 주문 실패 시 매 틱 동기 REST 재시도로 메인 UI가 멈추는 현상 방지용 쿨다운
+        self._exit_retry_not_before: Dict[str, float] = {}
+        self._exit_retry_skip_log_at: Dict[str, float] = {}
         # _run_start_sequence 가 백그라운드에서 도는 동안 중복 start() 방지
         self._run_start_sequence_active: bool = False
         # stop() 호출 시 워밍업 직후 단계(WS 기동 등)를 건너뛰기 위함
@@ -742,8 +745,44 @@ class TradingController:
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
 
         if action == "EXIT":
+            # 이미 매도 주문 접수 대기 중이면 중복 EXIT 제출 금지
+            try:
+                if bool(pos.get("exit_pending", False)):
+                    return
+            except Exception:
+                pass
+
             # [Audit] Exit Execution — 주문 실패 시 exit_pending 미설정(재평가·재시도 가능)
             if allow_order:
+                # 주문 거부/네트워크 지연 시 매 틱 동기 place_order를 반복하면 Tk 메인루프가 장시간 점유됩니다.
+                # 실패 후 짧은 쿨다운 동안은 재제출을 스킵해 UI 프리징을 완화합니다.
+                nk = str(code).zfill(6)
+                now_epoch = time.time()
+                try:
+                    not_before = float(
+                        self._exit_retry_not_before.get(nk, 0.0) or 0.0
+                    )
+                except Exception:
+                    not_before = 0.0
+                if now_epoch < not_before:
+                    try:
+                        last_skip = float(
+                            self._exit_retry_skip_log_at.get(nk, 0.0) or 0.0
+                        )
+                    except Exception:
+                        last_skip = 0.0
+                    if now_epoch - last_skip >= 5.0:
+                        self._exit_retry_skip_log_at[nk] = now_epoch
+                        try:
+                            wait_s = max(0.0, not_before - now_epoch)
+                            self.log(
+                                f"ℹ️ [Exit Signal/{reason}] {pos.get('name', code)}({nk}) "
+                                f"재시도 쿨다운 {wait_s:.1f}s 남음 — 동기 재주문 스킵"
+                            )
+                        except Exception:
+                            pass
+                    return
+
                 ord_no = self.app.order_manager.place_order(
                     code,
                     pos['qty'],
@@ -770,6 +809,12 @@ class TradingController:
                 except Exception:
                     pass
                 if ord_no:
+                    # 접수 성공 시 실패 쿨다운 상태 초기화
+                    try:
+                        self._exit_retry_not_before.pop(nk, None)
+                        self._exit_retry_skip_log_at.pop(nk, None)
+                    except Exception:
+                        pass
                     pos["exit_pending"] = True
                     # 주문 로그 `reason` 컬럼과 동일 문자열 — 종료내역·on_fill과 정합
                     pos["exit_reason"] = f"EXIT_{reason}"
@@ -805,9 +850,20 @@ class TradingController:
                         target=self.app.send_telegram_message, args=(msg,), daemon=True
                     ).start()
                 else:
+                    # 실패 시 짧은 쿨다운(기본 8초) 적용
+                    try:
+                        st = getattr(self.app, "settings", None) or {}
+                        cd = float(st.get("exit_order_retry_cooldown_sec", 8.0))
+                    except Exception:
+                        cd = 8.0
+                    cd = max(1.0, min(cd, 120.0))
+                    try:
+                        self._exit_retry_not_before[nk] = time.time() + cd
+                    except Exception:
+                        pass
                     self.log(
                         f"⚠️ [Exit Signal/{reason}] {pos['name']}({code}) 매도 주문 실패 "
-                        f"— exit_pending 미설정, 재평가 가능 ({profit_ratio:+.2f}%)"
+                        f"— {cd:.1f}s 후 재시도 ({profit_ratio:+.2f}%)"
                     )
                     try:
                         sl = getattr(self.app, "session_logger", None)

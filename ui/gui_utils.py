@@ -19,6 +19,7 @@ class GuiUtils:
     def __init__(self, log_area=None, root=None):
         self.log_area = log_area
         self.root = root
+        self._main_thread_id = threading.get_ident()
         self._log_msg_count = 0
         self._log_q: "queue.SimpleQueue[str]" = queue.SimpleQueue()
         self._log_flush_after_id: Optional[Union[str, int]] = None
@@ -51,6 +52,12 @@ class GuiUtils:
             "⚪",
         )
         self._icon_triggers = ("🔍", "❌", "⚠️", "📊", "✅", "🚀", "ℹ️", "🎯")
+        # 메인 스레드에서 주기적으로 큐를 배출하는 폴러를 시작합니다.
+        # (비메인 스레드는 Tk API를 직접 호출하지 않음)
+        try:
+            self._ensure_log_poller()
+        except Exception:
+            pass
 
     def log(self, message: Any) -> None:
         """
@@ -68,7 +75,29 @@ class GuiUtils:
             except Exception:
                 pass
             return
+        # Tk는 메인 스레드 전용. 비메인 스레드에서는 큐 적재만 하고 즉시 반환합니다.
+        # 메인 스레드 폴러가 주기적으로 배출합니다.
+        try:
+            if threading.get_ident() != self._main_thread_id:
+                return
+        except Exception:
+            pass
         self._request_log_flush()
+
+    def _ensure_log_poller(self) -> None:
+        """메인 스레드 주기 폴러를 1건 유지합니다."""
+        try:
+            r = self.root
+            if r is None:
+                return
+            if threading.get_ident() != self._main_thread_id:
+                return
+            if self._log_flush_after_id is None:
+                self._log_flush_after_id = r.after(
+                    self._LOG_DEBOUNCE_MS, self._drain_log_queue_on_main
+                )
+        except Exception:
+            pass
 
     def _request_log_flush(self) -> None:
         """Tk 메인 루프에 로그 배출 작업을 한 건만 예약합니다."""
@@ -115,6 +144,8 @@ class GuiUtils:
                 pass
         try:
             if self._log_q.empty():
+                # 큐가 비어도 폴러는 유지(비메인 로그 enqueue를 놓치지 않기 위함)
+                self._ensure_log_poller()
                 return
             r = self.root
             if r is not None:

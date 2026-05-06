@@ -13,6 +13,12 @@
 
 ---
 
+## 0.6.33 (2026-05-06)
+
+- 실시간 감시 안정화: Tk 메인 스레드에서만 UI API(`after`/렌더) 호출하도록 경로를 정리하고, 틱 후속 액션 큐를 재스케줄링/워치독으로 보강해 전체 UI 멈춤(탭 전환 불가) 재현 가능성을 완화(`core/realtime_tick_dispatch_service.py`, `ui/gui_utils.py`, `k_trader_gui.py`).
+- 실시간 갱신 성능: `pending_tree_updates` 렌더를 프레임 예산 기반으로 분할하고 강제 최소 갱신 경로를 라운드로빈/적체 임계치 기반으로 최적화해 화면 숫자 추종성과 응답성 균형을 개선(`core/signal_engine.py`, `ui/tabs/monitor_tab.py`, `k_trader_gui.py`).
+- 실시간 감시 표시 정합: 행 태그(컬러코딩) 갱신을 설정 기반으로 복구하고, 강제 주입 경로에서도 전략유형 컬럼을 `sel_track` 기반으로 채워 `-` 표시 깜빡임을 완화(`ui/tabs/monitor_tab.py`, `k_trader_gui.py`).
+
 ## 0.6.32 (2026-05-06)
 
 - 실시간 감시: `kodex200.csv`를 이름 표시 캐시로만 사용하도록 조정해, `watchlist_store.get_codes()`에 섞이던 문제로 인해 워밍업/WS 대상 종목 수가 과도하게 커지는 현상을 완화(`core/watchlist_store.py`, `k_trader_gui.py`).

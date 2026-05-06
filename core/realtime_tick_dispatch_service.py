@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.terminal_trace import terminal_trace
@@ -34,6 +35,12 @@ class RealtimeTickDispatchService:
         self._worker_batch_queue: "queue.SimpleQueue[List[Tuple[Any, ...]]]" = (
             queue.SimpleQueue()
         )
+
+        # 메인 스레드에서 SignalEngine 호출이 너무 오래 걸리면 Tk 이벤트 루프가 막혀
+        # 화면이 멈춘 것처럼 보일 수 있음 → 긴 처리만 진단 로그로 남김
+        self._slow_tick_last_ts: Dict[str, float] = {}
+        self._slow_tick_log_cooldown_sec: float = 20.0
+        self._slow_tick_threshold_sec: float = 0.50
 
     def _use_worker_thread(self) -> bool:
         try:
@@ -197,7 +204,10 @@ class RealtimeTickDispatchService:
     ) -> None:
         """
         웹소켓 콜백 진입점(비메인 스레드 가능).
-        - Tk root가 있으면 누적 후 after로 flush 예약
+        - Tk API(root.after)는 메인 스레드에서만 호출합니다.
+          (비메인 스레드에서 호출 시 UI 교착/응답없음 가능)
+        - 비메인 스레드에서는 SignalEngine을 defer_main_callbacks=True로 직접 호출하고,
+          UI 반영은 메인 큐 폴러로 위임합니다.
         - root가 없으면 즉시 SignalEngine 호출(호환/테스트용)
         """
         try:
@@ -206,6 +216,36 @@ class RealtimeTickDispatchService:
                 self.signal_engine.on_tick_received(
                     code, now_price, volume, trde_val, **dict(kwargs)
                 )
+                return
+
+            try:
+                main_tid = int(getattr(self.app, "_main_thread_id", 0) or 0)
+            except Exception:
+                main_tid = 0
+            is_main_thread = False
+            try:
+                is_main_thread = threading.get_ident() == main_tid and main_tid != 0
+            except Exception:
+                is_main_thread = False
+
+            if not is_main_thread:
+                # 비메인 스레드에서는 Tk API를 전혀 호출하지 않습니다.
+                # heavy 경로는 SignalEngine 내부 스로틀 + main action queue 폴러로 완충합니다.
+                try:
+                    self.signal_engine.on_tick_received(
+                        code,
+                        now_price,
+                        volume,
+                        trde_val,
+                        defer_main_callbacks=True,
+                        **dict(kwargs),
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.app._ensure_tick_main_action_poller()
+                except Exception:
+                    pass
                 return
 
             kw = dict(kwargs)
@@ -249,7 +289,26 @@ class RealtimeTickDispatchService:
         for _k, tup in batch.items():
             try:
                 c, np0, vol, tv, kw = tup
+                t0 = time.perf_counter()
                 self.signal_engine.on_tick_received(c, np0, vol, tv, **dict(kw))
+                dt = time.perf_counter() - t0
+                # worker 경로가 아니고, 메인에서 오래 처리되는 경우 Tk 이벤트 루프가 막힘
+                if dt >= self._slow_tick_threshold_sec:
+                    try:
+                        # 코드별 쿨다운으로 로그 폭주 방지
+                        cc = str(c).split("_")[0].zfill(6)
+                        now_ts = time.time()
+                        last = float(self._slow_tick_last_ts.get(cc, 0.0) or 0.0)
+                        if now_ts - last >= self._slow_tick_log_cooldown_sec:
+                            self._slow_tick_last_ts[cc] = now_ts
+                            sl = getattr(self.app, "session_logger", None)
+                            if sl is not None:
+                                sl.log(
+                                    "tick_dispatch_slow",
+                                    {"code": cc, "dt_sec": float(dt), "now_price": float(np0)},
+                                )
+                    except Exception:
+                        pass
             except Exception as e:
                 try:
                     self.log(f"⚠️ [Tick] 처리 예외: {e}")

@@ -210,6 +210,7 @@ class KiwoomApp:
     
     def __init__(self, root, auto_start=False):
         self.root = root
+        self._main_thread_id = threading.get_ident()
         self.auto_start = auto_start
         self.root.title(f"K-Trader v{APP_VERSION} [Remote Monitoring]")
         self.root.geometry("1400x900")
@@ -245,6 +246,10 @@ class KiwoomApp:
         self.notebook = None
         self.status_label = None
         self.pending_tree_updates = {} # [v4.5.3] UI 지연 업데이트용 큐
+        # pending 경로가 누락되어도 숫자 열이 멎지 않도록 monitor_info 기반 최소 행 갱신 캐시
+        self._ui_force_row_last_price: Dict[str, float] = {}
+        self._ui_force_row_last_push_ts: Dict[str, float] = {}
+        self._ui_force_row_rr_index: int = 0
         # REST 선체결 vs 웹소켓 CHE 중복 on_fill 방지 (주문번호 기준)
         self._exchange_fill_order_ids: Set[str] = set()
         # (구) 주기 계좌 동기화 타이머 취소용. 자동 동기화는 기동 후 1회만 수행한다.
@@ -356,6 +361,13 @@ class KiwoomApp:
         self._tick_worker_virtual_dirty: bool = False
         self._tick_main_poller_after_id: Optional[Any] = None
         self._tick_main_poller_lock = threading.Lock()
+        # strategy_action(특히 EXIT 주문 REST) 메인스레드 블로킹 방지용 비동기 실행 가드
+        self._strategy_action_lock = threading.Lock()
+        self._strategy_action_inflight_codes: Set[str] = set()
+        self._strategy_action_last_submit_ts: Dict[str, float] = {}
+        # UI 렌더 루프가 끊겼을 때 자동 재무장하기 위한 watchdog 상태
+        self._ui_render_last_enter_ts: float = 0.0
+        self._ui_watchdog_after_id: Optional[Any] = None
 
         # [v3.8] Core 매니저 통합 (Service Layer 중심)
         self.portfolio = PortfolioManager(
@@ -552,6 +564,14 @@ class KiwoomApp:
             self._initial_threads_started = True
             # 인증은 내부에서 백그라운드 워커로 재시도하므로 여기서는 추가 스레드 불필요
             self.get_auth_token()
+        try:
+            # UI 루프가 끊긴 상태(_update_timer_active만 True로 고정 등)를 자동 복구
+            if self._ui_watchdog_after_id is None:
+                self._ui_watchdog_after_id = self.root.after(
+                    1200, self._ui_render_watchdog_tick
+                )
+        except Exception:
+            pass
 
     def _on_tab_changed(self, event):
         tab_text = self.notebook.tab(self.notebook.select(), "text")
@@ -862,10 +882,9 @@ class KiwoomApp:
         한 프레임에 처리 건수를 제한해 탭 전환 반응을 유지합니다.
         """
         try:
-            with self._tick_main_poller_lock:
-                self._tick_main_poller_after_id = None
+            t0 = time.perf_counter()
         except Exception:
-            pass
+            t0 = 0.0
         monitoring = bool(self.is_monitoring) or bool(
             getattr(self.trading_controller, "is_monitoring", False)
         )
@@ -917,12 +936,68 @@ class KiwoomApp:
                         )
                         if not isinstance(skw, dict):
                             skw = {}
-                        self._on_strategy_action_needed(
-                            scode,
-                            sact,
-                            sreason,
-                            **skw,
-                        )
+                        # 주문 REST 호출이 메인 루프를 붙잡지 않도록 워커 스레드에서 처리
+                        try:
+                            nk = str(scode).split("_")[0].zfill(6)
+                        except Exception:
+                            nk = str(scode)
+                        now_ts = time.time()
+                        try:
+                            st3 = getattr(self, "settings", None) or {}
+                            submit_cd = float(
+                                st3.get("strategy_action_submit_cooldown_sec", 0.7)
+                            )
+                        except Exception:
+                            submit_cd = 0.7
+                        submit_cd = max(0.1, min(submit_cd, 10.0))
+
+                        skip_submit = False
+                        try:
+                            with self._strategy_action_lock:
+                                last = float(
+                                    self._strategy_action_last_submit_ts.get(nk, 0.0) or 0.0
+                                )
+                                if nk in self._strategy_action_inflight_codes:
+                                    skip_submit = True
+                                elif (now_ts - last) < submit_cd:
+                                    skip_submit = True
+                                else:
+                                    self._strategy_action_inflight_codes.add(nk)
+                                    self._strategy_action_last_submit_ts[nk] = now_ts
+                        except Exception:
+                            skip_submit = False
+
+                        if skip_submit:
+                            continue
+
+                        def _run_strategy_action_async() -> None:
+                            try:
+                                self._on_strategy_action_needed(
+                                    scode,
+                                    sact,
+                                    sreason,
+                                    **skw,
+                                )
+                            except Exception:
+                                pass
+                            finally:
+                                try:
+                                    with self._strategy_action_lock:
+                                        self._strategy_action_inflight_codes.discard(nk)
+                                except Exception:
+                                    pass
+
+                        try:
+                            threading.Thread(
+                                target=_run_strategy_action_async,
+                                daemon=True,
+                            ).start()
+                        except Exception:
+                            try:
+                                with self._strategy_action_lock:
+                                    self._strategy_action_inflight_codes.discard(nk)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
         except Exception:
@@ -945,8 +1020,10 @@ class KiwoomApp:
                 or getattr(self, "_tick_worker_ui_dirty", False)
                 or getattr(self, "_tick_worker_virtual_dirty", False)
             )
-            if monitoring and busy:
-                with self._tick_main_poller_lock:
+            with self._tick_main_poller_lock:
+                # 현재 실행 중인 콜백 슬롯을 해제한 뒤, 필요할 때만 다음 콜백 1건을 예약합니다.
+                self._tick_main_poller_after_id = None
+                if monitoring and busy:
                     r2 = getattr(self, "root", None)
                     if r2 is not None:
                         delay = 16
@@ -961,6 +1038,19 @@ class KiwoomApp:
                         self._tick_main_poller_after_id = r2.after(
                             delay, self._drain_tick_worker_main_queue
                         )
+        except Exception:
+            pass
+
+        # 메인 이벤트 루프가 오래 점유되면 탭 전환/렌더가 멈춘 것처럼 보일 수 있음
+        try:
+            dt = time.perf_counter() - t0
+            if dt >= 0.50:
+                sl = getattr(self, "session_logger", None)
+                if sl is not None:
+                    sl.log(
+                        "ui_main_queue_drain_slow",
+                        {"dt_sec": float(dt), "processed": int(processed)},
+                    )
         except Exception:
             pass
 
@@ -1080,6 +1170,55 @@ class KiwoomApp:
         """
         try:
             if self._update_timer_active:
+                # 타이머 플래그가 True인데 실제 렌더 진입이 오래 없으면 고착 상태로 판단해 강제 재무장
+                try:
+                    now_ts = time.time()
+                    last_enter = float(getattr(self, "_ui_render_last_enter_ts", 0.0) or 0.0)
+                    stale_sec = float((getattr(self, "settings", None) or {}).get("ui_render_stale_rearm_sec", 2.5))
+                    stale_sec = max(1.0, min(stale_sec, 15.0))
+                    if (now_ts - last_enter) >= stale_sec:
+                        self._update_timer_active = False
+                        r_force = getattr(self, "root", None)
+                        if r_force is not None:
+                            r_force.after(0, self._render_tree_updates)
+                            self._update_timer_active = True
+                            try:
+                                sl = getattr(self, "session_logger", None)
+                                if sl is not None:
+                                    sl.log(
+                                        "ui_update_timer_stale_forced_rearm",
+                                        {
+                                            "stale_sec": float(now_ts - last_enter),
+                                            "immediate": bool(immediate),
+                                        },
+                                    )
+                            except Exception:
+                                pass
+                            return
+                except Exception:
+                    pass
+                # UI 멈춤처럼 보일 때, 타이머가 계속 걸린 상태인지 확인용
+                try:
+                    sl = getattr(self, "session_logger", None)
+                    if sl is not None:
+                        now_ts = time.time()
+                        last = float(
+                            getattr(self, "_ui_update_timer_skip_log_last_ts", 0.0)
+                            or 0.0
+                        )
+                        if now_ts - last >= 10.0:
+                            setattr(self, "_ui_update_timer_skip_log_last_ts", now_ts)
+                            sl.log(
+                                "ui_update_timer_already_active",
+                                {
+                                    "immediate": bool(immediate),
+                                    "_update_timer_active": bool(
+                                        getattr(self, "_update_timer_active", False)
+                                    ),
+                                },
+                            )
+                except Exception:
+                    pass
                 return
             r = getattr(self, "root", None)
             if r is None:
@@ -1103,6 +1242,53 @@ class KiwoomApp:
             except Exception:
                 pass
 
+    def _ui_render_watchdog_tick(self) -> None:
+        """
+        UI 렌더 타이머 체인이 끊겼을 때 자동 재무장합니다.
+        - 감시 중인데 _update_timer_active=False 이면 즉시 렌더 예약
+        - _update_timer_active=True 인데 최근 렌더 진입이 오래 없으면(기본 3.5초) 강제 재무장
+        """
+        try:
+            self._ui_watchdog_after_id = None
+            monitoring = bool(self.is_monitoring) or bool(
+                getattr(self.trading_controller, "is_monitoring", False)
+            )
+            if monitoring:
+                now_ts = time.time()
+                last_enter = float(getattr(self, "_ui_render_last_enter_ts", 0.0) or 0.0)
+                if not bool(getattr(self, "_update_timer_active", False)):
+                    self.ensure_monitor_tree_refresh_scheduled(immediate=True)
+                else:
+                    stale_sec = 3.5
+                    if (now_ts - last_enter) >= stale_sec:
+                        try:
+                            sl = getattr(self, "session_logger", None)
+                            if sl is not None:
+                                sl.log(
+                                    "ui_render_watchdog_rearm",
+                                    {
+                                        "stale_sec": float(now_ts - last_enter),
+                                        "_update_timer_active": bool(
+                                            getattr(self, "_update_timer_active", False)
+                                        ),
+                                    },
+                                )
+                        except Exception:
+                            pass
+                        self._update_timer_active = False
+                        self.ensure_monitor_tree_refresh_scheduled(immediate=True)
+        except Exception:
+            pass
+        finally:
+            try:
+                r = getattr(self, "root", None)
+                if r is not None and r.winfo_exists():
+                    self._ui_watchdog_after_id = r.after(
+                        1200, self._ui_render_watchdog_tick
+                    )
+            except Exception:
+                self._ui_watchdog_after_id = None
+
     def _render_tree_updates(self) -> None:
         """
         감시 트리 실시간 갱신. 틱이 STARTED 콜백보다 먼저 올 수 있어
@@ -1110,6 +1296,26 @@ class KiwoomApp:
         감시 중이 아니면 타이머 체인을 멈추고 _update_timer_active 를 풀어 재무장 가능하게 한다.
         """
         try:
+            try:
+                self._ui_render_last_enter_ts = time.time()
+            except Exception:
+                pass
+            # _render_tree_updates 호출 자체가 멈췄는지 확인(쿨다운 10초)
+            try:
+                sl = getattr(self, "session_logger", None)
+                if sl is not None:
+                    now_ts = time.time()
+                    last = float(
+                        getattr(self, "_ui_render_call_last_ts", 0.0) or 0.0
+                    )
+                    if now_ts - last >= 10.0:
+                        setattr(self, "_ui_render_call_last_ts", now_ts)
+                        sl.log("ui_render_tree_updates_called", {"pending_size": int(len(getattr(self, "pending_tree_updates", {}) or {}))})
+            except Exception:
+                pass
+            import time as _t
+            t0 = _t.perf_counter()
+            pending_size = len(getattr(self, "pending_tree_updates", {}) or {})
             if not self.monitor_tab:
                 self._update_timer_active = False
                 return
@@ -1126,26 +1332,266 @@ class KiwoomApp:
             if not monitoring:
                 self._update_timer_active = False
                 return
+            # 안전망: pending 업데이트가 비거나 누락되는 구간에서도 monitor_info 숫자열을 주기적으로 강제 반영
+            try:
+                self._inject_min_monitor_updates_from_monitor_info()
+            except Exception:
+                pass
             self.monitor_tab.update_view(
                 self.pending_tree_updates, self.portfolio.virtual_positions
             )
             try:
-                self.monitor_tab.maybe_reconcile_monitor_trees(
-                    getattr(self, "monitor_info", None) or {},
-                    self.portfolio.virtual_positions,
-                )
+                # 실시간 장중에는 reconcile(대량 delete/insert 보정)가 메인 루프를 장시간 점유해
+                # 탭 전환 불가/응답없음을 유발할 수 있어 기본 비활성화.
+                # 필요 시 settings.json 에 enable_monitor_tree_reconcile=true 로만 활성화.
+                st = getattr(self, "settings", None) or {}
+                if bool(st.get("enable_monitor_tree_reconcile", False)):
+                    self.monitor_tab.maybe_reconcile_monitor_trees(
+                        getattr(self, "monitor_info", None) or {},
+                        self.portfolio.virtual_positions,
+                    )
             except Exception:
                 pass
-            self.root.after(REALTIME_TREE_UI_REFRESH_MS, self._render_tree_updates)
+            pending_after = 0
+            try:
+                pending_after = len(getattr(self, "pending_tree_updates", {}) or {})
+            except Exception:
+                pending_after = 0
+            backlog_size = max(int(pending_size), int(pending_after))
+
+            next_delay_ms = REALTIME_TREE_UI_REFRESH_MS
+            try:
+                st = getattr(self, "settings", None) or {}
+                base_ms = int(float(st.get("realtime_tree_ui_refresh_ms_base", 220)))
+                busy_ms = int(float(st.get("realtime_tree_ui_refresh_ms_busy", 90)))
+                busy_threshold = int(float(st.get("realtime_tree_ui_refresh_busy_pending_threshold", 12)))
+                idle_ms = int(float(st.get("realtime_tree_ui_refresh_ms_idle", base_ms)))
+            except Exception:
+                base_ms = 220
+                busy_ms = 90
+                busy_threshold = 12
+                idle_ms = base_ms
+            base_ms = max(50, min(base_ms, 1500))
+            busy_ms = max(20, min(busy_ms, base_ms))
+            idle_ms = max(base_ms, min(idle_ms, 2000))
+            busy_threshold = max(5, min(busy_threshold, 500))
+            if backlog_size >= busy_threshold:
+                # 대기 큐가 많은 프레임에서는 주기를 잠시 줄여 최신가 지연을 완화합니다.
+                next_delay_ms = busy_ms
+            elif backlog_size <= 0:
+                # 대기 큐가 비어 있으면 기본보다 살짝 느리게 돌려 메인 루프 점유를 낮춥니다.
+                next_delay_ms = idle_ms
+            else:
+                next_delay_ms = base_ms
+            self.root.after(next_delay_ms, self._render_tree_updates)
         except Exception as e:
             try:
                 self.log(f"⚠️ [UI] _render_tree_updates: {e}")
             except Exception:
                 pass
             try:
+                sl = getattr(self, "session_logger", None)
+                if sl is not None:
+                    sl.log(
+                        "ui_render_tree_updates_exception",
+                        {"error": str(e)},
+                    )
+            except Exception:
+                pass
+            try:
                 self._update_timer_active = False
             except Exception:
                 pass
+        finally:
+            try:
+                dt = _t.perf_counter() - t0
+                if dt >= 0.50:
+                    sl = getattr(self, "session_logger", None)
+                    if sl is not None:
+                        sl.log(
+                            "ui_render_tree_updates_slow",
+                            {"dt_sec": float(dt), "pending_size": int(pending_size)},
+                        )
+            except Exception:
+                pass
+
+    def _inject_min_monitor_updates_from_monitor_info(self) -> None:
+        """
+        SignalEngine pending enqueue가 누락되는 케이스를 우회하기 위한 최소 숫자열 강제 업데이트.
+        - 감시 대상 monitor_codes 만
+        - 가격 변화가 있거나 일정 시간(기본 3초) 경과 시에만 enqueue
+        """
+        try:
+            mi = getattr(self, "monitor_info", None) or {}
+            if not isinstance(mi, dict) or not mi:
+                return
+            try:
+                pending_now = len(getattr(self, "pending_tree_updates", {}) or {})
+            except Exception:
+                pending_now = 0
+            try:
+                st = getattr(self, "settings", None) or {}
+                inject_skip_threshold = int(
+                    float(st.get("ui_force_row_refresh_skip_pending_threshold", 120))
+                )
+            except Exception:
+                inject_skip_threshold = 120
+            inject_skip_threshold = max(20, min(inject_skip_threshold, 1000))
+            # 이미 처리 대기량이 큰 프레임에서는 강제 주입을 건너뛰어 UI 점유 시간을 줄입니다.
+            if pending_now >= inject_skip_threshold:
+                return
+            mc = list(getattr(self.trading_controller, "monitor_codes", None) or [])
+            if not mc:
+                mc = list(getattr(self, "monitor_codes", None) or [])
+            if not mc:
+                return
+            now_ts = time.time()
+            force_sec = 3.0
+            try:
+                st = getattr(self, "settings", None) or {}
+                force_sec = float(st.get("ui_force_row_refresh_sec", 3.0))
+            except Exception:
+                force_sec = 3.0
+            force_sec = max(0.5, min(force_sec, 30.0))
+            max_codes = 60
+            try:
+                st = getattr(self, "settings", None) or {}
+                max_codes = int(float(st.get("ui_force_row_refresh_max_codes", 60)))
+            except Exception:
+                max_codes = 60
+            max_codes = max(5, min(max_codes, 300))
+
+            total_codes = len(mc)
+            if total_codes <= 0:
+                return
+
+            start_idx = 0
+            try:
+                start_idx = int(getattr(self, "_ui_force_row_rr_index", 0) or 0)
+            except Exception:
+                start_idx = 0
+            if start_idx < 0:
+                start_idx = 0
+            if total_codes > 0:
+                start_idx = start_idx % total_codes
+
+            rotated_codes = mc[start_idx:] + mc[:start_idx]
+            count = 0
+            scanned = 0
+            for raw in rotated_codes:
+                scanned += 1
+                if count >= max_codes:
+                    break
+                nk = str(raw).split("_")[0].zfill(6)
+                info = mi.get(nk)
+                if not isinstance(info, dict):
+                    continue
+                try:
+                    now_p = float(
+                        info.get("price")
+                        if info.get("price") not in (None, "", 0)
+                        else (info.get("last_price") or 0)
+                    )
+                except Exception:
+                    now_p = 0.0
+                if now_p <= 0:
+                    continue
+                try:
+                    last_p = float(self._ui_force_row_last_price.get(nk, 0.0) or 0.0)
+                except Exception:
+                    last_p = 0.0
+                try:
+                    last_push = float(self._ui_force_row_last_push_ts.get(nk, 0.0) or 0.0)
+                except Exception:
+                    last_push = 0.0
+                if abs(now_p - last_p) < 0.0001 and (now_ts - last_push) < force_sec:
+                    continue
+
+                self._ui_force_row_last_price[nk] = now_p
+                self._ui_force_row_last_push_ts[nk] = now_ts
+                count += 1
+
+                nm = str(info.get("name", nk) or nk)
+                try:
+                    sc = float(info.get("score", 0) or 0)
+                except Exception:
+                    sc = 0.0
+                try:
+                    vol_i = int(float(info.get("volume", 0) or 0))
+                except Exception:
+                    vol_i = 0
+                try:
+                    vol_pow = float(info.get("vol_power", 0) or 0)
+                except Exception:
+                    vol_pow = 0.0
+                try:
+                    tr_raw = str(
+                        info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                    ).strip().upper()
+                    if tr_raw == "A":
+                        strat_label = "전략 A"
+                    elif tr_raw == "B":
+                        strat_label = "전략 B"
+                    else:
+                        strat_label = "전략 A+B"
+                except Exception:
+                    strat_label = "전략 A+B"
+                ratio_disp = str(info.get("ratio", "0"))
+                status_text = str(info.get("status_text") or info.get("confluence") or "대기")
+                try:
+                    raw_diff = info.get("diff")
+                    if raw_diff in (None, "", "-", "—"):
+                        vs_prev = "—"
+                    else:
+                        iv = int(round(float(str(raw_diff).replace(",", "").strip())))
+                        vs_prev = "0" if iv == 0 else f"{iv:+,}"
+                except Exception:
+                    vs_prev = "—"
+                try:
+                    ta = int(float(info.get("total_ask", 0) or 0))
+                    tb = int(float(info.get("total_bid", 0) or 0))
+                    if ta > 0 and tb > 0:
+                        br = float(ta) / float(tb)
+                        bid_ask_cell = f"{ta:,} / {tb:,} ({br:.1f})"
+                    else:
+                        bid_ask_cell = "— / — (—)"
+                except Exception:
+                    bid_ask_cell = "— / — (—)"
+                full_values = (
+                    f"{sc:.1f}",
+                    nk,
+                    nm,
+                    strat_label,
+                    f"{now_p:,.0f}",
+                    "—",
+                    vs_prev,
+                    ratio_disp,
+                    status_text,
+                    f"{vol_pow:.1f}%",
+                    bid_ask_cell,
+                    f"{vol_i:,}",
+                )
+                try:
+                    direction = self.monitor_tab._monitor_ratio_direction(ratio_disp)
+                except Exception:
+                    direction = "stable"
+                p_tag = (
+                    "price_up"
+                    if direction == "up"
+                    else ("price_down" if direction == "down" else "price_stable")
+                )
+                self.pending_tree_updates[nk] = (
+                    full_values,
+                    ("status_low", p_tag),
+                    False,
+                )
+            try:
+                if total_codes > 0:
+                    self._ui_force_row_rr_index = int((start_idx + scanned) % total_codes)
+            except Exception:
+                self._ui_force_row_rr_index = 0
+        except Exception:
+            pass
 
     def stream_subscription_codes(self) -> List[str]:
         """
