@@ -232,16 +232,41 @@ class RealtimeTickDispatchService:
                 # 비메인 스레드에서는 Tk API를 전혀 호출하지 않습니다.
                 # heavy 경로는 SignalEngine 내부 스로틀 + main action queue 폴러로 완충합니다.
                 try:
-                    self.signal_engine.on_tick_received(
-                        code,
-                        now_price,
-                        volume,
-                        trde_val,
-                        defer_main_callbacks=True,
-                        **dict(kwargs),
-                    )
+                    if self._use_worker_thread() and self._monitoring_active():
+                        self._ensure_worker_started()
+                        self._worker_batch_queue.put(
+                            [
+                                (
+                                    code,
+                                    now_price,
+                                    volume,
+                                    trde_val,
+                                    dict(kwargs),
+                                )
+                            ]
+                        )
+                    else:
+                        self.signal_engine.on_tick_received(
+                            code,
+                            now_price,
+                            volume,
+                            trde_val,
+                            defer_main_callbacks=True,
+                            **dict(kwargs),
+                        )
                 except Exception:
-                    pass
+                    # 워커 enqueue 실패 시 즉시 계산 경로로 폴백해 틱 유실을 방지합니다.
+                    try:
+                        self.signal_engine.on_tick_received(
+                            code,
+                            now_price,
+                            volume,
+                            trde_val,
+                            defer_main_callbacks=True,
+                            **dict(kwargs),
+                        )
+                    except Exception:
+                        pass
                 try:
                     self.app._ensure_tick_main_action_poller()
                 except Exception:

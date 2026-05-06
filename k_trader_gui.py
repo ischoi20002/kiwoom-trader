@@ -361,10 +361,13 @@ class KiwoomApp:
         self._tick_worker_virtual_dirty: bool = False
         self._tick_main_poller_after_id: Optional[Any] = None
         self._tick_main_poller_lock = threading.Lock()
-        # strategy_action(특히 EXIT 주문 REST) 메인스레드 블로킹 방지용 비동기 실행 가드
-        self._strategy_action_lock = threading.Lock()
-        self._strategy_action_inflight_codes: Set[str] = set()
-        self._strategy_action_last_submit_ts: Dict[str, float] = {}
+        # 주문 액션 공통 워커(매수/매도) + 종목별 직렬화 가드
+        self._order_action_queue: "queue.SimpleQueue[tuple]" = queue.SimpleQueue()
+        self._order_action_worker_threads: List[threading.Thread] = []
+        self._order_action_worker_stop = threading.Event()
+        self._order_action_guard_lock = threading.Lock()
+        self._order_action_inflight_codes: Set[str] = set()
+        self._order_action_last_submit_ts: Dict[Tuple[str, str], float] = {}
         # UI 렌더 루프가 끊겼을 때 자동 재무장하기 위한 watchdog 상태
         self._ui_render_last_enter_ts: float = 0.0
         self._ui_watchdog_after_id: Optional[Any] = None
@@ -844,6 +847,189 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def _order_action_normalize_code(self, raw_code: Any) -> str:
+        """주문 액션 가드용 종목코드를 6자리로 정규화합니다."""
+        try:
+            return str(raw_code).split("_")[0].zfill(6)
+        except Exception:
+            return str(raw_code)
+
+    def _order_action_submit_cooldown_sec(self, kind: str) -> float:
+        """액션 종류별 최소 제출 간격(초)을 반환합니다."""
+        try:
+            st = getattr(self, "settings", None) or {}
+            if str(kind) == "buy_signal":
+                v = float(st.get("buy_signal_submit_cooldown_sec", 0.35))
+                return max(0.05, min(v, 5.0))
+            v = float(st.get("strategy_action_submit_cooldown_sec", 0.7))
+            return max(0.1, min(v, 10.0))
+        except Exception:
+            if str(kind) == "buy_signal":
+                return 0.35
+            return 0.7
+
+    def _order_action_try_reserve(self, kind: str, code: str) -> bool:
+        """
+        공통 주문 액션 제출 가드.
+        - 종목별 inflight 1건만 허용(매수/매도 교차 중복 방지)
+        - kind+code 단위 쿨다운 적용
+        """
+        nk = self._order_action_normalize_code(code)
+        now_ts = time.time()
+        cd = self._order_action_submit_cooldown_sec(kind)
+        try:
+            with self._order_action_guard_lock:
+                if nk in self._order_action_inflight_codes:
+                    return False
+                last = float(self._order_action_last_submit_ts.get((str(kind), nk), 0.0) or 0.0)
+                if (now_ts - last) < cd:
+                    return False
+                self._order_action_inflight_codes.add(nk)
+                self._order_action_last_submit_ts[(str(kind), nk)] = now_ts
+                return True
+        except Exception:
+            return True
+
+    def _order_action_release(self, code: str) -> None:
+        """주문 액션 처리 종료 후 inflight 가드를 해제합니다."""
+        nk = self._order_action_normalize_code(code)
+        try:
+            with self._order_action_guard_lock:
+                self._order_action_inflight_codes.discard(nk)
+        except Exception:
+            pass
+
+    def _ensure_order_action_worker_started(self) -> None:
+        """매수/매도 공통 주문 액션 워커를 필요 시 시작합니다."""
+        try:
+            alive = [t for t in self._order_action_worker_threads if t.is_alive()]
+            self._order_action_worker_threads = alive
+            if alive:
+                return
+            self._order_action_worker_stop.clear()
+            worker_count = 2
+            try:
+                st = getattr(self, "settings", None) or {}
+                worker_count = int(float(st.get("order_action_worker_threads", 2)))
+            except Exception:
+                worker_count = 2
+            worker_count = max(1, min(worker_count, 4))
+            for idx in range(worker_count):
+                th = threading.Thread(
+                    target=self._order_action_worker_loop,
+                    name=f"OrderActionWorker-{idx+1}",
+                    daemon=True,
+                )
+                th.start()
+                self._order_action_worker_threads.append(th)
+        except Exception:
+            pass
+
+    def _enqueue_order_action(self, kind: str, payload: Any) -> bool:
+        """메인 큐에서 꺼낸 주문 액션을 공통 워커 큐로 안전하게 위임합니다."""
+        try:
+            if str(kind) == "buy_signal" and isinstance(payload, tuple) and len(payload) >= 1:
+                code = payload[0]
+            elif str(kind) == "strategy_action" and isinstance(payload, tuple) and len(payload) >= 1:
+                code = payload[0]
+            else:
+                return False
+            if not self._order_action_try_reserve(str(kind), str(code)):
+                return False
+            self._ensure_order_action_worker_started()
+            try:
+                self._order_action_queue.put((str(kind), payload))
+            except Exception:
+                self._order_action_release(str(code))
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _order_action_worker_loop(self) -> None:
+        """공통 주문 액션 워커 루프: 매수/매도 액션 실행."""
+        while not self._order_action_worker_stop.is_set():
+            try:
+                task = self._order_action_queue.get_nowait()
+            except queue.Empty:
+                if self._order_action_worker_stop.wait(0.05):
+                    break
+                continue
+            if not isinstance(task, tuple) or len(task) < 2:
+                continue
+            kind, payload = task[0], task[1]
+            code_for_release = ""
+            try:
+                if str(kind) == "buy_signal" and isinstance(payload, tuple):
+                    code_for_release = str(payload[0]) if len(payload) > 0 else ""
+                    (
+                        bcode,
+                        npv,
+                        rsi_sig,
+                        macd_val,
+                        osc_val,
+                        ma60_ratio,
+                    ) = payload
+                    code_for_release = str(bcode)
+                    buy_ok = bool(
+                        self._on_buy_signal_received(
+                            bcode,
+                            float(npv),
+                            float(rsi_sig),
+                            float(macd_val),
+                            float(osc_val),
+                            float(ma60_ratio),
+                        )
+                    )
+                    if buy_ok:
+                        try:
+                            bnk = self._order_action_normalize_code(bcode)
+                            self.signal_engine.last_buy_sig_time[bnk] = datetime.now()
+                        except Exception:
+                            pass
+                elif str(kind) == "strategy_action" and isinstance(payload, tuple):
+                    code_for_release = str(payload[0]) if len(payload) > 0 else ""
+                    scode, sact, sreason, skw = payload[0], payload[1], payload[2], (
+                        payload[3] if len(payload) > 3 else {}
+                    )
+                    if not isinstance(skw, dict):
+                        skw = {}
+                    self._on_strategy_action_needed(
+                        scode,
+                        sact,
+                        sreason,
+                        **skw,
+                    )
+            except Exception:
+                pass
+            finally:
+                if code_for_release:
+                    self._order_action_release(code_for_release)
+
+    def _shutdown_order_action_workers(self) -> None:
+        """앱 종료 시 공통 주문 액션 워커를 정지합니다."""
+        try:
+            self._order_action_worker_stop.set()
+        except Exception:
+            pass
+        try:
+            for th in list(self._order_action_worker_threads):
+                try:
+                    if th.is_alive():
+                        th.join(timeout=1.5)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._order_action_worker_threads = []
+        except Exception:
+            pass
+        try:
+            self._order_action_worker_stop.clear()
+        except Exception:
+            pass
+
     def _cancel_tick_main_poller(self) -> None:
         """감시 중단·종료 시 메인 큐 폴링 after 를 취소합니다."""
         try:
@@ -905,99 +1091,9 @@ class KiwoomApp:
                 processed += 1
                 try:
                     if kind == "buy_signal" and isinstance(payload, tuple):
-                        (
-                            bcode,
-                            npv,
-                            rsi_sig,
-                            macd_val,
-                            osc_val,
-                            ma60_ratio,
-                        ) = payload
-                        buy_ok = bool(
-                            self._on_buy_signal_received(
-                                bcode,
-                                float(npv),
-                                float(rsi_sig),
-                                float(macd_val),
-                                float(osc_val),
-                                float(ma60_ratio),
-                            )
-                        )
-                        if buy_ok:
-                            try:
-                                self.signal_engine.last_buy_sig_time[bcode] = (
-                                    datetime.now()
-                                )
-                            except Exception:
-                                pass
+                        self._enqueue_order_action("buy_signal", payload)
                     elif kind == "strategy_action" and isinstance(payload, tuple):
-                        scode, sact, sreason, skw = payload[0], payload[1], payload[2], (
-                            payload[3] if len(payload) > 3 else {}
-                        )
-                        if not isinstance(skw, dict):
-                            skw = {}
-                        # 주문 REST 호출이 메인 루프를 붙잡지 않도록 워커 스레드에서 처리
-                        try:
-                            nk = str(scode).split("_")[0].zfill(6)
-                        except Exception:
-                            nk = str(scode)
-                        now_ts = time.time()
-                        try:
-                            st3 = getattr(self, "settings", None) or {}
-                            submit_cd = float(
-                                st3.get("strategy_action_submit_cooldown_sec", 0.7)
-                            )
-                        except Exception:
-                            submit_cd = 0.7
-                        submit_cd = max(0.1, min(submit_cd, 10.0))
-
-                        skip_submit = False
-                        try:
-                            with self._strategy_action_lock:
-                                last = float(
-                                    self._strategy_action_last_submit_ts.get(nk, 0.0) or 0.0
-                                )
-                                if nk in self._strategy_action_inflight_codes:
-                                    skip_submit = True
-                                elif (now_ts - last) < submit_cd:
-                                    skip_submit = True
-                                else:
-                                    self._strategy_action_inflight_codes.add(nk)
-                                    self._strategy_action_last_submit_ts[nk] = now_ts
-                        except Exception:
-                            skip_submit = False
-
-                        if skip_submit:
-                            continue
-
-                        def _run_strategy_action_async() -> None:
-                            try:
-                                self._on_strategy_action_needed(
-                                    scode,
-                                    sact,
-                                    sreason,
-                                    **skw,
-                                )
-                            except Exception:
-                                pass
-                            finally:
-                                try:
-                                    with self._strategy_action_lock:
-                                        self._strategy_action_inflight_codes.discard(nk)
-                                except Exception:
-                                    pass
-
-                        try:
-                            threading.Thread(
-                                target=_run_strategy_action_async,
-                                daemon=True,
-                            ).start()
-                        except Exception:
-                            try:
-                                with self._strategy_action_lock:
-                                    self._strategy_action_inflight_codes.discard(nk)
-                            except Exception:
-                                pass
+                        self._enqueue_order_action("strategy_action", payload)
                 except Exception:
                     pass
         except Exception:
@@ -1964,6 +2060,10 @@ class KiwoomApp:
         try:
             if hasattr(self, "tick_dispatch_service"):
                 self.tick_dispatch_service.shutdown()
+        except Exception:
+            pass
+        try:
+            self._shutdown_order_action_workers()
         except Exception:
             pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()

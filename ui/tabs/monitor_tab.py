@@ -2719,9 +2719,50 @@ class MonitorTab:
                     # 데이터와 태그가 변경된 경우에만 업데이트
                     _step_log("target_tree_item_read_call")
                     curr = target_tree.item(iid)
+                    try:
+                        st_ui = getattr(self.app, "settings", None) or {}
+                        allow_strat_type_live_update = bool(
+                            st_ui.get("allow_monitor_strat_type_live_update", False)
+                        )
+                    except Exception:
+                        allow_strat_type_live_update = False
                     _step_log("target_tree_item_compare_call", {"curr_values_len": len(curr.get("values", ())) if isinstance(curr, dict) else None})
                     curr_values = curr.get("values", ()) if isinstance(curr, dict) else ()
                     curr_tags = curr.get("tags", ()) if isinstance(curr, dict) else ()
+                    # 전략유형(StratType)은 실시간 틱마다 변할 필요가 없어,
+                    # 기본값으로 기존 화면 값을 유지해 깜빡임을 줄입니다.
+                    if (
+                        not allow_strat_type_live_update
+                        and isinstance(curr_values, (list, tuple))
+                        and len(curr_values) > 3
+                        and isinstance(values, (list, tuple))
+                        and len(values) > 3
+                    ):
+                        try:
+                            values = list(values)
+                            values[3] = curr_values[3]
+                            values = tuple(values)
+                        except Exception:
+                            pass
+                    # 도달시 매도 기준가(AtrExit)는 강제 최소 주입 경로에서 '—'가 들어올 수 있어,
+                    # 기존 값이 유효하면 유지해 보유 종목 기준가 깜빡임/소실을 방지합니다.
+                    if (
+                        isinstance(curr_values, (list, tuple))
+                        and len(curr_values) > 5
+                        and isinstance(values, (list, tuple))
+                        and len(values) > 5
+                    ):
+                        try:
+                            incoming_atr = str(values[5] if values[5] is not None else "").strip()
+                            current_atr = str(
+                                curr_values[5] if curr_values[5] is not None else ""
+                            ).strip()
+                            if incoming_atr in ("", "-", "—") and current_atr not in ("", "-", "—"):
+                                values = list(values)
+                                values[5] = curr_values[5]
+                                values = tuple(values)
+                        except Exception:
+                            pass
                     if curr_values != values or final_tag not in curr_tags:
                         _step_log("target_tree_item_update_call", {"final_tag": str(final_tag)})
                         # Tk Treeview item 업데이트는 일부 케이스에서 호출이 멈추는 현상이 있어,

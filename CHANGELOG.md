@@ -13,6 +13,12 @@
 
 ---
 
+## 0.6.34 (2026-05-06)
+
+- 주문 액션 비동기화 정리: 매수/매도 공통 주문 액션 워커로 통합하고 종목별 직렬화(inflight)·쿨다운 안전가드를 강화(`k_trader_gui.py`).
+- UI 표시 정합: 전략유형(`StratType`) 실시간 깜빡임을 줄이기 위해 기본값으로 화면값 유지(설정 플래그 제공)하고, 강제 최소 갱신 경로에서도 보유 종목 `도달시 매도 기준가(AtrExit)`가 `-`로 덮이지 않도록 유지(`ui/tabs/monitor_tab.py`).
+- 실시간 틱 처리 분리: 비메인 스레드 틱 수신 시 워커 사용을 우선해 메인스레드 점유와 간섭을 완화(`core/realtime_tick_dispatch_service.py`).
+
 ## 0.6.33 (2026-05-06)
 
 - 실시간 감시 안정화: Tk 메인 스레드에서만 UI API(`after`/렌더) 호출하도록 경로를 정리하고, 틱 후속 액션 큐를 재스케줄링/워치독으로 보강해 전체 UI 멈춤(탭 전환 불가) 재현 가능성을 완화(`core/realtime_tick_dispatch_service.py`, `ui/gui_utils.py`, `k_trader_gui.py`).
