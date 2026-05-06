@@ -1583,8 +1583,13 @@ class VirtualTab:
             s = str(result or "").strip()
         except Exception:
             return "-"
-        if s.upper() == "FILLED":
+        su = s.upper()
+        # result 원천은 '주문 접수(SUCCESS)' 또는 '체결 완료(FILLED)'가 섞여 들어올 수 있음.
+        # UI에서는 두 의미를 구분해 표기합니다.
+        if su == "FILLED":
             return "성공"
+        if su == "SUCCESS":
+            return "접수"
         return s
 
     @staticmethod

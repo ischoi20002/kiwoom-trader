@@ -1274,6 +1274,57 @@ class DataManagerV2:
                 pass
             return None
 
+    def get_order_history_row_by_order_no(
+        self, order_no: str
+    ) -> Optional[Dict[str, Any]]:
+        """order_history에서 order_no 1건을 조회합니다.
+
+        반환 필드(대략):
+        - code, side, name, reason
+        - price, filled_price, filled_qty
+        - result
+        - timestamp
+        """
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return None
+            with self._get_state_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        code,
+                        side,
+                        name,
+                        reason,
+                        price,
+                        filled_price,
+                        filled_qty,
+                        result,
+                        timestamp
+                    FROM order_history
+                    WHERE order_no = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (oid,),
+                ).fetchone()
+            if not row:
+                return None
+            return {
+                "code": str(row[0] or ""),
+                "side": str(row[1] or ""),
+                "name": str(row[2] or ""),
+                "reason": str(row[3] or ""),
+                "price": float(row[4] or 0),
+                "filled_price": float(row[5] or 0),
+                "filled_qty": int(row[6] or 0),
+                "result": str(row[7] or ""),
+                "timestamp": row[8],
+            }
+        except Exception:
+            return None
+
     def get_order_history_row_for_telegram(
         self, code: str, order_no: str
     ) -> Optional[Dict[str, Any]]:

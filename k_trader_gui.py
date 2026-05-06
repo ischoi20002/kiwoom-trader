@@ -252,6 +252,8 @@ class KiwoomApp:
         self._ui_force_row_rr_index: int = 0
         # REST 선체결 vs 웹소켓 CHE 중복 on_fill 방지 (주문번호 기준)
         self._exchange_fill_order_ids: Set[str] = set()
+        # REST 주문 접수 직후 체결확정 확인(폴링) in-flight 중복 방지
+        self._exchange_fill_order_inflight: Set[str] = set()
         # (구) 주기 계좌 동기화 타이머 취소용. 자동 동기화는 기동 후 1회만 수행한다.
         self._account_sync_job: Optional[Any] = None
         self._virtual_tab_render_pending: bool = False

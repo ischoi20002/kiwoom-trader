@@ -19,6 +19,12 @@
 - UI 표시 정합: 전략유형(`StratType`) 실시간 깜빡임을 줄이기 위해 기본값으로 화면값 유지(설정 플래그 제공)하고, 강제 최소 갱신 경로에서도 보유 종목 `도달시 매도 기준가(AtrExit)`가 `-`로 덮이지 않도록 유지(`ui/tabs/monitor_tab.py`).
 - 실시간 틱 처리 분리: 비메인 스레드 틱 수신 시 워커 사용을 우선해 메인스레드 점유와 간섭을 완화(`core/realtime_tick_dispatch_service.py`).
 
+## 0.6.35 (2026-05-06)
+
+- 체결 확정 전 포지션/보유 제거 방지: REST 주문 접수 직후 `reconcile_exchange_fill_after_order_accept()`가 즉시 `on_fill`을 호출하지 않도록 변경하고, `order_history(order_no)`에서 `FILLED/filled_qty>0` 확인이 될 때까지 폴링 후에만 `on_fill` 반영(`core/fill_reconciliation_service.py`).
+- DB 조회/정합성: `data_manager_v2.get_order_history_row_by_order_no()`를 추가해 주문번호 단위 체결확정 확인을 지원(`data_manager_v2.py`).
+- REST/WS 동시 경합 방지: REST 접수 후 체결확정 폴링 in-flight 중복 방지용 가드(`k_trader_gui.py`).
+
 ## 0.6.33 (2026-05-06)
 
 - 실시간 감시 안정화: Tk 메인 스레드에서만 UI API(`after`/렌더) 호출하도록 경로를 정리하고, 틱 후속 액션 큐를 재스케줄링/워치독으로 보강해 전체 UI 멈춤(탭 전환 불가) 재현 가능성을 완화(`core/realtime_tick_dispatch_service.py`, `ui/gui_utils.py`, `k_trader_gui.py`).
