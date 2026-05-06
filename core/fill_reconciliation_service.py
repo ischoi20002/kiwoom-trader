@@ -299,7 +299,7 @@ class FillReconciliationService:
 
                                     try:
                                         tc = getattr(self.app, "trading_controller", None)
-                                        if tc and oid:
+                                        if tc and oid and self._should_clear_limit_order_watch_for_sell(code):
                                             tc.limit_order_watch_service.clear(oid)
                                     except Exception:
                                         pass
@@ -330,6 +330,44 @@ class FillReconciliationService:
             threading.Thread(target=_confirm_and_apply, daemon=True).start()
         except Exception as e:
             self.log(f"⚠️ [체결 동기화] 실패: {e}")
+
+    def _safe_int(self, v: Any, default: int = 0) -> int:
+        """값을 안전하게 int로 변환합니다."""
+        try:
+            return int(v or 0)
+        except Exception:
+            return default
+
+    def _normalize_code_6(self, raw_code: Any) -> str:
+        """코드를 6자리 종목코드로 정규화합니다."""
+        try:
+            return str(raw_code).split("_")[0].zfill(6)
+        except Exception:
+            return str(raw_code)[:6] if raw_code is not None else "000000"
+
+    def _should_clear_limit_order_watch_for_sell(
+        self, code: str
+    ) -> bool:
+        """
+        안전가드:
+        - 매도 주문이 부분체결이면, 포트폴리오에 잔여 수량이 남아있어야 합니다.
+        - 이때 limit_order_watch_service.clear()가 호출되면 exit_pending이 해제될 수 있어 위험합니다.
+        - 따라서 'sell'의 경우 포트폴리오 잔여 qty가 0 이하일 때만 clear를 허용합니다.
+        """
+        try:
+            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+        except Exception:
+            return True  # 결정 불가면 보수적으로 clear
+        nc = self._normalize_code_6(code)
+        try:
+            pos = vp.get(nc) or vp.get(code) or {}
+        except Exception:
+            pos = {}
+        try:
+            remaining_qty = self._safe_int(pos.get("qty"), 0)
+        except Exception:
+            remaining_qty = 0
+        return remaining_qty <= 0
 
     def on_execution_received(
         self,
@@ -458,7 +496,7 @@ class FillReconciliationService:
 
             try:
                 tc = getattr(self.app, "trading_controller", None)
-                if tc and oid:
+                if tc and oid and self._should_clear_limit_order_watch_for_sell(code):
                     tc.limit_order_watch_service.clear(oid)
             except Exception:
                 pass

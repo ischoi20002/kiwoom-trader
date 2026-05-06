@@ -1546,18 +1546,116 @@ class PortfolioManager:
                         er_pos = ""
                     exit_reason = er_order or er_pend or er_pos or "MANUAL"
                     p_val = self._to_f(price)
-                    self._finalize_sell_close_to_history(
-                        pos,
-                        code,
-                        p_val,
-                        exit_reason,
-                        snapshot,
-                        sell_r,
-                        now_str,
-                        remove_from_vp=remove_from_vp,
-                    )
-                    if remove_from_vp and oid:
-                        self._discard_pending_exit_snapshot(oid)
+
+                    # 부분체결(부분매도) 처리:
+                    # - pos['qty'](보유 잔량) <-> 체결 인자 qty(이번 체결량)가 다를 수 있음
+                    # - 이 경우에는 보유를 제거(remove_from_vp)하지 말고 qty/invested만 감소시켜야 합니다.
+                    sell_qty_val = 0
+                    try:
+                        sell_qty_val = self._to_i(qty)
+                    except Exception:
+                        sell_qty_val = 0
+                    try:
+                        cur_qty_val = self._to_i(pos.get("qty", 0))
+                    except Exception:
+                        cur_qty_val = 0
+
+                    if (
+                        sell_qty_val > 0
+                        and cur_qty_val > 0
+                        and sell_qty_val < cur_qty_val
+                    ):
+                        # 부분 청산: 종료내역(virtual_history) 확정/보유 제거는 하지 않고 잔량만 갱신
+                        try:
+                            if not isinstance(pos.get("events"), list):
+                                pos["events"] = []
+                        except Exception:
+                            pos["events"] = []
+
+                        avg_p = self._to_f(pos.get("avg_price", 0.0))
+                        invested_total = self._to_f(
+                            pos.get("invested", avg_p * cur_qty_val)
+                        )
+                        # invested 기반이면 비례로 비용을 차감(근사)
+                        cost_basis_total = (
+                            invested_total if invested_total > 0 else avg_p * cur_qty_val
+                        )
+                        cost_basis_sell = (
+                            cost_basis_total * (sell_qty_val / cur_qty_val)
+                            if cost_basis_total > 0
+                            else avg_p * sell_qty_val
+                        )
+
+                        sell_fee = p_val * sell_qty_val * sell_r
+                        net_proceeds = p_val * sell_qty_val - sell_fee
+                        pnl_amt = net_proceeds - cost_basis_sell
+                        pnl_pct = (
+                            (pnl_amt / cost_basis_sell) * 100
+                            if cost_basis_sell != 0
+                            else 0.0
+                        )
+
+                        try:
+                            _snap_ex = self._ensure_fill_snapshot(
+                                code,
+                                p_val,
+                                snapshot,
+                                str(exit_reason),
+                            )
+                        except Exception:
+                            _snap_ex = snapshot
+
+                        pos["events"].append(
+                            {
+                                "time": now_str,
+                                "action": "SELL_PARTIAL",
+                                "price": p_val,
+                                "qty": sell_qty_val,
+                                "snapshot": _snap_ex,
+                                "final_pnl_pct": pnl_pct,
+                                "realized_pnl_amt": pnl_amt,
+                            }
+                        )
+
+                        # 잔량 업데이트
+                        pos["qty"] = cur_qty_val - sell_qty_val
+                        # 평균단가 유지: invested만 남은 비용으로 감소
+                        pos["invested"] = max(
+                            0.0, cost_basis_total - cost_basis_sell
+                        )
+                        pos["exit_reason"] = pos.get("exit_reason", "")
+
+                        # DB 갱신(보유 유지)
+                        try:
+                            self.data_manager.save_active_position(
+                                code,
+                                pos.get("name", code),
+                                pos.get("avg_price", avg_p),
+                                pos.get("qty", cur_qty_val - sell_qty_val),
+                                pos.get("stage", 1),
+                                pos.get("invested", pos.get("invested", 0.0)),
+                                pos.get("entry_time", datetime.now().isoformat()),
+                                pos.get("reason", ""),
+                            )
+                        except Exception:
+                            pass
+
+                        # 부분체결이면 보유 제거/대기스냅샷 폐기는 하지 않습니다.
+                        remove_from_vp = False
+                    else:
+                        # 완전 청산: 기존 종료 확정 로직 사용
+                        self._finalize_sell_close_to_history(
+                            pos,
+                            code,
+                            p_val,
+                            exit_reason,
+                            snapshot,
+                            sell_r,
+                            now_str,
+                            remove_from_vp=remove_from_vp,
+                        )
+                        if remove_from_vp and oid:
+                            self._discard_pending_exit_snapshot(oid)
 
         if skipped_sell_no_position:
             try:

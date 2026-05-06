@@ -13,6 +13,10 @@
 
 ---
 
+## 0.6.36 (2026-05-06)
+
+- 부분체결 안전화: 매도 체결이 부분체결일 때 `PortfolioManager.on_fill(side="sell")`에서 보유 포지션을 제거하지 않고 잔여수량을 유지하도록 수정(SELL_PARTIAL 이벤트/qty 감소만 수행).
+
 ## 0.6.35 (2026-05-06)
 
 - 체결 확정 전 포지션/보유 제거 방지: REST 주문 접수 직후 `reconcile_exchange_fill_after_order_accept()`가 즉시 `on_fill`을 호출하지 않도록 변경하고, `order_history(order_no)`에서 `FILLED/filled_qty>0` 확인이 될 때까지 폴링 후에만 `on_fill` 반영(`core/fill_reconciliation_service.py`).
