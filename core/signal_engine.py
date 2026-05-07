@@ -985,6 +985,17 @@ class SignalEngine:
                 else ("price_down" if dir_rn < 0 else "price_stable")
             )
 
+            # wl_only 인 종목은 아래 UI 큐잉/compose 분기에서 status_text를 덮어쓰지 않을 수 있어,
+            # 워밍업 '✅ 15분봉·검증 완료'가 confluence 플레이스홀더로 고정되는 문제를
+            # 여기서 선제적으로 보정한다.
+            try:
+                conf_s = str(info.get("confluence", "")).strip()
+                prev_s = str(info.get("status_text", "")).strip()
+                if prev_s.startswith("✅ 15분봉") and (not conf_s or conf_s in ("-", "—")):
+                    info["status_text"] = "대기"
+            except Exception:
+                pass
+
             if not is_wl_only:
                 strat_label = "—"
                 atr_cell = "—"
@@ -1016,13 +1027,21 @@ class SignalEngine:
                 if not _session_ok:
                     _vp_str = "—"
                 # 신호상태 열은 monitor_tab 과 동일하게 status_text 단일 소스.
-                # 합치도가 아직 '-' 등 플레이스홀더일 때 매 틱 덮어쓰면 워밍업 '검증 완료' 문구가 사라져 '대기'로 보임.
+                # 합치도(confluence)가 '-'/'—'(플레이스홀더)이면 status_text가 워밍업의
+                # '✅ 15분봉·검증 완료'로 남아 "고정"되는 케이스가 있어,
+                # 그 문구일 때는 '대기'로 되돌려야 이후 틱에서 갱신된다.
                 try:
                     conf_s = str(info.get("confluence", "")).strip()
+                    prev_s = str(info.get("status_text", "")).strip()
                     if conf_s and conf_s not in ("-", "—"):
                         info["status_text"] = conf_s
-                    elif not str(info.get("status_text", "")).strip():
-                        info["status_text"] = "대기"
+                    else:
+                        # confluence 플레이스홀더인데도 워밍업 완료 문구가 유지되면
+                        # SignalEngine이 이후 실제 신호 계산을 못해도 화면이 고정된다.
+                        if prev_s.startswith("✅ 15분봉"):
+                            info["status_text"] = "대기"
+                        elif not prev_s:
+                            info["status_text"] = "대기"
                 except Exception:
                     pass
                 try:

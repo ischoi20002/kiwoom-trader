@@ -13,6 +13,10 @@
 
 ---
 
+## 0.6.37 (2026-05-07)
+
+- 실시간 감시 `신호상태` 고정 보정: 합치도(confluence) 플레이스홀더(`-`/`—`)일 때 워밍업 `✅ 15분봉·검증 완료` 문구가 `status_text`에 남지 않도록 `SignalEngine`에서 선제 `대기` 처리(`core/signal_engine.py`).
+
 ## 0.6.36 (2026-05-06)
 
 - 부분체결 안전화: 매도 체결이 부분체결일 때 `PortfolioManager.on_fill(side="sell")`에서 보유 포지션을 제거하지 않고 잔여수량을 유지하도록 수정(SELL_PARTIAL 이벤트/qty 감소만 수행).
