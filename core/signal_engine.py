@@ -31,6 +31,9 @@ class SignalEngine:
         self._ui_fallback_enqueue_last_ts: dict[str, float] = {}
         # 정상 경로에서도 숫자 열이 멎지 않도록 최소 enqueue를 강제하는 쿨다운
         self._ui_force_min_enqueue_last_ts: dict[str, float] = {}
+        # wl_only(관심목록만) 종목은 기존에 UI 갱신이 제한되어 대비(vs_prev) 등이 고정될 수 있어
+        # 최소 갱신을 위한 쿨다운 맵을 별도로 둔다.
+        self._wl_only_ui_force_min_enqueue_last_ts: dict[str, float] = {}
 
         # RSI는 틱마다(특히 메인 스레드에서) 계산하면 Pandas rolling 비용으로 UI가 멈출 수 있어,
         # 최소 재계산 간격을 둬서 틱당 연산량을 줄인다.
@@ -447,16 +450,18 @@ class SignalEngine:
                     continue
                 info[k] = v
 
-            # 1. 봉 데이터 업데이트(15분 슬롯 DF) — 틱 폭주 시 스로틀, 의미 있는 가격 변동 시 즉시 반영
+            # 1. 봉 데이터 업데이트(15분 슬롯 DF)
+            # 이전에는 가격 변동이 미세하면 stream_processor 호출 자체를 throttle 했으나,
+            # 이는 누적거래량(fid 13)의 차분 누적 방식에서 슬롯 마지막 0B를 누락시켜
+            # 봉 거래량이 실제의 5~10%만 잡히는 문제(BT 봉 대비 1000배 차이)를 일으켰습니다.
+            # 봉 갱신 자체는 dict 한 줄 갱신 수준으로 매우 가벼우므로 throttle을 제거하고
+            # 매 0B 틱마다 OHLCV·누적거래량 차분을 즉시 반영하도록 변경합니다.
             if not is_orderbook_only:
                 try:
                     _now_ts_bar = time.time()
-                    if not self._should_throttle_bar_update(
-                        code, float(now_price), _now_ts_bar
-                    ):
-                        self._update_realtime_bar(code, now_price, volume)
-                        self._bar_update_last_ts[code] = _now_ts_bar
-                        self._bar_update_anchor_price[code] = float(now_price)
+                    self._update_realtime_bar(code, now_price, volume)
+                    self._bar_update_last_ts[code] = _now_ts_bar
+                    self._bar_update_anchor_price[code] = float(now_price)
                 except Exception:
                     try:
                         self._update_realtime_bar(code, now_price, volume)
@@ -1183,54 +1188,89 @@ class SignalEngine:
                                 self.app.root.after(100, self.app._render_tree_updates)
                         except Exception:
                             pass
-            elif debug_enabled:
-                # 디버그 대상은 wl_only 여부와 무관하게 최소 숫자 열 업데이트를 강제 enqueue
-                # (특정 종목만 영구 정지되는 경로 우회)
+            else:
+                # wl_only(관심목록만) 종목도 대비(vs_prev) 등이 고정되지 않도록 최소 숫자 열을 갱신한다.
+                # (ATR/전략라벨 등은 wl_only에선 무의미하거나 비용이 크므로 생략)
+                nk = str(code).split("_")[0].zfill(6)
+                skip_enqueue = False
                 try:
-                    _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
-                except Exception:
-                    _vp_str = "—"
-                try:
-                    _nm = str(info.get("name") or code)
-                except Exception:
-                    _nm = str(code)
-                full_values = (
-                    f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
-                    str(code).zfill(6),
-                    _nm,
-                    "—",
-                    f"{int(float(now_price)):,}",
-                    "—",
-                    self._format_monitor_vs_prev_cell(info),
-                    str(info.get("ratio", "0")),
-                    str(info.get("status_text") or info.get("confluence") or "대기"),
-                    _vp_str,
-                    self._format_monitor_bid_ask_cell(info),
-                    f"{int(float(volume)):,}",
-                )
-                try:
-                    p_tag = (
-                        "price_up"
-                        if float(now_price) > float(info.get("last_price", now_price) or now_price)
-                        else "price_down"
+                    # 너무 잦은 enqueue는 Tk 부담이 커질 수 있어, 짧게 쿨다운을 둔다.
+                    now_t = time.time()
+                    last_t = float(
+                        self._wl_only_ui_force_min_enqueue_last_ts.get(nk, 0.0) or 0.0
                     )
+                    if now_t - last_t < 0.25:
+                        skip_enqueue = True
+                    self._wl_only_ui_force_min_enqueue_last_ts[nk] = now_t
                 except Exception:
-                    p_tag = "price_stable"
-                self.app.pending_tree_updates[code] = (
-                    full_values,
-                    ("status_low", p_tag),
-                    False,
-                )
-                if defer_main_callbacks:
-                    try:
-                        self.app.mark_tick_worker_ui_dirty()
-                    except Exception:
-                        pass
+                    # 쿨다운 계산 실패해도 화면 갱신은 막지 않는다.
+                    pass
+
+                if skip_enqueue:
+                    # on_tick_received 전체를 종료하지 말고, UI 큐잉만 스킵한다.
+                    pass
                 else:
+
                     try:
-                        self.app.ensure_monitor_tree_refresh_scheduled(immediate=False)
+                        _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
                     except Exception:
-                        pass
+                        _vp_str = "—"
+
+                    try:
+                        _nm = str(info.get("name") or nk)
+                    except Exception:
+                        _nm = nk
+
+                    # wl_only에서도 '대비'는 ws fid 11(diff) 기반으로 표시한다.
+                    full_values = (
+                        f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
+                        nk,
+                        _nm,
+                        "—",
+                        f"{int(float(now_price)):,}",
+                        "—",
+                        self._format_monitor_vs_prev_cell(info),
+                        ratio_cell,
+                        str(
+                            info.get("status_text")
+                            or info.get("confluence")
+                            or "대기"
+                        ),
+                        _vp_str,
+                        self._format_monitor_bid_ask_cell(info),
+                        f"{int(float(volume)):,}",
+                    )
+
+                    final_tags: list[str] = []
+                    try:
+                        m_ratio = float(
+                            self._to_scalar(info.get('met_ratio', 0.0), 0.0)
+                        )
+                        final_tags.append(
+                            "status_high" if m_ratio >= 0.7 else "status_low"
+                        )
+                    except Exception:
+                        final_tags.append("status_low")
+
+                    # 가격 방향 태그를 가장 뒤에 추가(우선 적용)
+                    final_tags.append(p_tag)
+
+                    self.app.pending_tree_updates[code] = (
+                        full_values,
+                        tuple(final_tags),
+                        False,
+                    )
+
+                    if defer_main_callbacks:
+                        try:
+                            self.app.mark_tick_worker_ui_dirty()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.app.ensure_monitor_tree_refresh_scheduled(immediate=False)
+                        except Exception:
+                            pass
             # 안전망: 감시 대상 종목은 조건 분기와 무관하게 최소 숫자열 enqueue를 주기적으로 강제
             # (특정 코드만 pending enqueue가 누락되어 숫자가 영구 정지되는 현상 우회)
             try:

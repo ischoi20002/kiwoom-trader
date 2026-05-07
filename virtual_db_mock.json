@@ -3014,7 +3014,173 @@
             "exit_time": "14:32:58",
             "exit_datetime": "2026-05-04 14:32:58",
             "code": "069260"
+        },
+        {
+            "name": "HD현대마린솔루션",
+            "avg_price": 255416.66666666666,
+            "qty": 6,
+            "stage": 2,
+            "invested": 1537863.75,
+            "entry_time": "2026-04-24T14:54:50.838424",
+            "reason": "TYPE_B",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-05-06 12:09:37",
+                    "action": "SYNC_EXIT",
+                    "price": 255416.66666666666,
+                    "qty": 6,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 255416.66666666666,
+            "max_p": 267000.0,
+            "max_price": 267000.0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 255416.66666666666,
+            "exit_date": "2026-05-06",
+            "exit_time": "12:09:37",
+            "exit_datetime": "2026-05-06 12:09:37",
+            "code": "443060"
+        },
+        {
+            "name": "현대차",
+            "avg_price": 554000.0,
+            "qty": 3,
+            "stage": 1,
+            "invested": 1667817.0,
+            "entry_time": "2026-05-06T09:33:03.567278",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-05-06 13:45:04",
+                    "action": "SELL",
+                    "price": 546000.0,
+                    "qty": 3,
+                    "snapshot": {
+                        "time": "2026-05-06 13:45:04",
+                        "price": 546000.0,
+                        "market_trend": "N/A",
+                        "vol_power": 102.09,
+                        "reason": "EXIT_ATR_SL",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.89
+                    }
+                }
+            ],
+            "max_now": 554000.0,
+            "ka_cur_prc": 549000.0,
+            "ka_evlu_amt": 1647000.0,
+            "ka_evlu_pfls_amt": -15000.0,
+            "ka_prft_rt": -0.9025270758122743,
+            "ka_pur_amt": 1662000.0,
+            "ka_sync_iso": "2026-05-06T12:30:49.189021",
+            "max_p": 559000.0,
+            "max_price": 559000.0,
+            "current_price": 547500,
+            "exit_reason": "EXIT_ATR_SL",
+            "final_pnl_pct": -2.327953246669149,
+            "realized_pnl_amt": -38826.0,
+            "exit_price": 546000.0,
+            "exit_date": "2026-05-06",
+            "exit_time": "13:45:04",
+            "exit_datetime": "2026-05-06 13:45:04",
+            "code": "005380",
+            "exit_pending": true,
+            "pending_exit_ord_no": "0147323"
         }
     ],
-    "pending_exit_snapshots": {}
+    "pending_exit_snapshots": {
+        "0016281": {
+            "code": "443060",
+            "exit_reason": "EXIT_FLASH_EXIT",
+            "registered_at": "2026-05-06T09:05:17.603247",
+            "pos": {
+                "name": "HD현대마린솔루션",
+                "avg_price": 255333.0,
+                "qty": 6,
+                "stage": 2,
+                "invested": 1537359.993,
+                "entry_time": "2026-04-24T14:54:50.838424",
+                "reason": "TYPE_B",
+                "sig_type": "TYPE_B",
+                "events": [],
+                "max_now": 255416.66666666666,
+                "ka_cur_prc": -259500.0,
+                "ka_evlu_amt": 0.0,
+                "ka_evlu_pfls_amt": 0.0,
+                "ka_prft_rt": 0.0,
+                "ka_pur_amt": 1532000.0,
+                "ka_sync_iso": "2026-05-06T09:04:15.937759",
+                "max_p": 267000.0,
+                "max_price": 267000.0,
+                "exit_pending": true,
+                "exit_reason": "EXIT_FLASH_EXIT",
+                "pending_exit_ord_no": "0016281"
+            }
+        },
+        "0147323": {
+            "code": "005380",
+            "exit_reason": "EXIT_ATR_SL",
+            "registered_at": "2026-05-06T13:45:04.479450",
+            "pos": {
+                "name": "현대차",
+                "avg_price": 554000.0,
+                "qty": 3,
+                "stage": 1,
+                "invested": 1667817.0,
+                "entry_time": "2026-05-06T09:33:03.567278",
+                "reason": "SYNCED",
+                "sig_type": "TYPE_A",
+                "events": [
+                    {
+                        "time": "2026-05-06 13:45:04",
+                        "action": "SELL",
+                        "price": 546000.0,
+                        "qty": 3,
+                        "snapshot": {
+                            "time": "2026-05-06 13:45:04",
+                            "price": 546000.0,
+                            "market_trend": "N/A",
+                            "vol_power": 102.09,
+                            "reason": "EXIT_ATR_SL",
+                            "rsi": NaN,
+                            "macd": NaN,
+                            "osc": NaN,
+                            "adx": NaN,
+                            "ma_alignment": "혼조(Neutral)",
+                            "bid_ask_ratio": 0.89
+                        }
+                    }
+                ],
+                "max_now": 554000.0,
+                "ka_cur_prc": 549000.0,
+                "ka_evlu_amt": 1647000.0,
+                "ka_evlu_pfls_amt": -15000.0,
+                "ka_prft_rt": -0.9025270758122743,
+                "ka_pur_amt": 1662000.0,
+                "ka_sync_iso": "2026-05-06T12:30:49.189021",
+                "max_p": 559000.0,
+                "max_price": 559000.0,
+                "current_price": 547500,
+                "exit_reason": "EXIT_ATR_SL",
+                "final_pnl_pct": -2.327953246669149,
+                "realized_pnl_amt": -38826.0,
+                "exit_price": 546000.0,
+                "exit_date": "2026-05-06",
+                "exit_time": "13:45:04",
+                "exit_datetime": "2026-05-06 13:45:04",
+                "code": "005380",
+                "exit_pending": true,
+                "pending_exit_ord_no": "0147323"
+            }
+        }
+    }
 }

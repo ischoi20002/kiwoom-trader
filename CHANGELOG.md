@@ -13,6 +13,18 @@
 
 ---
 
+## 0.6.38 (2026-05-07)
+
+- 실시간 15분봉 거래량 누락 정합성 강화 (BT 봉 대비 5~10% 수준만 잡히던 문제 해소): 0B(체결) 누적거래량(fid 13) 차분 누적이 슬롯 마지막 0B를 throttle/배치 타이밍으로 놓치는 문제를 정조준해 수정.
+  - `core/signal_engine.py`: `_should_throttle_bar_update` 의 OHLCV 갱신 throttle 제거 — 매 0B마다 stream_processor 호출되도록 변경(봉 갱신은 dict 한 줄 갱신 수준으로 매우 가벼움).
+  - `core/stream_processor.py`: 새 슬롯 진입 시점에 직전 봉 거래량을 _마지막 누적값(volume)_ 으로 한 번 더 보정(차분 정합성). 단 `cum_v_start>0` & 같은 날 봉일 때만 적용해 워밍업 봉을 큰 값으로 덮어쓰지 않도록 안전장치 추가. 같은 슬롯 내 워밍업 봉(`cum_v_start=0`)에 첫 0B가 들어올 때는 `cum_v_start` 만 갱신해 워밍업 V 보존.
+  - `core/warmup_service.py`: `_apply_deep_history_to_bars_data` 가 `_finalize_bars_for_stream` 으로 `cum_v_start` 를 0으로 리셋하던 문제로, 장중 deep history backfill 시점에 진행 중 봉의 차분 누적 기준점이 0으로 풀리는 부작용 차단(같은 슬롯이면 직전 `cum_v_start` 보존).
+- 실시간 패킷 정규화 보강(`ui/tabs/monitor_tab.py`): 0B fid 11(전일대비)·12(등락률) 토큰을 정규화하여 화살표(▲/▼)·대시(`-`/`—`)/None/콤마 등이 섞여도 엔진/UI 파싱이 일관되게 동작하도록 헬퍼 추가.
+- 동적 백테 단일일(start_date==end_date) `ref_day` 보정(`dynamic_backtest.py`): 첫 거래일에 한해 `ref_day` 를 _직전 거래일_ 로 맞춰 RT 종목선정과 동일 universe 기준이 되도록 `prepare_dynamic_universe` 시작점을 확장.
+- 봉 정합성 검증 진단 스크립트 추가:
+  - `_diag_today_check.py`: 디버그 코드 의존 없이 그날 RT DB(`realtime_15m_mock.db.bars_15m_rt`) 적재 종목 _전체_ 를 자동으로 `trading_data.db.bars_15m` 과 비교(슬롯별 OHLCV 일치율·`v_ratio`·TOP-10 출력).
+  - `_diag_042700_check.py`: 디버그 코드(0B periodic 로그)의 누적거래량 차분과 RT/TD 봉 거래량을 슬롯 단위로 대조해 stream_processor 차분 누적 정합성을 검증.
+
 ## 0.6.37 (2026-05-07)
 
 - 실시간 감시 `신호상태` 고정 보정: 합치도(confluence) 플레이스홀더(`-`/`—`)일 때 워밍업 `✅ 15분봉·검증 완료` 문구가 `status_text`에 남지 않도록 `SignalEngine`에서 선제 `대기` 처리(`core/signal_engine.py`).

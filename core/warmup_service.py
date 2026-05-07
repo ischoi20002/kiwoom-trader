@@ -1129,6 +1129,29 @@ class WarmupService:
             df_slice = self._indicator_calc_input_tail(combined)
             df_ind = TradingStrategy.calculate_indicators(df_slice, self.app.settings)
             fin = self._finalize_bars_for_stream(df_ind)
+            # _finalize_bars_for_stream 은 cum_v_start 를 0 으로 초기화하므로,
+            # 장중 backfill 시 _진행 중 봉_ 의 cum_v_start 가 0 으로 리셋되어
+            # 그 슬롯 후반부 차분만 잡히는 문제가 생김 → 교체 전 bars_data 의
+            # 마지막 봉 cum_v_start 를 동일 슬롯에 한해 보존합니다.
+            try:
+                if (
+                    cur is not None
+                    and not getattr(cur, "empty", True)
+                    and fin is not None
+                    and not getattr(fin, "empty", True)
+                    and "cum_v_start" in cur.columns
+                    and "cum_v_start" in fin.columns
+                ):
+                    cur_last_idx = cur.index[-1]
+                    fin_last_idx = fin.index[-1]
+                    if cur_last_idx == fin_last_idx:
+                        prev_start = cur.at[cur_last_idx, "cum_v_start"]
+                        if hasattr(prev_start, "iloc"):
+                            prev_start = prev_start.iloc[0]
+                        if float(prev_start) > 0:
+                            fin.at[fin_last_idx, "cum_v_start"] = float(prev_start)
+            except Exception:
+                pass
             if not isinstance(self.app.bars_data, dict):
                 self.app.bars_data = {}
             self.app.bars_data[code] = fin

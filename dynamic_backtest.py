@@ -209,6 +209,9 @@ class DynamicBacktester:
         self.use_type_b = False
         self.gap_down_lmt = -5.0
         self.stock_name_map = {}
+        # 백테스트 첫 day(start_date)가 단일(예: start_date==end_date)인 경우에도
+        # ref_day(선정 기준일)를 항상 "직전 영업일"로 맞추기 위한 값
+        self._bt_ref_day_for_first: Optional[str] = None
 
     def _cache_run_hot_settings(self) -> None:
         """run / 진단 공통: 루프에서 자주 읽는 설정·임계값 캐시"""
@@ -272,9 +275,28 @@ class DynamicBacktester:
             )
             return False
         print(f"[Dynamic] 백테스트 시작: {start_date} ~ {end_date} ({len(trading_days)} 영업일)")
+
+        # 첫 시뮬레이션 day에 대해 ref_day를 항상 직전 영업일로 맞춘다.
+        # (예: start_date=2026-05-07, end_date=2026-05-07이면 ref_day=2026-05-06 필요)
+        try:
+            sd = pd.to_datetime(start_date)
+            prev_range_start = (sd - timedelta(days=30)).strftime("%Y-%m-%d")
+            prev_range_end = (sd - timedelta(days=1)).strftime("%Y-%m-%d")
+            prev_days = self.db.get_trading_days(prev_range_start, prev_range_end) or []
+            if prev_days:
+                self._bt_ref_day_for_first = pd.to_datetime(prev_days[-1]).strftime(
+                    "%Y-%m-%d"
+                )
+            else:
+                self._bt_ref_day_for_first = None
+        except Exception:
+            self._bt_ref_day_for_first = None
+
+        # prepare_dynamic_universe 스케줄 생성도 ref_day에 해당하는 키가 포함되도록 시작일을 확장한다.
+        sched_start = self._bt_ref_day_for_first or start_date
         t_start = time.time()
         _result = strategy_selector.prepare_dynamic_universe(
-            self.settings, start_date, end_date, self.db, callback if callback else print
+            self.settings, sched_start, end_date, self.db, callback if callback else print
         )
         if isinstance(_result, tuple) and len(_result) == 3:
             universe_schedule, self.schedule_a, self.schedule_b = _result
@@ -331,7 +353,11 @@ class DynamicBacktester:
         try:
             for idx, current_day in enumerate(trading_days):
                 prev_day_idx = idx - 1
-                ref_day = trading_days[prev_day_idx] if prev_day_idx >= 0 else current_day
+                ref_day = (
+                    trading_days[prev_day_idx]
+                    if prev_day_idx >= 0
+                    else (self._bt_ref_day_for_first or current_day)
+                )
                 top_codes_a = self.schedule_a.get(ref_day, [])
                 top_codes_b = self.schedule_b.get(ref_day, [])
                 top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
@@ -427,7 +453,11 @@ class DynamicBacktester:
             
             # 2-1. 오전 종목 선정 (사전 계산된 스케줄 활용, Track A/B 분리)
             prev_day_idx = idx - 1
-            ref_day = trading_days[prev_day_idx] if prev_day_idx >= 0 else current_day
+            ref_day = (
+                trading_days[prev_day_idx]
+                if prev_day_idx >= 0
+                else (self._bt_ref_day_for_first or current_day)
+            )
             
             top_codes_a = self.schedule_a.get(ref_day, [])
             top_codes_b = self.schedule_b.get(ref_day, [])

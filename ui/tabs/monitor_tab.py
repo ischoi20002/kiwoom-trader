@@ -1953,8 +1953,39 @@ class MonitorTab:
                     continue
                 volume = int(get_val(13))
                 trde_val = int(get_val(26) // 1000)
-                ratio_val = vals.get('12', '0')
-                diff_val = vals.get('11', '0')
+                # fid 11(diff), 12(ratio)는 websocket payload에서 keys 타입이
+                # 문자열('11','12') 또는 정수(11,12)로 올 수 있다.
+                # 한쪽만 가정하면 매 틱 기본값('0')만 들어가 '대비'가 고정처럼 보일 수 있어
+                # 둘 다 확인하도록 한다.
+                def _normalize_ws_num_token(v: object) -> str:
+                    """
+                    websocket fid 토큰(문자열/숫자)을 UI/엔진이 처리 가능한 형태로 정규화한다.
+                    - '▲'/'▼'가 섞여 들어오면 +/−로 치환
+                    - '—'/'-'/'None'/빈 문자열은 '0'로 치환
+                    """
+                    try:
+                        if v is None:
+                            return "0"
+                        s = str(v).strip()
+                        if not s or s in ("-", "—", "–"):
+                            return "0"
+                        # 화살표 → 부호로 정규화
+                        if "▲" in s or "△" in s:
+                            s = s.replace("▲", "+").replace("△", "+")
+                        if "▼" in s or "▽" in s:
+                            s = s.replace("▼", "-").replace("▽", "-")
+                        # 기존에 부호가 없는데 중간에 +/− 치환이 없었으면, 첫 글자 기준으로 처리하지 않는다.
+                        # (fid 값이 예: '+1.23%' 또는 '-1.23%' 형태일 수 있어 그대로 유지)
+                        # 쉼표만 제거(표시용은 남겨도 되지만, 엔진 파싱은 ',' 제거 가정이 많음)
+                        s = s.replace(",", "").strip()
+                        return s
+                    except Exception:
+                        return "0"
+
+                ratio_raw = vals.get(12) if 12 in vals else vals.get("12", vals.get(12, "0"))
+                diff_raw = vals.get(11) if 11 in vals else vals.get("11", vals.get(11, "0"))
+                ratio_val = _normalize_ws_num_token(ratio_raw)
+                diff_val = _normalize_ws_num_token(diff_raw)
                 vol_power = get_val(228)
                 # 수신 자체를 GUI 멈춤 상황에서도 추적(해당 코드만 주기적 기록)
                 try:

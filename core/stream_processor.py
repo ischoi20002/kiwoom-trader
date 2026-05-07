@@ -91,8 +91,40 @@ class StreamProcessor:
             # 봉 내 거래량 = 현재 누계 - 봉 시작 누계
             start_v_v = df.at[last_idx, 'cum_v_start'] if 'cum_v_start' in df.columns else volume
             start_v = start_v_v.iloc[0] if hasattr(start_v_v, 'iloc') else start_v_v
-            df.at[last_idx, 'Volume'] = max(0, volume - float(start_v))
+            # 워밍업으로 적재된 봉(cum_v_start=0)이 마지막 봉이고 같은 슬롯에 첫 0B가 들어온 경우,
+            # 누계 차분이 매우 큰 값으로 잡혀 워밍업 봉의 정확한 거래량을 덮어쓰는 문제가 있어
+            # cum_v_start만 첫 0B 시점 누적값으로 갱신하고 기존 Volume(=워밍업 V)은 보존합니다.
+            # 이후 같은 슬롯 내 추가 0B 부터 정상 차분 누적이 시작됩니다.
+            if float(start_v) <= 0 and float(volume) > 0:
+                df.at[last_idx, 'cum_v_start'] = float(volume)
+            else:
+                df.at[last_idx, 'Volume'] = max(0, volume - float(start_v))
         else:
+            # 직전 슬롯 봉 마감 — throttle/배치/타이밍으로 마지막 0B의 누적이 봉에 반영되지 못해
+            # 봉 거래량이 누락되는 문제(BT 봉 대비 5~10% 수준만 잡히는 케이스)를 막기 위해,
+            # 새 슬롯 진입 시점의 누적거래량(volume)으로 직전 봉 거래량을 마지막에 한 번 더
+            # 정확히 보정합니다(차분 방식 정합성 보강).
+            #
+            # 단, 직전 봉이 _다른 날(=warmup 적재 봉, cum_v_start=0)_ 인 경우에는 누계 비교가
+            # 의미가 없어 매우 큰 값으로 덮어쓰일 위험이 있으므로 보정 대상에서 제외합니다.
+            try:
+                if 'cum_v_start' in df.columns:
+                    last_idx_dt = pd.to_datetime(last_idx)
+                    same_day = (
+                        last_idx_dt.year == now.year
+                        and last_idx_dt.month == now.month
+                        and last_idx_dt.day == now.day
+                    )
+                    prev_start_v = df.at[last_idx, 'cum_v_start']
+                    if hasattr(prev_start_v, 'iloc'):
+                        prev_start_v = prev_start_v.iloc[0]
+                    # cum_v_start가 0(=warmup 적재 봉, 누계 미상)이거나 다른 날 봉이면
+                    # 누계 차분이 의미 없어 워밍업 봉 V를 큰 값으로 덮어쓸 위험이 있으므로 skip.
+                    if same_day and float(prev_start_v) > 0:
+                        fixed_vol = max(0.0, float(volume) - float(prev_start_v))
+                        df.at[last_idx, 'Volume'] = fixed_vol
+            except Exception:
+                pass
             # 직전 슬롯 15분봉 확정 → 실시간 전용 DB 저장 (부하: 종목당 15분당 1회)
             if self._on_bar_closed is not None:
                 try:
