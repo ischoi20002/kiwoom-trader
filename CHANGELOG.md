@@ -13,6 +13,10 @@
 
 ---
 
+## 0.6.41 (2026-05-08)
+
+- 실시간 감시 「등락률」 열 표시를 ▲/▼ 형식으로 고정: 틱 정상 경로와 안전망·예외 폴백·강제 행 주입(`_inject_min_monitor_updates_from_monitor_info`)이 서로 다른 문자열(`info['ratio']`의 `+/−` 등)을 쓰며 깜빡이던 문제를 제거 (`core/signal_engine.py`의 `ratio_cell_display_for_monitor_tree`, `ui/tabs/monitor_tab.py`, `k_trader_gui.py`).
+
 ## 0.6.40 (2026-05-08)
 
 - 실시간 `bars_data` 키 정규화·별칭 승격: 워밍업과 스트림 경로의 종목코드 문자열이 어긋날 때 빈 DF 스텁으로 덮어 봉수·신호가 초기화되던 문제 완화 (`utils/normalization.py`의 `canonical_stock_code`, 신규 `utils/bars_data_keys.py`, `core/stream_processor.py`, `core/signal_engine.py`).

@@ -2138,12 +2138,25 @@ class MonitorTab:
             return set()
 
     def _monitor_ratio_direction(self, ratio_val: object) -> str:
-        """등락률 표시값 → up / down / stable (줄무늬 행 태그용)."""
+        """등락률 표시값 → up / down / stable (줄무늬 행 태그용). ▲/▼ 접두와 +/- 숫자 모두 허용."""
         try:
-            s = str(ratio_val).replace("%", "").strip()
-            if not s:
+            raw = str(ratio_val).strip()
+            if not raw:
                 return "stable"
-            v = float(s.replace("+", ""))
+            if raw.startswith(("▲", "△")):
+                return "up"
+            if raw.startswith(("▼", "▽")):
+                return "down"
+            s = raw.replace("%", "").replace(",", "").strip()
+            s = s.lstrip("+")
+            try:
+                v = float(s)
+            except ValueError:
+                if "▼" in raw or "▽" in raw:
+                    return "down"
+                if "▲" in raw or "△" in raw:
+                    return "up"
+                return "stable"
             if v > 0:
                 return "up"
             if v < 0:
@@ -2204,6 +2217,26 @@ class MonitorTab:
         except Exception:
             pass
 
+    def _ratio_cell_display_for_monitor_info(
+        self, nk: str, info: Dict[str, Any]
+    ) -> str:
+        """감시 트리 등락률 표시 — SignalEngine 과 동일(▲/▼ 고정)."""
+        try:
+            now_p = float(
+                info.get("price")
+                if info.get("price") not in (None, "", 0)
+                else (info.get("last_price") or 0)
+            )
+        except (TypeError, ValueError):
+            now_p = 0.0
+        try:
+            se = getattr(self.app, "signal_engine", None)
+            if se is not None and hasattr(se, "ratio_cell_display_for_monitor_tree"):
+                return se.ratio_cell_display_for_monitor_tree(info, float(now_p))
+        except Exception:
+            pass
+        return str(info.get("ratio", "0"))
+
     def _compose_monitor_row_values(self, nk: str, info: Dict[str, Any]) -> Tuple[Any, ...]:
         """감시·보유 트리 한 행 values (컬럼 순서는 _setup_ui 와 동일)."""
         try:
@@ -2229,7 +2262,7 @@ class MonitorTab:
         strat = format_entry_signal_type_label(
             pos_for_strat, sel_tr, code=nk, app=self.app
         )
-        ratio_disp = info.get("ratio", "0")
+        ratio_disp = self._ratio_cell_display_for_monitor_info(nk, info)
         nm = str(info.get("name", nk) or nk)
         try:
             sc = float(info.get("score", 0) or 0)
@@ -2367,7 +2400,9 @@ class MonitorTab:
                         pass
                 if target.exists(nk):
                     continue
-                direction = self._monitor_ratio_direction(info.get("ratio", "0"))
+                direction = self._monitor_ratio_direction(
+                    self._ratio_cell_display_for_monitor_info(nk, info)
+                )
                 try:
                     idx = len(target.get_children())
                 except Exception:
@@ -2483,7 +2518,9 @@ class MonitorTab:
                 if not info:
                     info = {"name": nk, "sel_track": "AB"}
                 values = self._compose_monitor_row_values(nk, info)
-                direction = self._monitor_ratio_direction(info.get("ratio", "0"))
+                direction = self._monitor_ratio_direction(
+                    self._ratio_cell_display_for_monitor_info(nk, info)
+                )
                 try:
                     idx = len(self.tree_monitor.get_children())
                 except Exception:
@@ -2886,7 +2923,7 @@ class MonitorTab:
             nk = str(code).split("_")[0].zfill(6)
             if nk in wl_only:
                 continue
-            ratio_disp = info.get("ratio", "0")
+            ratio_disp = self._ratio_cell_display_for_monitor_info(nk, info)
             direction = self._monitor_ratio_direction(ratio_disp)
             values = self._compose_monitor_row_values(nk, info)
             # 보유 중이면 아래(보유 트리)에만 넣음. 예전에는 위 트리만 채워 다음 틱까지 보유 트리가 비어 깜빡임 발생.

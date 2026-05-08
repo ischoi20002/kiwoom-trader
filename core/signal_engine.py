@@ -360,6 +360,25 @@ class SignalEngine:
             pass
         return ("0.00%", 0.0)
 
+    def ratio_cell_display_for_monitor_tree(
+        self, info: dict, now_price: float
+    ) -> str:
+        """
+        감시 트리 「등락률」 열 표시 문자열 (항상 ▲ / ▼ + 수치%).
+        ``info['ratio']`` 가 플러스/마이너스 문자열로 왔다 갔다 해도 동일 규칙으로 렌더한다.
+        """
+        try:
+            op = float(self._to_scalar(info.get("open", 0), 0))
+            if op <= 1e-12:
+                op = float(now_price)
+            np_f = float(now_price)
+            intraday_diff = np_f - op
+            return self._monitor_tree_ratio_and_direction(
+                info, np_f, intraday_diff, op
+            )[0]
+        except Exception:
+            return "0.00%"
+
     def _format_monitor_bid_ask_cell(self, info: dict) -> str:
         """감시 트리 Bid/Ask 열: 매도잔량 / 매수잔량 및 매도÷매수 비율(소수 1자리)."""
         try:
@@ -1354,7 +1373,9 @@ class SignalEngine:
                             f"{int(float(now_price)):,}",
                             "—",
                             self._format_monitor_vs_prev_cell(info),
-                            str(info.get("ratio", "0")),
+                            self.ratio_cell_display_for_monitor_tree(
+                                info, float(now_price)
+                            ),
                             str(info.get("status_text") or info.get("confluence") or "대기"),
                             _vp_str,
                             self._format_monitor_bid_ask_cell(info),
@@ -1458,7 +1479,9 @@ class SignalEngine:
                                 f"{np_i:,}",
                                 "—",
                                 self._format_monitor_vs_prev_cell(info),
-                                str(info.get("ratio", "0")),
+                                self.ratio_cell_display_for_monitor_tree(
+                                    info, float(now_price)
+                                ),
                                 str(info.get("status_text") or info.get("confluence") or "대기"),
                                 f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%",
                                 self._format_monitor_bid_ask_cell(info),

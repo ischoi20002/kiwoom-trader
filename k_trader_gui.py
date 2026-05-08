@@ -1634,7 +1634,17 @@ class KiwoomApp:
                         strat_label = "전략 A+B"
                 except Exception:
                     strat_label = "전략 A+B"
-                ratio_disp = str(info.get("ratio", "0"))
+                try:
+                    ratio_disp = str(info.get("ratio", "0"))
+                    se_inj = getattr(self, "signal_engine", None)
+                    if se_inj is not None and hasattr(
+                        se_inj, "ratio_cell_display_for_monitor_tree"
+                    ):
+                        ratio_disp = se_inj.ratio_cell_display_for_monitor_tree(
+                            info, float(now_p)
+                        )
+                except Exception:
+                    ratio_disp = str(info.get("ratio", "0"))
                 status_text = str(info.get("status_text") or info.get("confluence") or "대기")
                 try:
                     raw_diff = info.get("diff")
