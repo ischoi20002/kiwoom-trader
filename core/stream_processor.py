@@ -99,11 +99,20 @@ class StreamProcessor:
             start_v_v = df.at[last_idx, 'cum_v_start'] if 'cum_v_start' in df.columns else volume
             start_v = start_v_v.iloc[0] if hasattr(start_v_v, 'iloc') else start_v_v
             # 워밍업으로 적재된 봉(cum_v_start=0)이 마지막 봉이고 같은 슬롯에 첫 0B가 들어온 경우,
-            # 누계 차분이 매우 큰 값으로 잡혀 워밍업 봉의 정확한 거래량을 덮어쓰는 문제가 있어
-            # cum_v_start만 첫 0B 시점 누적값으로 갱신하고 기존 Volume(=워밍업 V)은 보존합니다.
-            # 이후 같은 슬롯 내 추가 0B 부터 정상 차분 누적이 시작됩니다.
+            # 누계 차분 방식 그대로 두면 두 번째 0B 부터 V = (volume - cum_v_start) 로 _덮어쓰기_ 되어
+            # 워밍업이 채운 슬롯 시작분 V(예: ka10080 1m 합산)가 손실됩니다.
+            # cum_v_start = (지금 누계 volume) - (현재 V) 로 잡으면, 이후 0B 마다
+            # V_new = volume_new - cum_v_start = (volume_new - volume) + V_warmup 가 되어
+            # 차분과 워밍업 V 가 함께 누적됩니다.
+            # (현재 V 가 0 인 일반 케이스에서는 cum_v_start = volume 로 결정되어 종전 동작과 동일)
             if float(start_v) <= 0 and float(volume) > 0:
-                df.at[last_idx, 'cum_v_start'] = float(volume)
+                cur_v_v = df.at[last_idx, 'Volume']
+                cur_v = cur_v_v.iloc[0] if hasattr(cur_v_v, 'iloc') else cur_v_v
+                try:
+                    cur_v_f = float(cur_v) if cur_v is not None else 0.0
+                except (TypeError, ValueError):
+                    cur_v_f = 0.0
+                df.at[last_idx, 'cum_v_start'] = max(0.0, float(volume) - cur_v_f)
             else:
                 df.at[last_idx, 'Volume'] = max(0, volume - float(start_v))
         else:

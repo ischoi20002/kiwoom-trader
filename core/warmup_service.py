@@ -830,6 +830,183 @@ class WarmupService:
             self.log(f"⚠️ [Warmup-API] 분봉→15m 변환 실패: {e}")
             return pd.DataFrame()
 
+    def _inprogress_slot_recover_with_1m_enabled(self) -> bool:
+        """재시작 시 진행 중 15m 슬롯을 ka10080(1분봉)으로 보강할지(기본 ON)."""
+        try:
+            return bool(
+                self.app.settings.get(
+                    "realtime_warmup_inprogress_slot_recover_with_1m", True
+                )
+            )
+        except Exception:
+            return True
+
+    def _minute_api_raw_to_1m_ohlcv(self, raw_api: Any) -> pd.DataFrame:
+        """
+        ka10080(tic_scope='1') 응답 → DatetimeIndex Open/High/Low/Close/Volume(1분봉).
+        cntr_tm 은 봉 종가 시각으로 해석합니다(_minute_api_list_to_15m_ohlcv 와 동일 규약).
+        """
+        if not raw_api:
+            return pd.DataFrame()
+        try:
+            df = pd.DataFrame(raw_api)
+            f_cl, f_op, f_hg, f_lw, f_tm, f_vl = (
+                "cur_prc",
+                "open_pric",
+                "high_pric",
+                "low_pric",
+                "cntr_tm",
+                "trde_qty",
+            )
+            for c in (f_cl, f_op, f_hg, f_lw, f_vl):
+                if c not in df.columns:
+                    return pd.DataFrame()
+                df[c] = pd.to_numeric(
+                    df[c].astype(str).str.replace("+", "").str.replace("-", ""),
+                    errors="coerce",
+                ).fillna(0)
+            df["datetime"] = pd.to_datetime(
+                df[f_tm].astype(str), format="%Y%m%d%H%M%S", errors="coerce"
+            )
+            df = df.dropna(subset=["datetime"])
+            if df.empty:
+                return pd.DataFrame()
+            df = df.set_index("datetime").sort_index()
+            df = df[~df.index.duplicated(keep="last")]
+            out = df[[f_op, f_hg, f_lw, f_cl, f_vl]].copy()
+            out.rename(
+                columns={
+                    f_op: "Open",
+                    f_hg: "High",
+                    f_lw: "Low",
+                    f_cl: "Close",
+                    f_vl: "Volume",
+                },
+                inplace=True,
+            )
+            return out[["Open", "High", "Low", "Close", "Volume"]].copy()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Warmup-1m] 1분봉 정규화 실패: {e}")
+            except Exception:
+                pass
+            return pd.DataFrame()
+
+    def _current_inprogress_slot_range(
+        self,
+    ) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+        """
+        현재 시각 기준 진행 중 15m 슬롯의 (시작 시각, 종가 시각) 반환.
+        장 시간이 아니거나 주말이면 None.
+        종가 시각은 right-label 규칙(slot_start + 15분).
+        """
+        try:
+            now = datetime.now()
+            if now.weekday() >= 5:
+                return None
+            open_t = datetime.strptime("09:00", "%H:%M").time()
+            close_t = datetime.strptime("15:30", "%H:%M").time()
+            if now.time() < open_t or now.time() > close_t:
+                return None
+            n = pd.Timestamp(now)
+            minute_floor = (n.minute // 15) * 15
+            slot_start = n.replace(
+                minute=minute_floor, second=0, microsecond=0
+            )
+            slot_end = slot_start + pd.Timedelta(minutes=15)
+            return slot_start, slot_end
+        except Exception:
+            return None
+
+    def _maybe_recover_inprogress_slot_with_1m(
+        self,
+        code: str,
+        name: str,
+        base: pd.DataFrame,
+        token: Optional[str],
+    ) -> pd.DataFrame:
+        """
+        재시작 시 진행 중 15m 슬롯의 V/OHLC 가 부분 손실됐을 가능성을 보정합니다.
+
+        ka10080(tic_scope='1') 로 1분봉 1페이지를 받아 진행 중 슬롯 (slot_start, slot_end]
+        구간에 속하는 1분봉을 합산해 base 의 해당 슬롯 봉을 정확한 OHLCV 로 덮어씁니다.
+        - 1분봉 cntr_tm 은 _봉 종가 시각_(09:01 = 09:00:01~09:01:00).
+        - 진행 중 슬롯은 아직 마감되지 않았으므로 _마감된 1분봉만_ 합산되며, 마지막 1분은
+          이후 0B 차분 누적으로 stream_processor 가 채웁니다.
+        - 결과 봉의 인덱스는 slot_end(right-label) — 기존 15m base 와 동일 규약.
+        """
+        try:
+            if not self._inprogress_slot_recover_with_1m_enabled():
+                return base
+            if not token:
+                return base
+            rng = self._current_inprogress_slot_range()
+            if rng is None:
+                return base
+            slot_start, slot_end = rng
+            try:
+                raw_list, _nk = self.data_manager.fetch_kiwoom_minute_chart_page(
+                    code, token, "", tic_scope="1"
+                )
+            except Exception as e:
+                try:
+                    self.log(
+                        f"⚠️ [Warmup-1m] {name}({code}) ka10080(1분) 조회 예외: {e}"
+                    )
+                except Exception:
+                    pass
+                return base
+            if not raw_list:
+                return base
+            df_1m = self._minute_api_raw_to_1m_ohlcv(raw_list)
+            if df_1m is None or df_1m.empty:
+                return base
+            mask = (df_1m.index > slot_start) & (df_1m.index <= slot_end)
+            in_slot = df_1m[mask]
+            if in_slot.empty:
+                return base
+            try:
+                o_val = float(in_slot.iloc[0]["Open"])
+                h_val = float(in_slot["High"].max())
+                l_val = float(in_slot["Low"].min())
+                c_val = float(in_slot.iloc[-1]["Close"])
+                v_val = int(in_slot["Volume"].sum())
+            except Exception:
+                return base
+            if o_val <= 0 or h_val <= 0 or l_val <= 0 or c_val <= 0:
+                return base
+            if base is None or base.empty:
+                out = pd.DataFrame(
+                    columns=["Open", "High", "Low", "Close", "Volume"]
+                )
+            else:
+                out = base.copy()
+            new_idx = pd.Timestamp(slot_end)
+            out.loc[new_idx, "Open"] = o_val
+            out.loc[new_idx, "High"] = h_val
+            out.loc[new_idx, "Low"] = l_val
+            out.loc[new_idx, "Close"] = c_val
+            out.loc[new_idx, "Volume"] = v_val
+            out = out.sort_index()
+            out = out[~out.index.duplicated(keep="last")]
+            try:
+                self.log(
+                    f"🔄 [Warmup-1m] {name}({code}) 진행중 "
+                    f"{new_idx.strftime('%H:%M')} 슬롯 1m 보강 "
+                    f"({len(in_slot)}봉 합산, V={v_val:,d})"
+                )
+            except Exception:
+                pass
+            return out
+        except Exception as e:
+            try:
+                self.log(
+                    f"⚠️ [Warmup-1m] {name}({code}) 진행중 슬롯 보강 실패: {e}"
+                )
+            except Exception:
+                pass
+            return base
+
     def _needs_intraday_api_backfill(self, base: pd.DataFrame) -> bool:
         """
         하베스팅은 보통 전일(이전 영업일)까지이므로, 장중에 감시를 켜면
@@ -1088,6 +1265,14 @@ class WarmupService:
                 mx = 0.0
             if mx > 0:
                 time.sleep(random.uniform(0.0, min(mx, 2.0)))
+
+            # [v0.6.39] 재시작 시 진행 중 15m 슬롯의 V/OHLC 부분 손실을 ka10080(1분봉) 합산으로 보정
+            try:
+                base = self._maybe_recover_inprogress_slot_with_1m(
+                    code, name, base, token
+                )
+            except Exception as e:
+                self._tt(f"_execute_one {code} 진행중 슬롯 1m 보강 예외: {e!r}")
 
             ok, reason = self._validate_warmup_base(base)
             nbar = len(base) if base is not None and not base.empty else 0

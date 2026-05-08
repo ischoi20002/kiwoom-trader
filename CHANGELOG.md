@@ -13,6 +13,13 @@
 
 ---
 
+## 0.6.42 (2026-05-08)
+
+- 재시작 시 진행 중 15m 슬롯의 거래량·OHLC 부분 손실 보정 (5/8 09:15·09:30 슬롯 평균 V가 5/7 같은 시간대의 7%·1.7% 수준으로 떨어진 원인 해소).
+  - `core/warmup_service.py`: 워밍업 검증 직전에 ka10080(`tic_scope='1'`)으로 1분봉 1페이지를 받아 _현재 진행 중 15m 슬롯_ `(slot_start, slot_end]` 구간의 1분봉을 합산해 OHLCV를 정확하게 채우는 `_maybe_recover_inprogress_slot_with_1m` 추가. 결과 봉 인덱스는 right-label(`slot_end`)로 기존 15m 규약과 일치. 1분봉 정규화 헬퍼 `_minute_api_raw_to_1m_ohlcv` 신설.
+  - `core/stream_processor.py`: 워밍업이 V를 채운 진행 중 봉(`cum_v_start=0`)에 첫 0B가 들어올 때, `cum_v_start = max(0, volume - 현재V)` 로 잡아 다음 0B부터 V_new = (volume_new − volume) + V_warmup 가 되도록 수정 — 기존 fix는 첫 0B의 누계만 `cum_v_start` 로 잡아 두 번째 0B에서 워밍업 V가 _덮어쓰기_ 되어 사라지던 회귀를 제거. 일반 케이스(현재 V=0)에서는 종전 동작과 동일(`cum_v_start = volume`).
+  - 신규 설정: `realtime_warmup_inprogress_slot_recover_with_1m`(기본 ON) — 1m 보강을 끄고 싶을 때 OFF.
+
 ## 0.6.41 (2026-05-08)
 
 - 실시간 감시 「등락률」 열 표시를 ▲/▼ 형식으로 고정: 틱 정상 경로와 안전망·예외 폴백·강제 행 주입(`_inject_min_monitor_updates_from_monitor_info`)이 서로 다른 문자열(`info['ratio']`의 `+/−` 등)을 쓰며 깜빡이던 문제를 제거 (`core/signal_engine.py`의 `ratio_cell_display_for_monitor_tree`, `ui/tabs/monitor_tab.py`, `k_trader_gui.py`).

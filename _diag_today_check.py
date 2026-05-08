@@ -61,16 +61,37 @@ def compare_one(code: str, day: str) -> dict[str, Any]:
     only_td = sorted(set(td_d) - set(rt_d))
 
     ohlcv_diff_rows = 0
+    o_diff = h_diff = l_diff = c_diff = v_diff = 0
     sum_rt_v = 0
     sum_td_v = 0
     for ts in common:
         r = rt_d[ts]
         t = td_d[ts]
-        if any(
-            (a is None) ^ (b is None)
-            or (a is not None and b is not None and abs(float(a) - float(b)) > 1e-6)
-            for a, b in zip(r[1:6], t[1:6])
-        ):
+        row_diff = False
+        for k_idx, kname in enumerate(("O", "H", "L", "C", "V"), start=1):
+            a = r[k_idx]
+            b = t[k_idx]
+            mismatch = (
+                ((a is None) ^ (b is None))
+                or (
+                    a is not None
+                    and b is not None
+                    and abs(float(a) - float(b)) > 1e-6
+                )
+            )
+            if mismatch:
+                row_diff = True
+                if kname == "O":
+                    o_diff += 1
+                elif kname == "H":
+                    h_diff += 1
+                elif kname == "L":
+                    l_diff += 1
+                elif kname == "C":
+                    c_diff += 1
+                else:
+                    v_diff += 1
+        if row_diff:
             ohlcv_diff_rows += 1
         sum_rt_v += int(r[5] or 0)
         sum_td_v += int(t[5] or 0)
@@ -83,6 +104,11 @@ def compare_one(code: str, day: str) -> dict[str, Any]:
         "only_rt": len(only_rt),
         "only_td": len(only_td),
         "ohlcv_diff": ohlcv_diff_rows,
+        "o_diff": o_diff,
+        "h_diff": h_diff,
+        "l_diff": l_diff,
+        "c_diff": c_diff,
+        "v_diff": v_diff,
         "sum_rt_v": sum_rt_v,
         "sum_td_v": sum_td_v,
         "v_ratio": (sum_rt_v / sum_td_v) if sum_td_v > 0 else None,
@@ -133,7 +159,8 @@ def main(argv: list[str]) -> None:
     results = [compare_one(c, day) for c in codes]
 
     print(
-        f"\n{'code':<8} {'rt':>4} {'td':>4} {'cmn':>4} {'diff':>4} "
+        f"\n{'code':<8} {'rt':>4} {'td':>4} {'cmn':>4} "
+        f"{'O':>3} {'H':>3} {'L':>3} {'C':>3} {'V':>3} "
         f"{'sum_rt_v':>11} {'sum_td_v':>11} {'v_ratio':>8}"
     )
     for r in results:
@@ -141,9 +168,27 @@ def main(argv: list[str]) -> None:
         ratio_s = "  -  " if ratio is None else f"{ratio:.2%}"
         print(
             f"{r['code']:<8} {r['rt_bars']:>4} {r['td_bars']:>4} "
-            f"{r['common']:>4} {r['ohlcv_diff']:>4} "
+            f"{r['common']:>4} "
+            f"{r['o_diff']:>3} {r['h_diff']:>3} {r['l_diff']:>3} "
+            f"{r['c_diff']:>3} {r['v_diff']:>3} "
             f"{r['sum_rt_v']:>11d} {r['sum_td_v']:>11d} {ratio_s:>8}"
         )
+
+    # OHLC 통계 — 봉 자체가 잘 만들어졌는지 판정
+    total_common = sum(r["common"] for r in results) or 1
+    total_o = sum(r["o_diff"] for r in results)
+    total_h = sum(r["h_diff"] for r in results)
+    total_l = sum(r["l_diff"] for r in results)
+    total_c = sum(r["c_diff"] for r in results)
+    total_v = sum(r["v_diff"] for r in results)
+    print(
+        f"\n[OHLC 일치율] 공통 슬롯 {total_common}개 중 불일치: "
+        f"O={total_o}({total_o/total_common:.1%}) "
+        f"H={total_h}({total_h/total_common:.1%}) "
+        f"L={total_l}({total_l/total_common:.1%}) "
+        f"C={total_c}({total_c/total_common:.1%}) "
+        f"V={total_v}({total_v/total_common:.1%})"
+    )
 
     valid = [r for r in results if r["v_ratio"] is not None]
     if valid:
@@ -152,14 +197,28 @@ def main(argv: list[str]) -> None:
         below_50 = sum(1 for r in ratios if r < 0.5)
         below_20 = sum(1 for r in ratios if r < 0.2)
         print(
-            f"\n[요약] 종목 {len(valid)}개 평균 v_ratio={avg:.2%} | "
+            f"\n[V 요약] 종목 {len(valid)}개 평균 v_ratio={avg:.2%} | "
             f"50% 미만 {below_50}개 | 20% 미만 {below_20}개"
         )
         worst = sorted(valid, key=lambda r: (r["v_ratio"], -r["ohlcv_diff"]))[:10]
-        print("[가장 차이 큰 종목 TOP-10]")
+        print("[V 차이 큰 종목 TOP-10]")
         for r in worst:
             print(
                 f"  {r['code']}  v_ratio={r['v_ratio']:.2%}  ohlcv_diff={r['ohlcv_diff']}"
+            )
+
+    # OHLC 불일치 종목 TOP-10 (v_ratio 와 별개로 OHLC 자체가 어긋난 케이스)
+    ohlc_bad = [r for r in results if (r["o_diff"] + r["h_diff"] + r["l_diff"] + r["c_diff"]) > 0]
+    if ohlc_bad:
+        ohlc_bad_sorted = sorted(
+            ohlc_bad,
+            key=lambda r: -(r["o_diff"] + r["h_diff"] + r["l_diff"] + r["c_diff"]),
+        )[:10]
+        print("[OHLC 불일치 큰 종목 TOP-10]")
+        for r in ohlc_bad_sorted:
+            print(
+                f"  {r['code']}  O={r['o_diff']} H={r['h_diff']} "
+                f"L={r['l_diff']} C={r['c_diff']}  (cmn={r['common']})"
             )
 
     if target_code:
