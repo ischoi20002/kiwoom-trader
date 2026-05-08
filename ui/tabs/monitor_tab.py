@@ -217,6 +217,10 @@ class MonitorTab:
         self._stream_sub_cache_ts: float = 0.0
         # WS recv 타임아웃 누적(실시간 패킷 부재 시 막힘처럼 보일 때 터미널 추적용)
         self._ws_idle_recv_count: int = 0
+        # 장운영구분(0s.fid215) 최신 코드 및 정규장 판별 상태
+        self._market_operation_code: str = ""
+        self._is_regular_session_active: bool = False
+        self._regular_session_op_codes: Set[str] = {"3", "4"}
         # 로그를 너무 많이 만들지 않기 위한 최소 관측용 플래그
         self._ws_logged_first_real: bool = False
         self._ws_logged_idle_once: bool = False
@@ -295,6 +299,18 @@ class MonitorTab:
                     await asyncio.sleep(0.06)
                 except Exception:
                     pass
+        # 장운영구분(0s.fid215) 별도 구독: 정규장/시간외 틱 필터 기준으로 사용
+        try:
+            market_packet: Dict[str, Any] = {
+                "trnm": "REG",
+                "grp_no": "0",
+                "refresh": "1",
+                "market": "AL",
+                "data": [{"item": [""], "type": ["0s"]}],
+            }
+            await ws.send(json.dumps(market_packet))
+        except Exception:
+            pass
         try:
             terminal_trace(
                 f"WS: {log_tag} 전송 종목={len(norm)} REG패킷={nchunk} "
@@ -1875,6 +1891,30 @@ class MonitorTab:
                 self.app._on_execution_received(code, order_no, cntg_qty, cntg_unpr, side)
                 continue
 
+            vals = item_data.get('values', {})
+            p_type = item_data.get('type', '0B')
+            # 장운영구분(0s.fid215) 수신: 정규장 여부를 먼저 갱신하고 종목 경로는 건너뜁니다.
+            if p_type == "0s":
+                try:
+                    op_code_raw = vals.get("215")
+                    if op_code_raw is None:
+                        op_code_raw = vals.get(215)
+                    op_code = str(op_code_raw if op_code_raw is not None else "").strip().lower()
+                    if op_code:
+                        prev_code = str(getattr(self, "_market_operation_code", "") or "")
+                        next_regular = op_code in self._regular_session_op_codes
+                        prev_regular = bool(getattr(self, "_is_regular_session_active", False))
+                        self._market_operation_code = op_code
+                        self._is_regular_session_active = next_regular
+                        if op_code != prev_code or next_regular != prev_regular:
+                            self.app.log(
+                                f"🕒 [WS] 장운영구분={op_code} "
+                                f"(정규장={'ON' if self._is_regular_session_active else 'OFF'})"
+                            )
+                except Exception:
+                    pass
+                continue
+
             mkey = self._resolve_monitor_info_key(code)
             if mkey is None:
                 if code in self._stream_subscription_zfilled_set():
@@ -1886,8 +1926,9 @@ class MonitorTab:
             if mkey not in mi:
                 continue
             info = mi[mkey]
-            vals = item_data.get('values', {})
-            p_type = item_data.get('type', '0B')
+            # 정규장(3/4) 외 구간 틱은 실시간 감시 경로에서 제외합니다.
+            if p_type in ("0B", "0D") and not self._is_regular_session_active:
+                continue
 
             def get_val(fid, default=0):
                 v = vals.get(str(fid))
