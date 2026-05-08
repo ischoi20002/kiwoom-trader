@@ -13,6 +13,10 @@
 
 ---
 
+## 0.6.45 (2026-05-08)
+
+- 키움 REST `dmst_stex_tp`: 모의투자는 `KRX`, 실전투자는 `SOR`로 분기 (`OrderManager.dmst_stex_tp_for_orders`). 매수·매도·취소(kt10000/10001/10003) 및 체결내역 조회(kt00007)에 동일 적용 (`core/order_manager.py`).
+
 ## 0.6.44 (2026-05-08)
 
 - 포지션관리 탭 주문·체결 목록: 미체결 후 취소 접수 성공 시 `order_history`를 `CANCELLED`로 갱신하고, 상태 열 표기를 `취소(미체결)`로 통일 (`core/order_manager.py`, `ui/tabs/virtual_tab.py`).

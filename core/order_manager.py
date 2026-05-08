@@ -38,6 +38,16 @@ class OrderManager:
     def _get_base_url(self):
         return config.MOCK_URL if getattr(config, 'USE_MOCK', False) else config.URL
 
+    @staticmethod
+    def dmst_stex_tp_for_orders() -> str:
+        """
+        키움 REST 주문·취소·체결내역(kt00007) 등에 쓰는 국내거래소 구분(dmst_stex_tp).
+
+        - 모의투자: KRX
+        - 실전투자: SOR (스마트오더 라우팅; 실서버 전환 시 요구)
+        """
+        return "KRX" if getattr(config, "USE_MOCK", False) else "SOR"
+
     def get_adjusted_price(self, price, side):
         """[v3.8] 공격적인 체결을 위해 ±1틱 보정 가격 산출"""
         tick = get_tick_size(price)
@@ -142,10 +152,11 @@ class OrderManager:
             
             self.app.log(f"🚀 [{mode_str}] 주문 발송 시도: {code}({name}) | {qty}주 | {adj_price:,}원")
 
+            stex = self.dmst_stex_tp_for_orders()
             if side == "buy":
                 # stock_buy_order_request_kt10000
                 res = self.order_api.stock_buy_order_request_kt10000(
-                    dmst_stex_tp="KRX", # 기본 거래소
+                    dmst_stex_tp=stex,
                     stk_cd=code,
                     ord_qty=str(int(qty)),
                     trde_tp=api_trde_tp,
@@ -154,7 +165,7 @@ class OrderManager:
             else:
                 # stock_sell_order_request_kt10001
                 res = self.order_api.stock_sell_order_request_kt10001(
-                    dmst_stex_tp="KRX",
+                    dmst_stex_tp=stex,
                     stk_cd=code,
                     ord_qty=str(int(qty)),
                     trde_tp=api_trde_tp,
@@ -1167,7 +1178,7 @@ class OrderManager:
             return False
         try:
             res = self.order_api.stock_cancel_order_request_kt10003(
-                dmst_stex_tp="KRX",
+                dmst_stex_tp=self.dmst_stex_tp_for_orders(),
                 orig_ord_no=oid,
                 stk_cd=code,
                 cncl_qty=str(cncl_qty).strip() or "0",
@@ -1432,7 +1443,7 @@ class OrderManager:
             "sell_tp": "0",
             "stk_cd": "",
             "fr_ord_no": "",
-            "dmst_stex_tp": "KRX",
+            "dmst_stex_tp": OrderManager.dmst_stex_tp_for_orders(),
         }
         try:
             resp = requests.post(url, headers=headers, json=body, timeout=20)
