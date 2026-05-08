@@ -113,6 +113,10 @@ class SignalEngine:
         self._bar_update_last_ts: dict[str, float] = {}
         self._bar_update_anchor_price: dict[str, float] = {}
         self._monitor_atr_cache_ts: dict[str, float] = {}
+        # 15분 슬롯 내 S1 pre-signal( Signal/Ready/Sig_Type )을 고정해
+        # 틱마다 지표가 흔들리며 매수 신호가 on/off 되는 현상을 줄입니다.
+        # key: code, value: {"slot_key": str, "signal": bool, "ready": bool, "sig_type": str}
+        self._s1_slot_gate_cache: dict[str, dict[str, Any]] = {}
 
     def _should_throttle_bar_update(
         self, code: str, price: float, now_ts: float
@@ -147,6 +151,27 @@ class SignalEngine:
         except (TypeError, ValueError):
             v = 1800.0
         return float(max(10.0, min(v, 86400.0)))
+
+    def _use_fixed_s1_presignal_gate(self) -> bool:
+        """
+        True면 동일 15분 슬롯 내에서는 첫 판정 시점의 S1 Signal/Ready를 고정합니다.
+        (백테 고정밀 경로의 pre-signal 게이팅과 유사하게 맞추기 위한 옵션)
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return bool(st.get("realtime_use_fixed_s1_presignal_gate", True))
+        except Exception:
+            return True
+
+    def _current_slot_key_from_bars(self, bars_df: Any) -> str:
+        """bars_data 마지막 행 기준 15분 슬롯 키(YYYY-mm-dd HH:MM:SS)."""
+        try:
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return ""
+            last_idx = bars_df.index[-1]
+            return pd.Timestamp(last_idx).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ""
 
     def _to_scalar(self, val, default=0):
         """[v4.5.9] 헬퍼: Series/DF/Numpy 등 어떤 형태에서든 안전하게 단일 스칼라 값 추출"""
@@ -753,6 +778,33 @@ class SignalEngine:
                         ma60_scalar = 0.0
                         ma60_ratio = 0.0
                 
+                    # [v0.6.43] 동일 15분 슬롯 내 S1 pre-signal 고정 게이트
+                    # - 슬롯이 바뀌면 현재 계산 결과로 게이트를 새로 생성
+                    # - 슬롯이 유지되는 동안은 게이트 signal/ready/sig_type 유지
+                    #   (틱별 미세 OHLC 변화로 신호가 흔들리는 문제 완화)
+                    try:
+                        if self._use_fixed_s1_presignal_gate():
+                            slot_key = self._current_slot_key_from_bars(_bd)
+                            if slot_key:
+                                gate = self._s1_slot_gate_cache.get(code)
+                                if (
+                                    not isinstance(gate, dict)
+                                    or str(gate.get("slot_key", "")) != slot_key
+                                ):
+                                    gate = {
+                                        "slot_key": slot_key,
+                                        "signal": bool(self._to_scalar(last_sig.get("Signal"), False)),
+                                        "ready": bool(self._to_scalar(last_sig.get("Ready"), False)),
+                                        "sig_type": str(self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B")),
+                                    }
+                                    self._s1_slot_gate_cache[code] = gate
+                                is_buy = bool(gate.get("signal", False) and gate.get("ready", False))
+                                last_sig["Signal"] = bool(gate.get("signal", False))
+                                last_sig["Ready"] = bool(gate.get("ready", False))
+                                last_sig["Sig_Type"] = str(gate.get("sig_type", last_sig.get("Sig_Type", "TYPE_B")))
+                    except Exception:
+                        pass
+
                     if is_buy:
                         sig_type = str(
                             self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B")

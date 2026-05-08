@@ -13,6 +13,13 @@
 
 ---
 
+## 0.7.0 (2026-05-08)
+
+- 실시간 S1 매수 판정에 15분 슬롯 고정 pre-signal 게이트 추가 (`core/signal_engine.py`):
+  - 동일 슬롯 내에서는 첫 판정 시점의 `Signal/Ready/Sig_Type`를 고정해 틱마다 신호가 on/off로 흔들리는 현상을 완화.
+  - 슬롯이 바뀌면 게이트를 새로 생성하며, `realtime_use_fixed_s1_presignal_gate`(기본 ON)으로 동작 제어 가능.
+  - 목적: 동적 백테 고정밀 경로의 “15분 pre-signal + 1분 체결” 구조와 RT 신호 게이팅 정합 강화.
+
 ## 0.6.45 (2026-05-08)
 
 - 키움 REST `dmst_stex_tp`: 모의투자는 `KRX`, 실전투자는 `SOR`로 분기 (`OrderManager.dmst_stex_tp_for_orders`). 매수·매도·취소(kt10000/10001/10003) 및 체결내역 조회(kt00007)에 동일 적용 (`core/order_manager.py`).
