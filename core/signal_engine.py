@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import threading
+import contextlib
 from datetime import datetime
 import time
 import traceback
@@ -9,6 +10,8 @@ from core.defaults import effective_min_15m_bars_for_monitoring
 from core.monitor_code_sets import watchlist_only_codes_set
 from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
+from utils.bars_data_keys import resolve_bars_data_frame
+from utils.normalization import canonical_stock_code
 from typing import Any, Optional, Tuple
 
 class SignalEngine:
@@ -229,13 +232,55 @@ class SignalEngine:
             pass
         return False
 
+    def _resolve_monitor_info_dict_key(self, nk: str) -> Optional[str]:
+        """
+        ``monitor_info`` 의 실제 dict 키를 반환합니다.
+        선정 CSV·레거시에서 ``2380`` / ``2380.0`` 등으로 들어간 경우에도
+        틱의 canonical(``002380``)과 매칭합니다.
+        """
+        try:
+            mi = getattr(self.app, "monitor_info", None) or {}
+            if not nk:
+                return None
+            if nk in mi:
+                return nk
+            for k in mi:
+                try:
+                    if canonical_stock_code(k) == nk:
+                        return str(k)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _bars_key_and_frame(self, code: str) -> Tuple[str, Optional[Any]]:
+        """
+        ``bars_data`` 에서 종목 DF 조회.
+        워밍업이 ``005930`` 으로 넣었는데 조회만 ``5930`` 처럼 어긋나면 canonical 로 승격합니다.
+        """
+        try:
+            lk = getattr(self.app, "_bars_data_lock", None)
+            ctx = lk if lk is not None else contextlib.nullcontext()
+            with ctx:
+                nk, df = resolve_bars_data_frame(
+                    getattr(self.app, "bars_data", None), code, migrate_alias=True
+                )
+                return nk, df
+        except Exception:
+            try:
+                nk = canonical_stock_code(code)
+                return nk, (self.app.bars_data or {}).get(nk)
+            except Exception:
+                return str(code).split("_")[0].zfill(6), None
+
     def _indicator_last_row_for_exit(self, code: str) -> Optional[dict]:
         """
         S1 신호용 min_15m_bars 미만이어도 청산·S2 판단에 쓸 마지막 지표 행.
         (기존에는 bars_ready 가 False 면 evaluate_position 자체를 호출하지 않아 ATR 등 청산이 멈춤)
         """
         try:
-            _bd = (self.app.bars_data or {}).get(code)
+            _nk, _bd = self._bars_key_and_frame(code)
             if _bd is None or getattr(_bd, "empty", True):
                 return None
             if len(_bd) < 2:
@@ -364,13 +409,15 @@ class SignalEngine:
         debug_codes: set[str] = {"016360", "042700", "267250", "454910"}
         try:
             if now_price <= 0: return # [v2.2] 유효하지 않은 가격 데이터 로직 진입 차단
-            code = str(code).split("_")[0].zfill(6)
-            if self._code_in_virtual_positions(code) and code not in self.app.monitor_info:
+            code = canonical_stock_code(code)
+            mi_key = self._resolve_monitor_info_dict_key(code)
+            if self._code_in_virtual_positions(code) and mi_key is None:
                 try:
                     self.app._ensure_vp_monitor_stub(code)
                 except Exception:
                     pass
-            if code not in self.app.monitor_info:
+                mi_key = self._resolve_monitor_info_dict_key(code)
+            if mi_key is None:
                 # 틱 수신이 있어도 UI/신호 업데이트는 monitor_info가 있어야만 진행됩니다.
                 # 일부 종목만 숫자가 안 바뀌는 원인 추적용으로 최소 경고만 남깁니다.
                 try:
@@ -392,7 +439,7 @@ class SignalEngine:
                     # 로깅 실패는 무시 (매매/틱 흐름 막지 않기)
                     pass
                 return
-            info = self.app.monitor_info[code]
+            info = self.app.monitor_info[mi_key]
             # 지정가 주문 시세 검증용: 틱 단가로 캐시를 매 틱 동기화 (화면·주문 기준 불일치 방지)
             try:
                 info["last_price"] = float(now_price)
@@ -549,7 +596,7 @@ class SignalEngine:
                 )
             except Exception:
                 _min_sig_bars = 60
-            _bd = (self.app.bars_data or {}).get(code)
+            bars_key, _bd = self._bars_key_and_frame(code)
             try:
                 current_bar_count = len(_bd) if _bd is not None and not getattr(_bd, "empty", True) else 0
             except Exception:
@@ -569,18 +616,27 @@ class SignalEngine:
                 cached_last_row = info.get("last_row_cache")
                 cached_last_sig_cache = info.get("last_sig_cache")
 
-                need_full_calc = (
-                    cached_last_row is None
-                    or cached_last_sig_cache is None
-                    or (now_ts - last_calc_ts) >= self._realtime_s1_full_calc_min_interval_sec
-                )
+                # 워밍업에서 last_* 캐시를 채운 뒤 last_calc_ts 가 아직 없으면(0),
+                # 첫 실시간 틱에서 전량 재계산하면 종목 수만큼 지연·큐 적체가 생김.
+                if cached_last_row is None or cached_last_sig_cache is None:
+                    need_full_calc = True
+                elif last_calc_ts <= 0.0:
+                    need_full_calc = False
+                else:
+                    need_full_calc = (
+                        (now_ts - last_calc_ts)
+                        >= self._realtime_s1_full_calc_min_interval_sec
+                    )
 
                 last_sig: dict = {}
                 last_row = cached_last_row
 
                 if need_full_calc:
+                    _src_df = self.app.bars_data.get(bars_key) if bars_key else None
+                    if _src_df is None:
+                        _src_df = _bd
                     df_with_ind = TradingStrategy.calculate_indicators(
-                        self.app.bars_data[code], self.app.settings
+                        _src_df, self.app.settings
                     )
                     try:
                         info["last_detailed_sig"] = TradingStrategy.get_buy_signals_detailed(
@@ -1053,7 +1109,7 @@ class SignalEngine:
                     if pos is not None and np_f > 0:
                         # 신호·매매용 last_row 는 bars_ready 일 때만 채워짐.
                         # 표시는 봉 수와 무관하게 마지막 봉+지표로 ATR 열을 채운다.
-                        _bd_atr = (self.app.bars_data or {}).get(code)
+                        _, _bd_atr = self._bars_key_and_frame(code)
                         row_for_atr: Optional[dict] = None
                         if last_row is not None:
                             if isinstance(last_row, dict):
@@ -1569,9 +1625,9 @@ class SignalEngine:
         except Exception:
             pass
 
-        if code not in self.app.bars_data: return 0.0
-        df = self.app.bars_data[code]
-        if len(df) < 15: return 0.0
+        _, df = self._bars_key_and_frame(code)
+        if df is None or getattr(df, "empty", True) or len(df) < 15:
+            return 0.0
         
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()

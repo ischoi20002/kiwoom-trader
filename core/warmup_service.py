@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from backtest_engine import TradingStrategy
 from core.defaults import effective_min_15m_bars_for_monitoring
 from core.terminal_trace import terminal_trace
+from utils.normalization import canonical_stock_code
 
 
 def _bar_slot_hhmm(ts: Any) -> str:
@@ -217,6 +218,92 @@ class WarmupService:
             except Exception:
                 pass
             return df if df is not None else pd.DataFrame()
+
+    def _resolve_monitor_info_key_for_seed(
+        self, monitor_info: Dict[str, Any], code: str
+    ) -> Optional[str]:
+        """워밍업 시드용: ``monitor_info`` 실제 키(monitor_tab·SignalEngine 과 동일 규칙)."""
+        try:
+            nk = canonical_stock_code(code)
+            if not nk:
+                return None
+            if nk in monitor_info:
+                return nk
+            for k in monitor_info:
+                try:
+                    if canonical_stock_code(k) == nk:
+                        return str(k)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _seed_monitor_signal_cache_after_warmup(
+        self,
+        code: str,
+        monitor_info: Optional[Dict[str, Any]],
+        df_ind: pd.DataFrame,
+        *,
+        stream_bar_count: int,
+    ) -> None:
+        """
+        워밍업에서 이미 계산한 지표·신호를 ``monitor_info`` 에 반영합니다.
+        실시간 첫 틱 전까지 신호상태 열이 비어 있거나 '대기'로 보이는 현상을 줄입니다.
+        """
+        try:
+            if not isinstance(monitor_info, dict) or df_ind is None:
+                return
+            if getattr(df_ind, "empty", True):
+                return
+            need = effective_min_15m_bars_for_monitoring(self.app.settings)
+            if len(df_ind) < need:
+                return
+            mi_key = self._resolve_monitor_info_key_for_seed(monitor_info, code)
+            if mi_key is None:
+                return
+            row = monitor_info[mi_key]
+            if not isinstance(row, dict):
+                return
+
+            detailed = TradingStrategy.get_buy_signals_detailed(
+                df_ind, self.app.settings, "UP"
+            )
+            if detailed is None or getattr(detailed, "empty", True):
+                return
+            last_ser = detailed.iloc[-1]
+            last_sig = (
+                last_ser.to_dict()
+                if hasattr(last_ser, "to_dict")
+                else dict(last_ser)
+            )
+            row["last_detailed_sig"] = detailed
+            row["last_bar_count"] = int(stream_bar_count)
+            row["last_row_cache"] = df_ind.iloc[-1].to_dict()
+            row["last_sig_cache"] = last_sig
+
+            _sel_tr = str(
+                row.get("sel_track", row.get("SelTrack", "AB")) or "AB"
+            ).strip().upper() or "AB"
+            se = getattr(self.app, "signal_engine", None)
+            if se is not None and hasattr(se, "_format_s1_confluence_status_line"):
+                try:
+                    row["confluence"] = se._format_s1_confluence_status_line(
+                        last_sig, _sel_tr
+                    )
+                except Exception:
+                    row["confluence"] = row.get("confluence", "-")
+            else:
+                row["confluence"] = row.get("confluence", "-")
+            try:
+                row["met_ratio"] = float(last_sig.get("Met_Ratio", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                row["met_ratio"] = 0.0
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Warmup] 신호 캐시 시드 실패 ({code}): {e}")
+            except Exception:
+                pass
 
     def _min_bars_for_signal(self) -> int:
         """실시간 최소 봉수(설정)와 ATR 주기(atr_period_a/b) 상한을 함께 반영."""
@@ -943,6 +1030,7 @@ class WarmupService:
         token: Optional[str],
         bars_data: Dict[str, Any],
         on_stock_ready: Optional[Callable[[str], None]],
+        monitor_info: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str, int]:
         """
         한 종목 워밍업 1회 시도.
@@ -1028,6 +1116,19 @@ class WarmupService:
             cm = lk if lk is not None else contextlib.nullcontext()
             with cm:
                 bars_data[code] = fin
+            try:
+                n_stream = len(fin) if fin is not None and not getattr(fin, "empty", True) else 0
+            except Exception:
+                n_stream = 0
+            try:
+                self._seed_monitor_signal_cache_after_warmup(
+                    code,
+                    monitor_info,
+                    df_ind,
+                    stream_bar_count=int(n_stream),
+                )
+            except Exception:
+                pass
             n_ok = len(bars_data[code]) if bars_data.get(code) is not None else 0
             if on_stock_ready is not None:
                 self._tt(f"_execute_one {code} on_stock_ready 콜백 호출")
@@ -1297,7 +1398,12 @@ class WarmupService:
                         f"code={code} → _execute_warmup_one_code 진입"
                     )
                     ok, reason, nbar = self._execute_warmup_one_code(
-                        code, name, token, bars_data, on_stock_ready
+                        code,
+                        name,
+                        token,
+                        bars_data,
+                        on_stock_ready,
+                        monitor_info,
                     )
                     self._tt(
                         f"[{i + 1}/{total}] attempt {attempt + 1} "

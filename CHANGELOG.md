@@ -13,6 +13,12 @@
 
 ---
 
+## 0.6.40 (2026-05-08)
+
+- 실시간 `bars_data` 키 정규화·별칭 승격: 워밍업과 스트림 경로의 종목코드 문자열이 어긋날 때 빈 DF 스텁으로 덮어 봉수·신호가 초기화되던 문제 완화 (`utils/normalization.py`의 `canonical_stock_code`, 신규 `utils/bars_data_keys.py`, `core/stream_processor.py`, `core/signal_engine.py`).
+- 종목코드 표기 정합: pandas·실수 문자열(`2380.0` 등)과 `monitor_info` 비표준 키가 있어도 틱·WS와 매칭되도록 보강 (`utils/normalization.py`, `core/signal_engine.py`, `core/trading_controller.py`, `ui/tabs/monitor_tab.py`).
+- 실시간 신호 표시 지연 완화: 워밍업 직후 `monitor_info`에 S1 신호 캐시를 시드하고, 캐시만 있는 첫 틱에서는 무거운 풀 재계산을 건너뛰도록 조정 (`core/warmup_service.py`, `core/signal_engine.py`).
+
 ## 0.6.39 (2026-05-08)
 
 - GUI 로그: 비메인 스레드에서 `self.log` 호출 시에도 메인 루프에 배출을 예약하도록 보강해, 기동 직후 REST 인증·계좌 동기화 등 백그라운드 메시지가 대시보드 로그 창에 누락되지 않도록 수정(`ui/gui_utils.py`).

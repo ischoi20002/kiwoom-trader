@@ -23,6 +23,7 @@ from core.terminal_trace import terminal_trace
 from backtest_engine import TradingStrategy
 from kiwoom_rest_api.auth.token import TokenManager
 from reporting.realtime_session_logger import RealtimeSessionLogger
+from utils.normalization import canonical_stock_code
 
 # 텔레그램 단일 메시지 최대 길이(일반 텍스트 기준 여유)
 _TELEGRAM_MAX_CHARS = 4000
@@ -1794,15 +1795,18 @@ class MonitorTab:
     def _resolve_monitor_info_key(self, nk: str) -> Optional[str]:
         """
         WS 종목코드(nk, 6자리)에 대응하는 monitor_info 딕셔너리 키.
-        키가 '3490' 등 비표준일 때도 매칭합니다.
+        키가 '3490'·``2380.0`` 등 비표준일 때도 매칭합니다.
         """
         try:
+            nk_canon = canonical_stock_code(nk)
             mi = getattr(self.app, "monitor_info", None) or {}
+            if nk_canon and nk_canon in mi:
+                return nk_canon
             if nk in mi:
                 return nk
             for k in mi:
                 try:
-                    if str(k).split("_")[0].zfill(6) == nk:
+                    if canonical_stock_code(k) == nk_canon:
                         return str(k)
                 except Exception:
                     continue

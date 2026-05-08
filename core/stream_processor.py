@@ -11,6 +11,8 @@ from strategy.indicator_constants import (
     RSI_MAIN_PERIOD,
     RSI_SIG_LOOKBACK,
 )
+from utils.bars_data_keys import resolve_bars_data_frame
+from utils.normalization import canonical_stock_code
 
 class StreamProcessor:
     """실시간 시세 데이터 처리 및 지표 계산 전용 클래스"""
@@ -54,6 +56,9 @@ class StreamProcessor:
     def _update_realtime_bar_impl(
         self, code, price, volume, bars_data: Dict[str, Any]
     ) -> Dict[str, Any]:
+        code = canonical_stock_code(code)
+        nk, df = resolve_bars_data_frame(bars_data, code, migrate_alias=True)
+        code = nk or code
         now = datetime.now()
         # [v3.5] 15분 단위 슬롯으로 원복 (지표 안정성 확보)
         target_minute = ((now.minute // 15) + 1) * 15
@@ -66,8 +71,10 @@ class StreamProcessor:
         now_dt = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
         dt_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        df = bars_data.get(code)
-        if df is None or df.empty:
+        # resolve 로 canonical 키·별칭 승격 반영. 여전히 비면 마지막으로 사전 조회.
+        if df is None or getattr(df, "empty", False):
+            df = bars_data.get(code)
+        if df is None or getattr(df, "empty", False):
             # 첫 진입 시 Volume은 0으로 시작 (기준점)
             new_row = {'datetime': dt_str, 'time': slot_time, 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 0, 'cum_v_start': volume}
             new_df = pd.DataFrame([new_row])

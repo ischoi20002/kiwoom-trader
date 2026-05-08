@@ -13,6 +13,7 @@ from core.limit_order_watch_service import LimitOrderWatchService
 from core.terminal_trace import terminal_trace
 from core.warmup_stream_prep_service import WarmupStreamPrepService
 from core.websocket_worker_service import WebsocketWorkerService
+from utils.normalization import canonical_stock_code
 
 
 def _implied_price_too_close_to_avg(
@@ -281,7 +282,10 @@ class TradingController:
         """감시 종목 기초 정보 및 트리뷰 매칭 정보 초기화"""
         self.monitor_info = {}
         for _, row in df.iterrows():
-            c = str(row['Code']).zfill(6)
+            raw_c = row.get("Code", row.get("code", ""))
+            c = canonical_stock_code(raw_c)
+            if not c:
+                continue
             self.monitor_info[c] = {
                 'name': row.get('Name', 'Unknown'),
                 'ma20': float(row.get('MA20', 0)),
