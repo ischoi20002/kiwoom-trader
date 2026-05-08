@@ -66,6 +66,9 @@ class GuiUtils:
         기존: 비메인 스레드마다 root.after(0, insert 1줄) → 실시간 틱 시 after 폭주로
         탭 전환·클릭이 한동안 먹지 않는 현상 발생.
         개선: 메시지는 큐에 쌓고, 메인 스레드에서 일정 간격으로 묶어서 insert (see 1회).
+
+        비메인 스레드는 큐 적재 후 ``root.after(0, ...)`` 로 배출만 예약합니다.
+        (예전 구현은 폴러가 빈 큐 1회 소비 뒤 멈추면 백그라운드 로그가 영구히 큐에만 남는 버그가 있었음)
         """
         try:
             self._log_q.put(str(message))
@@ -75,13 +78,22 @@ class GuiUtils:
             except Exception:
                 pass
             return
-        # Tk는 메인 스레드 전용. 비메인 스레드에서는 큐 적재만 하고 즉시 반환합니다.
-        # 메인 스레드 폴러가 주기적으로 배출합니다.
+
         try:
-            if threading.get_ident() != self._main_thread_id:
-                return
+            is_main_thread = threading.get_ident() == self._main_thread_id
         except Exception:
-            pass
+            is_main_thread = True
+
+        if not is_main_thread:
+            # Tk 위젯 갱신은 메인 루프에서만 — 배출 예약만 넘깁니다.
+            try:
+                r = self.root
+                if r is not None:
+                    r.after(0, self._request_log_flush)
+            except Exception:
+                pass
+            return
+
         self._request_log_flush()
 
     def _ensure_log_poller(self) -> None:

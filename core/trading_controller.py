@@ -551,12 +551,29 @@ class TradingController:
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
         Returns True iff 주문 접수(ord_no) 또는 가상 체결까지 성공 — SignalEngine 쿨타임 갱신용.
         """
+        # 지정가 매수: 실제 주문 호가 = 참고가+1틱 — 로그·JSONL의 price는 주문가 기준으로 통일
+        try:
+            adj_price = int(
+                self.app.order_manager.get_adjusted_price(float(price), "buy")
+            )
+        except Exception:
+            try:
+                adj_price = int(float(price))
+            except Exception:
+                adj_price = 0
+
         try:
             sl = getattr(self.app, "session_logger", None)
             if sl:
                 sl.log(
                     "buy_execute_start",
-                    {"code": code, "name": name, "price": float(price), "reason": reason},
+                    {
+                        "code": code,
+                        "name": name,
+                        "price": float(adj_price),
+                        "ref_price": float(price),
+                        "reason": reason,
+                    },
                 )
         except Exception:
             pass
@@ -605,7 +622,6 @@ class TradingController:
         # invest_amt는 D+2/(1+매수수수료율) 이하의 매수 원금 상한이다. (portfolio._max_buy_principal_cash_d2_limit)
         # adj_price(호가+1틱) 기준으로 산출한 주수가 0이면, 1주도 살 돈이 없는 것이므로
         # max(1, ...)로 1주를 강제하면 D+2 예수금이 마이너스(미수)로 간다 — 절대 금지.
-        adj_price = self.app.order_manager.get_adjusted_price(price, "buy")
         try:
             qty = int(invest_amt // int(adj_price))
         except (TypeError, ValueError, ZeroDivisionError):
@@ -700,7 +716,10 @@ class TradingController:
             except Exception as e:
                 self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
 
-        self.log(f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 ({price:,}원, {qty}주)")
+        self.log(
+            f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 "
+            f"(주문가 {adj_price:,}원, 참고가 {int(price):,}원, {qty}주)"
+        )
 
         try:
             self._narrow_monitor_sel_track_after_s1_buy(code, reason)
@@ -709,7 +728,11 @@ class TradingController:
 
         # 4. 텔레그램 알림 (비동기)
         import threading
-        msg = f"<b>💰 [매수발송/{reason}]</b>\n종목: {name}({code})\n가: {price:,}원 / 수: {qty}주\n시간: {datetime.now().strftime('%H:%M:%S')}"
+        msg = (
+            f"<b>💰 [매수발송/{reason}]</b>\n종목: {name}({code})\n"
+            f"주문가: {adj_price:,}원 (참고가 {int(price):,}원) / 수: {qty}주\n"
+            f"시간: {datetime.now().strftime('%H:%M:%S')}"
+        )
         threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
         return True
 
@@ -745,6 +768,21 @@ class TradingController:
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
 
         if action == "EXIT":
+            # 지정가 매도: 실제 주문 호가 = 참고가−1틱 — 로그·JSONL은 주문가 기준으로 매수와 동일하게 통일
+            try:
+                exit_ord_price = int(
+                    self.app.order_manager.get_adjusted_price(float(now_price), "sell")
+                )
+            except Exception:
+                try:
+                    exit_ord_price = int(float(now_price))
+                except Exception:
+                    exit_ord_price = 0
+            try:
+                ref_px = int(float(now_price or 0))
+            except Exception:
+                ref_px = 0
+
             # 이미 매도 주문 접수 대기 중이면 중복 EXIT 제출 금지
             try:
                 if bool(pos.get("exit_pending", False)):
@@ -799,7 +837,8 @@ class TradingController:
                             "code": code,
                             "name": pos.get("name", ""),
                             "qty": int(pos.get("qty", 0)),
-                            "price": int(now_price),
+                            "price": int(exit_ord_price),
+                            "ref_price": float(ref_px),
                             "result": "submitted" if ord_no else "failed",
                             "order_no": ord_no or "",
                             "reason": f"EXIT_{reason}",
@@ -839,11 +878,13 @@ class TradingController:
                     except Exception as e:
                         self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
                     self.log(
-                        f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 매도 접수 ({profit_ratio:+.2f}%)"
+                        f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 매도 접수 "
+                        f"({profit_ratio:+.2f}%) 주문가 {exit_ord_price:,}원 · 참고가 {ref_px:,}원"
                     )
                     import threading
                     msg = (
                         f"<b>🚀 [매도발송/{reason}]</b>\n종목: {pos['name']}({code})\n"
+                        f"주문가: {exit_ord_price:,}원 (참고가 {ref_px:,}원)\n"
                         f"수익률: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                     )
                     threading.Thread(
@@ -893,11 +934,13 @@ class TradingController:
                     snapshot=snapshot,
                 )
                 self.log(
-                    f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 가상 청산 ({profit_ratio:+.2f}%)"
+                    f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 가상 청산 "
+                    f"({profit_ratio:+.2f}%) 주문가 {exit_ord_price:,}원 · 참고가 {ref_px:,}원"
                 )
                 import threading
                 msg = (
                     f"<b>🚀 [매도발송/{reason}]</b>\n종목: {pos['name']}({code})\n"
+                    f"주문가: {exit_ord_price:,}원 (참고가 {ref_px:,}원)\n"
                     f"수익률: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                 )
                 threading.Thread(
@@ -952,11 +995,13 @@ class TradingController:
                         except Exception as e:
                             self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
                         self.log(
-                            f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 접수 ({now_price:,}원, {add_qty}주)"
+                            f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 접수 "
+                            f"(주문가 {adj_price:,}원, 참고가 {int(now_price):,}원, {add_qty}주)"
                         )
                         import threading
                         msg = (
                             f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n"
+                            f"주문가: {adj_price:,}원 (참고가 {int(now_price):,}원)\n"
                             f"평단대비: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                         )
                         threading.Thread(
