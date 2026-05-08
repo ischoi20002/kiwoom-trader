@@ -1179,6 +1179,40 @@ class OrderManager:
                 self.app.log(
                     f"✅ [{mode_str}] 주문 취소 접수: 원주문 {oid} / 응답 ord_no={out_ord or '-'}"
                 )
+                # 주문 로그 상태를 '접수'로 남기지 않도록 취소 접수 시 즉시 CANCELLED 반영.
+                # 부분체결 이력이 있을 수 있어 기존 filled_price/filled_qty는 최대한 보존합니다.
+                try:
+                    dm = getattr(self.app, "data_manager", None)
+                    if dm is not None and hasattr(dm, "update_order_status"):
+                        keep_code = code
+                        keep_filled_price = 0
+                        keep_filled_qty = 0
+                        try:
+                            row = dm.get_order_history_row_by_order_no(oid)
+                        except Exception:
+                            row = None
+                        if isinstance(row, dict):
+                            try:
+                                keep_code = str(row.get("code") or code).split("_")[0].zfill(6)
+                            except Exception:
+                                keep_code = code
+                            try:
+                                keep_filled_price = int(float(row.get("filled_price") or 0))
+                            except (TypeError, ValueError):
+                                keep_filled_price = 0
+                            try:
+                                keep_filled_qty = int(row.get("filled_qty") or 0)
+                            except (TypeError, ValueError):
+                                keep_filled_qty = 0
+                        dm.update_order_status(
+                            keep_code,
+                            oid,
+                            "CANCELLED",
+                            filled_price=keep_filled_price,
+                            filled_qty=keep_filled_qty,
+                        )
+                except Exception:
+                    pass
                 try:
                     sl = getattr(self.app, "session_logger", None)
                     if sl:

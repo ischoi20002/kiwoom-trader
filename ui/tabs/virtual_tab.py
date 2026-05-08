@@ -1588,6 +1588,8 @@ class VirtualTab:
         # UI에서는 두 의미를 구분해 표기합니다.
         if su == "FILLED":
             return "성공"
+        if su in ("CANCELLED", "CANCELED", "CANCEL", "CNCL"):
+            return "취소(미체결)"
         if su == "SUCCESS":
             return "접수"
         return s
