@@ -220,7 +220,15 @@ class MonitorTab:
         # 장운영구분(0s.fid215) 최신 코드 및 정규장 판별 상태
         self._market_operation_code: str = ""
         self._is_regular_session_active: bool = False
-        self._regular_session_op_codes: Set[str] = {"3", "4"}
+        # 키움 등에서 "03"/"04" 로 줄 수 있어 동일 취급
+        self._regular_session_op_codes: Set[str] = {"3", "4", "03", "04"}
+        # fid215 가 비어 있지 않게 한 번이라도 파싱되면 True(이후 3/4 아님은 브로커 우선, 로컬 폴백 안 함)
+        self._ws_has_explicit_fid215: bool = False
+        # 0s.fid215 값이 3/4가 아니거나 비어 있을 때 간이 진단 로그(스팸 방지 쿨다운)
+        self._ws_0s_diag_mismatch_last_ts: float = 0.0
+        self._ws_0s_diag_empty_logged: bool = False
+        # 정규장 OFF로 0B가 스킵될 때 1회 안내(0s 미수신·type 대소문자 등)
+        self._ws_logged_session_tick_skip_hint: bool = False
         # 로그를 너무 많이 만들지 않기 위한 최소 관측용 플래그
         self._ws_logged_first_real: bool = False
         self._ws_logged_idle_once: bool = False
@@ -234,6 +242,24 @@ class MonitorTab:
         # update_view가 너무 오래 걸려 UI가 멈춘 것처럼 보이는 케이스 기록(쿨다운/로그 폭주 방지용)
         self._update_view_slow_last_ts: float = 0.0
         self._setup_ui()
+
+    def _effective_regular_session_for_stream_ticks(self) -> bool:
+        """
+        0B/0D 실시간 처리 허용 여부.
+        - fid215 로 정규장(3/4)이면 True.
+        - fid215 가 아직 없거나 빈 값만 온 경우: PC 시각 기준 KRX 정규장이면 True(폴백).
+        - fid215 가 비어 있지 않은데 3/4(및 03/04)가 아니면 장외로 보고 False.
+        """
+        try:
+            if bool(getattr(self, "_is_regular_session_active", False)):
+                return True
+            if bool(getattr(self, "_ws_has_explicit_fid215", False)):
+                return False
+            from utils.krx_session import is_krx_regular_session
+
+            return bool(is_krx_regular_session())
+        except Exception:
+            return bool(getattr(self, "_is_regular_session_active", False))
 
     def _ws_reg_max_codes_per_chunk(self) -> int:
         """
@@ -283,6 +309,17 @@ class MonitorTab:
         norm, chunks = self._build_reg_chunks(codes)
         if not chunks:
             return
+
+        # REG 재전송마다 장운영·진단 상태 초기화(재접속 후 fid215·폴백 재평가)
+        try:
+            self._ws_0s_diag_empty_logged = False
+            self._ws_0s_diag_mismatch_last_ts = 0.0
+            self._ws_logged_session_tick_skip_hint = False
+            self._ws_has_explicit_fid215 = False
+            self._market_operation_code = ""
+            self._is_regular_session_active = False
+        except Exception:
+            pass
 
         nchunk = len(chunks)
         for idx, ch in enumerate(chunks):
@@ -1891,8 +1928,13 @@ class MonitorTab:
                 self.app._on_execution_received(code, order_no, cntg_qty, cntg_unpr, side)
                 continue
 
-            vals = item_data.get('values', {})
-            p_type = item_data.get('type', '0B')
+            vals = item_data.get('values', {}) or {}
+            # 브로커에 따라 type 이 "0B"/"0S" 처럼 대문자로 올 수 있음 → 분기·필터가 영원히 안 타는 문제 방지
+            try:
+                _raw_pt = item_data.get("type", "0B")
+                p_type = str(_raw_pt if _raw_pt is not None else "0B").strip().lower()
+            except Exception:
+                p_type = "0b"
             # 장운영구분(0s.fid215) 수신: 정규장 여부를 먼저 갱신하고 종목 경로는 건너뜁니다.
             if p_type == "0s":
                 try:
@@ -1900,7 +1942,21 @@ class MonitorTab:
                     if op_code_raw is None:
                         op_code_raw = vals.get(215)
                     op_code = str(op_code_raw if op_code_raw is not None else "").strip().lower()
-                    if op_code:
+                    if not op_code:
+                        # 215 비어 있음: WS 플래그는 OFF 유지하되, 틱은 _effective_regular_session_for_stream_ticks() 에서 로컬 정규장 폴백
+                        if not self._ws_0s_diag_empty_logged:
+                            self._ws_0s_diag_empty_logged = True
+                            try:
+                                ks = list(vals.keys())[:30]
+                            except Exception:
+                                ks = []
+                            self.app.log(
+                                "⚠️ [WS-0s 진단] fid215 비어 있음·미포함 — "
+                                f"raw={op_code_raw!r} type(raw)={type(op_code_raw).__name__} "
+                                f"values키샘플={ks!r} → PC시각 KRX 정규장이면 체결 표시(폴백)"
+                            )
+                    else:
+                        self._ws_has_explicit_fid215 = True
                         prev_code = str(getattr(self, "_market_operation_code", "") or "")
                         next_regular = op_code in self._regular_session_op_codes
                         prev_regular = bool(getattr(self, "_is_regular_session_active", False))
@@ -1911,6 +1967,18 @@ class MonitorTab:
                                 f"🕒 [WS] 장운영구분={op_code} "
                                 f"(정규장={'ON' if self._is_regular_session_active else 'OFF'})"
                             )
+                        # 3/4가 아닌데 값은 온 경우: 집합 불일치 의심 시 90초마다 1줄로 원문 확인
+                        if not next_regular:
+                            now_ts = time.time()
+                            if now_ts - float(
+                                getattr(self, "_ws_0s_diag_mismatch_last_ts", 0.0) or 0.0
+                            ) >= 90.0:
+                                self._ws_0s_diag_mismatch_last_ts = now_ts
+                                self.app.log(
+                                    "⚠️ [WS-0s 진단] 장운영코드가 3/4가 아님 — "
+                                    f"norm={op_code!r} raw={op_code_raw!r} "
+                                    f"type(raw)={type(op_code_raw).__name__} → 정규장=OFF(틱 차단)"
+                                )
                 except Exception:
                     pass
                 continue
@@ -1926,8 +1994,20 @@ class MonitorTab:
             if mkey not in mi:
                 continue
             info = mi[mkey]
-            # 정규장(3/4) 외 구간 틱은 실시간 감시 경로에서 제외합니다.
-            if p_type in ("0B", "0D") and not self._is_regular_session_active:
+            # 정규장 외(브로커 fid215 명시 + 비정규) 또는 로컬 장외: 실시간 감시 경로에서 제외
+            if p_type in ("0b", "0d") and not self._effective_regular_session_for_stream_ticks():
+                try:
+                    if (
+                        p_type == "0b"
+                        and not self._ws_logged_session_tick_skip_hint
+                    ):
+                        self._ws_logged_session_tick_skip_hint = True
+                        self.app.log(
+                            "⚠️ [WS 진단] 체결이 장외로 스킵됨 — "
+                            "fid215가 정규장 외 코드이며 로컬 시간도 정규장이 아닙니다."
+                        )
+                except Exception:
+                    pass
                 continue
 
             def get_val(fid, default=0):
@@ -1939,7 +2019,7 @@ class MonitorTab:
                 except Exception:
                     return default
 
-            if p_type == '0B':
+            if p_type == "0b":
                 now_price = int(get_val(10))
                 # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
                 # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
@@ -2052,7 +2132,7 @@ class MonitorTab:
                 info['trde_val'] = trde_val
                 info['vol_power'] = vol_power
                 self.app._on_realtime_data_received(code, now_price, volume, trde_val, vol_power=vol_power)
-            elif p_type == '0D':
+            elif p_type == "0d":
                 total_ask = int(get_val(121))
                 total_bid = int(get_val(125))
                 info['total_ask'] = total_ask
