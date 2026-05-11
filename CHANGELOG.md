@@ -13,6 +13,11 @@
 
 ---
 
+## 0.7.10 (2026-05-12)
+
+- **감시 선정 일봉 준비**: `KiwoomDailyHarvestService` — DB가 이미 기준 장마감일·1m 대비 동기화된 종목은 `1m→1d` 재집계·키움 ka10081 호출을 **생략**(`_code_needs_1m_to_1d_rebuild`, 완결성 선검사).
+- **`rebuild_daily_bars_from_1m`**: `DataManagerV2` — 전 구간 1m 풀스캔 대신 **마지막 일봉 다음날~1m 상한일** 구간만 `rebuild_daily_bars_from_1m_range`로 부분 집계. 일봉 없을 때만 1m MIN~MAX 전체.
+
 ## 0.7.9 (2026-05-11)
 
 - **키움 일봉 REST**: `core/kiwoom_daily_bars.py`(`ka10081`, 429 백오프·로그), `core/kiwoom_daily_harvest_service.py`(KODEX200 일봉 준비·완결성 `MAX(datetime)` 수정).

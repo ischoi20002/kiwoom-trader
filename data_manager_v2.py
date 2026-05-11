@@ -28,7 +28,6 @@ _CALENDAR_REFERENCE_STOCK_CODES: Tuple[str, ...] = (
 )
 from utils.bar_resample import (
     refresh_resampled_data_at_path,
-    aggregate_daily_ohlcv_from_1m_db,
     refresh_resampled_data_at_path_range,
     aggregate_daily_ohlcv_from_1m_db_range,
 )
@@ -708,21 +707,33 @@ class DataManagerV2:
 
     def rebuild_daily_bars_from_1m(self, code: str) -> bool:
         """
-        bars_1m 전 구간을 일(캘린더) 단위로 집계해 ``bars_1d``에 저장.
-        prepare_dynamic_universe / 선정이 참조하는 일봉 테이블을 분봉 DB와 맞춘다.
+        ``bars_1m``을 일(캘린더) 단위로 집계해 ``bars_1d``에 반영.
+
+        일봉이 1분봉 일자보다 이미 최신이면 DB 작업 없이 True.
+        그렇지 않으면 **뒤진 구간(마지막 일봉 다음날~1m 상한일)**만 읽어 부분 갱신해
+        전 구간 1m 스캔을 피한다. 일봉이 전혀 없을 때만 1m MIN~MAX 전체를 집계한다.
         """
         try:
             ncode = normalize_code(code)
         except Exception:
             return False
+
         try:
-            daily = aggregate_daily_ohlcv_from_1m_db(self.db_path, ncode)
-        except Exception as e:
+            with self._get_connection() as conn:
+                row_1m = conn.execute(
+                    "SELECT MIN(datetime), MAX(datetime) FROM bars_1m WHERE code = ?",
+                    (ncode,),
+                ).fetchone()
+                row_1d = conn.execute(
+                    "SELECT MAX(datetime) FROM bars_1d WHERE code = ?",
+                    (ncode,),
+                ).fetchone()
+        except sqlite3.Error as e:
             try:
                 import logging
 
                 logging.warning(
-                    "rebuild_daily_bars_from_1m 조회/집계 실패 %s: %s",
+                    "rebuild_daily_bars_from_1m 메타 조회 실패 %s: %s",
                     ncode,
                     e,
                     exc_info=True,
@@ -730,21 +741,57 @@ class DataManagerV2:
             except Exception:
                 pass
             return False
-        if daily is None or daily.empty:
-            return False
-        try:
-            self.save_daily_bars(ncode, daily)
-            return True
         except Exception as e:
             try:
                 import logging
 
                 logging.warning(
-                    "rebuild_daily_bars_from_1m 저장 실패 %s: %s", ncode, e, exc_info=True
+                    "rebuild_daily_bars_from_1m 메타 조회 예외 %s: %s", ncode, e, exc_info=True
                 )
             except Exception:
                 pass
             return False
+
+        min_1m = row_1m[0] if row_1m else None
+        max_1m = row_1m[1] if row_1m else None
+        max_1d = row_1d[0] if row_1d else None
+
+        if not max_1m:
+            return False
+
+        try:
+            end_day = str(max_1m).strip()[:10]
+            d_1m = datetime.strptime(end_day, "%Y-%m-%d").date()
+        except Exception:
+            return False
+
+        try:
+            min_day = str(min_1m).strip()[:10] if min_1m else end_day
+        except Exception:
+            min_day = end_day
+
+        # 일봉 없음: 1m이 존재하는 전 구간 집계
+        if not max_1d:
+            return self.rebuild_daily_bars_from_1m_range(ncode, min_day, end_day)
+
+        try:
+            d_1d = datetime.strptime(str(max_1d).strip()[:10], "%Y-%m-%d").date()
+        except Exception:
+            return self.rebuild_daily_bars_from_1m_range(ncode, min_day, end_day)
+
+        # 일봉 최종일이 1m 상한보다 미래로 잡힌 비정상 시 1m 기준으로 전 구간 재맞춤
+        if d_1d > d_1m:
+            return self.rebuild_daily_bars_from_1m_range(ncode, min_day, end_day)
+        if d_1d == d_1m:
+            return True
+
+        start_cal = d_1d + timedelta(days=1)
+        start_day = start_cal.strftime("%Y-%m-%d")
+
+        if start_day > end_day:
+            return self.rebuild_daily_bars_from_1m_range(ncode, min_day, end_day)
+
+        return self.rebuild_daily_bars_from_1m_range(ncode, start_day, end_day)
 
     def rebuild_daily_bars_from_1m_range(
         self,

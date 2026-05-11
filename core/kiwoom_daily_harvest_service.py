@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 import pandas as pd
 
@@ -118,6 +118,26 @@ class KiwoomDailyHarvestService:
             sleep_between_codes = 0.55
         sleep_between_codes = max(sleep_between_codes, 0.0)
 
+        # DB 일봉이 이미 기준 장마감일까지 갖춰져 있으면 API 호출 생략
+        try:
+            pre_integrity = self.check_daily_integrity(codes)
+        except Exception as e:
+            self._safe_log(f"  [Warn] 일봉 완결성 선검사 실패(하베스팅 계속): {e}")
+            pre_integrity = None
+        if pre_integrity is not None and pre_integrity.is_complete:
+            self._safe_log(
+                f"✅ [일봉 하베스팅] 완결성 이미 충족 — ka10081 호출 생략 "
+                f"({pre_integrity.ok_codes}/{pre_integrity.total_codes}, "
+                f"기준일 {pre_integrity.required_date})"
+            )
+            if progress_callback is not None:
+                try:
+                    progress_callback(0, total, "일봉 이미 최신 — 하베스팅 생략")
+                    progress_callback(total, total, f"완료 ({total}/{total})")
+                except Exception:
+                    pass
+            return pre_integrity
+
         self._safe_log(
             f"📥 [일봉 하베스팅] KODEX200 {total}종목 대상, {min_date}~{max_date} "
             f"(키움 ka10081, 요청간격≥{min_interval:.2f}s, 종목간격≥{sleep_between_codes:.2f}s)"
@@ -174,6 +194,24 @@ class KiwoomDailyHarvestService:
         )
         return result
 
+    def _code_needs_1m_to_1d_rebuild(
+        self,
+        ncode: str,
+        stale_or_missing: Set[str],
+    ) -> bool:
+        """
+        ``bars_1d`` 재집계가 필요한지.
+
+        - 완결성 점검상 미존재·기준일 미달 종목은 항상 True
+        - 그 외에는 ``bars_1m`` 최종일 대비 ``bars_1d`` 가 뒤처졌을 때만 True
+        """
+        if ncode in stale_or_missing:
+            return True
+        try:
+            return bool(self.data_manager.is_daily_bars_behind_1m(ncode))
+        except Exception:
+            return True
+
     def _rebuild_bars_1d_from_1m_for_codes(
         self,
         *,
@@ -181,7 +219,11 @@ class KiwoomDailyHarvestService:
         cfg: Dict[str, Any],
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> DailyHarvestIntegrityResult:
-        """``bars_1m`` 전 구간 집계로 ``bars_1d`` 를 재작성(백테·선정 단일 소스)."""
+        """
+        ``bars_1m`` 전 구간 집계로 ``bars_1d`` 를 재작성(백테·선정 단일 소스).
+
+        이미 기준 장마감일 충족이고 1m 대비 일봉이 뒤처지지 않은 종목은 재집계를 생략한다.
+        """
         total = len(codes)
         try:
             sleep_between = float(
@@ -191,13 +233,58 @@ class KiwoomDailyHarvestService:
             sleep_between = 0.02
         sleep_between = max(sleep_between, 0.0)
 
+        integrity_pre = self.check_daily_integrity(codes)
+        stale_or_missing: Set[str] = set(integrity_pre.missing_codes) | set(
+            integrity_pre.stale_codes
+        )
+        needs_any = any(
+            self._code_needs_1m_to_1d_rebuild(str(c).strip().zfill(6), stale_or_missing)
+            for c in codes
+        )
+        if not needs_any:
+            self._safe_log(
+                f"✅ [일봉 준비] 전 종목 이미 동기화 — 1m→1d 재집계 생략 "
+                f"({total}종목, 기준일 {integrity_pre.required_date})"
+            )
+            if progress_callback is not None:
+                try:
+                    progress_callback(0, total, "이미 동기화됨 — 집계 생략")
+                    progress_callback(total, total, f"완료 ({total}/{total})")
+                except Exception:
+                    pass
+            return integrity_pre
+
         self._safe_log(
             f"📥 [일봉 준비] KODEX200 {total}종목 — bars_1m → bars_1d 재집계 "
             f"(동적 백테·선정 동일 파이프라인, 종목 간격 {sleep_between:.3f}s)"
         )
         ok_count = 0
+        skipped = 0
         for idx, code in enumerate(codes, start=1):
             ncode = str(code).strip().zfill(6)
+            if not self._code_needs_1m_to_1d_rebuild(ncode, stale_or_missing):
+                skipped += 1
+                if progress_callback is not None:
+                    try:
+                        progress_callback(
+                            idx - 1, total, f"{ncode} 이미 동기화 — 건너뜀"
+                        )
+                    except Exception:
+                        pass
+                try:
+                    if progress_callback is not None:
+                        progress_callback(
+                            idx, total, f"{ncode} 처리 완료 ({idx}/{total})"
+                        )
+                except Exception:
+                    pass
+                if sleep_between > 0 and idx < total:
+                    try:
+                        time.sleep(sleep_between)
+                    except Exception:
+                        pass
+                continue
+
             if progress_callback is not None:
                 try:
                     progress_callback(idx - 1, total, f"{ncode} 1m→1d 집계 중…")
@@ -228,7 +315,8 @@ class KiwoomDailyHarvestService:
 
         result = self.check_daily_integrity(codes)
         self._safe_log(
-            f"✅ [일봉 준비] 1m→1d 성공 {ok_count}/{total}, "
+            f"✅ [일봉 준비] 1m→1d 재집계 성공 {ok_count}종목, "
+            f"생략 {skipped}종목(이미 동기화), "
             f"완결성 OK {result.ok_codes}/{result.total_codes}"
         )
         return result
