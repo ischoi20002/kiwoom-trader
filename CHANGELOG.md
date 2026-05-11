@@ -13,6 +13,21 @@
 
 ---
 
+## 0.7.9 (2026-05-11)
+
+- **키움 일봉 REST**: `core/kiwoom_daily_bars.py`(`ka10081`, 429 백오프·로그), `core/kiwoom_daily_harvest_service.py`(KODEX200 일봉 준비·완결성 `MAX(datetime)` 수정).
+- **감시 탭 선정**: `monitor_pre_selection_bars_1d_source` / `monitor_pre_selection_rebuild_sleep_sec`(`core/defaults.py`), 진행 표시·`db_only` 선정·`selected_targets.csv` 저장 흐름(`ui/tabs/monitor_tab.py`).
+- **`SelectionService`**: `api_only` 선정 시 `kiwoom_access_token` 전달로 키움 일봉 경로 우선(`core/selection_service.py`).
+- **`strategy_selector`·`data_manager_v2`**: 선정·일봉·키움 호출 페이싱 등 누적 수정.
+- **도구**: `tools/compare_selection_csvs.py`, `tools/compare_selection_sources.py`, `tools/diagnose_daily_bar_sources.py`, `tools/run_daily_selection_from_db.py`(선정 비교·일봉 소스 진단·DB 선정 실행).
+- `monitor_column_widths.json` UI 폭 조정.
+
+## 0.7.8 (2026-05-11)
+
+- 감시 **선정 직전 `bars_1d` 기본 소스**를 **`bars_1m` 전 구간 집계**(`rebuild_daily_bars_from_1m`)로 통일. 동적 백테·`prepare_dynamic_universe`와 동일 파이프라인이라 경로에 관계 없이 일봉 정의가 맞춰짐. 레거시 키움 일봉 직입은 `monitor_pre_selection_bars_1d_source`: `kiwoom_ka10081` 로 선택.
+- `KiwoomDailyHarvestService.check_daily_integrity`: `get_daily_bars(..., limit=1)`(ASC라 **최초** 일자만 조회) 오류를 **`MAX(datetime)`** 기준 최신일 검사로 수정.
+- `monitor_pre_selection_rebuild_sleep_sec`(기본 0.02): 1m→1d 루프 시 종목 간 간격.
+
 ## 0.7.7 (2026-05-11)
 
 - BT-HP 브리지(`realtime_signal_use_bt_hp_bridge`): **S1 신규만**이 아니라 **청산(EXIT)·추매(S2)** 도 동적 백테 `_process_intra_bar_dynamic` 과 동일한 1분 인트라바 루프로 판정. `core/bt_hp_intrabar_unified.py` + `SignalEngine` 포지션 액션 분기. 보유 시 `strategy_engine.evaluate_position` 틱 단발은 동 설정에서 생략(인트라바 결과만 사용).

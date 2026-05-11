@@ -64,6 +64,10 @@ DEFAULT_SETTINGS = {
     "realtime_warmup_retry_delay_sec": 30.0,
     "use_intraday_api_backfill": True,
     "require_full_warmup_for_monitoring": False,
+    # 감시 선정 직전 bars_1d: from_1m_aggregate(백테·prepare_dynamic_universe와 동일, 기본) |
+    # kiwoom_ka10081(키움 REST 일봉 직접·레거시, 1분 집계와 수치가 달라질 수 있음)
+    "monitor_pre_selection_bars_1d_source": "from_1m_aggregate",
+    "monitor_pre_selection_rebuild_sleep_sec": 0.02,
     "incremental_warmup_stream": False,
     # 실시간 틱·UI: 메인스레드 부하 완화 (settings.json 과 동기 권장)
     "realtime_tick_flush_ms": 150,

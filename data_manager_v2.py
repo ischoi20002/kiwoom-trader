@@ -715,6 +715,36 @@ class DataManagerV2:
             ncode = normalize_code(code)
         except Exception:
             return False
+        try:
+            daily = aggregate_daily_ohlcv_from_1m_db(self.db_path, ncode)
+        except Exception as e:
+            try:
+                import logging
+
+                logging.warning(
+                    "rebuild_daily_bars_from_1m 조회/집계 실패 %s: %s",
+                    ncode,
+                    e,
+                    exc_info=True,
+                )
+            except Exception:
+                pass
+            return False
+        if daily is None or daily.empty:
+            return False
+        try:
+            self.save_daily_bars(ncode, daily)
+            return True
+        except Exception as e:
+            try:
+                import logging
+
+                logging.warning(
+                    "rebuild_daily_bars_from_1m 저장 실패 %s: %s", ncode, e, exc_info=True
+                )
+            except Exception:
+                pass
+            return False
 
     def rebuild_daily_bars_from_1m_range(
         self,
@@ -747,27 +777,6 @@ class DataManagerV2:
             self.save_daily_bars(ncode, daily)
             return True
         except Exception:
-            return False
-        try:
-            daily = aggregate_daily_ohlcv_from_1m_db(self.db_path, ncode)
-        except Exception as e:
-            try:
-                import logging
-                logging.warning("rebuild_daily_bars_from_1m 조회/집계 실패 %s: %s", ncode, e, exc_info=True)
-            except Exception:
-                pass
-            return False
-        if daily is None or daily.empty:
-            return False
-        try:
-            self.save_daily_bars(ncode, daily)
-            return True
-        except Exception as e:
-            try:
-                import logging
-                logging.warning("rebuild_daily_bars_from_1m 저장 실패 %s: %s", ncode, e, exc_info=True)
-            except Exception:
-                pass
             return False
 
     def is_daily_bars_behind_1m(self, code: str) -> bool:

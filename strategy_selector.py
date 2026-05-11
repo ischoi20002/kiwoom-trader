@@ -988,7 +988,8 @@ def select_monitoring_targets(
     target_date: Optional[datetime] = None,
     data_manager: Any = None,
     *,
-    selection_ohlcv_source: Literal["db_then_api", "api_only"] = "api_only",
+    selection_ohlcv_source: Literal["db_then_api", "api_only", "db_only"] = "api_only",
+    kiwoom_access_token: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     KOSPI 200을 스캔해 Track A(눌림)·Track B(추세) 유니버스를 **분리** 선정합니다.
@@ -996,10 +997,14 @@ def select_monitoring_targets(
     상위 max_slots_a + max_slots_b 를 합산해 CSV/GUI에 반환합니다.
 
     selection_ohlcv_source:
-        - api_only (기본): 실시간 선정 시 trading_data.db 일봉 미사용(FDR). 배포본 무DB 대응.
+        - api_only (기본): 실시간 선정 시 trading_data.db 일봉 미사용.
+          ``kiwoom_access_token`` 이 있으면 키움 REST ``ka10081`` 일봉,
+          없으면 FDR ``KRX:{종목}`` 일봉(시작·종료일 명시, 접두사 없는 자동경로 미사용).
         - db_then_api: 실시간 선정 시 DB 일봉 우선 + 미갱신이면 SelectionDbStaleError.
           단, bars_1d 가 완전히 비어 있으면 신선도 검사만 생략하고 종목별로 DB→FDR 순으로 채움.
           (target_date 가 지정된 과거 선정은 data_manager 일봉 우선 유지)
+        - db_only: 실시간 선정 시 **로컬 bars_1d 만** 사용(FDR 폴백 없음). 하베스팅 반영분과 1:1 비교용.
+          일봉 종료일은 DB 최신 일자로 고정하며, bars_1d 가 비면 빈 결과로 종료합니다.
     """
     logger_callback("\n" + "="*50)
     t_str = target_date.strftime('%Y-%m-%d') if target_date else "실시간"
@@ -1016,12 +1021,37 @@ def select_monitoring_targets(
         _src = str(selection_ohlcv_source or "api_only").strip().lower()
     except Exception:
         _src = "api_only"
-    api_only_live = _src in ("api_only", "api", "fdr_only", "fdr")
-
+    db_only_no_fdr: bool = _src in ("db_only", "db-only", "local_db_only")
+    api_only_live: bool = (not db_only_no_fdr) and _src in (
+        "api_only",
+        "api",
+        "fdr_only",
+        "fdr",
+    )
+    _kiwoom_tok = (kiwoom_access_token or "").strip()
     if target_date is None and api_only_live:
+        if _kiwoom_tok:
+            logger_callback(
+                "[Select] 실시간 일봉: 키움 REST ka10081 (trading_data.db 미사용)"
+            )
+        else:
+            logger_callback(
+                "[Select] 실시간 일봉: FDR KRX 일봉 (토큰 없음, trading_data.db 미사용)"
+            )
+    elif target_date is None and db_only_no_fdr:
         logger_callback(
-            "[Select] 실시간 일봉: API 전용 모드(trading_data.db 미사용, FDR 일봉 기준)"
+            "[Select] 실시간 일봉: 로컬 DB 전용(trading_data.db bars_1d, FDR 폴백 없음)"
         )
+
+    # db_only: 일봉 조회 상한을 DB 최신 영업일로 맞춤(달력상 '오늘'과 불일치해도 EOD 기준 통일)
+    _eod_anchor: Optional[datetime] = None
+    if db_only_no_fdr and target_date is None and data_manager is not None:
+        try:
+            d_eod = data_manager.get_latest_daily_bar_date_in_db()
+            if d_eod is not None:
+                _eod_anchor = datetime(d_eod.year, d_eod.month, d_eod.day)
+        except Exception:
+            _eod_anchor = None
 
     # [v4.10] 실시간 + db_then_api: 일봉 신선도 검사 (api_only 는 스킵)
     # bars_1d 가 비어 있으면 검사 생략 — 미배포·빈 DB에서도 선정 가능(FDR 폴백)
@@ -1035,6 +1065,11 @@ def select_monitoring_targets(
                 "ℹ️ [선정] 로컬 bars_1d 가 비어 일봉 신선도 검사를 생략합니다. "
                 "(하베스팅 전 DB만 있는 배포 환경에서도 FDR 폴백으로 진행)"
             )
+            if db_only_no_fdr:
+                logger_callback(
+                    "⛔ [선정] db_only 모드는 bars_1d 일봉이 필요합니다. 하베스팅 후 다시 실행하세요."
+                )
+                return pd.DataFrame()
         else:
             try:
                 ok, stale_msg = data_manager.check_daily_bars_fresh_for_selection()
@@ -1241,7 +1276,12 @@ def select_monitoring_targets(
             df = None
             if use_dm_daily:
                 try:
-                    end_dt = target_date if target_date else datetime.now()
+                    if target_date:
+                        end_dt = target_date
+                    elif db_only_no_fdr and _eod_anchor is not None:
+                        end_dt = _eod_anchor
+                    else:
+                        end_dt = datetime.now()
                     end_s = end_dt.strftime('%Y-%m-%d')
                     start_s = (end_dt - timedelta(days=300)).strftime('%Y-%m-%d')
                     df = data_manager.get_daily_bars(code, start_s, end_s)
@@ -1253,19 +1293,108 @@ def select_monitoring_targets(
                     df = None
 
             if df is None or len(df) < 50:
-                # FDR 일봉 (실시간 api_only / DB 부족 시)
+                if db_only_no_fdr:
+                    return None, status
+                # 실시간 api_only: 키움 ka10081(토큰 있을 때) → 없으면 FDR
                 try:
                     end_anchor = target_date if target_date else datetime.now()
                 except Exception:
                     end_anchor = datetime.now()
+                max_d = end_anchor.strftime('%Y-%m-%d')
                 try:
                     start_s = (end_anchor - timedelta(days=250)).strftime('%Y-%m-%d')
                 except Exception:
                     start_s = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
-                try:
-                    df = fdr.DataReader(code, start_s)
-                except Exception:
-                    return None, status
+                if _kiwoom_tok:
+                    try:
+                        from core.kiwoom_daily_bars import fetch_kiwoom_daily_ohlcv_dataframe
+
+                        try:
+                            upd_tp = str(
+                                settings.get("kiwoom_daily_upd_stkpc_tp", "1") or "1"
+                            ).strip()
+                        except Exception:
+                            upd_tp = "1"
+                        try:
+                            _ki_min = float(
+                                settings.get(
+                                    "kiwoom_daily_min_request_interval_sec", 1.1
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            _ki_min = 1.1
+                        _ki_min = max(_ki_min, 0.9)
+                        df = fetch_kiwoom_daily_ohlcv_dataframe(
+                            code,
+                            _kiwoom_tok,
+                            min_date=start_s,
+                            max_date=max_d,
+                            upd_stkpc_tp=upd_tp,
+                            min_request_interval_sec=_ki_min,
+                            max_429_retries_per_page=int(
+                                settings.get("kiwoom_daily_max_429_retries_per_page", 8)
+                            ),
+                            logger_callback=logger_callback,
+                        )
+                    except Exception as _k_err:
+                        try:
+                            logger_callback(
+                                f"  [Warn] {code} 키움 일봉(ka10081) 조회 실패: {_k_err}"
+                            )
+                        except Exception:
+                            pass
+                        df = None
+                    if df is None or len(df) < 50:
+                        return None, status
+                else:
+                    # 접두사 없이 ``DataReader(code)`` 를 쓰면 FDR이 네이버 등 다른 소스로 갈 수 있어
+                    # 거래소 일봉과 선정이 어긋날 수 있음 → ``KRX:`` + (시작, 종료) 명시만 사용.
+                    _raw_lb = settings.get(
+                        "fdr_krx_lookback_days_try", (280, 200, 150, 120)
+                    )
+                    lookbacks: Tuple[int, ...] = ()
+                    if isinstance(_raw_lb, (list, tuple)) and len(_raw_lb) > 0:
+                        try:
+                            lookbacks = tuple(int(x) for x in _raw_lb)
+                        except (TypeError, ValueError):
+                            lookbacks = ()
+                    if not lookbacks:
+                        lookbacks = (280, 200, 150, 120)
+                    df = None
+                    last_err: Optional[BaseException] = None
+                    for lb in lookbacks:
+                        try:
+                            lb_i = int(lb)
+                        except (TypeError, ValueError):
+                            continue
+                        if lb_i < 60:
+                            continue
+                        try:
+                            st = (end_anchor - timedelta(days=lb_i)).strftime('%Y-%m-%d')
+                            df_try = fdr.DataReader(f"KRX:{code}", st, max_d)
+                        except Exception as ex:
+                            last_err = ex
+                            try:
+                                logger_callback(
+                                    f"  [Warn] {code} FDR KRX 일봉({lb_i}일) 조회 실패: {ex}"
+                                )
+                            except Exception:
+                                pass
+                            df = None
+                            continue
+                        if df_try is not None and len(df_try) >= 50:
+                            df = df_try
+                            break
+                        df = None
+                    if df is None or len(df) < 50:
+                        try:
+                            if last_err is not None:
+                                logger_callback(
+                                    f"  [Warn] {code} FDR KRX 일봉 확보 실패(50거래일 미만): {last_err}"
+                                )
+                        except Exception:
+                            pass
+                        return None, status
             
             if df is None or len(df) < 50: return None, status
             
@@ -1369,8 +1498,15 @@ def select_monitoring_targets(
         except Exception:
             return None, status
 
-    # 10개 스레드로 병렬 분석
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    # 병렬 분석 (키움 실시간 일봉은 API 제한 완화를 위해 기본 스레드 수를 낮춤)
+    try:
+        default_workers = 2 if (api_only_live and bool(_kiwoom_tok) and target_date is None) else 10
+        max_workers = int(settings.get("selection_max_workers", default_workers))
+    except Exception:
+        max_workers = 2 if (api_only_live and bool(_kiwoom_tok) and target_date is None) else 10
+    if max_workers < 1:
+        max_workers = 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         raw_results = list(executor.map(process_code, [row for _, row in df_top.iterrows()]))
 
     selected = [r[0] for r in raw_results if r[0] is not None]
@@ -1405,8 +1541,8 @@ def select_monitoring_targets(
     merged_rows = _merge_dual_track_picks(selected, settings, logger_callback)
     df_result = pd.DataFrame(merged_rows)
     if not df_result.empty:
-        # 캐시 저장 (실시간일 때만)
-        if not target_date:
+        # 캐시 저장: 실시간 + API/DB혼합 경로만 (db_only 는 CLI 등에서 별도 경로로 저장)
+        if not target_date and not db_only_no_fdr:
             df_result.to_csv("selected_targets.csv", index=False, encoding="utf-8-sig")
 
     logger_callback(

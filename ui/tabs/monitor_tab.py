@@ -10,11 +10,10 @@ import json
 import time
 import pandas as pd
 from datetime import datetime, timedelta
-import FinanceDataReader as fdr
-
 # Custom modules
 import config
 import strategy_selector
+from core.kiwoom_daily_harvest_service import KiwoomDailyHarvestService
 from core.monitor_code_sets import (
     monitor_selection_codes_set,
     watchlist_only_codes_set,
@@ -908,6 +907,24 @@ class MonitorTab:
         self.ctrl_frame = ttk.Frame(self.mo_main_frame)
         self.ctrl_frame.pack(fill=tk.X, pady=(0, 15))
 
+        # 종목선정 선행 일봉 하베스팅 진행 상태(버튼 클릭 시에만 노출)
+        self.selection_progress_frame = ttk.Frame(self.mo_main_frame)
+        self.selection_progress_frame.pack(fill=tk.X, pady=(0, 8))
+        self.selection_progress_label = ttk.Label(
+            self.selection_progress_frame,
+            text="",
+            font=("Malgun Gothic", 9),
+            foreground=self.app.colors["primary"],
+        )
+        self.selection_progressbar = ttk.Progressbar(
+            self.selection_progress_frame,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            length=260,
+        )
+        self.selection_progress_visible: bool = False
+
         # [임시] 매수신호 없이 주문·체결 흐름 테스트 — 감시/보유 트리에서 행 선택 후 1주 시장가
         test_wrap = ttk.Frame(self.ctrl_frame)
         test_wrap.pack(side=tk.LEFT, padx=(0, 12))
@@ -1187,6 +1204,41 @@ class MonitorTab:
             target=self.select_monitoring_targets, args=(auto_confirm,), daemon=True
         ).start()
 
+    def _set_selection_progress(self, cur: int, total: int, message: str) -> None:
+        """종목선정 선행 하베스팅 진행률 UI 갱신."""
+        try:
+            safe_total = max(int(total), 1)
+            safe_cur = min(max(int(cur), 0), safe_total)
+            pct = int((safe_cur / safe_total) * 100)
+            if not self.selection_progress_visible:
+                self.selection_progress_label.pack(side=tk.TOP, anchor=tk.W)
+                self.selection_progressbar.pack(side=tk.TOP, fill=tk.X)
+                self.selection_progress_visible = True
+            self.selection_progressbar.configure(maximum=safe_total, value=safe_cur)
+            self.selection_progress_label.configure(
+                text=f"⏳ {message} ({safe_cur}/{safe_total}, {pct}%)"
+            )
+        except Exception as e:
+            try:
+                self.app.log(f"⚠️ [선정 진행률] UI 갱신 실패: {e}")
+            except Exception:
+                pass
+
+    def _hide_selection_progress(self, done_message: str = "") -> None:
+        """선정 진행률 표시를 숨깁니다."""
+        try:
+            if done_message:
+                self.lbl_monitor_status.config(
+                    text=f"상태: {done_message}", foreground=self.app.colors["primary"]
+                )
+            self.selection_progress_label.pack_forget()
+            self.selection_progressbar.pack_forget()
+            self.selection_progress_visible = False
+            self.selection_progressbar.configure(value=0)
+            self.selection_progress_label.configure(text="")
+        except Exception:
+            pass
+
     @staticmethod
     def _log_selection_results(app: Any, df: pd.DataFrame) -> None:
         """선정 결과를 로그창에 표 형태로 출력 (팝업 대체)."""
@@ -1237,12 +1289,103 @@ class MonitorTab:
         """선정 스캔 후 로그 출력 + 감시 대상 즉시 등록 (확인 팝업 없음)."""
         df_snap: Optional[pd.DataFrame] = None
         aborted_stale = False
+        def _finalize_ui(done_message: str = "종목 선정 대기") -> None:
+            def _job() -> None:
+                try:
+                    self._hide_selection_progress(done_message)
+                except Exception:
+                    pass
+                try:
+                    if getattr(self, "btn_select", None) is not None:
+                        self.btn_select.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+            try:
+                self.app.root.after(0, _job)
+            except Exception:
+                _job()
+
         try:
+            st_sel = getattr(self.app, "settings", None) or {}
+            mode_raw = str(
+                st_sel.get("monitor_pre_selection_bars_1d_source", "from_1m_aggregate")
+                or "from_1m_aggregate"
+            ).strip().lower()
+            needs_kw_token = mode_raw in ("kiwoom_ka10081", "kiwoom", "ka10081")
+
+            kw_tok: str = ""
+            if needs_kw_token:
+                try:
+                    kw_tok = str(self.app.auth_manager.get_token() or "").strip()
+                except Exception:
+                    kw_tok = ""
+                if not kw_tok:
+                    self.app.log(
+                        "⛔ [선정] 키움 토큰이 없어 키움 일봉(ka10081) 하베스팅을 시작할 수 없습니다. "
+                        "설정 `monitor_pre_selection_bars_1d_source` 를 `from_1m_aggregate` 로 두면 "
+                        "토큰 없이 1분→일봉 집계만 수행합니다."
+                    )
+                    _finalize_ui("키움 토큰 없음")
+                    return
+
+            kodex_codes = strategy_selector.load_kodex200_universe_codes(
+                logger_callback=self.app.log
+            )
+            if not kodex_codes:
+                self.app.log("⛔ [선정] KODEX200 유니버스를 읽지 못해 중단합니다.")
+                _finalize_ui("유니버스 로드 실패")
+                return
+
+            def _progress(cur: int, total: int, msg: str) -> None:
+                try:
+                    self.app.root.after(
+                        0, lambda: self._set_selection_progress(cur, total, msg)
+                    )
+                except Exception:
+                    self._set_selection_progress(cur, total, msg)
+
+            prep_msg = (
+                "키움 일봉 하베스팅 준비"
+                if needs_kw_token
+                else "bars_1m→1d 집계 준비(백테와 동일)"
+            )
+            try:
+                self.app.root.after(
+                    0, lambda: self._set_selection_progress(0, len(kodex_codes), prep_msg)
+                )
+            except Exception:
+                self._set_selection_progress(0, len(kodex_codes), prep_msg)
+
+            harvest_service = KiwoomDailyHarvestService(
+                self.app.data_manager, logger_callback=self.app.log
+            )
+            integrity = harvest_service.harvest_daily_bars_for_codes(
+                codes=kodex_codes,
+                token=kw_tok,
+                settings=self.app.settings,
+                lookback_days=365,
+                progress_callback=_progress,
+            )
+            self.app.log(
+                "📊 [일봉 완결성] "
+                f"OK {integrity.ok_codes}/{integrity.total_codes}, "
+                f"필요 기준일 {integrity.required_date}"
+            )
+            if integrity.missing_codes:
+                self.app.log(
+                    f"⚠️ [일봉 완결성] 미존재 {len(integrity.missing_codes)}종목"
+                )
+            if integrity.stale_codes:
+                self.app.log(
+                    f"⚠️ [일봉 완결성] 기준일 미달 {len(integrity.stale_codes)}종목"
+                )
+
             df_result = strategy_selector.select_monitoring_targets(
                 settings=self.app.settings,
                 logger_callback=self.app.log,
                 data_manager=self.app.data_manager,
-                selection_ohlcv_source="api_only",
+                selection_ohlcv_source="db_only",
+                kiwoom_access_token=None,
             )
             if df_result is not None and not df_result.empty:
                 df_snap = df_result.copy()
@@ -1277,6 +1420,7 @@ class MonitorTab:
             self.app.log(f"DEBUG Traceback:\n{traceback.format_exc()}")
 
         if aborted_stale:
+            _finalize_ui("일봉 DB 미갱신")
             return
 
         def finish_on_main() -> None:
@@ -1285,6 +1429,17 @@ class MonitorTab:
                     self.app.log("⚠️ [선정] 조건에 부합하는 종목이 없습니다.")
                     return
                 self._log_selection_results(self.app, df_snap)
+                # ``db_only`` 경로에서는 strategy_selector 가 CSV를 쓰지 않으므로
+                # GUI 선정 직후 캐시 파일을 여기서 갱신한다(백테·CLI 결과와 비교용).
+                try:
+                    _csv_path = os.path.join(os.getcwd(), "selected_targets.csv")
+                    df_snap.to_csv(_csv_path, index=False, encoding="utf-8-sig")
+                    self.app.log(f"💾 [선정] 결과 저장: {_csv_path}")
+                except Exception as _csv_e:
+                    try:
+                        self.app.log(f"⚠️ [선정] selected_targets.csv 저장 실패: {_csv_e}")
+                    except Exception:
+                        pass
                 self.app.trading_controller.set_monitor_targets(df_snap)
                 self.app.monitor_codes = self.app.trading_controller.monitor_codes
                 self.app.monitor_info = self.app.trading_controller.monitor_info
@@ -1330,17 +1485,7 @@ class MonitorTab:
         except Exception:
             finish_on_main()
 
-        def _reenable_btn() -> None:
-            try:
-                if getattr(self, "btn_select", None) is not None:
-                    self.btn_select.config(state=tk.NORMAL)
-            except Exception:
-                pass
-
-        try:
-            self.app.root.after(0, _reenable_btn)
-        except Exception:
-            _reenable_btn()
+        _finalize_ui("종목 선정 완료")
 
     def get_tree_display_price(self, code: str) -> Optional[float]:
         """
