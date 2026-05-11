@@ -2,6 +2,8 @@
 """
 실시간 체결 틱(호가 제외)을 일자별 JSONL 로 저장합니다.
 
+- **KRX 거래일**이면서 **정규장(09:00~15:30, 로컬 시각)** 인 틱만 기록한다.
+  (장전·시간외·휴장일 등은 저장하지 않음)
 - 웹소켓 콜백 스레드에서 ``record`` 만 호출(블로킹 최소화).
 - 전용 데몬 스레드가 큐에서 배치로 꺼내 파일에 append.
 """
@@ -16,7 +18,36 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from reporting.krx_trading_calendar import is_trading_day
+from utils.krx_session import is_krx_regular_session
 from utils.server_mode_paths import project_root
+
+
+def _should_persist_tick_wall_time(now: datetime) -> bool:
+    """
+    로컬 시각 기준 KRX 거래일·정규장 구간이면 True.
+
+    캘린더 조회 실패 시에도 비정규장·주말은 가능한 한 제외한다.
+    """
+    try:
+        if not is_trading_day(now.date()):
+            return False
+    except Exception:
+        try:
+            if now.weekday() >= 5:
+                return False
+        except Exception:
+            return False
+    try:
+        return bool(is_krx_regular_session(now))
+    except Exception:
+        try:
+            if now.weekday() >= 5:
+                return False
+            hm = now.hour * 60 + now.minute
+            return (9 * 60) <= hm <= (15 * 60 + 30)
+        except Exception:
+            return False
 
 
 class RealtimeTickRecorder:
@@ -172,16 +203,23 @@ class RealtimeTickRecorder:
         """
         체결 1건 기록(호가 전용 패킷은 스킵).
 
+        KRX **거래일·정규장**에 해당할 때만 큐에 넣는다.
+
         ``volume`` 은 키움 누적거래량(cum) 가정(``SignalEngine`` 과 동일).
         """
         if not self._enabled():
             return
         if bool(kwargs.get("_orderbook_only", False)):
             return
+        try:
+            now = datetime.now()
+        except Exception:
+            return
+        if not _should_persist_tick_wall_time(now):
+            return
         self._ensure_thread()
         try:
             nk = str(code).split("_")[0].zfill(6)
-            now = datetime.now()
             day = now.strftime("%Y-%m-%d")
             row: Dict[str, Any] = {
                 "day": day,

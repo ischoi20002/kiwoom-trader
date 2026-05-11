@@ -13,6 +13,10 @@
 
 ---
 
+## 0.7.11 (2026-05-12)
+
+- **실시간 틱 JSONL**: `RealtimeTickRecorder` — KRX **거래일**(`is_trading_day`)이면서 **정규장 09:00~15:30**(로컬 시각, `is_krx_regular_session`)인 체결만 저장. 장전·시간외·휴장일·주말은 기록하지 않음(`core/realtime_tick_recorder.py`).
+
 ## 0.7.10 (2026-05-12)
 
 - **감시 선정 일봉 준비**: `KiwoomDailyHarvestService` — DB가 이미 기준 장마감일·1m 대비 동기화된 종목은 `1m→1d` 재집계·키움 ka10081 호출을 **생략**(`_code_needs_1m_to_1d_rebuild`, 완결성 선검사).
