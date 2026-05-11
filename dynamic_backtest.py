@@ -23,86 +23,18 @@ from backtest_engine import (
 )
 from utils.fee_rates import fee_decimal_rates_backtest
 from utils.krx_bars import m1_window_start_for_15m_end
+from core.bt_hp_signal_bridge import compute_intrabar_indicator_step
+from core.bt_hp_intrabar_unified import (
+    floor_sell_px_to_same_15m_bar,
+    m1_buy_price_conservative,
+    m1_float_ohlc,
+    m1_sell_price_conservative,
+)
 from strategy.synthetic_realtime_fill import (
     synthesize_bid_ask_ratio_vectorized,
     synthesize_vol_power_vectorized,
 )
 from typing import Any, Callable, List, Optional
-
-
-def _m1_sell_price_conservative(m1_r: Any) -> float:
-    """
-    고정밀 1분: 매도 체결·손익(보수적) — 저가(없으면 종가).
-    1분 안에서 낙폭·손절을 가혹히 반영.
-    """
-    try:
-        if m1_r is None:
-            return 0.0
-        c = _m1_float_ohlc(m1_r, "Close", "close", 0.0)
-        v = _m1_float_ohlc(m1_r, "Low", "low", float("nan"))
-        if v > 0 and np.isfinite(v):
-            return float(v)
-        if c > 0:
-            return float(c)
-    except (TypeError, ValueError, KeyError):
-        pass
-    return 0.0
-
-
-def _m1_buy_price_conservative(m1_r: Any) -> float:
-    """
-    고정밀 1분: 매수 체결(보수적) — 고가(없으면 종가).
-    체결가를 불리하게(더 비쌈) 잡기.
-    """
-    try:
-        if m1_r is None:
-            return 0.0
-        c = _m1_float_ohlc(m1_r, "Close", "close", 0.0)
-        v = _m1_float_ohlc(m1_r, "High", "high", float("nan"))
-        if v > 0 and np.isfinite(v):
-            return float(v)
-        if c > 0:
-            return float(c)
-    except (TypeError, ValueError, KeyError):
-        pass
-    return 0.0
-
-
-def _m1_float_ohlc(
-    m1_r: Any, cname: str, cname2: str, default: float
-) -> float:
-    """Series/dict 겸용 OHLC 스칼라 읽기."""
-    try:
-        for name in (cname, cname2):
-            v = None
-            if hasattr(m1_r, "get"):
-                v = m1_r.get(name)
-            elif name in m1_r:
-                v = m1_r[name]
-            if v is not None and not pd.isna(v):
-                f = float(v)
-                if np.isfinite(f):
-                    return f
-    except (TypeError, KeyError, ValueError):
-        pass
-    return float(default)
-
-
-def _floor_sell_px_to_same_15m_bar(px_m1: float, curr_15m: Any) -> float:
-    """
-    동일 15분 구간(curr_15m_time)에 대해: 1·15분 DB 집계가 어긋나 1분 저가가
-    15분 저가보다 밑으로 떨어질 수 없다. 그럴 때 체결·EXIT 판가는 15분 저가를 하한으로 쓴다.
-    (15분 차트 OHL·리포트와의 모순 완화)
-    """
-    try:
-        if curr_15m is None or not (px_m1 > 0) or not np.isfinite(float(px_m1)):
-            return float(px_m1)
-        lo_15 = _m1_float_ohlc(curr_15m, "Low", "low", float("nan"))
-        if lo_15 == lo_15 and lo_15 > 0 and float(px_m1) < float(lo_15):
-            return float(lo_15)
-    except (TypeError, ValueError, KeyError):
-        pass
-    return float(px_m1)
 
 
 def _dual_track_new_candidates(
@@ -1085,7 +1017,13 @@ class DynamicBacktester:
         curr_15m = day_df_15m.loc[curr_15m_time] if day_df_15m is not None and curr_15m_time in day_df_15m.index else None
         
         h_info = self.holdings.get(code)
-        
+        # 동적 고정밀 인트라바 지표: `core.bt_hp_signal_bridge` 와 실시간 감시가 동일 구현을 공유
+        _intrabar_holder: dict[str, Any] = {
+            "initialized": False,
+            "last_15m_dict": None,
+            "prices_tail": None,
+        }
+
         # [v36.2] 단일 루프 구조로 개편하여 모든 종목에 대해 1분 단위 시뮬레이션 수행
         for m1_idx in range(len(m1_chunk)):
             m1_r = m1_chunk.iloc[m1_idx]
@@ -1096,41 +1034,14 @@ class DynamicBacktester:
             indicator_to_use = curr_15m # Fallback
             
             if full_15m is not None and curr_15m is not None:
-                # [Perf] Pre-calculate values needed for incremental update once per 15m bar
-                if m1_idx == 0:
-                    base_idx = full_15m.index.get_loc(curr_15m.name)
-                    # prev_15m is the last finished bar
-                    prev_idx = max(0, base_idx - 1)
-                    self._last_15m_dict = full_15m.iloc[prev_idx].to_dict()
-                    
-                    # Pre-calculate sums for MA
-                    self._prices_tail = {
-                        5: full_15m['Close'].iloc[max(0, base_idx-4):base_idx].sum(),
-                        20: full_15m['Close'].iloc[max(0, base_idx-19):base_idx].sum(),
-                        60: full_15m['Close'].iloc[max(0, base_idx-59):base_idx].sum(),
-                        'rsi_vals': full_15m['Close'].iloc[max(0, base_idx-15):base_idx].values
-                    }
-                
-                sim_15m = TradingStrategy.simulate_intrabar_indicators(self._last_15m_dict, m1_r, self.settings, hist_df_prices_tail=self._prices_tail)
-                
-                if sim_15m is not None:
-                    # Sync static fields from current 15m bar
-                    for k in [
-                        "Signal",
-                        "Ready",
-                        "Sig_Type",
-                        "S1_Simultaneous_AB",
-                        "Volume",
-                        "Prev_Day_Vol",
-                        "Prev_Day_Vol_B",
-                        "Prev_Day_Vol_S1_A",
-                        "Prev_Day_Vol_S1_B",
-                        "Prev_Day_Vol_S2_A",
-                        "Prev_Day_Vol_S2_B",
-                        "Vol_MA20",
-                    ]:
-                        if k in curr_15m: sim_15m[k] = curr_15m[k]
-                    indicator_to_use = sim_15m
+                indicator_to_use = compute_intrabar_indicator_step(
+                    self.settings,
+                    full_15m,
+                    curr_15m,
+                    m1_chunk,
+                    m1_idx,
+                    _intrabar_holder,
+                )
 
             # 1. 매도(Exit) 감시 - 보유 중인 경우 최우선 순위
             if h_info is not None:
@@ -1138,8 +1049,8 @@ class DynamicBacktester:
                 if m1_r['High'] > h_info['max_p']: h_info['max_p'] = m1_r['High']
                 
                 # 보수적 백테: EXIT 판가·체결을 1분 저가 기준(종가 X)
-                px_sell = _m1_sell_price_conservative(m1_r)
-                px_sell = _floor_sell_px_to_same_15m_bar(px_sell, curr_15m)
+                px_sell = m1_sell_price_conservative(m1_r)
+                px_sell = floor_sell_px_to_same_15m_bar(px_sell, curr_15m)
                 # 1분 단위 정밀 매도 평가 (indicator_to_use에 시뮬레이션 데이터 전달)
                 res = TradingStrategy.evaluate_position(
                     code, px_sell, h_info, self.settings,
@@ -1232,7 +1143,7 @@ class DynamicBacktester:
                             m1_time,
                             m1_r,
                             indicator_row=indicator_to_use,
-                            fill_price=_m1_buy_price_conservative(m1_r),
+                            fill_price=m1_buy_price_conservative(m1_r),
                         )
                         if executed:
                             return # 매수 실제 체결된 경우에만 해당 15분 청크 종료

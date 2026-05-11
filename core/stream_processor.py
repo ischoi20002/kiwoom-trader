@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pandas as pd
 from backtest_engine import TradingStrategy
@@ -22,16 +22,35 @@ class StreamProcessor:
         logger_callback=None,
         on_fifteen_min_bar_closed=None,
         bars_data_lock=None,
+        tick_m1_store=None,
     ):
         self.settings = settings
         self.logger = logger_callback or print
         # (code, bar_index_ts, open, high, low, close, volume) — 슬롯이 바뀔 때 직전 봉 확정 시 1회
         self._on_bar_closed = on_fifteen_min_bar_closed
         self._bars_data_lock = bars_data_lock
+        # BT-HP 브리지용 1분봉: 15분 DF 갱신과 동일 틱에서 O(1) 갱신(API 미사용)
+        self._tick_m1_store: Optional[Any] = tick_m1_store
 
     def log(self, message):
         if self.logger:
             self.logger(message)
+
+    def _maybe_feed_tick_m1(
+        self, code: str, price: Any, volume: Any, now: datetime
+    ) -> None:
+        """실시간 1분 OHLCV 스토어에 동일 틱을 반영합니다."""
+        st = self._tick_m1_store
+        if st is None:
+            return
+        try:
+            st.feed_tick(str(code), float(price), float(volume), now=now)
+        except (TypeError, ValueError, AttributeError) as e:
+            if self.logger:
+                try:
+                    self.logger(f"⚠️ [Stream] tick_m1_store.feed_tick 실패 ({code}): {e!r}")
+                except Exception:
+                    pass
 
     @staticmethod
     def _scalar_cell(df, idx, col: str):
@@ -81,6 +100,7 @@ class StreamProcessor:
             new_df['datetime'] = pd.to_datetime(new_df['datetime'])
             new_df.set_index('datetime', inplace=True)
             bars_data[code] = new_df
+            self._maybe_feed_tick_m1(code, price, volume, now)
             return bars_data
         
         last_idx = df.index[-1]
@@ -167,6 +187,7 @@ class StreamProcessor:
             df['ma60'] = df['Close'].rolling(window=60).mean()
             
             bars_data[code] = df
+        self._maybe_feed_tick_m1(code, price, volume, now)
         return bars_data
 
     def calculate_indicators(self, df, period=None):

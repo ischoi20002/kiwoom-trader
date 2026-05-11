@@ -6,6 +6,8 @@ __pycache__/
 trading_data.db
 # 실시간 15분봉 전용 DB
 realtime_15m*.db
+# 실시간 체결 틱 JSONL (용량 큼)
+realtime_tick_logs/
 # 기타 로컬 SQLite (KTrader 등)
 KTrader.db
 trading_state_live.db

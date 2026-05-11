@@ -30,6 +30,21 @@ DEFAULT_SETTINGS = {
     "type_balance_a_pct": 40.0,
     "min_15m_bars_for_signal": 60,
     "s1_buy_signal_cooldown_sec": 1800.0,
+    # True: S1 신규 매수는 동적 백테 고정밀과 동일(1m + 인트라바 시뮬) 판정. False: 기존 틱 기반 신호.
+    "realtime_signal_use_bt_hp_bridge": False,
+    # 브리지 1분: 기본은 실시간 틱 집계(rt_tick_m1_store). API 지연 없음.
+    "realtime_signal_bt_hp_bridge_use_tick_1m": True,
+    "realtime_signal_bt_hp_bridge_tick_m1_max_rows": 24,
+    # True면 틱이 t_hi 까지 못 미칠 때만 ka10080 보강(지연·스로틀 감수). 운영 기본 OFF.
+    "realtime_signal_bt_hp_bridge_use_rest_1m": False,
+    "realtime_signal_bt_hp_bridge_ka10080_max_pages": 15,
+    # True일 때만 trading_data.db bars_1m 을 읽어 병합(로컬 분석·재현용).
+    "realtime_signal_bt_hp_bridge_use_trading_db_1m": False,
+    # 실시간 체결 틱 JSONL(호가 전용 패킷 제외). 디스크 사용 — 필요 시 True.
+    "realtime_tick_recorder_enabled": False,
+    "realtime_tick_recorder_subdir": "realtime_tick_logs",
+    "realtime_tick_recorder_batch_max": 500,
+    "realtime_tick_recorder_flush_wait_sec": 0.5,
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,
     "realtime_15m_calendar_retention_days": 365,

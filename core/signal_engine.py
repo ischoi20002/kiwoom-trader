@@ -1,3 +1,4 @@
+import copy
 import pandas as pd
 import numpy as np
 import threading
@@ -12,7 +13,13 @@ from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
 from utils.bars_data_keys import resolve_bars_data_frame
 from utils.normalization import canonical_stock_code
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+from core.bt_hp_intrabar_unified import evaluate_bt_hp_intrabar_unified
+from core.bt_hp_signal_bridge import (
+    resolve_m1_chunk_for_bt_hp_bridge,
+    sel_track_to_bt_code_track,
+)
 
 class SignalEngine:
     """[v25.7] 실시간 체결 데이터 분석 및 시그널 포착 엔진 클래스"""
@@ -173,6 +180,123 @@ class SignalEngine:
         except Exception:
             return ""
 
+    def _maybe_refresh_bt_hp_bridge_eval(
+        self,
+        code: str,
+        bars_15m: Any,
+        info: dict,
+        need_full_calc: bool,
+        slot_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        동적 백테 고정밀과 동일한 1m 인트라바 시뮬(신규 S1·추매 S2·청산 EXIT).
+
+        - 1분 청크: 틱 집계 `rt_tick_m1_store` 기본(REST/백테 DB는 설정으로).
+        - 반환 dict 는 UI·S1 호환 키 + ``unified`` 원본(청산·S2 판단용).
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            if not bool(st.get("realtime_signal_use_bt_hp_bridge", False)):
+                return None
+            dm = getattr(self.app, "data_manager", None)
+            if dm is None or bars_15m is None or getattr(bars_15m, "empty", True):
+                return None
+
+            curr_ts = pd.Timestamp(bars_15m.index[-1])
+            now_cap = pd.Timestamp.now()
+            m1_last = ""
+            try:
+                tok: Optional[str] = None
+                try:
+                    fn_tok = getattr(self.app, "get_auth_token", None)
+                    if callable(fn_tok):
+                        tok = fn_tok()
+                except Exception:
+                    tok = None
+                rt_m1 = getattr(self.app, "rt_tick_m1_store", None)
+                m1_chunk = resolve_m1_chunk_for_bt_hp_bridge(
+                    dm,
+                    str(code).zfill(6),
+                    tok,
+                    curr_ts,
+                    now_cap,
+                    st,
+                    rt_m1_store=rt_m1,
+                )
+                if m1_chunk is None or getattr(m1_chunk, "empty", True):
+                    return None
+                m1_last = str(m1_chunk.index[-1])
+            except (TypeError, ValueError, OSError, AttributeError):
+                return None
+
+            pf = ""
+            try:
+                if self._has_open_position(code):
+                    ps = self._bt_hp_position_snapshot(code)
+                    if isinstance(ps, dict):
+                        pf = f"|{int(ps.get('entry_n', 1) or 1)}|{float(ps.get('max_p', 0) or 0):.0f}"
+            except Exception:
+                pf = ""
+            fp = f"{slot_key}|{m1_last}{pf}"
+            prev_fp = str(info.get("_bt_hp_m1_fp") or "")
+            cached = info.get("_bt_hp_eval_cache")
+            if (
+                (not need_full_calc)
+                and prev_fp == fp
+                and isinstance(cached, dict)
+            ):
+                return cached
+
+            ct = sel_track_to_bt_code_track(
+                info.get("sel_track") or info.get("SelTrack")
+            )
+            pos_snap = (
+                self._bt_hp_position_snapshot(code)
+                if self._has_open_position(code)
+                else None
+            )
+            uni = evaluate_bt_hp_intrabar_unified(
+                st,
+                str(code).zfill(6),
+                bars_15m,
+                m1_chunk,
+                pos_snap,
+                ct,
+            )
+            if not isinstance(uni, dict) or not uni.get("ok"):
+                return None
+
+            s1e = uni.get("s1_eval") if isinstance(uni.get("s1_eval"), dict) else {}
+            ind_last = (
+                uni.get("indicator_last")
+                if isinstance(uni.get("indicator_last"), dict)
+                else {}
+            )
+            ind_for_row: Dict[str, Any] = {}
+            if pos_snap is None:
+                ind_for_row = (
+                    dict(s1e.get("indicator_to_use") or {})
+                    if isinstance(s1e.get("indicator_to_use"), dict)
+                    else dict(ind_last)
+                )
+            else:
+                ind_for_row = dict(ind_last) if ind_last else {}
+
+            res: Dict[str, Any] = {
+                "ok": True,
+                "unified": uni,
+                "indicator_to_use": ind_for_row,
+                "can_execute_entry": bool(s1e.get("can_execute_entry", False)),
+                "is_buy_signal": bool(s1e.get("is_buy_signal", False)),
+                "sig_type": str(s1e.get("sig_type") or "TYPE_B"),
+                "reason": str(s1e.get("reason") or ""),
+            }
+            info["_bt_hp_m1_fp"] = fp
+            info["_bt_hp_eval_cache"] = res
+            return res
+        except (TypeError, ValueError, KeyError, AttributeError, OSError):
+            return None
+
     def _to_scalar(self, val, default=0):
         """[v4.5.9] 헬퍼: Series/DF/Numpy 등 어떤 형태에서든 안전하게 단일 스칼라 값 추출"""
         if val is None: return default
@@ -256,6 +380,28 @@ class SignalEngine:
         except Exception:
             pass
         return False
+
+    def _bt_hp_position_snapshot(self, code: str) -> Optional[Dict[str, Any]]:
+        """BT-HP 인트라바 시뮬용 포지션 딥카피(실제 virtual_positions 는 변경하지 않음)."""
+        try:
+            vp = getattr(self.app, "virtual_positions", None) or {}
+            if not vp:
+                return None
+            nk = str(code).split("_")[0].zfill(6)
+            pos = vp.get(code) or vp.get(nk)
+            if pos is None:
+                for k, v in vp.items():
+                    try:
+                        if str(k).split("_")[0].zfill(6) == nk:
+                            pos = v
+                            break
+                    except Exception:
+                        continue
+            if not isinstance(pos, dict):
+                return None
+            return copy.deepcopy(pos)
+        except Exception:
+            return None
 
     def _resolve_monitor_info_dict_key(self, nk: str) -> Optional[str]:
         """
@@ -674,8 +820,76 @@ class SignalEngine:
 
                 last_sig: dict = {}
                 last_row = cached_last_row
+                _use_bt_hp = False
+                _bt_hp_res: Optional[Dict[str, Any]] = None
+                try:
+                    sk_bt = ""
+                    try:
+                        sk_bt = self._current_slot_key_from_bars(_bd) or ""
+                    except Exception:
+                        sk_bt = ""
+                    _bt_hp_res = self._maybe_refresh_bt_hp_bridge_eval(
+                        code, _bd, info, need_full_calc, sk_bt
+                    )
+                    if (
+                        _bt_hp_res is not None
+                        and _bt_hp_res.get("ok")
+                        and isinstance(_bt_hp_res.get("indicator_to_use"), dict)
+                    ):
+                        _use_bt_hp = True
+                except Exception:
+                    _use_bt_hp = False
+                    _bt_hp_res = None
 
-                if need_full_calc:
+                if _use_bt_hp and _bt_hp_res is not None:
+                    ind_bt = dict(_bt_hp_res["indicator_to_use"])
+                    last_row = ind_bt
+                    st_sig = str(_bt_hp_res.get("sig_type") or "TYPE_B")
+                    last_sig = {
+                        "Signal": bool(ind_bt.get("Signal", False)),
+                        "Ready": bool(ind_bt.get("Ready", False)),
+                        "Sig_Type": st_sig,
+                        "Met_Ratio": float(
+                            self._to_scalar(ind_bt.get("Met_Ratio", 0.0), 0.0)
+                        ),
+                    }
+                    is_buy = bool(_bt_hp_res.get("can_execute_entry", False))
+                    _sel_tr = str(
+                        info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                    ).strip().upper()
+                    try:
+                        info["confluence"] = self._format_s1_confluence_status_line(
+                            last_sig, _sel_tr
+                        )
+                    except Exception:
+                        info["confluence"] = "BT-HP 동기"
+                    try:
+                        if not is_buy and str(_bt_hp_res.get("reason") or "") == "smart_buy_blocked":
+                            info["confluence"] = "수급 대기(BT-HP)"
+                    except Exception:
+                        pass
+                    info["met_ratio"] = float(
+                        self._to_scalar(last_sig.get("Met_Ratio"), 0.0)
+                    )
+                    rsi_sig = float(
+                        self._to_scalar(
+                            ind_bt.get("RSI_Sig", ind_bt.get("RSI", 0)), 0.0
+                        )
+                    )
+                    macd_val = float(self._to_scalar(ind_bt.get("MACD", 0), 0.0))
+                    osc_val = float(self._to_scalar(ind_bt.get("OSC", 0), 0.0))
+                    ma60_scalar = float(self._to_scalar(ind_bt.get("MA60", 0), 0.0))
+                    ma60_ratio = (
+                        (now_price / ma60_scalar) * 100.0 if ma60_scalar > 0 else 0.0
+                    )
+                    try:
+                        info["last_row_cache"] = last_row
+                        info["last_sig_cache"] = last_sig
+                    except Exception:
+                        pass
+                    if need_full_calc:
+                        self._s1_full_calc_last_ts[code] = now_ts
+                elif not _use_bt_hp and need_full_calc:
                     _src_df = self.app.bars_data.get(bars_key) if bars_key else None
                     if _src_df is None:
                         _src_df = _bd
@@ -744,7 +958,7 @@ class SignalEngine:
                         ma60_ratio = (
                             (now_price / ma60_scalar) * 100.0 if ma60_scalar > 0 else 0.0
                         )
-                else:
+                elif not _use_bt_hp:
                     # 캐시 재사용 경로
                     last_sig = cached_last_sig_cache if isinstance(cached_last_sig_cache, dict) else {}
                     last_row = cached_last_row
@@ -872,105 +1086,115 @@ class SignalEngine:
                                 except Exception:
                                     pass
 
-                    # 관심목록 전용: Type B 매수 신호만 (감시와 동일 필터 후 B만)
-                    if is_wl_only and is_buy:
-                        _st_wl = str(self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B"))
-                        if "TYPE_B" not in _st_wl.upper():
-                            is_buy = False
-
-                    # 정규장 외(장전·장후): 매수·알림 전에 차단 (합치도 문구만 통일)
-                    if not _session_ok:
-                        info["confluence"] = "⏳ 정규장 외(실시간 체결 미진행) · 봉 준비"
-                        info["met_ratio"] = 0.0
+                # 관심목록 전용: Type B 매수 신호만 (감시와 동일 필터 후 B만)
+                if is_wl_only and is_buy:
+                    _st_wl = str(self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B"))
+                    if "TYPE_B" not in _st_wl.upper():
                         is_buy = False
 
-                    # 쿨타임 및 중복 진입 방지
-                    _cool_sec = self._s1_buy_signal_cooldown_sec()
-                    is_cool = True
-                    if code in self.last_buy_sig_time:
-                        if (datetime.now() - self.last_buy_sig_time[code]).total_seconds() < _cool_sec:
-                            is_cool = False
+                # 정규장 외(장전·장후): 매수·알림 전에 차단 (합치도 문구만 통일)
+                if not _session_ok:
+                    info["confluence"] = "⏳ 정규장 외(실시간 체결 미진행) · 봉 준비"
+                    info["met_ratio"] = 0.0
+                    is_buy = False
+
+                # 쿨타임 및 중복 진입 방지
+                _cool_sec = self._s1_buy_signal_cooldown_sec()
+                is_cool = True
+                if code in self.last_buy_sig_time:
+                    if (datetime.now() - self.last_buy_sig_time[code]).total_seconds() < _cool_sec:
+                        is_cool = False
                 
-                    if is_buy and is_cool and (not is_wl_only) and code not in self.app.virtual_positions:
+                if is_buy and is_cool and (not is_wl_only) and code not in self.app.virtual_positions:
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "signal_s1_raw",
+                                {
+                                    "code": code,
+                                    "name": str(info.get("name", "")),
+                                    "price": float(now_price),
+                                    "met_ratio": float(
+                                        self._to_scalar(info.get("met_ratio", 0.0), 0.0)
+                                    ),
+                                    "confluence": str(info.get("confluence", "")),
+                                },
+                            )
+                    except Exception:
+                        pass
+                    buy_ok = False
+                    if defer_main_callbacks:
                         try:
-                            sl = getattr(self.app, "session_logger", None)
-                            if sl:
-                                sl.log(
-                                    "signal_s1_raw",
-                                    {
-                                        "code": code,
-                                        "name": str(info.get("name", "")),
-                                        "price": float(now_price),
-                                        "met_ratio": float(
-                                            self._to_scalar(info.get("met_ratio", 0.0), 0.0)
-                                        ),
-                                        "confluence": str(info.get("confluence", "")),
-                                    },
-                                )
+                            # 메인 처리 전 동일 종목이 연속 큐 적재되는 것을 막기 위해 쿨타임 앵커를 먼저 둡니다.
+                            self.last_buy_sig_time[code] = datetime.now()
+                            self.app.enqueue_tick_main_action(
+                                "buy_signal",
+                                (
+                                    str(code).zfill(6),
+                                    float(now_price),
+                                    float(rsi_sig),
+                                    float(macd_val),
+                                    float(osc_val),
+                                    float(ma60_ratio),
+                                ),
+                            )
                         except Exception:
                             pass
-                        buy_ok = False
-                        if defer_main_callbacks:
-                            try:
-                                # 메인 처리 전 동일 종목이 연속 큐 적재되는 것을 막기 위해 쿨타임 앵커를 먼저 둡니다.
-                                self.last_buy_sig_time[code] = datetime.now()
-                                self.app.enqueue_tick_main_action(
-                                    "buy_signal",
-                                    (
-                                        str(code).zfill(6),
-                                        float(now_price),
-                                        float(rsi_sig),
-                                        float(macd_val),
-                                        float(osc_val),
-                                        float(ma60_ratio),
-                                    ),
+                    else:
+                        try:
+                            buy_ok = bool(
+                                self.app._on_buy_signal_received(
+                                    code,
+                                    now_price,
+                                    rsi_sig,
+                                    macd_val,
+                                    osc_val,
+                                    ma60_ratio,
                                 )
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                buy_ok = bool(
-                                    self.app._on_buy_signal_received(
-                                        code,
-                                        now_price,
-                                        rsi_sig,
-                                        macd_val,
-                                        osc_val,
-                                        ma60_ratio,
-                                    )
-                                )
-                            except Exception:
-                                buy_ok = False
-                            if buy_ok:
-                                self.last_buy_sig_time[code] = datetime.now()
-
-                    # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
-                    if is_wl_only and is_buy and is_cool and not has_wl_avg:
-                        _t_wb = self._wl_buy_last_tm.get(code)
-                        if _t_wb is None or (datetime.now() - _t_wb).total_seconds() >= _cool_sec:
-                            self._wl_buy_last_tm[code] = datetime.now()
-                            try:
-                                _nm = self.app.watchlist_store.get_display_name(code)
-                            except Exception:
-                                _nm = str(info.get("name", code))
-                            _mr = float(self._to_scalar(info.get("met_ratio", 0.0), 0.0))
-                            _msg = (
-                                "<b>⭐ [텔레그램·관심목록 전용]</b>\n"
-                                "<i>감시 자동매매/주문과 별도 채널 (알림만)</i>\n\n"
-                                "<b>TYPE B 매수 신호</b>\n"
-                                f"종목: {_nm} ({code})\n"
-                                f"가: {int(now_price):,}원\n"
-                                f"합치도: {_mr * 100:.0f}%\n"
-                                f"시간: {datetime.now().strftime('%H:%M:%S')}"
                             )
-                            threading.Thread(
-                                target=self._send_watchlist_telegram,
-                                args=(_msg,),
-                                daemon=True,
-                            ).start()
+                        except Exception:
+                            buy_ok = False
+                        if buy_ok:
+                            self.last_buy_sig_time[code] = datetime.now()
+
+                # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
+                if is_wl_only and is_buy and is_cool and not has_wl_avg:
+                    _t_wb = self._wl_buy_last_tm.get(code)
+                    if _t_wb is None or (datetime.now() - _t_wb).total_seconds() >= _cool_sec:
+                        self._wl_buy_last_tm[code] = datetime.now()
+                        try:
+                            _nm = self.app.watchlist_store.get_display_name(code)
+                        except Exception:
+                            _nm = str(info.get("name", code))
+                        _mr = float(self._to_scalar(info.get("met_ratio", 0.0), 0.0))
+                        _msg = (
+                            "<b>⭐ [텔레그램·관심목록 전용]</b>\n"
+                            "<i>감시 자동매매/주문과 별도 채널 (알림만)</i>\n\n"
+                            "<b>TYPE B 매수 신호</b>\n"
+                            f"종목: {_nm} ({code})\n"
+                            f"가: {int(now_price):,}원\n"
+                            f"합치도: {_mr * 100:.0f}%\n"
+                            f"시간: {datetime.now().strftime('%H:%M:%S')}"
+                        )
+                        threading.Thread(
+                            target=self._send_watchlist_telegram,
+                            args=(_msg,),
+                            daemon=True,
+                        ).start()
+                try:
+                    info["_bt_hp_bridge_res"] = (
+                        _bt_hp_res if (_use_bt_hp and _bt_hp_res) else None
+                    )
+                except Exception:
+                    pass
             else:
                 info['confluence'] = f"봉 충전 {current_bar_count}/{_min_sig_bars} (신호·매매 대기)"
                 info['met_ratio'] = 0.0
+                try:
+                    info["_bt_hp_bridge_res"] = None
+                except Exception:
+                    pass
 
             # 청산·S2 표시 공통: 마지막 지표 행 (봉 부족 시 보유면 보조 계산)
             eval_ind: Optional[dict] = None
@@ -1035,16 +1259,66 @@ class SignalEngine:
                 last_eval_ts = float(self._eval_position_last_ts.get(code, 0.0) or 0.0)
                 if (now_ts - last_eval_ts) >= self._realtime_eval_position_min_interval_sec:
                     self._eval_position_last_ts[code] = now_ts
-                    res = self.app.strategy_engine.evaluate_position(
-                        code,
-                        now_price,
-                        ind=eval_ind,
-                        is_power_exhausted=is_power_exhausted,
-                        bid_ask_ratio=bid_ask_ratio,
-                        ask_bid_ratio=ask_bid_ratio,
-                        vol_power=vol_power,
-                        sel_track=info.get("sel_track") or info.get("SelTrack"),
-                    )
+                    res: Dict[str, Any] = {"action": "HOLD"}
+                    try:
+                        br_hp = info.get("_bt_hp_bridge_res")
+                        uni_hp = (
+                            br_hp.get("unified")
+                            if isinstance(br_hp, dict)
+                            else None
+                        )
+                        st_hp = getattr(self.app, "settings", None) or {}
+                        use_ib = bool(
+                            st_hp.get("realtime_signal_use_bt_hp_bridge", False)
+                        ) and isinstance(uni_hp, dict) and bool(uni_hp.get("ok"))
+                        if use_ib and self._has_open_position(code):
+                            ex0 = uni_hp.get("exit_first")
+                            ad0 = uni_hp.get("stage2_addon")
+                            if isinstance(ex0, dict):
+                                res = {
+                                    "action": "EXIT",
+                                    "reason": str(ex0.get("reason") or "EXIT"),
+                                    "profit_ratio": float(
+                                        ex0.get("profit_ratio", 0) or 0
+                                    ),
+                                }
+                            elif isinstance(ad0, dict):
+                                res = {
+                                    "action": "STAGE2",
+                                    "reason": str(
+                                        ad0.get("reason") or "PROFIT_TRIGGER"
+                                    ),
+                                    "profit_ratio": 0.0,
+                                }
+                            else:
+                                res = {"action": "HOLD"}
+                        else:
+                            res = self.app.strategy_engine.evaluate_position(
+                                code,
+                                now_price,
+                                ind=eval_ind,
+                                is_power_exhausted=is_power_exhausted,
+                                bid_ask_ratio=bid_ask_ratio,
+                                ask_bid_ratio=ask_bid_ratio,
+                                vol_power=vol_power,
+                                sel_track=info.get("sel_track")
+                                or info.get("SelTrack"),
+                            )
+                    except Exception:
+                        try:
+                            res = self.app.strategy_engine.evaluate_position(
+                                code,
+                                now_price,
+                                ind=eval_ind,
+                                is_power_exhausted=is_power_exhausted,
+                                bid_ask_ratio=bid_ask_ratio,
+                                ask_bid_ratio=ask_bid_ratio,
+                                vol_power=vol_power,
+                                sel_track=info.get("sel_track")
+                                or info.get("SelTrack"),
+                            )
+                        except Exception:
+                            res = {"action": "HOLD"}
                     if res.get("action") != "HOLD":
                         if defer_main_callbacks:
                             try:

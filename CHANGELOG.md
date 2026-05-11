@@ -13,6 +13,35 @@
 
 ---
 
+## 0.7.7 (2026-05-11)
+
+- BT-HP 브리지(`realtime_signal_use_bt_hp_bridge`): **S1 신규만**이 아니라 **청산(EXIT)·추매(S2)** 도 동적 백테 `_process_intra_bar_dynamic` 과 동일한 1분 인트라바 루프로 판정. `core/bt_hp_intrabar_unified.py` + `SignalEngine` 포지션 액션 분기. 보유 시 `strategy_engine.evaluate_position` 틱 단발은 동 설정에서 생략(인트라바 결과만 사용).
+- `dynamic_backtest.py`: 1분 보수적 체결가 헬퍼를 `bt_hp_intrabar_unified` 로 이관·공유.
+
+## 0.7.6 (2026-05-11)
+
+- 실시간 **체결 틱 저장**: `core/realtime_tick_recorder.py` + `KiwoomApp._on_realtime_data_received`. 호가 전용(`_orderbook_only`)은 제외. 일자별 `realtime_tick_logs/YYYY-MM-DD_trades_{mock|live}.jsonl`. 설정 `realtime_tick_recorder_enabled`(기본 False), `realtime_tick_recorder_subdir`, `realtime_tick_recorder_batch_max`, `realtime_tick_recorder_flush_wait_sec`. 종료 시 큐 flush.
+
+## 0.7.5 (2026-05-11)
+
+- BT-HP 브리지 1분: **실시간 틱 집계**(`core/rt_tick_m1_store.py` + `StreamProcessor` 동일 틱 feed). HTTP 지연 없음. `realtime_signal_bt_hp_bridge_use_tick_1m`(기본 True), `realtime_signal_bt_hp_bridge_tick_m1_max_rows`(기본 24). `realtime_signal_bt_hp_bridge_use_rest_1m` 기본 **False**(필요 시에만 ka10080 보강).
+
+## 0.7.4 (2026-05-11)
+
+- BT-HP 브리지: **`trading_data.db` 의존 제거(운영 기본)**. (후속 v0.7.5에서 1분 소스를 **틱 집계**로 전환, ka10080 는 선택 보강.)
+
+## 0.7.3 (2026-05-11)
+
+- BT-HP 브리지: **`ka10080`(tic_scope=1)** 로 당일 1분 구간 REST 조회·병합 경로 추가(`resolve_m1_chunk_for_bt_hp_bridge`). 설정 `realtime_signal_bt_hp_bridge_use_rest_1m`(기본 True), `realtime_signal_bt_hp_bridge_ka10080_max_pages`(기본 15). (v0.7.4에서 운영은 `trading_data.db` 없이 ka10080 전용으로 정리.)
+
+## 0.7.2 (2026-05-11)
+
+- 실시간 S1 신규 매수를 **동적 백테 고정밀과 동일 로직**으로 맞출 수 있는 옵션 추가:
+  - `core/bt_hp_signal_bridge.py`: `compute_intrabar_indicator_step`(인트라바 지표) + `evaluate_bt_hp_s1_new_entry_only`(Signal∧Ready·트랙·스마트바이) + 1분 구간 조회(당시는 DB 전용, v0.7.3에서 REST 보강).
+  - `dynamic_backtest._process_intra_bar_dynamic`는 위 브리지의 `compute_intrabar_indicator_step`를 호출하도록 위임(백테 결과·판정 방식 유지).
+  - `SignalEngine`: `realtime_signal_use_bt_hp_bridge`(기본 `False`)가 `True`이고 DB 1분 구간이 있으면 해당 판정으로 `is_buy` 등을 채우고, 관심목록/정규장/쿨다운/주문 경로는 기존과 동일.
+  - `core/defaults.py`에 기본 키 추가.
+
 ## 0.7.1 (2026-05-11)
 
 - 실시간 감시 웹소켓(`ui/tabs/monitor_tab.py`):
