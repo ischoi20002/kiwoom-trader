@@ -13,6 +13,12 @@
 
 ---
 
+## 0.8.2 (2026-05-13)
+
+- **일일 감시목록 선정**: 선행 **일봉 DB 하베스팅 제거**, `select_monitoring_targets(..., api_only, kiwoom_access_token=None)` 로 **FDR 일봉만** 사용(`ui/tabs/monitor_tab.py`, `core/selection_service.py`).
+- **`KiwoomDailyHarvestService` 제거**: `core/kiwoom_daily_harvest_service.py` 삭제(감시 탭이 유일 호출부였음).
+- **FDR 일봉 조회**: `KRX:{코드}` 경로가 KRX 포털 **400·본문 LOGOUT** 으로 실패하는 경우가 많아, **6자리 종목코드 + (시작, 종료)** 직접 `DataReader` 호출로 변경(`strategy_selector.py`).
+
 ## 0.8.1 (2026-05-12)
 
 - **실시간 체결 틱 JSONL 디스크 저장 제거**: `core/realtime_tick_recorder.py` 삭제, `KiwoomApp` 연동·종료 `shutdown` 제거, 설정 키 `realtime_tick_recorder_*` 삭제(`k_trader_gui.py`, `core/defaults.py`, `settings.json`). 틱 배치·신호 경로(`RealtimeTickDispatchService`)는 유지.

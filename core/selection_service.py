@@ -25,17 +25,13 @@ class SelectionService:
         def worker():
             try:
                 self.log("🔍 [Selection] 시장 전 종목 스캔 및 전략 필터링 시작...")
-                kw_tok = None
-                try:
-                    kw_tok = self.app.auth_manager.get_token()
-                except Exception:
-                    kw_tok = None
+                # 감시 탭과 동일: 실시간 일봉은 FDR(종목코드 직접)만 사용(키움 일봉 미경유).
                 df_result = strategy_selector.select_monitoring_targets(
                     settings=self.app.settings,
                     logger_callback=self.log,
                     data_manager=getattr(self.app, "data_manager", None),
                     selection_ohlcv_source="api_only",
-                    kiwoom_access_token=kw_tok,
+                    kiwoom_access_token=None,
                 )
                 
                 if df_result is not None and not df_result.empty:

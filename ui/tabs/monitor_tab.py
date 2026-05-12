@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 # Custom modules
 import config
 import strategy_selector
-from core.kiwoom_daily_harvest_service import KiwoomDailyHarvestService
 from core.monitor_code_sets import (
     monitor_selection_codes_set,
     watchlist_only_codes_set,
@@ -911,7 +910,7 @@ class MonitorTab:
         self.ctrl_frame = ttk.Frame(self.mo_main_frame)
         self.ctrl_frame.pack(fill=tk.X, pady=(0, 15))
 
-        # 종목선정 선행 일봉 하베스팅 진행 상태(버튼 클릭 시에만 노출)
+        # 종목 선정 진행 표시용(과거 하베스팅용; 현재 FDR 선정 경로에서는 미사용)
         self.selection_progress_frame = ttk.Frame(self.mo_main_frame)
         self.selection_progress_frame.pack(fill=tk.X, pady=(0, 8))
         self.selection_progress_label = ttk.Label(
@@ -1290,9 +1289,13 @@ class MonitorTab:
             app.log(f"⚠️ [선정] 결과 로그 출력 실패: {e}")
 
     def select_monitoring_targets(self, auto_confirm: bool = False) -> None:
-        """선정 스캔 후 로그 출력 + 감시 대상 즉시 등록 (확인 팝업 없음)."""
+        """선정 스캔 후 로그 출력 + 감시 대상 즉시 등록 (확인 팝업 없음).
+
+        일봉은 로컬 DB 하베스팅 없이 ``strategy_selector.select_monitoring_targets`` 의
+        ``api_only`` 경로로 **FDR 일봉(종목코드 직접)** 만 조회합니다(키움 일봉 미사용).
+        """
         df_snap: Optional[pd.DataFrame] = None
-        aborted_stale = False
+
         def _finalize_ui(done_message: str = "종목 선정 대기") -> None:
             def _job() -> None:
                 try:
@@ -1310,122 +1313,23 @@ class MonitorTab:
                 _job()
 
         try:
-            st_sel = getattr(self.app, "settings", None) or {}
-            mode_raw = str(
-                st_sel.get("monitor_pre_selection_bars_1d_source", "from_1m_aggregate")
-                or "from_1m_aggregate"
-            ).strip().lower()
-            needs_kw_token = mode_raw in ("kiwoom_ka10081", "kiwoom", "ka10081")
-
-            kw_tok: str = ""
-            if needs_kw_token:
-                try:
-                    kw_tok = str(self.app.auth_manager.get_token() or "").strip()
-                except Exception:
-                    kw_tok = ""
-                if not kw_tok:
-                    self.app.log(
-                        "⛔ [선정] 키움 토큰이 없어 키움 일봉(ka10081) 하베스팅을 시작할 수 없습니다. "
-                        "설정 `monitor_pre_selection_bars_1d_source` 를 `from_1m_aggregate` 로 두면 "
-                        "토큰 없이 1분→일봉 집계만 수행합니다."
-                    )
-                    _finalize_ui("키움 토큰 없음")
-                    return
-
-            kodex_codes = strategy_selector.load_kodex200_universe_codes(
-                logger_callback=self.app.log
-            )
-            if not kodex_codes:
-                self.app.log("⛔ [선정] KODEX200 유니버스를 읽지 못해 중단합니다.")
-                _finalize_ui("유니버스 로드 실패")
-                return
-
-            def _progress(cur: int, total: int, msg: str) -> None:
-                try:
-                    self.app.root.after(
-                        0, lambda: self._set_selection_progress(cur, total, msg)
-                    )
-                except Exception:
-                    self._set_selection_progress(cur, total, msg)
-
-            prep_msg = (
-                "키움 일봉 하베스팅 준비"
-                if needs_kw_token
-                else "bars_1m→1d 집계 준비(백테와 동일)"
-            )
-            try:
-                self.app.root.after(
-                    0, lambda: self._set_selection_progress(0, len(kodex_codes), prep_msg)
-                )
-            except Exception:
-                self._set_selection_progress(0, len(kodex_codes), prep_msg)
-
-            harvest_service = KiwoomDailyHarvestService(
-                self.app.data_manager, logger_callback=self.app.log
-            )
-            integrity = harvest_service.harvest_daily_bars_for_codes(
-                codes=kodex_codes,
-                token=kw_tok,
-                settings=self.app.settings,
-                lookback_days=365,
-                progress_callback=_progress,
-            )
             self.app.log(
-                "📊 [일봉 완결성] "
-                f"OK {integrity.ok_codes}/{integrity.total_codes}, "
-                f"필요 기준일 {integrity.required_date}"
+                "📡 [선정] FDR 일봉(api_only·종목코드 직접, 키움 일봉 미사용)으로 유니버스 스캔을 시작합니다."
             )
-            if integrity.missing_codes:
-                self.app.log(
-                    f"⚠️ [일봉 완결성] 미존재 {len(integrity.missing_codes)}종목"
-                )
-            if integrity.stale_codes:
-                self.app.log(
-                    f"⚠️ [일봉 완결성] 기준일 미달 {len(integrity.stale_codes)}종목"
-                )
-
             df_result = strategy_selector.select_monitoring_targets(
                 settings=self.app.settings,
                 logger_callback=self.app.log,
                 data_manager=self.app.data_manager,
-                selection_ohlcv_source="db_only",
+                selection_ohlcv_source="api_only",
                 kiwoom_access_token=None,
             )
             if df_result is not None and not df_result.empty:
                 df_snap = df_result.copy()
-        except strategy_selector.SelectionDbStaleError as stale:
-            msg = str(stale.args[0]) if stale.args else "일봉 DB가 최신이 아닙니다."
-
-            def _warn_stale() -> None:
-                try:
-                    messagebox.showwarning(
-                        "일봉 DB 미갱신",
-                        "DB가 최신 장마감 일봉까지 반영되지 않았습니다.\n\n"
-                        f"{msg}\n\n"
-                        "데이터 수집(하베스팅)을 먼저 완료한 뒤 종목 선정을 실행하세요.",
-                        parent=self.parent,
-                    )
-                finally:
-                    try:
-                        if getattr(self, "btn_select", None) is not None:
-                            self.btn_select.config(state=tk.NORMAL)
-                    except Exception:
-                        pass
-
-            try:
-                self.app.root.after(0, _warn_stale)
-            except Exception:
-                _warn_stale()
-            aborted_stale = True
         except Exception as e:
             import traceback
 
             self.app.log(f"❌ 종목 선정 중 예외 발생: {e}")
             self.app.log(f"DEBUG Traceback:\n{traceback.format_exc()}")
-
-        if aborted_stale:
-            _finalize_ui("일봉 DB 미갱신")
-            return
 
         def finish_on_main() -> None:
             try:
@@ -1433,8 +1337,8 @@ class MonitorTab:
                     self.app.log("⚠️ [선정] 조건에 부합하는 종목이 없습니다.")
                     return
                 self._log_selection_results(self.app, df_snap)
-                # ``db_only`` 경로에서는 strategy_selector 가 CSV를 쓰지 않으므로
-                # GUI 선정 직후 캐시 파일을 여기서 갱신한다(백테·CLI 결과와 비교용).
+                # ``api_only`` 에서도 ``selected_targets.csv`` 를 명시 경로로 한 번 더
+                # 기록한다(작업 디렉터리·인코딩 통일, 비교·백업용).
                 try:
                     _csv_path = os.path.join(os.getcwd(), "selected_targets.csv")
                     df_snap.to_csv(_csv_path, index=False, encoding="utf-8-sig")

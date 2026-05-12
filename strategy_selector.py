@@ -999,7 +999,8 @@ def select_monitoring_targets(
     selection_ohlcv_source:
         - api_only (기본): 실시간 선정 시 trading_data.db 일봉 미사용.
           ``kiwoom_access_token`` 이 있으면 키움 REST ``ka10081`` 일봉,
-          없으면 FDR ``KRX:{종목}`` 일봉(시작·종료일 명시, 접두사 없는 자동경로 미사용).
+          없으면 FDR **6자리 종목코드** 직접 조회(시작·종료일 명시).
+          (``KRX:`` 접두사 경로는 KRX 포털 정책 변경으로 400/LOGOUT 이 잦아 사용하지 않음)
         - db_then_api: 실시간 선정 시 DB 일봉 우선 + 미갱신이면 SelectionDbStaleError.
           단, bars_1d 가 완전히 비어 있으면 신선도 검사만 생략하고 종목별로 DB→FDR 순으로 채움.
           (target_date 가 지정된 과거 선정은 data_manager 일봉 우선 유지)
@@ -1036,7 +1037,7 @@ def select_monitoring_targets(
             )
         else:
             logger_callback(
-                "[Select] 실시간 일봉: FDR KRX 일봉 (토큰 없음, trading_data.db 미사용)"
+                "[Select] 실시간 일봉: FDR 일봉(종목코드 직접, 토큰 없음, trading_data.db 미사용)"
             )
     elif target_date is None and db_only_no_fdr:
         logger_callback(
@@ -1347,8 +1348,9 @@ def select_monitoring_targets(
                     if df is None or len(df) < 50:
                         return None, status
                 else:
-                    # 접두사 없이 ``DataReader(code)`` 를 쓰면 FDR이 네이버 등 다른 소스로 갈 수 있어
-                    # 거래소 일봉과 선정이 어긋날 수 있음 → ``KRX:`` + (시작, 종료) 명시만 사용.
+                    # 과거에는 ``KRX:{code}`` 로 KRX 오픈API 일봉을 썼으나, 포털이 400+본문 LOGOUT 을
+                    # 반환하는 경우가 많아(라이브러리 메시지는 'Period is up to 2 years' 로 오인 유발)
+                    # **6자리 코드 + (시작, 종료)** 직접 조회로 통일한다.
                     _raw_lb = settings.get(
                         "fdr_krx_lookback_days_try", (280, 200, 150, 120)
                     )
@@ -1371,12 +1373,12 @@ def select_monitoring_targets(
                             continue
                         try:
                             st = (end_anchor - timedelta(days=lb_i)).strftime('%Y-%m-%d')
-                            df_try = fdr.DataReader(f"KRX:{code}", st, max_d)
+                            df_try = fdr.DataReader(code, st, max_d)
                         except Exception as ex:
                             last_err = ex
                             try:
                                 logger_callback(
-                                    f"  [Warn] {code} FDR KRX 일봉({lb_i}일) 조회 실패: {ex}"
+                                    f"  [Warn] {code} FDR 일봉({lb_i}일) 조회 실패: {ex}"
                                 )
                             except Exception:
                                 pass
@@ -1390,7 +1392,7 @@ def select_monitoring_targets(
                         try:
                             if last_err is not None:
                                 logger_callback(
-                                    f"  [Warn] {code} FDR KRX 일봉 확보 실패(50거래일 미만): {last_err}"
+                                    f"  [Warn] {code} FDR 일봉 확보 실패(50거래일 미만): {last_err}"
                                 )
                         except Exception:
                             pass
