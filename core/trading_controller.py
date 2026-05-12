@@ -551,18 +551,86 @@ class TradingController:
         except Exception:
             pass
 
+    def _live_submit_reference_price(self, code: Any, signal_hint: float) -> float:
+        """
+        지정가 주문 제출 시점에 쓸 참고 현재가.
+
+        - 메인 스레드: 감시 트리 표시가 > ``monitor_info`` 틱 캐시 > 신호 시점 가격.
+        - 그 외(주문 워커 스레드 등): Tk 미사용 — ``monitor_info`` 틱 캐시 > 신호 시점 가격.
+        """
+        try:
+            fb = float(signal_hint)
+        except (TypeError, ValueError):
+            fb = 0.0
+        try:
+            nk = canonical_stock_code(str(code).split("_")[0])
+        except Exception:
+            try:
+                nk = str(code).split("_")[0].zfill(6)
+            except Exception:
+                nk = ""
+        if not nk or nk == "000000":
+            return fb if fb > 0 else 0.0
+
+        on_main = threading.current_thread() is threading.main_thread()
+        if on_main:
+            try:
+                mt = getattr(self.app, "monitor_tab", None)
+                if mt is not None and hasattr(mt, "get_tree_display_price"):
+                    tp = mt.get_tree_display_price(nk)
+                    if tp is not None:
+                        v = float(tp)
+                        if v > 0:
+                            return v
+            except Exception:
+                pass
+
+        try:
+            mi = getattr(self.app, "monitor_info", None) or {}
+            mi_key: Optional[str] = nk if nk in mi else None
+            if mi_key is None:
+                for k in mi:
+                    try:
+                        if canonical_stock_code(k) == nk:
+                            mi_key = str(k)
+                            break
+                    except Exception:
+                        continue
+            if mi_key is not None:
+                ent = mi.get(mi_key) or {}
+                if isinstance(ent, dict):
+                    for fld in ("last_price", "price", "cur_prc"):
+                        try:
+                            v = float(ent.get(fld) or 0)
+                            if v > 0:
+                                return v
+                        except (TypeError, ValueError):
+                            continue
+        except Exception:
+            pass
+
+        return fb if fb > 0 else 0.0
+
     def execute_buy_signal(self, code, name, price, reason="TYPE_A") -> bool:
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
         Returns True iff 주문 접수(ord_no) 또는 가상 체결까지 성공 — SignalEngine 쿨타임 갱신용.
         """
+        try:
+            sig_hint = float(price)
+        except (TypeError, ValueError):
+            sig_hint = 0.0
+        order_ref = self._live_submit_reference_price(code, sig_hint)
+        if order_ref <= 0:
+            order_ref = sig_hint
+
         # 지정가 매수: 실제 주문 호가 = 참고가+1틱 — 로그·JSONL의 price는 주문가 기준으로 통일
         try:
             adj_price = int(
-                self.app.order_manager.get_adjusted_price(float(price), "buy")
+                self.app.order_manager.get_adjusted_price(float(order_ref), "buy")
             )
         except Exception:
             try:
-                adj_price = int(float(price))
+                adj_price = int(float(order_ref))
             except Exception:
                 adj_price = 0
 
@@ -575,7 +643,8 @@ class TradingController:
                         "code": code,
                         "name": name,
                         "price": float(adj_price),
-                        "ref_price": float(price),
+                        "ref_price": float(order_ref),
+                        "signal_hint_price": float(sig_hint),
                         "reason": reason,
                     },
                 )
@@ -680,7 +749,7 @@ class TradingController:
         ord_no = None
         if allow_order:
             ord_no = self.app.order_manager.place_order(
-                code, qty, price, order_type="00", side="buy", name=name, reason=reason
+                code, qty, order_ref, order_type="00", side="buy", name=name, reason=reason
             )
             try:
                 sl = getattr(self.app, "session_logger", None)
@@ -700,8 +769,10 @@ class TradingController:
             except Exception:
                 pass
         else:
-            snapshot = self.app.portfolio.capture_snapshot(code, price, reason=reason)
-            self.app.portfolio.on_fill(code, "buy", price, qty, name=name, reason=reason, snapshot=snapshot)
+            snapshot = self.app.portfolio.capture_snapshot(code, order_ref, reason=reason)
+            self.app.portfolio.on_fill(
+                code, "buy", order_ref, qty, name=name, reason=reason, snapshot=snapshot
+            )
 
         if allow_order and not ord_no:
             self.log(
@@ -722,7 +793,7 @@ class TradingController:
 
         self.log(
             f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 "
-            f"(주문가 {adj_price:,}원, 참고가 {int(price):,}원, {qty}주)"
+            f"(주문가 {adj_price:,}원, 참고가 {int(order_ref):,}원, {qty}주)"
         )
 
         try:
@@ -734,7 +805,7 @@ class TradingController:
         import threading
         msg = (
             f"<b>💰 [매수발송/{reason}]</b>\n종목: {name}({code})\n"
-            f"주문가: {adj_price:,}원 (참고가 {int(price):,}원) / 수: {qty}주\n"
+            f"주문가: {adj_price:,}원 (참고가 {int(order_ref):,}원) / 수: {qty}주\n"
             f"시간: {datetime.now().strftime('%H:%M:%S')}"
         )
         threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
@@ -767,6 +838,14 @@ class TradingController:
 
         now_price = kwargs.get('now_price', 0)
         profit_ratio = kwargs.get('profit_ratio', 0.0)
+
+        try:
+            np_hint = float(now_price)
+        except (TypeError, ValueError):
+            np_hint = 0.0
+        order_ref_px = self._live_submit_reference_price(code, np_hint)
+        if order_ref_px <= 0:
+            order_ref_px = np_hint
         
         use_mock = getattr(config, 'USE_MOCK', False)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
@@ -775,15 +854,15 @@ class TradingController:
             # 지정가 매도: 실제 주문 호가 = 참고가−1틱 — 로그·JSONL은 주문가 기준으로 매수와 동일하게 통일
             try:
                 exit_ord_price = int(
-                    self.app.order_manager.get_adjusted_price(float(now_price), "sell")
+                    self.app.order_manager.get_adjusted_price(float(order_ref_px), "sell")
                 )
             except Exception:
                 try:
-                    exit_ord_price = int(float(now_price))
+                    exit_ord_price = int(float(order_ref_px))
                 except Exception:
                     exit_ord_price = 0
             try:
-                ref_px = int(float(now_price or 0))
+                ref_px = int(float(order_ref_px or 0))
             except Exception:
                 ref_px = 0
 
@@ -828,7 +907,7 @@ class TradingController:
                 ord_no = self.app.order_manager.place_order(
                     code,
                     pos['qty'],
-                    now_price,
+                    order_ref_px,
                     order_type="00",
                     side="sell",
                     name=pos['name'],
@@ -993,12 +1072,12 @@ class TradingController:
                         pass
             else:
                 snapshot = self.app.portfolio.capture_snapshot(
-                    code, now_price, reason=f"EXIT_{reason}"
+                    code, order_ref_px, reason=f"EXIT_{reason}"
                 )
                 self.app.portfolio.on_fill(
                     code,
                     "sell",
-                    now_price,
+                    order_ref_px,
                     pos["qty"],
                     name=pos.get("name"),
                     reason=f"EXIT_{reason}",
@@ -1023,7 +1102,7 @@ class TradingController:
             add_amt = self.app.portfolio.calculate_order_quantity(stage=2, is_simulation=not allow_order)
             if add_amt <= 0: return
                 
-            adj_price = self.app.order_manager.get_adjusted_price(now_price, "buy")
+            adj_price = self.app.order_manager.get_adjusted_price(order_ref_px, "buy")
             add_qty = add_amt // adj_price
             
             if add_qty > 0:
@@ -1031,7 +1110,7 @@ class TradingController:
                     ord_no = self.app.order_manager.place_order(
                         code,
                         add_qty,
-                        now_price,
+                        order_ref_px,
                         order_type="00",
                         side="buy",
                         name=pos['name'],
@@ -1067,12 +1146,12 @@ class TradingController:
                             self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
                         self.log(
                             f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 접수 "
-                            f"(주문가 {adj_price:,}원, 참고가 {int(now_price):,}원, {add_qty}주)"
+                            f"(주문가 {adj_price:,}원, 참고가 {int(order_ref_px):,}원, {add_qty}주)"
                         )
                         import threading
                         msg = (
                             f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n"
-                            f"주문가: {adj_price:,}원 (참고가 {int(now_price):,}원)\n"
+                            f"주문가: {adj_price:,}원 (참고가 {int(order_ref_px):,}원)\n"
                             f"평단대비: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                         )
                         threading.Thread(
@@ -1084,13 +1163,13 @@ class TradingController:
                         )
                 else:
                     snapshot = self.app.portfolio.capture_snapshot(
-                        code, now_price, reason="Stage 2 Scaling"
+                        code, order_ref_px, reason="Stage 2 Scaling"
                     )
                     self.app.portfolio.on_fill(
-                        code, "buy", now_price, add_qty, snapshot=snapshot
+                        code, "buy", order_ref_px, add_qty, snapshot=snapshot
                     )
                     self.log(
-                        f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 가상체결 ({now_price:,}원, {add_qty}주)"
+                        f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 가상체결 ({order_ref_px:,}원, {add_qty}주)"
                     )
                     import threading
                     msg = (

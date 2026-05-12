@@ -13,6 +13,10 @@
 
 ---
 
+## 0.7.17 (2026-05-12)
+
+- **지정가 참고가(주문 시점)**: S1 매수·EXIT 매도·S2 추매에서 신호 시점 가격 대신 **`_live_submit_reference_price`** 로 주문 직전 시세를 사용 — 메인 스레드는 트리 표시가 → `monitor_info` 틱 캐시 → 신호 힌트 순, 주문 워커는 Tk 없이 캐시·힌트(`core/trading_controller.py`). `buy_execute_start`에 `signal_hint_price` 보존.
+
 ## 0.7.16 (2026-05-12)
 
 - **실시간 고정 프리시그널 게이트**: `get_buy_signals_detailed` 결과에 `Ready` 키가 없을 때 `ready`가 항상 거짓이 되어 매수가 막히던 문제를 **`_s1_presignal_ready_for_gate`** 로 수정 — 키가 없으면 `Signal`과 동기(`core/signal_engine.py`).
