@@ -236,14 +236,6 @@ class RtClosed15mOfficialReplaceScheduler:
         delay_sec: float,
     ) -> None:
         """이미 동일 종목·동일 봉 시각이 예약돼 있으면 무시합니다."""
-        try:
-            settings = getattr(app, "settings", None) or {}
-            if not bool(
-                settings.get("realtime_closed_15m_official_replace_enabled", True)
-            ):
-                return
-        except Exception:
-            return
         k = self._key(code, bar_ts)
         with self._lock:
             if self._scheduled.get(k):

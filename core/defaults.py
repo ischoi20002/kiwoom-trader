@@ -61,12 +61,16 @@ DEFAULT_SETTINGS = {
     "realtime_warmup_depth_calendar_slack_days": 21,
     "realtime_warmup_persist_to_rt15m_db": True,
     "realtime_bars_max_keep": 300,
-    # 15분 슬롯 확정 직후 ka10080(15분)으로 완성 봉 OHLCV 덮어쓰기(틱 누락 완화)
-    "realtime_closed_15m_official_replace_enabled": True,
+    # 15분 슬롯 확정 직후 ka10080(15분)으로 완성 봉 OHLCV 덮어쓰기(틱 누락 완화, 항상 동작)
     "realtime_closed_15m_official_replace_delay_sec": 2.5,
     "realtime_closed_15m_official_replace_max_retries": 3,
     "realtime_closed_15m_official_replace_max_pages": 8,
     "realtime_closed_15m_official_replace_inter_retry_sec": 0.6,
+    # 감시 종목: 매 분 ka10080(1분) 1페이지 — 분산·재시도·캐시(감시 중 항상)
+    "realtime_watchlist_m1_api_spread_sec": 8.0,
+    "realtime_watchlist_m1_api_max_retries": 3,
+    "realtime_watchlist_m1_api_backoff_base_sec": 0.45,
+    "realtime_watchlist_m1_api_cache_max_entries": 4000,
     "use_api_warmup_backfill": True,
     "realtime_warmup_ka10080_tic_scope": "15",
     "realtime_warmup_ka10080_max_pages": 40,

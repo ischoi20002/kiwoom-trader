@@ -13,6 +13,10 @@
 
 ---
 
+## 0.7.19 (2026-05-12)
+
+- **설정 단순화(실시간 정합성)**: `realtime_closed_15m_official_replace_enabled`, `realtime_watchlist_m1_api_enabled`, `realtime_causal_s1_blend_rt_m1_last_row` 제거 — 동작은 각각 **항상 활성**(감시 중·조건 충족 시). 튜닝용 `*_delay_sec`, `*_spread_sec`, 재시도·캐시 상한 등은 유지(`core/rt_closed_15m_official_replace.py`, `core/rt_watchlist_m1_api_poller.py`, `core/signal_engine.py`, `core/defaults.py`, `settings.json`). `config_handler`의 로드 시 강제 `True` 덮어쓰기 제거.
+
 ## 0.7.18 (2026-05-12)
 
 - **실시간 확정 15분봉 REST 치환**: 슬롯 전환 직후 틱으로 확정된 봉을 저장한 뒤, 짧은 지연·재시도·페이지 상한으로 **ka10080(설정 `realtime_warmup_ka10080_tic_scope`, 기본 15분)** 을 조회해 **완성 봉 한 줄만** `bars_data`·RT15m DB에 덮어씀 — 틱 누락 시 OHLCV 정합성 완화(`core/rt_closed_15m_official_replace.py`, `k_trader_gui.py`). 설정: `realtime_closed_15m_official_replace_*` (`core/defaults.py`).

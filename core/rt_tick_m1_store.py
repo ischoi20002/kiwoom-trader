@@ -3,6 +3,8 @@
 실시간 체결(누적거래량·가격)으로 1분 OHLCV 를 구성합니다.
 
 - BT-HP 브리지용: HTTP(ka10080) 지연 없이 동일 틱 경로에서만 갱신.
+- ``RtWatchlistM1ApiPoller`` 가 매 분 ka10080 로 받은 **완료 1분** 은
+  ``apply_official_closed_minute`` 로 동일 분 틱 집계를 **덮어써** 계산에 반영합니다.
 - 종목당 완료 1분봉은 소량만 유지(deque)하여 메모리·스냅샷 비용을 제한합니다.
 """
 
@@ -153,6 +155,81 @@ class RtTickM1Store:
                     st["V"] = max(0.0, cv - start_v)
             except (TypeError, ValueError, KeyError, AttributeError) as e:
                 self._emit_log(f"⚠️ [RtTickM1] feed_tick 예외 ({code}): {e!r}")
+
+    def apply_official_closed_minute(
+        self,
+        code: str,
+        open_label: Any,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> None:
+        """
+        ka10080 등으로 확인한 **완료 1분** 봉을 반영합니다.
+
+        ``open_label`` 은 해당 분의 **시작 시각**(``m1_bar_open_label_for_just_completed_minute`` 결과와 동일).
+        ``completed`` 에 동일 분이 있으면 API OHLCV 로 교체하고, 스트림 상태가 없으면 최소 상태를 만듭니다.
+        """
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return
+            ol = pd.Timestamp(open_label).floor("min")
+            o = float(open_)
+            h = float(high)
+            l_ = float(low)
+            c = float(close)
+            v = max(0.0, float(volume))
+        except (TypeError, ValueError):
+            return
+
+        with self._lock:
+            try:
+                st = self._st.get(nk)
+                if st is None:
+                    dq: Deque[
+                        Tuple[pd.Timestamp, float, float, float, float, float]
+                    ] = deque(maxlen=self._max_c)
+                    dq.append((ol, o, h, l_, c, v))
+                    nxt = ol + pd.Timedelta(minutes=1)
+                    self._st[nk] = {
+                        "bucket": nxt,
+                        "O": c,
+                        "H": c,
+                        "L": c,
+                        "C": c,
+                        "V": 0.0,
+                        "cum_v_start": 0.0,
+                        "completed": dq,
+                    }
+                    return
+
+                dq = st["completed"]
+                kept: List[Tuple[pd.Timestamp, float, float, float, float, float]] = [
+                    t
+                    for t in dq
+                    if pd.Timestamp(t[0]).floor("min") != ol
+                ]
+                kept.append((ol, o, h, l_, c, v))
+                kept.sort(key=lambda x: x[0])
+                st["completed"] = deque(
+                    kept[-self._max_c :], maxlen=self._max_c
+                )
+
+                try:
+                    bkt = pd.Timestamp(st["bucket"]).floor("min")
+                    if bkt == ol:
+                        st["O"] = o
+                        st["H"] = h
+                        st["L"] = l_
+                        st["C"] = c
+                        st["V"] = v
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            except (TypeError, ValueError, KeyError, AttributeError) as e:
+                self._emit_log(f"⚠️ [RtTickM1] apply_official_closed_minute 예외 ({code}): {e!r}")
 
     def dataframe_for_window(
         self,

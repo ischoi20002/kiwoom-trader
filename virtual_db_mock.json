@@ -3095,6 +3095,45 @@
             "code": "005380",
             "exit_pending": true,
             "pending_exit_ord_no": "0147323"
+        },
+        {
+            "name": "신세계",
+            "avg_price": 447500.0,
+            "qty": 4,
+            "stage": 1,
+            "invested": 1796265.0,
+            "entry_time": "2026-05-12T14:05:51.264595",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_B",
+            "events": [
+                {
+                    "time": "2026-05-12 14:20:43",
+                    "action": "SYNC_EXIT",
+                    "price": 436500.0,
+                    "qty": 4,
+                    "pnl": "-2.46%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 447500.0,
+            "ka_cur_prc": 446000.0,
+            "ka_evlu_amt": 1784000.0,
+            "ka_evlu_pfls_amt": -6000.0,
+            "ka_prft_rt": -0.33519553072625696,
+            "ka_pur_amt": 1790000.0,
+            "ka_sync_iso": "2026-05-12T14:05:51.272620",
+            "max_p": 449000.0,
+            "max_price": 449000.0,
+            "current_price": 436500,
+            "exit_pending": false,
+            "exit_reason": "EXIT_ATR_SL",
+            "final_pnl_pct": -2.4581005586592153,
+            "realized_pnl_amt": -44000.0,
+            "exit_price": 436500.0,
+            "exit_date": "2026-05-12",
+            "exit_time": "14:20:43",
+            "exit_datetime": "2026-05-12 14:20:43",
+            "code": "004170"
         }
     ],
     "pending_exit_snapshots": {
@@ -3180,6 +3219,35 @@
                 "code": "005380",
                 "exit_pending": true,
                 "pending_exit_ord_no": "0147323"
+            }
+        },
+        "0163082": {
+            "code": "004170",
+            "exit_reason": "EXIT_ATR_SL",
+            "registered_at": "2026-05-12T14:18:52.532483",
+            "pos": {
+                "name": "신세계",
+                "avg_price": 447500.0,
+                "qty": 4,
+                "stage": 1,
+                "invested": 1796265.0,
+                "entry_time": "2026-05-12T14:05:51.264595",
+                "reason": "SYNCED",
+                "sig_type": "TYPE_B",
+                "events": [],
+                "max_now": 447500.0,
+                "ka_cur_prc": 446000.0,
+                "ka_evlu_amt": 1784000.0,
+                "ka_evlu_pfls_amt": -6000.0,
+                "ka_prft_rt": -0.33519553072625696,
+                "ka_pur_amt": 1790000.0,
+                "ka_sync_iso": "2026-05-12T14:05:51.272620",
+                "max_p": 449000.0,
+                "max_price": 449000.0,
+                "current_price": 437500,
+                "exit_pending": true,
+                "exit_reason": "EXIT_ATR_SL",
+                "pending_exit_ord_no": "0163082"
             }
         }
     }

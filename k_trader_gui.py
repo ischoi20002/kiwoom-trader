@@ -61,6 +61,7 @@ from core.signal_callbacks_service import SignalCallbacksService
 from core.ui_trading_status_service import UiTradingStatusService
 from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
 from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
+from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 
 from kiwoom_rest_api.auth.token import TokenManager
 
@@ -356,6 +357,8 @@ class KiwoomApp:
         self.rt_closed_15m_official_scheduler = RtClosed15mOfficialReplaceScheduler(
             log=self.log
         )
+        self.rt_watchlist_m1_api_poller = RtWatchlistM1ApiPoller(self, log=self.log)
+        self.rt_watchlist_m1_api_poller.start()
         self.stream_processor = StreamProcessor(
             self.settings,
             logger_callback=self.log,
@@ -2129,6 +2132,12 @@ class KiwoomApp:
             pass
         try:
             self._shutdown_order_action_workers()
+        except Exception:
+            pass
+        try:
+            poller = getattr(self, "rt_watchlist_m1_api_poller", None)
+            if poller is not None:
+                poller.stop()
         except Exception:
             pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()

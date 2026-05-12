@@ -298,6 +298,53 @@ class SignalEngine:
         except Exception:
             return ""
 
+    def _causal_tail_blend_rt_m1_store_last_row(self, nk: str, tail: Any) -> Any:
+        """
+        인과 S1용 15m ``tail`` 의 **마지막(형성 중) 봉**을
+        ``RtTickM1Store`` 의 현재 15m 슬롯 구간 1분봉(틱 + ka10080 폴러 반영)으로
+        Open/High/Low/Close/Volume 을 재집계합니다.
+
+        백테 고정밀 1m 스텝과 정합을 맞추기 위한 경로이며, 1분 데이터가 없으면 원본을 유지합니다.
+        """
+        try:
+            if tail is None or getattr(tail, "empty", True):
+                return tail
+            rt_m1 = getattr(self.app, "rt_tick_m1_store", None)
+            if rt_m1 is None:
+                return tail
+            slot_end = pd.Timestamp(tail.index[-1])
+            t0 = m1_window_start_for_15m_end(slot_end)
+            try:
+                now_cap = pd.Timestamp.now().floor("min")
+            except Exception:
+                now_cap = pd.Timestamp.now()
+            t_hi = min(slot_end, now_cap)
+            if t_hi < t0:
+                return tail
+            m1df = rt_m1.dataframe_for_window(t0, t_hi)
+            if m1df is None or getattr(m1df, "empty", True):
+                return tail
+            o = float(m1df["Open"].iloc[0])
+            h = float(m1df["High"].max())
+            l_ = float(m1df["Low"].min())
+            c = float(m1df["Close"].iloc[-1])
+            v = float(m1df["Volume"].sum())
+            last_ix = tail.index[-1]
+            tail.at[last_ix, "Open"] = o
+            tail.at[last_ix, "High"] = h
+            tail.at[last_ix, "Low"] = l_
+            tail.at[last_ix, "Close"] = c
+            tail.at[last_ix, "Volume"] = v
+            if "time" in tail.columns:
+                try:
+                    t = pd.Timestamp(last_ix)
+                    tail.at[last_ix, "time"] = f"{t.hour:02d}{t.minute:02d}"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return tail
+
     def _maybe_apply_realtime_causal_s1(
         self,
         code: str,
@@ -378,6 +425,9 @@ class SignalEngine:
                 return None
 
             tail = bars_df.iloc[max(0, len(bars_df) - lb) :].copy()
+            if tail is None or getattr(tail, "empty", True):
+                return None
+            tail = self._causal_tail_blend_rt_m1_store_last_row(nk, tail)
             if tail is None or getattr(tail, "empty", True):
                 return None
             df_ind = TradingStrategy.calculate_indicators(tail, self.app.settings)
