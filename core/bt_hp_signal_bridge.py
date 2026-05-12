@@ -3,8 +3,7 @@
 동적 백테스트 고정밀(15m pre-signal + 1m intrabar)과 **동일한** 인트라바 지표 행을 계산합니다.
 
 - `dynamic_backtest._process_intra_bar_dynamic` 의 시뮬레이션 분기와 한 줄기를 유지합니다.
-- 실시간(`SignalEngine`)은 설정 `realtime_signal_use_bt_hp_bridge` 가 True 일 때
-  **보유 종목**에 한해 본 모듈의 ``unified`` 로 EXIT/S2 만 맞춥니다(미보유 S1 은 인과·일반 15분 경로).
+- 실시간 감시 신호 경로에서는 본 브리지를 사용하지 않습니다(백테·분석 스크립트용).
 """
 
 from __future__ import annotations
@@ -498,7 +497,7 @@ def resolve_m1_chunk_for_bt_hp_bridge(
         if use_tick and rt_m1_store is not None:
             try:
                 df_tick = rt_m1_store.dataframe_for_window(
-                    str(code).strip().zfill(6), t0, t_hi
+                    str(code).strip().zfill(6), t0, t_hi, include_open_bucket=True
                 )
                 if df_tick is not None and not df_tick.empty:
                     _apply_synthetic_metrics_m1(df_tick, settings)

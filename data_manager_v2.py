@@ -37,12 +37,52 @@ from utils.server_mode_paths import (
     state_db_path_for_live,
     state_db_path_for_mock,
 )
+import random
 import threading
 import requests
 import config
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ka10080 전역 페이싱(워밍업·M1폴러·15분 확정 보정 등 병렬 스레드가 동시에 때리는 429 완화)
+_KA10080_GLOBAL_LOCK = threading.Lock()
+_KA10080_GLOBAL_NEXT_MONOTONIC: float = 0.0
+
+
+def _ka10080_global_acquire_slot() -> None:
+    """다음 ka10080 POST 직전까지 대기하고, 이후 호출을 위해 전역 다음 허용 시각을 갱신합니다."""
+    global _KA10080_GLOBAL_NEXT_MONOTONIC
+    try:
+        gap = float(getattr(config, "KA10080_GLOBAL_MIN_INTERVAL_SEC", 0.35))
+    except Exception:
+        gap = 0.35
+    gap = max(0.12, min(gap, 2.0))
+    with _KA10080_GLOBAL_LOCK:
+        try:
+            now = time.monotonic()
+            wait_s = _KA10080_GLOBAL_NEXT_MONOTONIC - now
+            if wait_s > 0:
+                time.sleep(wait_s)
+            _KA10080_GLOBAL_NEXT_MONOTONIC = time.monotonic() + gap
+        except Exception:
+            pass
+
+
+def _ka10080_global_bump_cooldown(extra_sec: float) -> None:
+    """429 등으로 서버가 막힌 뒤 추가 대기가 필요할 때 전역 다음 허용 시각을 뒤로 미룹니다."""
+    global _KA10080_GLOBAL_NEXT_MONOTONIC
+    try:
+        bump = max(0.5, float(extra_sec))
+    except Exception:
+        bump = 1.0
+    try:
+        until = time.monotonic() + bump
+        with _KA10080_GLOBAL_LOCK:
+            if until > _KA10080_GLOBAL_NEXT_MONOTONIC:
+                _KA10080_GLOBAL_NEXT_MONOTONIC = until
+    except Exception:
+        pass
 
 
 class DataManagerV2:
@@ -2039,9 +2079,10 @@ class DataManagerV2:
             ts = "1"
         body: Dict[str, Any] = {"stk_cd": code, "tic_scope": ts, "upd_stkpc_tp": "1"}
         nk_in = (next_key or "").strip()
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
+                _ka10080_global_acquire_slot()
                 headers = {
                     "Content-Type": "application/json;charset=UTF-8",
                     "authorization": f"Bearer {token}",
@@ -2069,8 +2110,15 @@ class DataManagerV2:
                             nk_out = ""
                     return raw_list, nk_out
                 if res.status_code == 429:
+                    _ka10080_global_bump_cooldown(1.2 * (2**attempt))
                     if attempt + 1 < max_retries:
-                        time.sleep((attempt + 1) * 2.0)
+                        try:
+                            time.sleep(
+                                2.0 * (attempt + 1)
+                                + random.uniform(0.15, 0.45)
+                            )
+                        except Exception:
+                            time.sleep(2.0 * (attempt + 1))
                         continue
                     print(f"  [Error] ka10080 429 ({code})")
                     return None, ""

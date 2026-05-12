@@ -33,23 +33,7 @@ DEFAULT_SETTINGS = {
     "high_precision_causal_lookback_bars": 400,
     # 고정밀 인과 S1: 전역 15분 봉 인덱스 i 가 이 값 이상일 때만 Ready(벡터 루프와 동일하게 기본 19).
     "hp_causal_ready_min_bar_index": 19,
-    # 실시간 인과 S1: BT-HP 브리지 미사용 시 짧은 tail 로 ``calculate_indicators`` + 상세 신호 재실행(기본 OFF·부하 주의).
-    "realtime_causal_s1_enabled": False,
-    "realtime_causal_s1_interval_sec": 15.0,
-    "realtime_causal_s1_force_resync_sec": 90.0,
-    "realtime_causal_s1_lookback_bars": 400,
-    "realtime_causal_s1_max_evals_per_wall_second": 12,
     "s1_buy_signal_cooldown_sec": 1800.0,
-    # True: 1m 인트라바 브리지 — 보유 시 EXIT/S2 판단에만 사용. 미보유 S1 은 인과 S1·일반 15분 경로.
-    "realtime_signal_use_bt_hp_bridge": False,
-    # 브리지 1분: 기본은 실시간 틱 집계(rt_tick_m1_store). API 지연 없음.
-    "realtime_signal_bt_hp_bridge_use_tick_1m": True,
-    "realtime_signal_bt_hp_bridge_tick_m1_max_rows": 24,
-    # True면 틱이 t_hi 까지 못 미칠 때만 ka10080 보강(지연·스로틀 감수). 운영 기본 OFF.
-    "realtime_signal_bt_hp_bridge_use_rest_1m": False,
-    "realtime_signal_bt_hp_bridge_ka10080_max_pages": 15,
-    # True일 때만 trading_data.db bars_1m 을 읽어 병합(로컬 분석·재현용).
-    "realtime_signal_bt_hp_bridge_use_trading_db_1m": False,
     # 실시간 체결 틱 JSONL(호가 전용 패킷 제외). 디스크 사용 — 필요 시 True.
     "realtime_tick_recorder_enabled": False,
     "realtime_tick_recorder_subdir": "realtime_tick_logs",
@@ -66,6 +50,8 @@ DEFAULT_SETTINGS = {
     "realtime_closed_15m_official_replace_max_retries": 3,
     "realtime_closed_15m_official_replace_max_pages": 8,
     "realtime_closed_15m_official_replace_inter_retry_sec": 0.6,
+    # ka10080 REST 전역 최소 호출 간격(초). 워밍업·M1폴러·15분확정 등 병렬 호출이 429 나지 않게 직렬화.
+    "realtime_ka10080_global_min_interval_sec": 0.35,
     # 감시 종목: 매 분 ka10080(1분) 1페이지 — 분산·재시도·캐시(감시 중 항상)
     "realtime_watchlist_m1_api_spread_sec": 8.0,
     "realtime_watchlist_m1_api_max_retries": 3,
@@ -102,8 +88,6 @@ DEFAULT_SETTINGS = {
     "realtime_s1_full_calc_min_interval_sec": 1.0,
     "realtime_eval_position_min_interval_sec": 0.5,
     "realtime_exit_indicator_min_interval_sec": 0.5,
-    "realtime_bar_update_min_interval_sec": 0.12,
-    "realtime_bar_update_force_move_pct": 0.0003,
     "realtime_monitor_atr_display_min_interval_sec": 0.5,
     # 유니버스 인덱스 소스: KODEX200(기존 kodex200.csv) 또는 KOSPI200(신규 kospi_universe.csv + topN 슬라이스)
     "universe_index_choice": "KODEX200",

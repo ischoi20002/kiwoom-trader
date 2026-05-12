@@ -13,6 +13,13 @@
 
 ---
 
+## 0.8.0 (2026-05-12)
+
+- **실시간 신호용 봉( S1 / S2 / 청산 )**: 틱으로 15분 OHLCV를 쌓지 않고 **공식 1분(ka10080)** 만으로 현재 슬롯 마지막 행을 갱신·**슬롯 전환 시 롤** 후 `SignalEngine` 재평가 — `core/realtime_official_bars_sync.py`, `Rt15mSlotBoundaryWatcher`, `core/rt_watchlist_m1_api_poller.py`, `core/signal_engine.py`, `core/stream_processor.py`, `core/rt_tick_m1_store.py`, `k_trader_gui.py`, `core/trading_controller.py`.
+- **주문가·틱 UI**: 체결 틱 기반 `monitor_info` 등은 기존 유지(신호 봉과 분리).
+- **레거시 실시간 설정 제거**: 인과 S1·BT-HP 실시간 브리지·봉 갱신 스로틀 관련 키·코드 정리(`core/defaults.py`, `settings.json`, `core/bt_hp_signal_bridge.py` 주석).
+- **ka10080 HTTP 429 완화**: `fetch_kiwoom_minute_chart_page`에 **전역 최소 호출 간격**·429 시 쿨다운·재시도 강화(`data_manager_v2.py`, `config.py`, `realtime_ka10080_global_min_interval_sec`).
+
 ## 0.7.19 (2026-05-12)
 
 - **설정 단순화(실시간 정합성)**: `realtime_closed_15m_official_replace_enabled`, `realtime_watchlist_m1_api_enabled`, `realtime_causal_s1_blend_rt_m1_last_row` 제거 — 동작은 각각 **항상 활성**(감시 중·조건 충족 시). 튜닝용 `*_delay_sec`, `*_spread_sec`, 재시도·캐시 상한 등은 유지(`core/rt_closed_15m_official_replace.py`, `core/rt_watchlist_m1_api_poller.py`, `core/signal_engine.py`, `core/defaults.py`, `settings.json`). `config_handler`의 로드 시 강제 `True` 덮어쓰기 제거.

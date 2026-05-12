@@ -201,6 +201,12 @@ class TradingController:
         self.is_monitoring = False
         self._abort_monitor_start = True
         try:
+            bw = getattr(self.app, "rt_15m_slot_boundary_watcher", None)
+            if bw is not None:
+                bw.stop()
+        except Exception:
+            pass
+        try:
             poller = getattr(self.app, "rt_watchlist_m1_api_poller", None)
             if poller is not None:
                 poller.reset_round_state()
@@ -448,6 +454,13 @@ class TradingController:
             if code not in ac:
                 ac.append(code)
             n_ready = len(ac)
+
+            try:
+                bw = getattr(self.app, "rt_15m_slot_boundary_watcher", None)
+                if bw is not None and n_ready == 1:
+                    bw.start()
+            except Exception:
+                pass
 
             self.is_monitoring = True
             try:

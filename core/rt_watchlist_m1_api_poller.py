@@ -329,3 +329,9 @@ class RtWatchlistM1ApiPoller:
             self._remember_cache(key, (o, h, l_, c, v))
         except Exception:
             pass
+        try:
+            from core.realtime_official_bars_sync import schedule_official_sync_and_signal_eval
+
+            schedule_official_sync_and_signal_eval(self._app, nk)
+        except Exception:
+            pass

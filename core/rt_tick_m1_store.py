@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-실시간 체결(누적거래량·가격)으로 1분 OHLCV 를 구성합니다.
+실시간 **공식 1분**(ka10080) OHLCV 를 종목별로 소량 유지합니다.
 
-- BT-HP 브리지용: HTTP(ka10080) 지연 없이 동일 틱 경로에서만 갱신.
-- ``RtWatchlistM1ApiPoller`` 가 매 분 ka10080 로 받은 **완료 1분** 은
-  ``apply_official_closed_minute`` 로 동일 분 틱 집계를 **덮어써** 계산에 반영합니다.
-- 종목당 완료 1분봉은 소량만 유지(deque)하여 메모리·스냅샷 비용을 제한합니다.
+- ``RtWatchlistM1ApiPoller`` 가 매 분 받은 완료 1분을 ``apply_official_closed_minute`` 로 반영합니다.
+- ``dataframe_for_window`` 는 신호용 15분 형성 행 집계에 사용합니다(진행 중 분은 기본 제외).
 """
 
 from __future__ import annotations
@@ -31,10 +29,7 @@ def _floor_minute(ts: datetime) -> pd.Timestamp:
 
 class RtTickM1Store:
     """
-    틱 1회당 O(1) 갱신으로 1분 봉을 유지합니다.
-
-    ``StreamProcessor.update_realtime_bar`` 와 동일한 틱·``datetime.now`` 기준을 씁니다
-    (15분 슬롯 라벨과 별개로, 벽시계 분 단위 버킷).
+    공식 1분(REST) 봉을 종목별 deque 로 유지합니다.
     """
 
     def __init__(
@@ -66,95 +61,10 @@ class RtTickM1Store:
         now: Optional[datetime] = None,
     ) -> None:
         """
-        체결 1틱 반영. ``cum_volume`` 은 키움 0B 누적거래량(``StreamProcessor`` 와 동일 가정).
+        레거시 호환용 빈 구현입니다.
+        실시간 1분은 ka10080(``RtWatchlistM1ApiPoller``)만으로 적재합니다.
         """
-        try:
-            nk = canonical_stock_code(str(code).strip())
-            if not nk:
-                return
-            px = float(price)
-            cv = float(cum_volume)
-            dt = now if now is not None else datetime.now()
-            floor = _floor_minute(dt)
-        except (TypeError, ValueError):
-            return
-
-        with self._lock:
-            try:
-                st = self._st.get(nk)
-                if st is None:
-                    dq: Deque[Tuple[pd.Timestamp, float, float, float, float, float]] = deque(
-                        maxlen=self._max_c
-                    )
-                    self._st[nk] = {
-                        "bucket": floor,
-                        "O": px,
-                        "H": px,
-                        "L": px,
-                        "C": px,
-                        "V": 0.0,
-                        "cum_v_start": cv,
-                        "completed": dq,
-                    }
-                    return
-
-                bucket: pd.Timestamp = st["bucket"]
-                # 장중 재시작·시계 튐: 버킷이 한 시간 이상 어긋나면 상태 초기화
-                try:
-                    if abs((floor - bucket).total_seconds()) > 3600:
-                        st["completed"].clear()
-                        st["bucket"] = floor
-                        st["O"] = st["H"] = st["L"] = st["C"] = px
-                        st["V"] = 0.0
-                        st["cum_v_start"] = cv
-                        return
-                except (TypeError, ValueError, AttributeError):
-                    pass
-
-                if floor > bucket:
-                    # 직전 분 확정
-                    try:
-                        st["completed"].append(
-                            (
-                                bucket,
-                                float(st["O"]),
-                                float(st["H"]),
-                                float(st["L"]),
-                                float(st["C"]),
-                                max(0.0, float(st["V"])),
-                            )
-                        )
-                    except (TypeError, ValueError):
-                        pass
-                    st["bucket"] = floor
-                    st["O"] = st["H"] = st["L"] = st["C"] = px
-                    st["V"] = 0.0
-                    st["cum_v_start"] = cv
-                    return
-
-                if floor < bucket:
-                    # 비정상(시계 역행): 현재 분으로 덮어쓰기
-                    st["bucket"] = floor
-                    st["O"] = st["H"] = st["L"] = st["C"] = px
-                    st["V"] = 0.0
-                    st["cum_v_start"] = cv
-                    return
-
-                # 동일 분 갱신
-                st["C"] = px
-                if px > float(st["H"]):
-                    st["H"] = px
-                if px < float(st["L"]):
-                    st["L"] = px
-
-                start_v = float(st.get("cum_v_start", cv) or 0.0)
-                if start_v <= 0.0 and cv > 0.0:
-                    cur_v = float(st.get("V", 0.0) or 0.0)
-                    st["cum_v_start"] = max(0.0, cv - cur_v)
-                else:
-                    st["V"] = max(0.0, cv - start_v)
-            except (TypeError, ValueError, KeyError, AttributeError) as e:
-                self._emit_log(f"⚠️ [RtTickM1] feed_tick 예외 ({code}): {e!r}")
+        return
 
     def apply_official_closed_minute(
         self,
@@ -236,10 +146,14 @@ class RtTickM1Store:
         code: str,
         t0: pd.Timestamp,
         t_hi: pd.Timestamp,
+        *,
+        include_open_bucket: bool = False,
     ) -> pd.DataFrame:
         """
-        ``[t0, t_hi]`` 구간의 1분 OHLCV (진행 중 분 포함).
-        열: Open, High, Low, Close, Volume — 인덱스 분 시작.
+        ``[t0, t_hi]`` 구간의 1분 OHLCV.
+
+        - ``include_open_bucket=False``(기본): **완료 분**만 — 공식 REST로 닫힌 1분만 신호에 사용.
+        - ``True``: 현재 진행 중 분 버킷도 포함(레거시·디버그용).
         """
         out_empty = pd.DataFrame()
         try:
@@ -270,18 +184,19 @@ class RtTickM1Store:
                         continue
                     rows.append(tup)
 
-                bucket: pd.Timestamp = st["bucket"]
-                if t0s <= bucket <= this:
-                    rows.append(
-                        (
-                            bucket,
-                            float(st["O"]),
-                            float(st["H"]),
-                            float(st["L"]),
-                            float(st["C"]),
-                            max(0.0, float(st.get("V", 0.0) or 0.0)),
+                if include_open_bucket:
+                    bucket: pd.Timestamp = st["bucket"]
+                    if t0s <= bucket <= this:
+                        rows.append(
+                            (
+                                bucket,
+                                float(st["O"]),
+                                float(st["H"]),
+                                float(st["L"]),
+                                float(st["C"]),
+                                max(0.0, float(st.get("V", 0.0) or 0.0)),
+                            )
                         )
-                    )
             except (TypeError, ValueError, KeyError, AttributeError):
                 return out_empty
 

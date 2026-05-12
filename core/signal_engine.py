@@ -1,4 +1,3 @@
-import copy
 import pandas as pd
 import numpy as np
 import threading
@@ -11,19 +10,10 @@ from core.defaults import effective_min_15m_bars_for_monitoring
 from core.monitor_code_sets import watchlist_only_codes_set
 from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
-from utils.krx_bars import (
-    m1_bar_open_label_for_just_completed_minute,
-    m1_window_start_for_15m_end,
-)
 from utils.bars_data_keys import resolve_bars_data_frame
 from utils.normalization import canonical_stock_code
 from typing import Any, Dict, Optional, Tuple
 
-from core.bt_hp_intrabar_unified import evaluate_bt_hp_intrabar_unified
-from core.bt_hp_signal_bridge import (
-    resolve_m1_chunk_for_bt_hp_bridge,
-    sel_track_to_bt_code_track,
-)
 
 class SignalEngine:
     """[v25.7] 실시간 체결 데이터 분석 및 시그널 포착 엔진 클래스"""
@@ -96,69 +86,22 @@ class SignalEngine:
         self._eval_position_last_ts: dict[str, float] = {}
         self._exit_indicator_last_ts: dict[str, float] = {}
 
-        # 인과적 S1(실시간): 짧은 간격·지문·초당 예산으로 tail 재계산
-        self._causal_s1_last_fp: dict[str, str] = {}
-        self._causal_s1_last_eval_ts: dict[str, float] = {}
-        self._causal_s1_last_force_ts: dict[str, float] = {}
-        self._causal_s1_wall_sec: int = -1
-        self._causal_s1_wall_used: int = 0
-        # 1분 완성 시 인과 S1 interval 우회: (slot_key|닫힌 1분 라벨) 중복 방지
-        self._causal_s1_m1close_pair: dict[str, str] = {}
-
-        # 15분봉 DF 갱신: 틱마다 df.at 호출은 Tk 메인스레드에서 비용이 크므로 시간·가격 변화 기반 스로틀
+        # 감시 트리 ATR 표시용 스로틀
         try:
             st2 = getattr(self.app, "settings", None) or {}
-            self._realtime_bar_update_min_interval_sec: float = float(
-                st2.get("realtime_bar_update_min_interval_sec", 0.12)
-            )
-            self._realtime_bar_update_force_move_pct: float = float(
-                st2.get("realtime_bar_update_force_move_pct", 0.0003)
-            )
             self._realtime_monitor_atr_display_min_interval_sec: float = float(
                 st2.get("realtime_monitor_atr_display_min_interval_sec", 0.5)
             )
         except Exception:
-            self._realtime_bar_update_min_interval_sec = 0.12
-            self._realtime_bar_update_force_move_pct = 0.0003
             self._realtime_monitor_atr_display_min_interval_sec = 0.5
-        self._realtime_bar_update_min_interval_sec = max(
-            0.02, min(self._realtime_bar_update_min_interval_sec, 2.0)
-        )
-        self._realtime_bar_update_force_move_pct = max(
-            0.0, min(self._realtime_bar_update_force_move_pct, 0.05)
-        )
         self._realtime_monitor_atr_display_min_interval_sec = max(
             0.05, min(self._realtime_monitor_atr_display_min_interval_sec, 5.0)
         )
-        self._bar_update_last_ts: dict[str, float] = {}
-        self._bar_update_anchor_price: dict[str, float] = {}
         self._monitor_atr_cache_ts: dict[str, float] = {}
         # 15분 슬롯 내 S1 pre-signal( Signal/Ready/Sig_Type )을 고정해
         # 틱마다 지표가 흔들리며 매수 신호가 on/off 되는 현상을 줄입니다.
         # key: code, value: {"slot_key": str, "signal": bool, "ready": bool, "sig_type": str}
         self._s1_slot_gate_cache: dict[str, dict[str, Any]] = {}
-
-    def _should_throttle_bar_update(
-        self, code: str, price: float, now_ts: float
-    ) -> bool:
-        """
-        True 이면 이번 틱에서 15분봉 스트림 갱신(_update_realtime_bar)을 생략합니다.
-        최소 간격 내이면서 마지막 갱신가 대비 가격 변동이 force_move_pct 미만일 때만 생략합니다.
-        """
-        try:
-            min_iv = float(self._realtime_bar_update_min_interval_sec)
-            last_ts = float(self._bar_update_last_ts.get(code, 0.0) or 0.0)
-            if (now_ts - last_ts) >= min_iv:
-                return False
-            anchor = float(self._bar_update_anchor_price.get(code, 0.0) or 0.0)
-            if anchor <= 0:
-                return False
-            move = abs(float(price) - anchor) / anchor
-            if move >= float(self._realtime_bar_update_force_move_pct):
-                return False
-            return True
-        except Exception:
-            return False
 
     def _s1_buy_signal_cooldown_sec(self) -> float:
         """
@@ -211,477 +154,6 @@ class SignalEngine:
             return pd.Timestamp(last_idx).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return ""
-
-    def _realtime_causal_s1_enabled(self) -> bool:
-        """인과적 S1 tail 재계산(실시간) 사용 여부."""
-        try:
-            return bool(
-                (getattr(self.app, "settings", None) or {}).get(
-                    "realtime_causal_s1_enabled", False
-                )
-            )
-        except Exception:
-            return False
-
-    def _realtime_causal_s1_eval_on_m1_close_enabled(self) -> bool:
-        """
-        True면 KRX 15m 슬롯 안에서 1분봉이 닫힐 때마다(분 경계) 인과 S1 재평가가
-        ``realtime_causal_s1_interval_sec`` 스로틀을 한 번 건너뜁니다(백테 고정밀 1m 스텝과 정렬).
-        """
-        try:
-            return bool(
-                (getattr(self.app, "settings", None) or {}).get(
-                    "realtime_causal_s1_eval_on_m1_close", True
-                )
-            )
-        except Exception:
-            return True
-
-    def _m1_closed_label_in_current_15m_slot(
-        self, bars_df: Any, closed_label: pd.Timestamp
-    ) -> bool:
-        """닫힌 1분 라벨이 현재 형성 중 15m 의 bars_1m 창 ``[t0, slot_end)`` 안에 있는지."""
-        try:
-            if bars_df is None or getattr(bars_df, "empty", True):
-                return False
-            slot_end = pd.Timestamp(bars_df.index[-1])
-            t0 = m1_window_start_for_15m_end(slot_end)
-            cl = pd.Timestamp(closed_label)
-            return bool(t0 <= cl < slot_end)
-        except Exception:
-            return False
-
-    def _m1_close_interval_bypass_key(
-        self,
-        nk: str,
-        bars_df: Any,
-        tick_wall_dt: Optional[datetime],
-    ) -> str:
-        """
-        현재 틱이 '새로 닫힌 1분'이면 ``{slot_key}|{closed_lab}`` 키를 반환(아니면 ``''``).
-
-        키는 호출부에서 interval/fp 등을 통과한 뒤에만 ``_causal_s1_m1close_pair`` 에 기록합니다.
-        """
-        try:
-            if not self._realtime_causal_s1_enabled():
-                return ""
-            if not self._realtime_causal_s1_eval_on_m1_close_enabled():
-                return ""
-            if bars_df is None or getattr(bars_df, "empty", True):
-                return ""
-            wall = tick_wall_dt if tick_wall_dt is not None else datetime.now()
-            closed_lab = m1_bar_open_label_for_just_completed_minute(wall)
-            if not self._m1_closed_label_in_current_15m_slot(bars_df, closed_lab):
-                return ""
-            slot_key = self._current_slot_key_from_bars(bars_df) or ""
-            pair = f"{slot_key}|{closed_lab.strftime('%Y-%m-%d %H:%M:%S')}"
-            prev = str(self._causal_s1_m1close_pair.get(nk, "") or "")
-            if pair == prev:
-                return ""
-            return pair
-        except Exception:
-            return ""
-
-    def _causal_s1_fingerprint(self, bars_df: Any) -> str:
-        """슬롯 + 마지막(진행) 봉 OHLCV 지문 — 동일이면 무거운 재계산 생략."""
-        try:
-            if bars_df is None or getattr(bars_df, "empty", True):
-                return ""
-            lr = bars_df.iloc[-1]
-            sk = self._current_slot_key_from_bars(bars_df)
-            o = float(lr.get("Open", 0) or 0)
-            h = float(lr.get("High", 0) or 0)
-            l = float(lr.get("Low", 0) or 0)
-            c = float(lr.get("Close", 0) or 0)
-            v = float(lr.get("Volume", 0) or 0)
-            return f"{sk}|{o:.4f}|{h:.4f}|{l:.4f}|{c:.4f}|{v:.1f}"
-        except Exception:
-            return ""
-
-    def _causal_tail_blend_rt_m1_store_last_row(self, nk: str, tail: Any) -> Any:
-        """
-        인과 S1용 15m ``tail`` 의 **마지막(형성 중) 봉**을
-        ``RtTickM1Store`` 의 현재 15m 슬롯 구간 1분봉(틱 + ka10080 폴러 반영)으로
-        Open/High/Low/Close/Volume 을 재집계합니다.
-
-        백테 고정밀 1m 스텝과 정합을 맞추기 위한 경로이며, 1분 데이터가 없으면 원본을 유지합니다.
-        """
-        try:
-            if tail is None or getattr(tail, "empty", True):
-                return tail
-            rt_m1 = getattr(self.app, "rt_tick_m1_store", None)
-            if rt_m1 is None:
-                return tail
-            slot_end = pd.Timestamp(tail.index[-1])
-            t0 = m1_window_start_for_15m_end(slot_end)
-            try:
-                now_cap = pd.Timestamp.now().floor("min")
-            except Exception:
-                now_cap = pd.Timestamp.now()
-            t_hi = min(slot_end, now_cap)
-            if t_hi < t0:
-                return tail
-            m1df = rt_m1.dataframe_for_window(t0, t_hi)
-            if m1df is None or getattr(m1df, "empty", True):
-                return tail
-            o = float(m1df["Open"].iloc[0])
-            h = float(m1df["High"].max())
-            l_ = float(m1df["Low"].min())
-            c = float(m1df["Close"].iloc[-1])
-            v = float(m1df["Volume"].sum())
-            last_ix = tail.index[-1]
-            tail.at[last_ix, "Open"] = o
-            tail.at[last_ix, "High"] = h
-            tail.at[last_ix, "Low"] = l_
-            tail.at[last_ix, "Close"] = c
-            tail.at[last_ix, "Volume"] = v
-            if "time" in tail.columns:
-                try:
-                    t = pd.Timestamp(last_ix)
-                    tail.at[last_ix, "time"] = f"{t.hour:02d}{t.minute:02d}"
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return tail
-
-    def _maybe_apply_realtime_causal_s1(
-        self,
-        code: str,
-        bars_df: Any,
-        info: dict,
-        now_ts: float,
-        need_full_calc: bool,
-        now_price: float,
-        tick_wall_dt: Optional[datetime] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        짧은 간격·지문·초당 예산으로 15분 tail 을 잘라 ``calculate_indicators`` + ``get_buy_signals_detailed`` 재실행.
-        성공 시 ``last_sig``/``is_buy``/합치도 등에 덮어쓸 dict 반환.
-
-        ``realtime_causal_s1_eval_on_m1_close`` 가 켜져 있으면, 현재 15m 슬롯 안에서
-        1분봉이 막 닫힌 시점(분 경계)마다 ``realtime_causal_s1_interval_sec`` 스로틀을 한 번 건너뜁니다.
-        """
-        try:
-            st = getattr(self.app, "settings", None) or {}
-            nk = str(code).split("_")[0].zfill(6)
-            fp = self._causal_s1_fingerprint(bars_df)
-            if not fp:
-                return None
-
-            bypass_key = self._m1_close_interval_bypass_key(nk, bars_df, tick_wall_dt)
-
-            try:
-                interval = float(st.get("realtime_causal_s1_interval_sec", 15.0))
-            except (TypeError, ValueError):
-                interval = 15.0
-            interval = max(5.0, min(interval, 120.0))
-
-            try:
-                force_sec = float(st.get("realtime_causal_s1_force_resync_sec", 90.0))
-            except (TypeError, ValueError):
-                force_sec = 90.0
-            force_sec = max(interval, min(force_sec, 600.0))
-
-            try:
-                lb = int(float(st.get("realtime_causal_s1_lookback_bars", 400)))
-            except (TypeError, ValueError):
-                lb = 400
-            lb = max(80, min(lb, 2500))
-
-            try:
-                max_per_wall = int(
-                    float(st.get("realtime_causal_s1_max_evals_per_wall_second", 12))
-                )
-            except (TypeError, ValueError):
-                max_per_wall = 12
-            max_per_wall = max(1, min(max_per_wall, 80))
-
-            wsec = int(now_ts)
-            if wsec != int(getattr(self, "_causal_s1_wall_sec", -1)):
-                self._causal_s1_wall_sec = wsec
-                self._causal_s1_wall_used = 0
-            if int(self._causal_s1_wall_used) >= int(max_per_wall) and bypass_key == "":
-                return None
-
-            last_ev = float(self._causal_s1_last_eval_ts.get(nk, 0.0) or 0.0)
-            elapsed = float(now_ts) - last_ev
-            last_fp = str(self._causal_s1_last_fp.get(nk, "") or "")
-            last_force = float(self._causal_s1_last_force_ts.get(nk, 0.0) or 0.0)
-
-            short_sync = bool(need_full_calc) and elapsed >= 3.0
-            interval_bypass = bypass_key != ""
-            if not short_sync and not interval_bypass and elapsed < interval:
-                return None
-            # 1분 완성으로 interval 을 건너뛰는 경우, 동일 분 재시도 방지
-            if interval_bypass:
-                self._causal_s1_m1close_pair[nk] = bypass_key
-            if (
-                not short_sync
-                and not interval_bypass
-                and fp == last_fp
-                and (float(now_ts) - last_force) < force_sec
-            ):
-                return None
-
-            tail = bars_df.iloc[max(0, len(bars_df) - lb) :].copy()
-            if tail is None or getattr(tail, "empty", True):
-                return None
-            tail = self._causal_tail_blend_rt_m1_store_last_row(nk, tail)
-            if tail is None or getattr(tail, "empty", True):
-                return None
-            df_ind = TradingStrategy.calculate_indicators(tail, self.app.settings)
-            sigd = TradingStrategy.get_buy_signals_detailed(
-                df_ind, self.app.settings, "UP"
-            )
-            if sigd is None or getattr(sigd, "empty", True):
-                return None
-            last_ser = sigd.iloc[-1]
-            last_sig_row = (
-                last_ser.to_dict()
-                if hasattr(last_ser, "to_dict")
-                else dict(last_ser)
-            )
-            try:
-                ready_min = max(
-                    1, int(float(st.get("hp_causal_ready_min_bar_index", 19)))
-                )
-            except (TypeError, ValueError):
-                ready_min = 19
-            global_i = max(0, int(len(bars_df)) - 1)
-            ready_ok = int(global_i) >= int(ready_min)
-            sig_on = bool(last_sig_row.get("Signal", False)) and bool(ready_ok)
-            last_row_dict = df_ind.iloc[-1].to_dict()
-            # 상세 신호 행 전체를 유지해야 합치도(Met_A/Tot_A/…) 표시가 0/1로 붕괴하지 않음
-            last_sig_out: Dict[str, Any] = {}
-            try:
-                _raw = (
-                    last_ser.to_dict()
-                    if hasattr(last_ser, "to_dict")
-                    else dict(last_ser)
-                )
-                for _k, _v in _raw.items():
-                    sk = str(_k)
-                    try:
-                        if isinstance(_v, np.generic):
-                            last_sig_out[sk] = _v.item()
-                        else:
-                            last_sig_out[sk] = _v
-                    except Exception:
-                        last_sig_out[sk] = _v
-            except Exception:
-                last_sig_out = {}
-            last_sig_out["Signal"] = bool(last_sig_row.get("Signal", False))
-            last_sig_out["Ready"] = bool(ready_ok)
-            last_sig_out["Sig_Type"] = str(last_sig_row.get("Sig_Type", "TYPE_B"))
-            last_sig_out["Met_Ratio"] = float(
-                self._to_scalar(last_sig_row.get("Met_Ratio"), 0.0)
-            )
-            _sel_tr = str(
-                info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
-            ).strip().upper()
-            try:
-                conf = self._format_s1_confluence_status_line(last_sig_out, _sel_tr)
-            except Exception:
-                conf = "인과 S1"
-            met_r = float(self._to_scalar(last_sig_out.get("Met_Ratio"), 0.0))
-            rsi_sig = float(
-                self._to_scalar(last_row_dict.get("RSI_Sig", last_row_dict.get("RSI", 0)), 0.0)
-            )
-            macd_val = float(self._to_scalar(last_row_dict.get("MACD", 0), 0.0))
-            osc_val = float(self._to_scalar(last_row_dict.get("OSC", 0), 0.0))
-            ma60_scalar = float(self._to_scalar(last_row_dict.get("MA60", 0), 0.0))
-            ma60_ratio = (
-                (float(now_price) / ma60_scalar) * 100.0
-                if ma60_scalar > 0
-                else 0.0
-            )
-
-            self._causal_s1_wall_used = int(self._causal_s1_wall_used) + 1
-            self._causal_s1_last_eval_ts[nk] = float(now_ts)
-            self._causal_s1_last_fp[nk] = fp
-            self._causal_s1_last_force_ts[nk] = float(now_ts)
-
-            return {
-                "ok": True,
-                "last_sig": last_sig_out,
-                "last_row": last_row_dict,
-                "is_buy": bool(sig_on),
-                "confluence": str(conf),
-                "met_ratio": float(met_r),
-                "rsi_sig": float(rsi_sig),
-                "macd_val": float(macd_val),
-                "osc_val": float(osc_val),
-                "ma60_ratio": float(ma60_ratio),
-            }
-        except Exception as exc:
-            try:
-                if str(exc) != str(getattr(self, "_causal_s1_last_err", "")):
-                    self._causal_s1_last_err = str(exc)
-                    self.app.log(f"⚠️ [CausalS1] {code} 재계산 예외: {exc}")
-            except Exception:
-                pass
-            return None
-
-    def _apply_causal_s1_result_to_tick_state(
-        self,
-        code: str,
-        cr: Dict[str, Any],
-        info: dict,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], bool, float, float, float, float]:
-        """
-        인과 S1 재계산 성공 시 ``last_sig``/캐시·슬롯 게이트를 동기화하고
-        스마트바이 분기에서 쓰는 스칼라들을 반환합니다.
-        """
-        last_sig = dict(cr["last_sig"])
-        last_row = dict(cr["last_row"])
-        is_buy = bool(cr.get("is_buy", False))
-        try:
-            info["confluence"] = str(cr.get("confluence", ""))
-            info["met_ratio"] = float(cr.get("met_ratio", 0.0))
-        except Exception:
-            pass
-        rsi_sig = float(cr.get("rsi_sig", 0.0))
-        macd_val = float(cr.get("macd_val", 0.0))
-        osc_val = float(cr.get("osc_val", 0.0))
-        ma60_ratio = float(cr.get("ma60_ratio", 0.0))
-        try:
-            info["last_row_cache"] = last_row
-            info["last_sig_cache"] = last_sig
-        except Exception:
-            pass
-        # 슬롯 고정 게이트는 인과 스냅샷과 불일치할 수 있어 제거 후 다음 틱에서 재구성
-        try:
-            del self._s1_slot_gate_cache[code]
-        except KeyError:
-            pass
-        return last_sig, last_row, is_buy, rsi_sig, macd_val, osc_val, ma60_ratio
-
-    def _maybe_refresh_bt_hp_bridge_eval(
-        self,
-        code: str,
-        bars_15m: Any,
-        info: dict,
-        need_full_calc: bool,
-        slot_key: str,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        동적 백테 고정밀과 동일한 1m 인트라바 시뮬.
-
-        - **보유 중에만** 호출·캐시: 청산(EXIT)·추매(S2) 판단용 ``unified`` 를 채웁니다.
-        - 미보유 시 S1 은 ``인과 S1``·일반 15분 경로만 사용(브리지로 S1 이중 판정하지 않음).
-        - 1분 청크: 틱 집계 ``rt_tick_m1_store`` 기본(REST/백테 DB는 설정으로).
-        """
-        try:
-            st = getattr(self.app, "settings", None) or {}
-            if not bool(st.get("realtime_signal_use_bt_hp_bridge", False)):
-                return None
-            dm = getattr(self.app, "data_manager", None)
-            if dm is None or bars_15m is None or getattr(bars_15m, "empty", True):
-                return None
-            # 미보유: 브리지 미실행·캐시 제거(재진입 시 이전 unified 오염 방지)
-            if not self._has_open_position(code):
-                try:
-                    info.pop("_bt_hp_eval_cache", None)
-                    info.pop("_bt_hp_m1_fp", None)
-                except Exception:
-                    pass
-                return None
-
-            curr_ts = pd.Timestamp(bars_15m.index[-1])
-            now_cap = pd.Timestamp.now()
-            m1_last = ""
-            try:
-                tok: Optional[str] = None
-                try:
-                    fn_tok = getattr(self.app, "get_auth_token", None)
-                    if callable(fn_tok):
-                        tok = fn_tok()
-                except Exception:
-                    tok = None
-                rt_m1 = getattr(self.app, "rt_tick_m1_store", None)
-                m1_chunk = resolve_m1_chunk_for_bt_hp_bridge(
-                    dm,
-                    str(code).zfill(6),
-                    tok,
-                    curr_ts,
-                    now_cap,
-                    st,
-                    rt_m1_store=rt_m1,
-                )
-                if m1_chunk is None or getattr(m1_chunk, "empty", True):
-                    return None
-                m1_last = str(m1_chunk.index[-1])
-            except (TypeError, ValueError, OSError, AttributeError):
-                return None
-
-            pf = ""
-            try:
-                if self._has_open_position(code):
-                    ps = self._bt_hp_position_snapshot(code)
-                    if isinstance(ps, dict):
-                        pf = f"|{int(ps.get('entry_n', 1) or 1)}|{float(ps.get('max_p', 0) or 0):.0f}"
-            except Exception:
-                pf = ""
-            fp = f"{slot_key}|{m1_last}{pf}"
-            prev_fp = str(info.get("_bt_hp_m1_fp") or "")
-            cached = info.get("_bt_hp_eval_cache")
-            if (
-                (not need_full_calc)
-                and prev_fp == fp
-                and isinstance(cached, dict)
-            ):
-                return cached
-
-            ct = sel_track_to_bt_code_track(
-                info.get("sel_track") or info.get("SelTrack")
-            )
-            pos_snap = (
-                self._bt_hp_position_snapshot(code)
-                if self._has_open_position(code)
-                else None
-            )
-            uni = evaluate_bt_hp_intrabar_unified(
-                st,
-                str(code).zfill(6),
-                bars_15m,
-                m1_chunk,
-                pos_snap,
-                ct,
-            )
-            if not isinstance(uni, dict) or not uni.get("ok"):
-                return None
-
-            s1e = uni.get("s1_eval") if isinstance(uni.get("s1_eval"), dict) else {}
-            ind_last = (
-                uni.get("indicator_last")
-                if isinstance(uni.get("indicator_last"), dict)
-                else {}
-            )
-            ind_for_row: Dict[str, Any] = {}
-            if pos_snap is None:
-                ind_for_row = (
-                    dict(s1e.get("indicator_to_use") or {})
-                    if isinstance(s1e.get("indicator_to_use"), dict)
-                    else dict(ind_last)
-                )
-            else:
-                ind_for_row = dict(ind_last) if ind_last else {}
-
-            res: Dict[str, Any] = {
-                "ok": True,
-                "unified": uni,
-                "indicator_to_use": ind_for_row,
-                "can_execute_entry": bool(s1e.get("can_execute_entry", False)),
-                "is_buy_signal": bool(s1e.get("is_buy_signal", False)),
-                "sig_type": str(s1e.get("sig_type") or "TYPE_B"),
-                "reason": str(s1e.get("reason") or ""),
-            }
-            info["_bt_hp_m1_fp"] = fp
-            info["_bt_hp_eval_cache"] = res
-            return res
-        except (TypeError, ValueError, KeyError, AttributeError, OSError):
-            return None
 
     def _to_scalar(self, val, default=0):
         """[v4.5.9] 헬퍼: Series/DF/Numpy 등 어떤 형태에서든 안전하게 단일 스칼라 값 추출"""
@@ -766,28 +238,6 @@ class SignalEngine:
         except Exception:
             pass
         return False
-
-    def _bt_hp_position_snapshot(self, code: str) -> Optional[Dict[str, Any]]:
-        """BT-HP 인트라바 시뮬용 포지션 딥카피(실제 virtual_positions 는 변경하지 않음)."""
-        try:
-            vp = getattr(self.app, "virtual_positions", None) or {}
-            if not vp:
-                return None
-            nk = str(code).split("_")[0].zfill(6)
-            pos = vp.get(code) or vp.get(nk)
-            if pos is None:
-                for k, v in vp.items():
-                    try:
-                        if str(k).split("_")[0].zfill(6) == nk:
-                            pos = v
-                            break
-                    except Exception:
-                        continue
-            if not isinstance(pos, dict):
-                return None
-            return copy.deepcopy(pos)
-        except Exception:
-            return None
 
     def _resolve_monitor_info_dict_key(self, nk: str) -> Optional[str]:
         """
@@ -1071,6 +521,8 @@ class SignalEngine:
             for k, v in kwargs.items():
                 if k == "_orderbook_only":
                     continue
+                if str(k).startswith("_"):
+                    continue
                 info[k] = v
 
             # 틱 시각: 인과 S1 1분 완성 정렬(없으면 수신 시각으로 채움 → 분 경계 판정용)
@@ -1082,26 +534,7 @@ class SignalEngine:
             except Exception:
                 pass
 
-            # 1. 봉 데이터 업데이트(15분 슬롯 DF)
-            # 이전에는 가격 변동이 미세하면 stream_processor 호출 자체를 throttle 했으나,
-            # 이는 누적거래량(fid 13)의 차분 누적 방식에서 슬롯 마지막 0B를 누락시켜
-            # 봉 거래량이 실제의 5~10%만 잡히는 문제(BT 봉 대비 1000배 차이)를 일으켰습니다.
-            # 봉 갱신 자체는 dict 한 줄 갱신 수준으로 매우 가벼우므로 throttle을 제거하고
-            # 매 0B 틱마다 OHLCV·누적거래량 차분을 즉시 반영하도록 변경합니다.
-            if not is_orderbook_only:
-                try:
-                    _now_ts_bar = time.time()
-                    self._update_realtime_bar(code, now_price, volume)
-                    self._bar_update_last_ts[code] = _now_ts_bar
-                    self._bar_update_anchor_price[code] = float(now_price)
-                except Exception:
-                    try:
-                        self._update_realtime_bar(code, now_price, volume)
-                        self._bar_update_last_ts[code] = time.time()
-                        self._bar_update_anchor_price[code] = float(now_price)
-                    except Exception:
-                        pass
-            
+            # 1. 15분 OHLCV는 ``realtime_official_bars_sync``(공식 1분·슬롯 롤)만 갱신. 틱으로 봉을 바꾸지 않음.
             # 2. 실시간 지표 추출 (RSI, MACD 등)
             rsi_val = self._calculate_realtime_rsi(code)
             
@@ -1197,15 +630,6 @@ class SignalEngine:
             last_row = None
             if bars_ready:
                 now_ts = time.time()
-                tick_wall_for_causal: Optional[datetime] = None
-                try:
-                    tw = kwargs.get("ts_wall")
-                    if tw is not None:
-                        tick_wall_for_causal = pd.Timestamp(
-                            str(tw)[:26]
-                        ).to_pydatetime()
-                except Exception:
-                    tick_wall_for_causal = None
                 last_calc_ts = float(self._s1_full_calc_last_ts.get(code, 0.0) or 0.0)
                 cached_last_row = info.get("last_row_cache")
                 cached_last_sig_cache = info.get("last_sig_cache")
@@ -1225,18 +649,6 @@ class SignalEngine:
                 last_sig: dict = {}
                 last_row = cached_last_row
                 _bt_hp_res: Optional[Dict[str, Any]] = None
-                try:
-                    sk_bt = ""
-                    try:
-                        sk_bt = self._current_slot_key_from_bars(_bd) or ""
-                    except Exception:
-                        sk_bt = ""
-                    # BT-HP 브리지: 보유 시 EXIT/S2 전용(미보유 S1 은 인과·일반 경로만)
-                    _bt_hp_res = self._maybe_refresh_bt_hp_bridge_eval(
-                        code, _bd, info, need_full_calc, sk_bt
-                    )
-                except Exception:
-                    _bt_hp_res = None
 
                 if need_full_calc:
                     _src_df = self.app.bars_data.get(bars_key) if bars_key else None
@@ -1307,37 +719,6 @@ class SignalEngine:
                         ma60_ratio = (
                             (now_price / ma60_scalar) * 100.0 if ma60_scalar > 0 else 0.0
                         )
-                        # 인과 S1: 풀 계산 직후 tail 재평가로 합치도·Ready 정렬(스마트바이는 캐시 경로에서만 후행)
-                        try:
-                            if self._realtime_causal_s1_enabled():
-                                _cr = self._maybe_apply_realtime_causal_s1(
-                                    code,
-                                    _bd,
-                                    info,
-                                    now_ts,
-                                    need_full_calc,
-                                    float(now_price),
-                                    tick_wall_for_causal,
-                                )
-                                if isinstance(_cr, dict) and _cr.get("ok"):
-                                    (
-                                        last_sig,
-                                        last_row,
-                                        is_buy,
-                                        rsi_sig,
-                                        macd_val,
-                                        osc_val,
-                                        ma60_ratio,
-                                    ) = self._apply_causal_s1_result_to_tick_state(
-                                        code, _cr, info
-                                    )
-                        except Exception as exc_cs1:
-                            try:
-                                self.app.log(
-                                    f"⚠️ [CausalS1] {code} 풀계산 병합 예외: {exc_cs1}"
-                                )
-                            except Exception:
-                                pass
                 else:
                     # 캐시 재사용 경로
                     # 아래 게이트·스마트바이 분기에서 항상 참조되도록 선행 정의(else 경로 NameError 방지)
@@ -1410,36 +791,6 @@ class SignalEngine:
                             )
                     except Exception:
                         pass
-
-                    # 인과 S1: 슬롯 게이트 이후·스마트바이 직전에 tail 재평가(게이트와 충돌 시 캐시·게이트 재동기화)
-                    try:
-                        if self._realtime_causal_s1_enabled():
-                            _cr = self._maybe_apply_realtime_causal_s1(
-                                code,
-                                _bd,
-                                info,
-                                now_ts,
-                                need_full_calc,
-                                float(now_price),
-                                tick_wall_for_causal,
-                            )
-                            if isinstance(_cr, dict) and _cr.get("ok"):
-                                (
-                                    last_sig,
-                                    last_row,
-                                    is_buy,
-                                    rsi_sig,
-                                    macd_val,
-                                    osc_val,
-                                    ma60_ratio,
-                                ) = self._apply_causal_s1_result_to_tick_state(code, _cr, info)
-                    except Exception as exc_cs1b:
-                        try:
-                            self.app.log(
-                                f"⚠️ [CausalS1] {code} 캐시경로 병합 예외: {exc_cs1b}"
-                            )
-                        except Exception:
-                            pass
 
                     if is_buy:
                         sig_type = str(
@@ -1605,15 +956,7 @@ class SignalEngine:
                             daemon=True,
                         ).start()
                 try:
-                    info["_bt_hp_bridge_res"] = (
-                        _bt_hp_res
-                        if (
-                            isinstance(_bt_hp_res, dict)
-                            and _bt_hp_res.get("ok")
-                            and self._has_open_position(code)
-                        )
-                        else None
-                    )
+                    info["_bt_hp_bridge_res"] = None
                 except Exception:
                     pass
             else:
@@ -1689,49 +1032,17 @@ class SignalEngine:
                     self._eval_position_last_ts[code] = now_ts
                     res: Dict[str, Any] = {"action": "HOLD"}
                     try:
-                        br_hp = info.get("_bt_hp_bridge_res")
-                        uni_hp = (
-                            br_hp.get("unified")
-                            if isinstance(br_hp, dict)
-                            else None
+                        res = self.app.strategy_engine.evaluate_position(
+                            code,
+                            now_price,
+                            ind=eval_ind,
+                            is_power_exhausted=is_power_exhausted,
+                            bid_ask_ratio=bid_ask_ratio,
+                            ask_bid_ratio=ask_bid_ratio,
+                            vol_power=vol_power,
+                            sel_track=info.get("sel_track")
+                            or info.get("SelTrack"),
                         )
-                        st_hp = getattr(self.app, "settings", None) or {}
-                        use_ib = bool(
-                            st_hp.get("realtime_signal_use_bt_hp_bridge", False)
-                        ) and isinstance(uni_hp, dict) and bool(uni_hp.get("ok"))
-                        if use_ib and self._has_open_position(code):
-                            ex0 = uni_hp.get("exit_first")
-                            ad0 = uni_hp.get("stage2_addon")
-                            if isinstance(ex0, dict):
-                                res = {
-                                    "action": "EXIT",
-                                    "reason": str(ex0.get("reason") or "EXIT"),
-                                    "profit_ratio": float(
-                                        ex0.get("profit_ratio", 0) or 0
-                                    ),
-                                }
-                            elif isinstance(ad0, dict):
-                                res = {
-                                    "action": "STAGE2",
-                                    "reason": str(
-                                        ad0.get("reason") or "PROFIT_TRIGGER"
-                                    ),
-                                    "profit_ratio": 0.0,
-                                }
-                            else:
-                                res = {"action": "HOLD"}
-                        else:
-                            res = self.app.strategy_engine.evaluate_position(
-                                code,
-                                now_price,
-                                ind=eval_ind,
-                                is_power_exhausted=is_power_exhausted,
-                                bid_ask_ratio=bid_ask_ratio,
-                                ask_bid_ratio=ask_bid_ratio,
-                                vol_power=vol_power,
-                                sel_track=info.get("sel_track")
-                                or info.get("SelTrack"),
-                            )
                     except Exception:
                         try:
                             res = self.app.strategy_engine.evaluate_position(
@@ -2388,10 +1699,6 @@ class SignalEngine:
         except Exception:
             pass
 
-    def _update_realtime_bar(self, code, price, volume):
-        self.app.bars_data = self.app.stream_processor.update_realtime_bar(code, price, volume, self.app.bars_data or {})
-
-    def _calculate_realtime_rsi(self, code):
         """[v15.0] 실시간 봉 데이터를 기반으로 즉시 RSI 산출"""
         # 틱마다 RSI를 rolling 계산하면 메인 스레드가 과점유되므로 캐시/스로틀링 적용
         try:

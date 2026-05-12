@@ -19,6 +19,10 @@ USE_MOCK = True # 서버 전환 버튼에 의해 자동 수정됨
 # [Fix] USE_MOCK 값에 따라 최종 접속 URL을 결정합니다.
 URL = MOCK_URL if USE_MOCK else REAL_URL
 
+# ka10080 REST: 과다 호출(HTTP 429) 방지 — DataManagerV2 가 전역 최소 간격으로 직렬화.
+# KiwoomApp 기동 시 settings 의 realtime_ka10080_global_min_interval_sec 로 덮어씁니다.
+KA10080_GLOBAL_MIN_INTERVAL_SEC = 0.35
+
 MOCK_APP_KEY = "5-_eJyH9IVD8SFmAqXMHas0jaTCS0O9nJ-_ivKx4KLI"                     # 모의투자용 App Key
 MOCK_APP_SECRET = "NFlzCETCLsvRQ_BwghdIlLW_h0p39YlZZANiimKeF-E"                  # 모의투자용 Secret Key
 ALLOW_MOCK_ORDER = True # 모의투자 주문 허용 여부

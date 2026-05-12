@@ -209,7 +209,20 @@ class KiwoomApp:
         
     @property
     def virtual_positions(self): return self.portfolio.virtual_positions
-    
+
+    def _sync_ka10080_rest_pacing_from_settings(self) -> None:
+        """settings → config.KA10080_GLOBAL_MIN_INTERVAL_SEC (ka10080 REST 전역 최소 간격)."""
+        try:
+            st = getattr(self, "settings", None) or {}
+            g = float(st.get("realtime_ka10080_global_min_interval_sec", 0.35))
+            g = max(0.12, min(g, 2.0))
+            self.config.KA10080_GLOBAL_MIN_INTERVAL_SEC = g
+        except Exception:
+            try:
+                self.config.KA10080_GLOBAL_MIN_INTERVAL_SEC = 0.35
+            except Exception:
+                pass
+
     def __init__(self, root, auto_start=False):
         self.root = root
         self._main_thread_id = threading.get_ident()
@@ -287,6 +300,7 @@ class KiwoomApp:
         )
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        self._sync_ka10080_rest_pacing_from_settings()
         # Tick dispatch 주기는 SignalEngine이 메인 스레드를 과점유할 때 UI가 멎는 문제를 직접 줄이므로,
         # 애플리케이션 인스턴스에 모듈 상수값을 그대로 심어둔다.
         try:
@@ -314,15 +328,8 @@ class KiwoomApp:
         from core.rt_tick_m1_store import RtTickM1Store
         from core.stream_processor import StreamProcessor
 
-        try:
-            _m1_keep = int(
-                float(self.settings.get("realtime_signal_bt_hp_bridge_tick_m1_max_rows", 24))
-            )
-        except (TypeError, ValueError):
-            _m1_keep = 24
-        _m1_keep = max(8, min(_m1_keep, 64))
         self.rt_tick_m1_store = RtTickM1Store(
-            max_completed_per_code=_m1_keep,
+            max_completed_per_code=24,
             logger_callback=self.log,
         )
 
@@ -354,17 +361,20 @@ class KiwoomApp:
             except Exception:
                 pass
 
+        self._rt15_bar_closed_cb = _on_rt15_bar_closed
         self.rt_closed_15m_official_scheduler = RtClosed15mOfficialReplaceScheduler(
             log=self.log
         )
         self.rt_watchlist_m1_api_poller = RtWatchlistM1ApiPoller(self, log=self.log)
         self.rt_watchlist_m1_api_poller.start()
+        from core.realtime_official_bars_sync import Rt15mSlotBoundaryWatcher
+
+        self.rt_15m_slot_boundary_watcher = Rt15mSlotBoundaryWatcher(self, log=self.log)
         self.stream_processor = StreamProcessor(
             self.settings,
             logger_callback=self.log,
             on_fifteen_min_bar_closed=_on_rt15_bar_closed,
             bars_data_lock=self._bars_data_lock,
-            tick_m1_store=self.rt_tick_m1_store,
         )
         self.streaam_processor = self.stream_processor # [Typo Alias Safety]
         self.rsi_signals = {}
@@ -529,6 +539,7 @@ class KiwoomApp:
 
     def reset_ui_tabs(self):
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        self._sync_ka10080_rest_pacing_from_settings()
         if hasattr(self, 'notebook'):
             curr_tab = self.notebook.index("current")
             for child in self.notebook.winfo_children(): child.destroy()
