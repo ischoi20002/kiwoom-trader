@@ -10,14 +10,17 @@ pandas 기본 ``resample('15min')`` 은 label=left, closed=left 로
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Union
+from typing import Tuple, Union
 
+import numpy as np
 import pandas as pd
 
 from utils.normalization import normalize_code
 
 __all__ = [
     "m1_window_start_for_15m_end",
+    "m1_index_bounds_for_15m_end",
+    "m1_bar_open_label_for_just_completed_minute",
     "resample_1m_ohlcv_to_15m_krx",
     "KRX_15M_RESAMPLE_KWARGS",
 ]
@@ -39,6 +42,42 @@ def m1_window_start_for_15m_end(
     if t.hour == 9 and t.minute == 15:
         return t - pd.Timedelta(minutes=15)
     return t - pd.Timedelta(minutes=14)
+
+
+def m1_index_bounds_for_15m_end(
+    m1_index: pd.DatetimeIndex,
+    end_ts_15m: Union[pd.Timestamp, datetime, str],
+) -> Tuple[int, int]:
+    """
+    ``backtest_engine.SimpleBacktester.run`` 과 동일한 규칙으로,
+    15분봉 **라벨(종가 시각)** ``end_ts_15m`` 에 대응하는 ``bars_1m`` 행 구간 ``[s, e)`` 인덱스.
+
+    - 시작: ``m1_window_start_for_15m_end(end_ts_15m)`` (첫 09:15 봉만 T-15, 그 외 T-14)
+    - 끝: ``numpy.searchsorted(..., end_ts_15m, side='right')`` (15m 라벨 시각 **미만** 1분봉까지)
+    """
+    try:
+        t_end = pd.Timestamp(end_ts_15m)
+        t_start = m1_window_start_for_15m_end(t_end)
+        m1a = np.asarray(m1_index.values, dtype="datetime64[ns]")
+        s = int(np.searchsorted(m1a, np.datetime64(t_start), side="left"))
+        e = int(np.searchsorted(m1a, np.datetime64(t_end), side="right"))
+        return s, e
+    except Exception:
+        return 0, 0
+
+
+def m1_bar_open_label_for_just_completed_minute(
+    wall: Union[pd.Timestamp, datetime, str],
+) -> pd.Timestamp:
+    """
+    벽시계(또는 틱 ``ts_wall``) 시각 ``wall`` 기준, **방금 끝난** 1분봉의 시작 라벨.
+
+    ``bars_1m`` 인덱스(분 시작 시각)와 맞추기 위해 ``floor(분) - 1분`` 으로 둡니다.
+    예: ``wall=13:02:30`` → ``13:01:00`` (13:01~13:02 구간이 닫힘).
+    """
+    t = pd.Timestamp(wall)
+    floored = t.floor("min")
+    return floored - pd.Timedelta(minutes=1)
 
 
 def resample_1m_ohlcv_to_15m_krx(

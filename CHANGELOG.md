@@ -13,6 +13,12 @@
 
 ---
 
+## 0.7.16 (2026-05-12)
+
+- **실시간 고정 프리시그널 게이트**: `get_buy_signals_detailed` 결과에 `Ready` 키가 없을 때 `ready`가 항상 거짓이 되어 매수가 막히던 문제를 **`_s1_presignal_ready_for_gate`** 로 수정 — 키가 없으면 `Signal`과 동기(`core/signal_engine.py`).
+- **실시간 인과 S1·백테 1분 정렬**: KRX 15m 라벨 대응 1분 창(`m1_window_start_for_15m_end`, **`m1_bar_open_label_for_just_completed_minute`**, **`m1_index_bounds_for_15m_end`**)과 **`realtime_causal_s1_eval_on_m1_close`** 로, 분이 닫힐 때마다 interval 스로틀을 한 번 건너뛰어 고정밀 백테 스텝에 맞춤(`core/signal_engine.py`, `utils/krx_bars.py`, `settings.json`).
+- **검증 도구**: `tools/verify_rt_gate_at_signal_bars.py`, `tools/verify_shinsegae_hp_m1_buy_1301.py`, `tools/verify_m1_close_label_krx.py`, `tools/compare_rt_tick_vs_bt_15m.py`, `tools/_replay_lg_003550_rt_filters.py` 등.
+
 ## 0.7.15 (2026-05-12)
 
 - **지정가 미체결 타임아웃 + RC4033**: 취소 거부(미체결 없음·통상 전량 체결) 시 주문 로그를 `CANCELLED`로 덮지 않고, **`no_open_qty`** 로 구분(`core/order_manager.py`). 매도(`exit_sell`)는 **`exit_pending` 유지** + **`reconcile_exchange_fill_after_order_accept(..., boost_polling=True)`** 로 kt00007 재폴링 강화(`core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`, `k_trader_gui.py`).

@@ -11,6 +11,10 @@ from core.defaults import effective_min_15m_bars_for_monitoring
 from core.monitor_code_sets import watchlist_only_codes_set
 from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
+from utils.krx_bars import (
+    m1_bar_open_label_for_just_completed_minute,
+    m1_window_start_for_15m_end,
+)
 from utils.bars_data_keys import resolve_bars_data_frame
 from utils.normalization import canonical_stock_code
 from typing import Any, Dict, Optional, Tuple
@@ -98,6 +102,8 @@ class SignalEngine:
         self._causal_s1_last_force_ts: dict[str, float] = {}
         self._causal_s1_wall_sec: int = -1
         self._causal_s1_wall_used: int = 0
+        # 1분 완성 시 인과 S1 interval 우회: (slot_key|닫힌 1분 라벨) 중복 방지
+        self._causal_s1_m1close_pair: dict[str, str] = {}
 
         # 15분봉 DF 갱신: 틱마다 df.at 호출은 Tk 메인스레드에서 비용이 크므로 시간·가격 변화 기반 스로틀
         try:
@@ -177,6 +183,25 @@ class SignalEngine:
         except Exception:
             return True
 
+    def _s1_presignal_ready_for_gate(self, last_sig: dict[str, Any]) -> bool:
+        """
+        고정 프리시그널 게이트에 넣을 Ready 초기값.
+
+        ``get_buy_signals_detailed`` 결과 dict에는 ``Ready`` 키가 없는 경우가 많습니다.
+        이 때 ``bool(last_sig.get('Ready', False))`` 로만 읽으면 ready 가 항상 False 가 되어
+        ``signal and ready`` 게이트가 매수를 영구 차단하는 버그가 생깁니다.
+        키가 없으면 ``Signal`` 과 동일하게 두어, 슬롯 첫 판정의 신호가 그대로 통과합니다.
+        ``Ready`` 키가 있으면(인과 S1 등) 그 값을 그대로 따릅니다.
+        """
+        try:
+            if not isinstance(last_sig, dict):
+                return False
+            if "Ready" not in last_sig:
+                return bool(self._to_scalar(last_sig.get("Signal"), False))
+            return bool(self._to_scalar(last_sig.get("Ready"), False))
+        except Exception:
+            return False
+
     def _current_slot_key_from_bars(self, bars_df: Any) -> str:
         """bars_data 마지막 행 기준 15분 슬롯 키(YYYY-mm-dd HH:MM:SS)."""
         try:
@@ -197,6 +222,65 @@ class SignalEngine:
             )
         except Exception:
             return False
+
+    def _realtime_causal_s1_eval_on_m1_close_enabled(self) -> bool:
+        """
+        True면 KRX 15m 슬롯 안에서 1분봉이 닫힐 때마다(분 경계) 인과 S1 재평가가
+        ``realtime_causal_s1_interval_sec`` 스로틀을 한 번 건너뜁니다(백테 고정밀 1m 스텝과 정렬).
+        """
+        try:
+            return bool(
+                (getattr(self.app, "settings", None) or {}).get(
+                    "realtime_causal_s1_eval_on_m1_close", True
+                )
+            )
+        except Exception:
+            return True
+
+    def _m1_closed_label_in_current_15m_slot(
+        self, bars_df: Any, closed_label: pd.Timestamp
+    ) -> bool:
+        """닫힌 1분 라벨이 현재 형성 중 15m 의 bars_1m 창 ``[t0, slot_end)`` 안에 있는지."""
+        try:
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return False
+            slot_end = pd.Timestamp(bars_df.index[-1])
+            t0 = m1_window_start_for_15m_end(slot_end)
+            cl = pd.Timestamp(closed_label)
+            return bool(t0 <= cl < slot_end)
+        except Exception:
+            return False
+
+    def _m1_close_interval_bypass_key(
+        self,
+        nk: str,
+        bars_df: Any,
+        tick_wall_dt: Optional[datetime],
+    ) -> str:
+        """
+        현재 틱이 '새로 닫힌 1분'이면 ``{slot_key}|{closed_lab}`` 키를 반환(아니면 ``''``).
+
+        키는 호출부에서 interval/fp 등을 통과한 뒤에만 ``_causal_s1_m1close_pair`` 에 기록합니다.
+        """
+        try:
+            if not self._realtime_causal_s1_enabled():
+                return ""
+            if not self._realtime_causal_s1_eval_on_m1_close_enabled():
+                return ""
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return ""
+            wall = tick_wall_dt if tick_wall_dt is not None else datetime.now()
+            closed_lab = m1_bar_open_label_for_just_completed_minute(wall)
+            if not self._m1_closed_label_in_current_15m_slot(bars_df, closed_lab):
+                return ""
+            slot_key = self._current_slot_key_from_bars(bars_df) or ""
+            pair = f"{slot_key}|{closed_lab.strftime('%Y-%m-%d %H:%M:%S')}"
+            prev = str(self._causal_s1_m1close_pair.get(nk, "") or "")
+            if pair == prev:
+                return ""
+            return pair
+        except Exception:
+            return ""
 
     def _causal_s1_fingerprint(self, bars_df: Any) -> str:
         """슬롯 + 마지막(진행) 봉 OHLCV 지문 — 동일이면 무거운 재계산 생략."""
@@ -222,10 +306,14 @@ class SignalEngine:
         now_ts: float,
         need_full_calc: bool,
         now_price: float,
+        tick_wall_dt: Optional[datetime] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         짧은 간격·지문·초당 예산으로 15분 tail 을 잘라 ``calculate_indicators`` + ``get_buy_signals_detailed`` 재실행.
         성공 시 ``last_sig``/``is_buy``/합치도 등에 덮어쓸 dict 반환.
+
+        ``realtime_causal_s1_eval_on_m1_close`` 가 켜져 있으면, 현재 15m 슬롯 안에서
+        1분봉이 막 닫힌 시점(분 경계)마다 ``realtime_causal_s1_interval_sec`` 스로틀을 한 번 건너뜁니다.
         """
         try:
             st = getattr(self.app, "settings", None) or {}
@@ -233,6 +321,8 @@ class SignalEngine:
             fp = self._causal_s1_fingerprint(bars_df)
             if not fp:
                 return None
+
+            bypass_key = self._m1_close_interval_bypass_key(nk, bars_df, tick_wall_dt)
 
             try:
                 interval = float(st.get("realtime_causal_s1_interval_sec", 15.0))
@@ -264,7 +354,7 @@ class SignalEngine:
             if wsec != int(getattr(self, "_causal_s1_wall_sec", -1)):
                 self._causal_s1_wall_sec = wsec
                 self._causal_s1_wall_used = 0
-            if int(self._causal_s1_wall_used) >= int(max_per_wall):
+            if int(self._causal_s1_wall_used) >= int(max_per_wall) and bypass_key == "":
                 return None
 
             last_ev = float(self._causal_s1_last_eval_ts.get(nk, 0.0) or 0.0)
@@ -273,10 +363,15 @@ class SignalEngine:
             last_force = float(self._causal_s1_last_force_ts.get(nk, 0.0) or 0.0)
 
             short_sync = bool(need_full_calc) and elapsed >= 3.0
-            if not short_sync and elapsed < interval:
+            interval_bypass = bypass_key != ""
+            if not short_sync and not interval_bypass and elapsed < interval:
                 return None
+            # 1분 완성으로 interval 을 건너뛰는 경우, 동일 분 재시도 방지
+            if interval_bypass:
+                self._causal_s1_m1close_pair[nk] = bypass_key
             if (
                 not short_sync
+                and not interval_bypass
                 and fp == last_fp
                 and (float(now_ts) - last_force) < force_sec
             ):
@@ -928,6 +1023,15 @@ class SignalEngine:
                     continue
                 info[k] = v
 
+            # 틱 시각: 인과 S1 1분 완성 정렬(없으면 수신 시각으로 채움 → 분 경계 판정용)
+            try:
+                if kwargs.get("ts_wall") is None:
+                    kwargs["ts_wall"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S.%f"
+                    )
+            except Exception:
+                pass
+
             # 1. 봉 데이터 업데이트(15분 슬롯 DF)
             # 이전에는 가격 변동이 미세하면 stream_processor 호출 자체를 throttle 했으나,
             # 이는 누적거래량(fid 13)의 차분 누적 방식에서 슬롯 마지막 0B를 누락시켜
@@ -1043,6 +1147,15 @@ class SignalEngine:
             last_row = None
             if bars_ready:
                 now_ts = time.time()
+                tick_wall_for_causal: Optional[datetime] = None
+                try:
+                    tw = kwargs.get("ts_wall")
+                    if tw is not None:
+                        tick_wall_for_causal = pd.Timestamp(
+                            str(tw)[:26]
+                        ).to_pydatetime()
+                except Exception:
+                    tick_wall_for_causal = None
                 last_calc_ts = float(self._s1_full_calc_last_ts.get(code, 0.0) or 0.0)
                 cached_last_row = info.get("last_row_cache")
                 cached_last_sig_cache = info.get("last_sig_cache")
@@ -1154,6 +1267,7 @@ class SignalEngine:
                                     now_ts,
                                     need_full_calc,
                                     float(now_price),
+                                    tick_wall_for_causal,
                                 )
                                 if isinstance(_cr, dict) and _cr.get("ok"):
                                     (
@@ -1225,7 +1339,7 @@ class SignalEngine:
                                     gate = {
                                         "slot_key": slot_key,
                                         "signal": bool(self._to_scalar(last_sig.get("Signal"), False)),
-                                        "ready": bool(self._to_scalar(last_sig.get("Ready"), False)),
+                                        "ready": bool(self._s1_presignal_ready_for_gate(last_sig)),
                                         "sig_type": str(self._to_scalar(last_sig.get("Sig_Type", "TYPE_B"), "TYPE_B")),
                                     }
                                     self._s1_slot_gate_cache[code] = gate
@@ -1257,6 +1371,7 @@ class SignalEngine:
                                 now_ts,
                                 need_full_calc,
                                 float(now_price),
+                                tick_wall_for_causal,
                             )
                             if isinstance(_cr, dict) and _cr.get("ok"):
                                 (
