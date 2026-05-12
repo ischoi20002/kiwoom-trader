@@ -13,6 +13,10 @@
 
 ---
 
+## 0.8.1 (2026-05-12)
+
+- **실시간 체결 틱 JSONL 디스크 저장 제거**: `core/realtime_tick_recorder.py` 삭제, `KiwoomApp` 연동·종료 `shutdown` 제거, 설정 키 `realtime_tick_recorder_*` 삭제(`k_trader_gui.py`, `core/defaults.py`, `settings.json`). 틱 배치·신호 경로(`RealtimeTickDispatchService`)는 유지.
+
 ## 0.8.0 (2026-05-12)
 
 - **실시간 신호용 봉( S1 / S2 / 청산 )**: 틱으로 15분 OHLCV를 쌓지 않고 **공식 1분(ka10080)** 만으로 현재 슬롯 마지막 행을 갱신·**슬롯 전환 시 롤** 후 `SignalEngine` 재평가 — `core/realtime_official_bars_sync.py`, `Rt15mSlotBoundaryWatcher`, `core/rt_watchlist_m1_api_poller.py`, `core/signal_engine.py`, `core/stream_processor.py`, `core/rt_tick_m1_store.py`, `k_trader_gui.py`, `core/trading_controller.py`.

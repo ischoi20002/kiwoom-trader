@@ -405,9 +405,6 @@ class KiwoomApp:
         self.tick_dispatch_service = RealtimeTickDispatchService(
             self, self.signal_engine, log_func=self.log
         )
-        from core.realtime_tick_recorder import RealtimeTickRecorder
-
-        self.realtime_tick_recorder = RealtimeTickRecorder(self)
         # 틱 워커 스레드가 넣은 매수·청산·UI 갱신 요청을 메인에서만 처리
         self._tick_main_actions_queue: "queue.SimpleQueue[tuple]" = queue.SimpleQueue()
         self._tick_worker_ui_dirty: bool = False
@@ -860,12 +857,6 @@ class KiwoomApp:
         웹소켓 콜백은 비메인 스레드일 수 있음.
         SignalEngine·monitor_info 갱신은 메인 루프에서만 수행하고, 동일 종목은 한 프레임당 마지막 틱만 반영.
         """
-        try:
-            rec = getattr(self, "realtime_tick_recorder", None)
-            if rec is not None:
-                rec.record(code, now_price, volume, trde_val, **kwargs)
-        except Exception:
-            pass
         try:
             self.tick_dispatch_service.on_tick_received(
                 code, now_price, volume, trde_val, **kwargs
@@ -2133,12 +2124,6 @@ class KiwoomApp:
         try:
             if hasattr(self, "tick_dispatch_service"):
                 self.tick_dispatch_service.shutdown()
-        except Exception:
-            pass
-        try:
-            r = getattr(self, "realtime_tick_recorder", None)
-            if r is not None:
-                r.shutdown()
         except Exception:
             pass
         try:

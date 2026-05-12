@@ -34,11 +34,6 @@ DEFAULT_SETTINGS = {
     # 고정밀 인과 S1: 전역 15분 봉 인덱스 i 가 이 값 이상일 때만 Ready(벡터 루프와 동일하게 기본 19).
     "hp_causal_ready_min_bar_index": 19,
     "s1_buy_signal_cooldown_sec": 1800.0,
-    # 실시간 체결 틱 JSONL(호가 전용 패킷 제외). 디스크 사용 — 필요 시 True.
-    "realtime_tick_recorder_enabled": False,
-    "realtime_tick_recorder_subdir": "realtime_tick_logs",
-    "realtime_tick_recorder_batch_max": 500,
-    "realtime_tick_recorder_flush_wait_sec": 0.5,
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,
     "realtime_15m_calendar_retention_days": 365,
