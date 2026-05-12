@@ -60,6 +60,7 @@ from core.supply_display import capture_supply_snapshot
 from core.signal_callbacks_service import SignalCallbacksService
 from core.ui_trading_status_service import UiTradingStatusService
 from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
+from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
 
 from kiwoom_rest_api.auth.token import TokenManager
 
@@ -334,7 +335,27 @@ class KiwoomApp:
                     self.log(f"⚠️ [RT15mDB] 확정봉 저장 실패: {ex}")
                 except Exception:
                     pass
+            try:
+                sched = getattr(self, "rt_closed_15m_official_scheduler", None)
+                if sched is not None:
+                    try:
+                        dly = float(
+                            (self.settings or {}).get(
+                                "realtime_closed_15m_official_replace_delay_sec",
+                                2.5,
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        dly = 2.5
+                    sched.schedule(
+                        app=self, code=code, bar_ts=ts, delay_sec=dly
+                    )
+            except Exception:
+                pass
 
+        self.rt_closed_15m_official_scheduler = RtClosed15mOfficialReplaceScheduler(
+            log=self.log
+        )
         self.stream_processor = StreamProcessor(
             self.settings,
             logger_callback=self.log,
@@ -2184,6 +2205,121 @@ class KiwoomApp:
 
     def _recalculate_all_indicators(self, code):
         return self.strategy_engine.recalculate_indicators(code, self.bars_data, self.settings)
+
+    def _apply_official_closed_15m_bar(
+        self,
+        code: str,
+        bar_ts: Any,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> None:
+        """
+        확정된 15분 봉 한 줄을 REST(ka10080, tic_scope=설정) OHLCV로 덮어씁니다.
+        Tk 메인 스레드에서만 호출합니다.
+        """
+        from utils.bars_data_keys import resolve_bars_data_frame
+        from utils.normalization import canonical_stock_code
+        from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
+
+        try:
+            cc = canonical_stock_code(str(code).strip())
+            if not cc:
+                return
+            want = pd.Timestamp(bar_ts).floor("s")
+        except Exception:
+            return
+
+        lk = getattr(self, "_bars_data_lock", None)
+        bd = getattr(self, "bars_data", None)
+        if lk is None or not isinstance(bd, dict):
+            try:
+                self.realtime_monitor_bars_store.upsert_completed_bar(
+                    cc, want, open_, high, low, close, volume
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            with lk:
+                nk, df = resolve_bars_data_frame(bd, cc, migrate_alias=True)
+                use_key = nk or cc
+                if not use_key:
+                    return
+                if df is None or getattr(df, "empty", True):
+                    try:
+                        self.realtime_monitor_bars_store.upsert_completed_bar(
+                            use_key, want, open_, high, low, close, volume
+                        )
+                    except Exception:
+                        pass
+                    return
+                hit_idx = None
+                for ix in df.index:
+                    try:
+                        if pd.Timestamp(ix).floor("s") == want:
+                            hit_idx = ix
+                            break
+                    except Exception:
+                        continue
+                if hit_idx is None:
+                    try:
+                        self.log(
+                            f"ℹ️ [RT15m-Official] bars_data 에 해당 시각 없음 — DB만 갱신 "
+                            f"({use_key} {want})"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self.realtime_monitor_bars_store.upsert_completed_bar(
+                            use_key, want, open_, high, low, close, volume
+                        )
+                    except Exception:
+                        pass
+                    return
+                try:
+                    df.at[hit_idx, "Open"] = float(open_)
+                    df.at[hit_idx, "High"] = float(high)
+                    df.at[hit_idx, "Low"] = float(low)
+                    df.at[hit_idx, "Close"] = float(close)
+                    df.at[hit_idx, "Volume"] = float(volume)
+                    if "time" in df.columns:
+                        df.at[hit_idx, "time"] = ts_to_slot_hhmm(hit_idx)
+                except Exception as ex:
+                    try:
+                        self.log(
+                            f"⚠️ [RT15m-Official] OHLCV 덮어쓰기 실패 ({use_key}): {ex!r}"
+                        )
+                    except Exception:
+                        pass
+                    return
+                try:
+                    df["ma5"] = df["Close"].rolling(window=5).mean()
+                    df["ma20"] = df["Close"].rolling(window=20).mean()
+                    df["ma60"] = df["Close"].rolling(window=60).mean()
+                except Exception:
+                    pass
+                bd[use_key] = df
+                try:
+                    self.strategy_engine.recalculate_indicators(
+                        use_key, bd, self.settings
+                    )
+                except Exception:
+                    pass
+            try:
+                self.realtime_monitor_bars_store.upsert_completed_bar(
+                    use_key, want, open_, high, low, close, volume
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [RT15m-Official] _apply_official_closed_15m_bar 예외: {e!r}")
+            except Exception:
+                pass
 
     def send_telegram_message(self, message: str, parse_mode: Optional[str] = "HTML") -> None:
         try:

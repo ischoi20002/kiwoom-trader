@@ -13,6 +13,10 @@
 
 ---
 
+## 0.7.18 (2026-05-12)
+
+- **실시간 확정 15분봉 REST 치환**: 슬롯 전환 직후 틱으로 확정된 봉을 저장한 뒤, 짧은 지연·재시도·페이지 상한으로 **ka10080(설정 `realtime_warmup_ka10080_tic_scope`, 기본 15분)** 을 조회해 **완성 봉 한 줄만** `bars_data`·RT15m DB에 덮어씀 — 틱 누락 시 OHLCV 정합성 완화(`core/rt_closed_15m_official_replace.py`, `k_trader_gui.py`). 설정: `realtime_closed_15m_official_replace_*` (`core/defaults.py`).
+
 ## 0.7.17 (2026-05-12)
 
 - **지정가 참고가(주문 시점)**: S1 매수·EXIT 매도·S2 추매에서 신호 시점 가격 대신 **`_live_submit_reference_price`** 로 주문 직전 시세를 사용 — 메인 스레드는 트리 표시가 → `monitor_info` 틱 캐시 → 신호 힌트 순, 주문 워커는 Tk 없이 캐시·힌트(`core/trading_controller.py`). `buy_execute_start`에 `signal_hint_price` 보존.
