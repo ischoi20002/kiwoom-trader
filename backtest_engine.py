@@ -669,7 +669,16 @@ class TradingStrategy:
                 sim = bool(row.get("S1_Simultaneous_AB", False))
             else:
                 return "TYPE_B"
-            return TradingStrategy._s1_sig_type_simultaneous_balance_tie_b(settings, base, sim, holdings)
+            out = TradingStrategy._s1_sig_type_simultaneous_balance_tie_b(
+                settings, base, sim, holdings
+            )
+            u = str(out or "").strip().upper()
+            if u == "TYPE_A":
+                return "TYPE_A"
+            if u == "TYPE_B":
+                return "TYPE_B"
+            # 신호 DF에 NONE 등이 남는 경우 주문·내역 사유 컬럼에 'NONE'이 찍히지 않도록
+            return "TYPE_B"
         except Exception:
             return "TYPE_B"
 

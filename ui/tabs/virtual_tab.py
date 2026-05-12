@@ -3146,6 +3146,13 @@ class VirtualTab:
                 tag_base = "even" if row_i % 2 == 0 else "odd"
                 row_i += 1
 
+                try:
+                    rs_disp = str(reason or "").strip()
+                    if rs_disp.upper() in ("NONE", "NAN", ""):
+                        rs_disp = "—"
+                except Exception:
+                    rs_disp = "—"
+
                 self.tree_orders.insert(
                     "",
                     tk.END,
@@ -3161,7 +3168,7 @@ class VirtualTab:
                         self._order_log_vp_cell(snap_vp),
                         ba_o,
                         self._order_log_status_display(result),
-                        reason,
+                        rs_disp,
                     ),
                     tags=(tag_base, side_tag),
                 )
@@ -3253,7 +3260,7 @@ class VirtualTab:
         except Exception as e:
             messagebox.showerror("오류", f"설정 변경 중 오류가 발생했습니다: {e}")
 
-    def log_order(self, code, side, qty, price, order_type, result, reason=""):
+    def log_order(self, code, side, qty, price, order_type, result, name="", reason=""):
         """[v4.5.3] DB 기록 및 포지션 탭(보유·주문) UI 갱신 (캡슐화)"""
         try:
             from core.supply_display import capture_supply_snapshot
@@ -3261,7 +3268,6 @@ class VirtualTab:
             _sn = capture_supply_snapshot(self.app, code)
         except Exception:
             _sn = {"vol_power": None, "bid_ask_text": ""}
-        # 기존 호환: positional 8번째 인자가 name 컬럼으로 전달되던 패턴 유지
         self.app.data_manager.log_order(
             code,
             side,
@@ -3270,8 +3276,8 @@ class VirtualTab:
             order_type,
             "MOCK_ID",
             result,
-            name=reason,
-            reason="",
+            name=name or "",
+            reason=reason or "",
             snap_vol_power=_sn.get("vol_power"),
             snap_bid_ask=_sn.get("bid_ask_text") or "",
         )

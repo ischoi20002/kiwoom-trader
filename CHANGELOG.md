@@ -13,6 +13,12 @@
 
 ---
 
+## 0.7.14 (2026-05-12)
+
+- **주문·체결 UI**: 계좌 동기화(ka10085) 후에도 `order_history`가 `SUCCESS`(접수)만 남아 포지션과 어긋나던 문제 — `patch_buy_filled_price_after_reconcile`에서 잔고 수량·주문 수량 일치 시 **`FILLED`·`filled_qty`** 로 승격(`data_manager_v2.py`).
+- **주문 사유 `NONE`**: `Sig_Type`이 NONE일 때 그대로 주문 `reason`에 저장되던 것을 **`effective_s1_sig_type_for_buy`** 에서 `TYPE_A`/`TYPE_B` 외는 `TYPE_B`로 정규화(`backtest_engine.py`).
+- **포지션 탭 주문 내역**: 사유 표시에서 `NONE`/`NAN`/빈값은 **`—`**; `virtual_tab.log_order`가 DB에 **`name`/`reason`** 을 올바르게 넘기도록 수정(`ui/tabs/virtual_tab.py`).
+
 ## 0.7.13 (2026-05-12)
 
 - **실시간 인과 S1**(`core/signal_engine.py`, `core/defaults.py`): tail 룩백으로 `calculate_indicators` + `get_buy_signals_detailed` 재실행, 지문·초당 평가 예산·간격(`realtime_causal_s1_interval_sec` 기본 15초). `last_sig`에 `Met_A`/`Tot_A` 등 상세 행 전부 유지해 **신호상태 합치도**가 0/1로 붕괴하지 않도록 수정.

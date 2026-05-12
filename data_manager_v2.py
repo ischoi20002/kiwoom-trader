@@ -1480,8 +1480,11 @@ class DataManagerV2:
         broker_qty: int,
     ) -> None:
         """
-        계좌 동기화(ka10085) 직후 증권사 매입평균과 order_history.filled_price 를 맞춥니다.
-        동일 종목 매수 행이 DB에 1건일 때만 갱신합니다(추매 등 복수 건은 혼합 평단이므로 생략).
+        계좌 동기화(ka10085) 직후 증권사 매입평균과 order_history 를 맞춥니다.
+
+        - 동일 종목 **매수** 행이 DB에 1건일 때만 처리(추매 등 복수 건은 혼합 평단이라 생략).
+        - REST 체결 확정 스레드가 늦거나 kt00007 미반영으로 ``result=SUCCESS``(접수)만 남은 경우,
+          잔고 수량·주문 수량이 일치하면 **FILLED**·``filled_qty`` 로 승격해 주문·체결 UI와 포지션을 맞춥니다.
         """
         try:
             if broker_qty <= 0 or broker_avg_price <= 0:
@@ -1503,7 +1506,11 @@ class DataManagerV2:
                     try:
                         cur = conn.execute(
                             """
-                            SELECT id, COALESCE(filled_qty, 0), COALESCE(qty, 0), COALESCE(filled_price, 0)
+                            SELECT id,
+                                   COALESCE(filled_qty, 0),
+                                   COALESCE(qty, 0),
+                                   COALESCE(filled_price, 0),
+                                   UPPER(TRIM(COALESCE(result, '')))
                             FROM order_history
                             WHERE code = ?
                               AND LOWER(TRIM(COALESCE(side, ''))) = 'buy'
@@ -1523,15 +1530,47 @@ class DataManagerV2:
                         continue
                 if len(rows) != 1:
                     return
-                rid, fq, oq, old_fp = rows[0]
-                eff_q = int(fq) if fq else int(oq) if oq else 0
+                rid, fq, oq, old_fp, res_u = rows[0]
+                try:
+                    fq_i = int(fq or 0)
+                except (TypeError, ValueError):
+                    fq_i = 0
+                try:
+                    oq_i = int(oq or 0)
+                except (TypeError, ValueError):
+                    oq_i = 0
+                eff_q = fq_i if fq_i > 0 else oq_i
                 if eff_q > 0 and eff_q != int(broker_qty):
                     return
                 try:
-                    if int(old_fp) == fp_int:
-                        return
+                    old_fp_i = int(old_fp or 0)
                 except (TypeError, ValueError):
-                    pass
+                    old_fp_i = 0
+                # 접수(SUCCESS/MOCK)만 남고 잔고와 수량이 맞으면 체결 확정으로 승격
+                try:
+                    need_fill_status = (
+                        res_u in ("SUCCESS", "MOCK", "")
+                        and fq_i <= 0
+                        and oq_i > 0
+                        and int(broker_qty) == oq_i
+                    )
+                except Exception:
+                    need_fill_status = False
+
+                if need_fill_status:
+                    conn.execute(
+                        """
+                        UPDATE order_history
+                        SET filled_price = ?, filled_qty = ?, result = 'FILLED'
+                        WHERE id = ?
+                        """,
+                        (fp_int, int(broker_qty), int(rid)),
+                    )
+                    conn.commit()
+                    return
+
+                if old_fp_i == fp_int:
+                    return
                 conn.execute(
                     "UPDATE order_history SET filled_price = ? WHERE id = ?",
                     (fp_int, int(rid)),
