@@ -221,11 +221,13 @@ class MonitorTab:
         self._is_regular_session_active: bool = False
         # 키움 등에서 "03"/"04" 로 줄 수 있어 동일 취급
         self._regular_session_op_codes: Set[str] = {"3", "4", "03", "04"}
-        # fid215 가 비어 있지 않게 한 번이라도 파싱되면 True(이후 3/4 아님은 브로커 우선, 로컬 폴백 안 함)
+        # fid215 가 '의미 있는' 비정규 코드로 확정된 경우 True(로컬 정규장 폴백 안 함).
+        # '0'/'00' 등 플레이스홀더는 제외(모의 WS 등에서 명시적 장외로 오인하면 틱이 전부 스킵됨).
         self._ws_has_explicit_fid215: bool = False
         # 0s.fid215 값이 3/4가 아니거나 비어 있을 때 간이 진단 로그(스팸 방지 쿨다운)
         self._ws_0s_diag_mismatch_last_ts: float = 0.0
         self._ws_0s_diag_empty_logged: bool = False
+        self._ws_0s_diag_fid215_zero_logged: bool = False
         # 정규장 OFF로 0B가 스킵될 때 1회 안내(0s 미수신·type 대소문자 등)
         self._ws_logged_session_tick_skip_hint: bool = False
         # 로그를 너무 많이 만들지 않기 위한 최소 관측용 플래그
@@ -248,6 +250,7 @@ class MonitorTab:
         - fid215 로 정규장(3/4)이면 True.
         - fid215 가 아직 없거나 빈 값만 온 경우: PC 시각 기준 KRX 정규장이면 True(폴백).
         - fid215 가 비어 있지 않은데 3/4(및 03/04)가 아니면 장외로 보고 False.
+        - fid215 가 '0'/'00' 등 플레이스홀더면 비어 있음과 동일(로컬 시각 폴백).
         """
         try:
             if bool(getattr(self, "_is_regular_session_active", False)):
@@ -312,6 +315,7 @@ class MonitorTab:
         # REG 재전송마다 장운영·진단 상태 초기화(재접속 후 fid215·폴백 재평가)
         try:
             self._ws_0s_diag_empty_logged = False
+            self._ws_0s_diag_fid215_zero_logged = False
             self._ws_0s_diag_mismatch_last_ts = 0.0
             self._ws_logged_session_tick_skip_hint = False
             self._ws_has_explicit_fid215 = False
@@ -2087,6 +2091,19 @@ class MonitorTab:
                     if op_code_raw is None:
                         op_code_raw = vals.get(215)
                     op_code = str(op_code_raw if op_code_raw is not None else "").strip().lower()
+                    # 모의투자 등에서 215='0' 이 오면 "명시적 fid" 로 취급하면 _ws_has_explicit_fid215 가 켜져
+                    # 정규장이어도 체결 틱이 전부 스킵된다(REAL 수신만 되고 UI·엔진 무반응).
+                    if op_code in ("0", "00"):
+                        if not self._ws_0s_diag_fid215_zero_logged:
+                            self._ws_0s_diag_fid215_zero_logged = True
+                            try:
+                                self.app.log(
+                                    "⚠️ [WS-0s 진단] fid215=0/00 — 브로커 미정·플레이스홀더로 보고 "
+                                    "PC시각 KRX 정규장 폴백을 사용합니다."
+                                )
+                            except Exception:
+                                pass
+                        op_code = ""
                     if not op_code:
                         # 215 비어 있음: WS 플래그는 OFF 유지하되, 틱은 _effective_regular_session_for_stream_ticks() 에서 로컬 정규장 폴백
                         if not self._ws_0s_diag_empty_logged:

@@ -13,6 +13,10 @@
 
 ---
 
+## 0.7.12 (2026-05-12)
+
+- **실시간 감시 웹소켓**(`ui/tabs/monitor_tab.py`): `0s` **fid215** 가 모의 등에서 `'0'`/`'00'` 으로 올 때 **명시적 장외**로 오인하지 않고 비어 있음과 동일 처리 → PC 시각 `is_krx_regular_session()` 폴백으로 **0B 체결 틱이 다시 반영**되도록 수정(REG 시 진단 플래그 리셋 포함).
+
 ## 0.7.11 (2026-05-12)
 
 - **실시간 틱 JSONL**: `RealtimeTickRecorder` — KRX **거래일**(`is_trading_day`)이면서 **정규장 09:00~15:30**(로컬 시각, `is_krx_regular_session`)인 체결만 저장. 장전·시간외·휴장일·주말은 기록하지 않음(`core/realtime_tick_recorder.py`).
