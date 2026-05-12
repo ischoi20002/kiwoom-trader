@@ -36,8 +36,8 @@ DEFAULT_SETTINGS = {
     "s1_buy_signal_cooldown_sec": 1800.0,
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,
+    # realtime_15m_*.db 에서 오래된 15분봉을 삭제할 때만 사용(워밍업 과거 채움과 무관).
     "realtime_15m_calendar_retention_days": 365,
-    "realtime_warmup_depth_calendar_slack_days": 21,
     "realtime_warmup_persist_to_rt15m_db": True,
     "realtime_bars_max_keep": 300,
     # 15분 슬롯 확정 직후 ka10080(15분)으로 완성 봉 OHLCV 덮어쓰기(틱 누락 완화, 항상 동작)
@@ -55,9 +55,6 @@ DEFAULT_SETTINGS = {
     "use_api_warmup_backfill": True,
     "realtime_warmup_ka10080_tic_scope": "15",
     "realtime_warmup_ka10080_max_pages": 40,
-    "realtime_warmup_ka10080_max_pages_deep": 500,
-    "realtime_warmup_fetch_calendar_history": True,
-    "realtime_warmup_quick_then_deep_background": True,
     "realtime_warmup_indicator_calc_max_rows": 2000,
     "realtime_warmup_ka10080_page_delay_min": 0.2,
     "realtime_warmup_ka10080_page_delay_max": 0.55,

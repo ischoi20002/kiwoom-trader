@@ -13,6 +13,15 @@
 
 ---
 
+## 0.8.4 (2026-05-13)
+
+- **관심목록 다이얼로그**: 추가·삭제 시 `watchlist_favorites.json` **자동 저장**, 창 닫기(X)·「닫기」에서도 저장 시도. 기존「파일에 저장」은 **「지금 목록을 파일에 쓰기」**로 바꿔 수동 재기록·확인용임을 분명히 함(`ui/watchlist_dialog.py`).
+
+## 0.8.3 (2026-05-13)
+
+- **실시간 감시 시작 표시**: 워밍업·틱 수신 대상은 일일 선정에 **관심목록·가상보유**를 합친 값인데, 기존에는 합계만 `N종목`으로 표시되어 선정 수와 혼동되기 쉬웠음. 상태줄을 `일일 선정 A · 실시간 수신 B` 형태로 구분(`core/monitor_started_display.py`, `k_trader_gui.py`, `core/ui_trading_status_service.py`, `core/warmup_stream_prep_service.py`, `core/trading_controller.py`).
+- **진단 로그**: 선정 수와 병합 수가 다를 때 `watchlist_favorites.json` 경로와 관심·보유 건수를 한 줄로 안내(`core/warmup_stream_prep_service.py`).
+
 ## 0.8.2 (2026-05-13)
 
 - **일일 감시목록 선정**: 선행 **일봉 DB 하베스팅 제거**, `select_monitoring_targets(..., api_only, kiwoom_access_token=None)` 로 **FDR 일봉만** 사용(`ui/tabs/monitor_tab.py`, `core/selection_service.py`).

@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 
 def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
-    """기존 목록을 보여 주며 추가·삭제 후 저장할 수 있는 모달 창."""
+    """기존 목록을 보여 주며 추가·삭제 시 파일에 자동 반영하는 모달 창."""
     top = tk.Toplevel(parent)
     top.title("⭐ 관심목록 (텔레그램 알림 전용)")
     top.transient(parent)
@@ -74,6 +74,7 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
             var_name.set("")
             var_avg.set("")
             _refresh()
+            _persist_after_change(silent=True)
         except Exception as e:
             messagebox.showerror("오류", str(e), parent=top)
 
@@ -88,28 +89,77 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
             if messagebox.askyesno("삭제", f"{code} 를 관심목록에서 제거할까요?", parent=top):
                 app.watchlist_store.remove(code)
                 _refresh()
+                _persist_after_change(silent=True)
         except Exception as e:
             messagebox.showerror("오류", str(e), parent=top)
 
-    def _on_save() -> None:
+    def _persist_after_change(*, silent: bool) -> None:
+        """
+        메모리 변경 직후 디스크에 반영한다.
+        silent=True 이면 성공 시 팝업 없음(추가·삭제 흐름). 실패 시에만 알림.
+        """
         try:
             if app.watchlist_store.save():
-                messagebox.showinfo("저장", "watchlist_favorites.json 에 저장했습니다.", parent=top)
                 try:
-                    app.log("⭐ [관심목록] 저장 완료 (감시 재시작 시 스트림 반영)")
+                    app.log("⭐ [관심목록] watchlist_favorites.json 반영(자동 저장)")
                 except Exception:
                     pass
+                if not silent:
+                    messagebox.showinfo(
+                        "저장 완료",
+                        "watchlist_favorites.json 에 반영했습니다.\n"
+                        "실시간 감시는 다시 시작해야 워밍업·틱 구독 수에 반영됩니다.",
+                        parent=top,
+                    )
             else:
-                messagebox.showerror("오류", "저장에 실패했습니다.", parent=top)
+                messagebox.showerror(
+                    "저장 실패",
+                    "파일에 쓰지 못했습니다. 권한·경로를 확인한 뒤 "
+                    "[지금 목록을 파일에 쓰기]를 다시 눌러 주세요.",
+                    parent=top,
+                )
         except Exception as e:
-            messagebox.showerror("오류", str(e), parent=top)
+            messagebox.showerror("저장 오류", str(e), parent=top)
+
+    def _on_save_manual() -> None:
+        """자동 저장이 실패했거나, 디스크 동기화를 다시 확인할 때."""
+        _persist_after_change(silent=False)
+
+    def _on_close() -> None:
+        """닫기 전에 한 번 더 디스크에 맞춤(이미 자동 저장됐어도 무해)."""
+        try:
+            if not app.watchlist_store.save():
+                if not messagebox.askyesno(
+                    "저장 실패",
+                    "창을 닫기 전 파일 저장에 실패했습니다. 그래도 닫을까요?",
+                    parent=top,
+                ):
+                    return
+        except Exception as ex:
+            if not messagebox.askyesno(
+                "오류",
+                f"저장 중 오류: {ex}\n그래도 닫을까요?",
+                parent=top,
+            ):
+                return
+        try:
+            top.destroy()
+        except Exception:
+            pass
+
+    try:
+        top.protocol("WM_DELETE_WINDOW", _on_close)
+    except Exception:
+        pass
 
     hint = ttk.Label(
         outer,
         text=(
             "감시목록과 별도 · 화면에는 숨김 · 텔레그램만. "
             "평단을 비우면 TYPE B 매수 신호만 알림. 평단을 넣으면 그 가격 기준 S2 매도 신호만 알림. "
-            "종목명을 비우면 저장 시 시장명으로 채움. [파일에 저장] 후 감시 재시작 시 반영."
+            "종목명을 비우면 저장 시 시장명으로 채움. "
+            "추가·삭제 시 watchlist_favorites.json 에 자동 저장됩니다. "
+            "실시간 감시는 다시 시작해야 워밍업·구독 종목 수에 반영됩니다."
         ),
         wraplength=540,
     )
@@ -157,8 +207,13 @@ def open_watchlist_dialog(parent: tk.Misc, app: Any) -> None:
 
     btn_row = ttk.Frame(outer)
     ttk.Button(btn_row, text="삭제", width=10, command=_on_delete).pack(side=tk.LEFT, padx=2)
-    ttk.Button(btn_row, text="파일에 저장", width=12, command=_on_save).pack(side=tk.LEFT, padx=2)
-    ttk.Button(btn_row, text="닫기", width=8, command=top.destroy).pack(side=tk.RIGHT, padx=2)
+    ttk.Button(
+        btn_row,
+        text="지금 목록을 파일에 쓰기",
+        width=22,
+        command=_on_save_manual,
+    ).pack(side=tk.LEFT, padx=2)
+    ttk.Button(btn_row, text="닫기", width=8, command=_on_close).pack(side=tk.RIGHT, padx=2)
 
     btn_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
     add_f.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 4))

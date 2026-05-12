@@ -125,10 +125,18 @@ class UiTradingStatusService:
                         )
                     except Exception:
                         pass
+                try:
+                    from core.monitor_started_display import (
+                        format_monitor_started_status_text,
+                    )
+
+                    _started_txt = format_monitor_started_status_text(data)
+                except Exception:
+                    _started_txt = f"상태: 감시 중 ({data}종목)"
                 if getattr(self.app, "lbl_monitor_status", None):
                     try:
                         self.app.lbl_monitor_status.config(
-                            text=f"상태: 감시 중 ({data}종목)",
+                            text=_started_txt,
                             foreground=self.app.colors["success"],
                         )
                     except Exception:
@@ -136,7 +144,7 @@ class UiTradingStatusService:
                 if getattr(self.app, "status_label", None):
                     try:
                         self.app.status_label.config(
-                            text=f"상태: 감시 중 ({data}종목)",
+                            text=_started_txt,
                             foreground=self.app.colors["success"],
                         )
                     except Exception:

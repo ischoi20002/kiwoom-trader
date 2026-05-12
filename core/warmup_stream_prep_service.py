@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
+import os
 import threading
 from typing import Any, Optional
 
 from core.terminal_trace import terminal_trace
+
+# ``WatchlistStore`` 기본 파일명과 동일(경로만 안내용).
+_WATCHLIST_JSON_NAME = "watchlist_favorites.json"
 
 
 class WarmupStreamPrepService:
@@ -38,6 +42,31 @@ class WarmupStreamPrepService:
             merged = c._merged_warmup_codes()
             c._ensure_watchlist_monitor_info()
             c._ensure_virtual_positions_monitor_info()
+
+            # 일일 선정만 쓰는 것처럼 보여도, 관심·가상보유가 워밍업·틱 수신에 합쳐짐
+            try:
+                n_mon = len(c.monitor_codes or [])
+                n_mg = len(merged)
+                if n_mg != n_mon:
+                    try:
+                        wl_n = len(c.app.watchlist_store.get_codes())
+                    except Exception:
+                        wl_n = 0
+                    try:
+                        vp_n = len(
+                            getattr(c.app.portfolio, "virtual_positions", None) or {}
+                        )
+                    except Exception:
+                        vp_n = 0
+                    wl_path = os.path.join(os.getcwd(), _WATCHLIST_JSON_NAME)
+                    c.log(
+                        "ℹ️ [System] 실시간 워밍업·틱 수신 대상은 "
+                        f"일일 선정 {n_mon}종목 + 관심목록 {wl_n}건 + 가상보유 {vp_n}건을 "
+                        f"합친 뒤 중복 제거한 총 {n_mg}종목입니다. "
+                        f"(관심 파일: {wl_path})"
+                    )
+            except Exception:
+                pass
 
             require_full = bool(
                 c.app.settings.get("require_full_warmup_for_monitoring", False)
@@ -156,7 +185,18 @@ class WarmupStreamPrepService:
             c.app._active_stream_codes = successful
 
             def _notify_started_and_reg_refresh() -> None:
-                c._status_cb_on_main("STARTED", len(successful))
+                try:
+                    n_sel = len(c.monitor_codes or [])
+                except Exception:
+                    n_sel = 0
+                c._status_cb_on_main(
+                    "STARTED",
+                    {
+                        "n_selected": int(n_sel),
+                        "n_stream": int(len(successful)),
+                        "incremental": False,
+                    },
+                )
                 mt = getattr(c.app, "monitor_tab", None)
                 if mt is not None:
                     mt._pending_reg_refresh = True

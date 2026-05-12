@@ -314,7 +314,7 @@ class TradingController:
             }
 
     def _merged_warmup_codes(self):
-        """감시 종목 ∪ 관심목록 ∪ 가상·실제 보유 (순서 유지·중복 제거)."""
+        """감시 종목 ∪ 관심목록 ∪ 가상 보유 (순서 유지·중복 제거). 실계좌 보유는 포함하지 않음."""
         mc = [str(c).zfill(6) for c in (self.monitor_codes or [])]
         try:
             wl = [str(c).zfill(6) for c in self.app.watchlist_store.get_codes()]
@@ -473,7 +473,18 @@ class TradingController:
             except Exception:
                 pass
             if self.status_cb:
-                self.status_cb("STARTED", n_ready)
+                try:
+                    n_sel = len(self.monitor_codes or [])
+                except Exception:
+                    n_sel = 0
+                self.status_cb(
+                    "STARTED",
+                    {
+                        "n_selected": int(n_sel),
+                        "n_stream": int(n_ready),
+                        "incremental": True,
+                    },
+                )
 
             # 워밍업 워커가 _run_start_sequence 에서 먼저 웹소켓을 띄운 경우 중복 기동 방지
             if not getattr(self, "_incremental_stream_bootstrapped", False):

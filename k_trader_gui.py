@@ -311,8 +311,9 @@ class KiwoomApp:
         self.bars_data = self.config_handler.load_bars_cache()
         self._bars_data_lock = threading.RLock()
 
-        # [v4.5.7] Essential attributes for SignalEngine
-        # 실시간 감시 전용 15분봉 DB(하베스팅 trading_data.db 와 분리) — 슬롯 변경 시 확정 봉 적재
+        # [v4.5.7] 실시간 감시 전용 15분봉 DB(하베스팅 trading_data.db 와 분리) — 슬롯 변경 시 확정 봉 적재.
+        # ``realtime_15m_calendar_retention_days`` 는 SQLite 롤링(오래된 봉 삭제)에만 쓰이며,
+        # 워밍업이 과거 N일을 채우는 용도는 아님.
         from core.realtime_monitor_bars_store import RealtimeMonitorBarsStore
         try:
             _rt15_ret = int(
@@ -2067,10 +2068,19 @@ class KiwoomApp:
             except Exception:
                 pass
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
-            if self.lbl_monitor_status: self.lbl_monitor_status.config(text=f"상태: 감시 중 ({data}종목)", foreground=self.colors['success'])
+            try:
+                from core.monitor_started_display import format_monitor_started_status_text
+
+                _started_txt = format_monitor_started_status_text(data)
+            except Exception:
+                _started_txt = f"상태: 감시 중 ({data}종목)"
+            if self.lbl_monitor_status:
+                self.lbl_monitor_status.config(
+                    text=_started_txt, foreground=self.colors["success"]
+                )
             if self.status_label:
                 self.status_label.config(
-                    text=f"상태: 감시 중 ({data}종목)",
+                    text=_started_txt,
                     foreground=self.colors["success"],
                 )
             self.ensure_monitor_tree_refresh_scheduled(immediate=True)
