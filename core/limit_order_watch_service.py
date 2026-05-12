@@ -138,6 +138,88 @@ class LimitOrderWatchService:
         if kind == "s1_buy":
             self.s1_buy_pending_codes.add(nc)
 
+    def _schedule_boost_fill_reconcile(
+        self, *, order_no: str, code: str, kind: str, qty: int
+    ) -> None:
+        """
+        취소 거부(미체결 없음) 직후: 주문 로그 행 기준으로 kt00007 재폴링을 강하게 돌립니다.
+        체결가·수량은 DB/kt00007 확정 후에만 on_fill 됩니다.
+        """
+        oid = str(order_no or "").strip()
+        nc = self._normalize_code_6(code)
+        if not oid or not nc:
+            return
+        try:
+            dm = getattr(self.app, "data_manager", None)
+            if dm is None:
+                return
+            row = dm.get_order_history_row_by_order_no(oid)
+        except Exception:
+            row = None
+        if not isinstance(row, dict):
+            try:
+                self.log(
+                    f"ℹ️ [지정가] 강화 체결동기화 생략 — 주문로그 없음(ord={oid}, {nc})"
+                )
+            except Exception:
+                pass
+            return
+        try:
+            c = str(row.get("code") or nc).split("_")[0].zfill(6)
+            side = str(row.get("side") or "").strip().lower()
+            if side not in ("buy", "sell"):
+                side = "sell" if kind == "exit_sell" else "buy"
+            try:
+                q = int(row.get("qty") or qty or 0)
+            except Exception:
+                q = int(qty or 0)
+            try:
+                px = float(row.get("price") or 0)
+            except Exception:
+                px = 0.0
+            nm = str(row.get("name") or "")
+            rs = str(row.get("reason") or "")
+        except Exception:
+            return
+        if q <= 0 or px <= 0:
+            try:
+                self.log(
+                    f"ℹ️ [지정가] 강화 체결동기화 생략 — 수량/가격 부족(ord={oid})"
+                )
+            except Exception:
+                pass
+            return
+
+        def _run() -> None:
+            try:
+                self.app.reconcile_exchange_fill_after_order_accept(
+                    c,
+                    oid,
+                    side,
+                    int(q),
+                    float(px),
+                    nm,
+                    rs,
+                    boost_polling=True,
+                )
+            except Exception as ex:
+                try:
+                    self.log(f"⚠️ [지정가] 강화 체결동기화 예약 실패: {ex}")
+                except Exception:
+                    pass
+
+        try:
+            root = self._get_root()
+            if root is not None and hasattr(root, "after"):
+                root.after(0, _run)
+            else:
+                _run()
+        except Exception:
+            try:
+                _run()
+            except Exception:
+                pass
+
     def timeout(self, order_no: str) -> None:
         """미체결 타임아웃: 취소 API 호출 후 대기 플래그 해제."""
         if not order_no:
@@ -155,14 +237,19 @@ class LimitOrderWatchService:
         nc = meta.code
         kind = meta.kind
 
-        ok = False
+        cancel_st = "failed"
         try:
-            ok = bool(self.app.order_manager.cancel_order(oid, nc, "0"))
+            cancel_st = str(
+                self.app.order_manager.cancel_order(oid, nc, "0") or "failed"
+            )
         except Exception as e:
             try:
                 self.log(f"⚠️ [미체결타임아웃] 취소 API 예외: {e}")
             except Exception:
                 pass
+
+        ok = cancel_st == "cancelled"
+        no_open = cancel_st == "no_open_qty"
 
         # 주문 로그(세션) 기록
         try:
@@ -175,6 +262,7 @@ class LimitOrderWatchService:
                         "code": nc,
                         "kind": kind,
                         "cancel_ok": ok,
+                        "cancel_st": cancel_st,
                     },
                 )
         except Exception:
@@ -182,23 +270,51 @@ class LimitOrderWatchService:
 
         # kind별 플래그 정리 (TradingController 기존 동작 그대로)
         if kind == "exit_sell":
-            try:
-                with self.app.portfolio.lock:
-                    p = self.app.portfolio.virtual_positions.get(nc)
-                    if p:
-                        p["exit_pending"] = False
-                        p.pop("pending_exit_ord_no", None)
-            except Exception:
-                pass
-            try:
-                self.log(f"⏱️ [미체결타임아웃] 매도 취소 시도({ok}) — 종목 {nc} 전략 재평가 가능")
-            except Exception:
-                pass
+            if no_open:
+                # 전량 체결 가능성 — exit_pending 유지(중복 매도 방지), 강화 체결동기화
+                try:
+                    self._schedule_boost_fill_reconcile(
+                        order_no=oid, code=nc, kind=kind, qty=int(meta.qty or 0)
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.log(
+                        f"⏱️ [미체결타임아웃] 매도 취소 생략(미체결 없음) — "
+                        f"종목 {nc} 체결동기화 강화(ord={oid}), exit_pending 유지"
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    with self.app.portfolio.lock:
+                        p = self.app.portfolio.virtual_positions.get(nc)
+                        if p:
+                            p["exit_pending"] = False
+                            p.pop("pending_exit_ord_no", None)
+                except Exception:
+                    pass
+                try:
+                    self.log(
+                        f"⏱️ [미체결타임아웃] 매도 취소 시도({ok}) — 종목 {nc} 전략 재평가 가능"
+                    )
+                except Exception:
+                    pass
 
         elif kind == "s1_buy":
             self.s1_buy_pending_codes.discard(nc)
+            if no_open:
+                try:
+                    self._schedule_boost_fill_reconcile(
+                        order_no=oid, code=nc, kind=kind, qty=int(meta.qty or 0)
+                    )
+                except Exception:
+                    pass
             try:
-                self.log(f"⏱️ [미체결타임아웃] S1 매수 취소 시도({ok}) — 종목 {nc} 재신호 가능")
+                self.log(
+                    f"⏱️ [미체결타임아웃] S1 매수 취소 시도({ok}, no_open={no_open}) "
+                    f"— 종목 {nc} 재신호 가능"
+                )
             except Exception:
                 pass
 
@@ -211,8 +327,18 @@ class LimitOrderWatchService:
                         p.pop("s2_pending_ord_no", None)
             except Exception:
                 pass
+            if no_open:
+                try:
+                    self._schedule_boost_fill_reconcile(
+                        order_no=oid, code=nc, kind=kind, qty=int(meta.qty or 0)
+                    )
+                except Exception:
+                    pass
             try:
-                self.log(f"⏱️ [미체결타임아웃] S2 매수 취소 시도({ok}) — 종목 {nc} 재조건 시 재추매 가능")
+                self.log(
+                    f"⏱️ [미체결타임아웃] S2 매수 취소 시도({ok}, no_open={no_open}) "
+                    f"— 종목 {nc} 재조건 시 재추매 가능"
+                )
             except Exception:
                 pass
 

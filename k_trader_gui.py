@@ -1228,6 +1228,8 @@ class KiwoomApp:
         fill_price: float,
         name: str = "",
         reason: str = "",
+        *,
+        boost_polling: bool = False,
     ) -> None:
         try:
             self.fill_reconciliation_service.reconcile_exchange_fill_after_order_accept(
@@ -1238,6 +1240,7 @@ class KiwoomApp:
                 fill_price=fill_price,
                 name=name,
                 reason=reason,
+                boost_polling=boost_polling,
             )
         except Exception:
             try:

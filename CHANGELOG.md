@@ -13,6 +13,12 @@
 
 ---
 
+## 0.7.15 (2026-05-12)
+
+- **지정가 미체결 타임아웃 + RC4033**: 취소 거부(미체결 없음·통상 전량 체결) 시 주문 로그를 `CANCELLED`로 덮지 않고, **`no_open_qty`** 로 구분(`core/order_manager.py`). 매도(`exit_sell`)는 **`exit_pending` 유지** + **`reconcile_exchange_fill_after_order_accept(..., boost_polling=True)`** 로 kt00007 재폴링 강화(`core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`, `k_trader_gui.py`).
+- **체결 동기화 중복**: 부스트 재폴링이 기존 `inflight`와 충돌하지 않도록 **`boost_after_other`** 대기 후 재진입(`core/fill_reconciliation_service.py`).
+- **800033 매도가능수량 부족**: 거절 메시지 감지 시 **`exit_pending` 해제** + kt00007 병합·**`sync_with_actual_account(force=True)`** 예약(`core/order_manager.py` `last_order_reject_msg`, `core/trading_controller.py`).
+
 ## 0.7.14 (2026-05-12)
 
 - **주문·체결 UI**: 계좌 동기화(ka10085) 후에도 `order_history`가 `SUCCESS`(접수)만 남아 포지션과 어긋나던 문제 — `patch_buy_filled_price_after_reconcile`에서 잔고 수량·주문 수량 일치 시 **`FILLED`·`filled_qty`** 로 승격(`data_manager_v2.py`).

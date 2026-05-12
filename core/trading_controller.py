@@ -897,6 +897,73 @@ class TradingController:
                 else:
                     # 실패 시 짧은 쿨다운(기본 8초) 적용
                     try:
+                        reject = str(
+                            getattr(
+                                self.app.order_manager, "last_order_reject_msg", ""
+                            )
+                            or ""
+                        )
+                    except Exception:
+                        reject = ""
+                    insuff_sell = (
+                        "800033" in reject
+                        or "매도가능" in reject
+                        or "매도가능수량" in reject
+                    )
+                    if insuff_sell:
+                        # 서버상 매도 불가(이미 전량 매도된 경우 등) — 로컬·kt00007 괴리 보정
+                        try:
+                            pos["exit_pending"] = False
+                            pos.pop("pending_exit_ord_no", None)
+                        except Exception:
+                            pass
+
+                        def _recover_after_insufficient_sell() -> None:
+                            try:
+                                om = self.app.order_manager
+                                dm = self.app.data_manager
+                                if om is not None and dm is not None:
+                                    import datetime as _dt_rec
+
+                                    om.sync_exchange_fills_into_database(
+                                        dm,
+                                        dates=[_dt_rec.date.today()],
+                                        silent=True,
+                                        logger=self.log,
+                                    )
+                            except Exception:
+                                pass
+                            try:
+                                self.app.portfolio.sync_with_actual_account(
+                                    silent=True, force=True
+                                )
+                            except Exception:
+                                pass
+
+                        try:
+                            rt = getattr(self.app, "root", None)
+                            if rt is not None and hasattr(rt, "after"):
+                                rt.after(250, _recover_after_insufficient_sell)
+                            else:
+                                import threading as _th_rec
+
+                                _th_rec.Thread(
+                                    target=_recover_after_insufficient_sell,
+                                    daemon=True,
+                                ).start()
+                        except Exception:
+                            try:
+                                _recover_after_insufficient_sell()
+                            except Exception:
+                                pass
+                        try:
+                            self.log(
+                                f"ℹ️ [Exit Signal/{reason}] {pos.get('name', nk)}({nk}) "
+                                f"매도가능수량 부족 응답 — 체결내역 병합·계좌 동기화를 예약했습니다."
+                            )
+                        except Exception:
+                            pass
+                    try:
                         st = getattr(self.app, "settings", None) or {}
                         cd = float(st.get("exit_order_retry_cooldown_sec", 8.0))
                     except Exception:

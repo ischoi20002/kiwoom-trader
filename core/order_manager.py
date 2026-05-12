@@ -2,7 +2,7 @@ import requests
 import json
 import logging
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import config
 from utils.normalization import get_tick_size, normalize_code
@@ -34,6 +34,9 @@ class OrderManager:
             self.order_api = None
             self.account_api = None
             self.logger.error("❌ kiwoom_rest_api 패키지를 로드할 수 없습니다.")
+
+        # 직전 주문 API 거부 메시지(매도 실패 시 800033 등 후처리용)
+        self.last_order_reject_msg: str = ""
 
     def _get_base_url(self):
         return config.MOCK_URL if getattr(config, 'USE_MOCK', False) else config.URL
@@ -80,6 +83,10 @@ class OrderManager:
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
         
         if not allow_order:
+            try:
+                self.last_order_reject_msg = ""
+            except Exception:
+                pass
             self.app.log(f"⚠️ [{mode_str}] 주문 차단됨 (Safety Switch: OFF)")
             try:
                 sl = getattr(self.app, "session_logger", None)
@@ -99,10 +106,18 @@ class OrderManager:
             return None
 
         if not self.order_api:
+            try:
+                self.last_order_reject_msg = ""
+            except Exception:
+                pass
             self.app.log(f"❌ [{mode_str}] 주문 엔진 로드 실패")
             return None
 
         try:
+            try:
+                self.last_order_reject_msg = ""
+            except Exception:
+                pass
             if (
                 not skip_price_guard
                 and str(order_type).strip() == "00"
@@ -124,6 +139,10 @@ class OrderManager:
                     settings=st if isinstance(st, dict) else {},
                 )
                 if not ok_pg:
+                    try:
+                        self.last_order_reject_msg = str(msg_pg or "")
+                    except Exception:
+                        pass
                     self.app.log(f"❌ [{mode_str}] 주문 차단(시세 검증): {msg_pg}")
                     try:
                         sl = getattr(self.app, "session_logger", None)
@@ -212,12 +231,12 @@ class OrderManager:
                             ap=int(adj_price),
                             nm=name,
                             rs=reason: self.app.reconcile_exchange_fill_after_order_accept(
-                                c, o, s, q, float(ap), nm, rs
+                                c, o, s, q, float(ap), nm, rs, boost_polling=False
                             ),
                         )
                     else:
                         self.app.reconcile_exchange_fill_after_order_accept(
-                            code, ord_no, side, int(qty), float(adj_price), name, reason
+                            code, ord_no, side, int(qty), float(adj_price), name, reason, boost_polling=False
                         )
                 except Exception as sync_e:
                     self.logger.warning("체결 동기화 스케줄 실패: %s", sync_e)
@@ -242,6 +261,10 @@ class OrderManager:
                     pass
                 return ord_no
             else:
+                try:
+                    self.last_order_reject_msg = str(ret_msg or "")
+                except Exception:
+                    pass
                 self.app.log(f"❌ [{mode_str}] 주문 거부: {ret_msg} (ErrorCode: {ret_code})")
                 try:
                     sl = getattr(self.app, "session_logger", None)
@@ -263,6 +286,10 @@ class OrderManager:
                 return None
 
         except Exception as e:
+            try:
+                self.last_order_reject_msg = str(e)
+            except Exception:
+                pass
             self.app.log(f"💥 주문 프로세스 오류: {str(e)}")
             try:
                 sl = getattr(self.app, "session_logger", None)
@@ -274,6 +301,26 @@ class OrderManager:
             except Exception:
                 pass
             return None
+
+    @staticmethod
+    def _cancel_reject_means_no_open_qty(ret_msg: Any) -> bool:
+        """
+        kt10003 취소 거부 중 '미체결 잔량 없음(통상 전량 체결 후)' 패턴.
+        이 경우 DB를 CANCELLED로 덮어쓰면 안 됩니다.
+        """
+        try:
+            s = str(ret_msg or "")
+        except Exception:
+            s = ""
+        if not s:
+            return False
+        if "4033" in s:
+            return True
+        if "취소할 수량이 없" in s:
+            return True
+        if "정정/취소할 수량" in s and "없" in s:
+            return True
+        return False
 
     def _safe_float(self, val, default: float = 0.0) -> float:
         """API 숫자 필드(콤마·부호 문자열)를 float로 변환합니다."""
@@ -1155,10 +1202,17 @@ class OrderManager:
         order_no: str,
         stk_cd: str,
         cncl_qty: str = "0",
-    ) -> bool:
+    ) -> Literal["cancelled", "failed", "no_open_qty"]:
         """
         미체결 지정가 주문 취소 (kt10003).
         cncl_qty: '0' 이면 잔량 전부 취소.
+
+        Returns
+        -------
+        Literal["cancelled", "failed", "no_open_qty"]
+            - cancelled: 취소 접수 성공(미체결 잔량이 있었고 취소됨)
+            - no_open_qty: 취소할 미체결 없음(통상 전량 체결 직후). DB를 CANCELLED로 덮지 않음.
+            - failed: 그 외 거부·예외
         """
         use_mock = getattr(config, "USE_MOCK", False)
         mode_str = "모의투자" if use_mock else "실전투자"
@@ -1166,16 +1220,16 @@ class OrderManager:
         code = str(stk_cd or "").zfill(6)
         if not oid or not code:
             self.app.log(f"⚠️ [{mode_str}] 취소 실패: 주문번호/종목코드 누락")
-            return False
+            return "failed"
         if not self.order_api:
             self.app.log(f"❌ [{mode_str}] 주문 엔진 없음 — 취소 불가")
-            return False
+            return "failed"
         allow_order = getattr(config, "ALLOW_MOCK_ORDER", False) if use_mock else getattr(
             config, "ALLOW_REAL_ORDER", False
         )
         if not allow_order:
             self.app.log(f"⚠️ [{mode_str}] 취소 생략 (Safety Switch: OFF)")
-            return False
+            return "failed"
         try:
             res = self.order_api.stock_cancel_order_request_kt10003(
                 dmst_stex_tp=self.dmst_stex_tp_for_orders(),
@@ -1186,6 +1240,17 @@ class OrderManager:
             ret_code = res.get("return_code", -1)
             ret_msg = res.get("return_msg", "")
             out_ord = str(res.get("ord_no", "") or "").strip()
+            if not (ret_code == 0 or out_ord) and self._cancel_reject_means_no_open_qty(
+                ret_msg
+            ):
+                try:
+                    self.app.log(
+                        f"ℹ️ [{mode_str}] 주문 취소 거부(미체결 없음·통상 전량체결): "
+                        f"{ret_msg} — kt00007 체결동기화로 수량·단가를 확정합니다."
+                    )
+                except Exception:
+                    pass
+                return "no_open_qty"
             if ret_code == 0 or out_ord:
                 self.app.log(
                     f"✅ [{mode_str}] 주문 취소 접수: 원주문 {oid} / 응답 ord_no={out_ord or '-'}"
@@ -1239,11 +1304,11 @@ class OrderManager:
                         )
                 except Exception:
                     pass
-                return True
+                return "cancelled"
             self.app.log(
                 f"❌ [{mode_str}] 주문 취소 거부: {ret_msg} (code={ret_code})"
             )
-            return False
+            return "failed"
         except Exception as e:
             self.app.log(f"💥 [{mode_str}] 주문 취소 예외: {e}")
             try:
@@ -1255,7 +1320,7 @@ class OrderManager:
                     )
             except Exception:
                 pass
-            return False
+            return "failed"
 
     # ------------------------------------------------------------------ #
     # 증권사 REST 체결내역 (kt00007) → 포지션관리 주문 로그 DB 보강

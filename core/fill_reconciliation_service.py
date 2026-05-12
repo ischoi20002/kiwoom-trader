@@ -112,6 +112,8 @@ class FillReconciliationService:
         fill_price: float,
         name: str = "",
         reason: str = "",
+        *,
+        boost_polling: bool = False,
     ) -> None:
         """
         REST 주문 접수 성공 직후 웹소켓 CHE가 오지 않을 때도 DB 체결가·포지션을 맞춥니다.
@@ -123,11 +125,16 @@ class FillReconciliationService:
                 return
 
             # REST 접수 후 체결확정 폴링 동기화 in-flight 중복 방지
+            boost_after_other = False
             if oid and hasattr(self.app, "_exchange_fill_order_inflight"):
                 try:
                     if oid in self.app._exchange_fill_order_inflight:
-                        return
-                    self.app._exchange_fill_order_inflight.add(oid)
+                        if not boost_polling:
+                            return
+                        # boost: 기존 폴링 스레드가 끝날 때까지 대기 후 이어서 kt00007 재시도
+                        boost_after_other = True
+                    else:
+                        self.app._exchange_fill_order_inflight.add(oid)
                 except Exception:
                     pass
 
@@ -136,6 +143,21 @@ class FillReconciliationService:
             # 실제 체결 확정(kt00007 병합/DB filled_qty>0) 확인 후에만 on_fill을 호출합니다.
             def _confirm_and_apply() -> None:
                 try:
+                    if boost_after_other:
+                        import time as _twait
+
+                        for _w in range(80):
+                            try:
+                                if oid not in self.app._exchange_fill_order_inflight:
+                                    break
+                            except Exception:
+                                break
+                            _twait.sleep(0.5)
+                        try:
+                            self.app._exchange_fill_order_inflight.add(oid)
+                        except Exception:
+                            pass
+
                     # settings.json 우선, 없으면 보수적 기본값
                     try:
                         st = getattr(self.app, "settings", None) or {}
@@ -158,7 +180,13 @@ class FillReconciliationService:
                     except Exception:
                         retry_interval_sec = 1.0
 
-                    max_attempts = max(2, min(max_attempts, 20))
+                    if boost_polling:
+                        # 모의투자 등 kt00007 지연 시: RC4033 직후 강제 재폴링용
+                        max_attempts = max(max_attempts, 22)
+                        retry_interval_sec = max(retry_interval_sec, 1.1)
+
+                    upper_cap = 30 if boost_polling else 20
+                    max_attempts = max(2, min(max_attempts, upper_cap))
                     retry_interval_sec = max(0.2, min(retry_interval_sec, 5.0))
 
                     for _i in range(max_attempts):
