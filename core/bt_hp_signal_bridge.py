@@ -4,7 +4,7 @@
 
 - `dynamic_backtest._process_intra_bar_dynamic` 의 시뮬레이션 분기와 한 줄기를 유지합니다.
 - 실시간(`SignalEngine`)은 설정 `realtime_signal_use_bt_hp_bridge` 가 True 일 때
-  본 모듈 결과로 S1 매수 여부를 맞춥니다(백테 로직 변경 없음, 호출만 공유).
+  **보유 종목**에 한해 본 모듈의 ``unified`` 로 EXIT/S2 만 맞춥니다(미보유 S1 은 인과·일반 15분 경로).
 """
 
 from __future__ import annotations

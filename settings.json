@@ -53,6 +53,8 @@
     "realtime_bar_update_min_interval_sec": 0.12,
     "realtime_bar_update_force_move_pct": 0.0003,
     "realtime_monitor_atr_display_min_interval_sec": 0.5,
+    "realtime_causal_s1_enabled": true,
+    "realtime_causal_s1_interval_sec": 15.0,
     "universe_index_choice": "KODEX200",
     "kospi_top_n": "300",
     "kodex200_universe_priority": "csv_only",

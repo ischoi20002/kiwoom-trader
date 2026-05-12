@@ -29,8 +29,18 @@ DEFAULT_SETTINGS = {
     "use_type_balance_gate": False,
     "type_balance_a_pct": 40.0,
     "min_15m_bars_for_signal": 60,
+    # 고정밀 백테 인과 S1: ``calculate_indicators`` 재실행 시 사용할 15분봉 룩백 행 수(너무 작으면 장기 지표 불일치).
+    "high_precision_causal_lookback_bars": 400,
+    # 고정밀 인과 S1: 전역 15분 봉 인덱스 i 가 이 값 이상일 때만 Ready(벡터 루프와 동일하게 기본 19).
+    "hp_causal_ready_min_bar_index": 19,
+    # 실시간 인과 S1: BT-HP 브리지 미사용 시 짧은 tail 로 ``calculate_indicators`` + 상세 신호 재실행(기본 OFF·부하 주의).
+    "realtime_causal_s1_enabled": False,
+    "realtime_causal_s1_interval_sec": 15.0,
+    "realtime_causal_s1_force_resync_sec": 90.0,
+    "realtime_causal_s1_lookback_bars": 400,
+    "realtime_causal_s1_max_evals_per_wall_second": 12,
     "s1_buy_signal_cooldown_sec": 1800.0,
-    # True: S1 신규 매수는 동적 백테 고정밀과 동일(1m + 인트라바 시뮬) 판정. False: 기존 틱 기반 신호.
+    # True: 1m 인트라바 브리지 — 보유 시 EXIT/S2 판단에만 사용. 미보유 S1 은 인과 S1·일반 15분 경로.
     "realtime_signal_use_bt_hp_bridge": False,
     # 브리지 1분: 기본은 실시간 틱 집계(rt_tick_m1_store). API 지연 없음.
     "realtime_signal_bt_hp_bridge_use_tick_1m": True,

@@ -1788,10 +1788,17 @@ class SimpleBacktester:
                 # Bid/Ask Ratio mapping (v4.5: Ensure column names match data_loader)
                 m1_np_ba = m1_df_preloaded['total_bid'].values / m1_df_preloaded['total_ask'].values if 'total_bid' in m1_df_preloaded.columns else np.full(len(m1_df_preloaded), 1.0)
                 m1_np_vp = m1_df_preloaded['vol_power'].values if 'vol_power' in m1_df_preloaded.columns else np.full(len(m1_df_preloaded), 100.0)
+                # 고정밀 인과 S1: 1분 거래량 누적(없으면 15분 거래량을 구간 길이로 비례 배분)
+                m1_np_vol = (
+                    m1_df_preloaded["Volume"].values.astype("float64", copy=False)
+                    if "Volume" in m1_df_preloaded.columns
+                    else None
+                )
             else:
                 m1_boundaries = None
                 m1_np_ba = None
                 m1_np_vp = None
+                m1_np_vol = None
             
             # 신호 및 필터 미리 정리
             signal_shifted = df['Signal_Shifted'].values if 'Signal_Shifted' in df.columns else np.zeros(len(df), dtype=bool)
@@ -1815,7 +1822,20 @@ class SimpleBacktester:
             balance = params['balance']
             
             for i in range(1, total_bars):
-                m1_info = (m1_np_high, m1_np_close, m1_np_low, m1_np_time, m1_boundaries[i], m1_np_ba, m1_np_vp) if m1_boundaries else None
+                m1_info = (
+                    (
+                        m1_np_high,
+                        m1_np_close,
+                        m1_np_low,
+                        m1_np_time,
+                        m1_boundaries[i],
+                        m1_np_ba,
+                        m1_np_vp,
+                        m1_np_vol,
+                    )
+                    if m1_boundaries
+                    else None
+                )
                 
                 # Update loop locals
                 params['position'] = pos
@@ -2021,7 +2041,84 @@ class SimpleBacktester:
             if (indicators['Close'][i] / pos['avg_price'] - 1) * 100 < self.s2_trigger: return False
         return True
 
-            
+    def _hp_hist_slice_for_causal_s1(self, i: int) -> Optional[pd.DataFrame]:
+        """
+        인과적 고정밀 S1용: 현재 15분 인덱스 i 직전까지의 닫힌 15분봉만 잘라 반환합니다.
+        lookback 은 설정 ``high_precision_causal_lookback_bars``(기본 400)과 신호 최소봉 중 큰 값으로 캡합니다.
+        """
+        try:
+            if i <= 0:
+                return None
+            try:
+                from core.defaults import effective_min_15m_bars_for_monitoring
+
+                need = int(effective_min_15m_bars_for_monitoring(self.settings))
+            except Exception:
+                need = 60
+            try:
+                lb = int(float(self.settings.get("high_precision_causal_lookback_bars", 400)))
+            except (TypeError, ValueError):
+                lb = 400
+            lb = max(max(need + 10, 120), min(lb, 2500))
+            start = max(0, i - lb)
+            return self.df.iloc[start:i].copy()
+        except Exception:
+            return None
+
+    def _hp_causal_s1_buy_at_k(
+        self,
+        i: int,
+        k: int,
+        m1_highs: Any,
+        m1_closes: Any,
+        m1_lows: Any,
+        m1_vols: Any,
+        hist_slice: pd.DataFrame,
+    ) -> tuple[bool, str]:
+        """
+        1~k분 누적 OHLCV 로 마지막 가상 15분봉을 만들고, 닫힌 봉 히스토리와 합쳐 지표·S1 신호를 재계산합니다.
+        (완성된 i번째 봉 전체를 미리 쓰는 기존 고정밀 S1 경로의 미래참조를 제거)
+        """
+        try:
+            if k <= 0 or hist_slice is None or getattr(hist_slice, "empty", True):
+                return False, "TYPE_B"
+            seg_open = float(self.df.iloc[i]["Open"])
+            h_seg = float(np.max(np.asarray(m1_highs[:k], dtype=float)))
+            l_seg = float(np.min(np.asarray(m1_lows[:k], dtype=float)))
+            c_seg = float(m1_closes[k - 1])
+            nm = max(1, int(len(m1_highs)))
+            if m1_vols is not None and len(m1_vols) >= k:
+                v_seg = float(np.sum(np.asarray(m1_vols[:k], dtype=float)))
+            else:
+                v15 = float(self.df.iloc[i].get("Volume", 0) or 0)
+                v_seg = v15 * float(k) / float(nm)
+            virtual = self.df.iloc[[i]].copy()
+            ix0 = virtual.index[0]
+            virtual.loc[ix0, "Open"] = seg_open
+            virtual.loc[ix0, "High"] = h_seg
+            virtual.loc[ix0, "Low"] = l_seg
+            virtual.loc[ix0, "Close"] = c_seg
+            virtual.loc[ix0, "Volume"] = max(0.0, v_seg)
+            combined = pd.concat([hist_slice, virtual], axis=0)
+            combined = TradingStrategy.calculate_indicators(combined, self.settings)
+            sigd = TradingStrategy.get_buy_signals_detailed(combined, self.settings, "UP")
+            last_sig = bool(sigd.iloc[-1]["Signal"])
+            try:
+                ready_min = max(
+                    1, int(float(self.settings.get("hp_causal_ready_min_bar_index", 19)))
+                )
+            except (TypeError, ValueError):
+                ready_min = 19
+            ready_ok = int(i) >= int(ready_min)
+            sig_type = str(sigd.iloc[-1].get("Sig_Type", "TYPE_B"))
+            return bool(last_sig and ready_ok), sig_type
+        except Exception as exc:
+            try:
+                print(f"[HighPrec] 인과 S1 재계산 실패 (i={i}, k={k}): {exc}")
+            except Exception:
+                pass
+            return False, "TYPE_B"
+
     def _process_intra_bar_full_v3(
         self,
         i,
@@ -2035,22 +2132,35 @@ class SimpleBacktester:
         minute,
         m1_ba=None,
         m1_vp=None,
+        m1_vols=None,
         indicators=None,
         signal_shifted=False,
     ):
-        """[v40.0] Optimized High-Precision Simulation (O(1) Indicator Updates)"""
+        """
+        고정밀 1분 시뮬.
+        - 보유 중: 기존과 동일하게 인트라바 지표 + 청산·S2(스마트바이 설정 따름).
+        - 미보유 S1: 15분 벡터 신호를 그대로 덮어쓰지 않고, 1~k분 누적 가상 15분봉으로
+          ``calculate_indicators`` + ``get_buy_signals_detailed`` 를 다시 돌려 인과적으로 진입 시점만 잡음.
+        """
         # [보수적 1분 체결] 매도/EXIT 판가: 저가(m1_l), 매수 체결: 고가(m1_h) — 시뮬·지표 경로는 종가(m1_p) 유지
         # [Perf] Pre-calculated tail data for incremental indicator updates
         # Using index i-1 as the base for the current 15m bar simulation
-        base_idx = max(0, i-1)
+        base_idx = max(0, i - 1)
         last_15m_dict = {k: v[base_idx] for k, v in indicators.items()}
-        
+
         prices_tail = {
             5: self.df['Close'].iloc[max(0, i-4):i].sum(),
             20: self.df['Close'].iloc[max(0, i-19):i].sum(),
             60: self.df['Close'].iloc[max(0, i-59):i].sum(),
             'rsi_vals': self.df['Close'].iloc[max(0, i-15):i].values
         }
+
+        hist_slice_s1: Optional[pd.DataFrame] = None
+        try:
+            if params.get("position") is None and signal_shifted:
+                hist_slice_s1 = self._hp_hist_slice_for_causal_s1(i)
+        except Exception:
+            hist_slice_s1 = None
 
         for idx in range(len(m1_highs)):
             m1_p = m1_closes[idx]
@@ -2131,30 +2241,58 @@ class SimpleBacktester:
                             )
                             return params # 추가매수 시 해당 분 사이클 종료
             
-            # 2. 신규 진입(Entry) 감시
+            # 2. 신규 진입(Entry) 감시 — 인과적 가상 15분봉(1~k분 누적)으로 S1만 재판정
             else:
-                is_buy_signal = (indicator_to_use.get('Signal', False) and indicator_to_use.get('Ready', False))
-                if is_buy_signal:
-                    sig_type = indicator_to_use.get('Sig_Type', 'TYPE_B')
-                    use_sb = self.use_sb_a if sig_type == 'TYPE_A' else self.use_sb_b
-                    
+                if not signal_shifted or hist_slice_s1 is None or getattr(
+                    hist_slice_s1, "empty", True
+                ):
+                    continue
+                k = int(idx) + 1
+                try:
+                    is_causal, sig_type = self._hp_causal_s1_buy_at_k(
+                        i,
+                        k,
+                        m1_highs,
+                        m1_closes,
+                        m1_lows,
+                        m1_vols,
+                        hist_slice_s1,
+                    )
+                except Exception:
+                    is_causal, sig_type = False, "TYPE_B"
+                if is_causal:
+                    use_sb = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
                     can_buy = True
                     if use_sb:
                         ab_ratio = 1.0 / (m1_ba_val + 1e-10)
                         if ab_ratio < self.sb_ba or m1_vp_val < self.sb_vp:
                             can_buy = False
-                            
                     if can_buy:
-                        b_reason = f"1M_SIG|R:{indicator_to_use.get('RSI',0):.1f}|O:{indicator_to_use.get('OSC',0):.2f}+{idx}m"
-                        if use_sb: b_reason = "1M_SmartBuy|" + b_reason
+                        b_reason = (
+                            f"1M_CAUSAL_S1|k={k}|C:{m1_p:.2f}|H:{m1_h:.0f}|L:{m1_l:.0f}"
+                        )
+                        if use_sb:
+                            b_reason = "1M_SmartBuy|" + b_reason
                         try:
                             _hi2 = float(m1_h)
-                            px_in = _hi2 if (np.isfinite(_hi2) and _hi2 > 0) else float(m1_p)
+                            px_in = (
+                                _hi2
+                                if (np.isfinite(_hi2) and _hi2 > 0)
+                                else float(m1_p)
+                            )
                         except (TypeError, ValueError):
                             px_in = float(m1_p)
                         params = self._execute_buy(
-                            m1_t, px_in, "BUY_1ST", params, stage=1, reason=b_reason,
-                            indicators=indicators, i=i, max_p=px_in, sig_type=sig_type
+                            m1_t,
+                            px_in,
+                            "BUY_1ST",
+                            params,
+                            stage=1,
+                            reason=b_reason,
+                            indicators=indicators,
+                            i=i,
+                            max_p=px_in,
+                            sig_type=sig_type,
                         )
                         return params
 
@@ -2169,21 +2307,35 @@ class SimpleBacktester:
         
         # 1. High Precision Entry/Exit/Addon Monitoring
         if high_precision and m1_info is not None:
-            m1_high_total, m1_close_total, m1_low_total, m1_time_total, (s_idx, e_idx), m1_ba_total, m1_vp_total = m1_info
+            (
+                m1_high_total,
+                m1_close_total,
+                m1_low_total,
+                m1_time_total,
+                (s_idx, e_idx),
+                m1_ba_total,
+                m1_vp_total,
+                m1_vol_total,
+            ) = m1_info
             if e_idx > s_idx:
                 m1_highs = m1_high_total[s_idx:e_idx]
                 m1_closes = m1_close_total[s_idx:e_idx]
                 m1_lows = m1_low_total[s_idx:e_idx]
                 m1_ba = m1_ba_total[s_idx:e_idx] if m1_ba_total is not None else None
                 m1_vp = m1_vp_total[s_idx:e_idx] if m1_vp_total is not None else None
-                
+                m1_vols = (
+                    m1_vol_total[s_idx:e_idx]
+                    if m1_vol_total is not None
+                    else None
+                )
+
                 # Check if we should process high-precision (Position exists OR Signal exists)
                 if params['position'] is not None or signal_shifted[i]:
                     old_pos = params['position']
                     params = self._process_intra_bar_full_v3(
-                        i, code, m1_highs, m1_closes, m1_lows, m1_time_total[s_idx:e_idx], 
-                        params, time_hours[i], time_minutes[i], 
-                        m1_ba=m1_ba, m1_vp=m1_vp, indicators=indicators,
+                        i, code, m1_highs, m1_closes, m1_lows, m1_time_total[s_idx:e_idx],
+                        params, time_hours[i], time_minutes[i],
+                        m1_ba=m1_ba, m1_vp=m1_vp, m1_vols=m1_vols, indicators=indicators,
                         signal_shifted=signal_shifted[i]
                     )
                     # If position status changed or a trade happened, we might skip standard logic

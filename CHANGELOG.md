@@ -13,6 +13,13 @@
 
 ---
 
+## 0.7.13 (2026-05-12)
+
+- **실시간 인과 S1**(`core/signal_engine.py`, `core/defaults.py`): tail 룩백으로 `calculate_indicators` + `get_buy_signals_detailed` 재실행, 지문·초당 평가 예산·간격(`realtime_causal_s1_interval_sec` 기본 15초). `last_sig`에 `Met_A`/`Tot_A` 등 상세 행 전부 유지해 **신호상태 합치도**가 0/1로 붕괴하지 않도록 수정.
+- **BT-HP 브리지 분리**: 브리지는 **보유 시 EXIT/S2** 판단에만 사용, 미보유 S1은 인과·일반 15분 경로만 사용(`_maybe_refresh_bt_hp_bridge_eval`, S1 분기 정리). `core/bt_hp_signal_bridge.py` 주석 반영.
+- **백테 고정밀 인과 S1**(`backtest_engine.py`): 인트라바 S1 진입을 인과 tail 재평가 경로와 정렬(기존 세션 작업 포함).
+- **로컬 설정 예시**: `settings.json`에 `realtime_causal_s1_enabled` / `realtime_causal_s1_interval_sec`. `monitor_column_widths.json` 소폭 조정.
+
 ## 0.7.12 (2026-05-12)
 
 - **실시간 감시 웹소켓**(`ui/tabs/monitor_tab.py`): `0s` **fid215** 가 모의 등에서 `'0'`/`'00'` 으로 올 때 **명시적 장외**로 오인하지 않고 비어 있음과 동일 처리 → PC 시각 `is_krx_regular_session()` 폴백으로 **0B 체결 틱이 다시 반영**되도록 수정(REG 시 진단 플래그 리셋 포함).
