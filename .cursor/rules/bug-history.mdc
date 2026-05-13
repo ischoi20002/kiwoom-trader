@@ -33,6 +33,12 @@ alwaysApply: true
 백테스트 시작일 첫 날 MSI/ADX 계산이 NaN → 시장 추세 'UP' 오판  
 **수정**: 시작일 280일 이전부터 데이터 로드 후 지표 계산, 실제 기간만 슬라이스
 
+## core/signal_engine.py
+
+### Bug — `_calculate_realtime_rsi` 가 메서드 밖으로 깨짐
+`_tick_watchlist_synthetic_s2_exit` 의 `try/except` 직후 RSI 계산 블록이 **같은 함수 본문에 남아** `def _calculate_realtime_rsi` 가 소실 → 틱마다 `AttributeError`  
+**수정**: `_calculate_realtime_rsi(self, code)` 로 분리 복구
+
 ## strategy/simulation_models.py
 
 ### Bug 5 — 비결정론적 백테스트 결과

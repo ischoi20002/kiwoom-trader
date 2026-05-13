@@ -1699,8 +1699,12 @@ class SignalEngine:
         except Exception:
             pass
 
-        """[v15.0] 실시간 봉 데이터를 기반으로 즉시 RSI 산출"""
-        # 틱마다 RSI를 rolling 계산하면 메인 스레드가 과점유되므로 캐시/스로틀링 적용
+    def _calculate_realtime_rsi(self, code: str) -> float:
+        """
+        [v15.0] 실시간 봉 데이터를 기반으로 즉시 RSI 산출.
+
+        틱마다 rolling 을 돌리면 메인 스레드가 과점유되므로 최소 재계산 간격을 둔다.
+        """
         try:
             now_ts = time.time()
             last_ts = float(self._rsi_calc_last_ts.get(code, 0.0) or 0.0)
@@ -1709,20 +1713,27 @@ class SignalEngine:
         except Exception:
             pass
 
-        _, df = self._bars_key_and_frame(code)
-        if df is None or getattr(df, "empty", True) or len(df) < 15:
-            return 0.0
-        
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        
-        rs = gain / (loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        val = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 0.0
         try:
-            self._rsi_calc_last_ts[code] = time.time()
-            self._rsi_calc_last_val[code] = float(val) if val is not None else 0.0
+            _, df = self._bars_key_and_frame(code)
+            if df is None or getattr(df, "empty", True) or len(df) < 15:
+                return 0.0
+
+            delta = df["Close"].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+
+            rs = gain / (loss + 1e-10)
+            rsi = 100 - (100 / (1 + rs))
+            val = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 0.0
+            out = float(val) if val is not None else 0.0
+            try:
+                self._rsi_calc_last_ts[code] = time.time()
+                self._rsi_calc_last_val[code] = out
+            except Exception:
+                pass
+            return out
         except Exception:
-            pass
-        return float(val) if val is not None else 0.0
+            try:
+                return float(self._rsi_calc_last_val.get(code, 0.0) or 0.0)
+            except Exception:
+                return 0.0

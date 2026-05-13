@@ -13,6 +13,10 @@
 
 ---
 
+## 0.8.5 (2026-05-13)
+
+- **`SignalEngine._calculate_realtime_rsi` 누락**: RSI 본문이 `_tick_watchlist_synthetic_s2_exit` 안에 잘못 붙어 `AttributeError`로 틱 처리가 반복 실패하던 문제를 **독립 메서드로 복구**(`core/signal_engine.py`).
+
 ## 0.8.4 (2026-05-13)
 
 - **관심목록 다이얼로그**: 추가·삭제 시 `watchlist_favorites.json` **자동 저장**, 창 닫기(X)·「닫기」에서도 저장 시도. 기존「파일에 저장」은 **「지금 목록을 파일에 쓰기」**로 바꿔 수동 재기록·확인용임을 분명히 함(`ui/watchlist_dialog.py`).
