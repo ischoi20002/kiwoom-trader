@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import threading
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Dict, Optional, Set
 
 
@@ -220,6 +221,103 @@ class LimitOrderWatchService:
             except Exception:
                 pass
 
+    def _schedule_exit_sell_cancel_recovery(
+        self,
+        *,
+        code: str,
+        cancelled_ord_no: str,
+        order_qty_hint: int,
+    ) -> None:
+        """
+        매도 지정가가 미체결 타임아웃으로 취소된 직후 처리.
+
+        부분 체결 뒤 잔량만 취소되는 경우, 증권사 매도가능수량은 이미 줄었는데
+        로컬 VP 수량·exit_pending 해제 타이밍이 어긋나면 곧바로 전량 매도를 재시도해
+        800033(매도가능수량 부족)이 난다. kt00007 병합 후 잔고 동기화로 수량을 맞춘 뒤
+        exit_pending 을 해제한다.
+        """
+        nc = self._normalize_code_6(code)
+        oid = str(cancelled_ord_no or "").strip()
+        if not nc or not oid:
+            return
+        hint_q = int(order_qty_hint or 0)
+
+        def _on_main_finish() -> None:
+            try:
+                self._schedule_boost_fill_reconcile(
+                    order_no=oid,
+                    code=nc,
+                    kind="exit_sell",
+                    qty=hint_q,
+                )
+            except Exception:
+                pass
+            try:
+                with self.app.portfolio.lock:
+                    p = self.app.portfolio.virtual_positions.get(nc)
+                    if p:
+                        p["exit_pending"] = False
+                        p.pop("pending_exit_ord_no", None)
+            except Exception:
+                pass
+            try:
+                self.log(
+                    f"ℹ️ [미체결타임아웃] 매도 취소 후 잔고·주문로그 동기화 완료 — "
+                    f"종목 {nc} 재매도 판단 가능"
+                )
+            except Exception:
+                pass
+
+        def _bg_sync() -> None:
+            try:
+                om = getattr(self.app, "order_manager", None)
+                dm = getattr(self.app, "data_manager", None)
+                if om is not None and dm is not None:
+                    om.sync_exchange_fills_into_database(
+                        dm,
+                        dates=[date.today()],
+                        silent=True,
+                        logger=self.log,
+                    )
+            except Exception:
+                pass
+            try:
+                self.app.portfolio.sync_with_actual_account(
+                    silent=True, force=True
+                )
+            except Exception:
+                pass
+            try:
+                root = self._get_root()
+                if root is not None and hasattr(root, "after"):
+                    root.after(0, _on_main_finish)
+                else:
+                    _on_main_finish()
+            except Exception:
+                try:
+                    _on_main_finish()
+                except Exception:
+                    pass
+
+        try:
+            threading.Thread(target=_bg_sync, daemon=True).start()
+        except Exception as ex:
+            try:
+                self.log(
+                    f"⚠️ [미체결타임아웃] 매도 취소 후 동기화 스레드 실패({ex}) — "
+                    f"플래그만 즉시 해제합니다(잔고 괴리 가능)."
+                )
+            except Exception:
+                pass
+            try:
+                with self.app.portfolio.lock:
+                    p = self.app.portfolio.virtual_positions.get(nc)
+                    if p:
+                        p["exit_pending"] = False
+                        p.pop("pending_exit_ord_no", None)
+            except Exception:
+                pass
+
     def timeout(self, order_no: str) -> None:
         """미체결 타임아웃: 취소 API 호출 후 대기 플래그 해제."""
         if not order_no:
@@ -287,19 +385,34 @@ class LimitOrderWatchService:
                     pass
             else:
                 try:
-                    with self.app.portfolio.lock:
-                        p = self.app.portfolio.virtual_positions.get(nc)
-                        if p:
-                            p["exit_pending"] = False
-                            p.pop("pending_exit_ord_no", None)
-                except Exception:
-                    pass
-                try:
                     self.log(
-                        f"⏱️ [미체결타임아웃] 매도 취소 시도({ok}) — 종목 {nc} 전략 재평가 가능"
+                        f"⏱️ [미체결타임아웃] 매도 취소 시도({ok}) — "
+                        f"종목 {nc} 잔고 동기화 후 재매도 판단"
                     )
                 except Exception:
                     pass
+                try:
+                    self._schedule_exit_sell_cancel_recovery(
+                        code=nc,
+                        cancelled_ord_no=oid,
+                        order_qty_hint=int(meta.qty or 0),
+                    )
+                except Exception as ex:
+                    try:
+                        self.log(
+                            f"⚠️ [미체결타임아웃] 매도 취소 후 동기화 예약 실패({ex}) — "
+                            f"플래그만 즉시 해제"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        with self.app.portfolio.lock:
+                            p = self.app.portfolio.virtual_positions.get(nc)
+                            if p:
+                                p["exit_pending"] = False
+                                p.pop("pending_exit_ord_no", None)
+                    except Exception:
+                        pass
 
         elif kind == "s1_buy":
             self.s1_buy_pending_codes.discard(nc)

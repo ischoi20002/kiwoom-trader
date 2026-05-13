@@ -62,12 +62,21 @@ def canonical_stock_code(code: object) -> str:
         return ""
 
 def get_tick_size(price):
-    """[v3.8] 한국 주식시장 표준 호가 단위 (KOSPI/KOSDAQ 통합 기준, 2023~)"""
-    p = float(price)
-    if p < 2000: return 1
-    if p < 5000: return 5
-    if p < 10000: return 10
-    if p < 50000: return 50
-    if p < 100000: return 100
-    if p < 500000: return 500
+    """한국 주식시장 표준 호가 단위 (KOSPI/KOSDAQ 통합, 가격대별 단위)."""
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return 1
+    if p < 2000:
+        return 1
+    if p < 5000:
+        return 5
+    if p < 20000:
+        return 10
+    if p < 50000:
+        return 50
+    if p < 200000:
+        return 100
+    if p < 500000:
+        return 500
     return 1000

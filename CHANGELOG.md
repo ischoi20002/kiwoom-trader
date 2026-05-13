@@ -13,6 +13,11 @@
 
 ---
 
+## 0.8.9 (2026-05-13)
+
+- **호가단위(`get_tick_size`)**: 10원·100원 구간 상한을 거래소 기준에 맞게 조정(10원: 1만~2만 미만, 100원: 5만~20만 미만). 잘못된 틱으로 지정가 ±1호가가 어긋나던 원인 완화(`utils/normalization.py`).
+- **매도 미체결 타임아웃 후 800033**: 부분 체결 뒤 잔량 취소 시 로컬 보유 수량이 남아 **전량 매도**를 재시도하던 레이스를 줄이기 위해, 취소 직후 **kt00007 병합·`sync_with_actual_account(force=True)`** 로 잔고를 맞춘 뒤 `exit_pending` 해제(`core/limit_order_watch_service.py`).
+
 ## 0.8.8 (2026-05-13)
 
 - **감시 신호상태·추매(S2) 완료 표시**: `stage>=2` 이면 추매 지연과 무관하게 「추매(S2) 완료」로 덮어쓰던 로직을, **S1 진입 시각 기준 `s2_delay_hours` 충족 시에만** 완료 문구로 표시. 미충족이면 기존과 같이 `추매(A|B) N/M` 합치도 표시(`TradingStrategy.s2_delay_elapsed_for_position`, `core/signal_engine.py`, `backtest_engine.py`).
