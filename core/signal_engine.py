@@ -8,6 +8,7 @@ import traceback
 from backtest_engine import TradingStrategy
 from core.defaults import effective_min_15m_bars_for_monitoring
 from core.monitor_code_sets import watchlist_only_codes_set
+from core.monitor_signal_status_display import monitor_signal_status_display_text
 from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
 from utils.bars_data_keys import resolve_bars_data_frame
@@ -999,7 +1000,15 @@ class SignalEngine:
                                 break
                     if isinstance(pos_h, dict):
                         stg = int(pos_h.get("entry_n", pos_h.get("stage", 1)) or 1)
-                        if stg >= 2:
+                        _sel_h = info.get("sel_track") or info.get("SelTrack")
+                        # stage>=2(추매 체결)여도 S1 진입 시각 기준 지연 미충족이면
+                        # 「추매(S2) 완료」로 덮어쓰지 않음(동기화·DB 불일치 시 오표시 방지).
+                        if stg >= 2 and TradingStrategy.s2_delay_elapsed_for_position(
+                            pos_h,
+                            self.app.settings,
+                            datetime.now(),
+                            sel_track_hint=_sel_h,
+                        ):
                             info["confluence"] = "추매(S2) 완료"
                             info["met_ratio"] = 1.0
                         else:
@@ -1010,8 +1019,7 @@ class SignalEngine:
                                     eval_ind,
                                     market_trend="UP",
                                     curr_dt=datetime.now(),
-                                    sel_track_hint=info.get("sel_track")
-                                    or info.get("SelTrack"),
+                                    sel_track_hint=_sel_h,
                                     now_price=float(now_price),
                                 )
                             )
@@ -1261,7 +1269,7 @@ class SignalEngine:
                     atr_cell,
                     self._format_monitor_vs_prev_cell(info),
                     ratio_cell,
-                    str(info.get("status_text") or info.get("confluence") or "대기"),
+                    str(monitor_signal_status_display_text(info)),
                     _vp_str,
                     self._format_monitor_bid_ask_cell(info),
                     f"{int(volume):,}",
@@ -1372,9 +1380,7 @@ class SignalEngine:
                         self._format_monitor_vs_prev_cell(info),
                         ratio_cell,
                         str(
-                            info.get("status_text")
-                            or info.get("confluence")
-                            or "대기"
+                            monitor_signal_status_display_text(info)
                         ),
                         _vp_str,
                         self._format_monitor_bid_ask_cell(info),
@@ -1441,7 +1447,7 @@ class SignalEngine:
                             self.ratio_cell_display_for_monitor_tree(
                                 info, float(now_price)
                             ),
-                            str(info.get("status_text") or info.get("confluence") or "대기"),
+                            str(monitor_signal_status_display_text(info)),
                             _vp_str,
                             self._format_monitor_bid_ask_cell(info),
                             f"{int(float(volume)):,}",
@@ -1547,7 +1553,7 @@ class SignalEngine:
                                 self.ratio_cell_display_for_monitor_tree(
                                     info, float(now_price)
                                 ),
-                                str(info.get("status_text") or info.get("confluence") or "대기"),
+                                str(monitor_signal_status_display_text(info)),
                                 f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%",
                                 self._format_monitor_bid_ask_cell(info),
                                 f"{vol_i:,}",

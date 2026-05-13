@@ -13,6 +13,18 @@
 
 ---
 
+## 0.8.8 (2026-05-13)
+
+- **감시 신호상태·추매(S2) 완료 표시**: `stage>=2` 이면 추매 지연과 무관하게 「추매(S2) 완료」로 덮어쓰던 로직을, **S1 진입 시각 기준 `s2_delay_hours` 충족 시에만** 완료 문구로 표시. 미충족이면 기존과 같이 `추매(A|B) N/M` 합치도 표시(`TradingStrategy.s2_delay_elapsed_for_position`, `core/signal_engine.py`, `backtest_engine.py`).
+
+## 0.8.7 (2026-05-13)
+
+- **보유 체결 직후 UI 멈춤**: `vp_price_stub` 인데 틱·유효 `last_price` 가 없을 때 `_monitor_live_price` 가 **메인 스레드에서 키움 REST(동기)** 를 호출해 Tk가 블로킹되던 경로 제거. 스텁 구간은 평단만 잠시 표시용으로 쓰고, 틱 수신 후 정상화(`ui/tabs/virtual_tab.py`).
+
+## 0.8.6 (2026-05-13)
+
+- **감시 트리 신호상태 열**: ``status_text or confluence`` 순서 때문에 ``status_text`` 가 ``"대기"`` 등으로 남으면 **틱마다 갱신되는 ``confluence``(합치도)가 가려져** 숫자·문구가 멈춘 것처럼 보이던 문제 수정. 유효한 ``confluence`` 를 우선 표시하도록 ``core/monitor_signal_status_display.py`` 로 통일(`core/signal_engine.py`, `k_trader_gui.py`, `ui/tabs/monitor_tab.py`).
+
 ## 0.8.5 (2026-05-13)
 
 - **`SignalEngine._calculate_realtime_rsi` 누락**: RSI 본문이 `_tick_watchlist_synthetic_s2_exit` 안에 잘못 붙어 `AttributeError`로 틱 처리가 반복 실패하던 문제를 **독립 메서드로 복구**(`core/signal_engine.py`).

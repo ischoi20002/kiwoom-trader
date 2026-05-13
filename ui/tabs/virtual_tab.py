@@ -1673,7 +1673,11 @@ class VirtualTab:
     def _monitor_live_price(self, nk: str, pos: Dict[str, Any]) -> float:
         """
         6자리 종목코드 기준 현재가(청산 가정 시 단가).
-        틱 ``price`` → ``last_price``(평단 미러 제외) → REST 호가·전일 순. **평단 폴백 없음.**
+        틱 ``price`` → ``last_price``(평단 미러 제외) → (스텁이 아니면) REST 폴백.
+
+        ``vp_price_stub`` 인 보유 직후에는 틱이 아직 없고 ``last_price`` 가 평단과 같아
+        스킵되는 경우가 많다. 이때 **메인 스레드에서 동기 REST**를 호출하면 UI가 멈춘다.
+        스텁 구간에서는 REST를 쓰지 않고 평단을 잠시 표시용으로만 쓴다(틱 도착 후 정상화).
         """
         try:
             mi = getattr(self.app, "monitor_info", None) or {}
@@ -1711,6 +1715,13 @@ class VirtualTab:
                             return v
             except (TypeError, ValueError):
                 pass
+            # 스텁인데 위에서 못 구했으면: 동기 REST 금지 → 평단만 표시용(틱 전 잠시)
+            try:
+                if ap > 0:
+                    return float(ap)
+            except Exception:
+                pass
+            return 0.0
         else:
             try:
                 raw_lp = info.get("last_price")

@@ -56,6 +56,7 @@ from core.rest_auth_retry_service import RestAuthRetryService
 from core.fill_reconciliation_service import FillReconciliationService
 from core.defaults import DEFAULT_SETTINGS, get_allowed_keys
 from core.version import APP_VERSION
+from core.monitor_signal_status_display import monitor_signal_status_display_text
 from core.supply_display import capture_supply_snapshot
 from core.signal_callbacks_service import SignalCallbacksService
 from core.ui_trading_status_service import UiTradingStatusService
@@ -1698,7 +1699,7 @@ class KiwoomApp:
                         )
                 except Exception:
                     ratio_disp = str(info.get("ratio", "0"))
-                status_text = str(info.get("status_text") or info.get("confluence") or "대기")
+                status_text = monitor_signal_status_display_text(info)
                 try:
                     raw_diff = info.get("diff")
                     if raw_diff in (None, "", "-", "—"):

@@ -17,6 +17,7 @@ from core.monitor_code_sets import (
     monitor_selection_codes_set,
     watchlist_only_codes_set,
 )
+from core.monitor_signal_status_display import monitor_signal_status_display_text
 from core.terminal_trace import terminal_trace
 from backtest_engine import TradingStrategy
 from kiwoom_rest_api.auth.token import TokenManager
@@ -2507,7 +2508,7 @@ class MonitorTab:
             atr_cell,
             _monitor_fmt_vs_prev(info),
             str(ratio_disp),
-            info.get("status_text", "대기"),
+            monitor_signal_status_display_text(info),
             f"{vol_pow:.1f}%",
             _monitor_fmt_bid_ask(info),
             f"{vol_i:,}",

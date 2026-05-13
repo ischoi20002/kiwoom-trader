@@ -455,6 +455,55 @@ class TradingStrategy:
         return True
 
     @staticmethod
+    def s2_delay_elapsed_for_position(
+        pos: dict,
+        settings: dict,
+        curr_dt: object | None = None,
+        sel_track_hint: str | None = None,
+    ) -> bool:
+        """
+        S1 진입 시각(`entry_date` 또는 `entry_time`) 기준 추매 지연 시간 충족 여부.
+        Type A/B 키 선택은 `compute_s2_confluence_display_text` 와 동일.
+        `use_s2_delay` / `use_s2_b_delay` 가 꺼져 있으면 True.
+        """
+        try:
+            if not pos:
+                return False
+            s = settings or {}
+            _is_b = TradingStrategy._holding_sig_is_type_b(pos)
+            if not _is_b:
+                try:
+                    _is_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+                except Exception:
+                    _is_b = False
+            if not _is_b and sel_track_hint:
+                try:
+                    if str(sel_track_hint).strip().upper() == "B":
+                        _is_b = True
+                except Exception:
+                    pass
+
+            def _s2(a_key: str, b_key: str, default):
+                return s.get(b_key, default) if _is_b else s.get(a_key, default)
+
+            if not bool(_s2("use_s2_delay", "use_s2_b_delay", True)):
+                return True
+
+            min_hours = float(_s2("s2_delay_hours", "s2_b_delay_hours", 24))
+            et_raw = pos.get("entry_date") or pos.get("entry_time")
+            if et_raw is None:
+                return False
+            entry_dt = pd.to_datetime(et_raw)
+            cdt = (
+                pd.to_datetime(curr_dt)
+                if curr_dt is not None
+                else pd.Timestamp.now()
+            )
+            return (cdt - entry_dt).total_seconds() / 3600 >= min_hours
+        except Exception:
+            return False
+
+    @staticmethod
     def compute_s2_confluence_display_text(
         pos: dict,
         settings: dict,
@@ -510,22 +559,9 @@ class TradingStrategy:
 
             if _s2("use_s2_delay", "use_s2_b_delay", True):
                 total += 1
-                ok_delay = False
-                try:
-                    min_hours = float(_s2("s2_delay_hours", "s2_b_delay_hours", 24))
-                    et_raw = pos.get("entry_date") or pos.get("entry_time")
-                    if et_raw is not None:
-                        entry_dt = pd.to_datetime(et_raw)
-                        cdt = (
-                            pd.to_datetime(curr_dt)
-                            if curr_dt is not None
-                            else pd.Timestamp.now()
-                        )
-                        if (cdt - entry_dt).total_seconds() / 3600 >= min_hours:
-                            ok_delay = True
-                except Exception:
-                    ok_delay = False
-                if ok_delay:
+                if TradingStrategy.s2_delay_elapsed_for_position(
+                    pos, s, curr_dt, sel_track_hint=sel_track_hint
+                ):
                     passed += 1
 
             cp = float(now_price) if now_price is not None and float(now_price) > 0 else float(
