@@ -1,3 +1,4 @@
+import copy
 import pandas as pd
 import numpy as np
 import threading
@@ -6,7 +7,14 @@ from datetime import datetime
 import time
 import traceback
 from backtest_engine import TradingStrategy
+from core.bt_hp_intrabar_unified import evaluate_bt_hp_intrabar_unified
+from core.bt_hp_signal_bridge import _apply_synthetic_metrics_m1
 from core.defaults import effective_min_15m_bars_for_monitoring
+from core.realtime_official_bars_sync import stream_slot_end_datetime
+from utils.krx_bars import (
+    m1_bar_open_label_for_just_completed_minute,
+    m1_window_start_for_15m_end,
+)
 from core.monitor_code_sets import watchlist_only_codes_set
 from core.monitor_signal_status_display import monitor_signal_status_display_text
 from ui.tabs.monitor_tab import format_entry_signal_type_label
@@ -155,6 +163,277 @@ class SignalEngine:
             return pd.Timestamp(last_idx).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return ""
+
+    def _realtime_s1_mirror_dynamic_intrabar_enabled(self) -> bool:
+        """
+        동적 고정밀과 동일한 인트라바 판정 사용 여부.
+
+        - 미보유: S1 신규(기존)
+        - 보유: 청산(EXIT)·추매(S2) — ``evaluate_bt_hp_intrabar_unified`` 분기
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return bool(st.get("realtime_s1_mirror_dynamic_intrabar", True))
+        except Exception:
+            return True
+
+    def _intrabar_mirror_get_full15m_and_m1(
+        self, nk: str, full_15m_src: Any
+    ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
+        """
+        현재 15분 슬롯에 맞춘 15m 사본과 공식 1분 구간 ``[t0, t_hi]`` M1 DataFrame.
+
+        ``None`` 이면 M1 저장소/봉 부재 등으로 인트라바 미러를 적용하지 않습니다.
+        """
+        try:
+            if len(str(nk).strip()) != 6:
+                return None
+            m1s = getattr(self.app, "rt_tick_m1_store", None)
+            if m1s is None:
+                return None
+            if full_15m_src is None or getattr(full_15m_src, "empty", True):
+                return None
+            full_15m = full_15m_src.copy()
+            try:
+                slot_end = pd.Timestamp(full_15m.index[-1])
+            except Exception:
+                slot_end = stream_slot_end_datetime(datetime.now())
+            t0 = m1_window_start_for_15m_end(slot_end)
+            try:
+                wall = datetime.now()
+                closed_open = m1_bar_open_label_for_just_completed_minute(wall)
+                t_hi = min(slot_end, closed_open + pd.Timedelta(minutes=1))
+            except Exception:
+                try:
+                    t_hi = min(
+                        slot_end,
+                        pd.Timestamp(datetime.now()).floor("min"),
+                    )
+                except Exception:
+                    t_hi = slot_end
+            if t_hi < t0:
+                return None
+            try:
+                m1df = m1s.dataframe_for_window(
+                    nk, t0, t_hi, include_open_bucket=False
+                )
+            except TypeError:
+                m1df = m1s.dataframe_for_window(nk, t0, t_hi)
+            if m1df is None or getattr(m1df, "empty", True):
+                return None
+            m1df = m1df.copy()
+            try:
+                _apply_synthetic_metrics_m1(
+                    m1df, getattr(self.app, "settings", None) or {}
+                )
+            except Exception:
+                pass
+            return full_15m, m1df
+        except Exception:
+            return None
+
+    @staticmethod
+    def _indicator_row_to_plain_dict(row: Any) -> Dict[str, Any]:
+        """인트라바 지표 행(Series/dict)을 캐시용 dict 로 변환."""
+        if row is None:
+            return {}
+        try:
+            if isinstance(row, dict):
+                return dict(row)
+            if hasattr(row, "to_dict"):
+                return dict(row.to_dict())
+        except Exception:
+            pass
+        return {}
+
+    def _intrabar_mirror_s1_buy_pack(
+        self,
+        code: str,
+        full_15m_src: Any,
+        df_with_ind: Any,
+        info: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        미보유 S1: ``evaluate_bt_hp_intrabar_unified`` 로 동적 고정밀과 동일 분기.
+        매수 성립 시 ``force_buy`` 및 갱신할 ``last_sig``/``last_row`` 를 돌려줍니다.
+        """
+        try:
+            nk = str(code).strip().zfill(6)
+            if len(nk) != 6:
+                return None
+            st = getattr(self.app, "settings", None) or {}
+            pair = self._intrabar_mirror_get_full15m_and_m1(nk, full_15m_src)
+            if pair is None:
+                return None
+            full_15m, m1df = pair
+            ct = str(
+                info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+            ).strip().upper()
+            if ct not in ("A", "B", "AB"):
+                ct = "AB"
+            out = evaluate_bt_hp_intrabar_unified(
+                st, nk, full_15m, m1df, None, ct
+            )
+            if not isinstance(out, dict):
+                return None
+            se = out.get("s1_eval")
+            if not isinstance(se, dict):
+                return None
+            if not bool(se.get("can_execute_entry")) or not bool(
+                se.get("is_buy_signal")
+            ):
+                return None
+            ind = se.get("indicator_to_use")
+            ind_d = self._indicator_row_to_plain_dict(ind)
+            base_row = self._indicator_row_to_plain_dict(
+                df_with_ind.iloc[-1] if df_with_ind is not None and len(df_with_ind) else None
+            )
+            merged_row = dict(base_row)
+            for k, v in ind_d.items():
+                try:
+                    merged_row[k] = v
+                except Exception:
+                    pass
+            base_sig = {}
+            try:
+                detailed = info.get("last_detailed_sig")
+                if detailed is not None and len(detailed) > 0:
+                    ls = detailed.iloc[-1]
+                    base_sig = (
+                        ls.to_dict()
+                        if hasattr(ls, "to_dict")
+                        else dict(ls)
+                    )
+            except Exception:
+                base_sig = {}
+            if not base_sig:
+                base_sig = dict(info.get("last_sig_cache") or {})
+            base_sig["Signal"] = True
+            base_sig["Ready"] = True
+            try:
+                stp = str(se.get("sig_type") or base_sig.get("Sig_Type") or "TYPE_B")
+                base_sig["Sig_Type"] = stp
+            except Exception:
+                pass
+            return {
+                "force_buy": True,
+                "last_sig": base_sig,
+                "last_row": merged_row,
+            }
+        except Exception as e:
+            try:
+                if self._last_realtime_err != str(e):
+                    self._last_realtime_err = str(e)
+                    print(
+                        f"[SignalEngine] _intrabar_mirror_s1_buy_pack 실패 ({code}): {e}"
+                    )
+            except Exception:
+                pass
+            return None
+
+    def _intrabar_mirror_held_eval(
+        self,
+        code: str,
+        info: Dict[str, Any],
+        full_15m_src: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        보유 시 청산·S2 를 ``evaluate_bt_hp_intrabar_unified``(동적 고정밀)과 동일 분기로 판정.
+
+        Returns
+        -------
+        None
+            M1 윈도우 없음·설정 OFF 등 → 기존 ``StrategyEngine.evaluate_position`` 사용.
+        dict
+            ``action`` 이 ``HOLD``/``EXIT``/``STAGE2`` — 미러 판정 완료 시 레거시 틱 평가 생략.
+        """
+        try:
+            if not self._realtime_s1_mirror_dynamic_intrabar_enabled():
+                return None
+            if not self._code_in_virtual_positions(code):
+                return None
+            nk = str(code).strip().zfill(6)
+            if len(nk) != 6:
+                return None
+            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+            pos_live = vp.get(code) or vp.get(nk)
+            if pos_live is None:
+                for _k, v in vp.items():
+                    try:
+                        if str(_k).split("_")[0].zfill(6) == nk and isinstance(v, dict):
+                            pos_live = v
+                            break
+                    except Exception:
+                        continue
+            if not isinstance(pos_live, dict):
+                return None
+            if bool(pos_live.get("exit_pending", False)):
+                return {"action": "HOLD"}
+            pair = self._intrabar_mirror_get_full15m_and_m1(nk, full_15m_src)
+            if pair is None:
+                return None
+            full_15m, m1df = pair
+            pos_sim = copy.deepcopy(pos_live)
+            ct = str(
+                info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+            ).strip().upper()
+            if ct not in ("A", "B", "AB"):
+                ct = "AB"
+            st = getattr(self.app, "settings", None) or {}
+            out = evaluate_bt_hp_intrabar_unified(
+                st, nk, full_15m, m1df, pos_sim, ct
+            )
+            if not isinstance(out, dict):
+                return {"action": "HOLD"}
+            ex = out.get("exit_first")
+            if isinstance(ex, dict):
+                ep = float(ex.get("eval_price", 0) or 0)
+                pr = float(ex.get("profit_ratio", 0) or 0)
+                rs = str(ex.get("reason", "") or "EXIT")
+                return {
+                    "action": "EXIT",
+                    "reason": rs,
+                    "profit_ratio": pr,
+                    "now_price": ep,
+                }
+            s2 = out.get("stage2_addon")
+            if isinstance(s2, dict):
+                if bool(pos_live.get("s2_limit_order_pending", False)):
+                    return {"action": "HOLD"}
+                stg = int(pos_live.get("entry_n", pos_live.get("stage", 1)) or 1)
+                if stg >= 2:
+                    return {"action": "HOLD"}
+                fill_px = float(s2.get("fill_price", 0) or 0)
+                avg_p = float(
+                    self._to_scalar(
+                        pos_live.get("avg_price", pos_live.get("avg_p", 0)), 0.0
+                    )
+                )
+                try:
+                    pr_s2 = (
+                        (fill_px / avg_p - 1.0) * 100.0
+                        if avg_p > 0 and fill_px > 0
+                        else 0.0
+                    )
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pr_s2 = 0.0
+                return {
+                    "action": "STAGE2",
+                    "reason": str(s2.get("reason", "PROFIT_TRIGGER")),
+                    "profit_ratio": pr_s2,
+                    "now_price": fill_px,
+                }
+            return {"action": "HOLD"}
+        except Exception as e:
+            try:
+                if self._last_realtime_err != str(e):
+                    self._last_realtime_err = str(e)
+                    print(
+                        f"[SignalEngine] _intrabar_mirror_held_eval 실패 ({code}): {e}"
+                    )
+            except Exception:
+                pass
+            return None
 
     def _to_scalar(self, val, default=0):
         """[v4.5.9] 헬퍼: Series/DF/Numpy 등 어떤 형태에서든 안전하게 단일 스칼라 값 추출"""
@@ -700,8 +979,31 @@ class SignalEngine:
                         self._s1_full_calc_last_ts[code] = now_ts
                         last_sig = info["last_sig_cache"]
                         last_row = info["last_row_cache"]
-                        # [v4.5.9] 전방위적 스칼라 쉴드 적용
+                        # [v0.8.11] 미보유 S1: 동적 고정밀과 동일 인트라바 통합 판정(가능 시)
                         is_buy = bool(self._to_scalar(last_sig.get("Signal"), False))
+                        try:
+                            if (
+                                self._realtime_s1_mirror_dynamic_intrabar_enabled()
+                                and not self._code_in_virtual_positions(code)
+                            ):
+                                pack = self._intrabar_mirror_s1_buy_pack(
+                                    code, _src_df, df_with_ind, info
+                                )
+                                if isinstance(pack, dict) and pack.get("force_buy"):
+                                    is_buy = True
+                                    if isinstance(pack.get("last_sig"), dict):
+                                        last_sig = pack["last_sig"]
+                                        info["last_sig_cache"] = last_sig
+                                    if isinstance(pack.get("last_row"), dict):
+                                        last_row = pack["last_row"]
+                                        info["last_row_cache"] = last_row
+                        except Exception as _mir_e:
+                            try:
+                                print(
+                                    f"[SignalEngine] 인트라바 S1 미러 예외 ({code}): {_mir_e}"
+                                )
+                            except Exception:
+                                pass
                         _sel_tr = str(
                             info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
                         ).strip().upper()
@@ -1039,19 +1341,19 @@ class SignalEngine:
                 if (now_ts - last_eval_ts) >= self._realtime_eval_position_min_interval_sec:
                     self._eval_position_last_ts[code] = now_ts
                     res: Dict[str, Any] = {"action": "HOLD"}
+                    mirrored: Optional[Dict[str, Any]] = None
                     try:
-                        res = self.app.strategy_engine.evaluate_position(
-                            code,
-                            now_price,
-                            ind=eval_ind,
-                            is_power_exhausted=is_power_exhausted,
-                            bid_ask_ratio=bid_ask_ratio,
-                            ask_bid_ratio=ask_bid_ratio,
-                            vol_power=vol_power,
-                            sel_track=info.get("sel_track")
-                            or info.get("SelTrack"),
+                        bars_key_m, _bd_m = self._bars_key_and_frame(code)
+                        _src_m = (
+                            self.app.bars_data.get(bars_key_m) if bars_key_m else None
                         )
+                        if _src_m is None:
+                            _src_m = _bd_m
+                        mirrored = self._intrabar_mirror_held_eval(code, info, _src_m)
                     except Exception:
+                        mirrored = None
+
+                    if mirrored is None:
                         try:
                             res = self.app.strategy_engine.evaluate_position(
                                 code,
@@ -1065,7 +1367,42 @@ class SignalEngine:
                                 or info.get("SelTrack"),
                             )
                         except Exception:
-                            res = {"action": "HOLD"}
+                            try:
+                                res = self.app.strategy_engine.evaluate_position(
+                                    code,
+                                    now_price,
+                                    ind=eval_ind,
+                                    is_power_exhausted=is_power_exhausted,
+                                    bid_ask_ratio=bid_ask_ratio,
+                                    ask_bid_ratio=ask_bid_ratio,
+                                    vol_power=vol_power,
+                                    sel_track=info.get("sel_track")
+                                    or info.get("SelTrack"),
+                                )
+                            except Exception:
+                                res = {"action": "HOLD"}
+                    else:
+                        res = (
+                            mirrored
+                            if isinstance(mirrored, dict)
+                            else {"action": "HOLD"}
+                        )
+
+                    try:
+                        _raw_np = res.get("now_price")
+                        _eff_np = (
+                            float(_raw_np)
+                            if _raw_np is not None
+                            else float(now_price)
+                        )
+                    except (TypeError, ValueError):
+                        _eff_np = float(now_price)
+                    try:
+                        if not np.isfinite(_eff_np) or _eff_np <= 0:
+                            _eff_np = float(now_price)
+                    except Exception:
+                        _eff_np = float(now_price)
+
                     if res.get("action") != "HOLD":
                         if defer_main_callbacks:
                             try:
@@ -1076,7 +1413,7 @@ class SignalEngine:
                                         str(res.get("action") or ""),
                                         str(res.get("reason") or ""),
                                         {
-                                            "now_price": float(now_price),
+                                            "now_price": float(_eff_np),
                                             "profit_ratio": float(
                                                 res.get("profit_ratio", 0) or 0
                                             ),
@@ -1090,7 +1427,7 @@ class SignalEngine:
                                 code,
                                 res.get("action"),
                                 res.get("reason"),
-                                now_price=now_price,
+                                now_price=_eff_np,
                                 profit_ratio=res.get("profit_ratio", 0),
                             )
 

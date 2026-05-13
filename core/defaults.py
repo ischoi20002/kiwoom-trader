@@ -78,6 +78,8 @@ DEFAULT_SETTINGS = {
     "realtime_tree_first_refresh_delay_ms": 48,
     "realtime_rsi_calc_min_interval_sec": 1.0,
     "realtime_s1_full_calc_min_interval_sec": 1.0,
+    # True: 미보유 S1·보유 청산·S2 를 동적 고정밀과 동일 `evaluate_bt_hp_intrabar_unified` 경로로 판정(공식 1분·합성 수급).
+    "realtime_s1_mirror_dynamic_intrabar": True,
     "realtime_eval_position_min_interval_sec": 0.5,
     "realtime_exit_indicator_min_interval_sec": 0.5,
     "realtime_monitor_atr_display_min_interval_sec": 0.5,

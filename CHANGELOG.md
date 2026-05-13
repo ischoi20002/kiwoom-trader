@@ -13,6 +13,14 @@
 
 ---
 
+## 0.8.12 (2026-05-11)
+
+- **실시간 인트라바 미러(보유)**: `realtime_s1_mirror_dynamic_intrabar` 가 켜져 있고 공식 1분 윈도우가 있으면, 보유 종목의 **청산(EXIT)·추매(S2)** 도 `evaluate_bt_hp_intrabar_unified` 결과로 판정하고(참고가는 인트라바 보수 체결가), M1 미구축 시에만 기존 `StrategyEngine.evaluate_position` 틱 경로로 폴백(`core/signal_engine.py`). S1 미러용 15m·M1 조립 로직을 `_intrabar_mirror_get_full15m_and_m1` 로 공통화.
+
+## 0.8.11 (2026-05-11)
+
+- **실시간 S1 신규·동적 고정밀 정합**: `realtime_s1_mirror_dynamic_intrabar`(기본 `True`)일 때 미보유 종목의 전체 지표 재계산 직후, `evaluate_bt_hp_intrabar_unified`로 **동적 백테 인트라바와 동일한 S1 신규 판정**을 반영해 `is_buy`·`last_sig`·`last_row`를 덮어씀(`core/defaults.py`, `core/signal_engine.py`).
+
 ## 0.8.10 (2026-05-13)
 
 - **실시간 보유 시 UI 부하**: `TradingStrategy.evaluate_position`에서 `bars_df` 기준 `_peak_high_from_bars_df`를 **매 초·매 틱마다 전량 스캔**하던 경로를, 봉 길이·마지막 슬롯·마지막 봉 High·진입 앵커가 같을 때 **포지션 캐시 재사용**으로 줄임(`backtest_engine.py`). `now_price` 기반 고가 갱신은 기존과 동일.

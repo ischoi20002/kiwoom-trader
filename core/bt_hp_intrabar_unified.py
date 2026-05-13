@@ -4,7 +4,7 @@
 
 - 청산(EXIT)은 분마다 보수적 체결가로 `TradingStrategy.evaluate_position` 평가(선착순).
 - 신규(S1)·추매(S2) 매수도 동적 백테와 동일 분기(트랙·S2 승인·스마트바이).
-- 실시간 `SignalEngine` 은 본 모듈 결과로 매수/매도 경로를 통일한다.
+- 실시간 `SignalEngine` 은 본 모듈 결과로 미보유 S1·보유 청산·S2 매매 경로를 통일한다.
 """
 
 from __future__ import annotations
