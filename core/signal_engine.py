@@ -155,7 +155,15 @@ class SignalEngine:
             return False
 
     def _current_slot_key_from_bars(self, bars_df: Any) -> str:
-        """bars_data 마지막 행 기준 15분 슬롯 키(YYYY-mm-dd HH:MM:SS)."""
+        """
+        ``bars_data`` 마지막 행 기준 15분 슬롯 키(YYYY-mm-dd HH:MM:SS).
+
+        .. note::
+            실시간에서는 ``bars_data`` 가 슬롯마다 갱신되어 마지막 행이 **현재(또는 직전) 슬롯**을 가리킨다.
+            장종료까지 통째로 고정된 DataFrame을 넣으면 키가 **항상 당일 마지막 봉**으로 고정되어
+            슬롯 게이트·지표 ``iloc[-1]`` 이 백테와 어긋날 수 있으므로, 리플레이·검증 시에는
+            ``ts_wall`` 시각까지 잘라 넣는 것이 안전하다.
+        """
         try:
             if bars_df is None or getattr(bars_df, "empty", True):
                 return ""

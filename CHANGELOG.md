@@ -13,6 +13,12 @@
 
 ---
 
+## 0.8.14 (2026-05-14)
+
+- **SignalEngine 리플레이** (`tools/replay_realtime_signal_engine_day.py`): `--drive db_1m_closes` 로 DB 공식 1분봉만 순회(세션 JSONL 불필요). 리플레이 구간 동안 `core.signal_engine.is_krx_regular_session` 을 장중으로 고정해 장외 실행 시 S1 전면 차단을 방지. **매 틱 직전 `bars_data` 를 해당 시각 이하로 슬라이스**해, EOD 통째 DataFrame 때문에 `_current_slot_key_from_bars`·`iloc[-1]` 이 말미 슬롯만 보이던 문제를 제거.
+- **`_current_slot_key_from_bars`**: 실시간(스트림 갱신) vs 검증용 통째 DF 차이를 설명하는 주석 추가 (`core/signal_engine.py`).
+- **도구**: `tools/audit_krx_bars_db_day.py` — `trading_data.db` 1m/15m 시각이 KRX 격자·동시호가(15:20~) 구간과 어긋나는지 점검. `tools/verify_db_unified_vs_dynamic_intraday.py` — 동적 백테 고정밀 체결 vs `evaluate_bt_hp_intrabar_unified` 치환 경로 비교 출력.
+
 ## 0.8.13 (2026-05-14)
 
 - **실시간 S1 영구 정지 버그**: 워밍업이 `last_sig_cache`/`last_row_cache`만 채운 뒤 `_s1_full_calc_last_ts`가 비어 있으면 `need_full_calc`가 항상 False로만 이어져 **풀 지표 재계산·인트라바 미러가 한 번도 실행되지 않던** 문제 수정. `last_calc_ts <= 0` 분기에서 스로틀 앵커를 시드(`core/signal_engine.py`).
