@@ -13,6 +13,11 @@
 
 ---
 
+## 0.8.13 (2026-05-14)
+
+- **실시간 S1 영구 정지 버그**: 워밍업이 `last_sig_cache`/`last_row_cache`만 채운 뒤 `_s1_full_calc_last_ts`가 비어 있으면 `need_full_calc`가 항상 False로만 이어져 **풀 지표 재계산·인트라바 미러가 한 번도 실행되지 않던** 문제 수정. `last_calc_ts <= 0` 분기에서 스로틀 앵커를 시드(`core/signal_engine.py`).
+- **진단 로그**: `signal_engine_wl_only_state`의 `bars_ready`를 15분 봉 수 계산 **이후**에 기록하도록 이동(이전에는 항상 null).
+
 ## 0.8.12 (2026-05-11)
 
 - **실시간 인트라바 미러(보유)**: `realtime_s1_mirror_dynamic_intrabar` 가 켜져 있고 공식 1분 윈도우가 있으면, 보유 종목의 **청산(EXIT)·추매(S2)** 도 `evaluate_bt_hp_intrabar_unified` 결과로 판정하고(참고가는 인트라바 보수 체결가), M1 미구축 시에만 기존 `StrategyEngine.evaluate_position` 틱 경로로 폴백(`core/signal_engine.py`). S1 미러용 15m·M1 조립 로직을 `_intrabar_mirror_get_full15m_and_m1` 로 공통화.

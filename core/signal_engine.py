@@ -770,28 +770,6 @@ class SignalEngine:
                 _wl_ap = None
             has_wl_avg = _wl_ap is not None and float(_wl_ap) > 0
 
-            # [진단] pending_tree_updates 큐잉에서 제외(wl_only)되는지 여부 확인용
-            try:
-                debug_codes = {"016360", "042700", "267250", "454910"}
-                if str(code).zfill(6) in debug_codes:
-                    now_t = time.time()
-                    last_t = float(self._ui_debug_log_last_ts.get(code, 0.0) or 0.0)
-                    if now_t - last_t >= 5.0:
-                        self._ui_debug_log_last_ts[code] = now_t
-                        sl = getattr(self.app, "session_logger", None)
-                        if sl is not None:
-                            sl.log(
-                                "signal_engine_wl_only_state",
-                                {
-                                    "code": str(code).zfill(6),
-                                    "is_in_watchlist": bool(is_in_watchlist),
-                                    "is_wl_only": bool(is_wl_only),
-                                    "bars_ready": bool(bars_ready) if "bars_ready" in locals() else None,
-                                    "now_price": float(now_price),
-                                },
-                            )
-            except Exception:
-                pass
             debug_enabled = str(code).zfill(6) in {"016360", "042700", "267250", "454910"}
 
             # 0D(호가) 전용 패킷은 봉 업데이트를 건너뛰고 수급 필드만 반영합니다.
@@ -906,6 +884,28 @@ class SignalEngine:
                 and current_bar_count >= _min_sig_bars
             )
 
+            # [진단] wl_only·bars_ready (bars_ready 계산 이후에만 의미 있음)
+            try:
+                if str(code).zfill(6) in debug_codes:
+                    now_t = time.time()
+                    last_t = float(self._ui_debug_log_last_ts.get(code, 0.0) or 0.0)
+                    if now_t - last_t >= 5.0:
+                        self._ui_debug_log_last_ts[code] = now_t
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl is not None:
+                            sl.log(
+                                "signal_engine_wl_only_state",
+                                {
+                                    "code": str(code).zfill(6),
+                                    "is_in_watchlist": bool(is_in_watchlist),
+                                    "is_wl_only": bool(is_wl_only),
+                                    "bars_ready": bool(bars_ready),
+                                    "now_price": float(now_price),
+                                },
+                            )
+            except Exception:
+                pass
+
             is_buy = False
             last_row = None
             if bars_ready:
@@ -919,7 +919,16 @@ class SignalEngine:
                 if cached_last_row is None or cached_last_sig_cache is None:
                     need_full_calc = True
                 elif last_calc_ts <= 0.0:
+                    # 워밍업이 last_* 만 채우고 풀계산 시각은 비어 있는 경우.
+                    # 이 분기만 타고 끝나면 아래 ``if need_full_calc`` 에서
+                    # ``_s1_full_calc_last_ts`` 가 한 번도 설정되지 않아,
+                    # 이후 모든 틱에서 need_full_calc=False 로 고정되어
+                    # 지표 재계산·인트라바 미러가 영구 스킵되는 치명적 불일치가 난다.
                     need_full_calc = False
+                    try:
+                        self._s1_full_calc_last_ts[code] = float(now_ts)
+                    except Exception:
+                        pass
                 else:
                     need_full_calc = (
                         (now_ts - last_calc_ts)
