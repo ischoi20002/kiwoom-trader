@@ -493,7 +493,7 @@ def main() -> None:
     print(f"bars_15m 로드 종목: {list(bars_data.keys())}")
     print(f"bars_1m 시드 분 수(종목별): {m1_counts}")
 
-    if args.dynamic_bt:
+    if getattr(args, "dynamic_bt", False):
         print()
         run_dynamic_bt_one_day(day, load_settings())
 
