@@ -13,6 +13,13 @@
 
 ---
 
+## 0.8.15 (2026-05-15)
+
+- **실시간 기본 시장가**: `settings.json` / `defaults` 에 `realtime_use_market_orders`(기본 `true`). S1 매수·EXIT 매도·S2 추매 REST 주문을 `03`(시장가)로 전송, 시장가는 미체결 취소 타이머 없이 메타만 등록(`core/trading_controller.py`, `core/limit_order_watch_service.py`). 체결 시 매수 쪽 `limit_order_watch` 정리(`core/fill_reconciliation_service.py`).
+- **지정가 미체결 타임아웃**: 기본값 45초 등(`settings.json`, `core/defaults.py`, `limit_order_watch_service` 폴백).
+- **주문·체결 DB**: 동일 `order_no`에 접수·KT00007 행이 공존할 때 체결 우선 조회(`data_manager_v2.get_order_history_row_by_order_no`). 체결 동기화에서 취소/거부만 있고 체결 수량 0이면 폴링 조기 종료(`fill_reconciliation_service`).
+- **비상 전량 매도**: 시장가 `03` 고정(`core/portfolio_manager.py`). 감시 탭 테스트 주문 문구·유형 연동(`ui/tabs/monitor_tab.py`). `order_manager` 주석 보강.
+
 ## 0.8.14 (2026-05-14)
 
 - **SignalEngine 리플레이** (`tools/replay_realtime_signal_engine_day.py`): `--drive db_1m_closes` 로 DB 공식 1분봉만 순회(세션 JSONL 불필요). 리플레이 구간 동안 `core.signal_engine.is_krx_regular_session` 을 장중으로 고정해 장외 실행 시 S1 전면 차단을 방지. **매 틱 직전 `bars_data` 를 해당 시각 이하로 슬라이스**해, EOD 통째 DataFrame 때문에 `_current_slot_key_from_bars`·`iloc[-1]` 이 말미 슬롯만 보이던 문제를 제거.

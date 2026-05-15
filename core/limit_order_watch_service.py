@@ -13,13 +13,16 @@ class LimitOrderMeta:
     kind: str
     after_id: Any
     qty: int = 0
+    # False: 시장가 등 — 타임아웃 시 취소 API 없음(체결 시 clear()로만 정리)
+    cancel_on_timeout: bool = True
 
 
 class LimitOrderWatchService:
     """
     지정가 미체결 타임아웃 감시/취소/플래그 정리 서비스.
 
-    - 등록: `root.after(ms, cb)` 로 타임아웃 콜백 예약
+    - 등록: `root.after(ms, cb)` 로 타임아웃 콜백 예약(지정가)
+    - 시장가: 메타만 등록하고 타이머·취소 API는 생략 — 체결 시 `clear()` 로 플래그 정리
     - 취소(체결): `clear(order_no)` 로 예약 타이머 취소 + 상태 정리
     - 타임아웃: `timeout(order_no)` 로 취소 API 호출 + 상태 정리
     """
@@ -46,11 +49,11 @@ class LimitOrderWatchService:
         try:
             sec = float(
                 (getattr(self.app, "settings", None) or {}).get(
-                    "limit_order_unfilled_timeout_sec", 5.0
+                    "limit_order_unfilled_timeout_sec", 45.0
                 )
             )
         except (TypeError, ValueError):
-            sec = 5.0
+            sec = 45.0
         sec = max(2.0, min(sec, 120.0))
         return int(sec * 1000)
 
@@ -100,8 +103,16 @@ class LimitOrderWatchService:
             except Exception:
                 pass
 
-    def register(self, *, order_no: str, code: str, kind: str, qty: int = 0) -> None:
-        """지정가 접수 후 미체결 타임아웃 감시 예약."""
+    def register(
+        self,
+        *,
+        order_no: str,
+        code: str,
+        kind: str,
+        qty: int = 0,
+        cancel_on_timeout: bool = True,
+    ) -> None:
+        """주문 접수 후 감시 등록. 지정가는 미체결 타임아웃·취소 API, 시장가는 플래그만(취소 없음)."""
         oid = str(order_no or "").strip()
         nc = str(code).zfill(6)
         if not oid or not nc:
@@ -111,27 +122,45 @@ class LimitOrderWatchService:
         self.clear(oid)
 
         root = self._get_root()
-        if root is None:
-            return
+        after_id: Any = None
+        if cancel_on_timeout:
+            if root is None:
+                return
+            ms = self._get_timeout_ms()
 
-        ms = self._get_timeout_ms()
-
-        def _cb() -> None:
-            try:
-                self.timeout(oid)
-            except Exception as e:
+            def _cb() -> None:
                 try:
-                    self.log(f"⚠️ [미체결타임아웃] 처리 오류: {e}")
-                except Exception:
-                    pass
+                    self.timeout(oid)
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ [미체결타임아웃] 처리 오류: {e}")
+                    except Exception:
+                        pass
 
-        try:
-            self.log(f"⏱️ [지정가] 미체결 감시 등록 ({kind}) {nc} ord={oid} / {ms // 1000}초")
-        except Exception:
-            pass
+            try:
+                self.log(
+                    f"⏱️ [지정가] 미체결 감시 등록 ({kind}) {nc} ord={oid} / {ms // 1000}초"
+                )
+            except Exception:
+                pass
 
-        after_id = root.after(ms, _cb)
-        meta = LimitOrderMeta(code=nc, kind=kind, after_id=after_id, qty=int(qty))
+            after_id = root.after(ms, _cb)
+        else:
+            try:
+                self.log(
+                    f"⏱️ [시장가] 접수 감시 등록 ({kind}) {nc} ord={oid} "
+                    f"(미체결 취소 타이머 없음 — 체결 시 정리)"
+                )
+            except Exception:
+                pass
+
+        meta = LimitOrderMeta(
+            code=nc,
+            kind=kind,
+            after_id=after_id,
+            qty=int(qty),
+            cancel_on_timeout=bool(cancel_on_timeout),
+        )
 
         with self._lock:
             self.limit_order_meta[oid] = meta

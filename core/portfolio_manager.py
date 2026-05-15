@@ -1979,7 +1979,7 @@ class PortfolioManager:
                         code,
                         qty,
                         curr_p,
-                        order_type="00",
+                        order_type="03",
                         side="sell",
                         name=str(pos.get("name", "")),
                         reason="EMERGENCY",

@@ -73,7 +73,7 @@ class OrderManager:
         """
         주문 발송 (REST API 호출 - v4.0.0 Refactored)
         - order_type \"00\"(지정가): 매수는 현재가(참고가)+1틱, 매도는 -1틱으로 ord_uv 설정.
-        - order_type \"03\"(시장가): 호가 0 — 시장가만 필요할 때만 사용.
+        - order_type \"03\"(시장가): 호가 0 — 시장가 체결(실시간은 `realtime_use_market_orders`).
         - skip_price_guard: True 시 지정가 시세 일관성 검증 생략(비상 매도 등 한정 사용).
         """
         use_mock = getattr(config, 'USE_MOCK', False)

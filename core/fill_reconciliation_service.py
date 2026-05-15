@@ -236,6 +236,22 @@ class FillReconciliationService:
                             except Exception:
                                 fp = 0.0
 
+                            # 미체결 취소·거부 등으로 체결 없이 종료된 경우 — 폴링 중단(오탐 '체결 실패' 방지)
+                            if res in (
+                                "CANCELLED",
+                                "CANCELED",
+                                "REJECTED",
+                                "FAILED",
+                            ) and fqty <= 0:
+                                try:
+                                    self.log(
+                                        f"ℹ️ [체결 동기화] 주문번호 {oid} — "
+                                        f"체결 없이 종료({res}), 폴링 중단"
+                                    )
+                                except Exception:
+                                    pass
+                                return
+
                             # FILLED 또는 filled_qty>0일 때만 확정 반영
                             if res == "FILLED" or (fqty > 0 and fp > 0):
                                 if oid and oid in self.app._exchange_fill_order_ids:
@@ -327,8 +343,13 @@ class FillReconciliationService:
 
                                     try:
                                         tc = getattr(self.app, "trading_controller", None)
-                                        if tc and oid and self._should_clear_limit_order_watch_for_sell(code):
-                                            tc.limit_order_watch_service.clear(oid)
+                                        if tc and oid and applied:
+                                            if str(side or "").lower() == "buy":
+                                                tc.limit_order_watch_service.clear(oid)
+                                            elif self._should_clear_limit_order_watch_for_sell(
+                                                code
+                                            ):
+                                                tc.limit_order_watch_service.clear(oid)
                                     except Exception:
                                         pass
 
@@ -524,8 +545,11 @@ class FillReconciliationService:
 
             try:
                 tc = getattr(self.app, "trading_controller", None)
-                if tc and oid and self._should_clear_limit_order_watch_for_sell(code):
-                    tc.limit_order_watch_service.clear(oid)
+                if tc and oid and applied:
+                    if str(side or "").lower() == "buy":
+                        tc.limit_order_watch_service.clear(oid)
+                    elif self._should_clear_limit_order_watch_for_sell(code):
+                        tc.limit_order_watch_service.clear(oid)
             except Exception:
                 pass
 

@@ -581,6 +581,23 @@ class TradingController:
         except Exception:
             pass
 
+    def _realtime_order_type(self) -> str:
+        """
+        실시간 매매 REST 주문의 trde_tp 원천 문자열.
+
+        Returns
+        -------
+        str
+            ``'03'`` 시장가(``realtime_use_market_orders``), ``'00'`` 지정가.
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            if bool(st.get("realtime_use_market_orders", True)):
+                return "03"
+        except Exception:
+            pass
+        return "00"
+
     def _live_submit_reference_price(self, code: Any, signal_hint: float) -> float:
         """
         지정가 주문 제출 시점에 쓸 참고 현재가.
@@ -777,9 +794,10 @@ class TradingController:
 
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
         ord_no = None
+        ot = self._realtime_order_type()
         if allow_order:
             ord_no = self.app.order_manager.place_order(
-                code, qty, order_ref, order_type="00", side="buy", name=name, reason=reason
+                code, qty, order_ref, order_type=ot, side="buy", name=name, reason=reason
             )
             try:
                 sl = getattr(self.app, "session_logger", None)
@@ -789,7 +807,7 @@ class TradingController:
                         "name": name,
                         "qty": int(qty),
                         "price": int(adj_price),
-                        "order_type": "00",
+                        "order_type": ot,
                         "result": "submitted" if ord_no else "failed",
                         "order_no": ord_no or "",
                         "reason": reason,
@@ -817,13 +835,18 @@ class TradingController:
                     str(code).zfill(6),
                     "s1_buy",
                     qty=int(qty),
+                    cancel_on_timeout=(ot == "00"),
                 )
             except Exception as e:
                 self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
 
+        try:
+            _ot_label = "시장가" if ot == "03" else "지정가"
+        except Exception:
+            _ot_label = "주문"
         self.log(
             f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 "
-            f"(주문가 {adj_price:,}원, 참고가 {int(order_ref):,}원, {qty}주)"
+            f"({_ot_label}, 참고가 {int(order_ref):,}원 기준 수량산정 {adj_price:,}원, {qty}주)"
         )
 
         try:
@@ -833,9 +856,13 @@ class TradingController:
 
         # 4. 텔레그램 알림 (비동기)
         import threading
+        try:
+            _tl = "시장가" if ot == "03" else f"지정가 {adj_price:,}원"
+        except Exception:
+            _tl = "주문"
         msg = (
             f"<b>💰 [매수발송/{reason}]</b>\n종목: {name}({code})\n"
-            f"주문가: {adj_price:,}원 (참고가 {int(order_ref):,}원) / 수: {qty}주\n"
+            f"유형: {_tl}\n참고가: {int(order_ref):,}원 / 수: {qty}주\n"
             f"시간: {datetime.now().strftime('%H:%M:%S')}"
         )
         threading.Thread(target=self.app.send_telegram_message, args=(msg,), daemon=True).start()
@@ -879,9 +906,10 @@ class TradingController:
         
         use_mock = getattr(config, 'USE_MOCK', False)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
+        ot = self._realtime_order_type()
 
         if action == "EXIT":
-            # 지정가 매도: 실제 주문 호가 = 참고가−1틱 — 로그·JSONL은 주문가 기준으로 매수와 동일하게 통일
+            # 매도: 지정가(00)는 참고가−1틱 호가, 시장가(03)는 증권사 시장가 체결
             try:
                 exit_ord_price = int(
                     self.app.order_manager.get_adjusted_price(float(order_ref_px), "sell")
@@ -938,7 +966,7 @@ class TradingController:
                     code,
                     pos['qty'],
                     order_ref_px,
-                    order_type="00",
+                    order_type=ot,
                     side="sell",
                     name=pos['name'],
                     reason=f"EXIT_{reason}",
@@ -987,17 +1015,25 @@ class TradingController:
                             str(code).zfill(6),
                             "exit_sell",
                             qty=int(pos.get("qty", 0)),
+                            cancel_on_timeout=(ot == "00"),
                         )
                     except Exception as e:
                         self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
                     self.log(
                         f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 매도 접수 "
-                        f"({profit_ratio:+.2f}%) 주문가 {exit_ord_price:,}원 · 참고가 {ref_px:,}원"
+                        f"({'시장가' if ot == '03' else '지정가'}, {profit_ratio:+.2f}%) "
+                        f"참고가 {ref_px:,}원"
+                        + (
+                            f" · 호가 {exit_ord_price:,}원"
+                            if ot == "00"
+                            else ""
+                        )
                     )
                     import threading
                     msg = (
                         f"<b>🚀 [매도발송/{reason}]</b>\n종목: {pos['name']}({code})\n"
-                        f"주문가: {exit_ord_price:,}원 (참고가 {ref_px:,}원)\n"
+                        f"유형: {'시장가' if ot == '03' else f'지정가 {exit_ord_price:,}원'}\n"
+                        f"참고가: {ref_px:,}원\n"
                         f"수익률: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                     )
                     threading.Thread(
@@ -1141,7 +1177,7 @@ class TradingController:
                         code,
                         add_qty,
                         order_ref_px,
-                        order_type="00",
+                        order_type=ot,
                         side="buy",
                         name=pos['name'],
                         reason="Stage 2 Scaling",
@@ -1171,17 +1207,20 @@ class TradingController:
                                 str(code).zfill(6),
                                 "s2_buy",
                                 qty=int(add_qty),
+                                cancel_on_timeout=(ot == "00"),
                             )
                         except Exception as e:
                             self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
                         self.log(
                             f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 접수 "
-                            f"(주문가 {adj_price:,}원, 참고가 {int(order_ref_px):,}원, {add_qty}주)"
+                            f"({'시장가' if ot == '03' else '지정가'}, 참고가 {int(order_ref_px):,}원"
+                            f"{'' if ot == '03' else f', 호가 {adj_price:,}원'}, {add_qty}주)"
                         )
                         import threading
                         msg = (
                             f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n"
-                            f"주문가: {adj_price:,}원 (참고가 {int(order_ref_px):,}원)\n"
+                            f"유형: {'시장가' if ot == '03' else f'지정가 {adj_price:,}원'}\n"
+                            f"참고가: {int(order_ref_px):,}원\n"
                             f"평단대비: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                         )
                         threading.Thread(
@@ -1231,11 +1270,17 @@ class TradingController:
         code: str,
         kind: str,
         qty: int = 0,
+        *,
+        cancel_on_timeout: bool = True,
     ) -> None:
-        """지정가 접수 후 미체결 타임아웃 시 취소 API 및 상태 정리(재판정 가능)."""
+        """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만(취소 타이머 없음)."""
         try:
             self.limit_order_watch_service.register(
-                order_no=order_no, code=code, kind=kind, qty=qty
+                order_no=order_no,
+                code=code,
+                kind=kind,
+                qty=qty,
+                cancel_on_timeout=cancel_on_timeout,
             )
         except Exception as e:
             try:

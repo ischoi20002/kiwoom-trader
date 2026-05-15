@@ -1400,7 +1400,15 @@ class DataManagerV2:
                         timestamp
                     FROM order_history
                     WHERE order_no = ?
-                    ORDER BY timestamp DESC, id DESC
+                    ORDER BY
+                        CASE
+                            WHEN UPPER(TRIM(COALESCE(result, ''))) = 'FILLED'
+                                 OR COALESCE(filled_qty, 0) > 0
+                            THEN 1
+                            ELSE 0
+                        END DESC,
+                        timestamp DESC,
+                        id DESC
                     LIMIT 1
                     """,
                     (oid,),

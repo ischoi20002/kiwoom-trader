@@ -1485,9 +1485,12 @@ class MonitorTab:
             return
 
         act = "매수" if side == "buy" else "매도"
+        st = getattr(self.app, "settings", None) or {}
+        ot = "03" if bool(st.get("realtime_use_market_orders", True)) else "00"
+        ot_kr = "시장가" if ot == "03" else "지정가(참고가 기준 ±1틱)"
         if not messagebox.askyesno(
             "테스트 주문 확인",
-            f"{act} 1주 지정가(참고가 기준 ±1틱)를 보냅니다.\n\n"
+            f"{act} 1주 {ot_kr} 주문을 보냅니다.\n\n"
             f"{name} ({code})\n"
             f"참고가: {ref_p:,}원\n"
             f"모드: {mode_kr}\n\n"
@@ -1508,13 +1511,13 @@ class MonitorTab:
                     code,
                     1,
                     ref_p,
-                    order_type="00",
+                    order_type=ot,
                     side=side,
                     name=name,
                     reason="TEST_1SHARE_MARKET",
                 )
                 msg = (
-                    f"🧪 [테스트주문] {act} 1주 시장가 응답: "
+                    f"🧪 [테스트주문] {act} 1주 {ot_kr} 응답: "
                     f"{ord_no if ord_no else '실패/거부 — 로그 확인'}"
                 )
                 self.app.root.after(0, lambda m=msg: self.app.log(m))
