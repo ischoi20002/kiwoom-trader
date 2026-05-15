@@ -13,6 +13,12 @@
 
 ---
 
+## 0.8.16 (2026-05-15)
+
+- **시장가 매도 접수 → 체결 UI**: 잔고에 종목이 없는데 당일 `order_type=03` 매도가 `SUCCESS`만 남은 경우 `FILLED`로 승격(`data_manager_v2.patch_market_sell_success_when_not_in_holdings`). 계좌 동기화 직후·`kt00007` 백그라운드 병합 후 각각 호출(`core/portfolio_manager.py`). 보유 API 0건·로컬 포지션만 있을 때는 오판 방지로 스킵.
+- **주문 로그 코드 정규화**: `log_order` INSERT 시 `canonical_stock_code`로 6자리 통일(`data_manager_v2.py`).
+- **가상 DB JSON 저장**: `virtual_history` 등에 `pandas.Timestamp`·`numpy.datetime64` 등이 섞일 때 `json.dump` 실패하던 문제 — 저장 전 `_sanitize_for_virtual_db_json` 적용(`core/portfolio_manager.py`).
+
 ## 0.8.15 (2026-05-15)
 
 - **실시간 기본 시장가**: `settings.json` / `defaults` 에 `realtime_use_market_orders`(기본 `true`). S1 매수·EXIT 매도·S2 추매 REST 주문을 `03`(시장가)로 전송, 시장가는 미체결 취소 타이머 없이 메타만 등록(`core/trading_controller.py`, `core/limit_order_watch_service.py`). 체결 시 매수 쪽 `limit_order_watch` 정리(`core/fill_reconciliation_service.py`).

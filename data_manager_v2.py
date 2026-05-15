@@ -2,9 +2,9 @@ import sqlite3
 import pandas as pd
 import os
 from datetime import datetime, timedelta, date
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from utils.normalization import normalize_code
+from utils.normalization import normalize_code, canonical_stock_code
 from utils.telegram_sender import send_telegram_message
 
 # 시장지수·VIX 등 — 하베스팅/메인 DB에서 제외·정리 대상 코드 (bars_* / sync_meta)
@@ -951,6 +951,12 @@ class DataManagerV2:
     ):
         """주문 접수 DB 기록. snap_* 는 감시 화면과 동일한 체결강도·호가 문자열 스냅샷."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            code_db = canonical_stock_code(code)
+        except Exception:
+            code_db = str(code or "").strip().split("_", 1)[0].zfill(6)
+        if not code_db or code_db == "000000":
+            code_db = str(code or "").strip()
         with self._lock, self._get_state_connection() as conn:
             conn.execute(
                 """
@@ -961,7 +967,7 @@ class DataManagerV2:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    code,
+                    code_db,
                     side,
                     qty,
                     price,
@@ -1629,6 +1635,88 @@ class DataManagerV2:
                 print(f"[DataManagerV2] patch_buy_filled_price_after_reconcile: {e}")
             except Exception:
                 pass
+
+    def patch_market_sell_success_when_not_in_holdings(
+        self,
+        held_codes: Any,
+        *,
+        ambiguous_zero_holdings: bool = False,
+    ) -> int:
+        """
+        ka10085 동기화 직후: 잔고에 없는 종목인데 ``order_type=03``(시장가) 매도가
+        ``SUCCESS``(접수)만 남은 행을 ``FILLED`` 로 승격합니다.
+
+        - ``kt00007``·웹소켓 CHE 지연으로 체결 행이 늦게 오거나 누락될 때 주문·체결 UI를 맞춥니다.
+        - ``ambiguous_zero_holdings=True`` (보유 API 0건인데 로컬 포지션만 있는 등)일 때는
+          잔고 응답이 불확실하므로 **아무 것도 하지 않습니다**.
+        """
+        if ambiguous_zero_holdings:
+            return 0
+        try:
+            hc: Set[str] = set()
+            for x in held_codes or set():
+                nc = self._normalize_order_stock_code(x)
+                if nc:
+                    hc.add(nc)
+        except Exception:
+            hc = set()
+        today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+        patched = 0
+        try:
+            with self._lock, self._get_state_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT id, code, qty, price, order_no
+                    FROM order_history
+                    WHERE timestamp >= ?
+                      AND lower(trim(COALESCE(side, ''))) = 'sell'
+                      AND upper(trim(COALESCE(result, ''))) = 'SUCCESS'
+                      AND COALESCE(filled_qty, 0) = 0
+                      AND COALESCE(qty, 0) > 0
+                      AND trim(COALESCE(order_type, '')) IN ('03', '3')
+                    ORDER BY id ASC
+                    """,
+                    (today_start,),
+                )
+                rows = cur.fetchall()
+                for row in rows or []:
+                    try:
+                        rid = int(row[0])
+                        raw_c = row[1]
+                        oq = int(row[2] or 0)
+                        op = int(float(row[3] or 0))
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    nc = self._normalize_order_stock_code(raw_c)
+                    if not nc or nc in hc:
+                        continue
+                    fp = op if op > 0 else 0
+                    try:
+                        conn.execute(
+                            """
+                            UPDATE order_history
+                            SET result = 'FILLED',
+                                filled_qty = ?,
+                                filled_price = CASE WHEN ? > 0 THEN ? ELSE COALESCE(price, 0) END
+                            WHERE id = ?
+                            """,
+                            (oq, fp, fp, rid),
+                        )
+                        patched += 1
+                    except sqlite3.Error:
+                        continue
+                conn.commit()
+        except sqlite3.Error as e:
+            try:
+                print(f"[DataManagerV2] patch_market_sell_success_when_not_in_holdings: {e}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] patch_market_sell_success_when_not_in_holdings 오류: {e}")
+            except Exception:
+                pass
+        return patched
 
     def get_bars(self, code, start_dt=None, end_dt=None, interval='1m', limit=None):
         code = normalize_code(code)

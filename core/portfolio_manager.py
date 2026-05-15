@@ -4,7 +4,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import config
@@ -200,6 +200,91 @@ class PortfolioManager:
         except Exception:
             return {}
         return out
+
+    @staticmethod
+    def _sanitize_for_virtual_db_json(value: Any) -> Any:
+        """
+        ``virtual_db_*.json`` 저장용 — ``json.dump`` 이 처리하지 못하는
+        pandas.Timestamp·numpy 스칼라·datetime 등을 Python 기본형·문자열로 바꿉니다.
+        """
+        try:
+            import numpy as np
+        except Exception:
+            np = None  # type: ignore[assignment]
+        try:
+            import pandas as pd
+        except Exception:
+            pd = None  # type: ignore[assignment]
+
+        if isinstance(value, dict):
+            return {
+                str(k): PortfolioManager._sanitize_for_virtual_db_json(v)
+                for k, v in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [PortfolioManager._sanitize_for_virtual_db_json(v) for v in value]
+        if isinstance(value, set):
+            return [
+                PortfolioManager._sanitize_for_virtual_db_json(v)
+                for v in list(value)
+            ]
+        if isinstance(value, (datetime, date, timedelta)):
+            try:
+                return value.isoformat()
+            except Exception:
+                return str(value)
+        if pd is not None:
+            try:
+                if isinstance(value, pd.Timestamp):
+                    try:
+                        if bool(pd.isna(value)):
+                            return None
+                    except Exception:
+                        pass
+                    try:
+                        return value.isoformat()
+                    except Exception:
+                        return str(value)
+            except Exception:
+                pass
+        if np is not None:
+            try:
+                if isinstance(value, np.datetime64):
+                    return str(value)
+            except Exception:
+                pass
+            try:
+                if isinstance(value, np.ndarray):
+                    return PortfolioManager._sanitize_for_virtual_db_json(value.tolist())
+            except Exception:
+                pass
+            try:
+                if isinstance(value, (np.integer, np.floating, np.bool_)):
+                    return value.item()
+            except Exception:
+                pass
+            try:
+                if isinstance(value, np.generic):
+                    return value.item()
+            except Exception:
+                pass
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8", errors="replace")
+            except Exception:
+                return str(value)
+        try:
+            if hasattr(value, "isoformat") and callable(getattr(value, "isoformat")):
+                if type(value).__module__.startswith("pandas"):
+                    return str(value)
+        except Exception:
+            pass
+        try:
+            return str(value)
+        except Exception:
+            return None
 
     def _find_vp_key_for_code(self, norm_code: str) -> Optional[str]:
         """virtual_positions 키가 6자리 미일치일 때 동일 종목 키를 찾습니다."""
@@ -657,8 +742,12 @@ class PortfolioManager:
             with open(self._virtual_db_path(), 'w', encoding='utf-8') as f:
                 json.dump(
                     {
-                        "history": self.virtual_history,
-                        "pending_exit_snapshots": self._pending_exit_snapshots,
+                        "history": self._sanitize_for_virtual_db_json(
+                            self.virtual_history
+                        ),
+                        "pending_exit_snapshots": self._sanitize_for_virtual_db_json(
+                            self._pending_exit_snapshots
+                        ),
                     },
                     f,
                     ensure_ascii=False,
@@ -753,7 +842,8 @@ class PortfolioManager:
         server_codes = set()
         updated_count = 0
         new_count = 0
-        
+        local_codes: List[str] = []
+
         with self.lock:
             # 1. 서버 데이터 기준으로 로컬 데이터 업데이트
             for item in holdings:
@@ -986,6 +1076,40 @@ class PortfolioManager:
         self.save_db()
         self._schedule_gui_callback()
 
+        ambiguous_zh = False
+        try:
+            ambiguous_zh = (len(holdings) == 0 and len(local_codes) > 0)
+        except Exception:
+            ambiguous_zh = False
+        try:
+            n_sell_fix = int(
+                self.data_manager.patch_market_sell_success_when_not_in_holdings(
+                    set(server_codes),
+                    ambiguous_zero_holdings=ambiguous_zh,
+                )
+            )
+            if n_sell_fix > 0:
+                if not silent:
+                    try:
+                        self.log(
+                            f"ℹ️ [Sync] 시장가 매도 접수 {n_sell_fix}건을 체결(FILLED)로 보정 "
+                            f"(잔고에 해당 종목 없음·체결 API 지연 보완)"
+                        )
+                    except Exception:
+                        pass
+                try:
+                    app_ref2 = getattr(self, "app", None)
+                    r2 = getattr(app_ref2, "root", None) if app_ref2 else None
+                    if r2 is not None and hasattr(app_ref2, "refresh_virtual_tab_orders_only"):
+                        r2.after(0, app_ref2.refresh_virtual_tab_orders_only)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Sync] 시장가 매도 체결 보정 실패: {e}")
+            except Exception:
+                pass
+
         # 증권사 체결내역 REST(kt00007) → 주문 로그 DB 보강 (백그라운드 — API 다건·연속조회 지연 방지)
         try:
             app_ref = getattr(self, "app", None)
@@ -994,6 +1118,11 @@ class PortfolioManager:
                 dm = getattr(app_ref, "data_manager", None)
                 if om is not None and dm is not None:
                     st = self.settings or {}
+                    _cap_sc = set(server_codes)
+                    try:
+                        _cap_amb = bool(ambiguous_zh)
+                    except Exception:
+                        _cap_amb = False
 
                     def _bg_exchange_fills() -> None:
                         try:
@@ -1020,6 +1149,20 @@ class PortfolioManager:
                                     self.log(f"⚠️ [동기화] 체결내역 API 보강 실패: {e}")
                                 except Exception:
                                     pass
+                        try:
+                            n2 = int(
+                                dm.patch_market_sell_success_when_not_in_holdings(
+                                    _cap_sc,
+                                    ambiguous_zero_holdings=_cap_amb,
+                                )
+                            )
+                            if n2 and not silent:
+                                self.log(
+                                    f"ℹ️ [동기화] 시장가 매도 접수 {n2}건을 체결(FILLED)로 보정 "
+                                    f"(kt00007 이후 재확인)"
+                                )
+                        except Exception:
+                            pass
                         try:
                             root = getattr(app_ref, "root", None)
                             if root is not None and hasattr(
