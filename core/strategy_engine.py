@@ -2,6 +2,7 @@
 
 import threading
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 
@@ -30,53 +31,82 @@ class StrategyEngine:
         보유 종목의 현재 시세/상태 분석 및 액션 결정.
         결과 형태: {'action': 'EXIT'/'STAGE2'/'HOLD', 'reason': '...', 'data': {...}}
         """
-        if now_price <= 0: return {'action': 'HOLD'}
-        if code not in self.app.virtual_positions: return {'action': 'HOLD'}
-        
-        pos = self.app.virtual_positions[code]
-        if pos.get('exit_pending', False): return {'action': 'HOLD'}
-        
-        # [v35.8] 통합 매도 판단 함수 호출 (Modularized)
-        from backtest_engine import TradingStrategy
-        merged_kw = dict(kwargs)
-        try:
-            _bd = (self.app.bars_data or {}).get(code)
-            if _bd is not None and not getattr(_bd, "empty", True):
-                merged_kw["bars_df"] = _bd
-        except Exception:
-            pass
-        res = TradingStrategy.evaluate_position(
-            code, now_price, pos, self.app.settings,
-            indicator_row=kwargs.get('ind'),
-            current_time=datetime.now(),
-            is_realtime=True,
-            kwargs=merged_kw
-        )
-        
-        if res['action'] == 'EXIT':
-            return {'action': 'EXIT', 'reason': res['reason'], 'profit_ratio': res.get('profit_ratio', 0)}
+        return self.evaluate_position_scoped(code, now_price, scope="full", **kwargs)
 
-        # [v4.5.11] 상태 업데이트 (함수 내부에서 max_p 등은 이미 업데이트됨)
-        page_avg_p = pos.get('avg_price', now_price)
+    def evaluate_position_scoped(
+        self,
+        code: str,
+        now_price: float,
+        *,
+        scope: str = "full",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """
+        보유 평가 범위 분리.
+
+        - ``full``: 청산(``TradingStrategy.evaluate_position``) 후 S2 검토(기존과 동일).
+        - ``exit_only``: 청산만.
+        - ``s2_only``: S2만(청산 생략 — M1 주기 S2용).
+        """
+        if now_price <= 0:
+            return {"action": "HOLD"}
+        if code not in self.app.virtual_positions:
+            return {"action": "HOLD"}
+
+        pos = self.app.virtual_positions[code]
+        if pos.get("exit_pending", False):
+            return {"action": "HOLD"}
+
+        sc = str(scope or "full").strip().lower()
+        if sc not in ("full", "exit_only", "s2_only"):
+            sc = "full"
+
+        if sc in ("full", "exit_only"):
+            from backtest_engine import TradingStrategy
+
+            merged_kw = dict(kwargs)
+            try:
+                _bd = (self.app.bars_data or {}).get(code)
+                if _bd is not None and not getattr(_bd, "empty", True):
+                    merged_kw["bars_df"] = _bd
+            except Exception:
+                pass
+            res = TradingStrategy.evaluate_position(
+                code,
+                now_price,
+                pos,
+                self.app.settings,
+                indicator_row=kwargs.get("ind"),
+                current_time=datetime.now(),
+                is_realtime=True,
+                kwargs=merged_kw,
+            )
+
+            if res["action"] == "EXIT":
+                return {
+                    "action": "EXIT",
+                    "reason": res["reason"],
+                    "profit_ratio": res.get("profit_ratio", 0),
+                }
+            if sc == "exit_only":
+                return {"action": "HOLD"}
+
+        # --- S2 (full 또는 s2_only) ---
+        from backtest_engine import TradingStrategy
+
+        page_avg_p = pos.get("avg_price", now_price)
         profit_ratio = (now_price / page_avg_p - 1) * 100
-        pos['current_price'] = now_price
-        
-        # Helper variables for Scale-in logic
+        pos["current_price"] = now_price
+
         s = self.app.settings
-        ind = kwargs.get('ind')
-        now = datetime.now()
-        vol_power = kwargs.get('vol_power', 100.0)
-        ask_bid_ratio = kwargs.get('ask_bid_ratio', 1.0)
-        
-        # ---------------------------------------------------------
-        # [2단계] 추가 매수(Stage 2 Scale-in) 조건 검토
-        # ---------------------------------------------------------
-        stage = pos.get('stage', 1)
+        ind = kwargs.get("ind")
+        vol_power = kwargs.get("vol_power", 100.0)
+        ask_bid_ratio = kwargs.get("ask_bid_ratio", 1.0)
+
+        stage = int(pos.get("entry_n", pos.get("stage", 1)) or 1)
         if stage == 1:
-            # S2 지정가 미체결 중이면 중복 추매 주문만 억제(EXIT는 위에서 이미 판정됨)
             if pos.get("s2_limit_order_pending", False):
                 return {"action": "HOLD"}
-            # 백테스트와 동일한 S2 승인(Type A: s2_* / Type B: s2_b_* 완전 분리)
             pos_s2 = dict(pos)
             try:
                 et = pos.get("entry_time") or pos.get("entry_date")
@@ -120,7 +150,7 @@ class StrategyEngine:
                 "profit_ratio": profit_ratio,
             }
 
-        return {'action': 'HOLD'}
+        return {"action": "HOLD"}
 
     def calculate_confluence_status(self, code, now_price, ind, vol_power, ask_bid_ratio):
         """[v22.0] 실시간 감시창의 '상태' 컬럼에 표시할 종합 지수 산출"""

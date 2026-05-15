@@ -77,11 +77,16 @@ DEFAULT_SETTINGS = {
     "ws_reg_max_codes_per_chunk": 80,
     "realtime_tree_first_refresh_delay_ms": 48,
     "realtime_rsi_calc_min_interval_sec": 1.0,
+    # (레거시) 예전에는 S1 풀계산 최소 간격으로 사용. 현재는 15m 꼬리·M1 리비전 트리거가 우선.
     "realtime_s1_full_calc_min_interval_sec": 1.0,
+    # S1 풀계산: 15m/M1 지문이 안 바뀌어도 이 간격(초)마다 한 번은 재계산(안전망).
+    "realtime_s1_full_calc_fallback_sec": 120.0,
     # True: 미보유 S1·보유 청산·S2 를 동적 고정밀과 동일 `evaluate_bt_hp_intrabar_unified` 경로로 판정(공식 1분·합성 수급).
     "realtime_s1_mirror_dynamic_intrabar": True,
-    "realtime_eval_position_min_interval_sec": 0.5,
-    "realtime_exit_indicator_min_interval_sec": 0.5,
+    # 보유 청산·S2: ``evaluate_position`` / 인트라바 미러 호출 최소 간격(초). 너무 짧으면 매수 직후 과민 매도.
+    "realtime_eval_position_min_interval_sec": 15.0,
+    # 봉 부족 시 보유용 마지막 지표 행 재계산 최소 간격(초) — eval 과 동기 권장.
+    "realtime_exit_indicator_min_interval_sec": 15.0,
     "realtime_monitor_atr_display_min_interval_sec": 0.5,
     # 유니버스 인덱스 소스: KODEX200(기존 kodex200.csv) 또는 KOSPI200(신규 kospi_universe.csv + topN 슬라이스)
     "universe_index_choice": "KODEX200",

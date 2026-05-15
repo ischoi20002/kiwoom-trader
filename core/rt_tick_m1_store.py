@@ -43,6 +43,8 @@ class RtTickM1Store:
         self._log = logger_callback
         # code -> {"completed": Deque[Tuple[pd.Timestamp, float, float, float, float, float]], ...}
         self._st: Dict[str, Dict[str, Any]] = {}
+        # 공식 1분 반영 시마다 증가 — 실시간 S1 풀계산을 시간 스로틀 대신 M1 갱신에 맞출 때 사용
+        self._revision: Dict[str, int] = {}
 
     def _emit_log(self, msg: str) -> None:
         if self._log is None:
@@ -114,6 +116,7 @@ class RtTickM1Store:
                         "cum_v_start": 0.0,
                         "completed": dq,
                     }
+                    self._revision[nk] = int(self._revision.get(nk, 0)) + 1
                     return
 
                 dq = st["completed"]
@@ -138,8 +141,20 @@ class RtTickM1Store:
                         st["V"] = v
                 except (TypeError, ValueError, AttributeError):
                     pass
+                self._revision[nk] = int(self._revision.get(nk, 0)) + 1
             except (TypeError, ValueError, KeyError, AttributeError) as e:
                 self._emit_log(f"⚠️ [RtTickM1] apply_official_closed_minute 예외 ({code}): {e!r}")
+
+    def revision_for_code(self, code: str) -> int:
+        """``apply_official_closed_minute`` 성공 반영 횟수(종목별). 실패·미적재 시 0."""
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return 0
+            with self._lock:
+                return int(self._revision.get(nk, 0))
+        except (TypeError, ValueError):
+            return 0
 
     def dataframe_for_window(
         self,

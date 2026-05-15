@@ -13,6 +13,11 @@
 
 ---
 
+## 0.8.19 (2026-05-15)
+
+- **실시간 S1 풀계산 트리거**: 고정 1초 간격 대신 **15분봉 꼬리 지문 변경**·**(인트라바 미러 ON 시) 공식 1분 `RtTickM1Store` 반영 리비전** 시에 `calculate_indicators`+`get_buy_signals_detailed` 실행. 지문 불변 시에는 ``realtime_s1_full_calc_fallback_sec``(기본 120초) 안전망(`core/rt_tick_m1_store.py`, `core/signal_engine.py`, `core/defaults.py`, `settings.json`).
+- **보유 청산·S2**: 청산 평가는 ``realtime_eval_position_min_interval_sec`` 등 **15초** 간격 유지, **S2(stage==1)** 는 M1 반영 리비전마다 추가 평가. 인트라바 미러는 ``skip_holder_exit``, 레거시는 ``evaluate_position_scoped``(`core/bt_hp_intrabar_unified.py`, `core/strategy_engine.py`, `core/signal_engine.py`).
+
 ## 0.8.18 (2026-05-15)
 
 - **주문 상태·체결 추적**: `update_order_status` 가 종목 `code` 불일치로 갱신이 빠지던 문제를 완화(실주문은 `order_no`·당일 기준, `MOCK_ID` 만 `code` 한정). 체결 폴링은 **`filled_qty > 0`이면 확정**(체결가 0 레코드 포함), 실패 시 `exchange_fill_late_reconfirm_sec` 지연 후 `boost` 재시도·`sync_with_actual_account(force=True)` 예약(`data_manager_v2.py`, `core/fill_reconciliation_service.py`, `core/defaults.py`).

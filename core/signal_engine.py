@@ -71,28 +71,46 @@ class SignalEngine:
                 st.get("realtime_s1_full_calc_min_interval_sec", 1.0)
             )
             self._realtime_eval_position_min_interval_sec: float = float(
-                st.get("realtime_eval_position_min_interval_sec", 1.0)
+                st.get("realtime_eval_position_min_interval_sec", 15.0)
             )
             self._realtime_exit_indicator_min_interval_sec: float = float(
-                st.get("realtime_exit_indicator_min_interval_sec", 1.0)
+                st.get("realtime_exit_indicator_min_interval_sec", 15.0)
             )
         except Exception:
             self._realtime_s1_full_calc_min_interval_sec = 1.0
-            self._realtime_eval_position_min_interval_sec = 1.0
-            self._realtime_exit_indicator_min_interval_sec = 1.0
+            self._realtime_eval_position_min_interval_sec = 15.0
+            self._realtime_exit_indicator_min_interval_sec = 15.0
 
         self._realtime_s1_full_calc_min_interval_sec = max(
             0.05, min(self._realtime_s1_full_calc_min_interval_sec, 10.0)
         )
+        # 청산·S2: 너무 짧으면 매수 직후 틱 노이즈에 과민 반응 — 상한은 5분까지 허용
         self._realtime_eval_position_min_interval_sec = max(
-            0.05, min(self._realtime_eval_position_min_interval_sec, 10.0)
+            0.05, min(self._realtime_eval_position_min_interval_sec, 300.0)
         )
         self._realtime_exit_indicator_min_interval_sec = max(
-            0.05, min(self._realtime_exit_indicator_min_interval_sec, 10.0)
+            0.05, min(self._realtime_exit_indicator_min_interval_sec, 300.0)
         )
 
+        # 15m 꼬리·M1 리비전 기반 풀계산 트리거 시, 데이터가 안 바뀌어도 주기적으로 한 번은 재계산(지문 누락·예외 대비)
+        try:
+            st_fb = getattr(self.app, "settings", None) or {}
+            self._realtime_s1_full_calc_fallback_sec: float = float(
+                st_fb.get("realtime_s1_full_calc_fallback_sec", 120.0)
+            )
+        except Exception:
+            self._realtime_s1_full_calc_fallback_sec = 120.0
+        self._realtime_s1_full_calc_fallback_sec = max(
+            15.0, min(self._realtime_s1_full_calc_fallback_sec, 900.0)
+        )
+        self._s1_last_15m_fingerprint: dict[str, Tuple[Any, ...]] = {}
+        self._s1_last_m1_revision: dict[str, int] = {}
+
         self._s1_full_calc_last_ts: dict[str, float] = {}
-        self._eval_position_last_ts: dict[str, float] = {}
+        # 보유: 청산 평가(레거시·미러 exit 경로) 최소 간격 앵커
+        self._eval_exit_last_ts: dict[str, float] = {}
+        # 보유 S2: 공식 M1 반영 리비전과 동기(``RtTickM1Store.revision_for_code``)
+        self._held_s2_last_m1_rev: dict[str, int] = {}
         self._exit_indicator_last_ts: dict[str, float] = {}
 
         # 감시 트리 ATR 표시용 스로틀
@@ -344,9 +362,16 @@ class SignalEngine:
         code: str,
         info: Dict[str, Any],
         full_15m_src: Any,
+        *,
+        skip_exit: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         보유 시 청산·S2 를 ``evaluate_bt_hp_intrabar_unified``(동적 고정밀)과 동일 분기로 판정.
+
+        Parameters
+        ----------
+        skip_exit
+            True면 M1 루프에서 청산 ``evaluate_position`` 호출만 생략(S2·max_p 갱신은 유지).
 
         Returns
         -------
@@ -389,7 +414,7 @@ class SignalEngine:
                 ct = "AB"
             st = getattr(self.app, "settings", None) or {}
             out = evaluate_bt_hp_intrabar_unified(
-                st, nk, full_15m, m1df, pos_sim, ct
+                st, nk, full_15m, m1df, pos_sim, ct, skip_holder_exit=skip_exit
             )
             if not isinstance(out, dict):
                 return {"action": "HOLD"}
@@ -703,6 +728,73 @@ class SignalEngine:
             pass
         return False
 
+    def _held_position_stage(self, code: str) -> int:
+        """virtual_positions 기준 단계(``entry_n`` 우선)."""
+        try:
+            nk = str(code).split("_")[0].zfill(6)
+            vp = getattr(self.app.portfolio, "virtual_positions", None) or {}
+            pos_live = vp.get(code) or vp.get(nk)
+            if pos_live is None:
+                for _k, v in vp.items():
+                    try:
+                        if str(_k).split("_")[0].zfill(6) == nk and isinstance(v, dict):
+                            pos_live = v
+                            break
+                    except Exception:
+                        continue
+            if not isinstance(pos_live, dict):
+                return 1
+            return int(pos_live.get("entry_n", pos_live.get("stage", 1)) or 1)
+        except Exception:
+            return 1
+
+    def _s1_fingerprint_15m_tail(self, bars_df: Any) -> Tuple[Any, ...]:
+        """
+        15분봉 ``bars_data`` 프레임 꼬리 지문.
+        공식 싱크로 마지막 행이 바뀔 때만 변하도록 인덱스·길이·OHLCV 를 묶는다.
+        """
+        try:
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return ("", 0)
+            n = int(len(bars_df))
+            last_idx = bars_df.index[-1]
+            idx_s = str(pd.Timestamp(last_idx))
+            last = bars_df.iloc[-1]
+
+            def _cell(col: str, default: float = 0.0) -> float:
+                try:
+                    return float(last[col])
+                except Exception:
+                    return float(default)
+
+            return (
+                idx_s,
+                n,
+                _cell("Open"),
+                _cell("High"),
+                _cell("Low"),
+                _cell("Close"),
+                _cell("Volume"),
+            )
+        except Exception:
+            return ("err", -1)
+
+    def _s1_m1_revision_snapshot(self, bars_key: str) -> int:
+        """``RtTickM1Store`` 공식 1분 반영 리비전(없으면 0)."""
+        try:
+            nk = canonical_stock_code(str(bars_key).strip()) if bars_key else ""
+            if len(nk) != 6:
+                return 0
+            m1s = getattr(self.app, "rt_tick_m1_store", None)
+            if m1s is None:
+                return 0
+            rev_fn = getattr(m1s, "revision_for_code", None)
+            if rev_fn is None or not callable(rev_fn):
+                return 0
+            return int(rev_fn(nk))
+        except Exception:
+            return 0
+
     def on_tick_received(
         self,
         code,
@@ -918,6 +1010,15 @@ class SignalEngine:
             last_row = None
             if bars_ready:
                 now_ts = time.time()
+                fp_s1 = self._s1_fingerprint_15m_tail(_bd)
+                try:
+                    m1_rev_s1 = (
+                        self._s1_m1_revision_snapshot(str(bars_key))
+                        if bars_key
+                        else 0
+                    )
+                except Exception:
+                    m1_rev_s1 = 0
                 last_calc_ts = float(self._s1_full_calc_last_ts.get(code, 0.0) or 0.0)
                 cached_last_row = info.get("last_row_cache")
                 cached_last_sig_cache = info.get("last_sig_cache")
@@ -938,10 +1039,25 @@ class SignalEngine:
                     except Exception:
                         pass
                 else:
-                    need_full_calc = (
-                        (now_ts - last_calc_ts)
-                        >= self._realtime_s1_full_calc_min_interval_sec
+                    # 15m 꼬리 변경 또는(인트라바 미러 ON 시) 공식 M1 반영 시에만 풀계산.
+                    # ``realtime_s1_full_calc_fallback_sec``: 지문이 안 바뀌어도 주기적 재계산(예외·누락 안전망).
+                    try:
+                        mirror_on = self._realtime_s1_mirror_dynamic_intrabar_enabled()
+                    except Exception:
+                        mirror_on = True
+                    last_fp = self._s1_last_15m_fingerprint.get(code)
+                    last_m1r = self._s1_last_m1_revision.get(code)
+                    fp_changed = last_fp != fp_s1
+                    try:
+                        m1_changed = bool(mirror_on) and (
+                            last_m1r is None or int(last_m1r) != int(m1_rev_s1)
+                        )
+                    except Exception:
+                        m1_changed = bool(mirror_on)
+                    stale_fb = (now_ts - last_calc_ts) >= float(
+                        self._realtime_s1_full_calc_fallback_sec
                     )
+                    need_full_calc = fp_changed or m1_changed or stale_fb
 
                 last_sig: dict = {}
                 last_row = cached_last_row
@@ -994,6 +1110,11 @@ class SignalEngine:
                         ma60_ratio = 0.0
                     else:
                         self._s1_full_calc_last_ts[code] = now_ts
+                        try:
+                            self._s1_last_15m_fingerprint[code] = fp_s1
+                            self._s1_last_m1_revision[code] = int(m1_rev_s1)
+                        except Exception:
+                            pass
                         last_sig = info["last_sig_cache"]
                         last_row = info["last_row_cache"]
                         # [v0.8.11] 미보유 S1: 동적 고정밀과 동일 인트라바 통합 판정(가능 시)
@@ -1354,40 +1475,68 @@ class SignalEngine:
 
             if eval_ind is not None and not is_wl_only and _session_ok:
                 now_ts = time.time()
-                last_eval_ts = float(self._eval_position_last_ts.get(code, 0.0) or 0.0)
-                if (now_ts - last_eval_ts) >= self._realtime_eval_position_min_interval_sec:
-                    self._eval_position_last_ts[code] = now_ts
+                exit_interval = float(self._realtime_eval_position_min_interval_sec)
+                last_exit_ts = float(self._eval_exit_last_ts.get(code, 0.0) or 0.0)
+                exit_due = (now_ts - last_exit_ts) >= exit_interval
+
+                bars_key_m, _bd_m = self._bars_key_and_frame(code)
+                _src_m = (
+                    self.app.bars_data.get(bars_key_m) if bars_key_m else None
+                )
+                if _src_m is None:
+                    _src_m = _bd_m
+
+                try:
+                    m1_rev_h = (
+                        self._s1_m1_revision_snapshot(str(bars_key_m))
+                        if bars_key_m
+                        else 0
+                    )
+                except Exception:
+                    m1_rev_h = 0
+
+                stg_h = self._held_position_stage(code)
+                prev_m1r = self._held_s2_last_m1_rev.get(code)
+                try:
+                    has_m1_store = getattr(self.app, "rt_tick_m1_store", None) is not None
+                except Exception:
+                    has_m1_store = False
+
+                s2_m1_due = False
+                if int(stg_h) == 1:
+                    if has_m1_store:
+                        s2_m1_due = prev_m1r is None or int(prev_m1r) != int(m1_rev_h)
+                    else:
+                        s2_m1_due = exit_due
+
+                if exit_due or s2_m1_due:
                     res: Dict[str, Any] = {"action": "HOLD"}
                     mirrored: Optional[Dict[str, Any]] = None
+                    need_skip_exit = bool(s2_m1_due and not exit_due)
+
                     try:
-                        bars_key_m, _bd_m = self._bars_key_and_frame(code)
-                        _src_m = (
-                            self.app.bars_data.get(bars_key_m) if bars_key_m else None
-                        )
-                        if _src_m is None:
-                            _src_m = _bd_m
-                        mirrored = self._intrabar_mirror_held_eval(code, info, _src_m)
+                        if self._realtime_s1_mirror_dynamic_intrabar_enabled():
+                            mirrored = self._intrabar_mirror_held_eval(
+                                code, info, _src_m, skip_exit=need_skip_exit
+                            )
                     except Exception:
                         mirrored = None
 
-                    if mirrored is None:
-                        try:
-                            res = self.app.strategy_engine.evaluate_position(
-                                code,
-                                now_price,
-                                ind=eval_ind,
-                                is_power_exhausted=is_power_exhausted,
-                                bid_ask_ratio=bid_ask_ratio,
-                                ask_bid_ratio=ask_bid_ratio,
-                                vol_power=vol_power,
-                                sel_track=info.get("sel_track")
-                                or info.get("SelTrack"),
-                            )
-                        except Exception:
+                    if mirrored is not None:
+                        res = (
+                            mirrored
+                            if isinstance(mirrored, dict)
+                            else {"action": "HOLD"}
+                        )
+                        if exit_due:
+                            self._eval_exit_last_ts[code] = now_ts
+                    else:
+                        if exit_due:
                             try:
-                                res = self.app.strategy_engine.evaluate_position(
+                                res = self.app.strategy_engine.evaluate_position_scoped(
                                     code,
                                     now_price,
+                                    scope="exit_only",
                                     ind=eval_ind,
                                     is_power_exhausted=is_power_exhausted,
                                     bid_ask_ratio=bid_ask_ratio,
@@ -1397,13 +1546,49 @@ class SignalEngine:
                                     or info.get("SelTrack"),
                                 )
                             except Exception:
-                                res = {"action": "HOLD"}
-                    else:
-                        res = (
-                            mirrored
-                            if isinstance(mirrored, dict)
-                            else {"action": "HOLD"}
-                        )
+                                try:
+                                    res = self.app.strategy_engine.evaluate_position_scoped(
+                                        code,
+                                        now_price,
+                                        scope="exit_only",
+                                        ind=eval_ind,
+                                        is_power_exhausted=is_power_exhausted,
+                                        bid_ask_ratio=bid_ask_ratio,
+                                        ask_bid_ratio=ask_bid_ratio,
+                                        vol_power=vol_power,
+                                        sel_track=info.get("sel_track")
+                                        or info.get("SelTrack"),
+                                    )
+                                except Exception:
+                                    res = {"action": "HOLD"}
+                            self._eval_exit_last_ts[code] = now_ts
+
+                        if (res.get("action") == "HOLD") and s2_m1_due:
+                            try:
+                                res2 = self.app.strategy_engine.evaluate_position_scoped(
+                                    code,
+                                    now_price,
+                                    scope="s2_only",
+                                    ind=eval_ind,
+                                    is_power_exhausted=is_power_exhausted,
+                                    bid_ask_ratio=bid_ask_ratio,
+                                    ask_bid_ratio=ask_bid_ratio,
+                                    vol_power=vol_power,
+                                    sel_track=info.get("sel_track")
+                                    or info.get("SelTrack"),
+                                )
+                                if isinstance(res2, dict) and res2.get(
+                                    "action"
+                                ) == "STAGE2":
+                                    res = res2
+                            except Exception:
+                                pass
+
+                    if exit_due or s2_m1_due:
+                        try:
+                            self._held_s2_last_m1_rev[code] = int(m1_rev_h)
+                        except Exception:
+                            pass
 
                     try:
                         _raw_np = res.get("now_price")

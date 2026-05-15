@@ -113,9 +113,17 @@ def evaluate_bt_hp_intrabar_unified(
     m1_chunk: pd.DataFrame,
     pos_h: Optional[Dict[str, Any]],
     code_track: str,
+    *,
+    skip_holder_exit: bool = False,
 ) -> Dict[str, Any]:
     """
     동적 백테 고정밀 인트라바 1회분과 동일한 시뮬레이션.
+
+    Parameters
+    ----------
+    skip_holder_exit
+        True면 보유 구간에서 ``TradingStrategy.evaluate_position`` 청산 판정만 생략하고
+        max_p 갱신·S2 등은 그대로 진행한다(실시간: S2만 M1 주기에 맞출 때).
 
     Returns
     -------
@@ -194,54 +202,55 @@ def evaluate_bt_hp_intrabar_unified(
                 except (TypeError, ValueError, KeyError):
                     pass
 
-                px_sell = m1_sell_price_conservative(m1_r)
-                px_sell = floor_sell_px_to_same_15m_bar(px_sell, curr_15m)
-                try:
-                    ba_m = float(
-                        m1_r.get("bid_ask_ratio", 1.0)
-                        if hasattr(m1_r, "get")
-                        else 1.0
-                    )
-                    ab_m = float(
-                        m1_r.get(
-                            "ask_bid_ratio",
-                            1.0 / (ba_m + 1e-10),
+                if not skip_holder_exit:
+                    px_sell = m1_sell_price_conservative(m1_r)
+                    px_sell = floor_sell_px_to_same_15m_bar(px_sell, curr_15m)
+                    try:
+                        ba_m = float(
+                            m1_r.get("bid_ask_ratio", 1.0)
+                            if hasattr(m1_r, "get")
+                            else 1.0
                         )
-                        if hasattr(m1_r, "get")
-                        else 1.0
-                    )
-                    vp_m = float(
-                        m1_r.get("vol_power", m1_r.get("Vol_power", 100.0))
-                        if hasattr(m1_r, "get")
-                        else 100.0
-                    )
-                except (TypeError, ValueError):
-                    ba_m, ab_m, vp_m = 1.0, 1.0, 100.0
+                        ab_m = float(
+                            m1_r.get(
+                                "ask_bid_ratio",
+                                1.0 / (ba_m + 1e-10),
+                            )
+                            if hasattr(m1_r, "get")
+                            else 1.0
+                        )
+                        vp_m = float(
+                            m1_r.get("vol_power", m1_r.get("Vol_power", 100.0))
+                            if hasattr(m1_r, "get")
+                            else 100.0
+                        )
+                    except (TypeError, ValueError):
+                        ba_m, ab_m, vp_m = 1.0, 1.0, 100.0
 
-                res = TradingStrategy.evaluate_position(
-                    nk,
-                    float(px_sell),
-                    pos_sim,
-                    settings,
-                    indicator_row=ind_d,
-                    current_time=m1_time,
-                    is_realtime=True,
-                    kwargs={
-                        "bid_ask_ratio": ba_m,
-                        "ask_bid_ratio": ab_m,
-                        "vol_power": vp_m,
-                    },
-                )
-                if isinstance(res, dict) and str(res.get("action") or "") == "EXIT":
-                    out["ok"] = True
-                    out["exit_first"] = {
-                        "reason": str(res.get("reason") or "EXIT"),
-                        "profit_ratio": float(res.get("profit_ratio", 0) or 0),
-                        "eval_price": float(px_sell),
-                        "m1_idx": int(m1_idx),
-                    }
-                    out["reason"] = "exit"
-                    return out
+                    res = TradingStrategy.evaluate_position(
+                        nk,
+                        float(px_sell),
+                        pos_sim,
+                        settings,
+                        indicator_row=ind_d,
+                        current_time=m1_time,
+                        is_realtime=True,
+                        kwargs={
+                            "bid_ask_ratio": ba_m,
+                            "ask_bid_ratio": ab_m,
+                            "vol_power": vp_m,
+                        },
+                    )
+                    if isinstance(res, dict) and str(res.get("action") or "") == "EXIT":
+                        out["ok"] = True
+                        out["exit_first"] = {
+                            "reason": str(res.get("reason") or "EXIT"),
+                            "profit_ratio": float(res.get("profit_ratio", 0) or 0),
+                            "eval_price": float(px_sell),
+                            "m1_idx": int(m1_idx),
+                        }
+                        out["reason"] = "exit"
+                        return out
 
             # --- 2) 매수(S1 신규 / S2 추매) ---
             if ind_d is not None:
