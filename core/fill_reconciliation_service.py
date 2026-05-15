@@ -252,13 +252,23 @@ class FillReconciliationService:
                                     pass
                                 return
 
-                            # FILLED 또는 filled_qty>0일 때만 확정 반영
-                            if res == "FILLED" or (fqty > 0 and fp > 0):
+                            # FILLED 또는 체결 수량이 있으면 확정(체결가 0인 레거시·부분체결 대비)
+                            try:
+                                row_px = float(row.get("price") or 0)
+                            except (TypeError, ValueError):
+                                row_px = 0.0
+                            if res == "FILLED" or fqty > 0:
                                 if oid and oid in self.app._exchange_fill_order_ids:
                                     return
 
                                 confirmed_price = (
-                                    fp if fp > 0 else float(fill_price)
+                                    fp
+                                    if fp > 0
+                                    else (
+                                        row_px
+                                        if row_px > 0
+                                        else float(fill_price)
+                                    )
                                 )
                                 confirmed_qty = (
                                     fqty if fqty > 0 else int(qty)
@@ -364,10 +374,73 @@ class FillReconciliationService:
                         except Exception:
                             return
 
-                    # max_attempts 초과: FILLED 확인 실패
-                    self.log(
-                        f"⚠️ [체결 동기화] REST 접수(order_no={oid}) 체결 확정 실패 — FILLED 반영을 보류"
-                    )
+                    # max_attempts 초과: FILLED 확인 실패 — 지연 재시도·계좌 동기화로 흡수
+                    try:
+                        self.log(
+                            f"⚠️ [체결 동기화] REST 접수(order_no={oid}) 즉시 체결 확정 실패 — "
+                            f"지연 재시도·동기화 예약"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        import threading as _th2
+
+                        def _late_recover() -> None:
+                            try:
+                                if oid and oid in self.app._exchange_fill_order_ids:
+                                    return
+                                try:
+                                    st2 = getattr(self.app, "settings", None) or {}
+                                    delay = float(
+                                        st2.get(
+                                            "exchange_fill_late_reconfirm_sec",
+                                            35.0,
+                                        )
+                                    )
+                                except (TypeError, ValueError):
+                                    delay = 35.0
+                                delay = max(12.0, min(delay, 180.0))
+                                import time as _t2
+
+                                _t2.sleep(delay)
+                                if oid and oid in self.app._exchange_fill_order_ids:
+                                    return
+                                self.reconcile_exchange_fill_after_order_accept(
+                                    code,
+                                    oid,
+                                    side,
+                                    qty,
+                                    fill_price,
+                                    name,
+                                    reason,
+                                    boost_polling=True,
+                                )
+                                try:
+                                    rt = getattr(self.app, "root", None)
+                                    if rt is not None and hasattr(rt, "after"):
+                                        rt.after(
+                                            0,
+                                            lambda: self.app.portfolio.sync_with_actual_account(
+                                                silent=True, force=True
+                                            ),
+                                        )
+                                    else:
+                                        self.app.portfolio.sync_with_actual_account(
+                                            silent=True, force=True
+                                        )
+                                except Exception:
+                                    try:
+                                        self.app.portfolio.sync_with_actual_account(
+                                            silent=True, force=True
+                                        )
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                        _th2.Thread(target=_late_recover, daemon=True).start()
+                    except Exception:
+                        pass
                 finally:
                     if oid and hasattr(self.app, "_exchange_fill_order_inflight"):
                         try:

@@ -13,6 +13,12 @@
 
 ---
 
+## 0.8.18 (2026-05-15)
+
+- **주문 상태·체결 추적**: `update_order_status` 가 종목 `code` 불일치로 갱신이 빠지던 문제를 완화(실주문은 `order_no`·당일 기준, `MOCK_ID` 만 `code` 한정). 체결 폴링은 **`filled_qty > 0`이면 확정**(체결가 0 레코드 포함), 실패 시 `exchange_fill_late_reconfirm_sec` 지연 후 `boost` 재시도·`sync_with_actual_account(force=True)` 예약(`data_manager_v2.py`, `core/fill_reconciliation_service.py`, `core/defaults.py`).
+- **잔고 없음 매도 SUCCESS → FILLED**: 시장가뿐 아니라 **지정가(00)** 도 동일 보정; 승격 행에 대해 로컬 보유가 남아 있으면 **`on_fill`** 로 청산 정합(`data_manager_v2.patch_market_sell_success_when_not_in_holdings`, `core/portfolio_manager.py`).
+- **주문 로그 UI**: `SUCCESS` 이지만 체결 수량이 있으면 상태를 **성공**으로 표시(`ui/tabs/virtual_tab.py`).
+
 ## 0.8.17 (2026-05-15)
 
 - **실시간 터치호가 주문**: `realtime_touch_quote_orders`(기본 `true`)일 때 S1·EXIT·S2 REST 주문을 시장가 대신 **매수=매도1호가·매도=매수1호가** 지정가(`ka10004`)로 접수. 미체결 시 `touch_quote_order_poll_sec`(기본 5초)마다 호가 재조회 후 **`kt10002` 정정**(`touch_quote_order_max_amends`, 기본 3회), 이후 취소는 기존 지정가 타임아웃 경로(`core/trading_controller.py`, `core/limit_order_watch_service.py`, `core/order_manager.py`).

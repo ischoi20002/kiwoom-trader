@@ -1082,18 +1082,23 @@ class PortfolioManager:
         except Exception:
             ambiguous_zh = False
         try:
+            _patched_sell_rows: List[Dict[str, Any]] = []
             n_sell_fix = int(
                 self.data_manager.patch_market_sell_success_when_not_in_holdings(
                     set(server_codes),
                     ambiguous_zero_holdings=ambiguous_zh,
+                    patched_rows_out=_patched_sell_rows,
                 )
+            )
+            self._apply_patched_sell_rows_to_positions(
+                _patched_sell_rows, silent=silent
             )
             if n_sell_fix > 0:
                 if not silent:
                     try:
                         self.log(
-                            f"ℹ️ [Sync] 시장가 매도 접수 {n_sell_fix}건을 체결(FILLED)로 보정 "
-                            f"(잔고에 해당 종목 없음·체결 API 지연 보완)"
+                            f"ℹ️ [Sync] 매도 접수(SUCCESS) {n_sell_fix}건을 체결(FILLED)로 보정 "
+                            f"(잔고에 해당 종목 없음·시장가/지정가 공통)"
                         )
                     except Exception:
                         pass
@@ -1106,7 +1111,7 @@ class PortfolioManager:
                     pass
         except Exception as e:
             try:
-                self.log(f"⚠️ [Sync] 시장가 매도 체결 보정 실패: {e}")
+                self.log(f"⚠️ [Sync] 매도 접수→FILLED 보정 경로 실패: {e}")
             except Exception:
                 pass
 
@@ -1150,15 +1155,20 @@ class PortfolioManager:
                                 except Exception:
                                     pass
                         try:
+                            _rows2: List[Dict[str, Any]] = []
                             n2 = int(
                                 dm.patch_market_sell_success_when_not_in_holdings(
                                     _cap_sc,
                                     ambiguous_zero_holdings=_cap_amb,
+                                    patched_rows_out=_rows2,
                                 )
+                            )
+                            self._apply_patched_sell_rows_to_positions(
+                                _rows2, silent=silent
                             )
                             if n2 and not silent:
                                 self.log(
-                                    f"ℹ️ [동기화] 시장가 매도 접수 {n2}건을 체결(FILLED)로 보정 "
+                                    f"ℹ️ [동기화] 매도 접수(SUCCESS) {n2}건을 체결(FILLED)로 보정 "
                                     f"(kt00007 이후 재확인)"
                                 )
                         except Exception:
@@ -1185,6 +1195,52 @@ class PortfolioManager:
             self.log(
                 f"[Portfolio] 로컬 포지션 반영: 갱신 {updated_count}, 신규 {new_count}, 제거 {removed_count}"
             )
+
+    def _apply_patched_sell_rows_to_positions(
+        self,
+        patched_rows: List[Dict[str, Any]],
+        *,
+        silent: bool,
+    ) -> None:
+        """
+        잔고에 없는데 DB만 FILLED 로 승격된 매도 행에 대해, 로컬 보유가 남아 있으면
+        ``on_fill`` 로 청산·종료내역을 맞춥니다.
+        """
+        if not patched_rows:
+            return
+        for _pr in patched_rows:
+            try:
+                nk = str((_pr or {}).get("code") or "").strip().zfill(6)
+                if not nk or nk == "000000":
+                    continue
+                if nk not in self.virtual_positions:
+                    continue
+                _pq = int((_pr or {}).get("qty") or 0)
+                _pp = float((_pr or {}).get("price") or 0)
+                _oid = str((_pr or {}).get("order_no") or "").strip()
+                if _pq <= 0:
+                    continue
+                _px = _pp if _pp > 0 else float(
+                    self.virtual_positions[nk].get("avg_price") or 0
+                )
+                self.on_fill(
+                    nk,
+                    "sell",
+                    _px,
+                    _pq,
+                    name=str((_pr or {}).get("name") or ""),
+                    reason=str((_pr or {}).get("reason") or ""),
+                    fill_channel="exchange",
+                    order_no=_oid or None,
+                )
+            except Exception as _pf_e:
+                if not silent:
+                    try:
+                        self.log(
+                            f"⚠️ [Sync] 잔고없음 매도 FILLED 보정 후 on_fill 실패: {_pf_e}"
+                        )
+                    except Exception:
+                        pass
 
     def sync_deposit(self):
         """[v4.5.3] 예수금상세에서 출금가능금액만 조회해 actual_deposit 갱신(주문가능 아님)."""

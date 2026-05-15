@@ -1527,7 +1527,13 @@ class DataManagerV2:
         fill_snap_vol_power=None,
         fill_snap_bid_ask=None,
     ):
-        """체결 반영 시 fill_snap_* 로 체결 시점 수급 스냅샷을 함께 저장할 수 있습니다."""
+        """
+        체결 반영 시 fill_snap_* 로 체결 시점 수급 스냅샷을 함께 저장할 수 있습니다.
+
+        - ``code`` 는 로그·표시용이며, **주문번호**가 일치하면 ``canonical_stock_code`` 가
+          REST 체결 경로와 다르게 들어와도 갱신되도록 ``code`` 는 WHERE 에 강제하지 않습니다.
+        - ``MOCK_ID`` 행은 동일 주문번호가 여러 테스트에 쓰일 수 있어 ``code`` 로 한정합니다.
+        """
         sets = ["result = ?", "filled_price = ?", "filled_qty = ?"]
         params: List[Any] = [new_status, filled_price, filled_qty]
         if fill_snap_vol_power is not None:
@@ -1536,21 +1542,53 @@ class DataManagerV2:
         if fill_snap_bid_ask is not None:
             sets.append("fill_snap_bid_ask = ?")
             params.append(fill_snap_bid_ask)
-        params.extend(
-            [
-                code,
-                order_no,
-                datetime.now().strftime("%Y-%m-%d 00:00:00"),
-            ]
-        )
-        sql = f"""
-                UPDATE order_history 
-                SET {", ".join(sets)}
-                WHERE code = ? AND (order_no = ? OR order_no = 'MOCK_ID')
-                AND timestamp >= ?
-            """
+        today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+        oid = str(order_no or "").strip()
+        try:
+            nc = canonical_stock_code(str(code or "").strip())
+        except Exception:
+            try:
+                nc = str(code or "").split("_")[0].zfill(6)
+            except Exception:
+                nc = str(code or "").strip()
+
         with self._lock, self._get_state_connection() as conn:
-            conn.execute(sql, tuple(params))
+            try:
+                if oid.upper() == "MOCK_ID":
+                    sql = f"""
+                        UPDATE order_history
+                        SET {", ".join(sets)}
+                        WHERE order_no = 'MOCK_ID'
+                          AND (code = ? OR code = ?)
+                          AND timestamp >= ?
+                    """
+                    conn.execute(
+                        sql,
+                        tuple(params + [str(code or "").strip(), nc, today_start]),
+                    )
+                else:
+                    sql = f"""
+                        UPDATE order_history
+                        SET {", ".join(sets)}
+                        WHERE order_no = ?
+                          AND timestamp >= ?
+                    """
+                    conn.execute(sql, tuple(params + [oid, today_start]))
+            except sqlite3.Error:
+                # 폴백: 구버전과 동일(코드까지 일치)
+                try:
+                    sql_fb = f"""
+                        UPDATE order_history
+                        SET {", ".join(sets)}
+                        WHERE code = ? AND (order_no = ? OR order_no = 'MOCK_ID')
+                        AND timestamp >= ?
+                    """
+                    conn.execute(
+                        sql_fb,
+                        tuple(params + [nc, oid, today_start]),
+                    )
+                except sqlite3.Error:
+                    pass
             conn.commit()
 
     def patch_buy_filled_price_after_reconcile(
@@ -1667,14 +1705,17 @@ class DataManagerV2:
         held_codes: Any,
         *,
         ambiguous_zero_holdings: bool = False,
+        patched_rows_out: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
         """
-        ka10085 동기화 직후: 잔고에 없는 종목인데 ``order_type=03``(시장가) 매도가
-        ``SUCCESS``(접수)만 남은 행을 ``FILLED`` 로 승격합니다.
+        ka10085 동기화 직후: 잔고에 없는 종목인데 매도가 ``SUCCESS``(접수)만 남은 행을
+        ``FILLED`` 로 승격합니다.
 
-        - ``kt00007``·웹소켓 CHE 지연으로 체결 행이 늦게 오거나 누락될 때 주문·체결 UI를 맞춥니다.
+        - **시장가(03)** 뿐 아니라 **지정가(00)**·터치호가 매도도 동일하게 보정합니다.
+          (``kt00007``/CHE 지연으로 체결 행만 늦고 잔고는 이미 빠진 경우.)
         - ``ambiguous_zero_holdings=True`` (보유 API 0건인데 로컬 포지션만 있는 등)일 때는
           잔고 응답이 불확실하므로 **아무 것도 하지 않습니다**.
+        - ``patched_rows_out`` 이 리스트이면 승격한 행 ``dict`` 를 append(포지션 on_fill 연동용).
         """
         if ambiguous_zero_holdings:
             return 0
@@ -1692,14 +1733,14 @@ class DataManagerV2:
             with self._lock, self._get_state_connection() as conn:
                 cur = conn.execute(
                     """
-                    SELECT id, code, qty, price, order_no
+                    SELECT id, code, qty, price, order_no, name, reason
                     FROM order_history
                     WHERE timestamp >= ?
                       AND lower(trim(COALESCE(side, ''))) = 'sell'
                       AND upper(trim(COALESCE(result, ''))) = 'SUCCESS'
                       AND COALESCE(filled_qty, 0) = 0
                       AND COALESCE(qty, 0) > 0
-                      AND trim(COALESCE(order_type, '')) IN ('03', '3')
+                      AND trim(COALESCE(order_type, '')) IN ('03', '3', '00', '0', '')
                     ORDER BY id ASC
                     """,
                     (today_start,),
@@ -1711,6 +1752,9 @@ class DataManagerV2:
                         raw_c = row[1]
                         oq = int(row[2] or 0)
                         op = int(float(row[3] or 0))
+                        ord_no = str(row[4] or "").strip()
+                        nm = str(row[5] or "")
+                        rs = str(row[6] or "")
                     except (TypeError, ValueError, IndexError):
                         continue
                     nc = self._normalize_order_stock_code(raw_c)
@@ -1729,6 +1773,17 @@ class DataManagerV2:
                             (oq, fp, fp, rid),
                         )
                         patched += 1
+                        if isinstance(patched_rows_out, list):
+                            patched_rows_out.append(
+                                {
+                                    "code": nc,
+                                    "qty": int(oq),
+                                    "price": float(fp if fp > 0 else op),
+                                    "order_no": ord_no,
+                                    "name": nm,
+                                    "reason": rs,
+                                }
+                            )
                     except sqlite3.Error:
                         continue
                 conn.commit()

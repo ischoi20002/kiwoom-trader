@@ -1577,7 +1577,9 @@ class VirtualTab:
         return (str(entry_raw)[:16] if entry_raw else "-") or "-"
 
     @staticmethod
-    def _order_log_status_display(result: object) -> str:
+    def _order_log_status_display(
+        result: object, f_qty: object = None
+    ) -> str:
         """주문 로그 '상태': 체결 완료는 사용자 표기 '성공'."""
         try:
             s = str(result or "").strip()
@@ -1591,6 +1593,11 @@ class VirtualTab:
         if su in ("CANCELLED", "CANCELED", "CANCEL", "CNCL"):
             return "취소(미체결)"
         if su == "SUCCESS":
+            try:
+                if int(f_qty or 0) > 0:
+                    return "성공"
+            except (TypeError, ValueError):
+                pass
             return "접수"
         return s
 
@@ -3178,7 +3185,7 @@ class VirtualTab:
                         f_p_str,
                         self._order_log_vp_cell(snap_vp),
                         ba_o,
-                        self._order_log_status_display(result),
+                        self._order_log_status_display(result, f_qty),
                         rs_disp,
                     ),
                     tags=(tag_base, side_tag),
