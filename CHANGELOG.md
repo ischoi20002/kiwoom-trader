@@ -13,6 +13,12 @@
 
 ---
 
+## 0.8.17 (2026-05-15)
+
+- **실시간 터치호가 주문**: `realtime_touch_quote_orders`(기본 `true`)일 때 S1·EXIT·S2 REST 주문을 시장가 대신 **매수=매도1호가·매도=매수1호가** 지정가(`ka10004`)로 접수. 미체결 시 `touch_quote_order_poll_sec`(기본 5초)마다 호가 재조회 후 **`kt10002` 정정**(`touch_quote_order_max_amends`, 기본 3회), 이후 취소는 기존 지정가 타임아웃 경로(`core/trading_controller.py`, `core/limit_order_watch_service.py`, `core/order_manager.py`).
+- **주문번호 remap**: 정정으로 `order_no`가 바뀌면 `order_history` 갱신 및 `pending_exit_ord_no` / `s2_pending_ord_no` 동기화(`data_manager_v2.remap_order_history_order_no`).
+- **설정**: `defaults`·`settings.json`에 `realtime_touch_quote_orders`, `touch_quote_order_poll_sec`, `touch_quote_order_max_amends`. 감시 탭 테스트 주문 터치 모드 연동(`ui/tabs/monitor_tab.py`).
+
 ## 0.8.16 (2026-05-15)
 
 - **시장가 매도 접수 → 체결 UI**: 잔고에 종목이 없는데 당일 `order_type=03` 매도가 `SUCCESS`만 남은 경우 `FILLED`로 승격(`data_manager_v2.patch_market_sell_success_when_not_in_holdings`). 계좌 동기화 직후·`kt00007` 백그라운드 병합 후 각각 호출(`core/portfolio_manager.py`). 보유 API 0건·로컬 포지션만 있을 때는 오판 방지로 스킵.

@@ -94,6 +94,12 @@ DEFAULT_SETTINGS = {
     "limit_order_max_tick_deviation": 3,
     "limit_order_cache_vs_tree_mismatch_ticks": 10,
     "realtime_use_market_orders": True,
+    # True: 실시간 S1/EXIT/S2 를 시장가 대신 **매도1호가(매수)·매수1호가(매도)** 지정가로 접수하고,
+    # 미체결 시 ka10004 재조회 후 kt10002 정정(최대 touch_quote_order_max_amends 회).
+    # False 이고 realtime_use_market_orders True 이면 기존 03 시장가.
+    "realtime_touch_quote_orders": True,
+    "touch_quote_order_poll_sec": 5.0,
+    "touch_quote_order_max_amends": 3,
     "reconcile_remove_grace_seconds": 180,
     "reconcile_remove_confirm_syncs": 2,
     "sync_ghost_suppress_hours": 12.0,

@@ -69,12 +69,14 @@ class OrderManager:
         name="",
         reason="",
         skip_price_guard: bool = False,
+        apply_limit_tick_adjust: bool = True,
     ):
         """
         주문 발송 (REST API 호출 - v4.0.0 Refactored)
-        - order_type \"00\"(지정가): 매수는 현재가(참고가)+1틱, 매도는 -1틱으로 ord_uv 설정.
-        - order_type \"03\"(시장가): 호가 0 — 시장가 체결(실시간은 `realtime_use_market_orders`).
-        - skip_price_guard: True 시 지정가 시세 일관성 검증 생략(비상 매도 등 한정 사용).
+        - order_type \"00\"(지정가): 기본은 매수 +1틱·매도 −1틱 보정(`apply_limit_tick_adjust=True`).
+          터치호가(매도1/매수1) 주문은 ``apply_limit_tick_adjust=False`` 로 **보정 없이** ``price`` 그대로.
+        - order_type \"03\"(시장가): 호가 0 — 시장가 체결(``realtime_touch_quote_orders`` 가 꺼져 있고 시장가 모드일 때).
+        - skip_price_guard: True 시 지정가 시세 일관성 검증 생략(비상 매도·호가 직접조회 주문 등).
         """
         use_mock = getattr(config, 'USE_MOCK', False)
         mode_str = "모의투자" if use_mock else "실전투자"
@@ -163,7 +165,16 @@ class OrderManager:
                     return None
 
             # [v4.0] 가격 보정 적용 및 API 규격 매핑
-            adj_price = self.get_adjusted_price(price, side) if order_type == "00" else price
+            if order_type == "00":
+                if apply_limit_tick_adjust:
+                    adj_price = self.get_adjusted_price(price, side)
+                else:
+                    try:
+                        adj_price = int(round(float(price)))
+                    except (TypeError, ValueError):
+                        adj_price = 0
+            else:
+                adj_price = price
             
             # trde_tp: "0"(Limit), "3"(Market)
             # order_type "00" -> "0", "03" -> "3" 등 변환
@@ -442,6 +453,188 @@ class OrderManager:
             except Exception:
                 pass
         return None
+
+    def fetch_best_bid_ask_rest(self, stk_cd: str) -> Tuple[Optional[float], Optional[float]]:
+        """
+        키움 REST ``ka10004``(주식호가)로 **매수1호가·매도1호가** 를 조회합니다.
+
+        Returns
+        -------
+        (매수1호가, 매도1호가) 또는 실패 시 (None, None).
+        """
+        try:
+            code = str(stk_cd or "").strip().zfill(6)
+        except Exception:
+            return None, None
+        if not code or code == "000000":
+            return None, None
+
+        def _hp_int_from_obj(obj: Any) -> Tuple[int, int]:
+            """단일 dict 에서 (bid1, ask1) 정수. 없으면 0."""
+            if not isinstance(obj, dict):
+                return 0, 0
+            bid_v = ask_v = 0
+            for k in (
+                "buy_fpr_bid",
+                "buy_frst_bid",
+                "fpr_bid_buy",
+                "bid_fpr_bid",
+            ):
+                if k in obj:
+                    bid_v = self._safe_int_hp_field(obj.get(k))
+                    if bid_v > 0:
+                        break
+            for k in (
+                "sel_fpr_bid",
+                "sel_frst_bid",
+                "fpr_bid_sel",
+                "ask_fpr_bid",
+            ):
+                if k in obj:
+                    ask_v = self._safe_int_hp_field(obj.get(k))
+                    if ask_v > 0:
+                        break
+            return bid_v, ask_v
+
+        def _walk_collect(obj: Any, best: List[int]) -> None:
+            """best = [bid, ask] 최종 후보(>0 인 것만 갱신)."""
+            if isinstance(obj, dict):
+                b, a = _hp_int_from_obj(obj)
+                if b > 0:
+                    best[0] = b
+                if a > 0:
+                    best[1] = a
+                for v in obj.values():
+                    _walk_collect(v, best)
+            elif isinstance(obj, list):
+                for it in obj:
+                    _walk_collect(it, best)
+
+        try:
+            use_mock = getattr(config, "USE_MOCK", False)
+            host = config.MOCK_URL if use_mock else config.URL
+            token = self.app.auth_manager.get_auth_token()
+            if not token:
+                return None, None
+            url = f"{host}/api/dostk/mrkcond"
+            headers = {
+                "Content-Type": "application/json;charset=UTF-8",
+                "authorization": f"Bearer {token}",
+                "api-id": "ka10004",
+            }
+            res = requests.post(
+                url, headers=headers, json={"stk_cd": code}, timeout=8
+            )
+            if res.status_code != 200:
+                return None, None
+            try:
+                data = res.json()
+            except Exception:
+                return None, None
+            if not isinstance(data, dict):
+                return None, None
+            acc = [0, 0]
+            _walk_collect(data, acc)
+            bid1, ask1 = acc[0], acc[1]
+            if bid1 <= 0 and ask1 <= 0:
+                return None, None
+            return (
+                float(bid1) if bid1 > 0 else None,
+                float(ask1) if ask1 > 0 else None,
+            )
+        except requests.RequestException as e:
+            try:
+                self.logger.debug("fetch_best_bid_ask_rest 요청 실패: %s", e)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.logger.debug("fetch_best_bid_ask_rest 예외: %s", e)
+            except Exception:
+                pass
+        return None, None
+
+    def _safe_int_hp_field(self, v: Any) -> int:
+        """호가 문자열(앞자리 부호 등) → 양의 정수 가격."""
+        try:
+            x = abs(float(str(v).replace(",", "").strip()))
+            if x > 0:
+                return int(round(x))
+        except (TypeError, ValueError):
+            pass
+        return 0
+
+    def modify_limit_order(
+        self,
+        orig_ord_no: str,
+        stk_cd: str,
+        mdfy_qty: int,
+        mdfy_uv: int,
+    ) -> Tuple[bool, str, str]:
+        """
+        키움 REST ``kt10002`` 지정가 **정정** 주문.
+
+        Returns
+        -------
+        (성공 여부, 응답 주문번호 또는 빈 문자열, 메시지)
+        """
+        use_mock = getattr(config, "USE_MOCK", False)
+        mode_str = "모의투자" if use_mock else "실전투자"
+        oid = str(orig_ord_no or "").strip()
+        code = str(stk_cd or "").zfill(6)
+        if not oid or not code or code == "000000":
+            return False, "", "주문번호/종목코드 누락"
+        if not self.order_api:
+            return False, "", "주문 엔진 없음"
+        allow_order = (
+            getattr(config, "ALLOW_MOCK_ORDER", False)
+            if use_mock
+            else getattr(config, "ALLOW_REAL_ORDER", False)
+        )
+        if not allow_order:
+            try:
+                self.app.log(f"⚠️ [{mode_str}] 정정 생략 (Safety Switch: OFF)")
+            except Exception:
+                pass
+            return False, "", "safety_switch_off"
+        try:
+            mq = max(1, int(mdfy_qty))
+            uv = max(1, int(mdfy_uv))
+        except (TypeError, ValueError):
+            return False, "", "수량/단가 숫자 변환 실패"
+        try:
+            res = self.order_api.stock_modify_order_request_kt10002(
+                dmst_stex_tp=self.dmst_stex_tp_for_orders(),
+                orig_ord_no=oid,
+                stk_cd=code,
+                mdfy_qty=str(mq),
+                mdfy_uv=str(uv),
+            )
+            ret_code = int(res.get("return_code", -1) or -1)
+            ret_msg = str(res.get("return_msg", "") or "")
+            out_ord = str(res.get("ord_no", "") or "").strip()
+            if ret_code == 0 or out_ord:
+                try:
+                    self.app.log(
+                        f"✅ [{mode_str}] 정정 접수: 원={oid} → 응답ord={out_ord or '-'} "
+                        f"{code} 잔량{mq}@{uv:,}원"
+                    )
+                except Exception:
+                    pass
+                return True, out_ord, ret_msg
+            try:
+                self.app.log(
+                    f"❌ [{mode_str}] 정정 거부: {ret_msg} (code={ret_code})"
+                )
+            except Exception:
+                pass
+            return False, "", ret_msg
+        except Exception as e:
+            try:
+                self.app.log(f"💥 [{mode_str}] 정정 예외: {e}")
+            except Exception:
+                pass
+            return False, "", str(e)
 
     def _dostk_stk_cd_try_list(self, stk_cd: str) -> List[str]:
         """REST ``stk_cd`` 파라미터 후보(6자리·앞자리 0 제거 등)."""

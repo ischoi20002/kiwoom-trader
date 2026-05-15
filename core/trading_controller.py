@@ -7,7 +7,7 @@ import pandas as pd
 import os
 import config
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from core.limit_order_watch_service import LimitOrderWatchService
 from core.terminal_trace import terminal_trace
@@ -581,22 +581,53 @@ class TradingController:
         except Exception:
             pass
 
-    def _realtime_order_type(self) -> str:
+    def _realtime_live_order_spec(self) -> Tuple[str, str]:
         """
-        실시간 매매 REST 주문의 trde_tp 원천 문자열.
+        실시간 REST 주문 (주문유형, 실행 스타일).
 
         Returns
         -------
-        str
-            ``'03'`` 시장가(``realtime_use_market_orders``), ``'00'`` 지정가.
+        (order_type, style)
+            - ``order_type``: ``'03'`` 시장가 또는 ``'00'`` 지정가.
+            - ``style``: ``'touch'`` (매도1/매수1 호가 + 정정 루프), ``'tick'`` (참고가±1틱),
+              ``'market'`` (시장가).
         """
         try:
             st = getattr(self.app, "settings", None) or {}
-            if bool(st.get("realtime_use_market_orders", True)):
-                return "03"
+        except Exception:
+            st = {}
+        try:
+            if bool(st.get("realtime_touch_quote_orders", True)):
+                return ("00", "touch")
         except Exception:
             pass
-        return "00"
+        try:
+            if bool(st.get("realtime_use_market_orders", True)):
+                return ("03", "market")
+        except Exception:
+            pass
+        return ("00", "tick")
+
+    def _realtime_order_type(self) -> str:
+        """하위 호환: 주문 유형 문자열만 필요할 때."""
+        try:
+            return str(self._realtime_live_order_spec()[0])
+        except Exception:
+            return "00"
+
+    @staticmethod
+    def _exit_order_label(
+        ot: str, ex_style: str, exit_ord_price: int = 0
+    ) -> str:
+        """EXIT 로그·텔레그램용 주문 유형 문자열."""
+        try:
+            if ex_style == "touch":
+                return f"터치지정가(매수1호가) {int(exit_ord_price):,}원"
+            if str(ot).strip() == "03":
+                return "시장가"
+            return f"지정가 {int(exit_ord_price):,}원"
+        except Exception:
+            return "지정가"
 
     def _live_submit_reference_price(self, code: Any, signal_hint: float) -> float:
         """
@@ -670,11 +701,37 @@ class TradingController:
         if order_ref <= 0:
             order_ref = sig_hint
 
-        # 지정가 매수: 실제 주문 호가 = 참고가+1틱 — 로그·JSONL의 price는 주문가 기준으로 통일
+        ot, ex_style = self._realtime_live_order_spec()
+        adj_price = 0
         try:
-            adj_price = int(
-                self.app.order_manager.get_adjusted_price(float(order_ref), "buy")
-            )
+            if ex_style == "touch":
+                _nc = str(code).zfill(6)
+                _bid, _ask = self.app.order_manager.fetch_best_bid_ask_rest(_nc)
+                if _ask is None or float(_ask) <= 0:
+                    self.log(
+                        f"⚠️ [Skip] {name}({code}) S1 매수 생략: ka10004 매도1호가 조회 실패"
+                    )
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "buy_skipped",
+                                {
+                                    "code": code,
+                                    "name": name,
+                                    "reason": "touch_ask_unavailable",
+                                },
+                            )
+                    except Exception:
+                        pass
+                    return False
+                adj_price = int(round(float(_ask)))
+            else:
+                adj_price = int(
+                    self.app.order_manager.get_adjusted_price(
+                        float(order_ref), "buy"
+                    )
+                )
         except Exception:
             try:
                 adj_price = int(float(order_ref))
@@ -693,6 +750,7 @@ class TradingController:
                         "ref_price": float(order_ref),
                         "signal_hint_price": float(sig_hint),
                         "reason": reason,
+                        "order_exec_style": ex_style,
                     },
                 )
         except Exception:
@@ -794,11 +852,46 @@ class TradingController:
 
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
         ord_no = None
-        ot = self._realtime_order_type()
         if allow_order:
-            ord_no = self.app.order_manager.place_order(
-                code, qty, order_ref, order_type=ot, side="buy", name=name, reason=reason
-            )
+            try:
+                if ex_style == "touch":
+                    ord_no = self.app.order_manager.place_order(
+                        code,
+                        qty,
+                        float(adj_price),
+                        order_type="00",
+                        side="buy",
+                        name=name,
+                        reason=reason,
+                        skip_price_guard=True,
+                        apply_limit_tick_adjust=False,
+                    )
+                elif ex_style == "market":
+                    ord_no = self.app.order_manager.place_order(
+                        code,
+                        qty,
+                        order_ref,
+                        order_type="03",
+                        side="buy",
+                        name=name,
+                        reason=reason,
+                    )
+                else:
+                    ord_no = self.app.order_manager.place_order(
+                        code,
+                        qty,
+                        order_ref,
+                        order_type="00",
+                        side="buy",
+                        name=name,
+                        reason=reason,
+                    )
+            except Exception as _po_e:
+                try:
+                    self.log(f"⚠️ [Buy Signal] place_order 예외: {_po_e}")
+                except Exception:
+                    pass
+                ord_no = None
             try:
                 sl = getattr(self.app, "session_logger", None)
                 if sl:
@@ -808,6 +901,7 @@ class TradingController:
                         "qty": int(qty),
                         "price": int(adj_price),
                         "order_type": ot,
+                        "order_exec_style": ex_style,
                         "result": "submitted" if ord_no else "failed",
                         "order_no": ord_no or "",
                         "reason": reason,
@@ -817,9 +911,14 @@ class TradingController:
             except Exception:
                 pass
         else:
-            snapshot = self.app.portfolio.capture_snapshot(code, order_ref, reason=reason)
+            fill_px = (
+                float(adj_price) if ex_style == "touch" else float(order_ref)
+            )
+            snapshot = self.app.portfolio.capture_snapshot(
+                code, fill_px, reason=reason
+            )
             self.app.portfolio.on_fill(
-                code, "buy", order_ref, qty, name=name, reason=reason, snapshot=snapshot
+                code, "buy", fill_px, qty, name=name, reason=reason, snapshot=snapshot
             )
 
         if allow_order and not ord_no:
@@ -836,12 +935,21 @@ class TradingController:
                     "s1_buy",
                     qty=int(qty),
                     cancel_on_timeout=(ot == "00"),
+                    touch_mode=(ex_style == "touch"),
+                    touch_side="buy",
+                    touch_name=name,
+                    touch_reason=reason,
                 )
             except Exception as e:
                 self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
 
         try:
-            _ot_label = "시장가" if ot == "03" else "지정가"
+            if ex_style == "touch":
+                _ot_label = "터치지정가(매도1호가)"
+            elif ot == "03":
+                _ot_label = "시장가"
+            else:
+                _ot_label = "지정가"
         except Exception:
             _ot_label = "주문"
         self.log(
@@ -857,7 +965,12 @@ class TradingController:
         # 4. 텔레그램 알림 (비동기)
         import threading
         try:
-            _tl = "시장가" if ot == "03" else f"지정가 {adj_price:,}원"
+            if ex_style == "touch":
+                _tl = f"터치지정가(매도1호가) {adj_price:,}원"
+            elif ot == "03":
+                _tl = "시장가"
+            else:
+                _tl = f"지정가 {adj_price:,}원"
         except Exception:
             _tl = "주문"
         msg = (
@@ -906,19 +1019,41 @@ class TradingController:
         
         use_mock = getattr(config, 'USE_MOCK', False)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
-        ot = self._realtime_order_type()
+        ot, ex_style = self._realtime_live_order_spec()
 
         if action == "EXIT":
-            # 매도: 지정가(00)는 참고가−1틱 호가, 시장가(03)는 증권사 시장가 체결
-            try:
-                exit_ord_price = int(
-                    self.app.order_manager.get_adjusted_price(float(order_ref_px), "sell")
-                )
-            except Exception:
+            # 매도: 터치(매수1호가), 지정가(참고가−1틱), 시장가(03)
+            if ex_style == "touch":
                 try:
-                    exit_ord_price = int(float(order_ref_px))
+                    _nk = str(code).zfill(6)
+                    bid_t, ask_t = self.app.order_manager.fetch_best_bid_ask_rest(_nk)
                 except Exception:
+                    bid_t, ask_t = None, None
+                if bid_t is None or float(bid_t) <= 0:
+                    try:
+                        self.log(
+                            f"⚠️ [Exit Signal/{reason}] {pos.get('name', code)}({code}) "
+                            f"매도 생략: ka10004 매수1호가 조회 실패"
+                        )
+                    except Exception:
+                        pass
+                    return
+                try:
+                    exit_ord_price = int(round(float(bid_t)))
+                except (TypeError, ValueError):
                     exit_ord_price = 0
+            else:
+                try:
+                    exit_ord_price = int(
+                        self.app.order_manager.get_adjusted_price(
+                            float(order_ref_px), "sell"
+                        )
+                    )
+                except Exception:
+                    try:
+                        exit_ord_price = int(float(order_ref_px))
+                    except Exception:
+                        exit_ord_price = 0
             try:
                 ref_px = int(float(order_ref_px or 0))
             except Exception:
@@ -962,15 +1097,46 @@ class TradingController:
                             pass
                     return
 
-                ord_no = self.app.order_manager.place_order(
-                    code,
-                    pos['qty'],
-                    order_ref_px,
-                    order_type=ot,
-                    side="sell",
-                    name=pos['name'],
-                    reason=f"EXIT_{reason}",
-                )
+                ord_no = None
+                try:
+                    if ex_style == "touch":
+                        ord_no = self.app.order_manager.place_order(
+                            code,
+                            pos["qty"],
+                            float(exit_ord_price),
+                            order_type="00",
+                            side="sell",
+                            name=pos["name"],
+                            reason=f"EXIT_{reason}",
+                            skip_price_guard=True,
+                            apply_limit_tick_adjust=False,
+                        )
+                    elif ex_style == "market":
+                        ord_no = self.app.order_manager.place_order(
+                            code,
+                            pos["qty"],
+                            order_ref_px,
+                            order_type="03",
+                            side="sell",
+                            name=pos["name"],
+                            reason=f"EXIT_{reason}",
+                        )
+                    else:
+                        ord_no = self.app.order_manager.place_order(
+                            code,
+                            pos["qty"],
+                            order_ref_px,
+                            order_type="00",
+                            side="sell",
+                            name=pos["name"],
+                            reason=f"EXIT_{reason}",
+                        )
+                except Exception as _ex_po:
+                    try:
+                        self.log(f"⚠️ [Exit] place_order 예외: {_ex_po}")
+                    except Exception:
+                        pass
+                    ord_no = None
                 try:
                     sl = getattr(self.app, "session_logger", None)
                     if sl:
@@ -980,6 +1146,7 @@ class TradingController:
                             "qty": int(pos.get("qty", 0)),
                             "price": int(exit_ord_price),
                             "ref_price": float(ref_px),
+                            "order_exec_style": ex_style,
                             "result": "submitted" if ord_no else "failed",
                             "order_no": ord_no or "",
                             "reason": f"EXIT_{reason}",
@@ -1016,12 +1183,16 @@ class TradingController:
                             "exit_sell",
                             qty=int(pos.get("qty", 0)),
                             cancel_on_timeout=(ot == "00"),
+                            touch_mode=(ex_style == "touch"),
+                            touch_side="sell",
+                            touch_name=str(pos.get("name", "") or ""),
+                            touch_reason=f"EXIT_{reason}",
                         )
                     except Exception as e:
                         self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
                     self.log(
                         f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 매도 접수 "
-                        f"({'시장가' if ot == '03' else '지정가'}, {profit_ratio:+.2f}%) "
+                        f"({self._exit_order_label(ot, ex_style)}, {profit_ratio:+.2f}%) "
                         f"참고가 {ref_px:,}원"
                         + (
                             f" · 호가 {exit_ord_price:,}원"
@@ -1030,9 +1201,10 @@ class TradingController:
                         )
                     )
                     import threading
+                    _exit_tl = self._exit_order_label(ot, ex_style, exit_ord_price)
                     msg = (
                         f"<b>🚀 [매도발송/{reason}]</b>\n종목: {pos['name']}({code})\n"
-                        f"유형: {'시장가' if ot == '03' else f'지정가 {exit_ord_price:,}원'}\n"
+                        f"유형: {_exit_tl}\n"
                         f"참고가: {ref_px:,}원\n"
                         f"수익률: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                     )
@@ -1137,13 +1309,18 @@ class TradingController:
                     except Exception:
                         pass
             else:
+                fill_px = (
+                    float(exit_ord_price)
+                    if ex_style == "touch"
+                    else float(order_ref_px)
+                )
                 snapshot = self.app.portfolio.capture_snapshot(
-                    code, order_ref_px, reason=f"EXIT_{reason}"
+                    code, fill_px, reason=f"EXIT_{reason}"
                 )
                 self.app.portfolio.on_fill(
                     code,
                     "sell",
-                    order_ref_px,
+                    fill_px,
                     pos["qty"],
                     name=pos.get("name"),
                     reason=f"EXIT_{reason}",
@@ -1167,21 +1344,74 @@ class TradingController:
             # [Audit] Stage 2 Scale-in Execution
             add_amt = self.app.portfolio.calculate_order_quantity(stage=2, is_simulation=not allow_order)
             if add_amt <= 0: return
-                
-            adj_price = self.app.order_manager.get_adjusted_price(order_ref_px, "buy")
+
+            if ex_style == "touch":
+                try:
+                    _nk2 = str(code).zfill(6)
+                    bid_s2, ask_s2 = self.app.order_manager.fetch_best_bid_ask_rest(_nk2)
+                except Exception:
+                    bid_s2, ask_s2 = None, None
+                if ask_s2 is None or float(ask_s2) <= 0:
+                    try:
+                        self.log(
+                            f"⚠️ [Scale-in] {pos.get('name', code)}({code}) "
+                            f"2차 생략: ka10004 매도1호가 조회 실패"
+                        )
+                    except Exception:
+                        pass
+                    return
+                try:
+                    adj_price = int(round(float(ask_s2)))
+                except (TypeError, ValueError):
+                    adj_price = 0
+            else:
+                adj_price = self.app.order_manager.get_adjusted_price(
+                    order_ref_px, "buy"
+                )
             add_qty = add_amt // adj_price
             
             if add_qty > 0:
                 if allow_order:
-                    ord_no = self.app.order_manager.place_order(
-                        code,
-                        add_qty,
-                        order_ref_px,
-                        order_type=ot,
-                        side="buy",
-                        name=pos['name'],
-                        reason="Stage 2 Scaling",
-                    )
+                    ord_no = None
+                    try:
+                        if ex_style == "touch":
+                            ord_no = self.app.order_manager.place_order(
+                                code,
+                                add_qty,
+                                float(adj_price),
+                                order_type="00",
+                                side="buy",
+                                name=pos['name'],
+                                reason="Stage 2 Scaling",
+                                skip_price_guard=True,
+                                apply_limit_tick_adjust=False,
+                            )
+                        elif ex_style == "market":
+                            ord_no = self.app.order_manager.place_order(
+                                code,
+                                add_qty,
+                                order_ref_px,
+                                order_type="03",
+                                side="buy",
+                                name=pos['name'],
+                                reason="Stage 2 Scaling",
+                            )
+                        else:
+                            ord_no = self.app.order_manager.place_order(
+                                code,
+                                add_qty,
+                                order_ref_px,
+                                order_type="00",
+                                side="buy",
+                                name=pos['name'],
+                                reason="Stage 2 Scaling",
+                            )
+                    except Exception as _s2e:
+                        try:
+                            self.log(f"⚠️ [S2] place_order 예외: {_s2e}")
+                        except Exception:
+                            pass
+                        ord_no = None
                     try:
                         sl = getattr(self.app, "session_logger", None)
                         if sl:
@@ -1190,6 +1420,7 @@ class TradingController:
                                 "name": pos.get("name", ""),
                                 "qty": int(add_qty),
                                 "price": int(adj_price),
+                                "order_exec_style": ex_style,
                                 "result": "submitted" if ord_no else "failed",
                                 "order_no": ord_no or "",
                                 "reason": "Stage 2 Scaling",
@@ -1208,18 +1439,22 @@ class TradingController:
                                 "s2_buy",
                                 qty=int(add_qty),
                                 cancel_on_timeout=(ot == "00"),
+                                touch_mode=(ex_style == "touch"),
+                                touch_side="buy",
+                                touch_name=str(pos.get("name", "") or ""),
+                                touch_reason="Stage 2 Scaling",
                             )
                         except Exception as e:
                             self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
                         self.log(
                             f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 접수 "
-                            f"({'시장가' if ot == '03' else '지정가'}, 참고가 {int(order_ref_px):,}원"
-                            f"{'' if ot == '03' else f', 호가 {adj_price:,}원'}, {add_qty}주)"
+                            f"({self._s2_order_label(ot, ex_style)}, 참고가 {int(order_ref_px):,}원"
+                            f"{'' if ex_style == 'market' else f', 호가 {adj_price:,}원'}, {add_qty}주)"
                         )
                         import threading
                         msg = (
                             f"<b>🔥 [추매발송/2차]</b>\n종목: {pos['name']}({code})\n"
-                            f"유형: {'시장가' if ot == '03' else f'지정가 {adj_price:,}원'}\n"
+                            f"유형: {self._s2_order_label(ot, ex_style, adj_price)}\n"
                             f"참고가: {int(order_ref_px):,}원\n"
                             f"평단대비: {profit_ratio:+.1f}%\n시간: {datetime.now().strftime('%H:%M:%S')}"
                         )
@@ -1231,14 +1466,20 @@ class TradingController:
                             f"⚠️ [Scale-in] {pos['name']}({code}) 2차 매수 주문 실패 — 재조건 충족 시 재시도"
                         )
                 else:
+                    fill_s2 = (
+                        float(adj_price)
+                        if ex_style == "touch"
+                        else float(order_ref_px)
+                    )
                     snapshot = self.app.portfolio.capture_snapshot(
-                        code, order_ref_px, reason="Stage 2 Scaling"
+                        code, fill_s2, reason="Stage 2 Scaling"
                     )
                     self.app.portfolio.on_fill(
-                        code, "buy", order_ref_px, add_qty, snapshot=snapshot
+                        code, "buy", fill_s2, add_qty, snapshot=snapshot
                     )
                     self.log(
-                        f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 가상체결 ({order_ref_px:,}원, {add_qty}주)"
+                        f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 가상체결 "
+                        f"({float(adj_price) if ex_style == 'touch' else float(order_ref_px):,.0f}원, {add_qty}주)"
                     )
                     import threading
                     msg = (
@@ -1248,6 +1489,20 @@ class TradingController:
                     threading.Thread(
                         target=self.app.send_telegram_message, args=(msg,), daemon=True
                     ).start()
+
+    @staticmethod
+    def _s2_order_label(
+        ot: str, ex_style: str, adj_price: int = 0
+    ) -> str:
+        """S2 로그·텔레그램용 주문 유형."""
+        try:
+            if ex_style == "touch":
+                return f"터치지정가(매도1호가) {int(adj_price):,}원"
+            if str(ot).strip() == "03":
+                return "시장가"
+            return "지정가"
+        except Exception:
+            return "지정가"
 
     def _limit_order_timeout_ms(self) -> int:
         """settings.json `limit_order_unfilled_timeout_sec` — 서비스에서 사용."""
@@ -1272,8 +1527,12 @@ class TradingController:
         qty: int = 0,
         *,
         cancel_on_timeout: bool = True,
+        touch_mode: bool = False,
+        touch_side: str = "",
+        touch_name: str = "",
+        touch_reason: str = "",
     ) -> None:
-        """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만(취소 타이머 없음)."""
+        """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만. 터치: 정정 루프."""
         try:
             self.limit_order_watch_service.register(
                 order_no=order_no,
@@ -1281,6 +1540,10 @@ class TradingController:
                 kind=kind,
                 qty=qty,
                 cancel_on_timeout=cancel_on_timeout,
+                touch_mode=touch_mode,
+                touch_side=touch_side,
+                touch_name=touch_name,
+                touch_reason=touch_reason,
             )
         except Exception as e:
             try:

@@ -1486,8 +1486,13 @@ class MonitorTab:
 
         act = "매수" if side == "buy" else "매도"
         st = getattr(self.app, "settings", None) or {}
-        ot = "03" if bool(st.get("realtime_use_market_orders", True)) else "00"
-        ot_kr = "시장가" if ot == "03" else "지정가(참고가 기준 ±1틱)"
+        touch = bool(st.get("realtime_touch_quote_orders", True))
+        if touch:
+            ot = "00"
+            ot_kr = "터치지정가(매수=매도1호가, 매도=매수1호가)"
+        else:
+            ot = "03" if bool(st.get("realtime_use_market_orders", True)) else "00"
+            ot_kr = "시장가" if ot == "03" else "지정가(참고가 기준 ±1틱)"
         if not messagebox.askyesno(
             "테스트 주문 확인",
             f"{act} 1주 {ot_kr} 주문을 보냅니다.\n\n"
@@ -1507,15 +1512,44 @@ class MonitorTab:
                         lambda: self.app.log("❌ [테스트주문] OrderManager 없음"),
                     )
                     return
-                ord_no = om.place_order(
-                    code,
-                    1,
-                    ref_p,
-                    order_type=ot,
-                    side=side,
-                    name=name,
-                    reason="TEST_1SHARE_MARKET",
-                )
+                if touch:
+                    bid_h, ask_h = om.fetch_best_bid_ask_rest(code)
+                    try:
+                        if str(side).lower() == "buy":
+                            px_t = float(ask_h) if ask_h is not None else 0.0
+                        else:
+                            px_t = float(bid_h) if bid_h is not None else 0.0
+                    except (TypeError, ValueError):
+                        px_t = 0.0
+                    if px_t <= 0:
+                        self.app.root.after(
+                            0,
+                            lambda: self.app.log(
+                                "❌ [테스트주문] 터치호가 조회 실패(ka10004)"
+                            ),
+                        )
+                        return
+                    ord_no = om.place_order(
+                        code,
+                        1,
+                        px_t,
+                        order_type="00",
+                        side=side,
+                        name=name,
+                        reason="TEST_1SHARE_MARKET",
+                        skip_price_guard=True,
+                        apply_limit_tick_adjust=False,
+                    )
+                else:
+                    ord_no = om.place_order(
+                        code,
+                        1,
+                        ref_p,
+                        order_type=ot,
+                        side=side,
+                        name=name,
+                        reason="TEST_1SHARE_MARKET",
+                    )
                 msg = (
                     f"🧪 [테스트주문] {act} 1주 {ot_kr} 응답: "
                     f"{ord_no if ord_no else '실패/거부 — 로그 확인'}"

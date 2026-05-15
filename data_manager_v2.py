@@ -1403,7 +1403,8 @@ class DataManagerV2:
                         filled_price,
                         filled_qty,
                         result,
-                        timestamp
+                        timestamp,
+                        qty
                     FROM order_history
                     WHERE order_no = ?
                     ORDER BY
@@ -1431,9 +1432,34 @@ class DataManagerV2:
                 "filled_qty": int(row[6] or 0),
                 "result": str(row[7] or ""),
                 "timestamp": row[8],
+                "qty": int(row[9] or 0),
             }
         except Exception:
             return None
+
+    def remap_order_history_order_no(self, old_no: str, new_no: str) -> bool:
+        """
+        정정 접수 등으로 주문번호가 바뀐 경우, 동일 주문에 대한 ``order_history`` 행의
+        ``order_no`` 를 일괄 치환합니다(미체결 감시·체결동기화 키 정합).
+        """
+        try:
+            o_old = str(old_no or "").strip()
+            o_new = str(new_no or "").strip()
+            if not o_old or not o_new or o_old == o_new:
+                return False
+            with self._lock, self._get_state_connection() as conn:
+                cur = conn.execute(
+                    "UPDATE order_history SET order_no = ? WHERE order_no = ?",
+                    (o_new, o_old),
+                )
+                conn.commit()
+                return bool(cur.rowcount and cur.rowcount > 0)
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] remap_order_history_order_no 오류: {e}")
+            except Exception:
+                pass
+            return False
 
     def get_order_history_row_for_telegram(
         self, code: str, order_no: str

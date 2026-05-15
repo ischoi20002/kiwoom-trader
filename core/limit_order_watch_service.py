@@ -2,10 +2,10 @@
 import threading
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
-@dataclass(frozen=True)
+@dataclass
 class LimitOrderMeta:
     """미체결 지정가 타임아웃 예약 메타(단일 주문번호 기준)."""
 
@@ -15,6 +15,13 @@ class LimitOrderMeta:
     qty: int = 0
     # False: 시장가 등 — 타임아웃 시 취소 API 없음(체결 시 clear()로만 정리)
     cancel_on_timeout: bool = True
+    # --- 터치호가(매수=매도1호가, 매도=매수1호가) 정정 루프 ---
+    touch_mode: bool = False
+    touch_chain_key: str = ""
+    touch_side: str = ""
+    touch_name: str = ""
+    touch_reason: str = ""
+    touch_amend_attempts_done: int = 0
 
 
 class LimitOrderWatchService:
@@ -56,6 +63,264 @@ class LimitOrderWatchService:
             sec = 45.0
         sec = max(2.0, min(sec, 120.0))
         return int(sec * 1000)
+
+    def _get_touch_poll_ms(self) -> int:
+        """터치호가 정정 루프: 미체결 재확인 간격(ms)."""
+        try:
+            sec = float(
+                (getattr(self.app, "settings", None) or {}).get(
+                    "touch_quote_order_poll_sec", 5.0
+                )
+            )
+        except (TypeError, ValueError):
+            sec = 5.0
+        sec = max(2.0, min(sec, 60.0))
+        return int(sec * 1000)
+
+    def _get_touch_max_amends(self) -> int:
+        try:
+            n = int(
+                (getattr(self.app, "settings", None) or {}).get(
+                    "touch_quote_order_max_amends", 3
+                )
+            )
+        except (TypeError, ValueError):
+            n = 3
+        return max(1, min(n, 10))
+
+    def _find_touch_entry(self, chain_key: str) -> Tuple[str, Optional[LimitOrderMeta]]:
+        """``touch_chain_key`` 로 (현재 주문번호, 메타) 조회."""
+        ck = str(chain_key or "").strip()
+        if not ck:
+            return "", None
+        try:
+            with self._lock:
+                snap: List[Tuple[str, LimitOrderMeta]] = list(
+                    self.limit_order_meta.items()
+                )
+        except Exception:
+            return "", None
+        for no, m in snap:
+            try:
+                if m.touch_mode and str(m.touch_chain_key or "").strip() == ck:
+                    return str(no).strip(), m
+            except Exception:
+                continue
+        return "", None
+
+    def _touch_order_fully_filled(self, order_no: str, expect_qty: int) -> bool:
+        """주문 로그 기준 전량 체결 여부(부분 체결 후 잔량 정정은 별도 처리)."""
+        oid = str(order_no or "").strip()
+        if not oid:
+            return False
+        try:
+            dm = getattr(self.app, "data_manager", None)
+            if dm is None:
+                return False
+            row = dm.get_order_history_row_by_order_no(oid)
+        except Exception:
+            row = None
+        if not isinstance(row, dict):
+            return False
+        try:
+            fq = int(row.get("filled_qty") or 0)
+        except (TypeError, ValueError):
+            fq = 0
+        try:
+            res_u = str(row.get("result") or "").strip().upper()
+        except Exception:
+            res_u = ""
+        if fq >= max(1, int(expect_qty or 0)):
+            return True
+        if res_u == "FILLED" and fq > 0:
+            return True
+        return False
+
+    def _schedule_touch_timer(self, chain_key: str) -> None:
+        """다음 터치 폴링 타이머 예약(``touch_chain_key`` 기준)."""
+        ck = str(chain_key or "").strip()
+        if not ck:
+            return
+        root = self._get_root()
+        if root is None:
+            return
+        ms = self._get_touch_poll_ms()
+
+        def _cb() -> None:
+            try:
+                self._on_touch_poll(ck)
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
+                except Exception:
+                    pass
+
+        try:
+            aid = root.after(ms, _cb)
+        except Exception:
+            return
+        try:
+            with self._lock:
+                for no, m in self.limit_order_meta.items():
+                    if (
+                        m.touch_mode
+                        and str(m.touch_chain_key or "").strip() == ck
+                    ):
+                        m.after_id = aid
+                        break
+        except Exception:
+            pass
+
+    def _touch_apply_ord_no_remap(
+        self,
+        *,
+        old_no: str,
+        new_no: str,
+        meta: LimitOrderMeta,
+        nc: str,
+    ) -> None:
+        """정정 응답 주문번호가 바뀐 경우 메타 dict 키·DB·포지션 필드 갱신."""
+        o_old = str(old_no or "").strip()
+        o_new = str(new_no or "").strip()
+        if not o_old or not o_new or o_old == o_new:
+            return
+        try:
+            dm = getattr(self.app, "data_manager", None)
+            if dm is not None and hasattr(dm, "remap_order_history_order_no"):
+                dm.remap_order_history_order_no(o_old, o_new)
+        except Exception:
+            pass
+        try:
+            with self._lock:
+                if o_old in self.limit_order_meta:
+                    self.limit_order_meta.pop(o_old, None)
+                    self.limit_order_meta[o_new] = meta
+        except Exception:
+            pass
+        try:
+            if meta.kind == "exit_sell":
+                with self.app.portfolio.lock:
+                    p = self.app.portfolio.virtual_positions.get(nc)
+                    if p and str(p.get("pending_exit_ord_no") or "").strip() == o_old:
+                        p["pending_exit_ord_no"] = o_new
+        except Exception:
+            pass
+        try:
+            if meta.kind == "s2_buy":
+                with self.app.portfolio.lock:
+                    p2 = self.app.portfolio.virtual_positions.get(nc)
+                    if p2 and str(p2.get("s2_pending_ord_no") or "").strip() == o_old:
+                        p2["s2_pending_ord_no"] = o_new
+        except Exception:
+            pass
+
+    def _touch_execute_amend(self, meta: LimitOrderMeta, current_ord: str) -> bool:
+        """최신 호가 재조회 후 ``kt10002`` 정정. 성공 여부."""
+        nc = self._normalize_code_6(meta.code)
+        oid = str(current_ord or "").strip()
+        side = str(meta.touch_side or "").strip().lower()
+        if not oid or side not in ("buy", "sell"):
+            return False
+        om = getattr(self.app, "order_manager", None)
+        if om is None or not hasattr(om, "fetch_best_bid_ask_rest"):
+            return False
+        try:
+            bid, ask = om.fetch_best_bid_ask_rest(nc)
+        except Exception:
+            bid, ask = None, None
+        try:
+            if side == "buy":
+                px = int(round(float(ask))) if ask is not None and float(ask) > 0 else 0
+            else:
+                px = int(round(float(bid))) if bid is not None and float(bid) > 0 else 0
+        except (TypeError, ValueError):
+            px = 0
+        if px <= 0:
+            try:
+                self.log(
+                    f"⚠️ [터치호가] 정정 생략 — 호가 조회 실패 {nc} (ord={oid})"
+                )
+            except Exception:
+                pass
+            return False
+
+        try:
+            dm = getattr(self.app, "data_manager", None)
+            row = (
+                dm.get_order_history_row_by_order_no(oid)
+                if dm is not None
+                else None
+            )
+        except Exception:
+            row = None
+        try:
+            filled = int((row or {}).get("filled_qty") or 0)
+        except (TypeError, ValueError):
+            filled = 0
+        try:
+            order_qty = int((row or {}).get("qty") or meta.qty or 0)
+        except (TypeError, ValueError):
+            order_qty = int(meta.qty or 0)
+        rem = max(1, order_qty - max(0, filled))
+        try:
+            ok, new_no, msg = om.modify_limit_order(oid, nc, rem, px)
+        except Exception as ex:
+            try:
+                self.log(f"⚠️ [터치호가] 정정 예외: {ex}")
+            except Exception:
+                pass
+            return False
+        if not ok:
+            try:
+                self.log(f"⚠️ [터치호가] 정정 거부: {msg} (ord={oid})")
+            except Exception:
+                pass
+            return False
+        if new_no and new_no != oid:
+            self._touch_apply_ord_no_remap(
+                old_no=oid, new_no=new_no, meta=meta, nc=nc
+            )
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "touch_quote_amend",
+                    {
+                        "chain": meta.touch_chain_key,
+                        "old_ord": oid,
+                        "new_ord": new_no or oid,
+                        "code": nc,
+                        "side": side,
+                        "px": px,
+                        "rem_qty": rem,
+                    },
+                )
+        except Exception:
+            pass
+        return True
+
+    def _on_touch_poll(self, chain_key: str) -> None:
+        """터치호가: 체결 확인 → 정정(남은 횟수) 또는 취소."""
+        current_ord, meta = self._find_touch_entry(chain_key)
+        if not current_ord or meta is None or not meta.touch_mode:
+            return
+
+        if self._touch_order_fully_filled(current_ord, int(meta.qty or 0)):
+            self.clear(current_ord)
+            return
+
+        max_a = self._get_touch_max_amends()
+        if meta.touch_amend_attempts_done < max_a:
+            self._touch_execute_amend(meta, current_ord)
+            try:
+                meta.touch_amend_attempts_done = int(meta.touch_amend_attempts_done or 0) + 1
+            except Exception:
+                pass
+            self._schedule_touch_timer(chain_key)
+            return
+
+        # 정정 횟수 소진 후 미체결이면 기존 타임아웃과 동일하게 취소 처리
+        self.timeout(current_ord)
 
     def _normalize_code_6(self, code: Any) -> str:
         try:
@@ -111,8 +376,19 @@ class LimitOrderWatchService:
         kind: str,
         qty: int = 0,
         cancel_on_timeout: bool = True,
+        touch_mode: bool = False,
+        touch_side: str = "",
+        touch_name: str = "",
+        touch_reason: str = "",
     ) -> None:
-        """주문 접수 후 감시 등록. 지정가는 미체결 타임아웃·취소 API, 시장가는 플래그만(취소 없음)."""
+        """
+        주문 접수 후 감시 등록.
+
+        - 일반 지정가: 미체결 ``limit_order_unfilled_timeout_sec`` 후 취소.
+        - 시장가: 플래그만(취소 타이머 없음).
+        - 터치호가: ``touch_quote_order_poll_sec`` 마다 체결 확인 후 정정(최대
+          ``touch_quote_order_max_amends``), 이후 미체결이면 취소.
+        """
         oid = str(order_no or "").strip()
         nc = str(code).zfill(6)
         if not oid or not nc:
@@ -126,25 +402,47 @@ class LimitOrderWatchService:
         if cancel_on_timeout:
             if root is None:
                 return
-            ms = self._get_timeout_ms()
+            if touch_mode:
+                ms = self._get_touch_poll_ms()
 
-            def _cb() -> None:
-                try:
-                    self.timeout(oid)
-                except Exception as e:
+                def _tcb() -> None:
                     try:
-                        self.log(f"⚠️ [미체결타임아웃] 처리 오류: {e}")
-                    except Exception:
-                        pass
+                        self._on_touch_poll(oid)
+                    except Exception as e:
+                        try:
+                            self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
+                        except Exception:
+                            pass
 
-            try:
-                self.log(
-                    f"⏱️ [지정가] 미체결 감시 등록 ({kind}) {nc} ord={oid} / {ms // 1000}초"
-                )
-            except Exception:
-                pass
+                try:
+                    self.log(
+                        f"⏱️ [터치호가] 미체결·정정 감시 ({kind}) {nc} ord={oid} / "
+                        f"{ms // 1000}초 간격, 정정 최대 {self._get_touch_max_amends()}회"
+                    )
+                except Exception:
+                    pass
 
-            after_id = root.after(ms, _cb)
+                after_id = root.after(ms, _tcb)
+            else:
+                ms = self._get_timeout_ms()
+
+                def _cb() -> None:
+                    try:
+                        self.timeout(oid)
+                    except Exception as e:
+                        try:
+                            self.log(f"⚠️ [미체결타임아웃] 처리 오류: {e}")
+                        except Exception:
+                            pass
+
+                try:
+                    self.log(
+                        f"⏱️ [지정가] 미체결 감시 등록 ({kind}) {nc} ord={oid} / {ms // 1000}초"
+                    )
+                except Exception:
+                    pass
+
+                after_id = root.after(ms, _cb)
         else:
             try:
                 self.log(
@@ -160,6 +458,12 @@ class LimitOrderWatchService:
             after_id=after_id,
             qty=int(qty),
             cancel_on_timeout=bool(cancel_on_timeout),
+            touch_mode=bool(touch_mode),
+            touch_chain_key=oid if touch_mode else "",
+            touch_side=str(touch_side or "").strip().lower() if touch_mode else "",
+            touch_name=str(touch_name or "") if touch_mode else "",
+            touch_reason=str(touch_reason or "") if touch_mode else "",
+            touch_amend_attempts_done=0,
         )
 
         with self._lock:
