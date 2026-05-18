@@ -1539,6 +1539,7 @@ class MonitorTab:
                         reason="TEST_1SHARE_MARKET",
                         skip_price_guard=True,
                         apply_limit_tick_adjust=False,
+                        skip_immediate_fill_reconcile=True,
                     )
                 else:
                     ord_no = om.place_order(

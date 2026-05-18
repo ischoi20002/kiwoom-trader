@@ -22,6 +22,7 @@ class LimitOrderMeta:
     touch_name: str = ""
     touch_reason: str = ""
     touch_amend_attempts_done: int = 0
+    fill_price_hint: float = 0.0
 
 
 class LimitOrderWatchService:
@@ -62,6 +63,19 @@ class LimitOrderWatchService:
         except (TypeError, ValueError):
             sec = 45.0
         sec = max(2.0, min(sec, 120.0))
+        return int(sec * 1000)
+
+    def _get_touch_first_poll_ms(self) -> int:
+        """터치호가 첫 체결 확인 간격(ms) — ``exchange_fill_confirm_retry_interval_sec``."""
+        try:
+            sec = float(
+                (getattr(self.app, "settings", None) or {}).get(
+                    "exchange_fill_confirm_retry_interval_sec", 2.0
+                )
+            )
+        except (TypeError, ValueError):
+            sec = 2.0
+        sec = max(1.0, min(sec, 10.0))
         return int(sec * 1000)
 
     def _get_touch_poll_ms(self) -> int:
@@ -312,14 +326,51 @@ class LimitOrderWatchService:
             pass
         return True
 
+    def _touch_try_confirm_fill(
+        self, meta: LimitOrderMeta, current_ord: str
+    ) -> bool:
+        """
+        kt00007 1회 동기화 후 체결 확정 시 True.
+
+        체결·종료 확정이면 감시 메타를 정리하고 호출부는 폴링을 중단합니다.
+        """
+        frs = getattr(self.app, "fill_reconciliation_service", None)
+        if frs is None or not hasattr(frs, "try_confirm_fill_once"):
+            return False
+        side = str(meta.touch_side or "").strip().lower()
+        if side not in ("buy", "sell"):
+            return False
+        try:
+            status = frs.try_confirm_fill_once(
+                meta.code,
+                current_ord,
+                side,
+                int(meta.qty or 0),
+                float(meta.fill_price_hint or 0),
+                str(meta.touch_name or ""),
+                str(meta.touch_reason or ""),
+            )
+        except Exception as ex:
+            try:
+                self.log(f"⚠️ [터치호가] 체결 확인 오류: {ex}")
+            except Exception:
+                pass
+            return False
+        if status in ("filled", "terminal", "skipped"):
+            try:
+                self.clear(current_ord)
+            except Exception:
+                pass
+            return True
+        return False
+
     def _on_touch_poll(self, chain_key: str) -> None:
-        """터치호가: 체결 확인 → 정정(남은 횟수) 또는 취소."""
+        """터치호가: kt00007 체결 확인 → 정정(남은 횟수) 또는 취소."""
         current_ord, meta = self._find_touch_entry(chain_key)
         if not current_ord or meta is None or not meta.touch_mode:
             return
 
-        if self._touch_order_fully_filled(current_ord, int(meta.qty or 0)):
-            self.clear(current_ord)
+        if self._touch_try_confirm_fill(meta, current_ord):
             return
 
         max_a = self._get_touch_max_amends()
@@ -393,13 +444,15 @@ class LimitOrderWatchService:
         touch_side: str = "",
         touch_name: str = "",
         touch_reason: str = "",
+        fill_price_hint: float = 0.0,
     ) -> None:
         """
         주문 접수 후 감시 등록.
 
         - 일반 지정가: 미체결 ``limit_order_unfilled_timeout_sec`` 후 취소.
         - 시장가: 플래그만(취소 타이머 없음).
-        - 터치호가: ``touch_quote_order_poll_sec`` 마다 체결 확인 후 정정(최대
+        - 터치호가: 첫 ``exchange_fill_confirm_retry_interval_sec`` 후 kt00007 체결 확인,
+          이후 ``touch_quote_order_poll_sec`` 마다 체결 확인·정정(최대
           ``touch_quote_order_max_amends``), 이후 미체결이면 취소.
         """
         oid = str(order_no or "").strip()
@@ -416,21 +469,36 @@ class LimitOrderWatchService:
             if root is None:
                 return
             if touch_mode:
-                ms = self._get_touch_poll_ms()
+                ck = oid
+                ms = self._get_touch_first_poll_ms()
+                poll_sec = self._get_touch_poll_ms() // 1000
 
                 def _tcb() -> None:
-                    try:
-                        self._on_touch_poll(oid)
-                    except Exception as e:
+                    def _worker() -> None:
                         try:
-                            self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
-                        except Exception:
-                            pass
+                            self._on_touch_poll(ck)
+                        except Exception as e:
+                            try:
+                                self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
+                            except Exception:
+                                pass
+
+                    try:
+                        threading.Thread(target=_worker, daemon=True).start()
+                    except Exception:
+                        try:
+                            self._on_touch_poll(ck)
+                        except Exception as e:
+                            try:
+                                self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
+                            except Exception:
+                                pass
 
                 try:
                     self.log(
-                        f"⏱️ [터치호가] 미체결·정정 감시 ({kind}) {nc} ord={oid} / "
-                        f"{ms // 1000}초 간격, 정정 최대 {self._get_touch_max_amends()}회"
+                        f"⏱️ [터치호가] 체결·정정 통합 감시 ({kind}) {nc} ord={oid} / "
+                        f"첫 확인 {ms // 1000}초, 이후 {poll_sec}초, 정정 최대 "
+                        f"{self._get_touch_max_amends()}회"
                     )
                 except Exception:
                     pass
@@ -477,6 +545,7 @@ class LimitOrderWatchService:
             touch_name=str(touch_name or "") if touch_mode else "",
             touch_reason=str(touch_reason or "") if touch_mode else "",
             touch_amend_attempts_done=0,
+            fill_price_hint=float(fill_price_hint or 0) if touch_mode else 0.0,
         )
 
         with self._lock:

@@ -70,12 +70,14 @@ class OrderManager:
         reason="",
         skip_price_guard: bool = False,
         apply_limit_tick_adjust: bool = True,
+        skip_immediate_fill_reconcile: bool = False,
     ):
         """
         주문 발송 (REST API 호출 - v4.0.0 Refactored)
         - order_type \"00\"(지정가): 기본은 매수 +1틱·매도 −1틱 보정(`apply_limit_tick_adjust=True`).
           터치호가(매도1/매수1) 주문은 ``apply_limit_tick_adjust=False`` 로 **보정 없이** ``price`` 그대로.
-        - order_type \"03\"(시장가): 호가 0 — 시장가 체결(``realtime_touch_quote_orders`` 가 꺼져 있고 시장가 모드일 때).
+        - skip_immediate_fill_reconcile: True 시 접수 직후 2초×8 체결 폴링 생략(터치 감시가 담당).
+        - order_type \"03\"(시장가): 호가 0 — 레거시·테스트용.
         - skip_price_guard: True 시 지정가 시세 일관성 검증 생략(비상 매도·호가 직접조회 주문 등).
         """
         use_mock = getattr(config, 'USE_MOCK', False)
@@ -229,28 +231,36 @@ class OrderManager:
                     snap_bid_ask=_sn.get("bid_ask_text") or "",
                 )
 
-                # 웹소켓 CHE가 없을 때도 포지션·체결가 연동 (메인 스레드에서 실행)
-                try:
-                    root = getattr(self.app, "root", None)
-                    if root is not None and hasattr(root, "after"):
-                        root.after(
-                            0,
-                            lambda c=code,
-                            o=ord_no,
-                            s=side,
-                            q=int(qty),
-                            ap=int(adj_price),
-                            nm=name,
-                            rs=reason: self.app.reconcile_exchange_fill_after_order_accept(
-                                c, o, s, q, float(ap), nm, rs, boost_polling=False
-                            ),
-                        )
-                    else:
-                        self.app.reconcile_exchange_fill_after_order_accept(
-                            code, ord_no, side, int(qty), float(adj_price), name, reason, boost_polling=False
-                        )
-                except Exception as sync_e:
-                    self.logger.warning("체결 동기화 스케줄 실패: %s", sync_e)
+                # 터치호가: LimitOrderWatchService 가 kt00007·on_fill 처리 (중복 폴링 방지)
+                if not skip_immediate_fill_reconcile:
+                    try:
+                        root = getattr(self.app, "root", None)
+                        if root is not None and hasattr(root, "after"):
+                            root.after(
+                                0,
+                                lambda c=code,
+                                o=ord_no,
+                                s=side,
+                                q=int(qty),
+                                ap=int(adj_price),
+                                nm=name,
+                                rs=reason: self.app.reconcile_exchange_fill_after_order_accept(
+                                    c, o, s, q, float(ap), nm, rs, boost_polling=False
+                                ),
+                            )
+                        else:
+                            self.app.reconcile_exchange_fill_after_order_accept(
+                                code,
+                                ord_no,
+                                side,
+                                int(qty),
+                                float(adj_price),
+                                name,
+                                reason,
+                                boost_polling=False,
+                            )
+                    except Exception as sync_e:
+                        self.logger.warning("체결 동기화 스케줄 실패: %s", sync_e)
 
                 # 텔레그램 알림은 체결 확정 시점(포지션관리탭 주문·체결 내역 row 기준)으로만 발송합니다.
                 # (주문 성공 시점 메시지로 인해 매수/매도 1회 전송 요구 조건이 깨질 수 있음)

@@ -583,28 +583,10 @@ class TradingController:
         """
         실시간 REST 주문 (주문유형, 실행 스타일).
 
-        Returns
-        -------
-        (order_type, style)
-            - ``order_type``: ``'03'`` 시장가 또는 ``'00'`` 지정가.
-            - ``style``: ``'touch'`` (매도1/매수1 호가 + 정정 루프), ``'tick'`` (참고가±1틱),
-              ``'market'`` (시장가).
+        터치호가(매수=매도1·매도=매수1 + 정정 루프)만 사용합니다.
+        체결 확인은 ``LimitOrderWatchService`` 단일 경로(kt00007)에서 처리합니다.
         """
-        try:
-            st = getattr(self.app, "settings", None) or {}
-        except Exception:
-            st = {}
-        try:
-            if bool(st.get("realtime_touch_quote_orders", True)):
-                return ("00", "touch")
-        except Exception:
-            pass
-        try:
-            if bool(st.get("realtime_use_market_orders", True)):
-                return ("03", "market")
-        except Exception:
-            pass
-        return ("00", "tick")
+        return ("00", "touch")
 
     def _realtime_order_type(self) -> str:
         """하위 호환: 주문 유형 문자열만 필요할 때."""
@@ -863,6 +845,7 @@ class TradingController:
                         reason=reason,
                         skip_price_guard=True,
                         apply_limit_tick_adjust=False,
+                        skip_immediate_fill_reconcile=True,
                     )
                 elif ex_style == "market":
                     ord_no = self.app.order_manager.place_order(
@@ -937,6 +920,7 @@ class TradingController:
                     touch_side="buy",
                     touch_name=name,
                     touch_reason=reason,
+                    fill_price=float(adj_price),
                 )
             except Exception as e:
                 self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
@@ -1108,6 +1092,7 @@ class TradingController:
                             reason=f"EXIT_{reason}",
                             skip_price_guard=True,
                             apply_limit_tick_adjust=False,
+                            skip_immediate_fill_reconcile=True,
                         )
                     elif ex_style == "market":
                         ord_no = self.app.order_manager.place_order(
@@ -1185,6 +1170,7 @@ class TradingController:
                             touch_side="sell",
                             touch_name=str(pos.get("name", "") or ""),
                             touch_reason=f"EXIT_{reason}",
+                            fill_price=float(exit_ord_price),
                         )
                     except Exception as e:
                         self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
@@ -1383,6 +1369,7 @@ class TradingController:
                                 reason="Stage 2 Scaling",
                                 skip_price_guard=True,
                                 apply_limit_tick_adjust=False,
+                                skip_immediate_fill_reconcile=True,
                             )
                         elif ex_style == "market":
                             ord_no = self.app.order_manager.place_order(
@@ -1441,6 +1428,7 @@ class TradingController:
                                 touch_side="buy",
                                 touch_name=str(pos.get("name", "") or ""),
                                 touch_reason="Stage 2 Scaling",
+                                fill_price=float(adj_price),
                             )
                         except Exception as e:
                             self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
@@ -1529,8 +1517,9 @@ class TradingController:
         touch_side: str = "",
         touch_name: str = "",
         touch_reason: str = "",
+        fill_price: float = 0.0,
     ) -> None:
-        """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만. 터치: 정정 루프."""
+        """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만. 터치: 체결 확인+정정 루프."""
         try:
             self.limit_order_watch_service.register(
                 order_no=order_no,
@@ -1542,6 +1531,7 @@ class TradingController:
                 touch_side=touch_side,
                 touch_name=touch_name,
                 touch_reason=touch_reason,
+                fill_price_hint=float(fill_price or 0),
             )
         except Exception as e:
             try:

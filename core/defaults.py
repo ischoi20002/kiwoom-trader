@@ -98,10 +98,10 @@ DEFAULT_SETTINGS = {
     "limit_order_price_guard_enabled": True,
     "limit_order_max_tick_deviation": 3,
     "limit_order_cache_vs_tree_mismatch_ticks": 10,
-    "realtime_use_market_orders": True,
+    "realtime_use_market_orders": False,
     # True: 실시간 S1/EXIT/S2 를 시장가 대신 **매도1호가(매수)·매수1호가(매도)** 지정가로 접수하고,
     # 미체결 시 ka10004 재조회 후 kt10002 정정(최대 touch_quote_order_max_amends 회).
-    # False 이고 realtime_use_market_orders True 이면 기존 03 시장가.
+    # 실시간 REST는 터치호가 전용(매수=매도1·매도=매수1 + 정정 루프).
     "realtime_touch_quote_orders": True,
     "touch_quote_order_poll_sec": 5.0,
     "touch_quote_order_max_amends": 3,
@@ -325,7 +325,7 @@ DEFAULT_SETTINGS = {
     "limit_order_unfilled_timeout_sec": 45.0,
     "exchange_fill_sync_lookback_days": 7,
     "exchange_fill_confirm_max_attempts": 8,
-    "exchange_fill_confirm_retry_interval_sec": 1.0,
+    "exchange_fill_confirm_retry_interval_sec": 2.0,
     "exchange_fill_late_reconfirm_sec": 35.0,
     "bt_start_date": "2026-04-01",
     "bt_end_date": "2026-04-24",

@@ -13,6 +13,10 @@
 
 ---
 
+## 0.8.21 (2026-05-18)
+
+- **터치호가 전용·체결 경로 단일화**: 실시간 REST는 항상 터치 지정가. 접수 직후 **2초×8 공통 폴링 제거**, `LimitOrderWatchService` 폴링에서 **kt00007 1회 확인 → 호가 정정** 순(`core/trading_controller.py`, `core/order_manager.py`, `core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`).
+
 ## 0.8.20 (2026-05-18)
 
 - **보유 직후 UI 멈춤 완화**: 금일손익 분모(종목별 직전 종가 REST) **5분 캐시**, 보유 스텁 생성 시 **동기 REST 제거**, 포지션 탭 **주문 트리 지연 렌더**, 스텁 REST 보강은 **백그라운드**(`utils/eod_equity_snapshots.py`, `core/trading_controller.py`, `k_trader_gui.py`, `ui/tabs/virtual_tab.py`).
