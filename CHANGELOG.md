@@ -13,6 +13,12 @@
 
 ---
 
+## 0.8.20 (2026-05-18)
+
+- **보유 직후 UI 멈춤 완화**: 금일손익 분모(종목별 직전 종가 REST) **5분 캐시**, 보유 스텁 생성 시 **동기 REST 제거**, 포지션 탭 **주문 트리 지연 렌더**, 스텁 REST 보강은 **백그라운드**(`utils/eod_equity_snapshots.py`, `core/trading_controller.py`, `k_trader_gui.py`, `ui/tabs/virtual_tab.py`).
+- **터치호가 정정**: `touch_quote_order_poll` 의 호가 조회·정정을 **메인 스레드 밖**에서 실행해 Tk 교착 완화(`core/limit_order_watch_service.py`).
+- **감시·포지션 탭**: 렌더 중 **stale 재무장 중복 예약** 방지, 틱 요약의 금일손익·종료손익 **30초 스로틀**, `vp_price_stub` 이어도 틱 `price` 우선(`k_trader_gui.py`, `ui/tabs/virtual_tab.py`).
+
 ## 0.8.19 (2026-05-15)
 
 - **실시간 S1 풀계산 트리거**: 고정 1초 간격 대신 **15분봉 꼬리 지문 변경**·**(인트라바 미러 ON 시) 공식 1분 `RtTickM1Store` 반영 리비전** 시에 `calculate_indicators`+`get_buy_signals_detailed` 실행. 지문 불변 시에는 ``realtime_s1_full_calc_fallback_sec``(기본 120초) 안전망(`core/rt_tick_m1_store.py`, `core/signal_engine.py`, `core/defaults.py`, `settings.json`).

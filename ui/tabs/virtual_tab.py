@@ -1757,13 +1757,15 @@ class VirtualTab:
         try:
             mi = getattr(self.app, "monitor_info", None) or {}
             row = mi.get(nk, {}) or {}
+            raw_p = row.get("price")
+            if raw_p not in (None, "", 0):
+                v = float(raw_p)
+                if v > 0:
+                    return True
+            # 스텁이어도 틱 price 가 살아 있으면 실시간으로 간주(보유 직후 REST 폴백 방지)
             if row.get("vp_price_stub"):
                 return False
-            raw_p = row.get("price")
-            if raw_p in (None, "", 0):
-                return False
-            v = float(raw_p)
-            return v > 0
+            return False
         except Exception:
             return False
 
@@ -2623,13 +2625,14 @@ class VirtualTab:
             except Exception:
                 pass
 
-    def _render_virtual_positions(self):
+    def _render_virtual_positions(self, *, render_orders: bool = True) -> None:
         """데이터(app.virtual_positions / history / today_orders) 동기화"""
         # 0. 실시간 주문 로그 — 보유/히스토리 처리 전에 먼저 갱신(체결강도·호가 열 포함)
-        try:
-            self._render_orders()
-        except Exception:
-            pass
+        if render_orders:
+            try:
+                self._render_orders()
+            except Exception:
+                pass
         # 1. 보유 종목
         total_invested = 0
         total_unrealized_pnl = 0
@@ -2813,8 +2816,12 @@ class VirtualTab:
         주식평가·총자산·손익은 틱 기준이고, 예수금·D+1/D+2는 **메모리의 portfolio 필드**를 반영합니다
         (REST를 다시 호출하지 않음). 동기화 후 구조 시그니처가 같으면 경량 경로만 타는데,
         그때 이 필드를 갱신하지 않으면 예수·D+n이 0으로 남는 버그가 있었음.
+
+        금일손익(직전 종가 REST 합성)은 틱마다 재계산하지 않고 기본 30초 스로틀합니다.
         """
         try:
+            import time as _time_mod
+
             def _set_if_diff(key: str, text: str) -> None:
                 try:
                     v = self.vars.get(key)
@@ -2893,20 +2900,49 @@ class VirtualTab:
                 ta = 0.0
 
             try:
-                d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
-                    self.app,
-                    calendar_day=datetime.now().date(),
-                    current_total_assets=float(total_assets_day_pnl),
-                )
-            except Exception:
-                d_amt, d_pct = None, None
-            if d_amt is not None and d_pct is not None:
-                day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
-            else:
-                day_pnl_txt = "— (전일 기준 없음)"
+                st_th = getattr(self.app, "settings", None) or {}
+                day_throttle = float(st_th.get("virtual_tab_day_pnl_tick_throttle_sec", 30.0))
+            except (TypeError, ValueError):
+                day_throttle = 30.0
+            day_throttle = max(5.0, min(day_throttle, 300.0))
+            now_m = _time_mod.monotonic()
+            day_cache = getattr(self.app, "_vt_day_pnl_tick_cache", None)
+            use_day_cache = False
+            if isinstance(day_cache, dict):
+                try:
+                    if (
+                        _time_mod.monotonic() - float(day_cache.get("ts", 0.0) or 0.0)
+                        < day_throttle
+                    ):
+                        use_day_cache = True
+                        day_pnl_txt = str(day_cache.get("txt", "— (전일 기준 없음)"))
+                        closed_h = float(day_cache.get("closed_h", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    use_day_cache = False
+            if not use_day_cache:
+                try:
+                    d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
+                        self.app,
+                        calendar_day=datetime.now().date(),
+                        current_total_assets=float(total_assets_day_pnl),
+                    )
+                except Exception:
+                    d_amt, d_pct = None, None
+                if d_amt is not None and d_pct is not None:
+                    day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
+                else:
+                    day_pnl_txt = "— (전일 기준 없음)"
+                closed_h = self._sum_visible_history_realized_pnl()
+                try:
+                    self.app._vt_day_pnl_tick_cache = {
+                        "ts": now_m,
+                        "txt": day_pnl_txt,
+                        "closed_h": float(closed_h),
+                    }
+                except Exception:
+                    pass
             open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
 
-            closed_h = self._sum_visible_history_realized_pnl()
             cum_pnl_amt = float(closed_h) + float(total_unrealized_account)
             if ta > 1e-6:
                 cum_pnl_pct = (cum_pnl_amt / ta) * 100.0
@@ -3038,6 +3074,16 @@ class VirtualTab:
             return f"{float(v):.1f}%"
         except Exception:
             return "-"
+
+    def _render_orders_safe(self) -> None:
+        """메인 스레드 전용 — 주문 로그 트리만 갱신(예외 격리)."""
+        try:
+            self._render_orders()
+        except Exception as e:
+            try:
+                print(f"[UI Error] _render_orders_safe: {e}")
+            except Exception:
+                pass
 
     def _render_orders(self) -> None:
         """

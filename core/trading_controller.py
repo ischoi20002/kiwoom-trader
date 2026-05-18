@@ -33,6 +33,7 @@ def virtual_position_reference_price_for_monitor(
     *,
     order_manager: Optional[Any] = None,
     code: Optional[str] = None,
+    allow_rest: bool = True,
 ) -> float:
     """
     가상보유 포지션 dict에서 감시 트리·monitor_info 표시용 참고 현재가를 꺼냅니다.
@@ -70,7 +71,7 @@ def virtual_position_reference_price_for_monitor(
                 return impl
     except (TypeError, ValueError, ZeroDivisionError):
         pass
-    if order_manager is not None and code:
+    if allow_rest and order_manager is not None and code:
         try:
             cod = str(code).strip().zfill(6)
             if cod and cod != "000000":
@@ -350,11 +351,8 @@ class TradingController:
                     continue
                 nm = pos.get("name") or nk
                 ap = float(pos.get("avg_price", 0) or 0)
-                ref_p = virtual_position_reference_price_for_monitor(
-                    pos,
-                    order_manager=getattr(self.app, "order_manager", None),
-                    code=nk,
-                )
+                # 메인 스레드(체결·포지션 탭 렌더)에서 동기 REST 금지 — 틱·백그라운드 갱신으로 채움
+                ref_p = float(ap) if ap > 0 else 0.0
                 self.monitor_info[nk] = {
                     "name": nm,
                     "ma20": 0.0,
@@ -363,7 +361,7 @@ class TradingController:
                     "score": 0.0,
                     "ma_buffer_scale": 1.0,
                     "open": ap,
-                    "last_price": float(ref_p),
+                    "last_price": ref_p,
                     "sel_track": "AB",
                     "vp_price_stub": True,
                 }

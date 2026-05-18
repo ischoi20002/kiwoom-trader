@@ -1322,6 +1322,9 @@ class KiwoomApp:
         """
         try:
             if self._update_timer_active:
+                # 렌더가 이미 메인 스레드에서 돌고 있으면 after(0) 중복 예약 금지(폭주·멈춤 악화)
+                if bool(getattr(self, "_ui_render_in_progress", False)):
+                    return
                 # 타이머 플래그가 True인데 실제 렌더 진입이 오래 없으면 고착 상태로 판단해 강제 재무장
                 try:
                     now_ts = time.time()
@@ -1448,6 +1451,7 @@ class KiwoomApp:
         감시 중이 아니면 타이머 체인을 멈추고 _update_timer_active 를 풀어 재무장 가능하게 한다.
         """
         try:
+            self._ui_render_in_progress = True
             try:
                 self._ui_render_last_enter_ts = time.time()
             except Exception:
@@ -1555,6 +1559,10 @@ class KiwoomApp:
             except Exception:
                 pass
         finally:
+            try:
+                self._ui_render_in_progress = False
+            except Exception:
+                pass
             try:
                 dt = _t.perf_counter() - t0
                 if dt >= 0.50:
@@ -1887,9 +1895,23 @@ class KiwoomApp:
     def _refresh_vp_price_stubs_after_auth(self) -> None:
         """
         첫 렌더에서 토큰이 없어 last_price=0 이었던 vp_price_stub 행을 REST로 다시 채웁니다.
-        또한 **실시간 틱 price 가 아직 없을 때** 잘못 시드된 last_price(예: 역순 REST로
-        들어간 전일 값)도 인증 직후 한 번 교정합니다.
+        REST는 **백그라운드**에서만 호출하고, UI 갱신은 메인 스레드로 위임합니다.
         """
+        try:
+            import threading
+
+            threading.Thread(
+                target=self._refresh_vp_price_stubs_worker,
+                daemon=True,
+            ).start()
+        except Exception:
+            try:
+                self._refresh_vp_price_stubs_worker()
+            except Exception:
+                pass
+
+    def _refresh_vp_price_stubs_worker(self) -> None:
+        """vp_price_stub 참고가 REST 보강(비메인 스레드)."""
         om = getattr(self, "order_manager", None)
         if om is None:
             return
@@ -1905,19 +1927,18 @@ class KiwoomApp:
             vp = {}
         if not vp:
             return
-        mi = getattr(self, "monitor_info", None)
-        if not isinstance(mi, dict):
-            return
-        updated = False
+        patches: Dict[str, float] = {}
         for c_raw, pos in list(vp.items()):
             try:
                 if not isinstance(pos, dict):
                     continue
                 nk = str(c_raw).split("_")[0].zfill(6)
+                mi = getattr(self, "monitor_info", None)
+                if not isinstance(mi, dict):
+                    return
                 row = mi.get(nk)
                 if not isinstance(row, dict) or not row.get("vp_price_stub"):
                     continue
-                # 실시간 체결가가 이미 오면 last_price 는 건드리지 않음
                 try:
                     raw_p = row.get("price")
                     if raw_p not in (None, "", 0):
@@ -1931,6 +1952,7 @@ class KiwoomApp:
                         pos,
                         order_manager=om,
                         code=nk,
+                        allow_rest=True,
                     )
                 )
                 if ref_p <= 0:
@@ -1941,21 +1963,44 @@ class KiwoomApp:
                     lp = 0.0
                 if lp > 0 and abs(ref_p - lp) < 0.501:
                     continue
-                row = dict(row)
-                row["last_price"] = ref_p
-                mi[nk] = row
-                try:
-                    self.trading_controller.monitor_info[nk] = dict(row)
-                except Exception:
-                    pass
-                updated = True
+                patches[nk] = ref_p
             except Exception:
                 continue
-        if updated and hasattr(self, "virtual_tab"):
+        if not patches:
+            return
+
+        def _apply_on_main() -> None:
             try:
-                self.virtual_tab._render_virtual_positions()
+                mi = getattr(self, "monitor_info", None)
+                if not isinstance(mi, dict):
+                    return
+                for nk, ref_p in patches.items():
+                    row = mi.get(nk)
+                    if not isinstance(row, dict):
+                        continue
+                    row = dict(row)
+                    row["last_price"] = float(ref_p)
+                    mi[nk] = row
+                    try:
+                        self.trading_controller.monitor_info[nk] = dict(row)
+                    except Exception:
+                        pass
+                if hasattr(self, "virtual_tab"):
+                    try:
+                        self.virtual_tab.refresh_portfolio_light()
+                    except Exception:
+                        pass
             except Exception:
                 pass
+
+        try:
+            r = getattr(self, "root", None)
+            if r is not None:
+                r.after(0, _apply_on_main)
+            else:
+                _apply_on_main()
+        except Exception:
+            _apply_on_main()
 
     def _ensure_vp_monitor_stub(self, code: str) -> None:
         """보유만 있고 감시에 없던 종목에 monitor_info 스텁을 넣고 스트림 재등록을 요청합니다."""
@@ -1969,16 +2014,8 @@ class KiwoomApp:
                 return
             nm = pos.get("name") or nk
             ap = float(pos.get("avg_price", 0) or 0)
-            try:
-                ref_p = float(
-                    virtual_position_reference_price_for_monitor(
-                        pos,
-                        order_manager=getattr(self, "order_manager", None),
-                        code=nk,
-                    )
-                )
-            except Exception:
-                ref_p = 0.0
+            # 워커/메인 모두: 스텁 생성 시 동기 REST 금지(체결 직후 UI 멈춤 방지)
+            ref_p = float(ap) if ap > 0 else 0.0
             stub = {
                 "name": nm,
                 "ma20": 0.0,
@@ -2545,8 +2582,13 @@ class KiwoomApp:
 
         def _heavy_vp_render() -> None:
             try:
-                self.virtual_tab._render_virtual_positions()
+                # 보유 트리·요약만 먼저 — 주문 DB·트리 전체 재삽입은 한 틱 뒤(체결 직후 멈춤 완화)
+                self.virtual_tab._render_virtual_positions(render_orders=False)
                 self._last_vp_render_sig = self._vp_structure_signature()
+                try:
+                    setattr(self.app, "_vt_day_pnl_tick_cache", None)
+                except Exception:
+                    pass
             except Exception:
                 pass
             finally:
@@ -2554,6 +2596,17 @@ class KiwoomApp:
                     self._set_ui_busy(False)
                 except Exception:
                     pass
+            try:
+                r2 = getattr(self, "root", None)
+                vt = getattr(self, "virtual_tab", None)
+                if r2 is not None and vt is not None:
+                    r2.after(80, lambda: vt._render_orders_safe())
+            except Exception:
+                pass
+            try:
+                self._schedule_vp_stub_price_refresh_after_auth()
+            except Exception:
+                pass
             try:
                 mt = getattr(self, "monitor_tab", None)
                 if mt is not None:

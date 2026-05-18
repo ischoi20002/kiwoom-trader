@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from datetime import date, datetime
 from typing import Any, Dict, Optional, Tuple
 
@@ -58,6 +59,31 @@ def _portfolio_total_assets_like_virtual_tab_for_synthetic(
             return 0.0
 
 
+def _vp_signature_for_synthetic_cache(app: Any) -> Tuple[Any, ...]:
+    """금일손익 분모 캐시 키용 — 보유 종목·수량만 반영(6자리·중복 키 통합)."""
+    try:
+        portfolio = getattr(app, "portfolio", None)
+        if portfolio is None:
+            return tuple()
+        try:
+            with portfolio.lock:
+                vp = dict(getattr(portfolio, "virtual_positions", None) or {})
+        except Exception:
+            vp = dict(getattr(portfolio, "virtual_positions", None) or {})
+        merged: Dict[str, int] = {}
+        for k_raw, p0 in vp.items():
+            try:
+                nk = str(k_raw).split("_")[0].zfill(6)
+                qty = int((p0 or {}).get("qty", 0) or 0)
+                if nk not in merged:
+                    merged[nk] = qty
+            except Exception:
+                continue
+        return tuple(sorted(merged.items()))
+    except Exception:
+        return tuple()
+
+
 def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[float]:
     """
     보유 종목별 직전 장마감가( ``fetch_stock_prev_close_ka10001`` )로
@@ -68,7 +94,33 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
     안전 규칙:
     - 보유 종목 중 하나라도 직전 장마감가 조회에 실패하면(0/None), 평단으로 대체하지 않고 ``None`` 반환.
       (부분 폴백으로 허위 금일손익이 생성되는 것을 방지)
+
+    성능:
+    - 종목마다 동기 REST(ka10001)이므로, 동일 영업일·보유 구조에서는 앱 캐시로 재호출을 막는다.
+      (보유 직후·틱마다 ``compute_day_pnl`` 이 호출되면 UI가 멈출 수 있음)
     """
+    try:
+        cal = date.today()
+        prev = previous_trading_day(cal)
+        prev_key = prev.strftime("%Y-%m-%d") if prev is not None else ""
+        vp_sig = _vp_signature_for_synthetic_cache(app)
+        cache_key = (prev_key, vp_sig)
+        try:
+            cache = getattr(app, "_synthetic_prev_assets_cache", None)
+            if isinstance(cache, dict) and cache.get("key") == cache_key:
+                cached_val = cache.get("value")
+                cached_ts = float(cache.get("ts", 0.0) or 0.0)
+                if cached_val is not None and (time.monotonic() - cached_ts) < 300.0:
+                    try:
+                        v = float(cached_val)
+                        if math.isfinite(v) and v > 0:
+                            return v
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            pass
+    except Exception:
+        cache_key = None
     try:
         om = getattr(app, "order_manager", None)
         if om is None:
@@ -142,7 +194,26 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
                 portfolio, stock_liquid_prev
             )
         if total > 0 and math.isfinite(total):
-            return float(total)
+            out = float(total)
+            try:
+                if cache_key is not None:
+                    setattr(
+                        app,
+                        "_synthetic_prev_assets_cache",
+                        {"key": cache_key, "value": out, "ts": time.monotonic()},
+                    )
+            except Exception:
+                pass
+            return out
+        try:
+            if cache_key is not None:
+                setattr(
+                    app,
+                    "_synthetic_prev_assets_cache",
+                    {"key": cache_key, "value": None, "ts": time.monotonic()},
+                )
+        except Exception:
+            pass
         return None
     except Exception:
         return None

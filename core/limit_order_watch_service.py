@@ -147,13 +147,26 @@ class LimitOrderWatchService:
         ms = self._get_touch_poll_ms()
 
         def _cb() -> None:
-            try:
-                self._on_touch_poll(ck)
-            except Exception as e:
+            # 호가 조회·정정 REST는 메인 스레드에서 하면 Tk가 4~6초 멈춘 것처럼 보임
+            def _worker() -> None:
                 try:
-                    self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
-                except Exception:
-                    pass
+                    self._on_touch_poll(ck)
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
+                    except Exception:
+                        pass
+
+            try:
+                threading.Thread(target=_worker, daemon=True).start()
+            except Exception:
+                try:
+                    self._on_touch_poll(ck)
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ [터치호가] 폴링 오류: {e}")
+                    except Exception:
+                        pass
 
         try:
             aid = root.after(ms, _cb)
