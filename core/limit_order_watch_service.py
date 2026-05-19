@@ -241,8 +241,18 @@ class LimitOrderWatchService:
         except Exception:
             pass
 
-    def _touch_execute_amend(self, meta: LimitOrderMeta, current_ord: str) -> bool:
-        """최신 호가 재조회 후 ``kt10002`` 정정. 성공 여부."""
+    def _touch_execute_amend(
+        self, meta: LimitOrderMeta, current_ord: str
+    ) -> bool:
+        """
+        최신 호가 재조회 후 ``kt10002`` 정정.
+
+        Returns
+        -------
+        bool
+            True: 다음 터치호가 폴링(다음 정정 시도)을 예약해도 됩니다.
+            False: 주문이 terminal(예: RC4033: 남은 수량 없음) 이므로 추가 예약하지 않습니다.
+        """
         nc = self._normalize_code_6(meta.code)
         oid = str(current_ord or "").strip()
         side = str(meta.touch_side or "").strip().lower()
@@ -296,13 +306,36 @@ class LimitOrderWatchService:
                 self.log(f"⚠️ [터치호가] 정정 예외: {ex}")
             except Exception:
                 pass
-            return False
+            return True
         if not ok:
             try:
                 self.log(f"⚠️ [터치호가] 정정 거부: {msg} (ord={oid})")
             except Exception:
                 pass
-            return False
+            # RC4033 등: "정정/취소할 수량이 없음"(=남은 수량 0, 전량 체결/종료)
+            # 이 경우 터치 정정 루프를 계속 돌리면 동일 실패가 반복됩니다.
+            try:
+                s_msg = str(msg or "")
+            except Exception:
+                s_msg = ""
+            if ("4033" in s_msg) or ("no_open_qty" in s_msg) or ("정정/취소할 수량" in s_msg):
+                try:
+                    # exit_sell이면 kt00007로 체결 동기화(강제 재폴링) 시도합니다.
+                    if str(meta.kind or "") == "exit_sell":
+                        self._schedule_boost_fill_reconcile(
+                            order_no=oid,
+                            code=nc,
+                            kind=str(meta.kind or ""),
+                            qty=int(meta.qty or 0),
+                        )
+                except Exception:
+                    pass
+                try:
+                    self.clear(oid)
+                except Exception:
+                    pass
+                return False
+            return True
         if new_no and new_no != oid:
             self._touch_apply_ord_no_remap(
                 old_no=oid, new_no=new_no, meta=meta, nc=nc
@@ -375,12 +408,13 @@ class LimitOrderWatchService:
 
         max_a = self._get_touch_max_amends()
         if meta.touch_amend_attempts_done < max_a:
-            self._touch_execute_amend(meta, current_ord)
+            should_schedule = self._touch_execute_amend(meta, current_ord)
             try:
                 meta.touch_amend_attempts_done = int(meta.touch_amend_attempts_done or 0) + 1
             except Exception:
                 pass
-            self._schedule_touch_timer(chain_key)
+            if bool(should_schedule):
+                self._schedule_touch_timer(chain_key)
             return
 
         # 정정 횟수 소진 후 미체결이면 기존 타임아웃과 동일하게 취소 처리

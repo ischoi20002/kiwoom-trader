@@ -22,6 +22,10 @@
 
 - **실시간 감시 UI 멈춤 완화**: 보유행 ATR 표시를 위한 `calculate_indicators()` 호출을 종목별 IR 마지막 행 캐시로 재사용(기본 8초 최소 주기)해 주문 직후 계산부하 폭증으로 인한 프리징을 완화(`ui/tabs/monitor_tab.py`).
 
+## 0.8.24 (2026-05-19)
+
+- **터치호가 정정 루프 중단**: `RC4033(정정/취소할 수량이 없음)`(=전량 체결/남은 수량 0) 정정 거부 시 터치호가 정정 타이머를 terminal로 처리해 동일 실패 반복을 방지(`core/limit_order_watch_service.py`).
+
 ## 0.8.21 (2026-05-18)
 
 - **터치호가 전용·체결 경로 단일화**: 실시간 REST는 항상 터치 지정가. 접수 직후 **2초×8 공통 폴링 제거**, `LimitOrderWatchService` 폴링에서 **kt00007 1회 확인 → 호가 정정** 순(`core/trading_controller.py`, `core/order_manager.py`, `core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`).
