@@ -1605,6 +1605,19 @@ class KiwoomApp:
                 mc = list(getattr(self, "monitor_codes", None) or [])
             if not mc:
                 return
+            # 미선정(virtual_positions 등) 종목은 SignalEngine pending enqueue가 누락될 수 있어
+            # 최소 UI 갱신용 강제 enqueue 대상에 포함합니다.
+            try:
+                vpd = getattr(self.portfolio, "virtual_positions", None) or {}
+                for c_raw in vpd.keys():
+                    try:
+                        nk = str(c_raw).split("_")[0].zfill(6)
+                    except Exception:
+                        continue
+                    if nk and nk not in mc:
+                        mc.append(nk)
+            except Exception:
+                pass
             now_ts = time.time()
             force_sec = 3.0
             try:

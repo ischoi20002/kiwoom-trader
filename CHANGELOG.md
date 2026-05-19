@@ -26,6 +26,10 @@
 
 - **터치호가 정정 루프 중단**: `RC4033(정정/취소할 수량이 없음)`(=전량 체결/남은 수량 0) 정정 거부 시 터치호가 정정 타이머를 terminal로 처리해 동일 실패 반복을 방지(`core/limit_order_watch_service.py`).
 
+## 0.8.25 (2026-05-19)
+
+- **실시간감시 '가상보유 미선정' 현재가 갱신 보강**: `SignalEngine` pending enqueue가 누락되는 경우를 대비해 `실시간감시탭` 최소 강제 enqueue 대상에 `portfolio.virtual_positions`(보유) 종목을 포함시켜 `보유 및 대응종목`의 틱 갱신 누락을 완화(`k_trader_gui.py`).
+
 ## 0.8.21 (2026-05-18)
 
 - **터치호가 전용·체결 경로 단일화**: 실시간 REST는 항상 터치 지정가. 접수 직후 **2초×8 공통 폴링 제거**, `LimitOrderWatchService` 폴링에서 **kt00007 1회 확인 → 호가 정정** 순(`core/trading_controller.py`, `core/order_manager.py`, `core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`).
