@@ -2598,7 +2598,13 @@ class MonitorTab:
                     continue
                 for iid in list(tree.get_children()):
                     z = str(iid).split("_")[0].zfill(6)
-                    if z in wl_only and tree.exists(iid):
+                    # wl_only에 잘못 포함되는 경우가 있어도,
+                    # 실제 보유(virtual_positions)면 절대 삭제하지 않습니다.
+                    if (
+                        z in wl_only
+                        and tree.exists(iid)
+                        and not self._virtual_position_is_active(z, vp)
+                    ):
                         tree.delete(iid)
 
             # 누락 행 복구·보유/감시 트리 오배치 보정 (monitor_info 기준, 고아 강제 삭제는 하지 않음)
@@ -2923,20 +2929,28 @@ class MonitorTab:
                     _step_log("item_start", {"tag": str(tag), "price": values[4] if isinstance(values, (list, tuple)) and len(values) > 4 else None})
                     if cid in wl_only:
                         _step_log("wl_only_delete_loop_start")
-                        for tree in (self.tree_monitor, self.tree_active_monitor):
-                            if tree and tree.exists(iid):
-                                _step_log(
-                                    "wl_only_tree_delete_call",
-                                    {"tree": "monitor" if tree is self.tree_monitor else "active"},
-                                )
-                                tree.delete(iid)
+                        # 보유로 판정되는 종목은 wl_only로 분류되어도 UI에서 사라지면 안 됩니다.
                         try:
-                            self._vp_ui_inactive_streak.pop(iid, None)
-                            self._vp_ever_in_holdings.pop(iid, None)
+                            is_active_raw_guard = self._virtual_position_is_active(
+                                iid, virtual_positions
+                            )
                         except Exception:
-                            pass
-                        _step_log("wl_only_continue_end")
-                        continue
+                            is_active_raw_guard = False
+                        if not is_active_raw_guard:
+                            for tree in (self.tree_monitor, self.tree_active_monitor):
+                                if tree and tree.exists(iid):
+                                    _step_log(
+                                        "wl_only_tree_delete_call",
+                                        {"tree": "monitor" if tree is self.tree_monitor else "active"},
+                                    )
+                                    tree.delete(iid)
+                            try:
+                                self._vp_ui_inactive_streak.pop(iid, None)
+                                self._vp_ever_in_holdings.pop(iid, None)
+                            except Exception:
+                                pass
+                            _step_log("wl_only_continue_end")
+                            continue
                     # 보유 여부에 따라 타겟 트리 결정
                     _step_log("vp_active_check_start")
                     is_active_raw = self._virtual_position_is_active(
@@ -3147,8 +3161,15 @@ class MonitorTab:
         idx_watch = 0
         for code, info in sorted_items:
             nk = str(code).split("_")[0].zfill(6)
-            if nk in wl_only:
-                continue
+            # wl_only는 관심목록 전용인데,
+            # 보유(virtual_positions)로 판정되는 종목은 절대 보유 트리에서 스킵되지 않도록 방어합니다.
+            try:
+                if nk in wl_only and not self._virtual_position_is_active(nk, vp):
+                    continue
+            except Exception:
+                # 보유 판정 실패 시 기존 동작(continue)을 유지하지 않고,
+                # 오히려 보수적으로 표시 누락을 방지하기 위해 skip하지 않습니다.
+                pass
             ratio_disp = self._ratio_cell_display_for_monitor_info(nk, info)
             direction = self._monitor_ratio_direction(ratio_disp)
             values = self._compose_monitor_row_values(nk, info)

@@ -2574,6 +2574,13 @@ class KiwoomApp:
                             self.portfolio.virtual_positions,
                             getattr(self, "monitor_info", None) or {},
                         )
+                        # sig가 같아도 monitor_tab 행이 누락된 케이스가 있어
+                        # (초기화/정합성 충돌 등) 조기 return 경로에서도 복구를 시도합니다.
+                        mt.maybe_reconcile_monitor_trees(
+                            getattr(self, "monitor_info", None) or {},
+                            self.portfolio.virtual_positions,
+                            min_interval_s=0.0,
+                        )
                 except Exception:
                     pass
                 return
@@ -2614,6 +2621,16 @@ class KiwoomApp:
                         self.portfolio.virtual_positions,
                         getattr(self, "monitor_info", None) or {},
                     )
+                    # 보유(UI/틱) 경로가 누락되는 경우가 있어,
+                    # 포지션 탭에서 virtual_positions/monitor_info가 갱신된 직후 보유 트리를 복구합니다.
+                    try:
+                        mt.maybe_reconcile_monitor_trees(
+                            getattr(self, "monitor_info", None) or {},
+                            self.portfolio.virtual_positions,
+                            min_interval_s=0.0,
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

@@ -13,6 +13,11 @@
 
 ---
 
+## 0.8.22 (2026-05-19)
+
+- **실시간 감시 UI 정합**: 보유 직후/동일 시그니처 조기 return 경로에서도 `보유 및 대응종목` 누락을 복구(reconcile)하고, `wl_only`인데도 실제 보유면 삭제/스킵하지 않도록 방어(`k_trader_gui.py`, `ui/tabs/monitor_tab.py`).
+- **보유 스텁 '현재가' 시드**: 장 시작 전 `vp_price_stub` 표시용 `last_price`를 평단으로 고정하지 않고 `bars_data` 마지막 `Close`로 시드(전일종가처럼 표시)해 혼동을 줄임(`core/trading_controller.py`).
+
 ## 0.8.21 (2026-05-18)
 
 - **터치호가 전용·체결 경로 단일화**: 실시간 REST는 항상 터치 지정가. 접수 직후 **2초×8 공통 폴링 제거**, `LimitOrderWatchService` 폴링에서 **kt00007 1회 확인 → 호가 정정** 순(`core/trading_controller.py`, `core/order_manager.py`, `core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`).

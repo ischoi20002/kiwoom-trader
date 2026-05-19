@@ -351,8 +351,28 @@ class TradingController:
                     continue
                 nm = pos.get("name") or nk
                 ap = float(pos.get("avg_price", 0) or 0)
-                # 메인 스레드(체결·포지션 탭 렌더)에서 동기 REST 금지 — 틱·백그라운드 갱신으로 채움
-                ref_p = float(ap) if ap > 0 else 0.0
+                # 메인 스레드(체결·포지션 탭 렌더)에서 동기 REST 금지.
+                # 틱이 오기 전(장 시작 전)에는 bars_data의 마지막 Close(대개 전일종가)로 시드하고,
+                # 이후 k_trader_gui._refresh_vp_price_stubs_after_auth()가 백그라운드 REST로 last_price를 교체합니다.
+                ref_p = 0.0
+                try:
+                    bd = getattr(self.app, "bars_data", None)
+                    if isinstance(bd, dict):
+                        df = bd.get(nk)
+                        if df is not None and not getattr(df, "empty", True):
+                            lr = df.iloc[-1]
+                            # calculate_indicators 계열에서 'Close'를 사용하므로 여기서도 우선합니다.
+                            close_val = lr.get("Close") if hasattr(lr, "get") else None
+                            if close_val is None:
+                                # 혹시 컬럼명이 다른 경우를 위한 보조 폴백
+                                close_val = lr.get("close") if hasattr(lr, "get") else None
+                            if close_val is not None:
+                                ref_p = float(close_val) if float(close_val) > 0 else 0.0
+                except Exception:
+                    ref_p = 0.0
+                if ref_p <= 0 and ap > 0:
+                    # bars_data가 아직 없거나 비어 있으면, 평단으로 마지막 수단 시드(기존 동작 유지).
+                    ref_p = float(ap)
                 self.monitor_info[nk] = {
                     "name": nm,
                     "ma20": 0.0,
@@ -360,7 +380,7 @@ class TradingController:
                     "prev_vol": 0.0,
                     "score": 0.0,
                     "ma_buffer_scale": 1.0,
-                    "open": ap,
+                    "open": ref_p if ref_p > 0 else ap,
                     "last_price": ref_p,
                     "sel_track": "AB",
                     "vp_price_stub": True,
