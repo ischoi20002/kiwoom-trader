@@ -242,6 +242,11 @@ class MonitorTab:
         self._render_debug_last_ts: Dict[str, float] = {}
         # update_view가 너무 오래 걸려 UI가 멈춘 것처럼 보이는 케이스 기록(쿨다운/로그 폭주 방지용)
         self._update_view_slow_last_ts: float = 0.0
+        # 보유행 ATR 표시를 위한 지표(마지막 행) 캐시:
+        # - UI 틱/렌더마다 TradingStrategy.calculate_indicators()를 호출하면 CPU 부하가 커질 수 있어,
+        #   같은 종목에 대해 일정 시간(초) 동안 계산 결과를 재사용합니다.
+        self._atr_exit_ir_cache: Dict[str, Dict[str, Any]] = {}
+        self._atr_exit_ir_cache_ts: Dict[str, float] = {}
         self._setup_ui()
 
     def _effective_regular_session_for_stream_ticks(self) -> bool:
@@ -2508,12 +2513,32 @@ class MonitorTab:
             if pos is not None:
                 bd = (getattr(self.app, "bars_data", None) or {}).get(nk)
                 if bd is not None and not getattr(bd, "empty", True):
-                    # 실시간 StreamProcessor 는 ATR_A/B 를 봉에 붙이지 않음 → 전체 지표 재계산 후 마지막 행 사용
                     try:
-                        df_i = TradingStrategy.calculate_indicators(
-                            bd, self.app.settings
-                        )
-                        ir = df_i.iloc[-1].to_dict()
+                        # 실시간 StreamProcessor 는 ATR_A/B 를 봉에 붙이지 않음.
+                        # 다만 calculate_indicators() 자체가 무거우므로,
+                        # 일정 시간 동안은 마지막 지표행을 캐시로 재사용합니다.
+                        now_ts = time.time()
+                        try:
+                            min_sec = float(
+                                (getattr(self.app, "settings", None) or {}).get(
+                                    "realtime_monitor_atr_ir_cache_min_sec", 8.0
+                                )
+                            )
+                        except Exception:
+                            min_sec = 8.0
+                        min_sec = max(1.0, min_sec)
+
+                        ir = None
+                        if nk in self._atr_exit_ir_cache and nk in self._atr_exit_ir_cache_ts:
+                            age = now_ts - float(self._atr_exit_ir_cache_ts.get(nk, 0.0) or 0.0)
+                            if age <= min_sec:
+                                ir = self._atr_exit_ir_cache.get(nk)
+
+                        if not ir:
+                            df_i = TradingStrategy.calculate_indicators(bd, self.app.settings)
+                            ir = df_i.iloc[-1].to_dict()
+                            self._atr_exit_ir_cache[nk] = ir
+                            self._atr_exit_ir_cache_ts[nk] = now_ts
                     except Exception:
                         try:
                             lr = bd.iloc[-1]
@@ -2522,6 +2547,10 @@ class MonitorTab:
                                 if hasattr(lr, "to_dict")
                                 else dict(lr)
                             )
+                            # calculate_indicators 실패 시에도 캐시는 갱신(가능한 경우만)
+                            if isinstance(ir, dict):
+                                self._atr_exit_ir_cache[nk] = ir
+                                self._atr_exit_ir_cache_ts[nk] = time.time()
                         except Exception:
                             ir = {}
                     np_atr = float(now_p) if now_p > 0 else float(ir.get("Close", 0) or 0)
