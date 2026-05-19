@@ -30,6 +30,10 @@
 
 - **실시간감시 '가상보유 미선정' 현재가 갱신 보강**: `SignalEngine` pending enqueue가 누락되는 경우를 대비해 `실시간감시탭` 최소 강제 enqueue 대상에 `portfolio.virtual_positions`(보유) 종목을 포함시켜 `보유 및 대응종목`의 틱 갱신 누락을 완화(`k_trader_gui.py`).
 
+## 0.8.26 (2026-05-19)
+
+- **터치호가 정정 루프 오탐 방지**: 주문 로그 기준 전량 체결(예: `filled_qty`/`result`가 이미 FILLED 또는 잔량 0)로 판정되는 경우, `kt10002` 정정 타이머를 즉시 terminal 처리하여 불필요한 정정 반복을 줄임(`core/limit_order_watch_service.py`, 터치 정정 경로).
+
 ## 0.8.21 (2026-05-18)
 
 - **터치호가 전용·체결 경로 단일화**: 실시간 REST는 항상 터치 지정가. 접수 직후 **2초×8 공통 폴링 제거**, `LimitOrderWatchService` 폴링에서 **kt00007 1회 확인 → 호가 정정** 순(`core/trading_controller.py`, `core/order_manager.py`, `core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`).

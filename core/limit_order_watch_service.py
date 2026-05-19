@@ -298,6 +298,20 @@ class LimitOrderWatchService:
             order_qty = int((row or {}).get("qty") or meta.qty or 0)
         except (TypeError, ValueError):
             order_qty = int(meta.qty or 0)
+
+        # 이미 전량 체결된 주문이라면 남은 정정 루프를 더 돌리지 않습니다.
+        # (kt00007/DB 반영 지연 등으로 _touch_try_confirm_fill() 타이밍과 어긋나는 경우 방지)
+        try:
+            expect_qty = int(meta.qty or 0)
+        except (TypeError, ValueError):
+            expect_qty = int(order_qty or 0)
+        if self._touch_order_fully_filled(oid, expect_qty):
+            try:
+                # 터치 정정 예약 제거
+                self.clear(oid)
+            except Exception:
+                pass
+            return False
         rem = max(1, order_qty - max(0, filled))
         try:
             ok, new_no, msg = om.modify_limit_order(oid, nc, rem, px)
