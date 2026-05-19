@@ -292,7 +292,7 @@
     "smart_exit_bid_ratio": 1.5,
     "limit_order_unfilled_timeout_sec": 45.0,
     "exchange_fill_sync_lookback_days": 7,
-    "exchange_fill_confirm_retry_interval_sec": 2.0,
+    "exchange_fill_confirm_retry_interval_sec": 5.0,
     "bt_start_date": "2026-05-14",
     "bt_end_date": "2026-05-14",
     "mock_account_id": "81220142",

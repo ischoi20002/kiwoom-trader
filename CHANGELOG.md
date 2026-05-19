@@ -13,26 +13,33 @@
 
 ---
 
-## 0.8.22 (2026-05-19)
 
-- **실시간 감시 UI 정합**: 보유 직후/동일 시그니처 조기 return 경로에서도 `보유 및 대응종목` 누락을 복구(reconcile)하고, `wl_only`인데도 실제 보유면 삭제/스킵하지 않도록 방어(`k_trader_gui.py`, `ui/tabs/monitor_tab.py`).
-- **보유 스텁 '현재가' 시드**: 장 시작 전 `vp_price_stub` 표시용 `last_price`를 평단으로 고정하지 않고 `bars_data` 마지막 `Close`로 시드(전일종가처럼 표시)해 혼동을 줄임(`core/trading_controller.py`).
 
-## 0.8.23 (2026-05-19)
+## 0.8.27 (2026-05-19)
 
-- **실시간 감시 UI 멈춤 완화**: 보유행 ATR 표시를 위한 `calculate_indicators()` 호출을 종목별 IR 마지막 행 캐시로 재사용(기본 8초 최소 주기)해 주문 직후 계산부하 폭증으로 인한 프리징을 완화(`ui/tabs/monitor_tab.py`).
+- **터치호가 체결확인 레이턴시 완화**: `exchange_fill_confirm_retry_interval_sec` 기본값을 `5초`로 상향해(설정·기본값·폴링 첫 확인) DB/체결 반영 지연 레이스로 인한 불필요한 정정을 줄임(`settings.json`, `core/defaults.py`, `core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`).
+- **RC4042 안정화 진단/재시도**: `RC4042(정정가능수량 초과)` 발생 시 `filled_qty/qty/rem` 기준을 로그로 남기고, 해당 케이스에서는 정정 시도 횟수 소진(카운트) 대신 체결 동기화(boos_polling)로 전환해 동일 실패 연쇄를 완화(`core/limit_order_watch_service.py`).
 
-## 0.8.24 (2026-05-19)
+## 0.8.26 (2026-05-19)
 
-- **터치호가 정정 루프 중단**: `RC4033(정정/취소할 수량이 없음)`(=전량 체결/남은 수량 0) 정정 거부 시 터치호가 정정 타이머를 terminal로 처리해 동일 실패 반복을 방지(`core/limit_order_watch_service.py`).
+- **터치호가 정정 루프 오탐 방지**: 주문 로그 기준 전량 체결(예: `filled_qty`/`result`가 이미 FILLED 또는 잔량 0)로 판정되는 경우, `kt10002` 정정 타이머를 즉시 terminal 처리하여 불필요한 정정 반복을 줄임(`core/limit_order_watch_service.py`, 터치 정정 경로).
 
 ## 0.8.25 (2026-05-19)
 
 - **실시간감시 '가상보유 미선정' 현재가 갱신 보강**: `SignalEngine` pending enqueue가 누락되는 경우를 대비해 `실시간감시탭` 최소 강제 enqueue 대상에 `portfolio.virtual_positions`(보유) 종목을 포함시켜 `보유 및 대응종목`의 틱 갱신 누락을 완화(`k_trader_gui.py`).
 
-## 0.8.26 (2026-05-19)
+## 0.8.24 (2026-05-19)
 
-- **터치호가 정정 루프 오탐 방지**: 주문 로그 기준 전량 체결(예: `filled_qty`/`result`가 이미 FILLED 또는 잔량 0)로 판정되는 경우, `kt10002` 정정 타이머를 즉시 terminal 처리하여 불필요한 정정 반복을 줄임(`core/limit_order_watch_service.py`, 터치 정정 경로).
+- **터치호가 정정 루프 중단**: `RC4033(정정/취소할 수량이 없음)`(=전량 체결/남은 수량 0) 정정 거부 시 터치호가 정정 타이머를 terminal로 처리해 동일 실패 반복을 방지(`core/limit_order_watch_service.py`).
+
+## 0.8.23 (2026-05-19)
+
+- **실시간 감시 UI 멈춤 완화**: 보유행 ATR 표시를 위한 `calculate_indicators()` 호출을 종목별 IR 마지막 행 캐시로 재사용(기본 8초 최소 주기)해 주문 직후 계산부하 폭증으로 인한 프리징을 완화(`ui/tabs/monitor_tab.py`).
+
+## 0.8.22 (2026-05-19)
+
+- **실시간 감시 UI 정합**: 보유 직후/동일 시그니처 조기 return 경로에서도 `보유 및 대응종목` 누락을 복구(reconcile)하고, `wl_only`인데도 실제 보유면 삭제/스킵하지 않도록 방어(`k_trader_gui.py`, `ui/tabs/monitor_tab.py`).
+- **보유 스텁 '현재가' 시드**: 장 시작 전 `vp_price_stub` 표시용 `last_price`를 평단으로 고정하지 않고 `bars_data` 마지막 `Close`로 시드(전일종가처럼 표시)해 혼동을 줄임(`core/trading_controller.py`).
 
 ## 0.8.21 (2026-05-18)
 

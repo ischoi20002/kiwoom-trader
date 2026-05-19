@@ -22,6 +22,9 @@ class LimitOrderMeta:
     touch_name: str = ""
     touch_reason: str = ""
     touch_amend_attempts_done: int = 0
+    # True: (정정 시도 1회) 횟수 소진으로 카운트
+    # False: 체결 동기화/DB 반영 대기 목적(예: RC4042)이라면 소진하지 않음
+    touch_amend_should_increment: bool = True
     fill_price_hint: float = 0.0
 
 
@@ -70,11 +73,11 @@ class LimitOrderWatchService:
         try:
             sec = float(
                 (getattr(self.app, "settings", None) or {}).get(
-                    "exchange_fill_confirm_retry_interval_sec", 2.0
+                    "exchange_fill_confirm_retry_interval_sec", 5.0
                 )
             )
         except (TypeError, ValueError):
-            sec = 2.0
+            sec = 5.0
         sec = max(1.0, min(sec, 10.0))
         return int(sec * 1000)
 
@@ -256,6 +259,12 @@ class LimitOrderWatchService:
         nc = self._normalize_code_6(meta.code)
         oid = str(current_ord or "").strip()
         side = str(meta.touch_side or "").strip().lower()
+        # 기본적으로 정정 시도 횟수는 소진으로 카운트합니다.
+        # (특정 에러: RC4042에서는 소진하지 않도록 분기합니다)
+        try:
+            meta.touch_amend_should_increment = True
+        except Exception:
+            pass
         if not oid or side not in ("buy", "sell"):
             return False
         om = getattr(self.app, "order_manager", None)
@@ -332,6 +341,36 @@ class LimitOrderWatchService:
                 s_msg = str(msg or "")
             except Exception:
                 s_msg = ""
+            # RC4042: "정정수량이 정정가능수량을 초과"
+            # - 대개 직전 체결(부분체결) 반영이 DB/kt00007에 늦게 반영되는 레이스입니다.
+            # - 이때 다음 정정을 바로 때리면 동일 실패가 이어질 수 있으므로,
+            #   보강 체결동기화를 먼저 돌리고(boos_polling) 정정 횟수는 소진하지 않습니다.
+            if (
+                "4042" in s_msg
+                or "정정가능수량" in s_msg
+                or "정정수량이 정정가능수량을 초과" in s_msg
+            ):
+                try:
+                    # RC4042에서 rem 계산 기준( DB filled_qty/qty )을 남겨 원인(동기화 지연 vs 계산 기준 불일치)을 추적합니다.
+                    self.log(
+                        f"🧪 [터치호가] RC4042 추적 filled_qty={filled} qty={order_qty} rem={rem} (ord={oid}, code={nc})"
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._schedule_boost_fill_reconcile(
+                        order_no=oid,
+                        code=nc,
+                        kind=str(meta.kind or ""),
+                        qty=int(meta.qty or 0),
+                    )
+                except Exception:
+                    pass
+                try:
+                    meta.touch_amend_should_increment = False
+                except Exception:
+                    pass
+                return True
             if ("4033" in s_msg) or ("no_open_qty" in s_msg) or ("정정/취소할 수량" in s_msg):
                 try:
                     # exit_sell이면 kt00007로 체결 동기화(강제 재폴링) 시도합니다.
@@ -403,6 +442,15 @@ class LimitOrderWatchService:
             except Exception:
                 pass
             return False
+        try:
+            # 다음 정정으로 넘어가는지(=pending인지) 추적하기 위한 최소 로그입니다.
+            # (pending/terminal/skipped는 계속 정정 시도를 유발할 수 있습니다.)
+            if status in ("pending", "terminal", "skipped"):
+                self.log(
+                    f"🧪 [터치호가] try_confirm_fill_once status={status} ord={current_ord} kind={meta.kind} code={meta.code}"
+                )
+        except Exception:
+            pass
         if status in ("filled", "terminal", "skipped"):
             try:
                 self.clear(current_ord)
@@ -422,9 +470,19 @@ class LimitOrderWatchService:
 
         max_a = self._get_touch_max_amends()
         if meta.touch_amend_attempts_done < max_a:
-            should_schedule = self._touch_execute_amend(meta, current_ord)
+            # 다음 정정 시도 횟수 소진 여부(에러 타입에 따라 조정)
             try:
-                meta.touch_amend_attempts_done = int(meta.touch_amend_attempts_done or 0) + 1
+                meta.touch_amend_should_increment = True
+            except Exception:
+                pass
+            should_schedule = self._touch_execute_amend(meta, current_ord)
+            # RC4042 같은 케이스에서는 동기화 대기 목적이라 카운트를 소진하지 않습니다.
+            try:
+                inc = bool(getattr(meta, "touch_amend_should_increment", True))
+                if inc:
+                    meta.touch_amend_attempts_done = int(
+                        meta.touch_amend_attempts_done or 0
+                    ) + 1
             except Exception:
                 pass
             if bool(should_schedule):

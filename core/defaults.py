@@ -325,7 +325,7 @@ DEFAULT_SETTINGS = {
     "limit_order_unfilled_timeout_sec": 45.0,
     "exchange_fill_sync_lookback_days": 7,
     "exchange_fill_confirm_max_attempts": 8,
-    "exchange_fill_confirm_retry_interval_sec": 2.0,
+    "exchange_fill_confirm_retry_interval_sec": 5.0,
     "exchange_fill_late_reconfirm_sec": 35.0,
     "bt_start_date": "2026-04-01",
     "bt_end_date": "2026-04-24",

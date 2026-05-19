@@ -397,7 +397,7 @@ class FillReconciliationService:
                         max_attempts = 8
                     try:
                         retry_interval_sec = float(
-                            st.get("exchange_fill_confirm_retry_interval_sec", 2.0)
+                            st.get("exchange_fill_confirm_retry_interval_sec", 5.0)
                         )
                     except Exception:
                         retry_interval_sec = 1.0
