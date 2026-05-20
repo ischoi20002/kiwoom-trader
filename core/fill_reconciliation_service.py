@@ -236,6 +236,19 @@ class FillReconciliationService:
             except Exception:
                 pass
 
+        # 터치 정정/체결확인 디버깅용: "DB row는 확정인데 로컬 적용이 실패(applied=False)"
+        try:
+            if not applied:
+                self.log(
+                    "🧪 [체결적용실패] applied=False "
+                    f"code={code} ord={oid} side={side} "
+                    f"row.result={row.get('result')} row.filled_qty={row.get('filled_qty')} "
+                    f"row.price={row.get('price')} confirmed_qty={confirmed_qty} confirmed_price={confirmed_price} "
+                    f"reason={reason} touch_fill_hint={fill_price}"
+                )
+        except Exception:
+            pass
+
         if oid and applied:
             self.app._exchange_fill_order_ids.add(oid)
 
@@ -297,6 +310,23 @@ class FillReconciliationService:
             row = None
         if not isinstance(row, dict):
             return "pending"
+
+        # 현재 시점 row 스냅샷(디버그): pending이 반복되면 원인을 확정하기 좋습니다.
+        try:
+            _res_u = str((row or {}).get("result") or "").strip().upper()
+            _fq = int((row or {}).get("filled_qty") or 0)
+            _qp = int((row or {}).get("qty") or 0)
+            _fp = float((row or {}).get("filled_price") or 0)
+            _op = float((row or {}).get("price") or 0)
+            self.log(
+                "🧪 [체결확인-row] "
+                f"code={code} ord={oid} side={side} "
+                f"row.result={_res_u} row.filled_qty={_fq} row.qty={_qp} "
+                f"row.filled_price={_fp} row.price={_op} "
+                f"expect_qty={qty} hint_price={fill_price}"
+            )
+        except Exception:
+            pass
 
         decision = self._exchange_fill_row_decision(row)
         if decision is False:
@@ -503,18 +533,17 @@ class FillReconciliationService:
                                     boost_polling=True,
                                 )
                                 try:
-                                    rt = getattr(self.app, "root", None)
-                                    if rt is not None and hasattr(rt, "after"):
-                                        rt.after(
-                                            0,
-                                            lambda: self.app.portfolio.sync_with_actual_account(
+                                    # GUI 프리징 방지: Tk 메인스레드(root.after)로 즉시 sync를 태우지 않고
+                                    # 백그라운드 스레드에서 처리합니다.
+                                    def _bg_sync() -> None:
+                                        try:
+                                            self.app.portfolio.sync_with_actual_account(
                                                 silent=True, force=True
-                                            ),
-                                        )
-                                    else:
-                                        self.app.portfolio.sync_with_actual_account(
-                                            silent=True, force=True
-                                        )
+                                            )
+                                        except Exception:
+                                            pass
+
+                                    threading.Thread(target=_bg_sync, daemon=True).start()
                                 except Exception:
                                     try:
                                         self.app.portfolio.sync_with_actual_account(

@@ -22,6 +22,11 @@
 - **매수 접수(SUCCESS) 승격 안정화**: ka10085 동기화 직후 `patch_buy_filled_price_after_reconcile()`가 여러 접수(SUCCESS) 행 중 일부를 잘못 스킵해 `filled_qty=0`이 남는 문제를 완화(재료 후보 선택 강화)(`data_manager_v2.py`).
 - **WS 장운영구분 플레이스홀더 정규화**: `0s.fid215`가 `o/q/r` 같은 문자열 플레이스홀더로 들어오는 경우를 placeholder로 취급해 정규장 OFF 확정으로 인한 틱 차단을 완화(`ui/tabs/monitor_tab.py`).
 
+## 0.8.30 (2026-05-20)
+
+- **GUI 프리징 완화(체결 동기화 복구 경로)**: `FillReconciliationService`의 late recover에서 `sync_with_actual_account(force=True)`를 Tk 메인스레드에 바로 태우지 않고 백그라운드 스레드로 처리해 화면 멈춤을 줄임.
+- **체결확인 pending 원인 디버깅**: `try_confirm_fill_once()`의 row 스냅샷과 `applied=False` 실패를 로깅해 “체결은 됐는데 pending으로 남는” 원인을 DB(kt00007 병합/row 확정) vs 로컬 적용(Portfolio.on_fill) 중 어디에서 발생하는지 분리함(`core/fill_reconciliation_service.py`).
+
 ## 0.8.28 (2026-05-20)
 
 - **터치호가 pending→정정 연쇄 완화**: `try_confirm_fill_once`가 `pending`을 반환하는 동안은 즉시 `kt10002` 정정을 보내지 않고, pending이 1회 연속일 때는 amend를 유예하여 RC4033/RC4042 연쇄를 줄입니다(`core/limit_order_watch_service.py`).
