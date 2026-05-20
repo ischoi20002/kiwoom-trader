@@ -1646,9 +1646,48 @@ class DataManagerV2:
                             break
                     except sqlite3.Error:
                         continue
-                if len(rows) != 1:
-                    return
-                rid, fq, oq, old_fp, res_u = rows[0]
+                # 기존 로직은 buy 행이 1건일 때만 패치했는데,
+                # 같은 종목에 대해 접수(SUCCESS)만 남은 buy가 여러 건 누적되면
+                # len(rows) != 1 이 되어 패치가 영구히 스킵될 수 있습니다.
+                # (예: filled_qty=0이 계속 남아 VP(on_fill/확정)가 늦게/누락되는 케이스)
+                selected = None
+                broker_qty_i = int(broker_qty)
+                for (rid0, fq0, oq0, old_fp0, res_u0) in rows:
+                    try:
+                        fq_i0 = int(fq0 or 0)
+                    except (TypeError, ValueError):
+                        fq_i0 = 0
+                    try:
+                        oq_i0 = int(oq0 or 0)
+                    except (TypeError, ValueError):
+                        oq_i0 = 0
+                    if broker_qty_i <= 0 or oq_i0 <= 0:
+                        continue
+                    # 접수만 남은 케이스 위주로 선택
+                    if fq_i0 > 0:
+                        continue
+                    if oq_i0 != broker_qty_i:
+                        continue
+                    res_u_norm0 = str(res_u0 or "").strip().upper()
+                    if res_u_norm0 not in ("SUCCESS", "MOCK", ""):
+                        continue
+                    try:
+                        old_fp_i0 = int(old_fp0 or 0)
+                    except (TypeError, ValueError):
+                        old_fp_i0 = 0
+                    if old_fp_i0 > 0:
+                        # 가격까지 이미 맞춰진 상태면 굳이 패치할 필요가 없습니다.
+                        continue
+                    selected = (rid0, fq0, oq0, old_fp0, res_u_norm0)
+                    break
+
+                # 매칭되는 후보가 없으면 기존 호환을 위해 rows[0]만 처리(=1건 전제)
+                if selected is None:
+                    if len(rows) != 1:
+                        return
+                    rid, fq, oq, old_fp, res_u = rows[0]
+                else:
+                    rid, fq, oq, old_fp, res_u = selected
                 try:
                     fq_i = int(fq or 0)
                 except (TypeError, ValueError):
@@ -1667,7 +1706,7 @@ class DataManagerV2:
                 # 접수(SUCCESS/MOCK)만 남고 잔고와 수량이 맞으면 체결 확정으로 승격
                 try:
                     need_fill_status = (
-                        res_u in ("SUCCESS", "MOCK", "")
+                        str(res_u or "").strip().upper() in ("SUCCESS", "MOCK", "")
                         and fq_i <= 0
                         and oq_i > 0
                         and int(broker_qty) == oq_i

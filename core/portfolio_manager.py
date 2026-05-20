@@ -501,6 +501,70 @@ class PortfolioManager:
         except Exception:
             return False
 
+    def _latest_sell_exit_datetime_for_code(
+        self, code: str, *, within_hours: Optional[float] = None
+    ) -> Optional[datetime]:
+        """
+        최근(설정 시간 이내) 해당 종목에 대해 종료(SELL) 이력이 있으면
+        가장 최근 종료 시각(datetime)을 반환합니다.
+
+        SYNCED 자동등록 생략이 과도하게 걸린 경우(SELL 직후 재진입 등)에
+        'SELL 이후 새 BUY가 발생했는지' 판단을 돕기 위한 보조 함수입니다.
+        """
+        try:
+            nc = self._normalize_stock_code(code)
+            if not nc:
+                return None
+
+            st = self.settings or {}
+            if within_hours is None:
+                try:
+                    raw_m = st.get("sync_ghost_suppress_minutes")
+                    if raw_m is not None and str(raw_m).strip() != "":
+                        mins = float(raw_m)
+                    else:
+                        hrs_legacy = float(st.get("sync_ghost_suppress_hours", 12.0))
+                        mins = hrs_legacy * 60.0
+                except Exception:
+                    mins = 15.0
+                mins = min(max(mins, 2.0), 180.0)
+                cutoff = datetime.now() - timedelta(minutes=mins)
+            else:
+                try:
+                    hrs = float(within_hours)
+                except (TypeError, ValueError):
+                    hrs = 12.0
+                hrs = max(0.25, min(hrs, 168.0))
+                cutoff = datetime.now() - timedelta(hours=hrs)
+
+            latest_exit: Optional[datetime] = None
+            for pos in reversed(self.virtual_history):
+                try:
+                    pc = self._normalize_stock_code(str(pos.get("code", "")))
+                except Exception:
+                    continue
+                if pc != nc:
+                    continue
+                evs = pos.get("events") or []
+                has_sell = any(
+                    str(e.get("action", "")).upper() == "SELL"
+                    for e in evs
+                    if isinstance(e, dict)
+                )
+                if not has_sell:
+                    continue
+                ex_dt = self._parse_history_exit_datetime(pos)
+                if ex_dt is None:
+                    continue
+                if ex_dt < cutoff:
+                    # reversed 순회이므로 최신 종료가 cutoff보다 작으면 종료
+                    break
+                latest_exit = ex_dt
+                break
+            return latest_exit
+        except Exception:
+            return None
+
     def _cost_basis_from_buy_events(
         self, pos: Dict[str, Any]
     ) -> Optional[Tuple[float, float, int]]:
@@ -884,18 +948,56 @@ class PortfolioManager:
                     except (TypeError, ValueError):
                         nh = 1.0
                     nh = max(0.1, min(nh, 48.0))
-                    if self._recent_sell_exit_exists_for_code(
+                    # 최근 실매도 종료(ghost 방지) 스킵은 "서버 잔고가 0인데 로컬만 남은" 경우에만
+                    # 의미가 있습니다. 서버 보유가 qty>0인데도 SYNCED 등록을 스킵하면
+                    # "체결은 됐는데 VP로 안 올라오는" 현상이 생깁니다.
+                    qty_i = 0
+                    try:
+                        qty_i = int(qty or 0)
+                    except Exception:
+                        qty_i = 0
+
+                    if qty_i <= 0 and self._recent_sell_exit_exists_for_code(
                         code, within_hours=nh
                     ):
-                        if not silent:
+                        # SELL 직후 재진입(새 BUY)인데도 SYNCED 등록이 스킵되면
+                        # "체결은 됐는데 보유종목으로 안 올라오는" 현상이 생깁니다.
+                        # 따라서 SELL 이후 새 BUY SUCCESS/filled가 들어왔는지 보고 허용합니다.
+                        allow_register = False
+                        try:
+                            last_sell_dt = self._latest_sell_exit_datetime_for_code(
+                                code, within_hours=nh
+                            )
+                        except Exception:
+                            last_sell_dt = None
+
+                        try:
+                            lb = self.data_manager.get_last_successful_buy_for_code(
+                                self._normalize_stock_code(code)
+                            )
+                        except Exception:
+                            lb = None
+
+                        if last_sell_dt is not None and lb is not None:
                             try:
-                                self.log(
-                                    f"[Sync] {code}({name}) SYNCED 자동등록 생략 — "
-                                    f"최근 {nh:.1f}h 이내 실매도 종료 이력 있음(잔고 유령 방지)"
+                                buy_ts = str(lb.get("timestamp") or "").strip()
+                                buy_dt = datetime.strptime(
+                                    buy_ts[:19], "%Y-%m-%d %H:%M:%S"
                                 )
+                                allow_register = buy_dt > last_sell_dt
                             except Exception:
-                                pass
-                        continue
+                                allow_register = False
+
+                        if not allow_register:
+                            if not silent:
+                                try:
+                                    self.log(
+                                        f"[Sync] {code}({name}) SYNCED 자동등록 생략 — "
+                                        f"최근 {nh:.1f}h 이내 실매도 종료 이력 있음(잔고 유령 방지)"
+                                    )
+                                except Exception:
+                                    pass
+                            continue
                     _sync_sig = "TYPE_A"
                     try:
                         mi = getattr(self.app, "monitor_info", None) or {}

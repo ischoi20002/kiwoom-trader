@@ -484,22 +484,36 @@ class LimitOrderWatchService:
         if self._touch_try_confirm_fill(meta, current_ord):
             return
 
-        # try_confirm_fill_once가 pending이면, "너무 이른 amend"를 줄이기 위해 1회 연속 pending 동안은 amend를 생략합니다.
+        # try_confirm_fill_once가 pending인 경우:
+        # - 너무 이른 kt10002 정정으로 RC4033/RC4042 연쇄가 발생하는 걸 줄이기 위해
+        #   "pending인 동안은 amend를 보내지 않고" 다음 확인만 예약합니다.
+        # - 단, pending이 너무 오래 지속되면(=감시 루프가 진행되지 않으면) 기존 정책대로
+        #   지정된 최대 회차(touch_quote_order_max_amends)에 도달했을 때 취소(timeout)로 흡수합니다.
         try:
             pending_cnt = int(getattr(meta, "touch_pending_confirm_cnt", 0) or 0)
         except Exception:
             pending_cnt = 0
-        if pending_cnt <= 1:
-            self._schedule_touch_timer(chain_key)
-            return
-
-        # pending이 연속으로(2회 이상) 누적된 경우에만 amend 진행
-        try:
-            meta.touch_pending_confirm_cnt = 0
-        except Exception:
-            pass
 
         max_a = self._get_touch_max_amends()
+        if pending_cnt > 0:
+            try:
+                if meta.touch_amend_attempts_done < max_a:
+                    meta.touch_amend_attempts_done = int(
+                        meta.touch_amend_attempts_done or 0
+                    ) + 1
+                    self._schedule_touch_timer(chain_key)
+                    return
+            except Exception:
+                # 카운트 갱신 실패해도 최소한 amend 대신 다음 확인 예약은 유지
+                try:
+                    self._schedule_touch_timer(chain_key)
+                    return
+                except Exception:
+                    pass
+            self.timeout(current_ord)
+            return
+
+        # pending이 아닌 경우(=filled/terminal/skipped로 clear된 케이스 외)에는 기존 amend 로직으로 진행합니다.
         if meta.touch_amend_attempts_done < max_a:
             # 다음 정정 시도 횟수 소진 여부(에러 타입에 따라 조정)
             try:

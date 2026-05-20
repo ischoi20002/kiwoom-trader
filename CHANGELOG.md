@@ -15,6 +15,13 @@
 
 
 
+## 0.8.29 (2026-05-20)
+
+- **터치호가 amend 유예(추가 방어)**: `try_confirm_fill_once`가 `pending`이면 정정(amend)을 보내지 않고 다음 확인만 예약(ghost/RC4033·RC4042 연쇄 완화)(`core/limit_order_watch_service.py`).
+- **보유종목 등록 누락(SYNCED 스킵 완화)**: ka10085 동기화에서 최근 SELL 종료(잔고 유령 방지) 스킵이 과도하게 적용되어 체결은 됐는데 VP에 안 올라오는 케이스를 완화(서버 보유 qty>0 또는 SELL 이후 새 BUY가 있으면 허용) (`core/portfolio_manager.py`).
+- **매수 접수(SUCCESS) 승격 안정화**: ka10085 동기화 직후 `patch_buy_filled_price_after_reconcile()`가 여러 접수(SUCCESS) 행 중 일부를 잘못 스킵해 `filled_qty=0`이 남는 문제를 완화(재료 후보 선택 강화)(`data_manager_v2.py`).
+- **WS 장운영구분 플레이스홀더 정규화**: `0s.fid215`가 `o/q/r` 같은 문자열 플레이스홀더로 들어오는 경우를 placeholder로 취급해 정규장 OFF 확정으로 인한 틱 차단을 완화(`ui/tabs/monitor_tab.py`).
+
 ## 0.8.28 (2026-05-20)
 
 - **터치호가 pending→정정 연쇄 완화**: `try_confirm_fill_once`가 `pending`을 반환하는 동안은 즉시 `kt10002` 정정을 보내지 않고, pending이 1회 연속일 때는 amend를 유예하여 RC4033/RC4042 연쇄를 줄입니다(`core/limit_order_watch_service.py`).

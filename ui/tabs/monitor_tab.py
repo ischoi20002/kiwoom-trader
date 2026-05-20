@@ -2052,6 +2052,14 @@ class MonitorTab:
                             except Exception:
                                 pass
                         op_code = ""
+                    # 모의/특정 브로커/테스트 데이터에서 0s.fid215가 숫자가 아닌 문자로
+                    # ('o'/'q'/'r' 등) 들어오는 경우가 있습니다.
+                    # 이 값을 "명시적 fid"로 확정하면 정규장 OFF로 내려가 0B/0D 틱이
+                    # 전부 continue(스킵)되어 "틱이 안 들어오는 것처럼" 보입니다.
+                    # 따라서 숫자형 정규장 코드(3/4, 03/04)로 확정되지 않으면
+                    # placeholder로 취급하여 폴백 경로를 유지합니다.
+                    if op_code in ("o", "q", "r"):
+                        op_code = ""
                     if not op_code:
                         # 215 비어 있음: WS 플래그는 OFF 유지하되, 틱은 _effective_regular_session_for_stream_ticks() 에서 로컬 정규장 폴백
                         if not self._ws_0s_diag_empty_logged:
