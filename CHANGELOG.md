@@ -15,6 +15,10 @@
 
 
 
+## 0.8.28 (2026-05-20)
+
+- **터치호가 pending→정정 연쇄 완화**: `try_confirm_fill_once`가 `pending`을 반환하는 동안은 즉시 `kt10002` 정정을 보내지 않고, pending이 1회 연속일 때는 amend를 유예하여 RC4033/RC4042 연쇄를 줄입니다(`core/limit_order_watch_service.py`).
+
 ## 0.8.27 (2026-05-19)
 
 - **터치호가 체결확인 레이턴시 완화**: `exchange_fill_confirm_retry_interval_sec` 기본값을 `5초`로 상향해(설정·기본값·폴링 첫 확인) DB/체결 반영 지연 레이스로 인한 불필요한 정정을 줄임(`settings.json`, `core/defaults.py`, `core/limit_order_watch_service.py`, `core/fill_reconciliation_service.py`).

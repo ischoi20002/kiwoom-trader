@@ -22,6 +22,8 @@ class LimitOrderMeta:
     touch_name: str = ""
     touch_reason: str = ""
     touch_amend_attempts_done: int = 0
+    # kt00007/DB 체결확인 결과가 pending으로 계속 나오는 동안은 너무 이른 정정(amend)을 피하기 위한 카운터
+    touch_pending_confirm_cnt: int = 0
     # True: (정정 시도 1회) 횟수 소진으로 카운트
     # False: 체결 동기화/DB 반영 대기 목적(예: RC4042)이라면 소진하지 않음
     touch_amend_should_increment: bool = True
@@ -451,6 +453,20 @@ class LimitOrderWatchService:
                 )
         except Exception:
             pass
+        # pending이면 "정정(amend)로 바로 가지 않도록" 카운터를 올립니다.
+        if status == "pending":
+            try:
+                meta.touch_pending_confirm_cnt = int(meta.touch_pending_confirm_cnt or 0) + 1
+            except Exception:
+                pass
+            return False
+
+        # pending이 아닌 경우(=확정/종료 등) 카운터 초기화
+        try:
+            meta.touch_pending_confirm_cnt = 0
+        except Exception:
+            pass
+
         if status in ("filled", "terminal", "skipped"):
             try:
                 self.clear(current_ord)
@@ -467,6 +483,21 @@ class LimitOrderWatchService:
 
         if self._touch_try_confirm_fill(meta, current_ord):
             return
+
+        # try_confirm_fill_once가 pending이면, "너무 이른 amend"를 줄이기 위해 1회 연속 pending 동안은 amend를 생략합니다.
+        try:
+            pending_cnt = int(getattr(meta, "touch_pending_confirm_cnt", 0) or 0)
+        except Exception:
+            pending_cnt = 0
+        if pending_cnt <= 1:
+            self._schedule_touch_timer(chain_key)
+            return
+
+        # pending이 연속으로(2회 이상) 누적된 경우에만 amend 진행
+        try:
+            meta.touch_pending_confirm_cnt = 0
+        except Exception:
+            pass
 
         max_a = self._get_touch_max_amends()
         if meta.touch_amend_attempts_done < max_a:
