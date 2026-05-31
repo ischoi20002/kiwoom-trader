@@ -237,7 +237,7 @@ class HarvestService:
             time.sleep(0.3)
             
         # total_fetched는 "API가 준 청크 중 필터 통과 건수"라 중복(INSERT OR IGNORE)일 수 있습니다.
-        # 실제로 1m 범위가 확장되었을 때만 15m 리샘플/1d 집계를 수행해 시간을 줄입니다.
+        # 실제로 1m 범위가 확장되었을 때만 15m 리샘플·FDR 일봉 반영을 수행해 시간을 줄입니다.
         try:
             new_last_sync = self.db.get_last_sync_time(code)
             new_earliest_sync = self.db.get_earliest_sync_time(code)
@@ -283,18 +283,15 @@ class HarvestService:
             self.log(
                 f"[OK] {code} 처리 완료: 신규 1분봉 {total_fetched}개(bars_1m) + 15분봉 테이블 갱신(bars_15m)"
             )
-            # 1분봉 → 일봉(bars_1d) 집계: 동적 백테·DB 일봉 선정 경로용
+            # FDR → bars_1d: 동적 백테·감시 선정과 동일 일봉 소스
             try:
-                if start_day and end_day:
-                    ok = self.db.rebuild_daily_bars_from_1m_range(code, start_day, end_day)
-                else:
-                    ok = self.db.rebuild_daily_bars_from_1m(code)
+                ok = self.db.sync_daily_bars_from_fdr_to_required_eod(code)
                 if ok:
-                    self.log(f"   - {code}: bars_1d(일봉) 1m 집계 반영 완료")
-                    self._codes_1d_rebuilt_inline.add(_nk)
+                    self.log(f"   - {code}: bars_1d(FDR) 최신 EOD 반영 완료")
+                    self._codes_1d_fdr_synced.add(_nk)
             except Exception as e:
                 try:
-                    self.log(f"   ⚠️ {code}: bars_1d 집계 실패(무시하고 계속): {e}")
+                    self.log(f"   ⚠️ {code}: bars_1d(FDR) 반영 실패(무시하고 계속): {e}")
                 except Exception:
                     pass
         else:
@@ -554,9 +551,9 @@ class HarvestService:
         # 종목별 sync_meta를 한 번에 적재해 is_data_complete()의 DB 왕복을 제거합니다.
         self._preload_sync_meta_cache(all_codes)
 
-        # 이번 런에서 1m가 실제로 쌓인 종목 / harvest_code 안에서 이미 1d까지 재집계한 종목
+        # 이번 런에서 1m가 실제로 쌓인 종목 / harvest_code 안에서 FDR 1d까지 반영한 종목
         self._codes_1m_updated: set[str] = set()
-        self._codes_1d_rebuilt_inline: set[str] = set()
+        self._codes_1d_fdr_synced: set[str] = set()
 
         for idx, code in enumerate(all_codes):
             if not self.running: break
@@ -580,8 +577,8 @@ class HarvestService:
                 # 이미 최신이거나(보통 continue로 여기까지 오지 않지만) DB 범위 확장 없음이면 대기 최소화
                 time.sleep(0.02)
 
-        # 1m 대비 bars_1d 누락·인라인 집계 실패분만 보강 (매 런 전 유니버스 전체 리빌드는 생략)
-        self.log("📅 [1m→1d] 주식 유니버스 bars_1d 조건부 보강(누락·이번 런 1m 미반영분)…")
+        # FDR → bars_1d: 1m 적재 여부와 무관하게 EOD 기준 일봉 보강
+        self.log("📅 [FDR→1d] 유니버스 bars_1d 조건부 보강(마지막 완결 거래일 기준)…")
         n_1d_ok = 0
         n_1d_skip = 0
         for j, code in enumerate(all_codes):
@@ -592,24 +589,24 @@ class HarvestService:
             except Exception:
                 ncode = str(code).strip()
             try:
-                behind = self.db.is_daily_bars_behind_1m(code)
+                behind = self.db.is_daily_bars_behind_required_eod(code)
             except Exception:
                 behind = True
             need = behind or (
                 ncode in self._codes_1m_updated
-                and ncode not in self._codes_1d_rebuilt_inline
+                and ncode not in self._codes_1d_fdr_synced
             )
             if not need:
                 n_1d_skip += 1
                 continue
             try:
-                if self.db.rebuild_daily_bars_from_1m(code):
+                if self.db.sync_daily_bars_from_fdr_to_required_eod(code):
                     n_1d_ok += 1
             except Exception as e:
                 if j < 5:
-                    self.log(f"   ⚠️ [1m→1d] {code}: {e}")
+                    self.log(f"   ⚠️ [FDR→1d] {code}: {e}")
         self.log(
-            f"   [1m→1d] 집계 반영 종목: {n_1d_ok}, 스킵(이미 최신): {n_1d_skip}"
+            f"   [FDR→1d] 반영 종목: {n_1d_ok}, 스킵(이미 최신): {n_1d_skip}"
         )
 
         # 대량 적재 후 플래너 통계 갱신 (조회 지연 완화에 유리, 락은 짧음)

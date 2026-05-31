@@ -15,6 +15,15 @@
 
 
 
+## 0.8.32 (2026-05-31)
+
+- **bars_1d 소스 FDR 통일**: 하베스팅·`update_historical_data`·`update_daily_data`가 1m 집계 대신 FDR 일봉을 `bars_1d`에 반영. 감시 선정(`api_only`)·동적 백테(`prepare_dynamic_universe`)와 동일 일봉 정의(`data_manager_v2.py`, `harvest_service.py`).
+- **FDR 일봉 API**: `sync_daily_bars_from_fdr*`, `is_daily_bars_behind_required_eod`, `fetch_fdr_daily_dataframe` (`data_manager_v2.py`).
+- **과거 bars_1d 백필 도구**: `tools/backfill_bars_1d_from_fdr.py` — 유니버스×구간 FDR → `bars_1d` 일괄 교체.
+- **감시 api_only EOD 앵커**: `target_date` 미지정 시 `required_eod_bar_date_asof_local()` 15:30 기준(`strategy_selector.py`).
+- **설정**: `monitor_pre_selection_bars_1d_source` 기본값 `fdr` (`core/defaults.py`, `settings.json`).
+- **감시·백테 선정 비교**: 「백테스팅 선정목록」 버튼으로 `selected_targets.csv` vs DB `bars_1d` 선정 대조(`ui/tabs/monitor_tab.py`, `core/selection_compare.py`).
+
 ## 0.8.31 (2026-05-31)
 
 - **하베스팅 DB 완결성 판정 수정**: 장 개시 전 완결 여부를 기준 종목 DB `last_sync`(오래된 값)로 판단하던 문제를 KRX 캘린더 `required_eod_bar_datetime_asof_local()` 기준으로 교체해, 최신 거래일 15:30 미만 데이터가 잘못 스킵되지 않도록 함(`harvest_service.py`, `reporting/krx_trading_calendar.py`).

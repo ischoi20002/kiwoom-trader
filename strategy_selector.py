@@ -1298,7 +1298,17 @@ def select_monitoring_targets(
                     return None, status
                 # 실시간 api_only: 키움 ka10081(토큰 있을 때) → 없으면 FDR
                 try:
-                    end_anchor = target_date if target_date else datetime.now()
+                    if target_date:
+                        end_anchor = target_date
+                    else:
+                        from reporting.krx_trading_calendar import (
+                            required_eod_bar_date_asof_local,
+                        )
+
+                        req_d = required_eod_bar_date_asof_local()
+                        end_anchor = datetime(
+                            req_d.year, req_d.month, req_d.day, 15, 30, 0
+                        )
                 except Exception:
                     end_anchor = datetime.now()
                 max_d = end_anchor.strftime('%Y-%m-%d')

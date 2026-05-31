@@ -43,7 +43,7 @@
     "realtime_warmup_retry_delay_sec": 30.0,
     "use_intraday_api_backfill": true,
     "require_full_warmup_for_monitoring": false,
-    "monitor_pre_selection_bars_1d_source": "from_1m_aggregate",
+    "monitor_pre_selection_bars_1d_source": "fdr",
     "monitor_pre_selection_rebuild_sleep_sec": 0.02,
     "incremental_warmup_stream": false,
     "realtime_tick_flush_ms": 150,

@@ -17,7 +17,10 @@ from core.monitor_code_sets import (
     monitor_selection_codes_set,
     watchlist_only_codes_set,
 )
-from core.monitor_signal_status_display import monitor_signal_status_display_text
+from core.selection_compare import (
+    load_selection_csv,
+    log_selection_comparison,
+)
 from core.terminal_trace import terminal_trace
 from backtest_engine import TradingStrategy
 from kiwoom_rest_api.auth.token import TokenManager
@@ -960,6 +963,13 @@ class MonitorTab:
 
         # 실시간 감시 시작/중단과 동일 폭(폰트 기준 문자 단위). 한글·이모지 여유.
         _monitor_ctrl_btn_w = 20
+        self.btn_compare_bt_sel = ttk.Button(
+            self.ctrl_frame,
+            text="백테스팅 선정목록",
+            width=_monitor_ctrl_btn_w,
+            style="Action.TButton",
+            command=self.start_bt_selection_compare_thread,
+        )
         self.btn_select = ttk.Button(
             self.ctrl_frame,
             text="일일 감시목록 선정",
@@ -981,9 +991,9 @@ class MonitorTab:
             font=("Malgun Gothic", 10),
             foreground=self.app.colors["primary"],
         )
-        # 오른쪽 묶음: 읽기 순서(왼→오) = 상태 | 실시간 감시 시작/중단 | 일일 감시목록 선정
+        # 오른쪽 묶음: 읽기 순서(왼→오) = 상태 | 실시간 감시 | 일일 감시목록 선정 | 백테스팅 선정목록
         # side=RIGHT 는 먼저 pack 한 위젯이 부모의 오른쪽에 붙고, 다음은 그 왼쪽에 이어 붙음.
-        # 상태 라벨을 왼쪽에 두면 문구 길이가 바뀌어도 두 버튼은 오른쪽 고정으로 겹침·밀림이 줄어듦.
+        self.btn_compare_bt_sel.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 8))
         self.lbl_monitor_status.pack(side=tk.RIGHT, padx=(4, 0))
@@ -1400,6 +1410,173 @@ class MonitorTab:
             finish_on_main()
 
         _finalize_ui("종목 선정 완료")
+
+    def start_bt_selection_compare_thread(self) -> None:
+        """백테스트·DB 일봉 선정과 일일 감시목록 선정 결과를 비교합니다."""
+        try:
+            if getattr(self, "btn_compare_bt_sel", None) is not None:
+                self.btn_compare_bt_sel.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        threading.Thread(
+            target=self.compare_backtest_vs_live_selection,
+            daemon=True,
+        ).start()
+
+    def compare_backtest_vs_live_selection(self) -> None:
+        """
+        A: 일일 감시목록(selected_targets.csv 또는 현재 monitor_codes)
+        B: trading_data.db bars_1d 기반 선정(db_only — 동적 백테스트와 동일 일봉 소스)
+        """
+        summary: Optional[Dict[str, Any]] = None
+        live_df: Optional[pd.DataFrame] = None
+        bt_df: Optional[pd.DataFrame] = None
+        live_label = ""
+
+        def _finalize_ui(done_message: str = "선정 비교 대기") -> None:
+            def _job() -> None:
+                try:
+                    self.lbl_monitor_status.config(
+                        text=f"상태: {done_message}",
+                        foreground=self.app.colors["primary"],
+                    )
+                except Exception:
+                    pass
+                try:
+                    if getattr(self, "btn_compare_bt_sel", None) is not None:
+                        self.btn_compare_bt_sel.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+
+            try:
+                self.app.root.after(0, _job)
+            except Exception:
+                _job()
+
+        try:
+            self.app.log(
+                "\n🔍 [선정 비교] 백테스팅·DB 일봉(db_only) 선정을 실행하고 "
+                "일일 감시목록 결과와 대조합니다…"
+            )
+
+            # A — 일일 감시 선정 결과
+            csv_live = os.path.join(os.getcwd(), "selected_targets.csv")
+            try:
+                if os.path.isfile(csv_live):
+                    live_df = load_selection_csv(csv_live)
+                    live_label = f"일일 감시목록 ({os.path.basename(csv_live)})"
+                elif getattr(self.app, "monitor_codes", None):
+                    codes = [
+                        str(c).strip().zfill(6)
+                        for c in (self.app.monitor_codes or [])
+                        if c
+                    ]
+                    if codes:
+                        live_df = pd.DataFrame({"Code": codes})
+                        live_label = "현재 감시 등록(monitor_codes)"
+            except Exception as e:
+                self.app.log(f"⚠️ [선정 비교] 감시목록 로드 실패: {e}")
+
+            if live_df is None or live_df.empty:
+                self.app.log(
+                    "⚠️ [선정 비교] 비교 기준(A)이 없습니다. "
+                    "먼저 「일일 감시목록 선정」을 실행하거나 selected_targets.csv 를 준비하세요."
+                )
+                _finalize_ui("선정 비교 — 감시목록 없음")
+                return
+
+            # B — DB 일봉 선정(동적 백테스트와 동일 bars_1d)
+            db_eod_hint = ""
+            try:
+                dm = getattr(self.app, "data_manager", None)
+                if dm is not None:
+                    d_eod = dm.get_latest_daily_bar_date_in_db()
+                    if d_eod is not None:
+                        db_eod_hint = d_eod.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+            try:
+                bt_df = strategy_selector.select_monitoring_targets(
+                    settings=self.app.settings,
+                    logger_callback=self.app.log,
+                    data_manager=self.app.data_manager,
+                    selection_ohlcv_source="db_only",
+                )
+            except strategy_selector.SelectionDbStaleError as e:
+                self.app.log(f"⛔ [선정 비교] DB 일봉이 오래되었거나 부족합니다: {e}")
+                self.app.log(
+                    "⛔ [선정 비교] DB 하베스팅을 완료한 뒤 다시 시도하세요."
+                )
+                _finalize_ui("선정 비교 — DB 부족")
+                return
+
+            if bt_df is None or bt_df.empty:
+                self.app.log(
+                    "⚠️ [선정 비교] DB 일봉(db_only) 선정 결과가 비어 있습니다. "
+                    "bars_1d 하베스팅(FDR→1d)을 확인하세요."
+                )
+                _finalize_ui("선정 비교 — DB 선정 없음")
+                return
+
+            # 비교용 CSV 저장(도구 compare_selection_csvs.py 와 호환)
+            try:
+                bt_csv = os.path.join(os.getcwd(), "selected_targets_from_db.csv")
+                bt_df.to_csv(bt_csv, index=False, encoding="utf-8-sig")
+                self.app.log(f"💾 [선정 비교] DB 선정 저장: {bt_csv}")
+            except Exception as e:
+                self.app.log(f"⚠️ [선정 비교] selected_targets_from_db.csv 저장 실패: {e}")
+
+            bt_label = "백테·DB 일봉(db_only)"
+            summary = log_selection_comparison(
+                self.app.log,
+                live_df=live_df,
+                bt_df=bt_df,
+                live_label=live_label,
+                bt_label=bt_label,
+                db_eod_hint=db_eod_hint,
+            )
+
+            def _show_summary_popup() -> None:
+                try:
+                    if summary is None:
+                        return
+                    same = summary.get("set_equal") and summary.get("order_equal")
+                    title = "선정 비교 — 일치" if same else "선정 비교 — 차이 있음"
+                    only_a = len(summary.get("only_live") or [])
+                    only_b = len(summary.get("only_bt") or [])
+                    body = (
+                        f"A(감시): {summary.get('live_count', 0)}종목\n"
+                        f"B(백테·DB): {summary.get('bt_count', 0)}종목\n\n"
+                        f"집합 동일: {'예' if summary.get('set_equal') else '아니오'}\n"
+                        f"순서 동일: {'예' if summary.get('order_equal') else '아니오'}\n"
+                        f"A에만: {only_a}개  |  B에만: {only_b}개\n"
+                    )
+                    if db_eod_hint:
+                        body += f"\nDB 일봉 기준일: {db_eod_hint}"
+                    body += "\n\n자세한 목록은 하단 로그창을 확인하세요."
+                    if same:
+                        messagebox.showinfo(title, body, parent=self.parent)
+                    else:
+                        messagebox.showwarning(title, body, parent=self.parent)
+                except Exception:
+                    pass
+
+            try:
+                self.app.root.after(0, _show_summary_popup)
+            except Exception:
+                _show_summary_popup()
+
+            _finalize_ui("선정 비교 완료")
+        except Exception as e:
+            import traceback
+
+            try:
+                self.app.log(f"❌ [선정 비교] 예외: {e}")
+                self.app.log(f"DEBUG Traceback:\n{traceback.format_exc()}")
+            except Exception:
+                pass
+            _finalize_ui("선정 비교 오류")
 
     def get_tree_display_price(self, code: str) -> Optional[float]:
         """
