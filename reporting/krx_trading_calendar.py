@@ -136,6 +136,17 @@ def required_eod_bar_date_asof_local(now: Optional[datetime] = None) -> date:
         return d
 
 
+def required_eod_bar_datetime_asof_local(now: Optional[datetime] = None) -> Optional[datetime]:
+    """
+    하베스팅·DB 완결성 판정용: 반드시 포함되어야 할 마지막 **1분봉** 시각(해당 영업일 15:30:00).
+    """
+    try:
+        req_d = required_eod_bar_date_asof_local(now)
+        return datetime(req_d.year, req_d.month, req_d.day, 15, 30, 0)
+    except Exception:
+        return None
+
+
 def is_krx_regular_session_local(now: Optional[datetime] = None) -> bool:
     """
     PC 로컬 시각을 한국장 기준으로 본다고 가정할 때, KRX 정규장(09:00~15:30) 구간 여부.

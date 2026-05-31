@@ -15,6 +15,11 @@
 
 
 
+## 0.8.31 (2026-05-31)
+
+- **하베스팅 DB 완결성 판정 수정**: 장 개시 전 완결 여부를 기준 종목 DB `last_sync`(오래된 값)로 판단하던 문제를 KRX 캘린더 `required_eod_bar_datetime_asof_local()` 기준으로 교체해, 최신 거래일 15:30 미만 데이터가 잘못 스킵되지 않도록 함(`harvest_service.py`, `reporting/krx_trading_calendar.py`).
+- **하베스팅 DB 경로 고정**: `os.getcwd()` 대신 `DataManagerV2.DEFAULT_DB_PATH`를 사용해 GUI와 동일한 `trading_data.db`를 참조(`harvest_service.py`).
+
 ## 0.8.29 (2026-05-20)
 
 - **터치호가 amend 유예(추가 방어)**: `try_confirm_fill_once`가 `pending`이면 정정(amend)을 보내지 않고 다음 확인만 예약(ghost/RC4033·RC4042 연쇄 완화)(`core/limit_order_watch_service.py`).
