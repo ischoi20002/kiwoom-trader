@@ -15,6 +15,10 @@
 
 
 
+## 0.8.34 (2026-06-02)
+
+- **주문 로직 독립 분리**: 매수/매도 집행·미체결 감시·체결 동기화·액션 큐를 `core/execution/` 패키지로 모음. `OrderExecutionService`(S1/S2/EXIT), `OrderActionDispatcher`(워커 큐), 기존 fill/limit/post-fill 서비스 이동. `TradingController`·`k_trader_gui`는 thin delegate 유지 — 이후 전면 개편 대비.
+
 ## 0.8.33 (2026-06-02)
 
 - **감시 트리 신호상태 고정**: `monitor_tab.py`에 `monitor_signal_status_display_text` import 누락으로 선정·갱신 실패하던 문제 수정. 워밍업·`대기` 문구가 합치도를 가리지 않도록 플레이스홀더 확장(`core/monitor_signal_status_display.py`).
