@@ -17,6 +17,7 @@ from core.monitor_code_sets import (
     monitor_selection_codes_set,
     watchlist_only_codes_set,
 )
+from core.monitor_signal_status_display import monitor_signal_status_display_text
 from core.selection_compare import (
     load_selection_csv,
     log_selection_comparison,

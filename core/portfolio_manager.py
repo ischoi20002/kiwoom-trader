@@ -53,6 +53,11 @@ class PortfolioManager:
         # D+2 축소 안내 로그 스로틀(틱마다 동일 메시지 반복 방지)
         self._d2_shrink_log_ts: float = 0.0
         self._d2_shrink_log_sig: Optional[Tuple[int, int]] = None
+        # 체결 직후 on_fill 연속 호출 시 포지션 탭 전체 리빌드를 한 번으로 묶음
+        self._gui_cb_after_id: Any = None
+        self._gui_cb_last_flush_ts: float = 0.0
+        self._gui_cb_dirty: bool = False
+        self._gui_cb_in_progress: bool = False
 
     def _virtual_db_path(self) -> str:
         """종료내역 JSON — config.USE_MOCK 에 따라 virtual_db_mock.json / virtual_db_live.json."""
@@ -62,29 +67,136 @@ class PortfolioManager:
             root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             return os.path.join(root, "virtual_db_mock.json")
 
+    def _portfolio_gui_callback_debounce_ms(self) -> int:
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            ms = int(float(st.get("portfolio_gui_callback_debounce_ms", 1200)))
+            return max(200, min(ms, 5000))
+        except Exception:
+            return 1200
+
+    def _schedule_portfolio_ui_refresh(self, *, light: bool = False) -> None:
+        """
+        체결·동기화 후 UI 갱신.
+        light=True: 보유 행·요약·주문 로그만(전체 리빌드·금일손익 REST 재계산 생략).
+        """
+        if light:
+            try:
+                app = self.app
+                fn = getattr(app, "request_virtual_tab_sync_light_refresh", None)
+                if callable(fn):
+                    fn()
+                    return
+            except Exception:
+                pass
+        self._schedule_gui_callback()
+
+    def is_redundant_late_exchange_sell_fill(
+        self, code: str, order_no: Optional[str]
+    ) -> bool:
+        """
+        계좌 동기화로 보유가 이미 비워진 뒤 kt00007 매도 체결이 늦게 오면
+        종료내역 보강·전체 GUI 리빌드를 생략합니다.
+        """
+        try:
+            ncode = self._normalize_stock_code(code)
+        except Exception:
+            try:
+                ncode = str(code).split("_")[0].zfill(6)
+            except Exception:
+                ncode = ""
+        if not ncode:
+            return False
+        oid = str(order_no or "").strip()
+        try:
+            with self.lock:
+                if ncode in self.virtual_positions:
+                    return False
+                if oid and oid in self._orphan_sell_order_ids:
+                    return True
+        except Exception:
+            pass
+        if oid:
+            try:
+                row = self.data_manager.get_order_history_row_by_order_no(oid)
+            except Exception:
+                row = None
+            if isinstance(row, dict):
+                try:
+                    side = str(row.get("side", "") or "").strip().lower()
+                    fq = int(row.get("filled_qty", 0) or 0)
+                    res = str(row.get("result", "") or "").strip().upper()
+                    if side == "sell" and fq > 0:
+                        if res in ("FILLED", "SUCCESS") or fq > 0:
+                            return True
+                except Exception:
+                    pass
+        return False
+
     def _schedule_gui_callback(self) -> None:
         """
         gui_callback(포지션 관리 탭 전체 갱신 등)은 체결·WS·백그라운드 스레드에서 트리거될 수 있습니다.
-        Tkinter 위젯은 메인 스레드에서만 안전하므로 root.after(0)으로 넘깁니다.
+        연속 호출은 trailing debounce 로 한 번만 메인 스레드에서 실행합니다.
         """
         if not self.gui_callback:
             return
         try:
+            self._gui_cb_dirty = True
+        except Exception:
+            pass
+        try:
             root = getattr(self.app, "root", None)
-            if root is not None:
-                root.after(0, self._run_gui_callback_on_main)
-            else:
+            if root is None:
                 self.gui_callback()
+                return
+            delay = int(self._portfolio_gui_callback_debounce_ms())
+            try:
+                if self._gui_cb_after_id is not None:
+                    root.after_cancel(self._gui_cb_after_id)
+            except Exception:
+                pass
+            self._gui_cb_after_id = root.after(delay, self._flush_gui_callback_on_main)
         except Exception:
             try:
                 self.gui_callback()
             except Exception as e:
                 self.log(f"⚠️ [Portfolio] GUI 콜백 실패: {e}")
 
-    def _run_gui_callback_on_main(self) -> None:
+    def _flush_gui_callback_on_main(self) -> None:
         try:
-            if self.gui_callback:
+            self._gui_cb_after_id = None
+            if not self._gui_cb_dirty:
+                return
+            if not self.gui_callback:
+                return
+            if bool(getattr(self, "_gui_cb_in_progress", False)):
+                try:
+                    root = getattr(self.app, "root", None)
+                    if root is not None:
+                        delay = int(self._portfolio_gui_callback_debounce_ms())
+                        self._gui_cb_after_id = root.after(
+                            max(120, delay), self._flush_gui_callback_on_main
+                        )
+                except Exception:
+                    pass
+                return
+            self._gui_cb_dirty = False
+            self._gui_cb_in_progress = True
+            try:
+                self._gui_cb_last_flush_ts = time.time()
                 self.gui_callback()
+            finally:
+                self._gui_cb_in_progress = False
+            if bool(getattr(self, "_gui_cb_dirty", False)):
+                try:
+                    root = getattr(self.app, "root", None)
+                    if root is not None:
+                        delay = int(self._portfolio_gui_callback_debounce_ms())
+                        self._gui_cb_after_id = root.after(
+                            delay, self._flush_gui_callback_on_main
+                        )
+                except Exception:
+                    pass
         except Exception as e:
             self.log(f"⚠️ [Portfolio] GUI 콜백 예외: {e}")
 
@@ -826,6 +938,8 @@ class PortfolioManager:
         force: bool = False,
         *,
         refresh_cash_deposit: bool = True,
+        schedule_gui_refresh: bool = True,
+        schedule_orders_refresh: bool = True,
     ) -> None:
         """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 포지션을 동기화 (Reconciliation)"""
         # [v4.5.1 API Throttle] 자동 동기화만 쿨다운; 동기화 버튼(force=True)은 즉시 실행
@@ -1176,7 +1290,8 @@ class PortfolioManager:
             self._dedupe_all_vp_keys()
 
         self.save_db()
-        self._schedule_gui_callback()
+        if schedule_gui_refresh:
+            self._schedule_portfolio_ui_refresh(light=bool(silent))
 
         ambiguous_zh = False
         try:
@@ -1204,13 +1319,15 @@ class PortfolioManager:
                         )
                     except Exception:
                         pass
-                try:
-                    app_ref2 = getattr(self, "app", None)
-                    r2 = getattr(app_ref2, "root", None) if app_ref2 else None
-                    if r2 is not None and hasattr(app_ref2, "refresh_virtual_tab_orders_only"):
-                        r2.after(0, app_ref2.refresh_virtual_tab_orders_only)
-                except Exception:
-                    pass
+                if schedule_orders_refresh:
+                    try:
+                        app_ref2 = getattr(self, "app", None)
+                        if app_ref2 is not None and hasattr(
+                            app_ref2, "request_virtual_tab_orders_refresh"
+                        ):
+                            app_ref2.request_virtual_tab_orders_refresh()
+                    except Exception:
+                        pass
         except Exception as e:
             try:
                 self.log(f"⚠️ [Sync] 매도 접수→FILLED 보정 경로 실패: {e}")
@@ -1218,9 +1335,17 @@ class PortfolioManager:
                 pass
 
         # 증권사 체결내역 REST(kt00007) → 주문 로그 DB 보강 (백그라운드 — API 다건·연속조회 지연 방지)
+        # 체결 직후 silent 동기화에서는 이미 kt00007 병합이 돌았을 수 있어 기본 생략(UI·REST 폭주 방지).
         try:
             app_ref = getattr(self, "app", None)
-            if app_ref is not None:
+            run_bg_fills = True
+            if silent:
+                try:
+                    st = self.settings or {}
+                    run_bg_fills = bool(st.get("sync_run_kt00007_on_silent_sync", False))
+                except Exception:
+                    run_bg_fills = False
+            if app_ref is not None and run_bg_fills:
                 om = getattr(app_ref, "order_manager", None)
                 dm = getattr(app_ref, "data_manager", None)
                 if om is not None and dm is not None:
@@ -1275,14 +1400,14 @@ class PortfolioManager:
                                 )
                         except Exception:
                             pass
-                        try:
-                            root = getattr(app_ref, "root", None)
-                            if root is not None and hasattr(
-                                app_ref, "refresh_virtual_tab_orders_only"
-                            ):
-                                root.after(0, app_ref.refresh_virtual_tab_orders_only)
-                        except Exception:
-                            pass
+                        if schedule_orders_refresh:
+                            try:
+                                if hasattr(
+                                    app_ref, "request_virtual_tab_orders_refresh"
+                                ):
+                                    app_ref.request_virtual_tab_orders_refresh()
+                            except Exception:
+                                pass
 
                     threading.Thread(target=_bg_exchange_fills, daemon=True).start()
         except Exception as e:
@@ -1969,7 +2094,7 @@ class PortfolioManager:
             return False
 
         self.save_db()
-        self._schedule_gui_callback()
+        self._schedule_portfolio_ui_refresh(light=True)
 
         try:
             sl = getattr(self.app, "session_logger", None)
@@ -2037,6 +2162,12 @@ class PortfolioManager:
             ncode = str(code).split("_")[0].zfill(6)
         oid = str(order_no or "").strip()
         pending_handled = False
+
+        try:
+            if self.is_redundant_late_exchange_sell_fill(ncode, oid):
+                return False
+        except Exception:
+            pass
 
         with self.lock:
             self._merge_vp_alias_to_canonical(ncode)
@@ -2209,7 +2340,7 @@ class PortfolioManager:
                     pass
 
         self.save_db()
-        self._schedule_gui_callback()
+        self._schedule_portfolio_ui_refresh(light=True)
 
         try:
             sl = getattr(self.app, "session_logger", None)

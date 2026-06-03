@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import threading
+import time
 from typing import Any, Dict, Literal, Optional, Set
 
 from core.supply_display import capture_supply_snapshot
@@ -14,6 +16,9 @@ class FillReconciliationService:
     def __init__(self, app: Any, *, log_func: Optional[Any] = None) -> None:
         self.app = app
         self.log = log_func or print
+        # kt00007 병합은 주문 건수만큼 동시에 돌면 REST·DB 부하로 UI가 멈춘 것처럼 보임
+        self._kt00007_sync_lock = threading.Lock()
+        self._kt00007_last_sync_ts: float = 0.0
 
     @staticmethod
     def _order_side_to_kr(side: str) -> str:
@@ -103,21 +108,52 @@ class FillReconciliationService:
             except Exception:
                 pass
 
-    def _sync_exchange_fills_today_silent(self) -> None:
-        """당일 kt00007 체결을 DB order_history에 병합(조용히)."""
+    def _kt00007_sync_min_interval_sec(self) -> float:
         try:
-            import datetime as _dt
+            st = getattr(self.app, "settings", None) or {}
+            v = float(st.get("exchange_fill_kt00007_sync_min_interval_sec", 5.0))
+            return max(1.5, min(v, 30.0))
+        except Exception:
+            return 5.0
 
-            today = _dt.date.today()
-            om = getattr(self.app, "order_manager", None)
-            dm = getattr(self.app, "data_manager", None)
-            if om is not None and dm is not None:
-                om.sync_exchange_fills_into_database(
-                    dm,
-                    dates=[today],
-                    silent=True,
-                    logger=self.log,
-                )
+    def _sync_exchange_fills_today_silent(self, *, force: bool = False) -> None:
+        """
+        당일 kt00007 체결을 DB order_history에 병합(조용히).
+        짧은 간격으로 중복 호출되면 스킵해 체결 직후 REST 폭주를 막습니다.
+        """
+        try:
+            now = time.time()
+            min_iv = self._kt00007_sync_min_interval_sec()
+            if not force:
+                try:
+                    if (now - float(self._kt00007_last_sync_ts or 0.0)) < min_iv:
+                        return
+                except Exception:
+                    pass
+            with self._kt00007_sync_lock:
+                now = time.time()
+                if not force:
+                    try:
+                        if (now - float(self._kt00007_last_sync_ts or 0.0)) < min_iv:
+                            return
+                    except Exception:
+                        pass
+                import datetime as _dt
+
+                today = _dt.date.today()
+                om = getattr(self.app, "order_manager", None)
+                dm = getattr(self.app, "data_manager", None)
+                if om is not None and dm is not None:
+                    om.sync_exchange_fills_into_database(
+                        dm,
+                        dates=[today],
+                        silent=True,
+                        logger=self.log,
+                    )
+                try:
+                    self._kt00007_last_sync_ts = time.time()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -223,16 +259,28 @@ class FillReconciliationService:
 
         if not applied and str(side or "").lower() == "sell":
             try:
-                applied = self.app.portfolio.record_orphan_sell_close(
-                    code,
-                    float(confirmed_price),
-                    int(confirmed_qty),
-                    str(name or ""),
-                    str(reason or ""),
-                    str(order_no or ""),
-                    snapshot,
-                    "exchange",
-                )
+                pm = self.app.portfolio
+                if hasattr(pm, "is_redundant_late_exchange_sell_fill") and pm.is_redundant_late_exchange_sell_fill(
+                    code, str(order_no or "")
+                ):
+                    try:
+                        self.log(
+                            f"ℹ️ [체결 동기화] 매도 체결 생략({code}) — "
+                            f"동기화·주문로그 반영 완료(중복 종료내역·UI 리빌드 방지)"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    applied = pm.record_orphan_sell_close(
+                        code,
+                        float(confirmed_price),
+                        int(confirmed_qty),
+                        str(name or ""),
+                        str(reason or ""),
+                        str(order_no or ""),
+                        snapshot,
+                        "exchange",
+                    )
             except Exception:
                 pass
 
@@ -287,6 +335,8 @@ class FillReconciliationService:
         fill_price: float,
         name: str = "",
         reason: str = "",
+        *,
+        force_kt00007_sync: bool = False,
     ) -> Literal["filled", "terminal", "pending", "skipped"]:
         """
         kt00007 1회 동기화 + DB 1회 확인(터치호가 감시용).
@@ -302,7 +352,7 @@ class FillReconciliationService:
         except Exception:
             pass
 
-        self._sync_exchange_fills_today_silent()
+        self._sync_exchange_fills_today_silent(force=bool(force_kt00007_sync))
 
         try:
             row = self.app.data_manager.get_order_history_row_by_order_no(oid)
@@ -311,20 +361,22 @@ class FillReconciliationService:
         if not isinstance(row, dict):
             return "pending"
 
-        # 현재 시점 row 스냅샷(디버그): pending이 반복되면 원인을 확정하기 좋습니다.
+        # 반복 폴링마다 로그를 남기면 Tk 메인 스레드·터미널이 과부하됩니다.
         try:
-            _res_u = str((row or {}).get("result") or "").strip().upper()
-            _fq = int((row or {}).get("filled_qty") or 0)
-            _qp = int((row or {}).get("qty") or 0)
-            _fp = float((row or {}).get("filled_price") or 0)
-            _op = float((row or {}).get("price") or 0)
-            self.log(
-                "🧪 [체결확인-row] "
-                f"code={code} ord={oid} side={side} "
-                f"row.result={_res_u} row.filled_qty={_fq} row.qty={_qp} "
-                f"row.filled_price={_fp} row.price={_op} "
-                f"expect_qty={qty} hint_price={fill_price}"
-            )
+            st = getattr(self.app, "settings", None) or {}
+            if bool(st.get("enable_fill_reconcile_row_debug", False)):
+                _res_u = str((row or {}).get("result") or "").strip().upper()
+                _fq = int((row or {}).get("filled_qty") or 0)
+                _qp = int((row or {}).get("qty") or 0)
+                _fp = float((row or {}).get("filled_price") or 0)
+                _op = float((row or {}).get("price") or 0)
+                self.log(
+                    "🧪 [체결확인-row] "
+                    f"code={code} ord={oid} side={side} "
+                    f"row.result={_res_u} row.filled_qty={_fq} row.qty={_qp} "
+                    f"row.filled_price={_fp} row.price={_op} "
+                    f"expect_qty={qty} hint_price={fill_price}"
+                )
         except Exception:
             pass
 
@@ -354,6 +406,74 @@ class FillReconciliationService:
         ):
             return "filled"
         return "pending"
+
+    def run_light_boost_confirm(
+        self,
+        code: str,
+        order_no: str,
+        side: str,
+        qty: int,
+        fill_price: float,
+        name: str = "",
+        reason: str = "",
+    ) -> None:
+        """
+        RC4033(미체결 없음)·타임아웃 등에서 전량 체결 가능성이 있을 때 경량 확인.
+        ``reconcile_exchange_fill_after_order_accept(boost_polling=True)`` 대신
+        짧은 ``try_confirm_fill_once`` 루프만 돌려 REST·스레드 폭주를 줄입니다.
+        """
+        oid = str(order_no or "").strip()
+        if not oid:
+            return
+        try:
+            if oid in self.app._exchange_fill_order_ids:
+                return
+        except Exception:
+            pass
+
+        def _worker() -> None:
+            try:
+                try:
+                    st = getattr(self.app, "settings", None) or {}
+                    max_a = int(float(st.get("exchange_fill_boost_max_attempts", 4)))
+                    interval = float(
+                        st.get("exchange_fill_confirm_retry_interval_sec", 5.0)
+                    )
+                except (TypeError, ValueError):
+                    max_a = 4
+                    interval = 5.0
+                max_a = max(2, min(max_a, 8))
+                interval = max(2.0, min(interval, 8.0))
+                for i in range(max_a):
+                    try:
+                        if oid in self.app._exchange_fill_order_ids:
+                            return
+                    except Exception:
+                        pass
+                    status = self.try_confirm_fill_once(
+                        code,
+                        oid,
+                        side,
+                        int(qty),
+                        float(fill_price),
+                        name,
+                        reason,
+                        force_kt00007_sync=(i == 0),
+                    )
+                    if status in ("filled", "terminal", "skipped"):
+                        return
+                    if i + 1 < max_a:
+                        try:
+                            time.sleep(interval)
+                        except Exception:
+                            return
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(target=_worker, daemon=True, name="FillBoostLight").start()
+        except Exception:
+            pass
 
     def reconcile_exchange_fill_after_order_accept(
         self,
@@ -433,19 +553,29 @@ class FillReconciliationService:
                         retry_interval_sec = 1.0
 
                     if boost_polling:
-                        # 모의투자 등 kt00007 지연 시: RC4033 직후 강제 재폴링용
-                        max_attempts = max(max_attempts, 22)
-                        retry_interval_sec = max(retry_interval_sec, 1.1)
+                        try:
+                            boost_cap = int(
+                                float(
+                                    st.get("exchange_fill_boost_max_attempts", 6)
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            boost_cap = 6
+                        boost_cap = max(2, min(boost_cap, 6))
+                        max_attempts = min(max(max_attempts, boost_cap), boost_cap)
+                        retry_interval_sec = max(retry_interval_sec, 2.5)
 
-                    upper_cap = 30 if boost_polling else 20
+                    upper_cap = 12 if boost_polling else 12
                     max_attempts = max(2, min(max_attempts, upper_cap))
-                    retry_interval_sec = max(0.2, min(retry_interval_sec, 5.0))
+                    retry_interval_sec = max(0.5, min(retry_interval_sec, 5.0))
 
                     for _i in range(max_attempts):
                         if oid and oid in self.app._exchange_fill_order_ids:
                             return
 
-                        self._sync_exchange_fills_today_silent()
+                        self._sync_exchange_fills_today_silent(
+                            force=(_i == 0)
+                        )
 
                         try:
                             row = self.app.data_manager.get_order_history_row_by_order_no(

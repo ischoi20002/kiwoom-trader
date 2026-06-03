@@ -327,6 +327,18 @@ DEFAULT_SETTINGS = {
     "exchange_fill_confirm_max_attempts": 8,
     "exchange_fill_confirm_retry_interval_sec": 5.0,
     "exchange_fill_late_reconfirm_sec": 35.0,
+    # kt00007 병합 최소 간격(초) — 체결 폴링·터치호가가 동시에 돌 때 REST 폭주 완화
+    "exchange_fill_kt00007_sync_min_interval_sec": 5.0,
+    # RC4033·타임아웃 등 경량 체결 확인 최대 횟수
+    "exchange_fill_boost_max_attempts": 4,
+    # on_fill 연속 시 포지션 탭 gui_callback 디바운스(ms)
+    "portfolio_gui_callback_debounce_ms": 1200,
+    "virtual_tab_orders_refresh_debounce_ms": 800,
+    "virtual_tab_light_refresh_debounce_ms": 450,
+    "post_fill_sync_first_delay_ms": 8500,
+    "post_fill_sync_follow_delay_ms": 28000,
+    "post_fill_sync_enable_followup": True,
+    "sync_run_kt00007_on_silent_sync": False,
     "bt_start_date": "2026-04-01",
     "bt_end_date": "2026-04-24",
     "mock_account_id": "81220142",

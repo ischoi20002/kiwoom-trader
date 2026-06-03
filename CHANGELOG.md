@@ -15,6 +15,12 @@
 
 
 
+## 0.8.33 (2026-06-02)
+
+- **감시 트리 신호상태 고정**: `monitor_tab.py`에 `monitor_signal_status_display_text` import 누락으로 선정·갱신 실패하던 문제 수정. 워밍업·`대기` 문구가 합치도를 가리지 않도록 플레이스홀더 확장(`core/monitor_signal_status_display.py`).
+- **체결·동기화 직후 UI 멈춤 완화**: kt00007 병합 스로틀·boost 폴링 축소, 체결 후 계좌 동기화 1/2차 디바운스, 포지션 탭 GUI·주문로그 debounce(`core/fill_reconciliation_service.py`, `core/post_fill_account_sync_service.py`, `core/portfolio_manager.py`, `k_trader_gui.py`, `core/defaults.py`).
+- **동기화 직후 경량 UI 갱신**: silent 계좌 동기화·늦은 매도 체결 시 전체 리빌드 대신 `request_virtual_tab_sync_light_refresh`(보유·요약·주문로그만). 동기화로 이미 반영된 중복 매도는 종료내역 보강·UI 리빌드 생략(`core/portfolio_manager.py`, `core/fill_reconciliation_service.py`, `core/limit_order_watch_service.py`).
+
 ## 0.8.32 (2026-05-31)
 
 - **bars_1d 소스 FDR 통일**: 하베스팅·`update_historical_data`·`update_daily_data`가 1m 집계 대신 FDR 일봉을 `bars_1d`에 반영. 감시 선정(`api_only`)·동적 백테(`prepare_dynamic_universe`)와 동일 일봉 정의(`data_manager_v2.py`, `harvest_service.py`).

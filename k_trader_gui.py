@@ -273,6 +273,9 @@ class KiwoomApp:
         # (구) 주기 계좌 동기화 타이머 취소용. 자동 동기화는 기동 후 1회만 수행한다.
         self._account_sync_job: Optional[Any] = None
         self._virtual_tab_render_pending: bool = False
+        self._vt_orders_refresh_after_id: Any = None
+        self._vt_light_refresh_after_id: Any = None
+        self._vt_light_refresh_dirty: bool = False
         self._virtual_tab_render_last_ts: float = 0.0
 
         # 실시간 감시/계좌정보 텔레그램 스로틀
@@ -759,6 +762,8 @@ class KiwoomApp:
         force: bool = False,
         refresh_cash_deposit: bool = True,
         wait_for_lock: bool = False,
+        schedule_gui_refresh: bool = True,
+        schedule_orders_refresh: bool = True,
     ) -> None:
         """
         계좌 동기화는 REST(ka85·예수 등)·정합·JSON 저장으로 메인 스레드에서 실행 시
@@ -793,6 +798,8 @@ class KiwoomApp:
                     silent=silent,
                     force=force,
                     refresh_cash_deposit=refresh_cash_deposit,
+                    schedule_gui_refresh=schedule_gui_refresh,
+                    schedule_orders_refresh=schedule_orders_refresh,
                 )
             except Exception as e:
                 try:
@@ -1844,6 +1851,127 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def request_virtual_tab_sync_light_refresh(self) -> None:
+        """
+        계좌 동기화·늦은 체결 확인 직후: 전체 ``_render_virtual_positions`` 대신
+        보유 행 정리·요약·주문 로그만 갱신(금일손익 REST·히스토리 전량 스캔 생략).
+        """
+        try:
+            if not hasattr(self, "virtual_tab"):
+                return
+            r = getattr(self, "root", None)
+            if r is None:
+                return
+            self._vt_light_refresh_dirty = True
+            try:
+                if self._vt_light_refresh_after_id is not None:
+                    r.after_cancel(self._vt_light_refresh_after_id)
+            except Exception:
+                pass
+            try:
+                delay = 450
+                st = getattr(self, "settings", None) or {}
+                delay = int(float(st.get("virtual_tab_light_refresh_debounce_ms", 450)))
+                delay = max(150, min(delay, 3000))
+            except Exception:
+                delay = 450
+            self._vt_light_refresh_after_id = r.after(
+                delay, self._flush_virtual_tab_sync_light_refresh
+            )
+        except Exception:
+            pass
+
+    def _flush_virtual_tab_sync_light_refresh(self) -> None:
+        """메인 스레드: 동기화 직후 경량 포지션 탭 갱신."""
+        try:
+            self._vt_light_refresh_after_id = None
+            if not self._vt_light_refresh_dirty:
+                return
+            self._vt_light_refresh_dirty = False
+            if not hasattr(self, "virtual_tab"):
+                return
+            try:
+                self.trading_controller._ensure_virtual_positions_monitor_info()
+            except Exception:
+                pass
+            try:
+                self.monitor_info = dict(self.trading_controller.monitor_info or {})
+            except Exception:
+                pass
+            vt = self.virtual_tab
+            try:
+                merged = vt._vp_items_by_normalized()
+                tr = getattr(vt, "tree_active", None)
+                if tr is not None:
+                    for nk in list(tr.get_children()):
+                        if nk not in merged:
+                            try:
+                                vt._remove_active_tree_row(nk)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            try:
+                vt.refresh_portfolio_light()
+            except Exception:
+                pass
+            try:
+                sig = self._vp_structure_signature()
+                setattr(self, "_last_vp_render_sig", sig)
+            except Exception:
+                pass
+            try:
+                self.request_virtual_tab_orders_refresh()
+            except Exception:
+                pass
+            try:
+                mt = getattr(self, "monitor_tab", None)
+                if mt is not None:
+                    mt._purge_stale_active_monitor_rows(
+                        self.portfolio.virtual_positions,
+                        getattr(self, "monitor_info", None) or {},
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [UI] 경량 포지션 갱신 실패: {e}")
+            except Exception:
+                pass
+
+    def request_virtual_tab_orders_refresh(self) -> None:
+        """주문·체결 트리만 trailing debounce 로 갱신(체결·동기화 연속 호출 완화)."""
+        try:
+            if not hasattr(self, "virtual_tab"):
+                return
+            r = getattr(self, "root", None)
+            if r is None:
+                return
+            try:
+                delay = 600
+                st = getattr(self, "settings", None) or {}
+                delay = int(float(st.get("virtual_tab_orders_refresh_debounce_ms", 600)))
+                delay = max(250, min(delay, 5000))
+            except Exception:
+                delay = 600
+            try:
+                jid = getattr(self, "_vt_orders_refresh_after_id", None)
+                if jid is not None:
+                    r.after_cancel(jid)
+            except Exception:
+                pass
+
+            def _flush() -> None:
+                try:
+                    self._vt_orders_refresh_after_id = None
+                    self.refresh_virtual_tab_orders_only()
+                except Exception:
+                    pass
+
+            self._vt_orders_refresh_after_id = r.after(delay, _flush)
+        except Exception:
+            pass
+
     def request_virtual_tab_realtime_render(self) -> None:
         """
         보유 탭 실시간 수익·평가 요약을 스로틀하여 갱신합니다.
@@ -2563,16 +2691,8 @@ class KiwoomApp:
         """
         PortfolioManager gui_callback 진입점.
         포지션 구조가 이전과 같으면 히스토리·주문 트리 전체 삭제 없이 보유 셀·요약만 갱신한다.
-        전체 리빌드는 무거우므로 한 틱 지연 후 수행하고, 그동안 하단에 처리 중 표시.
+        전체 리빌드는 무거우므로 한 틱 지연 후 수행합니다.
         """
-        try:
-            self.trading_controller._ensure_virtual_positions_monitor_info()
-        except Exception:
-            pass
-        try:
-            self.monitor_info = dict(self.trading_controller.monitor_info or {})
-        except Exception:
-            pass
         if not hasattr(self, "virtual_tab"):
             return
         try:
@@ -2587,13 +2707,6 @@ class KiwoomApp:
                             self.portfolio.virtual_positions,
                             getattr(self, "monitor_info", None) or {},
                         )
-                        # sig가 같아도 monitor_tab 행이 누락된 케이스가 있어
-                        # (초기화/정합성 충돌 등) 조기 return 경로에서도 복구를 시도합니다.
-                        mt.maybe_reconcile_monitor_trees(
-                            getattr(self, "monitor_info", None) or {},
-                            self.portfolio.virtual_positions,
-                            min_interval_s=0.0,
-                        )
                 except Exception:
                     pass
                 return
@@ -2602,7 +2715,15 @@ class KiwoomApp:
 
         def _heavy_vp_render() -> None:
             try:
-                # 보유 트리·요약만 먼저 — 주문 DB·트리 전체 재삽입은 한 틱 뒤(체결 직후 멈춤 완화)
+                try:
+                    self.trading_controller._ensure_virtual_positions_monitor_info()
+                except Exception:
+                    pass
+                try:
+                    self.monitor_info = dict(self.trading_controller.monitor_info or {})
+                except Exception:
+                    pass
+                # 보유 트리·요약만 먼저 — 주문 트리는 debounce 경로로 분리
                 self.virtual_tab._render_virtual_positions(render_orders=False)
                 self._last_vp_render_sig = self._vp_structure_signature()
                 try:
@@ -2611,16 +2732,8 @@ class KiwoomApp:
                     pass
             except Exception:
                 pass
-            finally:
-                try:
-                    self._set_ui_busy(False)
-                except Exception:
-                    pass
             try:
-                r2 = getattr(self, "root", None)
-                vt = getattr(self, "virtual_tab", None)
-                if r2 is not None and vt is not None:
-                    r2.after(80, lambda: vt._render_orders_safe())
+                self.request_virtual_tab_orders_refresh()
             except Exception:
                 pass
             try:
@@ -2634,31 +2747,17 @@ class KiwoomApp:
                         self.portfolio.virtual_positions,
                         getattr(self, "monitor_info", None) or {},
                     )
-                    # 보유(UI/틱) 경로가 누락되는 경우가 있어,
-                    # 포지션 탭에서 virtual_positions/monitor_info가 갱신된 직후 보유 트리를 복구합니다.
-                    try:
-                        mt.maybe_reconcile_monitor_trees(
-                            getattr(self, "monitor_info", None) or {},
-                            self.portfolio.virtual_positions,
-                            min_interval_s=0.0,
-                        )
-                    except Exception:
-                        pass
             except Exception:
                 pass
 
         try:
-            self._set_ui_busy(True, "보유·주문 화면을 그리는 중")
             r = getattr(self, "root", None)
             if r is not None:
                 r.after(1, _heavy_vp_render)
             else:
                 _heavy_vp_render()
         except Exception:
-            try:
-                self._set_ui_busy(False)
-            except Exception:
-                pass
+            pass
 
     def refresh_virtual_tab_orders_only(self) -> None:
         """포지션 관리 탭 — 주문 로그 트리만 갱신(증권사 체결 API 병합 후 경량 호출)."""
@@ -2704,24 +2803,17 @@ class KiwoomApp:
                         )
                 except Exception:
                     pass
-            finally:
-                try:
-                    self._set_ui_busy(False)
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
         try:
-            self._set_ui_busy(True, "포지션 탭 전체 갱신")
             r = getattr(self, "root", None)
             if r is not None:
                 r.after(1, _heavy_full)
             else:
                 _heavy_full()
         except Exception:
-            try:
-                self._set_ui_busy(False)
-            except Exception:
-                pass
+            pass
 
     def sync_with_actual_account(
         self,

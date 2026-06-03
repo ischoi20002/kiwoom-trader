@@ -759,16 +759,22 @@ class LimitOrderWatchService:
 
         def _run() -> None:
             try:
-                self.app.reconcile_exchange_fill_after_order_accept(
-                    c,
-                    oid,
-                    side,
-                    int(q),
-                    float(px),
-                    nm,
-                    rs,
-                    boost_polling=True,
-                )
+                frs = getattr(self.app, "fill_reconciliation_service", None)
+                if frs is not None and hasattr(frs, "run_light_boost_confirm"):
+                    frs.run_light_boost_confirm(
+                        c, oid, side, int(q), float(px), nm, rs
+                    )
+                else:
+                    self.app.reconcile_exchange_fill_after_order_accept(
+                        c,
+                        oid,
+                        side,
+                        int(q),
+                        float(px),
+                        nm,
+                        rs,
+                        boost_polling=True,
+                    )
             except Exception as ex:
                 try:
                     self.log(f"⚠️ [지정가] 강화 체결동기화 예약 실패: {ex}")
@@ -849,14 +855,31 @@ class LimitOrderWatchService:
                 pass
             try:
                 self.app.portfolio.sync_with_actual_account(
-                    silent=True, force=True
+                    silent=True,
+                    force=True,
+                    schedule_gui_refresh=False,
+                    schedule_orders_refresh=False,
                 )
             except Exception:
                 pass
             try:
                 root = self._get_root()
                 if root is not None and hasattr(root, "after"):
-                    root.after(0, _on_main_finish)
+                    def _after_sync_ui() -> None:
+                        try:
+                            fn = getattr(
+                                self.app, "request_virtual_tab_sync_light_refresh", None
+                            )
+                            if callable(fn):
+                                fn()
+                        except Exception:
+                            pass
+                        try:
+                            _on_main_finish()
+                        except Exception:
+                            pass
+
+                    root.after(0, _after_sync_ui)
                 else:
                     _on_main_finish()
             except Exception:

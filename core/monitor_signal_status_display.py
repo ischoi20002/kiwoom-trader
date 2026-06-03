@@ -12,11 +12,17 @@ from typing import Any, Dict, Optional
 
 
 def _is_status_placeholder(text: object) -> bool:
+    """합치도·보조 문구가 비어 있거나 의미 없는 값인지."""
     try:
         t = str(text).strip()
     except Exception:
         return True
-    return t in ("", "-", "—")
+    if t in ("", "-", "—", "대기"):
+        return True
+    # 워밍업·준비 안내는 confluence 가 채워지면 표시에서 제외(고정처럼 보이는 현상 방지)
+    if t.startswith("⏳") or t.startswith("✅ 15분봉") or t.startswith("❌ 워밍업"):
+        return True
+    return False
 
 
 def monitor_signal_status_display_text(info: Optional[Dict[str, Any]]) -> str:
