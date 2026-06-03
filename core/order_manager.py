@@ -230,6 +230,19 @@ class OrderManager:
                     snap_vol_power=_sn.get("vol_power"),
                     snap_bid_ask=_sn.get("bid_ask_text") or "",
                 )
+                try:
+                    fcs = getattr(self.app, "fill_confirmation_service", None)
+                    if fcs is not None and ord_no:
+                        fcs.ensure_submitted_state(
+                            str(ord_no).strip(),
+                            code=str(code).zfill(6),
+                            side=str(side).lower(),
+                            order_qty=int(qty),
+                            name=str(name or ""),
+                            reason=str(reason or ""),
+                        )
+                except Exception:
+                    pass
 
                 # 터치호가: LimitOrderWatchService 가 kt00007·on_fill 처리 (중복 폴링 방지)
                 if not skip_immediate_fill_reconcile:
@@ -1685,6 +1698,7 @@ class OrderManager:
         *,
         cont_yn: str = "N",
         next_key: str = "",
+        fr_ord_no: str = "",
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[requests.Response]]:
         """
         계좌별주문체결내역상세요청(kt00007) 1페이지.
@@ -1710,7 +1724,7 @@ class OrderManager:
             "stk_bond_tp": "1",
             "sell_tp": "0",
             "stk_cd": "",
-            "fr_ord_no": "",
+            "fr_ord_no": str(fr_ord_no or "").strip()[:20],
             "dmst_stex_tp": OrderManager.dmst_stex_tp_for_orders(),
         }
         try:
@@ -1729,7 +1743,9 @@ class OrderManager:
         rows = self._extract_kt00007_rows(data)
         return rows, data if isinstance(data, dict) else {}, resp
 
-    def fetch_exchange_fills_for_date(self, day: date) -> List[Dict[str, Any]]:
+    def fetch_exchange_fills_for_date(
+        self, day: date, *, fr_ord_no: str = ""
+    ) -> List[Dict[str, Any]]:
         """
         특정 캘린더일의 체결내역만 수집. 연속조회(cont-yn) 전부 펼침.
         반환: merge_exchange_fill_order_rows 에 넘길 dict 목록.
@@ -1740,7 +1756,7 @@ class OrderManager:
         nk = ""
         for _ in range(80):
             rows, data, resp = self._post_kt00007_page(
-                ord_dt, cont_yn=cont, next_key=nk
+                ord_dt, cont_yn=cont, next_key=nk, fr_ord_no=fr_ord_no
             )
             try:
                 rc = data.get("return_code", 0)
@@ -1881,6 +1897,49 @@ class OrderManager:
             if not silent:
                 try:
                     log_fn(f"⚠️ [kt00007] 체결내역 동기화 실패: {e}")
+                except Exception:
+                    pass
+        return total_added
+
+    def sync_exchange_fills_for_order_no(
+        self,
+        data_manager: Any,
+        order_no: str,
+        *,
+        dates: Optional[List[date]] = None,
+        silent: bool = False,
+        logger: Optional[Any] = None,
+    ) -> int:
+        """특정 주문번호만 kt00007 조회·병합(per-order 긴급 sync)."""
+        log_fn = logger or getattr(self.app, "log", print)
+        oid = str(order_no or "").strip()
+        if not oid:
+            return 0
+        total_added = 0
+        try:
+            if dates is not None:
+                day_list = list(dates)
+            else:
+                day_list = [date.today()]
+            for d in day_list:
+                try:
+                    rows = self.fetch_exchange_fills_for_date(d, fr_ord_no=oid)
+                    if not rows:
+                        continue
+                    added = int(
+                        data_manager.merge_exchange_fill_order_rows(rows) or 0
+                    )
+                    total_added += added
+                except Exception as e:
+                    if not silent:
+                        try:
+                            log_fn(f"⚠️ [kt00007/{oid}] 체결 병합 실패: {e}")
+                        except Exception:
+                            pass
+        except Exception as e:
+            if not silent:
+                try:
+                    log_fn(f"⚠️ [kt00007/{oid}] 동기화 실패: {e}")
                 except Exception:
                     pass
         return total_added

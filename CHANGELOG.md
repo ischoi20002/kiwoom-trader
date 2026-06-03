@@ -15,6 +15,13 @@
 
 
 
+## 0.8.35 (2026-06-02)
+
+- **체결 확인 증분 반영(Phase 5)**: `FillConfirmationService` — CHE·REST 경로가 주문번호별 `applied_qty` delta만 `on_fill`. 부분체결 2건째 CHE가 스킵되던 문제 수정.
+- **체결 상태 DB(Phase 2)**: `order_fill_state` 테이블 — `order_qty`/`exchange_filled_qty`/`applied_qty` 추적.
+- **kt00007 per-order sync(Phase 3)**: `fr_ord_no` 필터·전역 스로틀 bypass — 터치 poll `try_confirm_fill_once` 경로.
+- **post-fill sync(Phase 6)**: 미확정 주문 존재 시 `post_fill_sync_skip_while_pending` 으로 계좌동기화 생략.
+
 ## 0.8.34 (2026-06-02)
 
 - **주문 로직 독립 분리**: 매수/매도 집행·미체결 감시·체결 동기화·액션 큐를 `core/execution/` 패키지로 모음. `OrderExecutionService`(S1/S2/EXIT), `OrderActionDispatcher`(워커 큐), 기존 fill/limit/post-fill 서비스 이동. `TradingController`·`k_trader_gui`는 thin delegate 유지 — 이후 전면 개편 대비.

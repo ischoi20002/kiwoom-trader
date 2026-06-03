@@ -16,9 +16,9 @@ class FillReconciliationService:
     def __init__(self, app: Any, *, log_func: Optional[Any] = None) -> None:
         self.app = app
         self.log = log_func or print
-        # kt00007 병합은 주문 건수만큼 동시에 돌면 REST·DB 부하로 UI가 멈춘 것처럼 보임
-        self._kt00007_sync_lock = threading.Lock()
-        self._kt00007_last_sync_ts: float = 0.0
+
+    def _fcs(self) -> Any:
+        return getattr(self.app, "fill_confirmation_service", None)
 
     @staticmethod
     def _order_side_to_kr(side: str) -> str:
@@ -110,50 +110,21 @@ class FillReconciliationService:
 
     def _kt00007_sync_min_interval_sec(self) -> float:
         try:
-            st = getattr(self.app, "settings", None) or {}
-            v = float(st.get("exchange_fill_kt00007_sync_min_interval_sec", 5.0))
-            return max(1.5, min(v, 30.0))
+            fcs = self._fcs()
+            if fcs is not None:
+                return float(fcs._kt00007_global_min_interval_sec())
         except Exception:
-            return 5.0
+            pass
+        return 5.0
 
-    def _sync_exchange_fills_today_silent(self, *, force: bool = False) -> None:
-        """
-        당일 kt00007 체결을 DB order_history에 병합(조용히).
-        짧은 간격으로 중복 호출되면 스킵해 체결 직후 REST 폭주를 막습니다.
-        """
+    def _sync_exchange_fills_today_silent(
+        self, *, force: bool = False, order_no: Optional[str] = None
+    ) -> None:
+        """당일 kt00007 병합 — FillConfirmationService 위임."""
         try:
-            now = time.time()
-            min_iv = self._kt00007_sync_min_interval_sec()
-            if not force:
-                try:
-                    if (now - float(self._kt00007_last_sync_ts or 0.0)) < min_iv:
-                        return
-                except Exception:
-                    pass
-            with self._kt00007_sync_lock:
-                now = time.time()
-                if not force:
-                    try:
-                        if (now - float(self._kt00007_last_sync_ts or 0.0)) < min_iv:
-                            return
-                    except Exception:
-                        pass
-                import datetime as _dt
-
-                today = _dt.date.today()
-                om = getattr(self.app, "order_manager", None)
-                dm = getattr(self.app, "data_manager", None)
-                if om is not None and dm is not None:
-                    om.sync_exchange_fills_into_database(
-                        dm,
-                        dates=[today],
-                        silent=True,
-                        logger=self.log,
-                    )
-                try:
-                    self._kt00007_last_sync_ts = time.time()
-                except Exception:
-                    pass
+            fcs = self._fcs()
+            if fcs is not None:
+                fcs.sync_kt00007(order_no=order_no, force=bool(force))
         except Exception:
             pass
 
@@ -181,7 +152,7 @@ class FillReconciliationService:
             fqty = 0
         if res in ("CANCELLED", "CANCELED", "REJECTED", "FAILED") and fqty <= 0:
             return False
-        if res == "FILLED" or fqty > 0:
+        if res in ("FILLED", "PARTIAL") or fqty > 0:
             return True
         return None
 
@@ -197,134 +168,28 @@ class FillReconciliationService:
         reason: str,
         row: Dict[str, Any],
     ) -> bool:
-        """체결 확정 row 기준 on_fill·DB·감시 정리. 성공 시 True."""
-        oid = str(order_no or "").strip()
-        if oid and oid in self.app._exchange_fill_order_ids:
-            return False
-
+        """체결 확정 row 기준 증분 on_fill — FillConfirmationService 위임."""
         try:
-            fp = float(row.get("filled_price", 0) or 0)
-        except Exception:
-            fp = 0.0
-        try:
-            fqty = int(row.get("filled_qty", 0) or 0)
-        except Exception:
-            fqty = 0
-        try:
-            row_px = float(row.get("price") or 0)
-        except (TypeError, ValueError):
-            row_px = 0.0
-
-        confirmed_price = (
-            fp if fp > 0 else (row_px if row_px > 0 else float(fill_price))
-        )
-        confirmed_qty = fqty if fqty > 0 else int(qty)
-
-        try:
-            _fs = capture_supply_snapshot(self.app, code)
-        except Exception:
-            _fs = {"vol_power": None, "bid_ask_text": ""}
-
-        try:
-            self.app.data_manager.update_order_status(
-                code,
-                order_no,
-                "FILLED",
-                filled_price=int(confirmed_price),
-                filled_qty=int(confirmed_qty),
-                fill_snap_vol_power=_fs.get("vol_power"),
-                fill_snap_bid_ask=_fs.get("bid_ask_text") or "— / — (—)",
-            )
-        except Exception:
-            pass
-
-        snap_reason = self.app._resolve_fill_snapshot_reason(
-            code, side, reason, channel="REST"
-        )
-        snapshot = self.app.portfolio.capture_snapshot(
-            code, confirmed_price, reason=snap_reason
-        )
-
-        applied = self.app.portfolio.on_fill(
-            code,
-            side,
-            confirmed_price,
-            confirmed_qty,
-            name=name or None,
-            reason=reason or None,
-            snapshot=snapshot,
-            fill_channel="exchange",
-            order_no=oid or None,
-        )
-
-        if not applied and str(side or "").lower() == "sell":
-            try:
-                pm = self.app.portfolio
-                if hasattr(pm, "is_redundant_late_exchange_sell_fill") and pm.is_redundant_late_exchange_sell_fill(
-                    code, str(order_no or "")
-                ):
-                    try:
-                        self.log(
-                            f"ℹ️ [체결 동기화] 매도 체결 생략({code}) — "
-                            f"동기화·주문로그 반영 완료(중복 종료내역·UI 리빌드 방지)"
-                        )
-                    except Exception:
-                        pass
-                else:
-                    applied = pm.record_orphan_sell_close(
-                        code,
-                        float(confirmed_price),
-                        int(confirmed_qty),
-                        str(name or ""),
-                        str(reason or ""),
-                        str(order_no or ""),
-                        snapshot,
-                        "exchange",
+            fcs = self._fcs()
+            if fcs is not None:
+                return bool(
+                    fcs.ingest_rest_confirmed(
+                        code=code,
+                        order_no=order_no,
+                        side=side,
+                        qty=int(qty),
+                        fill_price=float(fill_price),
+                        name=name,
+                        reason=reason,
+                        row=row,
                     )
-            except Exception:
-                pass
-
-        # 터치 정정/체결확인 디버깅용: "DB row는 확정인데 로컬 적용이 실패(applied=False)"
-        try:
-            if not applied:
-                self.log(
-                    "🧪 [체결적용실패] applied=False "
-                    f"code={code} ord={oid} side={side} "
-                    f"row.result={row.get('result')} row.filled_qty={row.get('filled_qty')} "
-                    f"row.price={row.get('price')} confirmed_qty={confirmed_qty} confirmed_price={confirmed_price} "
-                    f"reason={reason} touch_fill_hint={fill_price}"
                 )
-        except Exception:
-            pass
-
-        if oid and applied:
-            self.app._exchange_fill_order_ids.add(oid)
-
-        if applied:
-            if oid and str(side or "").lower() in ("buy", "sell"):
-                self._maybe_send_buy_sell_telegram(code, oid, side)
-
+        except Exception as e:
             try:
-                self.log(
-                    f"✅ [체결 동기화] REST 접수 후 체결 확정 반영 {code} "
-                    f"{'매수' if str(side).lower() == 'buy' else '매도'} {confirmed_qty}주 "
-                    f"({int(confirmed_price):,}원)"
-                )
+                self.log(f"⚠️ [체결 동기화] ingest_rest 실패: {e}")
             except Exception:
                 pass
-
-            try:
-                tc = getattr(self.app, "trading_controller", None)
-                if tc and oid and applied:
-                    if str(side or "").lower() == "buy":
-                        tc.limit_order_watch_service.clear(oid)
-                    elif self._should_clear_limit_order_watch_for_sell(code):
-                        tc.limit_order_watch_service.clear(oid)
-            except Exception:
-                pass
-
-            self.app._schedule_account_sync_after_fill()
-        return bool(applied)
+        return False
 
     def try_confirm_fill_once(
         self,
@@ -339,20 +204,29 @@ class FillReconciliationService:
         force_kt00007_sync: bool = False,
     ) -> Literal["filled", "terminal", "pending", "skipped"]:
         """
-        kt00007 1회 동기화 + DB 1회 확인(터치호가 감시용).
-
-        접수 직후 2초×8 공통 루프 대신 터치 폴링에서 호출합니다.
+        kt00007 1회(per-order) 동기화 + DB 1회 확인(터치호가 감시용).
         """
         oid = str(order_no or "").strip()
         if not oid:
             return "pending"
         try:
-            if oid in self.app._exchange_fill_order_ids:
+            fcs = self._fcs()
+            if fcs is not None and fcs.is_fully_applied(oid):
                 return "skipped"
+            elif oid in self.app._exchange_fill_order_ids:
+                fcs2 = self._fcs()
+                if fcs2 is None or fcs2.is_fully_applied(oid):
+                    return "skipped"
         except Exception:
-            pass
+            try:
+                if oid in self.app._exchange_fill_order_ids:
+                    return "skipped"
+            except Exception:
+                pass
 
-        self._sync_exchange_fills_today_silent(force=bool(force_kt00007_sync))
+        self._sync_exchange_fills_today_silent(
+            force=bool(force_kt00007_sync), order_no=oid
+        )
 
         try:
             row = self.app.data_manager.get_order_history_row_by_order_no(oid)
@@ -361,7 +235,6 @@ class FillReconciliationService:
         if not isinstance(row, dict):
             return "pending"
 
-        # 반복 폴링마다 로그를 남기면 Tk 메인 스레드·터미널이 과부하됩니다.
         try:
             st = getattr(self.app, "settings", None) or {}
             if bool(st.get("enable_fill_reconcile_row_debug", False)):
@@ -370,12 +243,19 @@ class FillReconciliationService:
                 _qp = int((row or {}).get("qty") or 0)
                 _fp = float((row or {}).get("filled_price") or 0)
                 _op = float((row or {}).get("price") or 0)
+                _aq = 0
+                try:
+                    fcs = self._fcs()
+                    if fcs is not None:
+                        _aq = fcs.get_applied_qty(oid)
+                except Exception:
+                    pass
                 self.log(
                     "🧪 [체결확인-row] "
                     f"code={code} ord={oid} side={side} "
                     f"row.result={_res_u} row.filled_qty={_fq} row.qty={_qp} "
                     f"row.filled_price={_fp} row.price={_op} "
-                    f"expect_qty={qty} hint_price={fill_price}"
+                    f"applied_qty={_aq} expect_qty={qty} hint_price={fill_price}"
                 )
         except Exception:
             pass
@@ -404,7 +284,24 @@ class FillReconciliationService:
             reason=reason,
             row=row,
         ):
+            try:
+                fcs = self._fcs()
+                if fcs is not None:
+                    if fcs.is_fully_applied(oid):
+                        return "filled"
+                    if fcs.get_applied_qty(oid) > 0:
+                        return "pending"
+            except Exception:
+                pass
             return "filled"
+        try:
+            fcs = self._fcs()
+            if fcs is not None and fcs.get_applied_qty(oid) > 0:
+                if fcs.is_fully_applied(oid):
+                    return "filled"
+                return "pending"
+        except Exception:
+            pass
         return "pending"
 
     def run_light_boost_confirm(
@@ -427,7 +324,9 @@ class FillReconciliationService:
             return
         try:
             if oid in self.app._exchange_fill_order_ids:
-                return
+                fcs = self._fcs()
+                if fcs is None or fcs.is_fully_applied(oid):
+                    return
         except Exception:
             pass
 
@@ -446,8 +345,12 @@ class FillReconciliationService:
                 interval = max(2.0, min(interval, 8.0))
                 for i in range(max_a):
                     try:
-                        if oid in self.app._exchange_fill_order_ids:
+                        fcs = self._fcs()
+                        if fcs is not None and fcs.is_fully_applied(oid):
                             return
+                        if oid in self.app._exchange_fill_order_ids:
+                            if fcs is None or fcs.is_fully_applied(oid):
+                                return
                     except Exception:
                         pass
                     status = self.try_confirm_fill_once(
@@ -493,8 +396,16 @@ class FillReconciliationService:
         """
         try:
             oid = str(order_no or "").strip()
-            if oid and oid in self.app._exchange_fill_order_ids:
-                return
+            try:
+                fcs = self._fcs()
+                if fcs is not None and fcs.is_fully_applied(oid):
+                    return
+                if oid and oid in self.app._exchange_fill_order_ids:
+                    if fcs is None or fcs.is_fully_applied(oid):
+                        return
+            except Exception:
+                if oid and oid in self.app._exchange_fill_order_ids:
+                    return
 
             # REST 접수 후 체결확정 폴링 동기화 in-flight 중복 방지
             boost_after_other = False
@@ -570,11 +481,16 @@ class FillReconciliationService:
                     retry_interval_sec = max(0.5, min(retry_interval_sec, 5.0))
 
                     for _i in range(max_attempts):
-                        if oid and oid in self.app._exchange_fill_order_ids:
-                            return
+                        try:
+                            fcs = self._fcs()
+                            if fcs is not None and fcs.is_fully_applied(oid):
+                                return
+                        except Exception:
+                            if oid and oid in self.app._exchange_fill_order_ids:
+                                return
 
                         self._sync_exchange_fills_today_silent(
-                            force=(_i == 0)
+                            force=(_i == 0), order_no=oid
                         )
 
                         try:
@@ -745,134 +661,15 @@ class FillReconciliationService:
         price: float,
         side: str,
     ) -> None:
-        """
-        웹소켓 CHE 처리:
-        - 이미 REST 동기화가 on_fill까지 완료했던 경우(oid in _exchange_fill_order_ids)는
-          DB 체결가 갱신 + 계좌 동기화만 수행하고 on_fill은 생략
-        - 그렇지 않으면 DB 갱신 + portfolio.on_fill / (필요 시) 종료내역 보강 수행
-        """
+        """웹소켓 CHE — FillConfirmationService 증분 반영."""
         try:
-            oid = str(order_no or "").strip()
-            if oid and oid in self.app._exchange_fill_order_ids:
-                try:
-                    try:
-                        _fs = capture_supply_snapshot(self.app, code)
-                    except Exception:
-                        _fs = {"vol_power": None, "bid_ask_text": ""}
-
-                    self.app.data_manager.update_order_status(
-                        code,
-                        order_no,
-                        "FILLED",
-                        filled_price=price,
-                        filled_qty=qty,
-                        fill_snap_vol_power=_fs.get("vol_power"),
-                        fill_snap_bid_ask=_fs.get("bid_ask_text")
-                        or "— / — (—)",
-                    )
-                except Exception as ue:
-                    self.log(f"⚠️ [체결 보정] DB 갱신 실패: {ue}")
-
-                self.log(
-                    f"ℹ️ [체결 보정] CHE 체결가 반영 {code} {price:,}원 (주문번호 {oid})"
-                )
-                self.app._schedule_account_sync_after_fill()
+            fcs = self._fcs()
+            if fcs is not None:
+                fcs.ingest_che(code, order_no, qty, price, side)
                 return
-
+        except Exception as e:
             try:
-                try:
-                    _fs = capture_supply_snapshot(self.app, code)
-                except Exception:
-                    _fs = {"vol_power": None, "bid_ask_text": ""}
-
-                self.app.data_manager.update_order_status(
-                    code,
-                    order_no,
-                    "FILLED",
-                    filled_price=price,
-                    filled_qty=qty,
-                    fill_snap_vol_power=_fs.get("vol_power"),
-                    fill_snap_bid_ask=_fs.get("bid_ask_text")
-                    or "— / — (—)",
-                )
-            except Exception as ue:
-                self.log(f"⚠️ [체결] DB 갱신 실패: {ue}")
-
-            snap_reason = self.app._resolve_fill_snapshot_reason(
-                code, side, None, channel="EXEC"
-            )
-            snapshot = self.app.portfolio.capture_snapshot(
-                code, price, reason=snap_reason
-            )
-            applied = self.app.portfolio.on_fill(
-                code,
-                side,
-                price,
-                qty,
-                snapshot=snapshot,
-                fill_channel="exchange",
-                order_no=oid or None,
-            )
-
-            # 로컬 보유가 없어 on_fill 이 스킵된 매도: 주문 로그는 있는데 종료내역만 누락되는 경우 보강
-            if (not applied and str(side or "").lower() == "sell"):
-                meta: Optional[Dict[str, Any]] = None
-                try:
-                    meta = self.app.data_manager.get_sell_order_meta_by_order_no(
-                        oid
-                    )
-                except Exception:
-                    meta = None
-                try:
-                    nm = str((meta or {}).get("name") or "")
-                    rs = str((meta or {}).get("reason") or "")
-                except Exception:
-                    nm, rs = "", ""
-
-                try:
-                    applied = self.app.portfolio.record_orphan_sell_close(
-                        code,
-                        float(price),
-                        int(qty),
-                        nm,
-                        rs,
-                        oid,
-                        snapshot,
-                        "exchange",
-                    )
-                except Exception as oe:
-                    self.log(f"⚠️ [체결] 종료내역 보강 실패: {oe}")
-
-            if applied:
-                # 텔레그램 전송 전에 중복 방지 set에 oid를 먼저 넣어
-                # REST/WS 경로가 엇갈리는 극단 케이스에서 2회 전송 레이스를 제거합니다.
-                if oid and applied:
-                    self.app._exchange_fill_order_ids.add(oid)
-                if oid and str(side or "").lower() in ("buy", "sell"):
-                    self._maybe_send_buy_sell_telegram(code, oid, side)
-
-                self.log(
-                    f"✅ [체결] {code} {'매수' if side == 'buy' else '매도'} {qty}주 완료 ({price:,}원)"
-                )
-            elif str(side or "").lower() == "sell":
-                self.log(
-                    f"⚠️ [체결] CHE 매도는 포트폴리오에 미반영({code}) "
-                    f"— 로컬 보유 없음·종료내역 보강도 실패. 주문 로그를 확인하세요."
-                )
-
-            # 위에서 already add
-
-            try:
-                tc = getattr(self.app, "trading_controller", None)
-                if tc and oid and applied:
-                    if str(side or "").lower() == "buy":
-                        tc.limit_order_watch_service.clear(oid)
-                    elif self._should_clear_limit_order_watch_for_sell(code):
-                        tc.limit_order_watch_service.clear(oid)
+                self.log(f"⚠️ [체결] CHE 위임 실패: {e}")
             except Exception:
                 pass
-
-            self.app._schedule_account_sync_after_fill()
-        except Exception as e:
-            self.log(f"⚠️ [체결] 처리 실패: {e}")
 

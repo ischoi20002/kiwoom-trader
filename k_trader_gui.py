@@ -56,6 +56,7 @@ from core.rest_auth_retry_service import RestAuthRetryService
 from core.fill_reconciliation_service import FillReconciliationService
 from core.execution.order_execution_service import OrderExecutionService
 from core.execution.order_action_dispatcher import OrderActionDispatcher
+from core.execution.fill_confirmation_service import FillConfirmationService
 from core.defaults import DEFAULT_SETTINGS, get_allowed_keys
 from core.version import APP_VERSION
 from core.monitor_signal_status_display import monitor_signal_status_display_text
@@ -499,7 +500,10 @@ class KiwoomApp:
             self, log_func=self.log
         )
 
-        # 체결 동기화(REST/WS) 서비스 추출
+        # 체결 동기화(REST/WS) — FillConfirmationService 먼저 초기화
+        self.fill_confirmation_service = FillConfirmationService(
+            self, log_func=self.log
+        )
         self.fill_reconciliation_service = FillReconciliationService(
             self, log_func=self.log
         )

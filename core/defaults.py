@@ -329,6 +329,8 @@ DEFAULT_SETTINGS = {
     "exchange_fill_late_reconfirm_sec": 35.0,
     # kt00007 병합 최소 간격(초) — 체결 폴링·터치호가가 동시에 돌 때 REST 폭주 완화
     "exchange_fill_kt00007_sync_min_interval_sec": 5.0,
+    # per-order kt00007 긴급 sync 최소 간격(초) — 터치 poll 전용
+    "exchange_fill_kt00007_per_order_min_sec": 1.2,
     # RC4033·타임아웃 등 경량 체결 확인 최대 횟수
     "exchange_fill_boost_max_attempts": 4,
     # on_fill 연속 시 포지션 탭 gui_callback 디바운스(ms)
@@ -338,6 +340,8 @@ DEFAULT_SETTINGS = {
     "post_fill_sync_first_delay_ms": 8500,
     "post_fill_sync_follow_delay_ms": 28000,
     "post_fill_sync_enable_followup": True,
+    # 미확정 주문 존재 시 post-fill 계좌동기화 생략
+    "post_fill_sync_skip_while_pending": True,
     "sync_run_kt00007_on_silent_sync": False,
     "bt_start_date": "2026-04-01",
     "bt_end_date": "2026-04-24",

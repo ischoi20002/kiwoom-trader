@@ -374,6 +374,19 @@ class DataManagerV2:
                 )
             except sqlite3.Error:
                 pass
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS order_fill_state (
+                    order_no TEXT PRIMARY KEY,
+                    code TEXT DEFAULT '',
+                    side TEXT DEFAULT '',
+                    order_qty INTEGER DEFAULT 0,
+                    exchange_filled_qty INTEGER DEFAULT 0,
+                    applied_qty INTEGER DEFAULT 0,
+                    name TEXT DEFAULT '',
+                    reason TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT ''
+                )
+            """)
             conn.commit()
 
     def _init_state_tables(self) -> None:
@@ -1641,6 +1654,211 @@ class DataManagerV2:
         except Exception:
             return None
 
+    def upsert_order_fill_state_submitted(
+        self,
+        order_no: str,
+        *,
+        code: str,
+        side: str,
+        order_qty: int,
+        name: str = "",
+        reason: str = "",
+    ) -> None:
+        """접수 직후 order_fill_state 행을 생성·갱신합니다."""
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._lock, self._get_state_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO order_fill_state (
+                        order_no, code, side, order_qty, exchange_filled_qty,
+                        applied_qty, name, reason, updated_at
+                    ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)
+                    ON CONFLICT(order_no) DO UPDATE SET
+                        code = excluded.code,
+                        side = excluded.side,
+                        order_qty = CASE
+                            WHEN excluded.order_qty > 0 THEN excluded.order_qty
+                            ELSE order_fill_state.order_qty
+                        END,
+                        name = CASE
+                            WHEN excluded.name != '' THEN excluded.name
+                            ELSE order_fill_state.name
+                        END,
+                        reason = CASE
+                            WHEN excluded.reason != '' THEN excluded.reason
+                            ELSE order_fill_state.reason
+                        END,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        oid,
+                        str(code or "").zfill(6),
+                        str(side or "").lower(),
+                        int(order_qty or 0),
+                        str(name or ""),
+                        str(reason or ""),
+                        now,
+                    ),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def get_order_fill_state(self, order_no: str) -> Optional[Dict[str, Any]]:
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return None
+            with self._get_state_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT order_no, code, side, order_qty, exchange_filled_qty,
+                           applied_qty, name, reason, updated_at
+                    FROM order_fill_state WHERE order_no = ?
+                    """,
+                    (oid,),
+                ).fetchone()
+            if not row:
+                return None
+            return {
+                "order_no": str(row[0] or ""),
+                "code": str(row[1] or ""),
+                "side": str(row[2] or ""),
+                "order_qty": int(row[3] or 0),
+                "exchange_filled_qty": int(row[4] or 0),
+                "applied_qty": int(row[5] or 0),
+                "name": str(row[6] or ""),
+                "reason": str(row[7] or ""),
+                "updated_at": row[8],
+            }
+        except Exception:
+            return None
+
+    def increment_order_fill_applied_qty(
+        self,
+        order_no: str,
+        delta: int,
+        *,
+        exchange_filled_qty: Optional[int] = None,
+    ) -> None:
+        try:
+            oid = str(order_no or "").strip()
+            dq = int(delta or 0)
+            if not oid or dq <= 0:
+                return
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._lock, self._get_state_connection() as conn:
+                if exchange_filled_qty is not None:
+                    conn.execute(
+                        """
+                        UPDATE order_fill_state
+                        SET applied_qty = applied_qty + ?,
+                            exchange_filled_qty = MAX(exchange_filled_qty, ?),
+                            updated_at = ?
+                        WHERE order_no = ?
+                        """,
+                        (dq, int(exchange_filled_qty), now, oid),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE order_fill_state
+                        SET applied_qty = applied_qty + ?,
+                            updated_at = ?
+                        WHERE order_no = ?
+                        """,
+                        (dq, now, oid),
+                    )
+                conn.commit()
+        except Exception:
+            pass
+
+    def increment_order_fill_exchange_qty(self, order_no: str, delta: int) -> None:
+        try:
+            oid = str(order_no or "").strip()
+            dq = int(delta or 0)
+            if not oid or dq <= 0:
+                return
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._lock, self._get_state_connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE order_fill_state
+                    SET exchange_filled_qty = exchange_filled_qty + ?,
+                        updated_at = ?
+                    WHERE order_no = ?
+                    """,
+                    (dq, now, oid),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def set_order_fill_exchange_qty(self, order_no: str, cumulative: int) -> None:
+        try:
+            oid = str(order_no or "").strip()
+            cum = int(cumulative or 0)
+            if not oid or cum <= 0:
+                return
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._lock, self._get_state_connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE order_fill_state
+                    SET exchange_filled_qty = MAX(exchange_filled_qty, ?),
+                        updated_at = ?
+                    WHERE order_no = ?
+                    """,
+                    (cum, now, oid),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def sum_order_history_filled_qty(self, order_no: str) -> int:
+        """당일 동일 주문번호 체결 수량 합(kt00007 다건·부분체결)."""
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return 0
+            today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+            with self._get_state_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(filled_qty), 0)
+                    FROM order_history
+                    WHERE order_no = ?
+                      AND timestamp >= ?
+                      AND COALESCE(filled_qty, 0) > 0
+                    """,
+                    (oid, today_start),
+                ).fetchone()
+            return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
+
+    def list_order_fill_states_pending_today(self) -> List[str]:
+        """exchange_filled_qty > applied_qty 이거나 applied < order_qty 인 주문번호."""
+        try:
+            today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+            with self._get_state_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT order_no FROM order_fill_state
+                    WHERE updated_at >= ?
+                      AND order_qty > 0
+                      AND applied_qty < order_qty
+                    """,
+                    (today_start,),
+                ).fetchall()
+            return [str(r[0]) for r in rows if r and r[0]]
+        except Exception:
+            return []
+
     def remap_order_history_order_no(self, old_no: str, new_no: str) -> bool:
         """
         정정 접수 등으로 주문번호가 바뀐 경우, 동일 주문에 대한 ``order_history`` 행의
@@ -1656,6 +1874,13 @@ class DataManagerV2:
                     "UPDATE order_history SET order_no = ? WHERE order_no = ?",
                     (o_new, o_old),
                 )
+                try:
+                    conn.execute(
+                        "UPDATE order_fill_state SET order_no = ? WHERE order_no = ?",
+                        (o_new, o_old),
+                    )
+                except sqlite3.Error:
+                    pass
                 conn.commit()
                 return bool(cur.rowcount and cur.rowcount > 0)
         except Exception as e:

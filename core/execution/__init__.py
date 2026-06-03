@@ -6,11 +6,13 @@
 """
 from core.execution.fill_reconciliation_service import FillReconciliationService
 from core.execution.limit_order_watch_service import LimitOrderWatchService
+from core.execution.fill_confirmation_service import FillConfirmationService
 from core.execution.order_action_dispatcher import OrderActionDispatcher
 from core.execution.order_execution_service import OrderExecutionService
 from core.execution.post_fill_account_sync_service import PostFillAccountSyncService
 
 __all__ = [
+    "FillConfirmationService",
     "FillReconciliationService",
     "LimitOrderWatchService",
     "OrderActionDispatcher",
