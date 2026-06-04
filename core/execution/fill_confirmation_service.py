@@ -603,6 +603,218 @@ class FillConfirmationService:
         except Exception:
             pass
 
+    def confirm_after_no_open_qty(
+        self,
+        *,
+        code: str,
+        order_no: str,
+        side: str,
+        qty: int,
+        fill_price_hint: float,
+        name: str = "",
+        reason: str = "",
+        kind: str = "",
+    ) -> bool:
+        """
+        RC4033·취소 no_open_qty — 거래소상 체결됐으나 kt00007/DB가 늦을 때 즉시 확정.
+
+        짧은 간격 kt00007 재시도 → 실패 시 매도는 잔고 동기화·힌트가로 증분 on_fill.
+        """
+        oid = str(order_no or "").strip()
+        nc = str(code or "").split("_")[0].zfill(6)
+        side_l = str(side or "").strip().lower()
+        if not oid or not nc or side_l not in ("buy", "sell"):
+            return False
+
+        if self.is_fully_applied(oid):
+            self._release_exit_pending_if_sell(nc, oid, kind)
+            return True
+
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            max_a = int(float(st.get("exchange_fill_no_open_confirm_attempts", 8)))
+            interval = float(st.get("exchange_fill_no_open_confirm_interval_sec", 0.8))
+        except (TypeError, ValueError):
+            max_a = 8
+            interval = 0.8
+        max_a = max(3, min(max_a, 12))
+        interval = max(0.35, min(interval, 3.0))
+
+        frs = getattr(self.app, "fill_reconciliation_service", None)
+        oq = max(int(qty or 0), self.get_order_qty(oid))
+
+        for i in range(max_a):
+            if self.is_fully_applied(oid):
+                self._release_exit_pending_if_sell(nc, oid, kind)
+                return True
+
+            self.sync_kt00007(order_no=oid, force=True)
+
+            if frs is not None and hasattr(frs, "try_confirm_fill_once"):
+                try:
+                    status = frs.try_confirm_fill_once(
+                        nc,
+                        oid,
+                        side_l,
+                        oq,
+                        float(fill_price_hint or 0),
+                        name,
+                        reason,
+                        force_kt00007_sync=True,
+                    )
+                    if status in ("filled", "skipped"):
+                        self._release_exit_pending_if_sell(nc, oid, kind)
+                        return True
+                    if status == "terminal":
+                        break
+                except Exception:
+                    pass
+
+            try:
+                row = self.app.data_manager.get_order_history_row_by_order_no(oid)
+            except Exception:
+                row = None
+            if isinstance(row, dict):
+                try:
+                    if self.ingest_rest_confirmed(
+                        code=nc,
+                        order_no=oid,
+                        side=side_l,
+                        qty=oq,
+                        fill_price=float(fill_price_hint or 0),
+                        name=name,
+                        reason=reason,
+                        row=row,
+                    ):
+                        if self.is_fully_applied(oid):
+                            self._release_exit_pending_if_sell(nc, oid, kind)
+                            return True
+                except Exception:
+                    pass
+
+            if side_l == "sell" and i >= 1:
+                if self._try_apply_sell_when_holdings_gone(
+                    nc,
+                    oid,
+                    oq,
+                    float(fill_price_hint or 0),
+                    name,
+                    reason,
+                    kind,
+                ):
+                    return True
+
+            if i + 1 < max_a:
+                try:
+                    time.sleep(interval)
+                except Exception:
+                    break
+
+        if self.is_fully_applied(oid):
+            self._release_exit_pending_if_sell(nc, oid, kind)
+            return True
+        return False
+
+    def _try_apply_sell_when_holdings_gone(
+        self,
+        code: str,
+        order_no: str,
+        order_qty: int,
+        fill_price_hint: float,
+        name: str,
+        reason: str,
+        kind: str,
+    ) -> bool:
+        """kt00007 없을 때: REST 잔고 동기화 후 종목 미보유면 힌트가로 매도 증분."""
+        try:
+            self.app._run_portfolio_sync_in_daemon_thread(
+                silent=True,
+                force=True,
+                refresh_cash_deposit=False,
+                wait_for_lock=True,
+                schedule_gui_refresh=False,
+                schedule_orders_refresh=False,
+            )
+        except TypeError:
+            try:
+                self.app.portfolio.sync_with_actual_account(
+                    silent=True,
+                    force=True,
+                    refresh_cash_deposit=False,
+                    schedule_gui_refresh=False,
+                    schedule_orders_refresh=False,
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        nc = str(code).zfill(6)
+        oid = str(order_no or "").strip()
+        try:
+            with self.app.portfolio.lock:
+                still = nc in (self.app.portfolio.virtual_positions or {})
+        except Exception:
+            still = True
+
+        if still:
+            return False
+
+        delta = int(order_qty or 0) - int(self.get_applied_qty(oid))
+        if delta <= 0:
+            self._release_exit_pending_if_sell(nc, oid, kind)
+            return self.is_fully_applied(oid)
+
+        px = float(fill_price_hint or 0)
+        if px <= 0:
+            try:
+                row = self.app.data_manager.get_order_history_row_by_order_no(oid)
+                if isinstance(row, dict):
+                    px = float(row.get("price") or row.get("filled_price") or 0)
+            except Exception:
+                px = 0.0
+        if px <= 0:
+            return False
+
+        try:
+            self.log(
+                f"ℹ️ [체결/잔고] {nc} kt00007 지연 — 잔고 동기화로 매도 확정 시도 "
+                f"(ord={oid}, {delta}주 @ {int(px):,}원)"
+            )
+        except Exception:
+            pass
+
+        ok = self.apply_exchange_delta(
+            code=nc,
+            order_no=oid,
+            side="sell",
+            delta_qty=delta,
+            fill_price=px,
+            name=name,
+            reason=reason,
+            channel="REST",
+            update_db_status=True,
+        )
+        if ok or self.is_fully_applied(oid):
+            self._release_exit_pending_if_sell(nc, oid, kind)
+            return True
+        return False
+
+    def _release_exit_pending_if_sell(
+        self, code: str, order_no: str, kind: str
+    ) -> None:
+        if str(kind or "") != "exit_sell":
+            return
+        nc = str(code).split("_")[0].zfill(6)
+        try:
+            with self.app.portfolio.lock:
+                p = self.app.portfolio.virtual_positions.get(nc)
+                if isinstance(p, dict):
+                    p["exit_pending"] = False
+                    p.pop("pending_exit_ord_no", None)
+        except Exception:
+            pass
+
     def _schedule_account_sync_after_fill_if_ready(self) -> None:
         """미확정 주문이 없을 때만 체결 후 계좌 동기화 예약(Phase 6)."""
         try:

@@ -325,14 +325,20 @@ DEFAULT_SETTINGS = {
     "limit_order_unfilled_timeout_sec": 45.0,
     "exchange_fill_sync_lookback_days": 7,
     "exchange_fill_confirm_max_attempts": 8,
-    "exchange_fill_confirm_retry_interval_sec": 5.0,
+    "exchange_fill_confirm_retry_interval_sec": 2.5,
     "exchange_fill_late_reconfirm_sec": 35.0,
     # kt00007 병합 최소 간격(초) — 체결 폴링·터치호가가 동시에 돌 때 REST 폭주 완화
     "exchange_fill_kt00007_sync_min_interval_sec": 5.0,
     # per-order kt00007 긴급 sync 최소 간격(초) — 터치 poll 전용
     "exchange_fill_kt00007_per_order_min_sec": 1.2,
     # RC4033·타임아웃 등 경량 체결 확인 최대 횟수
-    "exchange_fill_boost_max_attempts": 4,
+    "exchange_fill_boost_max_attempts": 6,
+    # RC4033 즉시확정·boost 폴링 간격(초)
+    "exchange_fill_boost_interval_sec": 1.5,
+    "exchange_fill_no_open_confirm_attempts": 8,
+    "exchange_fill_no_open_confirm_interval_sec": 0.8,
+    # 터치 pending N회 후 취소 API로 전량체결(RC4033) 조기 탐지
+    "touch_pending_cancel_probe_after": 2,
     # on_fill 연속 시 포지션 탭 gui_callback 디바운스(ms)
     "portfolio_gui_callback_debounce_ms": 1200,
     "virtual_tab_orders_refresh_debounce_ms": 800,

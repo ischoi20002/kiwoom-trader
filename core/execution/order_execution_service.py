@@ -660,7 +660,7 @@ class OrderExecutionService:
                         self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
                     self.log(
                         f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 매도 접수 "
-                        f"({self._exit_order_label(ot, ex_style)}, {profit_ratio:+.2f}%) "
+                        f"({self._exit_order_label(ot, ex_style, exit_ord_price)}, {profit_ratio:+.2f}%) "
                         f"참고가 {ref_px:,}원"
                         + (
                             f" · 호가 {exit_ord_price:,}원"

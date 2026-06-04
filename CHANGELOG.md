@@ -15,6 +15,11 @@
 
 
 
+## 0.8.36 (2026-06-02)
+
+- **RC4033 즉시 체결확정**: pending 4회·24초 후 동기화에 의존하던 흐름 개선 — `confirm_after_no_open_qty`(kt00007 연속 재시도 + 잔고 기반 매도 확정), pending 2회 후 취소조회 조기 탐지, boost 간격 1.5초.
+- **터치 poll**: `try_confirm_fill_once` 항상 `force_kt00007_sync`, 첫 확인 간격 기본 2.5초.
+
 ## 0.8.35 (2026-06-02)
 
 - **체결 확인 증분 반영(Phase 5)**: `FillConfirmationService` — CHE·REST 경로가 주문번호별 `applied_qty` delta만 `on_fill`. 부분체결 2건째 CHE가 스킵되던 문제 수정.

@@ -375,14 +375,7 @@ class LimitOrderWatchService:
                 return True
             if ("4033" in s_msg) or ("no_open_qty" in s_msg) or ("정정/취소할 수량" in s_msg):
                 try:
-                    # exit_sell이면 kt00007로 체결 동기화(강제 재폴링) 시도합니다.
-                    if str(meta.kind or "") == "exit_sell":
-                        self._schedule_boost_fill_reconcile(
-                            order_no=oid,
-                            code=nc,
-                            kind=str(meta.kind or ""),
-                            qty=int(meta.qty or 0),
-                        )
+                    self._run_terminal_fill_confirm(meta, oid)
                 except Exception:
                     pass
                 try:
@@ -437,6 +430,7 @@ class LimitOrderWatchService:
                 float(meta.fill_price_hint or 0),
                 str(meta.touch_name or ""),
                 str(meta.touch_reason or ""),
+                force_kt00007_sync=True,
             )
         except Exception as ex:
             try:
@@ -495,7 +489,28 @@ class LimitOrderWatchService:
             pending_cnt = 0
 
         max_a = self._get_touch_max_amends()
+        probe_after = self._touch_pending_probe_after()
         if pending_cnt > 0:
+            if pending_cnt >= probe_after:
+                try:
+                    cancel_st = str(
+                        self.app.order_manager.cancel_order(
+                            current_ord, meta.code, "0"
+                        )
+                        or "failed"
+                    )
+                except Exception:
+                    cancel_st = "failed"
+                if cancel_st == "no_open_qty":
+                    try:
+                        self.log(
+                            f"ℹ️ [터치호가] pending {pending_cnt}회 — "
+                            f"취소조회로 전량체결 확인(ord={current_ord})"
+                        )
+                    except Exception:
+                        pass
+                    self._run_terminal_fill_confirm(meta, current_ord)
+                    return
             try:
                 if meta.touch_amend_attempts_done < max_a:
                     meta.touch_amend_attempts_done = int(
@@ -705,7 +720,103 @@ class LimitOrderWatchService:
         if kind == "s1_buy":
             self.s1_buy_pending_codes.add(nc)
 
+    def _touch_pending_probe_after(self) -> int:
+        try:
+            n = int(
+                (getattr(self.app, "settings", None) or {}).get(
+                    "touch_pending_cancel_probe_after", 2
+                )
+            )
+        except (TypeError, ValueError):
+            n = 2
+        return max(1, min(n, 5))
+
+    def _run_terminal_fill_confirm(self, meta: LimitOrderMeta, order_no: str) -> None:
+        """RC4033·no_open_qty 직후 즉시 체결 확정(백그라운드)."""
+        oid = str(order_no or "").strip()
+        nc = self._normalize_code_6(meta.code)
+        if not oid or not nc:
+            return
+
+        def _worker() -> None:
+            try:
+                fcs = getattr(self.app, "fill_confirmation_service", None)
+                if fcs is None:
+                    self._schedule_boost_fill_reconcile_legacy(
+                        order_no=oid,
+                        code=nc,
+                        kind=str(meta.kind or ""),
+                        qty=int(meta.qty or 0),
+                    )
+                    return
+                side = str(meta.touch_side or "").strip().lower()
+                if side not in ("buy", "sell"):
+                    side = "sell" if str(meta.kind or "") == "exit_sell" else "buy"
+                ok = fcs.confirm_after_no_open_qty(
+                    code=nc,
+                    order_no=oid,
+                    side=side,
+                    qty=int(meta.qty or 0),
+                    fill_price_hint=float(meta.fill_price_hint or 0),
+                    name=str(meta.touch_name or ""),
+                    reason=str(meta.touch_reason or ""),
+                    kind=str(meta.kind or ""),
+                )
+                if ok:
+                    try:
+                        self.clear(oid)
+                    except Exception:
+                        pass
+            except Exception as ex:
+                try:
+                    self.log(f"⚠️ [터치호가] 즉시 체결확정 실패: {ex}")
+                except Exception:
+                    pass
+
+        try:
+            threading.Thread(
+                target=_worker, daemon=True, name=f"FillConfirm-{oid}"
+            ).start()
+        except Exception:
+            try:
+                _worker()
+            except Exception:
+                pass
+
     def _schedule_boost_fill_reconcile(
+        self, *, order_no: str, code: str, kind: str, qty: int
+    ) -> None:
+        """RC4033·4042 등 — 즉시 체결확정 경로(legacy boost 폴링 대체)."""
+        oid = str(order_no or "").strip()
+        nc = self._normalize_code_6(code)
+        meta: Optional[LimitOrderMeta] = None
+        try:
+            with self._lock:
+                meta = self.limit_order_meta.get(oid)
+        except Exception:
+            meta = None
+        if meta is None:
+            side = "sell" if str(kind or "") == "exit_sell" else "buy"
+            try:
+                px = 0.0
+                dm = getattr(self.app, "data_manager", None)
+                if dm is not None:
+                    row = dm.get_order_history_row_by_order_no(oid)
+                    if isinstance(row, dict):
+                        px = float(row.get("price") or 0)
+            except Exception:
+                px = 0.0
+            meta = LimitOrderMeta(
+                code=nc,
+                kind=str(kind or ""),
+                after_id=None,
+                qty=int(qty or 0),
+                touch_side=side,
+                fill_price_hint=float(px),
+            )
+        self._run_terminal_fill_confirm(meta, oid)
+
+    def _schedule_boost_fill_reconcile_legacy(
         self, *, order_no: str, code: str, kind: str, qty: int
     ) -> None:
         """
@@ -958,17 +1069,14 @@ class LimitOrderWatchService:
         # kind별 플래그 정리 (TradingController 기존 동작 그대로)
         if kind == "exit_sell":
             if no_open:
-                # 전량 체결 가능성 — exit_pending 유지(중복 매도 방지), 강화 체결동기화
                 try:
-                    self._schedule_boost_fill_reconcile(
-                        order_no=oid, code=nc, kind=kind, qty=int(meta.qty or 0)
-                    )
+                    self._run_terminal_fill_confirm(meta, oid)
                 except Exception:
                     pass
                 try:
                     self.log(
                         f"⏱️ [미체결타임아웃] 매도 취소 생략(미체결 없음) — "
-                        f"종목 {nc} 체결동기화 강화(ord={oid}), exit_pending 유지"
+                        f"종목 {nc} 즉시 체결확정(ord={oid})"
                     )
                 except Exception:
                     pass

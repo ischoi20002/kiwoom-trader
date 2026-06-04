@@ -334,15 +334,15 @@ class FillReconciliationService:
             try:
                 try:
                     st = getattr(self.app, "settings", None) or {}
-                    max_a = int(float(st.get("exchange_fill_boost_max_attempts", 4)))
+                    max_a = int(float(st.get("exchange_fill_boost_max_attempts", 6)))
                     interval = float(
-                        st.get("exchange_fill_confirm_retry_interval_sec", 5.0)
+                        st.get("exchange_fill_boost_interval_sec", 1.5)
                     )
                 except (TypeError, ValueError):
-                    max_a = 4
-                    interval = 5.0
-                max_a = max(2, min(max_a, 8))
-                interval = max(2.0, min(interval, 8.0))
+                    max_a = 6
+                    interval = 1.5
+                max_a = max(3, min(max_a, 10))
+                interval = max(0.5, min(interval, 4.0))
                 for i in range(max_a):
                     try:
                         fcs = self._fcs()
@@ -361,7 +361,7 @@ class FillReconciliationService:
                         float(fill_price),
                         name,
                         reason,
-                        force_kt00007_sync=(i == 0),
+                        force_kt00007_sync=True,
                     )
                     if status in ("filled", "terminal", "skipped"):
                         return
