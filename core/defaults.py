@@ -339,6 +339,9 @@ DEFAULT_SETTINGS = {
     "exchange_fill_no_open_confirm_interval_sec": 0.8,
     # 터치 pending N회 후 취소 API로 전량체결(RC4033) 조기 탐지
     "touch_pending_cancel_probe_after": 2,
+    "touch_exit_pending_probe_after": 1,
+    "touch_fill_first_poll_sec": 2.0,
+    "exchange_fill_trust_no_open_qty": True,
     # on_fill 연속 시 포지션 탭 gui_callback 디바운스(ms)
     "portfolio_gui_callback_debounce_ms": 1200,
     "virtual_tab_orders_refresh_debounce_ms": 800,

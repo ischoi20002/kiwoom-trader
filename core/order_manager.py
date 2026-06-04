@@ -1,6 +1,7 @@
 import requests
 import json
 import logging
+import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
@@ -355,6 +356,64 @@ class OrderManager:
         if "정정/취소할 수량" in s and "없" in s:
             return True
         return False
+
+    def _notify_no_open_qty_to_fill_service(self, code: str, order_no: str) -> None:
+        """RC4033 직후 FillConfirmationService 즉시 반영(터치 poll·타임아웃과 병행)."""
+        try:
+            fcs = getattr(self.app, "fill_confirmation_service", None)
+            if fcs is None:
+                return
+            oid = str(order_no or "").strip()
+            nc = str(code or "").zfill(6)
+            dm = getattr(self.app, "data_manager", None)
+            row = None
+            if dm is not None:
+                try:
+                    row = dm.get_order_history_row_by_order_no(oid)
+                except Exception:
+                    row = None
+            side = "sell"
+            qty = 0
+            px = 0.0
+            nm = ""
+            rs = ""
+            kind = ""
+            if isinstance(row, dict):
+                side = str(row.get("side") or "sell").strip().lower()
+                qty = int(row.get("qty", 0) or 0)
+                px = float(row.get("price") or 0)
+                nm = str(row.get("name") or "")
+                rs = str(row.get("reason") or "")
+                if "EXIT" in rs.upper():
+                    kind = "exit_sell"
+            st = getattr(self.app, "settings", None) or {}
+            if not bool(st.get("exchange_fill_trust_no_open_qty", True)):
+                return
+
+            def _run() -> None:
+                try:
+                    if side == "sell":
+                        fcs.apply_trusted_fill_on_no_open_qty(
+                            code=nc,
+                            order_no=oid,
+                            side=side,
+                            qty=qty,
+                            fill_price_hint=px,
+                            name=nm,
+                            reason=rs,
+                            kind=kind,
+                        )
+                except Exception:
+                    pass
+
+            try:
+                threading.Thread(
+                    target=_run, daemon=True, name=f"NoOpenQty-{oid}"
+                ).start()
+            except Exception:
+                _run()
+        except Exception:
+            pass
 
     def _safe_float(self, val, default: float = 0.0) -> float:
         """API 숫자 필드(콤마·부호 문자열)를 float로 변환합니다."""
@@ -1462,8 +1521,12 @@ class OrderManager:
                 try:
                     self.app.log(
                         f"ℹ️ [{mode_str}] 주문 취소 거부(미체결 없음·통상 전량체결): "
-                        f"{ret_msg} — kt00007 체결동기화로 수량·단가를 확정합니다."
+                        f"{ret_msg} — 즉시 체결 반영 시도"
                     )
+                except Exception:
+                    pass
+                try:
+                    self._notify_no_open_qty_to_fill_service(code, oid)
                 except Exception:
                     pass
                 return "no_open_qty"

@@ -71,16 +71,17 @@ class LimitOrderWatchService:
         return int(sec * 1000)
 
     def _get_touch_first_poll_ms(self) -> int:
-        """터치호가 첫 체결 확인 간격(ms) — ``exchange_fill_confirm_retry_interval_sec``."""
+        """터치호가 첫 체결 확인 간격(ms)."""
         try:
-            sec = float(
-                (getattr(self.app, "settings", None) or {}).get(
-                    "exchange_fill_confirm_retry_interval_sec", 5.0
+            st = getattr(self.app, "settings", None) or {}
+            sec = float(st.get("touch_fill_first_poll_sec", 0))
+            if sec <= 0:
+                sec = float(
+                    st.get("exchange_fill_confirm_retry_interval_sec", 2.5)
                 )
-            )
         except (TypeError, ValueError):
-            sec = 5.0
-        sec = max(1.0, min(sec, 10.0))
+            sec = 2.5
+        sec = max(1.0, min(sec, 8.0))
         return int(sec * 1000)
 
     def _get_touch_poll_ms(self) -> int:
@@ -491,7 +492,17 @@ class LimitOrderWatchService:
         max_a = self._get_touch_max_amends()
         probe_after = self._touch_pending_probe_after()
         if pending_cnt > 0:
-            if pending_cnt >= probe_after:
+            do_probe = pending_cnt >= probe_after
+            if str(meta.kind or "") == "exit_sell":
+                try:
+                    st = getattr(self.app, "settings", None) or {}
+                    exit_probe = int(
+                        float(st.get("touch_exit_pending_probe_after", 1))
+                    )
+                    do_probe = pending_cnt >= max(1, min(exit_probe, 3))
+                except (TypeError, ValueError):
+                    do_probe = pending_cnt >= 1
+            if do_probe:
                 try:
                     cancel_st = str(
                         self.app.order_manager.cancel_order(

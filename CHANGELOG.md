@@ -15,6 +15,12 @@
 
 
 
+## 0.8.37 (2026-06-04)
+
+- **RC4033 즉시 on_fill**: kt00007 대기 없이 `apply_trusted_fill_on_no_open_qty` — 매도는 증권사 미체결없음 확인 직후 힌트가로 포지션 반영.
+- **취소 API RC4033** 시 `OrderManager`에서도 동일 경로 트리거.
+- **EXIT pending 1회** 후 취소조회(`touch_exit_pending_probe_after`), 첫 체결확인 `touch_fill_first_poll_sec` 2초.
+
 ## 0.8.36 (2026-06-02)
 
 - **RC4033 즉시 체결확정**: pending 4회·24초 후 동기화에 의존하던 흐름 개선 — `confirm_after_no_open_qty`(kt00007 연속 재시도 + 잔고 기반 매도 확정), pending 2회 후 취소조회 조기 탐지, boost 간격 1.5초.

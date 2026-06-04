@@ -603,6 +603,109 @@ class FillConfirmationService:
         except Exception:
             pass
 
+    def apply_trusted_fill_on_no_open_qty(
+        self,
+        *,
+        code: str,
+        order_no: str,
+        side: str,
+        qty: int,
+        fill_price_hint: float,
+        name: str = "",
+        reason: str = "",
+        kind: str = "",
+    ) -> bool:
+        """
+        RC4033·no_open_qty: 증권사가 '미체결 없음'을 확인한 경우 — kt00007 대기 없이 잔여 수량 즉시 on_fill.
+
+        모의투자에서 kt00007 반영이 수 초~수십 초 늦을 때 주기 동기화에만 의존하지 않도록 합니다.
+        """
+        oid = str(order_no or "").strip()
+        nc = str(code or "").split("_")[0].zfill(6)
+        side_l = str(side or "").strip().lower()
+        if not oid or not nc or side_l not in ("buy", "sell"):
+            return False
+
+        if self.is_fully_applied(oid):
+            self._release_exit_pending_if_sell(nc, oid, kind)
+            return True
+
+        oq = max(int(qty or 0), self.get_order_qty(oid))
+        if oq <= 0:
+            try:
+                row = self.app.data_manager.get_order_history_row_by_order_no(oid)
+                if isinstance(row, dict):
+                    oq = int(row.get("qty", 0) or 0)
+            except Exception:
+                oq = 0
+        if oq <= 0:
+            return False
+
+        applied = self.get_applied_qty(oid)
+        delta = int(oq) - int(applied)
+        if delta <= 0:
+            if side_l == "sell":
+                try:
+                    with self.app.portfolio.lock:
+                        pos = self.app.portfolio.virtual_positions.get(nc)
+                        if isinstance(pos, dict):
+                            rem = int(pos.get("qty", 0) or 0)
+                            if rem > 0:
+                                delta = rem
+                except Exception:
+                    pass
+        if delta <= 0:
+            self._release_exit_pending_if_sell(nc, oid, kind)
+            return self.is_fully_applied(oid)
+
+        px = float(fill_price_hint or 0)
+        if px <= 0:
+            try:
+                row = self.app.data_manager.get_order_history_row_by_order_no(oid)
+                if isinstance(row, dict):
+                    px = float(
+                        row.get("filled_price")
+                        or row.get("price")
+                        or 0
+                    )
+            except Exception:
+                px = 0.0
+        if px <= 0:
+            return False
+
+        try:
+            self.log(
+                f"✅ [체결/RC4033] {nc} "
+                f"{'매수' if side_l == 'buy' else '매도'} +{delta}주 @ {int(px):,}원 "
+                f"(증권사 미체결없음 — 즉시 반영, ord={oid})"
+            )
+        except Exception:
+            pass
+
+        ok = self.apply_exchange_delta(
+            code=nc,
+            order_no=oid,
+            side=side_l,
+            delta_qty=delta,
+            fill_price=px,
+            name=name,
+            reason=reason,
+            channel="REST",
+            cumulative_filled_qty=int(oq),
+        )
+        if ok or self.is_fully_applied(oid):
+            self._release_exit_pending_if_sell(nc, oid, kind)
+            try:
+                threading.Thread(
+                    target=lambda: self.sync_kt00007(order_no=oid, force=True),
+                    daemon=True,
+                    name=f"Kt00007AfterRC4033-{oid}",
+                ).start()
+            except Exception:
+                pass
+            return True
+        return False
+
     def confirm_after_no_open_qty(
         self,
         *,
@@ -629,6 +732,25 @@ class FillConfirmationService:
         if self.is_fully_applied(oid):
             self._release_exit_pending_if_sell(nc, oid, kind)
             return True
+
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            trust_first = bool(st.get("exchange_fill_trust_no_open_qty", True))
+        except Exception:
+            trust_first = True
+
+        if trust_first and side_l == "sell":
+            if self.apply_trusted_fill_on_no_open_qty(
+                code=nc,
+                order_no=oid,
+                side=side_l,
+                qty=int(qty or 0),
+                fill_price_hint=float(fill_price_hint or 0),
+                name=name,
+                reason=reason,
+                kind=kind,
+            ):
+                return True
 
         try:
             st = getattr(self.app, "settings", None) or {}
@@ -692,7 +814,7 @@ class FillConfirmationService:
                 except Exception:
                     pass
 
-            if side_l == "sell" and i >= 1:
+            if side_l == "sell" and i >= 0:
                 if self._try_apply_sell_when_holdings_gone(
                     nc,
                     oid,
