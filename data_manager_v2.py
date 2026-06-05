@@ -48,6 +48,38 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ka10080 전역 페이싱(워밍업·M1폴러·15분 확정 보정 등 병렬 스레드가 동시에 때리는 429 완화)
 _KA10080_GLOBAL_LOCK = threading.Lock()
 _KA10080_GLOBAL_NEXT_MONOTONIC: float = 0.0
+_KA10080_RATE_LIMIT_LOG_LOCK = threading.Lock()
+_KA10080_RATE_LIMIT_LOG_AT: Dict[str, float] = {}
+
+
+def _log_ka10080_rate_limit_throttled(code: str, *, status_code: int = 429) -> None:
+    """종목별 ka10080 429·과다호출 로그 스팸 방지 + 전역 쿨다운 강화."""
+    try:
+        nk = normalize_code(str(code).strip())
+    except Exception:
+        nk = str(code or "").strip()
+    if not nk:
+        return
+    now = time.monotonic()
+    try:
+        with _KA10080_RATE_LIMIT_LOG_LOCK:
+            last = float(_KA10080_RATE_LIMIT_LOG_AT.get(nk, 0.0) or 0.0)
+            if now - last < 90.0:
+                return
+            _KA10080_RATE_LIMIT_LOG_AT[nk] = now
+    except Exception:
+        pass
+    try:
+        print(
+            f"  [Error] ka10080 {status_code} ({nk}) — "
+            f"키움 호출 제한, 1~2분 후 자동 재시도"
+        )
+    except Exception:
+        pass
+    try:
+        _ka10080_global_bump_cooldown(20.0)
+    except Exception:
+        pass
 
 
 def _ka10080_global_acquire_slot() -> None:
@@ -1654,6 +1686,73 @@ class DataManagerV2:
         except Exception:
             return None
 
+    def get_open_sell_orders_for_code(
+        self,
+        code: str,
+        *,
+        lookback_days: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        접수(SUCCESS)만 남아 증권사 매도가능수량을 잠그는 매도 주문 목록.
+
+        kt00007·체결 지연·미체결 타임아웃 직후 등으로 로컬 DB에 SUCCESS가 남은 경우
+        800033(매도가능수량 부족) 복구 시 취소 대상으로 사용합니다.
+        """
+        out: List[Dict[str, Any]] = []
+        try:
+            nc = self._normalize_order_stock_code(code)
+            if not nc:
+                return out
+            lookback_days = max(1, min(int(lookback_days or 5), 30))
+            since = (
+                datetime.now() - timedelta(days=lookback_days)
+            ).strftime("%Y-%m-%d 00:00:00")
+            with self._get_state_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT order_no, code, qty, filled_qty, price, timestamp, reason
+                    FROM order_history
+                    WHERE timestamp >= ?
+                      AND lower(trim(COALESCE(side, ''))) = 'sell'
+                      AND upper(trim(COALESCE(result, ''))) = 'SUCCESS'
+                      AND COALESCE(filled_qty, 0) = 0
+                      AND COALESCE(qty, 0) > 0
+                      AND trim(COALESCE(order_no, '')) != ''
+                    ORDER BY timestamp ASC
+                    """,
+                    (since,),
+                ).fetchall()
+            for row in rows or []:
+                try:
+                    raw_c = self._normalize_order_stock_code(row[1])
+                    if raw_c != nc:
+                        continue
+                    oid = str(row[0] or "").strip()
+                    if not oid:
+                        continue
+                    oq = int(row[2] or 0)
+                    if oq <= 0:
+                        continue
+                    out.append(
+                        {
+                            "order_no": oid,
+                            "code": raw_c,
+                            "qty": oq,
+                            "filled_qty": int(row[3] or 0),
+                            "price": int(float(row[4] or 0)),
+                            "timestamp": str(row[5] or ""),
+                            "reason": str(row[6] or ""),
+                        }
+                    )
+                except (TypeError, ValueError, IndexError):
+                    continue
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] get_open_sell_orders_for_code 오류: {e}")
+            except Exception:
+                pass
+        return out
+
     def upsert_order_fill_state_submitted(
         self,
         order_no: str,
@@ -2740,17 +2839,17 @@ class DataManagerV2:
                             nk_out = ""
                     return raw_list, nk_out
                 if res.status_code == 429:
-                    _ka10080_global_bump_cooldown(1.2 * (2**attempt))
+                    _ka10080_global_bump_cooldown(1.5 * (2**attempt))
                     if attempt + 1 < max_retries:
                         try:
                             time.sleep(
-                                2.0 * (attempt + 1)
-                                + random.uniform(0.15, 0.45)
+                                2.5 * (attempt + 1)
+                                + random.uniform(0.2, 0.6)
                             )
                         except Exception:
-                            time.sleep(2.0 * (attempt + 1))
+                            time.sleep(2.5 * (attempt + 1))
                         continue
-                    print(f"  [Error] ka10080 429 ({code})")
+                    _log_ka10080_rate_limit_throttled(code, status_code=429)
                     return None, ""
                 print(f"  [Error] ka10080 Status {res.status_code} ({code})")
                 return None, ""

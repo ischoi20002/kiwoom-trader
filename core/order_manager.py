@@ -357,6 +357,23 @@ class OrderManager:
             return True
         return False
 
+    @staticmethod
+    def _cancel_reject_means_stale_order(ret_msg: Any) -> bool:
+        """kt10003: 원주문번호 없음(만료·타계좌·DB만 남은 접수) — 체결 신뢰 대상 아님."""
+        try:
+            s = str(ret_msg or "")
+        except Exception:
+            s = ""
+        if not s:
+            return False
+        if "4032" in s:
+            return True
+        if "원주문번호가 존재하지" in s:
+            return True
+        if "원주문" in s and "존재하지" in s:
+            return True
+        return False
+
     def _notify_no_open_qty_to_fill_service(self, code: str, order_no: str) -> None:
         """RC4033 직후 FillConfirmationService 즉시 반영(터치 poll·타임아웃과 병행)."""
         try:
@@ -1477,16 +1494,17 @@ class OrderManager:
         order_no: str,
         stk_cd: str,
         cncl_qty: str = "0",
-    ) -> Literal["cancelled", "failed", "no_open_qty"]:
+    ) -> Literal["cancelled", "failed", "no_open_qty", "stale_ord_no"]:
         """
         미체결 지정가 주문 취소 (kt10003).
         cncl_qty: '0' 이면 잔량 전부 취소.
 
         Returns
         -------
-        Literal["cancelled", "failed", "no_open_qty"]
+        Literal["cancelled", "failed", "no_open_qty", "stale_ord_no"]
             - cancelled: 취소 접수 성공(미체결 잔량이 있었고 취소됨)
             - no_open_qty: 취소할 미체결 없음(통상 전량 체결 직후). DB를 CANCELLED로 덮지 않음.
+            - stale_ord_no: 원주문 없음(RC4032 등) — 로컬 스냅샷·접수 로그만 정리
             - failed: 그 외 거부·예외
         """
         use_mock = getattr(config, "USE_MOCK", False)
@@ -1530,6 +1548,22 @@ class OrderManager:
                 except Exception:
                     pass
                 return "no_open_qty"
+            if not (ret_code == 0 or out_ord) and self._cancel_reject_means_stale_order(
+                ret_msg
+            ):
+                try:
+                    self.app.log(
+                        f"ℹ️ [{mode_str}] 주문 취소 생략(원주문 없음·만료): {ret_msg}"
+                    )
+                except Exception:
+                    pass
+                try:
+                    dm = getattr(self.app, "data_manager", None)
+                    if dm is not None and hasattr(dm, "update_order_status"):
+                        dm.update_order_status(code, oid, "CANCELLED")
+                except Exception:
+                    pass
+                return "stale_ord_no"
             if ret_code == 0 or out_ord:
                 self.app.log(
                     f"✅ [{mode_str}] 주문 취소 접수: 원주문 {oid} / 응답 ord_no={out_ord or '-'}"
@@ -1600,6 +1634,331 @@ class OrderManager:
             except Exception:
                 pass
             return "failed"
+
+    def _clear_local_exit_lock_for_order(
+        self,
+        code: str,
+        order_no: str,
+        *,
+        log_fn: Optional[Any] = None,
+    ) -> None:
+        """스냅샷·exit_pending·VP 플래그에서 해당 주문번호 잠금을 제거합니다."""
+        nk = normalize_code(str(code or "").split("_")[0])
+        oid = str(order_no or "").strip()
+        if not nk or not oid:
+            return
+        try:
+            pf = getattr(self.app, "portfolio", None)
+            if pf is not None:
+                try:
+                    pf._discard_pending_exit_snapshot(oid)
+                except Exception:
+                    pass
+                try:
+                    with pf.lock:
+                        p = pf.virtual_positions.get(nk)
+                        if p and str(
+                            p.get("pending_exit_ord_no") or ""
+                        ).strip() == oid:
+                            p["exit_pending"] = False
+                            p.pop("pending_exit_ord_no", None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def purge_local_sell_lock_refs_for_code(
+        self,
+        code: str,
+        *,
+        log_fn: Optional[Any] = None,
+    ) -> None:
+        """증권사에 없는 원주문(RC4032) 등 — 로컬 매도대기 참조만 일괄 제거."""
+        nk = normalize_code(str(code or "").split("_")[0])
+        if not nk:
+            return
+        _log = log_fn or getattr(self.app, "log", None) or (lambda _m: None)
+        try:
+            pf = getattr(self.app, "portfolio", None)
+            if pf is not None:
+                with pf.lock:
+                    snap_items = list(
+                        (pf._pending_exit_snapshots or {}).items()
+                    )
+                for oid, rec in snap_items:
+                    try:
+                        if normalize_code((rec or {}).get("code")) == nk:
+                            pf._discard_pending_exit_snapshot(str(oid))
+                    except Exception:
+                        pass
+                try:
+                    with pf.lock:
+                        p = pf.virtual_positions.get(nk)
+                        if p:
+                            p["exit_pending"] = False
+                            p.pop("pending_exit_ord_no", None)
+                except Exception:
+                    pass
+        except Exception as ex:
+            try:
+                _log(f"⚠️ [매도잠금해제] 로컬 참조 정리 실패({nk}): {ex}")
+            except Exception:
+                pass
+
+    def fetch_unfilled_sell_orders_ka10075(
+        self, code: str
+    ) -> List[Dict[str, Any]]:
+        """ka10075 미체결 — 해당 종목 매도 주문 목록(증권사 기준)."""
+        nk = normalize_code(str(code or "").split("_")[0])
+        if not nk or not self.account_api:
+            return []
+        out: List[Dict[str, Any]] = []
+        try:
+            use_mock = getattr(config, "USE_MOCK", False)
+            stex = "1" if use_mock else "0"
+            res = self.account_api.unfilled_orders_request_ka10075(
+                all_stk_tp="1",
+                trde_tp="1",
+                stex_tp=stex,
+                stock_code=nk,
+            )
+            if not isinstance(res, dict):
+                return out
+            try:
+                rc = res.get("return_code", 0)
+                if rc is not None and int(str(rc).strip()) != 0:
+                    return out
+            except (TypeError, ValueError):
+                pass
+            oso = res.get("oso") or []
+            if not isinstance(oso, list):
+                oso = []
+            for row in oso:
+                if not isinstance(row, dict):
+                    continue
+                c = normalize_code(row.get("stk_cd") or row.get("pdno") or "")
+                if c != nk:
+                    continue
+                try:
+                    oq = int(
+                        float(
+                            str(row.get("oso_qty") or row.get("ord_qty") or 0)
+                            .replace(",", "")
+                            .strip()
+                            or 0
+                        )
+                    )
+                except (TypeError, ValueError):
+                    oq = 0
+                if oq <= 0:
+                    continue
+                out.append(
+                    {
+                        "order_no": str(row.get("ord_no") or "").strip(),
+                        "code": c,
+                        "oso_qty": oq,
+                        "ord_qty": int(
+                            float(
+                                str(row.get("ord_qty") or 0)
+                                .replace(",", "")
+                                .strip()
+                                or 0
+                            )
+                        ),
+                    }
+                )
+        except Exception as e:
+            try:
+                self.logger.debug("fetch_unfilled_sell_orders_ka10075: %s", e)
+            except Exception:
+                pass
+        return out
+
+    def sum_broker_unfilled_sell_qty_for_code(self, code: str) -> int:
+        """증권사 ka10075 미체결 매도 수량 합."""
+        total = 0
+        try:
+            for row in self.fetch_unfilled_sell_orders_ka10075(code):
+                try:
+                    total += int((row or {}).get("oso_qty") or 0)
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
+        return max(0, total)
+
+    def cancel_broker_unfilled_sells_for_code(
+        self,
+        code: str,
+        *,
+        log_fn: Optional[Any] = None,
+    ) -> int:
+        """증권사 미체결(ka10075) 매도 주문을 kt10003으로 취소합니다."""
+        nk = normalize_code(str(code or "").split("_")[0])
+        _log = log_fn or getattr(self.app, "log", None) or (lambda _m: None)
+        cancelled = 0
+        try:
+            rows = self.fetch_unfilled_sell_orders_ka10075(nk)
+        except Exception:
+            rows = []
+        if rows:
+            try:
+                _log(
+                    f"ℹ️ [매도잠금해제] {nk} 증권사 미체결 매도 {len(rows)}건 조회"
+                )
+            except Exception:
+                pass
+        for row in rows:
+            try:
+                oid = str((row or {}).get("order_no") or "").strip()
+                if not oid:
+                    continue
+                st = self.cancel_order(oid, nk)
+                if st == "cancelled":
+                    cancelled += 1
+                if st in ("cancelled", "no_open_qty", "stale_ord_no"):
+                    self._clear_local_exit_lock_for_order(
+                        nk, oid, log_fn=_log
+                    )
+            except Exception as ex:
+                try:
+                    _log(f"⚠️ [매도잠금해제] 미체결 취소 예외({nk}): {ex}")
+                except Exception:
+                    pass
+        return cancelled
+
+    def cancel_stale_open_sell_orders_for_code(
+        self,
+        code: str,
+        *,
+        log_fn: Optional[Any] = None,
+    ) -> int:
+        """
+        종목별 매도 잠금 해제: 증권사 미체결(ka10075) → 스냅샷/DB 접수 → 로컬 참조 정리.
+
+        800033(매도가능수량 부족) 또는 exit_pending 고착 시 호출합니다.
+        """
+        nk = normalize_code(str(code or "").split("_")[0])
+        if not nk or nk == "000000":
+            return 0
+        _log = log_fn or getattr(self.app, "log", None) or (lambda _m: None)
+        cancelled = 0
+        seen: Set[str] = set()
+
+        try:
+            cancelled += int(
+                self.cancel_broker_unfilled_sells_for_code(nk, log_fn=_log)
+                or 0
+            )
+            for row in self.fetch_unfilled_sell_orders_ka10075(nk):
+                o = str((row or {}).get("order_no") or "").strip()
+                if o:
+                    seen.add(o)
+        except Exception:
+            pass
+
+        def _after_cancel(st: str, oid: str) -> None:
+            nonlocal cancelled
+            if st == "cancelled":
+                cancelled += 1
+            if st in ("cancelled", "no_open_qty", "stale_ord_no"):
+                self._clear_local_exit_lock_for_order(nk, oid, log_fn=_log)
+
+        try:
+            pf = getattr(self.app, "portfolio", None)
+            if pf is not None:
+                with pf.lock:
+                    snap_items = list(
+                        (pf._pending_exit_snapshots or {}).items()
+                    )
+                for oid, rec in snap_items:
+                    try:
+                        if not isinstance(rec, dict):
+                            continue
+                        if normalize_code(rec.get("code")) != nk:
+                            continue
+                        o = str(oid or "").strip()
+                        if not o or o in seen:
+                            if o:
+                                _after_cancel("stale_ord_no", o)
+                            continue
+                        seen.add(o)
+                        _after_cancel(self.cancel_order(o, nk), o)
+                    except Exception as ex_row:
+                        try:
+                            _log(
+                                f"⚠️ [매도잠금해제] 스냅샷 취소 예외({o}): {ex_row}"
+                            )
+                        except Exception:
+                            pass
+        except Exception as ex_snap:
+            try:
+                _log(f"⚠️ [매도잠금해제] 스냅샷 순회 실패: {ex_snap}")
+            except Exception:
+                pass
+
+        try:
+            dm = getattr(self.app, "data_manager", None)
+            if dm is not None and hasattr(dm, "get_open_sell_orders_for_code"):
+                for row in dm.get_open_sell_orders_for_code(nk):
+                    try:
+                        o = str((row or {}).get("order_no") or "").strip()
+                        if not o or o in seen:
+                            continue
+                        seen.add(o)
+                        _after_cancel(self.cancel_order(o, nk), o)
+                    except Exception as ex_db:
+                        try:
+                            _log(f"⚠️ [매도잠금해제] DB 주문 취소 예외: {ex_db}")
+                        except Exception:
+                            pass
+        except Exception as ex_list:
+            try:
+                _log(f"⚠️ [매도잠금해제] 접수 매도 조회 실패: {ex_list}")
+            except Exception:
+                pass
+
+        try:
+            self.purge_local_sell_lock_refs_for_code(nk, log_fn=_log)
+        except Exception:
+            pass
+
+        if cancelled > 0:
+            try:
+                _log(
+                    f"ℹ️ [매도잠금해제] {nk} 매도 취소 {cancelled}건 — "
+                    f"매도가능수량 복구 시도"
+                )
+            except Exception:
+                pass
+        return cancelled
+
+    def sum_open_sell_lock_qty_for_code(self, code: str) -> int:
+        """매도가능수량에서 잠긴 양 추정(증권사 미체결 + 로컬 접수 SUCCESS)."""
+        nk = normalize_code(str(code or "").split("_")[0])
+        if not nk:
+            return 0
+        broker = 0
+        local = 0
+        try:
+            broker = int(self.sum_broker_unfilled_sell_qty_for_code(nk))
+        except Exception:
+            broker = 0
+        try:
+            dm = getattr(self.app, "data_manager", None)
+            if dm is not None and hasattr(dm, "get_open_sell_orders_for_code"):
+                for row in dm.get_open_sell_orders_for_code(nk):
+                    try:
+                        oq = int((row or {}).get("qty") or 0)
+                        fq = int((row or {}).get("filled_qty") or 0)
+                        rem = max(0, oq - fq)
+                        if rem > 0:
+                            local += rem
+                    except (TypeError, ValueError):
+                        continue
+        except Exception:
+            pass
+        return max(broker, local)
 
     # ------------------------------------------------------------------ #
     # 증권사 REST 체결내역 (kt00007) → 포지션관리 주문 로그 DB 보강

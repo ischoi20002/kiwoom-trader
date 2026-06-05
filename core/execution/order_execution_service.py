@@ -27,6 +27,7 @@ class OrderExecutionService:
         self._buy_skip_d2_one_lot_log_at: Dict[str, float] = {}
         self._exit_retry_not_before: Dict[str, float] = {}
         self._exit_retry_skip_log_at: Dict[str, float] = {}
+        self._exit_stale_pending_probe_at: Dict[str, float] = {}
 
     @property
     def s1_buy_order_pending_codes(self) -> Set[str]:
@@ -152,6 +153,129 @@ class OrderExecutionService:
             pass
 
         return fb if fb > 0 else 0.0
+
+    def _maybe_clear_stale_exit_pending(
+        self, code: str, pos: Dict[str, Any]
+    ) -> bool:
+        """
+        exit_pending 이지만 증권사 미체결이 없는(또는 취소 가능한) 고착 상태를 해제합니다.
+        해제되면 True — 호출부가 매도 주문을 이어갈 수 있습니다.
+        """
+        nk = str(code).zfill(6)
+        try:
+            if not bool(pos.get("exit_pending", False)):
+                return True
+        except Exception:
+            return True
+
+        now_epoch = time.time()
+        try:
+            last_probe = float(
+                self._exit_stale_pending_probe_at.get(nk, 0.0) or 0.0
+            )
+        except Exception:
+            last_probe = 0.0
+        if now_epoch - last_probe < 3.0:
+            return False
+        self._exit_stale_pending_probe_at[nk] = now_epoch
+
+        oid = str(pos.get("pending_exit_ord_no") or "").strip()
+        om = getattr(self.app, "order_manager", None)
+        if om is None:
+            try:
+                pos["exit_pending"] = False
+                pos.pop("pending_exit_ord_no", None)
+            except Exception:
+                pass
+            return True
+
+        try:
+            if oid:
+                st = om.cancel_order(oid, nk)
+                if st in ("cancelled", "no_open_qty", "stale_ord_no"):
+                    try:
+                        pos["exit_pending"] = False
+                        pos.pop("pending_exit_ord_no", None)
+                        self.app.portfolio._discard_pending_exit_snapshot(oid)
+                    except Exception:
+                        pass
+                    try:
+                        self.log(
+                            f"ℹ️ [Exit] {pos.get('name', nk)}({nk}) "
+                            f"매도대기 해제(원주문 {oid}, {st})"
+                        )
+                    except Exception:
+                        pass
+                    return True
+            else:
+                om.cancel_stale_open_sell_orders_for_code(
+                    nk, log_fn=self.log
+                )
+                try:
+                    om.purge_local_sell_lock_refs_for_code(
+                        nk, log_fn=self.log
+                    )
+                except Exception:
+                    pass
+                try:
+                    pos["exit_pending"] = False
+                    pos.pop("pending_exit_ord_no", None)
+                except Exception:
+                    pass
+                return True
+        except Exception as ex:
+            try:
+                self.log(f"⚠️ [Exit] 매도대기 해제 시도 실패({nk}): {ex}")
+            except Exception:
+                pass
+        return False
+
+    def _resolve_exit_sell_qty(self, code: str, pos: Dict[str, Any]) -> int:
+        """매도 주문 수량 — 로컬 보유에서 접수 매도 잠금분을 제외."""
+        nk = str(code).zfill(6)
+        try:
+            local_q = int(pos.get("qty", 0) or 0)
+        except (TypeError, ValueError):
+            local_q = 0
+        if local_q <= 0:
+            return 0
+        try:
+            om = getattr(self.app, "order_manager", None)
+            locked = (
+                int(om.sum_open_sell_lock_qty_for_code(nk))
+                if om is not None
+                else 0
+            )
+        except Exception:
+            locked = 0
+        sell_q = max(0, local_q - locked)
+        if locked > 0 and sell_q < local_q:
+            try:
+                self.log(
+                    f"ℹ️ [Exit] {pos.get('name', nk)}({nk}) "
+                    f"매도수량 조정 {local_q}→{sell_q}주 "
+                    f"(매도 잠금 추정 {locked}주)"
+                )
+            except Exception:
+                pass
+        if sell_q <= 0 and local_q > 0:
+            try:
+                broker_lock = int(
+                    om.sum_broker_unfilled_sell_qty_for_code(nk)
+                    if om is not None
+                    else 0
+                )
+            except Exception:
+                broker_lock = 0
+            if broker_lock > 0:
+                try:
+                    self.log(
+                        f"ℹ️ [Exit] {pos.get('name', nk)}({nk}) "
+                        f"증권사 미체결 매도 {broker_lock}주 — 잠금 해제 후 재시도"
+                    )
+                except Exception:
+                    pass
+        return sell_q
 
     def execute_buy_signal(self, code, name, price, reason="TYPE_A") -> bool:
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
@@ -526,11 +650,35 @@ class OrderExecutionService:
                 ref_px = 0
 
             # 이미 매도 주문 접수 대기 중이면 중복 EXIT 제출 금지
+            # (단, 증권사 미체결 없음·취소 가능한 고착은 해제 후 재시도)
             try:
                 if bool(pos.get("exit_pending", False)):
-                    return
+                    if not self._maybe_clear_stale_exit_pending(code, pos):
+                        return
             except Exception:
                 pass
+
+            sell_qty = self._resolve_exit_sell_qty(code, pos)
+            if sell_qty <= 0:
+                try:
+                    nk_pre = str(code).zfill(6)
+                    om_pre = getattr(self.app, "order_manager", None)
+                    if om_pre is not None:
+                        om_pre.cancel_stale_open_sell_orders_for_code(
+                            nk_pre, log_fn=self.log
+                        )
+                    sell_qty = self._resolve_exit_sell_qty(code, pos)
+                except Exception:
+                    sell_qty = 0
+            if sell_qty <= 0:
+                try:
+                    self.log(
+                        f"⚠️ [Exit Signal/{reason}] {pos.get('name', code)}({code}) "
+                        f"매도 생략: 매도가능 수량 0(접수 매도·잠금 확인)"
+                    )
+                except Exception:
+                    pass
+                return
 
             # [Audit] Exit Execution — 주문 실패 시 exit_pending 미설정(재평가·재시도 가능)
             if allow_order:
@@ -568,7 +716,7 @@ class OrderExecutionService:
                     if ex_style == "touch":
                         ord_no = self.app.order_manager.place_order(
                             code,
-                            pos["qty"],
+                            sell_qty,
                             float(exit_ord_price),
                             order_type="00",
                             side="sell",
@@ -581,7 +729,7 @@ class OrderExecutionService:
                     elif ex_style == "market":
                         ord_no = self.app.order_manager.place_order(
                             code,
-                            pos["qty"],
+                            sell_qty,
                             order_ref_px,
                             order_type="03",
                             side="sell",
@@ -591,7 +739,7 @@ class OrderExecutionService:
                     else:
                         ord_no = self.app.order_manager.place_order(
                             code,
-                            pos["qty"],
+                            sell_qty,
                             order_ref_px,
                             order_type="00",
                             side="sell",
@@ -610,7 +758,7 @@ class OrderExecutionService:
                         _os = {
                             "code": code,
                             "name": pos.get("name", ""),
-                            "qty": int(pos.get("qty", 0)),
+                            "qty": int(sell_qty),
                             "price": int(exit_ord_price),
                             "ref_price": float(ref_px),
                             "order_exec_style": ex_style,
@@ -648,7 +796,7 @@ class OrderExecutionService:
                             str(ord_no).strip(),
                             str(code).zfill(6),
                             "exit_sell",
-                            qty=int(pos.get("qty", 0)),
+                            qty=int(sell_qty),
                             cancel_on_timeout=(ot == "00"),
                             touch_mode=(ex_style == "touch"),
                             touch_side="sell",
@@ -707,6 +855,13 @@ class OrderExecutionService:
                             try:
                                 om = self.app.order_manager
                                 dm = self.app.data_manager
+                                if om is not None:
+                                    try:
+                                        om.cancel_stale_open_sell_orders_for_code(
+                                            nk, log_fn=self.log
+                                        )
+                                    except Exception:
+                                        pass
                                 if om is not None and dm is not None:
                                     import datetime as _dt_rec
 
@@ -722,6 +877,16 @@ class OrderExecutionService:
                                 self.app.portfolio.sync_with_actual_account(
                                     silent=True, force=True
                                 )
+                            except Exception:
+                                pass
+                            try:
+                                with self.app.portfolio.lock:
+                                    p2 = self.app.portfolio.virtual_positions.get(
+                                        nk
+                                    )
+                                    if p2 is not None:
+                                        p2["exit_pending"] = False
+                                        p2.pop("pending_exit_ord_no", None)
                             except Exception:
                                 pass
 
@@ -789,7 +954,7 @@ class OrderExecutionService:
                     code,
                     "sell",
                     fill_px,
-                    pos["qty"],
+                    sell_qty,
                     name=pos.get("name"),
                     reason=f"EXIT_{reason}",
                     snapshot=snapshot,

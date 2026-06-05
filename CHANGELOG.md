@@ -13,7 +13,12 @@
 
 ---
 
+## 0.8.38 (2026-06-05)
 
+- **터치호가 감시 주기**: 접수·정정 후 **5초** 체결 확인(`touch_fill_first_poll_sec`) → 미체결 시 **30초** 후 정정(`touch_quote_order_poll_sec`) → 정정 후 다시 5초 확인 루프(`touch_poll_phase` confirm/amend 분리).
+- **EXIT 터치 pending**: pending 중 **취소 API 미호출** — 미체결 매도 유지·kt00007 재확인만; terminal(체결 없음) 시 `exit_pending` 해제·재매도 복구 스케줄.
+- **매도 잠금 복구**: `cancel_stale_open_sell_orders_for_code`·`sum_open_sell_lock_qty_for_code` — ka10075 미체결 매도 정리, 800033 시 잠금 해제 후 재시도; `exit_pending` 만료 해제·매도 수량 보정.
+- **ka10080 429**: 분봉 REST 한도 로그 스로틀·전역 쿨다운(`data_manager_v2`).
 
 ## 0.8.37 (2026-06-04)
 

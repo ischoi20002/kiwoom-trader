@@ -28,6 +28,8 @@ class LimitOrderMeta:
     # False: 체결 동기화/DB 반영 대기 목적(예: RC4042)이라면 소진하지 않음
     touch_amend_should_increment: bool = True
     fill_price_hint: float = 0.0
+    # "confirm": kt00007 체결 확인만 / "amend": 호가 정정만 (확인 후 touch_quote_order_poll_sec 대기)
+    touch_poll_phase: str = "confirm"
 
 
 class LimitOrderWatchService:
@@ -156,15 +158,29 @@ class LimitOrderWatchService:
             return True
         return False
 
-    def _schedule_touch_timer(self, chain_key: str) -> None:
-        """다음 터치 폴링 타이머 예약(``touch_chain_key`` 기준)."""
+    def _schedule_touch_timer(
+        self, chain_key: str, *, phase: str = "confirm"
+    ) -> None:
+        """
+        다음 터치 폴링 타이머 예약(``touch_chain_key`` 기준).
+
+        - confirm: ``touch_fill_first_poll_sec`` 후 체결 확인(접수·정정 직후)
+        - amend: ``touch_quote_order_poll_sec`` 후 호가 정정
+        """
         ck = str(chain_key or "").strip()
         if not ck:
             return
         root = self._get_root()
         if root is None:
             return
-        ms = self._get_touch_poll_ms()
+        ph = str(phase or "confirm").strip().lower()
+        if ph not in ("confirm", "amend"):
+            ph = "confirm"
+        ms = (
+            self._get_touch_poll_ms()
+            if ph == "amend"
+            else self._get_touch_first_poll_ms()
+        )
 
         def _cb() -> None:
             # 호가 조회·정정 REST는 메인 스레드에서 하면 Tk가 4~6초 멈춘 것처럼 보임
@@ -200,9 +216,34 @@ class LimitOrderWatchService:
                         and str(m.touch_chain_key or "").strip() == ck
                     ):
                         m.after_id = aid
+                        m.touch_poll_phase = ph
                         break
         except Exception:
             pass
+
+    def _touch_run_amend_phase(
+        self, chain_key: str, current_ord: str, meta: LimitOrderMeta
+    ) -> None:
+        """체결 확인 후 대기한 뒤 호가 정정만 수행하고, 5초 뒤 재확인을 예약합니다."""
+        max_a = self._get_touch_max_amends()
+        if meta.touch_amend_attempts_done >= max_a:
+            self.timeout(current_ord)
+            return
+        try:
+            meta.touch_amend_should_increment = True
+        except Exception:
+            pass
+        should_schedule = self._touch_execute_amend(meta, current_ord)
+        try:
+            inc = bool(getattr(meta, "touch_amend_should_increment", True))
+            if inc:
+                meta.touch_amend_attempts_done = int(
+                    meta.touch_amend_attempts_done or 0
+                ) + 1
+        except Exception:
+            pass
+        if bool(should_schedule):
+            self._schedule_touch_timer(chain_key, phase="confirm")
 
     def _touch_apply_ord_no_remap(
         self,
@@ -463,6 +504,13 @@ class LimitOrderWatchService:
             pass
 
         if status in ("filled", "terminal", "skipped"):
+            if status == "terminal" and str(meta.kind or "") == "exit_sell":
+                try:
+                    self._on_exit_sell_touch_terminal_without_fill(
+                        meta, current_ord
+                    )
+                except Exception:
+                    pass
             try:
                 self.clear(current_ord)
             except Exception:
@@ -470,10 +518,51 @@ class LimitOrderWatchService:
             return True
         return False
 
+    def _on_exit_sell_touch_terminal_without_fill(
+        self, meta: LimitOrderMeta, order_no: str
+    ) -> None:
+        """터치 매도가 취소·거부 등으로 끝났을 때 exit_pending 해제 및 잔고 동기화."""
+        nc = self._normalize_code_6(meta.code)
+        oid = str(order_no or "").strip()
+        if not nc or not oid:
+            return
+        try:
+            with self.app.portfolio.lock:
+                p = self.app.portfolio.virtual_positions.get(nc)
+                if p:
+                    pend = str(p.get("pending_exit_ord_no") or "").strip()
+                    if not pend or pend == oid:
+                        p["exit_pending"] = False
+                        p.pop("pending_exit_ord_no", None)
+        except Exception:
+            pass
+        try:
+            self.log(
+                f"ℹ️ [터치호가] 매도 종료(체결 없음) — {nc} 재매도 판단 가능(ord={oid})"
+            )
+        except Exception:
+            pass
+        try:
+            self._schedule_exit_sell_cancel_recovery(
+                code=nc,
+                cancelled_ord_no=oid,
+                order_qty_hint=int(meta.qty or 0),
+            )
+        except Exception:
+            pass
+
     def _on_touch_poll(self, chain_key: str) -> None:
-        """터치호가: kt00007 체결 확인 → 정정(남은 횟수) 또는 취소."""
+        """터치호가: kt00007 체결 확인(5초) → 대기 후 정정(30초) → 재확인(5초) 루프."""
         current_ord, meta = self._find_touch_entry(chain_key)
         if not current_ord or meta is None or not meta.touch_mode:
+            return
+
+        try:
+            phase = str(getattr(meta, "touch_poll_phase", "confirm") or "confirm")
+        except Exception:
+            phase = "confirm"
+        if phase == "amend":
+            self._touch_run_amend_phase(chain_key, current_ord, meta)
             return
 
         if self._touch_try_confirm_fill(meta, current_ord):
@@ -503,64 +592,63 @@ class LimitOrderWatchService:
                 except (TypeError, ValueError):
                     do_probe = pending_cnt >= 1
             if do_probe:
-                try:
-                    cancel_st = str(
-                        self.app.order_manager.cancel_order(
-                            current_ord, meta.code, "0"
-                        )
-                        or "failed"
-                    )
-                except Exception:
-                    cancel_st = "failed"
-                if cancel_st == "no_open_qty":
+                # 매도(EXIT): 미체결에 취소 API를 걸면 주문만 취소되고 보유는 그대로 남음.
+                # 취소조회(전량체결 여부)는 미체결 타임아웃(timeout)에서만 수행합니다.
+                if str(meta.kind or "") == "exit_sell":
                     try:
                         self.log(
-                            f"ℹ️ [터치호가] pending {pending_cnt}회 — "
-                            f"취소조회로 전량체결 확인(ord={current_ord})"
+                            f"ℹ️ [터치호가] 매도 pending {pending_cnt}회 — "
+                            f"kt00007 재확인(미체결 유지, ord={current_ord})"
                         )
                     except Exception:
                         pass
-                    self._run_terminal_fill_confirm(meta, current_ord)
-                    return
+                    try:
+                        self._schedule_boost_fill_reconcile(
+                            order_no=current_ord,
+                            code=meta.code,
+                            kind="exit_sell",
+                            qty=int(meta.qty or 0),
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        cancel_st = str(
+                            self.app.order_manager.cancel_order(
+                                current_ord, meta.code, "0"
+                            )
+                            or "failed"
+                        )
+                    except Exception:
+                        cancel_st = "failed"
+                    if cancel_st == "no_open_qty":
+                        try:
+                            self.log(
+                                f"ℹ️ [터치호가] pending {pending_cnt}회 — "
+                                f"취소조회로 전량체결 확인(ord={current_ord})"
+                            )
+                        except Exception:
+                            pass
+                        self._run_terminal_fill_confirm(meta, current_ord)
+                        return
             try:
                 if meta.touch_amend_attempts_done < max_a:
-                    meta.touch_amend_attempts_done = int(
-                        meta.touch_amend_attempts_done or 0
-                    ) + 1
-                    self._schedule_touch_timer(chain_key)
+                    self._schedule_touch_timer(chain_key, phase="confirm")
                     return
             except Exception:
-                # 카운트 갱신 실패해도 최소한 amend 대신 다음 확인 예약은 유지
                 try:
-                    self._schedule_touch_timer(chain_key)
+                    self._schedule_touch_timer(chain_key, phase="confirm")
                     return
                 except Exception:
                     pass
             self.timeout(current_ord)
             return
 
-        # pending이 아닌 경우(=filled/terminal/skipped로 clear된 케이스 외)에는 기존 amend 로직으로 진행합니다.
+        # 미체결·미확정: touch_quote_order_poll_sec(기본 30초) 후 정정 단계
         if meta.touch_amend_attempts_done < max_a:
-            # 다음 정정 시도 횟수 소진 여부(에러 타입에 따라 조정)
-            try:
-                meta.touch_amend_should_increment = True
-            except Exception:
-                pass
-            should_schedule = self._touch_execute_amend(meta, current_ord)
-            # RC4042 같은 케이스에서는 동기화 대기 목적이라 카운트를 소진하지 않습니다.
-            try:
-                inc = bool(getattr(meta, "touch_amend_should_increment", True))
-                if inc:
-                    meta.touch_amend_attempts_done = int(
-                        meta.touch_amend_attempts_done or 0
-                    ) + 1
-            except Exception:
-                pass
-            if bool(should_schedule):
-                self._schedule_touch_timer(chain_key)
+            self._schedule_touch_timer(chain_key, phase="amend")
             return
 
-        # 정정 횟수 소진 후 미체결이면 기존 타임아웃과 동일하게 취소 처리
         self.timeout(current_ord)
 
     def _normalize_code_6(self, code: Any) -> str:
@@ -628,9 +716,9 @@ class LimitOrderWatchService:
 
         - 일반 지정가: 미체결 ``limit_order_unfilled_timeout_sec`` 후 취소.
         - 시장가: 플래그만(취소 타이머 없음).
-        - 터치호가: 첫 ``exchange_fill_confirm_retry_interval_sec`` 후 kt00007 체결 확인,
-          이후 ``touch_quote_order_poll_sec`` 마다 체결 확인·정정(최대
-          ``touch_quote_order_max_amends``), 이후 미체결이면 취소.
+        - 터치호가: ``touch_fill_first_poll_sec`` 후 kt00007 체결 확인,
+          이후 ``touch_quote_order_poll_sec`` 후 호가 정정(최대
+          ``touch_quote_order_max_amends``), 정정 직후 다시 첫 확인 간격으로 루프.
         """
         oid = str(order_no or "").strip()
         nc = str(code).zfill(6)
@@ -673,9 +761,9 @@ class LimitOrderWatchService:
 
                 try:
                     self.log(
-                        f"⏱️ [터치호가] 체결·정정 통합 감시 ({kind}) {nc} ord={oid} / "
-                        f"첫 확인 {ms // 1000}초, 이후 {poll_sec}초, 정정 최대 "
-                        f"{self._get_touch_max_amends()}회"
+                        f"⏱️ [터치호가] 체결·정정 감시 ({kind}) {nc} ord={oid} / "
+                        f"확인 {ms // 1000}초 → 정정 {poll_sec}초 후, 정정 후 재확인 "
+                        f"{ms // 1000}초 (최대 {self._get_touch_max_amends()}회)"
                     )
                 except Exception:
                     pass
@@ -723,6 +811,7 @@ class LimitOrderWatchService:
             touch_reason=str(touch_reason or "") if touch_mode else "",
             touch_amend_attempts_done=0,
             fill_price_hint=float(fill_price_hint or 0) if touch_mode else 0.0,
+            touch_poll_phase="confirm" if touch_mode else "confirm",
         )
 
         with self._lock:

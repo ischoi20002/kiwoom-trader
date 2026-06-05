@@ -103,7 +103,7 @@ DEFAULT_SETTINGS = {
     # 미체결 시 ka10004 재조회 후 kt10002 정정(최대 touch_quote_order_max_amends 회).
     # 실시간 REST는 터치호가 전용(매수=매도1·매도=매수1 + 정정 루프).
     "realtime_touch_quote_orders": True,
-    "touch_quote_order_poll_sec": 5.0,
+    "touch_quote_order_poll_sec": 30.0,
     "touch_quote_order_max_amends": 3,
     "reconcile_remove_grace_seconds": 180,
     "reconcile_remove_confirm_syncs": 2,
@@ -340,7 +340,7 @@ DEFAULT_SETTINGS = {
     # 터치 pending N회 후 취소 API로 전량체결(RC4033) 조기 탐지
     "touch_pending_cancel_probe_after": 2,
     "touch_exit_pending_probe_after": 1,
-    "touch_fill_first_poll_sec": 2.0,
+    "touch_fill_first_poll_sec": 5.0,
     "exchange_fill_trust_no_open_qty": True,
     # on_fill 연속 시 포지션 탭 gui_callback 디바운스(ms)
     "portfolio_gui_callback_debounce_ms": 1200,
