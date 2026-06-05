@@ -13,9 +13,14 @@
 
 ---
 
+## 0.8.39 (2026-06-05)
+
+- **터치호가 옵션 정리**: `touch_fill_first_poll_sec` 설정 키 제거(혼란 방지). 터치 confirm 간격은 `touch_quote_order_poll_sec` 기준으로 일원화.
+- **터치호가 세트 동작**: 체결 확인 → 미체결이면 곧바로 정정 주문을 한 세트로 묶어 `touch_quote_order_poll_sec` 뒤에 진행.
+
 ## 0.8.38 (2026-06-05)
 
-- **터치호가 감시 주기**: 접수·정정 후 **5초** 체결 확인(`touch_fill_first_poll_sec`) → 미체결 시 **30초** 후 정정(`touch_quote_order_poll_sec`) → 정정 후 다시 5초 확인 루프(`touch_poll_phase` confirm/amend 분리).
+- **터치호가 감시 주기**: 접수·정정 후 `touch_quote_order_poll_sec` 기준으로 **체결 확인**을 하고, 미체결이면 즉시 정정(이후 다시 동일 주기로 루프).
 - **EXIT 터치 pending**: pending 중 **취소 API 미호출** — 미체결 매도 유지·kt00007 재확인만; terminal(체결 없음) 시 `exit_pending` 해제·재매도 복구 스케줄.
 - **매도 잠금 복구**: `cancel_stale_open_sell_orders_for_code`·`sum_open_sell_lock_qty_for_code` — ka10075 미체결 매도 정리, 800033 시 잠금 해제 후 재시도; `exit_pending` 만료 해제·매도 수량 보정.
 - **ka10080 429**: 분봉 REST 한도 로그 스로틀·전역 쿨다운(`data_manager_v2`).
@@ -24,7 +29,7 @@
 
 - **RC4033 즉시 on_fill**: kt00007 대기 없이 `apply_trusted_fill_on_no_open_qty` — 매도는 증권사 미체결없음 확인 직후 힌트가로 포지션 반영.
 - **취소 API RC4033** 시 `OrderManager`에서도 동일 경로 트리거.
-- **EXIT pending 1회** 후 취소조회(`touch_exit_pending_probe_after`), 첫 체결확인 `touch_fill_first_poll_sec` 2초.
+- **EXIT pending 1회** 후 취소조회(`touch_exit_pending_probe_after`), 이후 체결 확인은 `touch_quote_order_poll_sec` 기준.
 
 ## 0.8.36 (2026-06-02)
 

@@ -73,17 +73,22 @@ class LimitOrderWatchService:
         return int(sec * 1000)
 
     def _get_touch_first_poll_ms(self) -> int:
-        """터치호가 첫 체결 확인 간격(ms)."""
+        """
+        터치호가 "확인/정정 한 세트" 동작 간격(ms).
+
+        요구사항:
+        - 체결 확인(kt00007) 후 미체결이면 정정(kt10002)을 "추가 대기" 없이 곧바로 수행
+        - 따라서 첫 확인 타이머를 `touch_quote_order_poll_sec`(기본 30초) 기준으로 맞춰야
+          "확인+정정"이 한 세트로 30초 후 진행됩니다.
+        """
         try:
             st = getattr(self.app, "settings", None) or {}
-            sec = float(st.get("touch_fill_first_poll_sec", 0))
-            if sec <= 0:
-                sec = float(
-                    st.get("exchange_fill_confirm_retry_interval_sec", 2.5)
-                )
+            # confirm 콜백 시점(=한 세트 시작/끝)을 30초로 맞춥니다.
+            sec = float(st.get("touch_quote_order_poll_sec", 30.0))
         except (TypeError, ValueError):
-            sec = 2.5
-        sec = max(1.0, min(sec, 8.0))
+            sec = 30.0
+        # 기존 구현은 max 8초로 클램프되어 30초 반영이 불가능했습니다.
+        sec = max(1.0, min(sec, 60.0))
         return int(sec * 1000)
 
     def _get_touch_poll_ms(self) -> int:
@@ -164,7 +169,7 @@ class LimitOrderWatchService:
         """
         다음 터치 폴링 타이머 예약(``touch_chain_key`` 기준).
 
-        - confirm: ``touch_fill_first_poll_sec`` 후 체결 확인(접수·정정 직후)
+        - confirm: ``touch_quote_order_poll_sec`` 후 체결 확인(접수·정정 직후)
         - amend: ``touch_quote_order_poll_sec`` 후 호가 정정
         """
         ck = str(chain_key or "").strip()
@@ -224,7 +229,7 @@ class LimitOrderWatchService:
     def _touch_run_amend_phase(
         self, chain_key: str, current_ord: str, meta: LimitOrderMeta
     ) -> None:
-        """체결 확인 후 대기한 뒤 호가 정정만 수행하고, 5초 뒤 재확인을 예약합니다."""
+        """(confirm에서 넘어옴) 호가 정정만 수행하고, 다음 confirm은 한 세트 간격(30초)으로 예약합니다."""
         max_a = self._get_touch_max_amends()
         if meta.touch_amend_attempts_done >= max_a:
             self.timeout(current_ord)
@@ -552,7 +557,7 @@ class LimitOrderWatchService:
             pass
 
     def _on_touch_poll(self, chain_key: str) -> None:
-        """터치호가: kt00007 체결 확인(5초) → 대기 후 정정(30초) → 재확인(5초) 루프."""
+        """터치호가: kt00007 확인(기준 30초) → 미체결이면 곧바로 kt10002 정정."""
         current_ord, meta = self._find_touch_entry(chain_key)
         if not current_ord or meta is None or not meta.touch_mode:
             return
@@ -646,7 +651,9 @@ class LimitOrderWatchService:
 
         # 미체결·미확정: touch_quote_order_poll_sec(기본 30초) 후 정정 단계
         if meta.touch_amend_attempts_done < max_a:
-            self._schedule_touch_timer(chain_key, phase="amend")
+            # "확인+정정"을 한 세트로 묶기 위해 amend 타이머를 별도로 예약하지 않고,
+            # confirm 콜백 내에서 즉시 정정을 실행합니다.
+            self._touch_run_amend_phase(chain_key, current_ord, meta)
             return
 
         self.timeout(current_ord)
@@ -716,8 +723,8 @@ class LimitOrderWatchService:
 
         - 일반 지정가: 미체결 ``limit_order_unfilled_timeout_sec`` 후 취소.
         - 시장가: 플래그만(취소 타이머 없음).
-        - 터치호가: ``touch_fill_first_poll_sec`` 후 kt00007 체결 확인,
-          이후 ``touch_quote_order_poll_sec`` 후 호가 정정(최대
+        - 터치호가: ``touch_quote_order_poll_sec`` 후 kt00007 체결 확인,
+          미체결이면 즉시 정정(최대
           ``touch_quote_order_max_amends``), 정정 직후 다시 첫 확인 간격으로 루프.
         """
         oid = str(order_no or "").strip()
@@ -762,8 +769,8 @@ class LimitOrderWatchService:
                 try:
                     self.log(
                         f"⏱️ [터치호가] 체결·정정 감시 ({kind}) {nc} ord={oid} / "
-                        f"확인 {ms // 1000}초 → 정정 {poll_sec}초 후, 정정 후 재확인 "
-                        f"{ms // 1000}초 (최대 {self._get_touch_max_amends()}회)"
+                        f"확인 {ms // 1000}초 후 미체결이면 즉시 정정, "
+                        f"정정 후 재확인은 {ms // 1000}초 (최대 {self._get_touch_max_amends()}회)"
                     )
                 except Exception:
                     pass
