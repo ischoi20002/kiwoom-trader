@@ -63,14 +63,16 @@ class PostFillAccountSyncService:
             return 28000
 
     def _run_sync(self, *, refresh_cash: bool, refresh_gui: bool) -> None:
+        sync_ctx = "post_fill_full" if refresh_cash else "post_fill_holdings"
         try:
             self.app._run_portfolio_sync_in_daemon_thread(
-                silent=True,
+                silent=False,
                 force=True,
                 refresh_cash_deposit=bool(refresh_cash),
                 wait_for_lock=False,
                 schedule_gui_refresh=bool(refresh_gui),
                 schedule_orders_refresh=bool(refresh_gui),
+                sync_context=sync_ctx,
             )
         except TypeError:
             # 구버전 시그니처 호환
@@ -83,12 +85,12 @@ class PostFillAccountSyncService:
                 )
             except Exception as e:
                 try:
-                    self.log(f"⚠️ [체결 동기화] 실행 예외: {e}")
+                    self.log(f"⚠️ [체결후] 동기화 예외: {e}")
                 except Exception:
                     pass
         except Exception as e:
             try:
-                self.log(f"⚠️ [체결 동기화] 실행 예외: {e}")
+                self.log(f"⚠️ [체결후] 동기화 예외: {e}")
             except Exception:
                 pass
 
@@ -105,6 +107,10 @@ class PostFillAccountSyncService:
 
             with self._lock:
                 self._cancel_post_fill_sync_jobs()
+                try:
+                    self.log("ℹ️ [체결후] 잔고·예수 동기화 예약")
+                except Exception:
+                    pass
 
                 follow_ms = self._follow_delay_ms()
                 try:

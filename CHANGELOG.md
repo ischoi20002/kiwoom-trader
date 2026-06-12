@@ -13,6 +13,11 @@
 
 ---
 
+## 0.8.40 (2026-06-10)
+
+- **체결·주문 로그 정리**: SYNCED(ka10085 선반영) 포지션을 S1 체결 확정으로 처리(S2 오표시·수량 합산 방지). `[체결/REST]`·`[Portfolio]` 중복 제거, Buy Signal→주문 접수 순서 정리, 터치호가 pending/확정·체결후 동기화 로그 간소화.
+- **워밍업 강제 API 갱신**: `realtime_warmup_force_api_refresh`(기본 True) — 감시 시작 시 DB 검증 통과해도 종목마다 ka10080 15분봉 REST 1회 조회.
+
 ## 0.8.39 (2026-06-05)
 
 - **터치호가 옵션 정리**: `touch_fill_first_poll_sec` 설정 키 제거(혼란 방지). 터치 confirm 간격은 `touch_quote_order_poll_sec` 기준으로 일원화.

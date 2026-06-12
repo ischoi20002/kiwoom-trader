@@ -34,6 +34,7 @@
     "realtime_watchlist_m1_api_backoff_base_sec": 0.45,
     "realtime_watchlist_m1_api_cache_max_entries": 4000,
     "use_api_warmup_backfill": true,
+    "realtime_warmup_force_api_refresh": true,
     "realtime_warmup_ka10080_tic_scope": "15",
     "realtime_warmup_ka10080_max_pages": 40,
     "realtime_warmup_indicator_calc_max_rows": 2000,

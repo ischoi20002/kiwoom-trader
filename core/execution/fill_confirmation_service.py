@@ -421,16 +421,7 @@ class FillConfirmationService:
                 except Exception:
                     pass
 
-            try:
-                ch = "CHE" if channel == "CHE" else "REST"
-                self.log(
-                    f"✅ [체결/{ch}] {nc} "
-                    f"{'매수' if side_l == 'buy' else '매도'} +{dq}주 "
-                    f"(적용누적 {self.get_applied_qty(oid)}/{self.get_order_qty(oid)}주, "
-                    f"{int(fp):,}원)"
-                )
-            except Exception:
-                pass
+            # 포지션 반영 로그는 portfolio.on_fill 에서 1회만 출력
 
             self._clear_limit_watch_if_done(nc, oid, side_l)
             self._mark_complete_if_fully_applied(oid)

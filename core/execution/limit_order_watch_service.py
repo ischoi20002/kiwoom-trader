@@ -30,6 +30,7 @@ class LimitOrderMeta:
     fill_price_hint: float = 0.0
     # "confirm": kt00007 체결 확인만 / "amend": 호가 정정만 (확인 후 touch_quote_order_poll_sec 대기)
     touch_poll_phase: str = "confirm"
+    touch_pending_logged: bool = False
 
 
 class LimitOrderWatchService:
@@ -486,11 +487,21 @@ class LimitOrderWatchService:
                 pass
             return False
         try:
-            # 다음 정정으로 넘어가는지(=pending인지) 추적하기 위한 최소 로그입니다.
-            # (pending/terminal/skipped는 계속 정정 시도를 유발할 수 있습니다.)
-            if status in ("pending", "terminal", "skipped"):
+            if status == "filled":
                 self.log(
-                    f"🧪 [터치호가] try_confirm_fill_once status={status} ord={current_ord} kind={meta.kind} code={meta.code}"
+                    f"✅ [터치호가] 체결 확인 완료 ord={current_ord} {meta.code}"
+                )
+            elif status == "pending":
+                if not bool(getattr(meta, "touch_pending_logged", False)):
+                    meta.touch_pending_logged = True
+                    _sec = self._get_touch_confirm_poll_ms() // 1000
+                    self.log(
+                        f"ℹ️ [터치호가] kt00007 미반영 — {_sec}초 후 재확인 "
+                        f"(ord={current_ord})"
+                    )
+            elif status == "terminal":
+                self.log(
+                    f"ℹ️ [터치호가] 주문 종료({status}) ord={current_ord} {meta.code}"
                 )
         except Exception:
             pass
@@ -767,10 +778,10 @@ class LimitOrderWatchService:
                                 pass
 
                 try:
+                    _sec = ms // 1000
                     self.log(
-                        f"⏱️ [터치호가] 체결·정정 감시 ({kind}) {nc} ord={oid} / "
-                        f"확인 {ms // 1000}초 후 미체결이면 즉시 정정, "
-                        f"정정 후 재확인은 {ms // 1000}초 (최대 {self._get_touch_max_amends()}회)"
+                        f"⏱️ [터치호가] ord={oid} · {_sec}초마다 체결 확인 "
+                        f"(미체결 시 정정, 최대 {self._get_touch_max_amends()}회)"
                     )
                 except Exception:
                     pass

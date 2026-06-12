@@ -776,6 +776,7 @@ class KiwoomApp:
         wait_for_lock: bool = False,
         schedule_gui_refresh: bool = True,
         schedule_orders_refresh: bool = True,
+        sync_context: str = "",
     ) -> None:
         """
         계좌 동기화는 REST(ka85·예수 등)·정합·JSON 저장으로 메인 스레드에서 실행 시
@@ -812,6 +813,7 @@ class KiwoomApp:
                     refresh_cash_deposit=refresh_cash_deposit,
                     schedule_gui_refresh=schedule_gui_refresh,
                     schedule_orders_refresh=schedule_orders_refresh,
+                    sync_context=str(sync_context or "").strip(),
                 )
             except Exception as e:
                 try:

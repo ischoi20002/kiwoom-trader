@@ -320,6 +320,18 @@ class WarmupService:
         except (TypeError, ValueError):
             return 30.0
 
+    def _warmup_force_api_refresh(self) -> bool:
+        """
+        True(기본): 감시 시작 워밍업마다 ka10080(15분)을 DB 검증과 무관하게 조회·병합.
+        DB 단절·오래된 tail 을 그대로 쓰는 것을 방지합니다.
+        """
+        try:
+            return bool(
+                self.app.settings.get("realtime_warmup_force_api_refresh", True)
+            )
+        except Exception:
+            return True
+
     def _interruptible_sleep(self, total_sec: float) -> None:
         """
         재시도 대기 중에도 stop() 으로 워밍업이 중단되면 잠자기를 끊습니다.
@@ -595,7 +607,11 @@ class WarmupService:
         )
 
         if by_tm:
-            if pages >= 20 or len(by_tm) >= 500:
+            # 강제 갱신 모드에서는 1페이지만 받아도 로그(워밍업 API 동작 확인용)
+            log_pages = pages >= 20 or len(by_tm) >= 500 or (
+                self._warmup_force_api_refresh() and pages >= 1
+            )
+            if log_pages:
                 try:
                     ts = str(tic_scope).strip() or "?"
                     bar_lbl = "15분봉" if ts == "15" else f"{ts}분봉"
@@ -907,6 +923,7 @@ class WarmupService:
         """
         (1) 15m 봉 수 < 신호 기준 이거나
         (2) 장중인데 당일·최근 15분 구간이 DB 에 비어 있는 경우
+        (3) ``realtime_warmup_force_api_refresh``(기본 True) — DB만으로 검증되어도 매번 ka10080 조회
         → 키움 분봉 API 로 보충 후 병합.
         """
         try:
@@ -924,9 +941,12 @@ class WarmupService:
             need = self._min_bars_for_signal()
             short = base.empty or len(base) < need
             gap = self._needs_intraday_api_backfill(base)
-            if not short and not gap:
+            force = self._warmup_force_api_refresh()
+            if not force and not short and not gap:
                 return base
-            reason = []
+            reason: List[str] = []
+            if force:
+                reason.append("강제갱신")
             if short:
                 reason.append(f"봉수<{need}")
             if gap:
@@ -944,7 +964,7 @@ class WarmupService:
                 raw_api, tic_scope=self._warmup_ka10080_tic_scope()
             )
             if api15.empty:
-                if gap or short:
+                if gap or short or force:
                     self.log(
                         f"⚠️ [Warmup-API] {name}({code}) 보충 스킵(응답없음) [{','.join(reason)}]"
                     )
@@ -1052,33 +1072,36 @@ class WarmupService:
             self._tt(
                 f"_execute_one begin code={code} name={name!r} token_present={bool(token)}"
             )
-            # 감시 시작 조건: 최소 봉·장중 당일 갭만 ka10080 로 보충합니다.
+            # DB 로드 후 ka10080 병합(기본: 매 감시 시작마다 강제 API 갱신).
             base = self._load_15m_ohlcv_frame(code)
             try:
                 n0 = len(base) if base is not None and not base.empty else 0
             except Exception:
                 n0 = 0
             self._tt(f"_execute_one {code} _load_15m_ohlcv_frame rows={n0}")
-            # DB만으로 이미 검증되면 ka10080 호출·페이지 대기 전체를 생략(42종목 시 누적 체감 큼)
-            ok_skip_api, _rs = self._validate_warmup_base(base)
-            if ok_skip_api:
+            if self._warmup_force_api_refresh() or not self._validate_warmup_base(base)[0]:
                 try:
                     ctx = getattr(self, "_warmup_prep_ui", None)
                     if ctx:
+                        lbl = (
+                            "ka10080 15분봉 갱신(강제)"
+                            if self._warmup_force_api_refresh()
+                            else "ka10080 15분봉 보충"
+                        )
                         self._notify_stock_prep(
                             "prep_progress",
                             int(ctx["cur"]),
                             int(ctx["total"]),
                             name,
                             code,
-                            "DB만으로 검증 통과(API 생략)",
+                            lbl,
                         )
                 except Exception:
                     pass
-            else:
                 self._tt(
-                    f"_execute_one {code} ka10080 경로 진입(quick API 보충) "
-                    f"pre_rows={n0} token={bool(token)}"
+                    f"_execute_one {code} ka10080 경로 진입 "
+                    f"force={self._warmup_force_api_refresh()} pre_rows={n0} "
+                    f"token={bool(token)}"
                 )
                 base = self._maybe_api_backfill_15m(code, name, base, token)
                 try:
@@ -1209,7 +1232,10 @@ class WarmupService:
         if _src == "api_only":
             hint_parts.append("DB 미사용·ka10080 전용")
         elif _src == "realtime_15m_db_then_api":
-            hint_parts.append("실시간15mDB→API·통과 시 RT DB 영속화")
+            if self._warmup_force_api_refresh():
+                hint_parts.append("실시간15mDB→매회 ka10080 갱신·RT DB 영속화")
+            else:
+                hint_parts.append("실시간15mDB→API·통과 시 RT DB 영속화")
         else:
             hint_parts.append("하베스팅 DB→API")
         try:

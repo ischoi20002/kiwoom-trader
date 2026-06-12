@@ -53,6 +53,8 @@ DEFAULT_SETTINGS = {
     "realtime_watchlist_m1_api_backoff_base_sec": 0.45,
     "realtime_watchlist_m1_api_cache_max_entries": 4000,
     "use_api_warmup_backfill": True,
+    # True: 감시 시작 워밍업마다 DB 검증 통과 여부와 무관하게 ka10080(15분) 조회·병합
+    "realtime_warmup_force_api_refresh": True,
     "realtime_warmup_ka10080_tic_scope": "15",
     "realtime_warmup_ka10080_max_pages": 40,
     "realtime_warmup_indicator_calc_max_rows": 2000,

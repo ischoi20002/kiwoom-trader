@@ -438,6 +438,20 @@ class OrderExecutionService:
                 pass
             return False
 
+        try:
+            if ex_style == "touch":
+                _ot_label = "터치지정가(매도1호가)"
+            elif ot == "03":
+                _ot_label = "시장가"
+            else:
+                _ot_label = "지정가"
+        except Exception:
+            _ot_label = "주문"
+        self.log(
+            f"🚀 [Buy Signal] {name}({code}) {reason} · "
+            f"{_ot_label} {adj_price:,}원 × {qty}주"
+        )
+
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
         ord_no = None
         if allow_order:
@@ -532,20 +546,6 @@ class OrderExecutionService:
                 )
             except Exception as e:
                 self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
-
-        try:
-            if ex_style == "touch":
-                _ot_label = "터치지정가(매도1호가)"
-            elif ot == "03":
-                _ot_label = "시장가"
-            else:
-                _ot_label = "지정가"
-        except Exception:
-            _ot_label = "주문"
-        self.log(
-            f"🚀 [Buy Signal] {name}({code}) {reason} 진입 시도 "
-            f"({_ot_label}, 참고가 {int(order_ref):,}원 기준 수량산정 {adj_price:,}원, {qty}주)"
-        )
 
         try:
             self._notify_s1_buy_submitted(code, reason)

@@ -182,8 +182,6 @@ class OrderManager:
             # trde_tp: "0"(Limit), "3"(Market)
             # order_type "00" -> "0", "03" -> "3" 등 변환
             api_trde_tp = str(int(order_type)) 
-            
-            self.app.log(f"🚀 [{mode_str}] 주문 발송 시도: {code}({name}) | {qty}주 | {adj_price:,}원")
 
             stex = self.dmst_stex_tp_for_orders()
             if side == "buy":
@@ -211,7 +209,10 @@ class OrderManager:
             ord_no = res.get("ord_no", "")
 
             if ret_code == 0 or ord_no:
-                self.app.log(f"✅ [{mode_str}] 주문 성공! 번호: {ord_no}")
+                self.app.log(
+                    f"✅ [{mode_str}] 주문 접수: {code}({name}) ord={ord_no} | "
+                    f"{qty}주 @ {adj_price:,}원"
+                )
                 # [v3.8] DB 로그 + 감시 화면과 동일한 체결강도·호가 스냅샷
                 try:
                     _sn = capture_supply_snapshot(self.app, code)
@@ -1125,14 +1126,20 @@ class OrderManager:
             detail = detail[:1500] + " ...(생략)"
         return (len(parts), detail)
 
-    def get_holdings(self, *, refresh_cash_deposit: bool = True):
+    def get_holdings(
+        self,
+        *,
+        refresh_cash_deposit: bool = True,
+        log_summary: bool = True,
+        sync_context: str = "",
+    ):
         """
         실시간 계좌 잔고 동기화 (ka10085 규격).
 
         refresh_cash_deposit=False 인 경우: 보유 목록(ka10085)만 사용하고
         예수금상세(ka10001)·별도 예수 TR(get_deposit) 호출을 생략합니다.
-        포지션 탭에서 주기(30초) 정합 시 API 부하·과다 갱신을 줄이기 위함이며,
-        예수금·D+1/D+2·출금가능은 매매 체결 후 전체 동기화에서만 갱신합니다.
+        log_summary=False: 요약 로그 생략(체결 후 silent 동기화 등).
+        sync_context: 로그 접두 구분 (예: post_fill_holdings, post_fill_full).
         """
         if not self.account_api:
             return None
@@ -1220,50 +1227,58 @@ class OrderManager:
 
                 n_hold, _hold_detail = self._summarize_holdings_qty_positive(holdings)
 
-                if refresh_cash_deposit:
-                    # 주문가능(ord)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
-                    try:
-                        ca = float(cash_orderable or 0)
-                        d2v = float(d2_deposit or 0)
-                        d1v = float(d1_deposit or 0)
-                        tol = max(1.0, d2v * 0.0001) if d2v > 0 else 1.0
-                        if ca > 0 and abs(ca - d2v) > tol:
-                            dep_seg = (
-                                f"주문가능금액 {ca:,.0f}원 | D+2 예수금 {d2v:,.0f}원 | "
-                                f"D+1 예수금 {d1v:,.0f}원"
-                            )
-                        else:
-                            show_amt = d2v if d2v > 0 else ca
-                            dep_seg = (
-                                f"주문가능금액(D+2예수) {show_amt:,.0f}원 | "
-                                f"D+1 예수금 {d1v:,.0f}원"
-                            )
-                    except Exception:
-                        dep_seg = (
-                            f"주문가능금액(D+2예수) {d2_deposit:,.0f}원 | "
-                            f"D+1 예수금 {d1_deposit:,.0f}원"
-                        )
-                    try:
-                        self.app.log(
-                            f"✅ [{mode_str}] 계좌 동기화 | 총자산 {total_equity:,.0f}원 | "
-                            f"{dep_seg} | 실질 보유 {n_hold}종목"
-                        )
-                    except Exception as le:
+                if log_summary:
+                    _ctx = str(sync_context or "").strip()
+                    if _ctx == "post_fill_full":
+                        _tag = "체결후"
+                    elif _ctx == "post_fill_holdings":
+                        _tag = "체결후·보유"
+                    else:
+                        _tag = mode_str
+
+                    if refresh_cash_deposit:
+                        # 주문가능(ord)은 키움에서 보통 D+2 추정예수와 같게 나오는 경우가 많음 — 동일하면 한 번만 표기
                         try:
-                            self.app.log(f"⚠️ [계좌] 동기화 요약 로그 실패: {le}")
+                            ca = float(cash_orderable or 0)
+                            d2v = float(d2_deposit or 0)
+                            d1v = float(d1_deposit or 0)
+                            tol = max(1.0, d2v * 0.0001) if d2v > 0 else 1.0
+                            if ca > 0 and abs(ca - d2v) > tol:
+                                dep_seg = (
+                                    f"주문가능금액 {ca:,.0f}원 | D+2 예수금 {d2v:,.0f}원 | "
+                                    f"D+1 예수금 {d1v:,.0f}원"
+                                )
+                            else:
+                                show_amt = d2v if d2v > 0 else ca
+                                dep_seg = (
+                                    f"주문가능금액(D+2예수) {show_amt:,.0f}원 | "
+                                    f"D+1 예수금 {d1v:,.0f}원"
+                                )
                         except Exception:
-                            pass
-                else:
-                    try:
-                        self.app.log(
-                            f"✅ [{mode_str}] 보유 정합(주기) | 실질 보유 {n_hold}종목 | "
-                            f"예수금·D+1/D+2·총자산 REST는 생략(매매 체결 시 반영)"
-                        )
-                    except Exception as le:
+                            dep_seg = (
+                                f"주문가능금액(D+2예수) {d2_deposit:,.0f}원 | "
+                                f"D+1 예수금 {d1_deposit:,.0f}원"
+                            )
                         try:
-                            self.app.log(f"⚠️ [계좌] 정합 로그 실패: {le}")
-                        except Exception:
-                            pass
+                            self.app.log(
+                                f"✅ [{_tag}] 계좌 동기화 | 총자산 {total_equity:,.0f}원 | "
+                                f"{dep_seg} | 실질 보유 {n_hold}종목"
+                            )
+                        except Exception as le:
+                            try:
+                                self.app.log(f"⚠️ [계좌] 동기화 요약 로그 실패: {le}")
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            self.app.log(
+                                f"✅ [{_tag}] 보유 동기화 | 실질 보유 {n_hold}종목"
+                            )
+                        except Exception as le:
+                            try:
+                                self.app.log(f"⚠️ [계좌] 정합 로그 실패: {le}")
+                            except Exception:
+                                pass
 
                 return {
                     "holdings": holdings,

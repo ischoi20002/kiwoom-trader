@@ -502,6 +502,25 @@ class PortfolioManager:
         except Exception as e:
             self.log(f"⚠️ [Portfolio] VP 키 일괄 정규화 실패: {e}")
 
+    def _has_confirmed_buy_events(self, pos: Dict[str, Any]) -> bool:
+        """포지션에 확정된 매수(BUY_S1/S2) 이벤트가 있는지."""
+        try:
+            for ev in pos.get("events") or []:
+                if isinstance(ev, dict) and str(ev.get("action", "")).startswith("BUY_"):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _is_synced_placeholder_position(self, pos: Dict[str, Any]) -> bool:
+        """ka10085 선반영(SYNCED) — on_fill 전 임시 포지션."""
+        try:
+            if str(pos.get("reason", "")).upper() != "SYNCED":
+                return False
+            return not self._has_confirmed_buy_events(pos)
+        except Exception:
+            return False
+
     def _should_skip_reconcile_remove(self, pos: Dict[str, Any]) -> bool:
         """
         매수 직후 ka10085 잔고에 아직 안 잡히는 API 지연으로,
@@ -940,6 +959,7 @@ class PortfolioManager:
         refresh_cash_deposit: bool = True,
         schedule_gui_refresh: bool = True,
         schedule_orders_refresh: bool = True,
+        sync_context: str = "",
     ) -> None:
         """[v3.7.8] 실제 키움 계좌의 보유 종목과 로컬 포지션을 동기화 (Reconciliation)"""
         # [v4.5.1 API Throttle] 자동 동기화만 쿨다운; 동기화 버튼(force=True)은 즉시 실행
@@ -954,7 +974,9 @@ class PortfolioManager:
         # [v4.5 Asset Harden] get_holdings()가 딕셔너리를 반환함에 따라 호출부 수정
         try:
             account_data = self.order_manager.get_holdings(
-                refresh_cash_deposit=refresh_cash_deposit
+                refresh_cash_deposit=refresh_cash_deposit,
+                log_summary=not silent,
+                sync_context=str(sync_context or "").strip(),
             )
         except Exception as gh_ex:
             self.log(f"[Error] [Sync] 계좌 조회 호출 실패: {gh_ex}")
@@ -1880,51 +1902,133 @@ class PortfolioManager:
                         }
                     )
                     self.data_manager.save_active_position(code, reg_name, fp, iq, 1, total_invested, datetime.now().isoformat(), reg_reason)
-                    self.log(f"[Portfolio] {reg_name}({code}) 신규 진입 등록 ({price:,}원)")
+                    _ord_sfx = f" ord={order_no}" if order_no else ""
+                    self.log(
+                        f"[Portfolio] {reg_name}({code}) S1 진입 · {iq}주 @ {int(fp):,}원{_ord_sfx}"
+                    )
                     # 텔레그램 발송은 체결 DB(row) 확정 시점으로 중앙화되어 있습니다.
                 else:
-                    # 추가 매수 (Stage 2)
                     pos = self.virtual_positions[code]
-                    old_qty = self._to_i(pos.get('qty', 0))
-                    old_avg = self._to_f(pos.get('avg_price', 0.0))
-                    new_total_qty = old_qty + self._to_i(qty)
-                    new_avg_price = ((old_avg * old_qty) + (self._to_f(price) * self._to_i(qty))) / new_total_qty if new_total_qty > 0 else self._to_f(price)
-                    
-                    pos['qty'] = new_total_qty
-                    pos['avg_price'] = new_avg_price
-                    pos['stage'] = 2
-                    _p2 = self._to_f(price)
-                    _q2 = self._to_i(qty)
-                    _snap_s2 = self._ensure_fill_snapshot(
-                        code, _p2, snapshot, str(reason or pos.get("reason") or "S2")
-                    )
-                    pos["events"].append(
-                        {
-                            "time": now_str,
-                            "action": "BUY_S2",
-                            "price": _p2,
-                            "qty": _q2,
-                            "snapshot": _snap_s2,
-                        }
-                    )
-                    # invested: S1과 동일하게 매수수수료 포함(이벤트 합산 우선, 실패 시 추매 다리만 수수료 반영)
-                    _tup_ev = self._cost_basis_from_buy_events(pos)
-                    if _tup_ev is not None:
-                        _w_avg_ev, _inv_ev, _ev_q = _tup_ev
-                        if _ev_q == new_total_qty:
-                            pos["avg_price"] = float(_w_avg_ev)
-                            pos["invested"] = float(_inv_ev)
+                    synced_ph = self._is_synced_placeholder_position(pos)
+                    has_buy_ev = self._has_confirmed_buy_events(pos)
+
+                    # S1 첫 체결: SYNCED 선반영·이벤트 없음 — 수량 합산하지 않음
+                    if synced_ph or not has_buy_ev:
+                        meta = self.data_manager.get_latest_order_meta(code)
+                        reg_name = name or str(pos.get("name") or "") or (
+                            meta[0] if meta else "Unknown"
+                        )
+                        reg_reason = reason or str(pos.get("reason") or "") or (
+                            meta[1] if meta else "SIGNAL"
+                        )
+                        if str(reg_reason).upper() == "SYNCED":
+                            reg_reason = str(
+                                reason or (meta[1] if meta else "SIGNAL")
+                            )
+                        try:
+                            _sig_type = (
+                                "TYPE_B"
+                                if "TYPE_B" in str(reg_reason).upper()
+                                else "TYPE_A"
+                            )
+                        except Exception:
+                            _sig_type = str(pos.get("sig_type") or "TYPE_A")
+                        fp = self._to_f(price)
+                        iq = self._to_i(qty)
+                        fee_amt = fp * iq * buy_r
+                        total_invested = fp * iq + fee_amt
+                        pos["name"] = reg_name
+                        pos["avg_price"] = fp
+                        pos["qty"] = iq
+                        pos["stage"] = 1
+                        pos["invested"] = total_invested
+                        pos["reason"] = reg_reason
+                        pos["sig_type"] = _sig_type
+                        try:
+                            pos["max_now"] = max(
+                                float(pos.get("max_now") or fp), fp
+                            )
+                        except (TypeError, ValueError):
+                            pos["max_now"] = fp
+                        _snap_s1 = self._ensure_fill_snapshot(
+                            code, fp, snapshot, str(reg_reason)
+                        )
+                        pos["events"] = [
+                            {
+                                "time": now_str,
+                                "action": "BUY_S1",
+                                "price": fp,
+                                "qty": iq,
+                                "snapshot": _snap_s1,
+                            }
+                        ]
+                        self.data_manager.save_active_position(
+                            code,
+                            reg_name,
+                            fp,
+                            iq,
+                            1,
+                            total_invested,
+                            pos.get("entry_time") or datetime.now().isoformat(),
+                            reg_reason,
+                        )
+                        _ord_sfx = f" ord={order_no}" if order_no else ""
+                        if synced_ph:
+                            self.log(
+                                f"[Portfolio] {reg_name}({code}) S1 체결 확정 · "
+                                f"{iq}주 @ {int(fp):,}원 (잔고 선반영→주문 확정){_ord_sfx}"
+                            )
+                        else:
+                            self.log(
+                                f"[Portfolio] {reg_name}({code}) S1 진입 · "
+                                f"{iq}주 @ {int(fp):,}원{_ord_sfx}"
+                            )
+                    else:
+                        # 추가 매수 (Stage 2)
+                        old_qty = self._to_i(pos.get('qty', 0))
+                        old_avg = self._to_f(pos.get('avg_price', 0.0))
+                        new_total_qty = old_qty + self._to_i(qty)
+                        new_avg_price = ((old_avg * old_qty) + (self._to_f(price) * self._to_i(qty))) / new_total_qty if new_total_qty > 0 else self._to_f(price)
+
+                        pos['qty'] = new_total_qty
+                        pos['avg_price'] = new_avg_price
+                        pos['stage'] = 2
+                        _p2 = self._to_f(price)
+                        _q2 = self._to_i(qty)
+                        _snap_s2 = self._ensure_fill_snapshot(
+                            code, _p2, snapshot, str(reason or pos.get("reason") or "S2")
+                        )
+                        pos["events"].append(
+                            {
+                                "time": now_str,
+                                "action": "BUY_S2",
+                                "price": _p2,
+                                "qty": _q2,
+                                "snapshot": _snap_s2,
+                            }
+                        )
+                        # invested: S1과 동일하게 매수수수료 포함(이벤트 합산 우선, 실패 시 추매 다리만 수수료 반영)
+                        _tup_ev = self._cost_basis_from_buy_events(pos)
+                        if _tup_ev is not None:
+                            _w_avg_ev, _inv_ev, _ev_q = _tup_ev
+                            if _ev_q == new_total_qty:
+                                pos["avg_price"] = float(_w_avg_ev)
+                                pos["invested"] = float(_inv_ev)
+                            else:
+                                _fee2 = _p2 * float(_q2) * buy_r
+                                pos["invested"] = float(pos.get("invested", 0) or 0) + _p2 * float(_q2) + _fee2
                         else:
                             _fee2 = _p2 * float(_q2) * buy_r
                             pos["invested"] = float(pos.get("invested", 0) or 0) + _p2 * float(_q2) + _fee2
-                    else:
-                        _fee2 = _p2 * float(_q2) * buy_r
-                        pos["invested"] = float(pos.get("invested", 0) or 0) + _p2 * float(_q2) + _fee2
-                    
-                    # DB 동기화
-                    self.data_manager.save_active_position(code, pos['name'], pos['avg_price'], new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
-                    self.log(f"[Portfolio] {pos['name']}({code}) 2차 수량 업데이트 (평단: {int(new_avg_price):,}원)")
-                    # 텔레그램 발송은 체결 DB(row) 확정 시점으로 중앙화되어 있습니다.
+
+                        # DB 동기화
+                        self.data_manager.save_active_position(code, pos['name'], pos['avg_price'], new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
+                        _ord_sfx = f" ord={order_no}" if order_no else ""
+                        self.log(
+                            f"[Portfolio] {pos['name']}({code}) S2 추매 · "
+                            f"+{_q2}주 (합계 {new_total_qty}주, 평단 {int(new_avg_price):,}원){_ord_sfx}"
+                        )
+                        # 텔레그램 발송은 체결 DB(row) 확정 시점으로 중앙화되어 있습니다.
             
             elif side == "sell":
                 # 청산 — 보유 dict 우선, 없으면 매도 접수 시 저장한 스냅샷(주문번호)
