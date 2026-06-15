@@ -981,8 +981,33 @@ class PortfolioManager:
         except Exception as gh_ex:
             self.log(f"[Error] [Sync] 계좌 조회 호출 실패: {gh_ex}")
             return
-        if account_data is None: 
-            self.log("[Error] [Sync] 계좌 정보를 실시간으로 가져올 수 없습니다. (혹은 API 429 제한)")
+        if account_data is None:
+            auth_busy = False
+            try:
+                ras = getattr(self.app, "rest_auth_retry_service", None)
+                auth_busy = bool(ras is not None and ras.is_running())
+            except Exception:
+                auth_busy = False
+            if auth_busy:
+                if not silent:
+                    self.log(
+                        "ℹ️ [Sync] 인증 진행 중 — 계좌 동기화는 인증 완료 후 자동 재시도합니다."
+                    )
+                return
+            try:
+                am = getattr(self.app, "auth_manager", None)
+                if am is not None and not am.has_cached_token():
+                    if not silent:
+                        self.log(
+                            "ℹ️ [Sync] REST 토큰 없음 — 키움 API 인증 후 동기화해 주세요."
+                        )
+                    return
+            except Exception:
+                pass
+            self.log(
+                "[Error] [Sync] 계좌 정보를 실시간으로 가져올 수 없습니다. "
+                "(API 429·토큰 만료 가능 — 1~2분 후 재시도)"
+            )
             return
         
         self.last_sync_time = now # 성공 시점 업데이트
@@ -1188,23 +1213,36 @@ class PortfolioManager:
             # 2. 로컬에만 있는 종목 제거 (매매 누락 보정)
             local_codes = list(self.virtual_positions.keys())
             removed_count = 0
+            # qty>0 파싱 결과 — ka10085 성공 후 비어 있으면 증권사 잔고 0종목 확정
+            confirmed_zero_holdings = len(server_codes) == 0
 
-            # 보유 API가 0건인데 로컬만 있으면: 응답 누락/지연 가능성이 커서 자동 제거하지 않음
-            if len(holdings) == 0 and len(local_codes) > 0:
-                if not silent:
-                    self.log(
-                        "[Sync] 보유 API 응답 0건 — 로컬 포지션 자동 제거 생략 "
-                        "(전량 매도 후에는 수동 동기화 또는 다음 성공 응답을 확인하세요)"
-                    )
-            else:
+            try:
+                confirm_n = int(
+                    float(self.settings.get("reconcile_remove_confirm_syncs", 2))
+                )
+            except (TypeError, ValueError):
+                confirm_n = 2
+            confirm_n = max(1, min(confirm_n, 10))
+
+            # 대시보드「동기화」(force=True): 잔고 0 확인 시 연속 확인·매수 유예 없이 즉시 정합
+            force_reconcile_zero = bool(force and confirmed_zero_holdings)
+
+            if confirmed_zero_holdings and len(local_codes) > 0 and not silent:
                 try:
-                    confirm_n = int(
-                        float(self.settings.get("reconcile_remove_confirm_syncs", 2))
-                    )
-                except (TypeError, ValueError):
-                    confirm_n = 2
-                confirm_n = max(1, min(confirm_n, 10))
+                    if force_reconcile_zero:
+                        self.log(
+                            "[Sync] 증권사 보유 0종목 확인 — "
+                            "로컬 포지션을 정합합니다(수동 동기화)"
+                        )
+                    else:
+                        self.log(
+                            f"[Sync] 증권사 보유 0종목 — 로컬만 남은 종목은 "
+                            f"{confirm_n}회 연속 확인 후 제거합니다"
+                        )
+                except Exception:
+                    pass
 
+            if len(local_codes) > 0:
                 for code in local_codes:
                     nc = self._normalize_stock_code(code)
                     if nc in server_codes:
@@ -1216,26 +1254,14 @@ class PortfolioManager:
 
             for code in local_codes:
                 if self._normalize_stock_code(code) not in server_codes:
-                    # 보유 0건 분기에서는 위에서 제거 루프를 돌지 않음 — 여기서도 스킵
-                    if len(holdings) == 0 and len(local_codes) > 0:
-                        continue
                     nc = self._normalize_stock_code(code)
-                    try:
-                        confirm_n = int(
-                            float(self.settings.get("reconcile_remove_confirm_syncs", 2))
-                        )
-                    except (TypeError, ValueError):
-                        confirm_n = 2
-                    confirm_n = max(1, min(confirm_n, 10))
-                    if (
-                        int(self._reconcile_server_missing_streak.get(nc, 0))
-                        < confirm_n
-                    ):
+                    streak = int(self._reconcile_server_missing_streak.get(nc, 0) or 0)
+                    if not force_reconcile_zero and streak < confirm_n:
                         if not silent:
                             try:
                                 self.log(
                                     f"[Sync] {code} 서버 목록 미포함 "
-                                    f"({self._reconcile_server_missing_streak.get(nc, 0)}/{confirm_n}회) "
+                                    f"({streak}/{confirm_n}회) "
                                     f"— 연속 확인 후에만 제거"
                                 )
                             except Exception:
@@ -1243,7 +1269,7 @@ class PortfolioManager:
                         continue
 
                     pos = self.virtual_positions[code]
-                    if self._should_skip_reconcile_remove(pos):
+                    if not force_reconcile_zero and self._should_skip_reconcile_remove(pos):
                         if not silent:
                             try:
                                 self.log(
@@ -1316,10 +1342,6 @@ class PortfolioManager:
             self._schedule_portfolio_ui_refresh(light=bool(silent))
 
         ambiguous_zh = False
-        try:
-            ambiguous_zh = (len(holdings) == 0 and len(local_codes) > 0)
-        except Exception:
-            ambiguous_zh = False
         try:
             _patched_sell_rows: List[Dict[str, Any]] = []
             n_sell_fix = int(

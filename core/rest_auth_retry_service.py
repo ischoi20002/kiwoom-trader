@@ -20,6 +20,14 @@ class RestAuthRetryService:
         self._lock = threading.Lock()
         self._running: bool = False
 
+    def is_running(self) -> bool:
+        """인증 재시도 워커가 돌고 있는지."""
+        try:
+            with self._lock:
+                return bool(self._running)
+        except Exception:
+            return False
+
     def start(self) -> None:
         """인증 워커를 시작합니다. 이미 실행 중이면 스킵합니다."""
         acquired = False
@@ -76,25 +84,48 @@ class RestAuthRetryService:
 
         for attempt in range(1, max_attempts + 1):
             try:
+                am = getattr(self.app, "auth_manager", None)
+                if am is not None and getattr(am, "is_fatal_auth_error", lambda: False)():
+                    break
+
+                wait_sec = 0.0
                 if attempt > 1:
+                    wait_sec = float(delay_sec)
                     try:
-                        self.app.auth_manager.invalidate_cached_token()
+                        if am is not None and hasattr(am, "oauth_cooldown_remaining_sec"):
+                            wait_sec = max(
+                                wait_sec, float(am.oauth_cooldown_remaining_sec())
+                            )
                     except Exception:
                         pass
-
                     try:
-                        self._safe_log(
-                            f"🔁 [Auth] {attempt}/{max_attempts}차 인증 시도 "
-                            f"({delay_sec:.1f}초 대기 후)..."
-                        )
+                        if wait_sec >= 5.0:
+                            self._safe_log(
+                                f"⏳ [Auth] {int(wait_sec)}초 대기 후 "
+                                f"{attempt}/{max_attempts}차 인증 시도…"
+                            )
+                        else:
+                            self._safe_log(
+                                f"🔁 [Auth] {attempt}/{max_attempts}차 인증 시도 "
+                                f"({wait_sec:.1f}초 대기 후)…"
+                            )
                     except Exception:
                         pass
-
-                    time.sleep(delay_sec)
+                    if wait_sec > 0:
+                        time.sleep(wait_sec)
                     delay_sec = min(delay_sec * backoff_mult, max_delay)
+                    try:
+                        if am is not None and not am.is_fatal_auth_error():
+                            am.invalidate_cached_token()
+                    except Exception:
+                        pass
 
                 try:
-                    token = self.app.auth_manager.get_auth_token()
+                    token = (
+                        am.get_auth_token()
+                        if am is not None
+                        else None
+                    )
                 except Exception as ex:
                     token = None
                     self._safe_log(f"⚠️ [Auth] {attempt}/{max_attempts}차 예외: {ex}")
@@ -103,16 +134,26 @@ class RestAuthRetryService:
                     if attempt > 1:
                         self._safe_log(f"✅ [Auth] {attempt}회차에서 인증 성공")
                     break
+
+                if am is not None and am.is_fatal_auth_error():
+                    break
             except Exception as loop_ex:
                 self._safe_log(f"⚠️ [Auth] 재시도 루프 오류: {loop_ex}")
 
         if not token:
             # UI 갱신은 Tk 메인 스레드로 위임
             try:
-                self._safe_log(
-                    f"❌ [Auth] {max_attempts}회 시도 후에도 인증에 실패했습니다. "
-                    "네트워크·키움 API 상태를 확인하거나 잠시 뒤 앱을 다시 시작해 주세요."
-                )
+                am = getattr(self.app, "auth_manager", None)
+                if am is not None and am.is_fatal_auth_error():
+                    self._safe_log(
+                        "❌ [Auth] API 키가 올바르지 않아 인증을 중단했습니다. "
+                        "config.py 키를 수정한 뒤 앱을 다시 시작하세요."
+                    )
+                else:
+                    self._safe_log(
+                        f"❌ [Auth] {max_attempts}회 시도 후에도 인증에 실패했습니다. "
+                        "네트워크·키움 API 상태를 확인하거나 잠시 뒤 앱을 다시 시작해 주세요."
+                    )
             except Exception:
                 pass
             try:
