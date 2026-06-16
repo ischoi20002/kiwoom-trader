@@ -1300,8 +1300,21 @@ class OrderManager:
                 self.app.log("⚠️ [Throttle] 키움 서버 조회 제한(429)에 도달했습니다. 1~2분 후 자동으로 동기화됩니다.")
                 return None
             else:
-                msg = res.get("return_msg", "Unknown error")
-                self.app.log(f"⚠️ 계좌 조회 실패: {msg} (ErrorCode: {ret_code})")
+                msg = str(res.get("return_msg", "Unknown error") or "")
+                if "8005" in msg or int(ret_code or 0) == 3:
+                    try:
+                        self.app.auth_manager.invalidate_cached_token()
+                    except Exception:
+                        pass
+                    try:
+                        self.app.get_auth_token()
+                    except Exception:
+                        pass
+                    self.app.log(
+                        "⚠️ [계좌] 토큰 무효(8005) — 캐시 삭제 후 재인증을 시도합니다."
+                    )
+                else:
+                    self.app.log(f"⚠️ 계좌 조회 실패: {msg} (ErrorCode: {ret_code})")
                 return None
 
         except Exception as e:

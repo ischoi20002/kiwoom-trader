@@ -170,6 +170,13 @@ class WarmupService:
             if not isinstance(row, dict):
                 return
 
+            se = getattr(self.app, "signal_engine", None)
+            if se is not None and hasattr(se, "_apply_ready_column_to_indicators"):
+                try:
+                    df_ind = se._apply_ready_column_to_indicators(df_ind)
+                except Exception:
+                    pass
+
             detailed = TradingStrategy.get_buy_signals_detailed(
                 df_ind, self.app.settings, "UP"
             )
@@ -181,6 +188,11 @@ class WarmupService:
                 if hasattr(last_ser, "to_dict")
                 else dict(last_ser)
             )
+            if se is not None and hasattr(se, "_merge_ready_into_sig"):
+                try:
+                    last_sig = se._merge_ready_into_sig(last_sig, int(stream_bar_count))
+                except Exception:
+                    pass
             row["last_detailed_sig"] = detailed
             row["last_bar_count"] = int(stream_bar_count)
             row["last_row_cache"] = df_ind.iloc[-1].to_dict()
@@ -189,7 +201,6 @@ class WarmupService:
             _sel_tr = str(
                 row.get("sel_track", row.get("SelTrack", "AB")) or "AB"
             ).strip().upper() or "AB"
-            se = getattr(self.app, "signal_engine", None)
             if se is not None and hasattr(se, "_format_s1_confluence_status_line"):
                 try:
                     row["confluence"] = se._format_s1_confluence_status_line(
@@ -1151,6 +1162,12 @@ class WarmupService:
                 f"{len(df_slice) if df_slice is not None and not getattr(df_slice, 'empty', True) else 0}"
             )
             df_ind = TradingStrategy.calculate_indicators(df_slice, self.app.settings)
+            se = getattr(self.app, "signal_engine", None)
+            if se is not None and hasattr(se, "_apply_ready_column_to_indicators"):
+                try:
+                    df_ind = se._apply_ready_column_to_indicators(df_ind)
+                except Exception:
+                    pass
             fin = self._finalize_bars_for_stream(df_ind)
             lk = getattr(self.app, "_bars_data_lock", None)
             cm = lk if lk is not None else contextlib.nullcontext()

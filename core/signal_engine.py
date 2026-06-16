@@ -145,29 +145,82 @@ class SignalEngine:
     def _use_fixed_s1_presignal_gate(self) -> bool:
         """
         True면 동일 15분 슬롯 내에서는 첫 판정 시점의 S1 Signal/Ready를 고정합니다.
-        (백테 고정밀 경로의 pre-signal 게이팅과 유사하게 맞추기 위한 옵션)
+
+        ``realtime_s1_mirror_dynamic_intrabar`` 가 켜져 있으면 동적 고정밀과 동일하게
+        분봉 단위로 판정하므로 슬롯 고정 게이트는 사용하지 않습니다(장전 False 고정 등 오판 방지).
         """
         try:
+            if self._realtime_s1_mirror_dynamic_intrabar_enabled():
+                return False
             st = getattr(self.app, "settings", None) or {}
             return bool(st.get("realtime_use_fixed_s1_presignal_gate", True))
         except Exception:
             return True
 
+    def _hp_causal_ready_min_bar_index(self) -> int:
+        """동적 고정밀 ``_prepare_15m_cached_data`` 의 Ready 최소 봉 인덱스."""
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return max(0, int(float(st.get("hp_causal_ready_min_bar_index", 19))))
+        except (TypeError, ValueError):
+            return 19
+
+    def _apply_ready_column_to_indicators(self, df_ind: Any) -> Any:
+        """백테스트와 동일: 전역 15분봉 인덱스가 임계 이상일 때만 Ready=True."""
+        try:
+            if df_ind is None or getattr(df_ind, "empty", True):
+                return df_ind
+            ready_min = self._hp_causal_ready_min_bar_index()
+            out = df_ind.copy()
+            out["Ready"] = out.reset_index(drop=True).index >= ready_min
+            return out
+        except Exception:
+            return df_ind
+
+    def _last_bar_ready(self, bar_count: int) -> bool:
+        try:
+            return int(bar_count) >= self._hp_causal_ready_min_bar_index()
+        except (TypeError, ValueError):
+            return False
+
+    def _merge_ready_into_sig(
+        self, last_sig: dict[str, Any], bar_count: int
+    ) -> dict[str, Any]:
+        """``get_buy_signals_detailed`` 결과에 백테와 동일한 Ready 를 병합."""
+        try:
+            if not isinstance(last_sig, dict):
+                return {}
+            out = dict(last_sig)
+            if "Ready" not in out:
+                out["Ready"] = self._last_bar_ready(bar_count)
+            return out
+        except Exception:
+            return last_sig if isinstance(last_sig, dict) else {}
+
+    def _s1_buy_from_sig_dict(
+        self, last_sig: dict[str, Any], bar_count: int
+    ) -> bool:
+        """동적 고정밀과 동일: ``Signal ∧ Ready``."""
+        try:
+            sig = self._merge_ready_into_sig(last_sig, bar_count)
+            return bool(self._to_scalar(sig.get("Signal"), False)) and bool(
+                self._to_scalar(sig.get("Ready"), False)
+            )
+        except Exception:
+            return False
+
     def _s1_presignal_ready_for_gate(self, last_sig: dict[str, Any]) -> bool:
         """
         고정 프리시그널 게이트에 넣을 Ready 초기값.
 
-        ``get_buy_signals_detailed`` 결과 dict에는 ``Ready`` 키가 없는 경우가 많습니다.
-        이 때 ``bool(last_sig.get('Ready', False))`` 로만 읽으면 ready 가 항상 False 가 되어
-        ``signal and ready`` 게이트가 매수를 영구 차단하는 버그가 생깁니다.
-        키가 없으면 ``Signal`` 과 동일하게 두어, 슬롯 첫 판정의 신호가 그대로 통과합니다.
-        ``Ready`` 키가 있으면(인과 S1 등) 그 값을 그대로 따릅니다.
+        ``get_buy_signals_detailed`` 결과에는 ``Ready`` 가 없을 수 있으므로,
+        호출 전 ``_merge_ready_into_sig`` 로 병합하는 것이 권장됩니다.
         """
         try:
             if not isinstance(last_sig, dict):
                 return False
             if "Ready" not in last_sig:
-                return bool(self._to_scalar(last_sig.get("Signal"), False))
+                return False
             return bool(self._to_scalar(last_sig.get("Ready"), False))
         except Exception:
             return False
@@ -356,6 +409,48 @@ class SignalEngine:
             except Exception:
                 pass
             return None
+
+    def _apply_intrabar_mirror_s1_after_eval(
+        self,
+        code: str,
+        info: Dict[str, Any],
+        full_15m_src: Any,
+        df_with_ind: Any,
+        *,
+        is_buy: bool,
+        last_sig: dict[str, Any],
+        last_row: Optional[dict[str, Any]],
+    ) -> Tuple[bool, dict[str, Any], Optional[dict[str, Any]]]:
+        """
+        풀계산·캐시 경로 공통: 동적 고정밀 인트라바 미러로 S1 매수 여부를 최종 보정.
+        """
+        try:
+            if not self._realtime_s1_mirror_dynamic_intrabar_enabled():
+                return is_buy, last_sig, last_row
+            if self._code_in_virtual_positions(code):
+                return is_buy, last_sig, last_row
+            pack = self._intrabar_mirror_s1_buy_pack(
+                code, full_15m_src, df_with_ind, info
+            )
+            if isinstance(pack, dict) and pack.get("force_buy"):
+                is_buy = True
+                if isinstance(pack.get("last_sig"), dict):
+                    last_sig = pack["last_sig"]
+                    info["last_sig_cache"] = last_sig
+                if isinstance(pack.get("last_row"), dict):
+                    last_row = pack["last_row"]
+                    info["last_row_cache"] = last_row
+            return is_buy, last_sig, last_row
+        except Exception as e:
+            try:
+                if self._last_realtime_err != str(e):
+                    self._last_realtime_err = str(e)
+                    print(
+                        f"[SignalEngine] 인트라바 S1 미러 예외 ({code}): {e}"
+                    )
+            except Exception:
+                pass
+            return is_buy, last_sig, last_row
 
     def _intrabar_mirror_held_eval(
         self,
@@ -1029,10 +1124,7 @@ class SignalEngine:
                     need_full_calc = True
                 elif last_calc_ts <= 0.0:
                     # 워밍업이 last_* 만 채우고 풀계산 시각은 비어 있는 경우.
-                    # 이 분기만 타고 끝나면 아래 ``if need_full_calc`` 에서
-                    # ``_s1_full_calc_last_ts`` 가 한 번도 설정되지 않아,
-                    # 이후 모든 틱에서 need_full_calc=False 로 고정되어
-                    # 지표 재계산·인트라바 미러가 영구 스킵되는 치명적 불일치가 난다.
+                    # 타임스탬프만 기록하고 캐시를 우선 사용(아래 공통 인트라바 미러가 보정).
                     need_full_calc = False
                     try:
                         self._s1_full_calc_last_ts[code] = float(now_ts)
@@ -1062,14 +1154,19 @@ class SignalEngine:
                 last_sig: dict = {}
                 last_row = cached_last_row
                 _bt_hp_res: Optional[Dict[str, Any]] = None
+                _mirror_15m_src: Any = None
+                _mirror_df_ind: Any = None
 
                 if need_full_calc:
                     _src_df = self.app.bars_data.get(bars_key) if bars_key else None
                     if _src_df is None:
                         _src_df = _bd
+                    _mirror_15m_src = _src_df
                     df_with_ind = TradingStrategy.calculate_indicators(
                         _src_df, self.app.settings
                     )
+                    df_with_ind = self._apply_ready_column_to_indicators(df_with_ind)
+                    _mirror_df_ind = df_with_ind
                     try:
                         info["last_detailed_sig"] = TradingStrategy.get_buy_signals_detailed(
                             df_with_ind, self.app.settings, "UP"
@@ -1084,6 +1181,7 @@ class SignalEngine:
                             if hasattr(last_ser, "to_dict")
                             else dict(last_ser)
                         )
+                        last_sig = self._merge_ready_into_sig(last_sig, current_bar_count)
                         info["last_sig_cache"] = last_sig
                     except Exception as exc_sig:
                         # 시그널/지표 계산 실패 시 캐시가 있으면 아래 분기에서 안내 없이 재사용
@@ -1117,31 +1215,7 @@ class SignalEngine:
                             pass
                         last_sig = info["last_sig_cache"]
                         last_row = info["last_row_cache"]
-                        # [v0.8.11] 미보유 S1: 동적 고정밀과 동일 인트라바 통합 판정(가능 시)
-                        is_buy = bool(self._to_scalar(last_sig.get("Signal"), False))
-                        try:
-                            if (
-                                self._realtime_s1_mirror_dynamic_intrabar_enabled()
-                                and not self._code_in_virtual_positions(code)
-                            ):
-                                pack = self._intrabar_mirror_s1_buy_pack(
-                                    code, _src_df, df_with_ind, info
-                                )
-                                if isinstance(pack, dict) and pack.get("force_buy"):
-                                    is_buy = True
-                                    if isinstance(pack.get("last_sig"), dict):
-                                        last_sig = pack["last_sig"]
-                                        info["last_sig_cache"] = last_sig
-                                    if isinstance(pack.get("last_row"), dict):
-                                        last_row = pack["last_row"]
-                                        info["last_row_cache"] = last_row
-                        except Exception as _mir_e:
-                            try:
-                                print(
-                                    f"[SignalEngine] 인트라바 S1 미러 예외 ({code}): {_mir_e}"
-                                )
-                            except Exception:
-                                pass
+                        is_buy = self._s1_buy_from_sig_dict(last_sig, current_bar_count)
                         _sel_tr = str(
                             info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
                         ).strip().upper()
@@ -1169,7 +1243,9 @@ class SignalEngine:
                     last_sig = cached_last_sig_cache if isinstance(cached_last_sig_cache, dict) else {}
                     last_row = cached_last_row
                     if last_sig and isinstance(last_row, dict):
-                        is_buy = bool(self._to_scalar(last_sig.get("Signal"), False))
+                        last_sig = self._merge_ready_into_sig(last_sig, current_bar_count)
+                        is_buy = self._s1_buy_from_sig_dict(last_sig, current_bar_count)
+                        _mirror_15m_src = self.app.bars_data.get(bars_key) if bars_key else _bd
                         info["confluence"] = self._format_s1_confluence_status_line(
                             last_sig, _sel_tr
                         )
@@ -1299,6 +1375,34 @@ class SignalEngine:
                                             )
                                 except Exception:
                                     pass
+
+                # 풀계산·캐시 공통: 동적 고정밀 인트라바 미러(워밍업 직후 캐시 경로 포함)
+                if bars_ready and last_sig and isinstance(last_row, dict):
+                    try:
+                        if _mirror_15m_src is None:
+                            _mirror_15m_src = (
+                                self.app.bars_data.get(bars_key) if bars_key else _bd
+                            )
+                        is_buy, last_sig, last_row = self._apply_intrabar_mirror_s1_after_eval(
+                            code,
+                            info,
+                            _mirror_15m_src,
+                            _mirror_df_ind,
+                            is_buy=is_buy,
+                            last_sig=last_sig,
+                            last_row=last_row,
+                        )
+                        _sel_tr = str(
+                            info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                        ).strip().upper()
+                        info["confluence"] = self._format_s1_confluence_status_line(
+                            last_sig, _sel_tr
+                        )
+                        info["met_ratio"] = float(
+                            self._to_scalar(last_sig.get("Met_Ratio"), 0.0)
+                        )
+                    except Exception:
+                        pass
 
                 # 관심목록 전용: Type B 매수 신호만 (감시와 동일 필터 후 B만)
                 if is_wl_only and is_buy:

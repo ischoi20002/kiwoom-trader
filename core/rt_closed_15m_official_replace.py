@@ -172,7 +172,9 @@ def fetch_official_15m_row_for_timestamp(
             merged = merged[~merged.index.duplicated(keep="last")]
             row = _find_row_for_bar_end(merged, want)
             if row is None:
-                if log:
+                # 같은 슬롯/종목은 scheduler 쪽에서 쿨다운을 두지만,
+                # 여기서는 per-call 스팸을 더 줄이기 위해 "마지막 시도"에만 로그를 남깁니다.
+                if log and (attempt + 1 >= retries):
                     try:
                         log(
                             f"ℹ️ [RT15m-Official] {nc} {want} 행 미발견 "
@@ -218,6 +220,9 @@ class RtClosed15mOfficialReplaceScheduler:
         self._log = log
         self._lock = threading.Lock()
         self._scheduled: Dict[str, bool] = {}
+        # 실패(행 미발견 등) 이후 동일 키를 일정 시간 동안 재시도/로그하지 않기 위한 쿨다운
+        self._fail_cooldown_until: Dict[str, float] = {}
+        self._fail_counts: Dict[str, int] = {}
 
     def _key(self, code: str, bar_ts: Any) -> str:
         nc = canonical_stock_code(str(code).strip())
@@ -240,6 +245,13 @@ class RtClosed15mOfficialReplaceScheduler:
         with self._lock:
             if self._scheduled.get(k):
                 return
+            try:
+                now_m = time.monotonic()
+                until = float(self._fail_cooldown_until.get(k, 0.0) or 0.0)
+                if until > now_m:
+                    return
+            except Exception:
+                pass
             self._scheduled[k] = True
 
         def _delay() -> float:
@@ -353,6 +365,13 @@ class RtClosed15mOfficialReplaceScheduler:
                 )
                 root = getattr(app, "root", None)
                 if tup is None or root is None:
+                    # 행 미발견/메인 root 없음 등 실패는 즉시 재스케줄 루프가 생길 수 있으므로
+                    # 동일 키에 대해 쿨다운을 둡니다.
+                    with self._lock:
+                        cnt = int(self._fail_counts.get(k, 0) or 0) + 1
+                        self._fail_counts[k] = cnt
+                        delay = min(900.0, 60.0 * (2 ** max(0, cnt - 1)))  # 1분 → 2분 → 4분 … (최대 15분)
+                        self._fail_cooldown_until[k] = time.monotonic() + delay
                     with self._lock:
                         self._scheduled.pop(k, None)
                     return
@@ -375,6 +394,8 @@ class RtClosed15mOfficialReplaceScheduler:
                     finally:
                         with self._lock:
                             self._scheduled.pop(k, None)
+                            self._fail_cooldown_until.pop(k, None)
+                            self._fail_counts.pop(k, None)
 
                 try:
                     root.after(0, _apply_main)
