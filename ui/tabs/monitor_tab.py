@@ -986,6 +986,13 @@ class MonitorTab:
             command=self.app.toggle_monitoring,
             style="Accent.TButton",
         )
+        self.btn_continuous_monitor = ttk.Button(
+            self.ctrl_frame,
+            text="🔄 연속 감시 시작",
+            width=_monitor_ctrl_btn_w,
+            command=self.app.toggle_continuous_monitoring,
+            style="Action.TButton",
+        )
         self.lbl_monitor_status = ttk.Label(
             self.ctrl_frame,
             text="상태: 대기 중",
@@ -996,6 +1003,7 @@ class MonitorTab:
         # side=RIGHT 는 먼저 pack 한 위젯이 부모의 오른쪽에 붙고, 다음은 그 왼쪽에 이어 붙음.
         self.btn_compare_bt_sel.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
+        self.btn_continuous_monitor.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 8))
         self.lbl_monitor_status.pack(side=tk.RIGHT, padx=(4, 0))
 
@@ -1305,13 +1313,30 @@ class MonitorTab:
         except Exception as e:
             app.log(f"⚠️ [선정] 결과 로그 출력 실패: {e}")
 
-    def select_monitoring_targets(self, auto_confirm: bool = False) -> None:
+    def select_monitoring_targets(
+        self,
+        auto_confirm: bool = False,
+        on_complete: Optional[Any] = None,
+    ) -> None:
         """선정 스캔 후 로그 출력 + 감시 대상 즉시 등록 (확인 팝업 없음).
 
         일봉은 로컬 DB 하베스팅 없이 ``strategy_selector.select_monitoring_targets`` 의
         ``api_only`` 경로로 **FDR 일봉(종목코드 직접)** 만 조회합니다(키움 일봉 미사용).
+
+        Parameters
+        ----------
+        on_complete
+            선정·등록 후처리가 끝나면 ``(성공 여부)`` 를 넘깁니다(연속 감시 EOD 사이클용).
         """
         df_snap: Optional[pd.DataFrame] = None
+
+        def _notify_complete(ok: bool) -> None:
+            if on_complete is None:
+                return
+            try:
+                on_complete(bool(ok))
+            except Exception:
+                pass
 
         def _finalize_ui(done_message: str = "종목 선정 대기") -> None:
             def _job() -> None:
@@ -1352,6 +1377,7 @@ class MonitorTab:
             try:
                 if df_snap is None or df_snap.empty:
                     self.app.log("⚠️ [선정] 조건에 부합하는 종목이 없습니다.")
+                    _notify_complete(False)
                     return
                 self._log_selection_results(self.app, df_snap)
                 # ``api_only`` 에서도 ``selected_targets.csv`` 를 명시 경로로 한 번 더
@@ -1402,8 +1428,10 @@ class MonitorTab:
                             pass
 
                 threading.Thread(target=_send_telegram_parts, daemon=True).start()
+                _notify_complete(True)
             except Exception as ex:
                 self.app.log(f"❌ [선정] 등록·로그 후처리 실패: {ex}")
+                _notify_complete(False)
 
         try:
             self.app.root.after(0, finish_on_main)

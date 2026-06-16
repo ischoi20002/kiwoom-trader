@@ -52,6 +52,7 @@ from core.selection_service import SelectionService
 from core.post_fill_account_sync_service import PostFillAccountSyncService
 from core.realtime_tick_dispatch_service import RealtimeTickDispatchService
 from core.eod_equity_snapshot_service import EodEquitySnapshotService
+from core.continuous_monitor_service import ContinuousMonitorService
 from core.rest_auth_retry_service import RestAuthRetryService
 from core.fill_reconciliation_service import FillReconciliationService
 from core.execution.order_execution_service import OrderExecutionService
@@ -469,6 +470,9 @@ class KiwoomApp:
 
         # [EOD Equity Snapshot] 스케줄러/저장 서비스 추출
         self.eod_equity_snapshot_service = EodEquitySnapshotService(
+            self, log_func=self.log
+        )
+        self.continuous_monitor_service = ContinuousMonitorService(
             self, log_func=self.log
         )
 
@@ -2240,7 +2244,65 @@ class KiwoomApp:
         except Exception:
             pass
 
-    def toggle_monitoring(self): return self.trading_controller.toggle()
+    def toggle_monitoring(self):
+        """일반 실시간 감시 토글(연속 감시 자동 전환 없음)."""
+        tc = self.trading_controller
+        try:
+            if bool(getattr(tc, "is_monitoring", False)):
+                try:
+                    cms = getattr(self, "continuous_monitor_service", None)
+                    if cms is not None:
+                        cms.disarm(manual=True)
+                except Exception:
+                    pass
+                return tc.stop()
+        except Exception:
+            pass
+        return tc.toggle()
+
+    def toggle_continuous_monitoring(self) -> None:
+        """연속 감시: 장마감 후 자동 중단→선정→재시작."""
+        try:
+            svc = self.continuous_monitor_service
+            tc = self.trading_controller
+            if svc.armed:
+                svc.disarm(manual=True)
+                if bool(getattr(tc, "is_monitoring", False)):
+                    tc.stop()
+                self._sync_continuous_monitor_ui()
+                return
+            svc.arm()
+            if not bool(getattr(tc, "is_monitoring", False)):
+                if not bool(tc.start()):
+                    svc.disarm(manual=False)
+                    try:
+                        self.log(
+                            "⚠️ [연속감시] 감시 시작에 실패했습니다. "
+                            "일일 감시목록 선정 후 다시 시도하세요."
+                        )
+                    except Exception:
+                        pass
+            self._sync_continuous_monitor_ui()
+        except Exception as e:
+            try:
+                self.log(f"❌ [연속감시] 토글 오류: {e}")
+            except Exception:
+                pass
+
+    def _sync_continuous_monitor_ui(self) -> None:
+        """연속 감시 버튼 문구·스타일 동기화."""
+        try:
+            mt = getattr(self, "monitor_tab", None)
+            svc = getattr(self, "continuous_monitor_service", None)
+            btn = getattr(mt, "btn_continuous_monitor", None) if mt is not None else None
+            if btn is None or svc is None:
+                return
+            if svc.armed:
+                btn.config(text="⏹️ 연속 감시 중단", style="Warning.TButton")
+            else:
+                btn.config(text="🔄 연속 감시 시작", style="Action.TButton")
+        except Exception:
+            pass
 
     def stop_monitoring(self) -> None:
         """
@@ -2306,6 +2368,13 @@ class KiwoomApp:
                 self._start_eod_equity_snapshot_scheduler()
             except Exception:
                 pass
+            try:
+                cms = getattr(self, "continuous_monitor_service", None)
+                if cms is not None and cms.armed:
+                    cms.start_scheduler()
+            except Exception:
+                pass
+            self._sync_continuous_monitor_ui()
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
             try:
                 from core.monitor_started_display import format_monitor_started_status_text
@@ -2332,15 +2401,47 @@ class KiwoomApp:
                     seq=0,
                 )
         elif status == "STOPPED":
+            cms = getattr(self, "continuous_monitor_service", None)
+            eod_cycle_stop = False
+            try:
+                if cms is not None and cms.consume_eod_stop_flag():
+                    eod_cycle_stop = True
+            except Exception:
+                pass
             self.is_monitoring = False
             self._active_stream_codes = []
             self._maybe_stop_account_sync_timer()
             # 다음 감시 시작 시 다시 1회 발송되도록 리셋
             self._telegram_sent_on_monitor_start = False
-            if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="▶️ 실시간 감시 시작", style="Accent.TButton")
-            if self.lbl_monitor_status: self.lbl_monitor_status.config(text="상태: 대기 중", foreground=self.colors['primary'])
-            if self.status_label:
-                self.status_label.config(text="상태: 대기 중", foreground=self.colors["primary"])
+            if self.btn_monitor_toggle:
+                self.btn_monitor_toggle.config(
+                    text="▶️ 실시간 감시 시작", style="Accent.TButton"
+                )
+            if eod_cycle_stop and cms is not None and cms.armed:
+                _wait_txt = "상태: 연속 감시 — 장마감 전환 중(선정·재시작)"
+                if self.lbl_monitor_status:
+                    self.lbl_monitor_status.config(
+                        text=_wait_txt, foreground=self.colors.get("primary", "#88C0D0")
+                    )
+                if self.status_label:
+                    self.status_label.config(
+                        text=_wait_txt, foreground=self.colors.get("primary", "#88C0D0")
+                    )
+            else:
+                try:
+                    if cms is not None and cms.armed and not eod_cycle_stop:
+                        cms.disarm(manual=True)
+                except Exception:
+                    pass
+                if self.lbl_monitor_status:
+                    self.lbl_monitor_status.config(
+                        text="상태: 대기 중", foreground=self.colors["primary"]
+                    )
+                if self.status_label:
+                    self.status_label.config(
+                        text="상태: 대기 중", foreground=self.colors["primary"]
+                    )
+            self._sync_continuous_monitor_ui()
 
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")
@@ -2351,6 +2452,12 @@ class KiwoomApp:
                     self.root.after_cancel(self._equity_snapshot_after_id)
             except Exception:
                 pass
+        except Exception:
+            pass
+        try:
+            cms = getattr(self, "continuous_monitor_service", None)
+            if cms is not None:
+                cms.shutdown()
         except Exception:
             pass
         try:

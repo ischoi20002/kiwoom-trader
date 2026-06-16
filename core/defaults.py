@@ -64,6 +64,9 @@ DEFAULT_SETTINGS = {
     "realtime_warmup_retry_delay_sec": 30.0,
     "use_intraday_api_backfill": True,
     "require_full_warmup_for_monitoring": False,
+    # 연속 감시: 장마감(15:30) 후 buffer 분 경과 시 자동 중단→일일선정→재시작
+    "continuous_monitor_eod_buffer_minutes": 15,
+    "continuous_monitor_stop_settle_sec": 5.0,
     # bars_1d 소스: fdr(하베스팅·백테 선정 기본, 감시 api_only와 동일) |
     # from_1m_aggregate(레거시 1m 집계), kiwoom_ka10081(키움 REST 일봉 직접)
     "monitor_pre_selection_bars_1d_source": "fdr",
