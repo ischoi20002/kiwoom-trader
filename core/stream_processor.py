@@ -12,6 +12,7 @@ from strategy.indicator_constants import (
     RSI_SIG_LOOKBACK,
 )
 from utils.bars_data_keys import resolve_bars_data_frame
+from utils.krx_bars import krx_stream_slot_end_datetime
 from utils.normalization import canonical_stock_code
 
 class StreamProcessor:
@@ -60,16 +61,20 @@ class StreamProcessor:
         nk, df = resolve_bars_data_frame(bars_data, code, migrate_alias=True)
         code = nk or code
         now = datetime.now()
-        # [v3.5] 15분 단위 슬롯으로 원복 (지표 안정성 확보)
-        target_minute = ((now.minute // 15) + 1) * 15
-        target_hour = now.hour
-        if target_minute == 60:
-            target_minute, target_hour = 0, target_hour + 1
-        slot_time = f"{target_hour:02d}{target_minute:02d}"
-
-        # [v35.7] 슬롯 시간을 현재 날짜와 결합하여 전체 타임스탬프 생성
-        now_dt = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-        dt_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        slot_end = krx_stream_slot_end_datetime(now)
+        try:
+            slot_time = f"{int(slot_end.hour):02d}{int(slot_end.minute):02d}"
+            dt_str = slot_end.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            target_minute = ((now.minute // 15) + 1) * 15
+            target_hour = now.hour
+            if target_minute == 60:
+                target_minute, target_hour = 0, target_hour + 1
+            slot_time = f"{target_hour:02d}{target_minute:02d}"
+            now_dt = now.replace(
+                hour=target_hour, minute=target_minute, second=0, microsecond=0
+            )
+            dt_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         # resolve 로 canonical 키·별칭 승격 반영. 여전히 비면 마지막으로 사전 조회.
         if df is None or getattr(df, "empty", False):
@@ -149,7 +154,10 @@ class StreamProcessor:
                     l = float(self._scalar_cell(df, last_idx, "Low"))
                     c = float(self._scalar_cell(df, last_idx, "Close"))
                     v = float(self._scalar_cell(df, last_idx, "Volume"))
-                    self._on_bar_closed(code, last_idx, o, h, l, c, v)
+                    from utils.krx_bars import is_krx_15m_slot_end
+
+                    if is_krx_15m_slot_end(last_idx):
+                        self._on_bar_closed(code, last_idx, o, h, l, c, v)
                 except Exception as e:
                     if self.logger:
                         self.logger(f"⚠️ [Stream] 확정 15분봉 저장 콜백 실패: {e}")

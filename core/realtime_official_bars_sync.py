@@ -20,28 +20,18 @@ import pandas as pd
 from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
 from utils.bars_data_keys import resolve_bars_data_frame
 from utils.krx_bars import (
+    is_krx_15m_slot_end,
+    krx_stream_slot_end_datetime,
     m1_bar_open_label_for_just_completed_minute,
     m1_window_start_for_15m_end,
+    next_krx_15m_slot_end,
 )
 from utils.normalization import canonical_stock_code
 
 
 def stream_slot_end_datetime(now: datetime) -> pd.Timestamp:
-    """
-    ``StreamProcessor._update_realtime_bar_impl`` 과 동일한 15분 슬롯 **종가 시각** 라벨.
-    """
-    try:
-        target_minute = ((now.minute // 15) + 1) * 15
-        target_hour = now.hour
-        if target_minute == 60:
-            target_minute = 0
-            target_hour = target_hour + 1
-        now_dt = now.replace(
-            hour=target_hour, minute=target_minute, second=0, microsecond=0
-        )
-        return pd.Timestamp(now_dt)
-    except Exception:
-        return pd.Timestamp(now).floor("15min")
+    """KRX 장중 15분봉 종가 라벨(야간·장외 슬롯 생성 없음)."""
+    return krx_stream_slot_end_datetime(now)
 
 
 def _on_bar_closed_safe(app: Any, code: str, ts: Any, o: float, h: float, l: float, c: float, v: float) -> None:
@@ -77,7 +67,9 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
             if df is None or getattr(df, "empty", True):
                 return False
             want = stream_slot_end_datetime(datetime.now())
-            while True:
+            guard = 0
+            while guard < 64:
+                guard += 1
                 try:
                     last_ix = pd.Timestamp(df.index[-1])
                 except Exception:
@@ -92,13 +84,21 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
                     v = float(df.at[last_ix, "Volume"])
                 except Exception:
                     o = h = l_ = c = v = 0.0
-                _on_bar_closed_safe(app, use_key, last_ix, o, h, l_, c, v)
+                # 장외·야간 등 비정상 인덱스는 공식 REST 대상이 아니므로 콜백 생략
+                if is_krx_15m_slot_end(last_ix):
+                    _on_bar_closed_safe(app, use_key, last_ix, o, h, l_, c, v)
                 try:
-                    nxt = last_ix + pd.Timedelta(minutes=15)
+                    nxt = next_krx_15m_slot_end(last_ix)
                 except Exception:
+                    nxt = None
+                if nxt is None:
                     break
                 if nxt > want:
                     nxt = want
+                if not is_krx_15m_slot_end(nxt):
+                    break
+                if pd.Timestamp(nxt) <= last_ix:
+                    break
                 try:
                     pc = float(df.at[last_ix, "Close"])
                 except Exception:

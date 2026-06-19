@@ -9,8 +9,8 @@ pandas 기본 ``resample('15min')`` 은 label=left, closed=left 로
 """
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Tuple, Union
+from datetime import datetime, time, timedelta
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -23,10 +23,142 @@ __all__ = [
     "m1_bar_open_label_for_just_completed_minute",
     "resample_1m_ohlcv_to_15m_krx",
     "KRX_15M_RESAMPLE_KWARGS",
+    "is_krx_15m_slot_end",
+    "krx_stream_slot_end_datetime",
+    "next_krx_15m_slot_end",
 ]
 
 # DB·백텐·키움 REST resample(r/r)과 동일
 KRX_15M_RESAMPLE_KWARGS: dict = {"label": "right", "closed": "right"}
+
+# KRX 정규장 15분봉(right-label) 첫·마지막 슬롯 종가 시각
+_KRX_FIRST_15M_END = time(9, 15)
+_KRX_LAST_15M_END = time(15, 30)
+
+
+def _krx_day_first_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
+    return day0.normalize() + pd.Timedelta(hours=9, minutes=15)
+
+
+def _krx_day_last_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
+    return day0.normalize() + pd.Timedelta(hours=15, minutes=30)
+
+
+def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
+    """``t`` 날짜 **다음날**부터 찾은 첫 평일 09:15."""
+    try:
+        d = pd.Timestamp(t).normalize() + pd.Timedelta(days=1)
+        for _ in range(8):
+            if d.weekday() < 5:
+                return _krx_day_first_slot_end(d)
+            d = d + pd.Timedelta(days=1)
+    except Exception:
+        pass
+    return _krx_day_first_slot_end(pd.Timestamp(t).normalize() + pd.Timedelta(days=1))
+
+
+def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """
+    KRX 정규장 15분봉 종가 라벨(09:15~15:30, 15분 간격, 평일) 여부.
+
+    공휴일은 미반영(평일만). 장외·야간 슬롯은 False.
+    """
+    try:
+        t = pd.Timestamp(ts).floor("s")
+        if t.weekday() >= 5:
+            return False
+        if t.second != 0 or t.microsecond != 0:
+            return False
+        hm = t.hour * 60 + t.minute
+        if hm < 9 * 60 + 15 or hm > 15 * 60 + 30:
+            return False
+        return (t.minute % 15) == 0
+    except Exception:
+        return False
+
+
+def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp:
+    """
+    벽시계 기준 **현재 형성 중** 15분봉의 종가 라벨(KRX 장중만).
+
+    - 09:15 이전: 당일 09:15
+    - 09:15~15:30: 해당 구간의 right-label 종가 시각
+    - 15:30 이후·주말: 당일(또는 직전 평일) 15:30 — 장외에는 새 슬롯을 만들지 않음
+    """
+    try:
+        raw = now if now is not None else datetime.now()
+        t = pd.Timestamp(raw)
+        day0 = t.normalize()
+        if t.weekday() >= 5:
+            # 주말: 직전 금요일 15:30 고정(새 슬롯 전진 없음)
+            d = day0
+            while d.weekday() >= 5:
+                d = d - pd.Timedelta(days=1)
+            return _krx_day_last_slot_end(d)
+
+        hm = t.hour * 60 + t.minute
+        if hm < 9 * 60 + 15:
+            return _krx_day_first_slot_end(day0)
+        if hm >= 15 * 60 + 30:
+            return _krx_day_last_slot_end(day0)
+
+        # 장중: 09:15 기준 15분 단위로 올림한 종가 라벨
+        base_min = 9 * 60 + 15
+        offset = hm - base_min
+        slot_idx = offset // 15
+        end_min = base_min + (slot_idx + 1) * 15
+        if end_min > 15 * 60 + 30:
+            end_min = 15 * 60 + 30
+        return day0 + pd.Timedelta(minutes=end_min)
+    except Exception:
+        try:
+            return pd.Timestamp(now or datetime.now()).floor("15min")
+        except Exception:
+            return pd.Timestamp.now().floor("15min")
+
+
+def next_krx_15m_slot_end(
+    ts: Union[pd.Timestamp, datetime, str],
+) -> Optional[pd.Timestamp]:
+    """
+    ``ts`` **이후** 첫 KRX 15분봉 종가 시각.
+
+    장마감(15:30) 다음은 **다음 평일 09:15** 로 점프합니다(야간 00:00·03:00 등 생성 안 함).
+    """
+    try:
+        t = pd.Timestamp(ts).floor("s")
+        day0 = t.normalize()
+
+        if t.weekday() >= 5:
+            return _next_weekday_first_slot_after(t)
+
+        hm = t.hour * 60 + t.minute
+        last_end = _krx_day_last_slot_end(day0)
+        first_end = _krx_day_first_slot_end(day0)
+
+        if hm >= 15 * 60 + 30:
+            return _next_weekday_first_slot_after(t)
+
+        if hm < 9 * 60 + 15:
+            if t < first_end:
+                return first_end
+            return next_krx_15m_slot_end(first_end)
+
+        if is_krx_15m_slot_end(t):
+            nxt = t + pd.Timedelta(minutes=15)
+            if is_krx_15m_slot_end(nxt):
+                return nxt
+            if t < last_end:
+                return last_end
+            return _next_weekday_first_slot_after(t)
+
+        # 슬롯 경계 사이 → 올림한 종가 라벨
+        up = krx_stream_slot_end_datetime(t.to_pydatetime())
+        if up > t:
+            return up
+        return next_krx_15m_slot_end(up)
+    except Exception:
+        return None
 
 
 def m1_window_start_for_15m_end(

@@ -241,6 +241,11 @@ class RtClosed15mOfficialReplaceScheduler:
         delay_sec: float,
     ) -> None:
         """이미 동일 종목·동일 봉 시각이 예약돼 있으면 무시합니다."""
+        try:
+            if not is_krx_15m_slot_end(bar_ts):
+                return
+        except Exception:
+            return
         k = self._key(code, bar_ts)
         with self._lock:
             if self._scheduled.get(k):
