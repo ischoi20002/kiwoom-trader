@@ -239,6 +239,9 @@ def evaluate_bt_hp_intrabar_unified(
                             "bid_ask_ratio": ba_m,
                             "ask_bid_ratio": ab_m,
                             "vol_power": vp_m,
+                            # [버그픽스] 동기화 포지션 등 sig_type 이 비어 있을 때 트랙 힌트로
+                            # Type A/B 청산 키(TP/SL/Flash/Trail)를 올바르게 적용(상향 폴백).
+                            "sel_track": ct,
                         },
                     )
                     if isinstance(res, dict) and str(res.get("action") or "") == "EXIT":

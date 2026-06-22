@@ -68,6 +68,9 @@ from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
 from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
 from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 
+from utils.monitor_vp_stub import is_vp_price_stub_active, stamp_vp_price_stub
+from utils.normalization import canonical_stock_code
+
 from kiwoom_rest_api.auth.token import TokenManager
 
 # [v3.5] Kiwoom REST API 전역 설정
@@ -2142,7 +2145,7 @@ class KiwoomApp:
                 if not isinstance(mi, dict):
                     return
                 row = mi.get(nk)
-                if not isinstance(row, dict) or not row.get("vp_price_stub"):
+                if not isinstance(row, dict) or not is_vp_price_stub_active(row):
                     continue
                 try:
                     raw_p = row.get("price")
@@ -2221,7 +2224,7 @@ class KiwoomApp:
             ap = float(pos.get("avg_price", 0) or 0)
             # 워커/메인 모두: 스텁 생성 시 동기 REST 금지(체결 직후 UI 멈춤 방지)
             ref_p = float(ap) if ap > 0 else 0.0
-            stub = {
+            stub: Dict[str, Any] = {
                 "name": nm,
                 "ma20": 0.0,
                 "ma60": 0.0,
@@ -2232,8 +2235,8 @@ class KiwoomApp:
                 # 계좌 스냅(ka_cur_prc 등)이 있으면 보유 탭과 같이 참고가 표시. 평단은 넣지 않음.
                 "last_price": ref_p,
                 "sel_track": "AB",
-                "vp_price_stub": True,
             }
+            stamp_vp_price_stub(stub, settings=getattr(self, "settings", None))
             self.monitor_info[nk] = stub
             try:
                 self.trading_controller.monitor_info[nk] = stub
@@ -2582,7 +2585,6 @@ class KiwoomApp:
         Tk 메인 스레드에서만 호출합니다.
         """
         from utils.bars_data_keys import resolve_bars_data_frame
-        from utils.normalization import canonical_stock_code
         from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
 
         try:

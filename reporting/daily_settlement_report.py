@@ -14,6 +14,8 @@ from datetime import date, datetime, timedelta
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from utils.monitor_vp_stub import is_vp_price_stub_active
+
 
 try:
     import plotly.graph_objects as go
@@ -536,7 +538,7 @@ def _daily_row_has_ka_snapshot(pos: Dict[str, Any]) -> bool:
 def _daily_has_live_tick_price(info: Dict[str, Any]) -> bool:
     """VirtualTab._has_live_tick_price 와 동일(행 단위 info)."""
     try:
-        if bool(info.get("vp_price_stub")):
+        if is_vp_price_stub_active(info):
             return False
         raw_p = info.get("price")
         if raw_p in (None, "", 0):
@@ -571,7 +573,7 @@ def _daily_monitor_live_price_for_holding(
     VirtualTab._monitor_live_price 와 동등한 폴백 체인(틱 price → last_price → REST → 평단).
     일일 결산 요약 전용으로 info 를 인자로 받습니다.
     """
-    stub_flag = bool(info.get("vp_price_stub"))
+    stub_flag = is_vp_price_stub_active(info)
     try:
         ap = float(pos.get("avg_price", 0) or 0)
     except (TypeError, ValueError):

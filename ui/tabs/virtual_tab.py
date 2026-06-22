@@ -9,7 +9,10 @@ from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import config
-from utils.eod_equity_snapshots import compute_day_pnl_vs_eod_store
+from utils.eod_equity_snapshots import (
+    compute_day_pnl_vs_eod_store,
+    compute_synthetic_prior_total_assets_at_prev_close,
+)
 from utils.equity_snapshots_store import (
     equity_snapshots_root_candidates,
     read_equity_snapshot_from_root,
@@ -20,6 +23,7 @@ from utils.fee_rates import (
     unrealized_at_price_net_of_sell_fee,
 )
 from utils.plotly_cdn import plotly_cdn_script_tag
+from utils.monitor_vp_stub import is_vp_price_stub_active
 from reporting.krx_trading_calendar import (
     is_trading_day,
     next_trading_day,
@@ -77,6 +81,10 @@ class VirtualTab:
         self.lbl_mock_result = None
         # 종목별 REST 시세 폴백 캐시 (API 과다·429 방지)
         self._fallback_quote_cache: Dict[str, Tuple[float, float]] = {}
+        # [버그픽스] REST 폴백을 메인 스레드에서 동기 호출하면 종목당 최대 8~16초 UI 멈춤.
+        # 백그라운드 워커가 캐시를 채우도록 inflight 가드를 둔다.
+        self._fallback_quote_cache_lock = threading.Lock()
+        self._fallback_quote_inflight: set = set()
         # 주문 로그: 조회 중인 날짜(네비게이션). 기본은 오늘.
         self._order_log_view_date: date = date.today()
         self._order_log_date_var: Optional[tk.StringVar] = None
@@ -1677,6 +1685,120 @@ class VirtualTab:
             pass
         return 0.0
 
+    def _schedule_day_pnl_warmup(self) -> None:
+        """금일손익 분모(직전 장마감 합성 총자산)의 종목별 동기 REST(ka10001)를
+        백그라운드에서 미리 계산해 앱 캐시(_synthetic_prev_assets_cache)를 데운다.
+        실시간 UI 틱 경로는 allow_rest=False 로만 호출하므로 메인 스레드가 멈추지 않는다."""
+        try:
+            app = getattr(self, "app", None)
+            if app is None:
+                return
+            lock = getattr(self, "_fallback_quote_cache_lock", None)
+            if lock is not None:
+                with lock:
+                    if getattr(app, "_vt_day_pnl_warmup_inflight", False):
+                        return
+                    app._vt_day_pnl_warmup_inflight = True
+            else:
+                if getattr(app, "_vt_day_pnl_warmup_inflight", False):
+                    return
+                app._vt_day_pnl_warmup_inflight = True
+
+            def _worker() -> None:
+                got = None
+                try:
+                    got = compute_synthetic_prior_total_assets_at_prev_close(
+                        app, allow_rest=True
+                    )
+                except Exception:
+                    got = None
+                finally:
+                    try:
+                        if lock is not None:
+                            with lock:
+                                app._vt_day_pnl_warmup_inflight = False
+                        else:
+                            app._vt_day_pnl_warmup_inflight = False
+                    except Exception:
+                        pass
+                if got is not None:
+                    try:
+                        root = getattr(app, "root", None)
+                        req = getattr(
+                            app, "request_virtual_tab_realtime_render", None
+                        )
+                        if root is not None and callable(req):
+                            root.after(0, req)
+                    except Exception:
+                        pass
+
+            threading.Thread(
+                target=_worker, name="VpDayPnlWarmup", daemon=True
+            ).start()
+        except Exception:
+            try:
+                app = getattr(self, "app", None)
+                if app is not None:
+                    app._vt_day_pnl_warmup_inflight = False
+            except Exception:
+                pass
+
+    def _fallback_quote_cached_value(self, nk: str) -> float:
+        """REST 폴백 캐시의 유효값(55초 TTL)을 **블로킹 없이** 반환. 없으면 0.0."""
+        try:
+            now_m = time.monotonic()
+            with self._fallback_quote_cache_lock:
+                cached = self._fallback_quote_cache.get(nk)
+            if cached is not None and (now_m - cached[0]) < 55.0:
+                return float(cached[1])
+        except Exception:
+            pass
+        return 0.0
+
+    def _schedule_fallback_quote_refresh(self, nk: str) -> None:
+        """REST 시세 폴백을 백그라운드 스레드에서 갱신(메인 스레드 블로킹 방지)."""
+        try:
+            code = str(nk or "").strip()
+            if not code:
+                return
+            with self._fallback_quote_cache_lock:
+                if code in self._fallback_quote_inflight:
+                    return
+                self._fallback_quote_inflight.add(code)
+
+            def _worker() -> None:
+                got = 0.0
+                try:
+                    got = float(self._rest_quote_fallback_close(code) or 0.0)
+                except Exception:
+                    got = 0.0
+                finally:
+                    try:
+                        with self._fallback_quote_cache_lock:
+                            self._fallback_quote_inflight.discard(code)
+                    except Exception:
+                        pass
+                # 값이 들어오면 다음 렌더에서 반영되도록 경량 갱신 요청
+                if got > 0:
+                    try:
+                        app = getattr(self, "app", None)
+                        root = getattr(app, "root", None)
+                        req = getattr(app, "request_virtual_tab_realtime_render", None)
+                        if root is not None and callable(req):
+                            root.after(0, req)
+                    except Exception:
+                        pass
+
+            threading.Thread(
+                target=_worker, name=f"VpQuoteFallback-{code}", daemon=True
+            ).start()
+        except Exception:
+            try:
+                with self._fallback_quote_cache_lock:
+                    self._fallback_quote_inflight.discard(str(nk or "").strip())
+            except Exception:
+                pass
+
     def _monitor_live_price(self, nk: str, pos: Dict[str, Any]) -> float:
         """
         6자리 종목코드 기준 현재가(청산 가정 시 단가).
@@ -1691,7 +1813,7 @@ class VirtualTab:
             info = mi.get(nk, {}) or {}
         except Exception:
             info = {}
-        stub_flag = bool(info.get("vp_price_stub"))
+        stub_flag = is_vp_price_stub_active(info)
         try:
             ap = float(pos.get("avg_price", 0) or 0)
         except (TypeError, ValueError):
@@ -1746,9 +1868,12 @@ class VirtualTab:
                             return v
             except (TypeError, ValueError):
                 pass
-        api_px = self._rest_quote_fallback_close(nk)
-        if api_px > 0:
-            return api_px
+        # [버그픽스] 메인 스레드에서 동기 REST(_rest_quote_fallback_close) 호출 금지.
+        # 캐시된 값이 있으면 즉시 반환하고, 없으면 백그라운드 갱신만 예약한 뒤 0.0 반환.
+        cached_px = self._fallback_quote_cached_value(nk)
+        if cached_px > 0:
+            return cached_px
+        self._schedule_fallback_quote_refresh(nk)
         # 평단은 '현재가'로 쓰지 않음(미시세·스텁과 구분 불가 → 동일 숫자 오해)
         return 0.0
 
@@ -1763,7 +1888,7 @@ class VirtualTab:
                 if v > 0:
                     return True
             # 스텁이어도 틱 price 가 살아 있으면 실시간으로 간주(보유 직후 REST 폴백 방지)
-            if row.get("vp_price_stub"):
+            if is_vp_price_stub_active(row):
                 return False
             return False
         except Exception:
@@ -2743,18 +2868,22 @@ class VirtualTab:
             ta = 0.0
 
         # 금일 손익: 직전 장마감 시세 합성 분모와 동일하게 **D+2+순매각 합**(증권사 총평가 치환 없음)을 분자로 사용.
+        # [버그픽스] 메인 스레드에서 종목별 동기 ka10001 루프를 돌리지 않도록 allow_rest=False(캐시 전용).
+        # 캐시가 비어 None 이면 백그라운드 워밍만 예약하고 placeholder 를 잠시 표시한다.
         try:
             d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
                 self.app,
                 calendar_day=datetime.now().date(),
                 current_total_assets=float(total_assets_day_pnl),
+                allow_rest=False,
             )
         except Exception:
             d_amt, d_pct = None, None
         if d_amt is not None and d_pct is not None:
             day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
         else:
-            day_pnl_txt = "— (전일 기준 없음)"
+            day_pnl_txt = "— (계산 중)"
+            self._schedule_day_pnl_warmup()
         open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
 
         # 누적 수익(종료+보유): 매매종료 손익 합 + 보유 「미실현 손익」(계좌 요약 정의와 동일).
@@ -2920,27 +3049,43 @@ class VirtualTab:
                 except (TypeError, ValueError):
                     use_day_cache = False
             if not use_day_cache:
+                # [버그픽스] 실시간 틱 경로에서는 allow_rest=False 로 캐시만 사용한다.
+                # 캐시가 비어 None 이면 메인 스레드를 막지 않고 백그라운드 워밍만 예약.
                 try:
                     d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
                         self.app,
                         calendar_day=datetime.now().date(),
                         current_total_assets=float(total_assets_day_pnl),
+                        allow_rest=False,
                     )
                 except Exception:
                     d_amt, d_pct = None, None
                 if d_amt is not None and d_pct is not None:
                     day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
                 else:
-                    day_pnl_txt = "— (전일 기준 없음)"
+                    # 직전 표시값이 있으면 유지(깜빡임 방지), 없으면 placeholder
+                    prev_txt = None
+                    try:
+                        if isinstance(day_cache, dict):
+                            prev_txt = day_cache.get("txt")
+                    except Exception:
+                        prev_txt = None
+                    day_pnl_txt = str(prev_txt) if prev_txt else "— (계산 중)"
+                    self._schedule_day_pnl_warmup()
                 closed_h = self._sum_visible_history_realized_pnl()
-                try:
-                    self.app._vt_day_pnl_tick_cache = {
-                        "ts": now_m,
-                        "txt": day_pnl_txt,
-                        "closed_h": float(closed_h),
-                    }
-                except Exception:
-                    pass
+                # 실제 값일 때만 30초 throttle 캐시에 기록한다.
+                # placeholder 를 캐시에 넣으면 워밍 완료 후에도 throttle 동안 고착되므로,
+                # 미확정(d_amt None) 동안은 캐시를 갱신하지 않고 다음 틱이 캐시(allow_rest=False)를
+                # 다시 시도하도록 둔다(워밍 완료 시 즉시 실제 값 반영).
+                if d_amt is not None and d_pct is not None:
+                    try:
+                        self.app._vt_day_pnl_tick_cache = {
+                            "ts": now_m,
+                            "txt": day_pnl_txt,
+                            "closed_h": float(closed_h),
+                        }
+                    except Exception:
+                        pass
             open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
 
             cum_pnl_amt = float(closed_h) + float(total_unrealized_account)

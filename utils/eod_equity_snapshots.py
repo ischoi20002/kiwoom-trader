@@ -84,7 +84,9 @@ def _vp_signature_for_synthetic_cache(app: Any) -> Tuple[Any, ...]:
         return tuple()
 
 
-def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[float]:
+def compute_synthetic_prior_total_assets_at_prev_close(
+    app: Any, *, allow_rest: bool = True
+) -> Optional[float]:
     """
     보유 종목별 직전 장마감가( ``fetch_stock_prev_close_ka10001`` )로
     **포지션 탭과 동일한 순매각 주식 합**( ``invested`` + 매도 수수료 차감 미실현 )을 구하고,
@@ -121,6 +123,11 @@ def compute_synthetic_prior_total_assets_at_prev_close(app: Any) -> Optional[flo
             pass
     except Exception:
         cache_key = None
+    # [버그픽스] allow_rest=False(실시간 UI 틱 경로)에서는 유효 캐시가 없을 때
+    # 종목별 동기 REST(ka10001) 루프를 메인 스레드에서 돌리지 않는다(UI 멈춤 방지).
+    # 캐시는 위에서 이미 반환됐으므로 여기 도달 = 캐시 미스 → None 반환(호출 측이 백그라운드로 데움).
+    if not allow_rest:
+        return None
     try:
         om = getattr(app, "order_manager", None)
         if om is None:
@@ -327,6 +334,7 @@ def compute_day_pnl_vs_eod_store(
     *,
     calendar_day: date,
     current_total_assets: float,
+    allow_rest: bool = True,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
     """
     금일 손익(원), 대비(%), 분모 **기준 총자산**(직전 장마감 시세 합성), 직전 영업일 키.
@@ -347,7 +355,9 @@ def compute_day_pnl_vs_eod_store(
         return None, None, None, None
     prev_key = prev.strftime("%Y-%m-%d")
     try:
-        prev_assets = compute_synthetic_prior_total_assets_at_prev_close(app)
+        prev_assets = compute_synthetic_prior_total_assets_at_prev_close(
+            app, allow_rest=allow_rest
+        )
     except Exception:
         prev_assets = None
     if prev_assets is None or prev_assets <= 0:

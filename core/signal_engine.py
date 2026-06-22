@@ -21,6 +21,7 @@ from ui.tabs.monitor_tab import format_entry_signal_type_label
 from utils.krx_session import is_krx_regular_session
 from utils.bars_data_keys import resolve_bars_data_frame
 from utils.normalization import canonical_stock_code
+from utils.monitor_vp_stub import clear_vp_price_stub_if_expired
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -452,6 +453,85 @@ class SignalEngine:
                 pass
             return is_buy, last_sig, last_row
 
+    def _realtime_gap_down_mirror_ok(
+        self,
+        nk: str,
+        pos: Dict[str, Any],
+        info: Dict[str, Any],
+        *,
+        reason: str,
+    ) -> bool:
+        """
+        인트라바 미러 GAP_DOWN: M1 보수적 저가만으로 청산하지 않도록 실시간 틱·진입 유예를 검사.
+
+        Returns
+        -------
+        True
+            GAP_DOWN 청산 허용.
+        False
+            보류(HOLD).
+        """
+        try:
+            if str(reason or "").strip().upper() != "GAP_DOWN":
+                return True
+            st = getattr(self.app, "settings", None) or {}
+            if not bool(st.get("realtime_gap_down_tick_confirm", True)):
+                return True
+
+            # 진입 직후 유예
+            try:
+                entry_grace = float(st.get("realtime_gap_down_entry_grace_sec", 90.0))
+            except (TypeError, ValueError):
+                entry_grace = 90.0
+            entry_grace = max(0.0, min(entry_grace, 600.0))
+            if entry_grace > 0:
+                et = pos.get("entry_time") or pos.get("entry_date")
+                if et is not None:
+                    try:
+                        entry_ts = float(pd.Timestamp(et).timestamp())
+                        if (time.time() - entry_ts) < entry_grace:
+                            return False
+                    except Exception:
+                        pass
+
+            avg_p = float(
+                self._to_scalar(pos.get("avg_price", pos.get("avg_p", 0)), 0.0)
+            )
+            if avg_p <= 0:
+                return True
+
+            is_type_b = TradingStrategy._holding_sig_is_type_b(pos)
+            if not is_type_b:
+                try:
+                    is_type_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+                except Exception:
+                    is_type_b = False
+            _rx = TradingStrategy._exit_track_risk_bundle(st, is_type_b)
+            gap_limit = float(_rx.get("gap_down_limit", -5.0))
+
+            live_px = 0.0
+            try:
+                raw_p = info.get("price")
+                if raw_p not in (None, "", 0):
+                    live_px = float(raw_p)
+            except (TypeError, ValueError):
+                live_px = 0.0
+            if live_px <= 0:
+                try:
+                    raw_lp = info.get("last_price")
+                    if raw_lp not in (None, "", 0):
+                        live_px = float(raw_lp)
+                except (TypeError, ValueError):
+                    live_px = 0.0
+            if live_px <= 0:
+                # 틱 없으면 M1 저가 단독 GAP_DOWN 신뢰하지 않음
+                return False
+
+            live_pr = (live_px / avg_p - 1.0) * 100.0
+            return bool(live_pr <= gap_limit)
+        except Exception:
+            return True
+
     def _intrabar_mirror_held_eval(
         self,
         code: str,
@@ -502,6 +582,28 @@ class SignalEngine:
                 return None
             full_15m, m1df = pair
             pos_sim = copy.deepcopy(pos_live)
+            # [버그픽스] RT 미러는 현재 15분 슬롯 M1 고점만 누적하므로, 이전 슬롯에서 형성된
+            # 당일 고점이 유실되어 Flash/ATR 트레일 무장 기준(max_p)이 백테스트와 어긋난다.
+            # full_15m(당일 봉)에서 진입 시각 이후 고가를 복원해 pos_sim.max_p 를 시드한다(상향만).
+            try:
+                entry_ts = pos_live.get("entry_time") or ""
+                peak_hi = TradingStrategy._peak_high_from_bars_df(
+                    full_15m, since=(entry_ts or None)
+                )
+                if peak_hi is not None and float(peak_hi) > 0:
+                    cur_mp = 0.0
+                    for _mk in ("max_p", "max_price", "max_now"):
+                        try:
+                            _v = float(pos_sim.get(_mk, 0) or 0)
+                            if _v > cur_mp:
+                                cur_mp = _v
+                        except (TypeError, ValueError):
+                            continue
+                    seeded = max(cur_mp, float(peak_hi))
+                    pos_sim["max_p"] = seeded
+                    pos_sim["max_price"] = seeded
+            except Exception:
+                pass
             ct = str(
                 info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
             ).strip().upper()
@@ -518,6 +620,10 @@ class SignalEngine:
                 ep = float(ex.get("eval_price", 0) or 0)
                 pr = float(ex.get("profit_ratio", 0) or 0)
                 rs = str(ex.get("reason", "") or "EXIT")
+                if not self._realtime_gap_down_mirror_ok(
+                    nk, pos_live, info, reason=rs
+                ):
+                    return {"action": "HOLD"}
                 return {
                     "action": "EXIT",
                     "reason": rs,
@@ -948,8 +1054,7 @@ class SignalEngine:
             except (TypeError, ValueError):
                 pass
             try:
-                if info.get("vp_price_stub"):
-                    info.pop("vp_price_stub", None)
+                clear_vp_price_stub_if_expired(info)
             except Exception:
                 pass
             try:

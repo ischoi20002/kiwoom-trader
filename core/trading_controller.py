@@ -13,6 +13,7 @@ from core.terminal_trace import terminal_trace
 from core.warmup_stream_prep_service import WarmupStreamPrepService
 from core.websocket_worker_service import WebsocketWorkerService
 from utils.normalization import canonical_stock_code
+from utils.monitor_vp_stub import stamp_vp_price_stub
 
 
 def _implied_price_too_close_to_avg(
@@ -360,7 +361,7 @@ class TradingController:
                 if ref_p <= 0 and ap > 0:
                     # bars_data가 아직 없거나 비어 있으면, 평단으로 마지막 수단 시드(기존 동작 유지).
                     ref_p = float(ap)
-                self.monitor_info[nk] = {
+                row_mi: Dict[str, Any] = {
                     "name": nm,
                     "ma20": 0.0,
                     "ma60": 0.0,
@@ -370,8 +371,12 @@ class TradingController:
                     "open": ref_p if ref_p > 0 else ap,
                     "last_price": ref_p,
                     "sel_track": "AB",
-                    "vp_price_stub": True,
                 }
+                stamp_vp_price_stub(
+                    row_mi,
+                    settings=getattr(self.app, "settings", None),
+                )
+                self.monitor_info[nk] = row_mi
             except Exception:
                 continue
 

@@ -192,8 +192,17 @@ class OrderActionDispatcher:
                         sreason,
                         **skw,
                     )
-            except Exception:
-                pass
+            except Exception as ex:
+                # [버그픽스] 주문 발송/전략 액션 처리 예외를 조용히 삼키면
+                # place_order/REST 실패가 무시되고 exit_pending·s1_buy 상태만 어긋난 채 남는다.
+                try:
+                    log_fn = getattr(self.app, "log", None) or print
+                    log_fn(
+                        f"⚠️ [OrderDispatcher] 액션 처리 예외(kind={kind}, "
+                        f"code={code_for_release}): {ex}"
+                    )
+                except Exception:
+                    pass
             finally:
                 if code_for_release:
                     self._release(code_for_release)

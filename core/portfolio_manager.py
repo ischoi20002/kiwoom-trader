@@ -46,6 +46,9 @@ class PortfolioManager:
 
         # on_fill 등에서 보조 메서드가 같은 스레드로 lock 재진입할 수 있음
         self.lock = threading.RLock()
+        # [버그픽스] 계좌 동기화 동시 실행(여러 경로의 직접 호출) 시 reconcile·save_db·
+        # streak 카운터가 interleave 되는 것을 막는 비차단 재진입 가드.
+        self._sync_in_progress_lock = threading.Lock()
         # record_orphan_sell_close 동일 주문번호 중복 기록 방지
         self._orphan_sell_order_ids: Set[str] = set()
         # 매도 주문 접수 직후 포지션 전체 스냅샷(주문번호 키) — 동기화로 로컬 보유가 먼저 사라져도 체결 시 종료 확정
@@ -903,6 +906,19 @@ class PortfolioManager:
                 if active:
                     # active가 리스트라면 딕셔너리로 변환
                     if isinstance(active, list):
+                        # [버그픽스] 재인증 등으로 load_all 이 재호출되면 DB active 에는
+                        # exit_pending/pending_*·max_p·events 같은 휘발 상태가 없어 그대로
+                        # 덮으면 '매도 진행 중' 플래그가 사라져 이중 매도가 날 수 있다.
+                        # 기존 메모리 포지션의 휘발 필드를 베이스코드 기준으로 보존한다.
+                        prev_by_base: Dict[str, Dict[str, Any]] = {}
+                        try:
+                            for _pk, _pv in (self.virtual_positions or {}).items():
+                                if isinstance(_pv, dict):
+                                    _bk = str(_pk).split("_")[0].zfill(6)
+                                    if _bk not in prev_by_base:
+                                        prev_by_base[_bk] = _pv
+                        except Exception:
+                            prev_by_base = {}
                         for row in active:
                             # row: (code, name, avg_p, qty, stage, invested, time, reason)
                             code = row[0]
@@ -913,13 +929,48 @@ class PortfolioManager:
                                 )
                             except Exception:
                                 _sig = "TYPE_A"
-                            self.virtual_positions[code] = {
+                            new_pos: Dict[str, Any] = {
                                 "name": row[1], "avg_price": float(row[2]), "qty": int(row[3]),
                                 "stage": int(row[4]), "invested": float(row[5]),
                                 "entry_time": row[6], "reason": row[7],
                                 "sig_type": _sig,
                                 "events": [], "max_now": float(row[2])
                             }
+                            try:
+                                _old = prev_by_base.get(_nk)
+                                if isinstance(_old, dict):
+                                    for _vf in (
+                                        "exit_pending",
+                                        "pending_exit_ord_no",
+                                        "s1_limit_order_pending",
+                                        "s2_limit_order_pending",
+                                        "s2_limit_order_pending_ord_no",
+                                    ):
+                                        if _vf in _old:
+                                            new_pos[_vf] = _old[_vf]
+                                    try:
+                                        _om = max(
+                                            float(_old.get("max_p", 0) or 0),
+                                            float(_old.get("max_now", 0) or 0),
+                                            float(_old.get("max_price", 0) or 0),
+                                        )
+                                        if _om > float(new_pos.get("max_now", 0) or 0):
+                                            new_pos["max_now"] = _om
+                                            new_pos["max_p"] = _om
+                                            new_pos["max_price"] = _om
+                                    except (TypeError, ValueError):
+                                        pass
+                                    try:
+                                        if (
+                                            isinstance(_old.get("events"), list)
+                                            and _old.get("events")
+                                        ):
+                                            new_pos["events"] = _old["events"]
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            self.virtual_positions[code] = new_pos
                     else:
                         self.virtual_positions = active
                     self.log(f"[Portfolio] DB에서 {len(self.virtual_positions)}개의 활성 포지션 복구")
@@ -928,30 +979,94 @@ class PortfolioManager:
                 self.log(f"[Error] [Portfolio] DB 포지션 복구 실패: {e}")
 
     def save_db(self):
-        """현재 상태를 파일에 저장합니다 (히스토리 위주)."""
+        """현재 상태를 파일에 저장합니다 (히스토리 위주).
+
+        [버그픽스] 직렬화 스냅샷을 `self.lock` 안에서 만들어 다른 스레드(on_fill/sync/
+        register_pending_exit_snapshot)의 동시 변경으로 인한 history-pending 불일치를 막고,
+        임시파일에 기록 후 os.replace 로 원자적 교체하여 쓰기 도중 종료 시 파일 손상을 방지한다.
+        """
         try:
             try:
-                self._prune_stale_pending_exit_snapshots()
+                with self.lock:
+                    self._prune_stale_pending_exit_snapshots()
             except Exception:
                 pass
-            with open(self._virtual_db_path(), 'w', encoding='utf-8') as f:
-                json.dump(
-                    {
+            # 락 안에서 직렬화까지 완료하여 일관된 스냅샷을 확보(부분 변경 차단)
+            try:
+                with self.lock:
+                    payload = {
                         "history": self._sanitize_for_virtual_db_json(
                             self.virtual_history
                         ),
                         "pending_exit_snapshots": self._sanitize_for_virtual_db_json(
                             self._pending_exit_snapshots
                         ),
-                    },
-                    f,
-                    ensure_ascii=False,
-                    indent=4,
-                )
+                    }
+                    data_str = json.dumps(
+                        payload, ensure_ascii=False, indent=4
+                    )
+            except Exception as e:
+                self.log(f"[Error] [Portfolio] DB 직렬화 실패: {e}")
+                return
+            path = self._virtual_db_path()
+            tmp_path = f"{path}.tmp"
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(data_str)
+                    try:
+                        f.flush()
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                os.replace(tmp_path, path)
+            except Exception as e:
+                self.log(f"[Error] [Portfolio] DB 저장(원자적 교체) 실패: {e}")
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
         except Exception as e:
             self.log(f"[Error] [Portfolio] DB 저장 실패: {e}")
 
     def sync_with_actual_account(
+        self,
+        silent: bool = False,
+        force: bool = False,
+        *,
+        refresh_cash_deposit: bool = True,
+        schedule_gui_refresh: bool = True,
+        schedule_orders_refresh: bool = True,
+        sync_context: str = "",
+    ) -> None:
+        """[버그픽스] 동시 실행 가드 래퍼 — 이미 동기화가 진행 중이면 중복 호출을 건너뛴다.
+
+        여러 경로(체결 확인·미체결 타임아웃·EOD·수동 버튼)에서 직접 호출되어도
+        reconcile/save_db/streak 카운터가 interleave 되지 않도록 직렬화한다.
+        """
+        if not self._sync_in_progress_lock.acquire(blocking=False):
+            if not silent:
+                try:
+                    self.log("ℹ️ [Sync] 이미 계좌 동기화가 진행 중 — 중복 호출 건너뜀")
+                except Exception:
+                    pass
+            return
+        try:
+            self._sync_with_actual_account_impl(
+                silent=silent,
+                force=force,
+                refresh_cash_deposit=refresh_cash_deposit,
+                schedule_gui_refresh=schedule_gui_refresh,
+                schedule_orders_refresh=schedule_orders_refresh,
+                sync_context=sync_context,
+            )
+        finally:
+            try:
+                self._sync_in_progress_lock.release()
+            except Exception:
+                pass
+
+    def _sync_with_actual_account_impl(
         self,
         silent: bool = False,
         force: bool = False,
@@ -1275,6 +1390,25 @@ class PortfolioManager:
                                 self.log(
                                     f"[Sync] {pos.get('name', code)}({code}) "
                                     f"잔고 API 미반영 가능 — 유예 중(재동기화 대기)"
+                                )
+                            except Exception:
+                                pass
+                        continue
+                    # [버그픽스] 매도 주문이 실제 진행 중(exit_pending + pending 스냅샷 존재)인데
+                    # 잔고에서 잠시 사라진 경우, 여기서 독립적으로 SYNC_EXIT 이력을 만들면
+                    # 이후 체결 확인 경로(_take_pending_exit_for_order → 실 SELL 기록)와 겹쳐
+                    # 동일 라운드 종료내역이 이중 기록되고 손익이 왜곡된다.
+                    # 따라서 진행 중 매도는 reconcile 제거를 보류하고 체결 경로가 처리하도록 둔다.
+                    if (
+                        not force_reconcile_zero
+                        and bool(pos.get("exit_pending"))
+                        and self._has_pending_exit_snapshot_for_code(code)
+                    ):
+                        if not silent:
+                            try:
+                                self.log(
+                                    f"[Sync] {pos.get('name', code)}({code}) "
+                                    f"매도 진행 중(미체결 대기) — reconcile 제거 보류"
                                 )
                             except Exception:
                                 pass
@@ -1771,6 +1905,22 @@ class PortfolioManager:
         except Exception:
             pass
         return None
+
+    def _has_pending_exit_snapshot_for_code(self, code: str) -> bool:
+        """해당 종목코드로 진행 중(접수 후 미체결) 매도 스냅샷이 있는지 확인합니다."""
+        try:
+            nc = self._normalize_stock_code(code)
+            if not nc:
+                return False
+            with self.lock:
+                for rec in self._pending_exit_snapshots.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    if self._normalize_stock_code(rec.get("code")) == nc:
+                        return True
+        except Exception:
+            pass
+        return False
 
     def _discard_pending_exit_snapshot(self, order_no: str) -> None:
         """정상 청산 완료 등으로 더 이상 필요 없는 대기 스냅샷을 제거합니다."""

@@ -13,6 +13,22 @@
 
 ---
 
+## 0.8.45 (2026-06-22)
+
+전체 코드 재점검(청산·주문/체결·실시간/UI·동기화)으로 발견한 버그 13건 수정.
+
+- **UI 멈춤(메인스레드 동기 REST)**: 보유 현재가 폴백(ka10004/ka10001, 종목당 8~16초)과 금일손익 분모(보유 종목별 ka10001)를 **백그라운드 워커**로 전환하고 캐시만 사용(`allow_rest=False`). EOD 리포트 경로는 동기 정확도 유지(`ui/tabs/virtual_tab.py`, `utils/eod_equity_snapshots.py`).
+- **터치호가 pending 무한 루프**: kt00007 미반영이 지속되면 `exit_pending`(재매도 불가)·`s1_buy_pending`(재매수 불가)가 영구 잠금되던 경로에 누적 상한(`touch_pending_confirm_max`, 기본 20) 추가 → 초과 시 미체결 타임아웃 흡수(`core/execution/limit_order_watch_service.py`).
+- **좀비 타이머**: `_schedule_touch_timer` 재예약 전 기존 `after_id` 취소 — 동일 주문 폴링 워커 중복 실행 방지.
+- **`save_db` 원자적 저장**: `self.lock` 안 스냅샷 직렬화 + `tmp→os.replace` 교체로 동시 변경/쓰기 중 종료 시 손상 방지(`core/portfolio_manager.py`).
+- **reconcile 이중 종료내역**: 매도 진행 중(`exit_pending`+pending 스냅샷) 종목의 reconcile 제거 보류 — `SYNC_EXIT`와 실체결 SELL 이중 기록·손익 왜곡 방지.
+- **재인증 `load_all` 휘발필드 보존**: DB 재로드 시 `exit_pending`·`pending_exit_ord_no`·`max_p`·`events`를 메모리에서 보존(이중 매도 방지).
+- **계좌 동기화 동시 실행 가드**: `sync_with_actual_account` 비차단 재진입 래퍼로 reconcile/save_db/streak interleave 방지.
+- **RT 미러 청산 정합**: 현재 슬롯 M1 고점만 누적해 유실되던 당일 고점을 `full_15m`로 복원 시드(`max_p`) — Flash/ATR 트레일 무장 BT-RT 정합. 동기화 포지션의 `sel_track` 트랙 힌트 전달로 B트랙 A키 오적용 방지(`core/signal_engine.py`, `core/bt_hp_intrabar_unified.py`).
+- **매수 부분체결 가드**: 전량 체결 시에만 watch/`s1_buy_pending` 해제 — 잔량 호가 잔존 중 이중 매수 방지(`core/execution/fill_confirmation_service.py`).
+- **기타**: `_get_touch_confirm_poll_ms` 미정의(AttributeError) 교정, `OrderActionDispatcher` 워커 예외 로깅, `vp_stub` 레거시 `is_active`/`clear` 일관화(`utils/monitor_vp_stub.py`).
+- **설정**: `touch_pending_confirm_max`(기본 20) 신규. `vp_price_stub_grace_sec`·`realtime_gap_down_tick_confirm`·`realtime_gap_down_entry_grace_sec`·`realtime_monitor_atr_ir_cache_min_sec`를 `settings.json`에 명시(`core/defaults.py`, `settings.json`).
+
 ## 0.8.44 (2026-06-19)
 
 - **KRX 15분봉 슬롯 정합**: 장외·야간(19:15, 00:00 등) 가짜 슬롯 전진 제거 — `is_krx_15m_slot_end`·`next_krx_15m_slot_end`(15:30→익일 09:15) 적용, `[RT15m-Official] 행 미발견` 로그 스팸 완화.

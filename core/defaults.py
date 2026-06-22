@@ -93,6 +93,14 @@ DEFAULT_SETTINGS = {
     # 봉 부족 시 보유용 마지막 지표 행 재계산 최소 간격(초) — eval 과 동기 권장.
     "realtime_exit_indicator_min_interval_sec": 15.0,
     "realtime_monitor_atr_display_min_interval_sec": 0.5,
+    # 보유 직후 monitor_info 스텁 유지(초) — 첫 틱에 즉시 해제하지 않아 메인 REST·UI 멈춤 완화
+    "vp_price_stub_grace_sec": 45.0,
+    # 실시간 인트라바 미러 GAP_DOWN: M1 저가만으로 청산하지 않고 틱 현재가도 한도 이하여야 함
+    "realtime_gap_down_tick_confirm": True,
+    # 진입 직후 N초 동안 미러 GAP_DOWN 억제(매수 직후 M1 저가 오판 방지)
+    "realtime_gap_down_entry_grace_sec": 90.0,
+    # 감시 트리 보유행 ATR 지표행 캐시(초) — calculate_indicators 메인 호출 최소화
+    "realtime_monitor_atr_ir_cache_min_sec": 12.0,
     # 유니버스 인덱스 소스: KODEX200(기존 kodex200.csv) 또는 KOSPI200(신규 kospi_universe.csv + topN 슬라이스)
     "universe_index_choice": "KODEX200",
     # KOSPI200 모드에서 사용할 상위 종목 N (kospi_universe.csv head(N) 슬라이스)
@@ -110,6 +118,9 @@ DEFAULT_SETTINGS = {
     "realtime_touch_quote_orders": True,
     "touch_quote_order_poll_sec": 30.0,
     "touch_quote_order_max_amends": 3,
+    # kt00007 체결확인이 계속 pending(미반영)일 때 confirm 재예약을 무한 반복하지 않도록 누적 상한.
+    # 상한 초과 시 미체결 타임아웃으로 흡수 → exit_pending/s1 매수 pending 영구 잠금 방지.
+    "touch_pending_confirm_max": 20,
     "reconcile_remove_grace_seconds": 180,
     "reconcile_remove_confirm_syncs": 2,
     "sync_ghost_suppress_hours": 12.0,

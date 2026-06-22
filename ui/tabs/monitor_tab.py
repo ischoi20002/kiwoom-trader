@@ -251,6 +251,8 @@ class MonitorTab:
         #   같은 종목에 대해 일정 시간(초) 동안 계산 결과를 재사용합니다.
         self._atr_exit_ir_cache: Dict[str, Dict[str, Any]] = {}
         self._atr_exit_ir_cache_ts: Dict[str, float] = {}
+        self._atr_exit_ir_inflight: Set[str] = set()
+        self._atr_exit_ir_cache_lock = threading.Lock()
         self._setup_ui()
 
     def _effective_regular_session_for_stream_ticks(self) -> bool:
@@ -2682,6 +2684,63 @@ class MonitorTab:
             pass
         return str(info.get("ratio", "0"))
 
+    def _schedule_atr_ir_recompute(self, nk: str, bd: Any) -> None:
+        """
+        보유행 ATR 표시용 ``calculate_indicators`` 를 백그라운드에서 계산합니다.
+        메인 스레드(Tk)에서 무거운 지표 재계산으로 UI가 멈추는 현상을 줄입니다.
+        """
+        try:
+            code = str(nk).strip().zfill(6)
+            if len(code) != 6 or bd is None or getattr(bd, "empty", True):
+                return
+            with self._atr_exit_ir_cache_lock:
+                if code in self._atr_exit_ir_inflight:
+                    return
+                self._atr_exit_ir_inflight.add(code)
+        except Exception:
+            return
+
+        settings = getattr(self.app, "settings", None) or {}
+        bd_copy = bd
+
+        def _worker() -> None:
+            ir_local: Optional[Dict[str, Any]] = None
+            try:
+                df_i = TradingStrategy.calculate_indicators(bd_copy, settings)
+                ir_local = df_i.iloc[-1].to_dict()
+            except Exception:
+                try:
+                    lr = bd_copy.iloc[-1]
+                    ir_local = (
+                        lr.to_dict() if hasattr(lr, "to_dict") else dict(lr)
+                    )
+                except Exception:
+                    ir_local = None
+            try:
+                with self._atr_exit_ir_cache_lock:
+                    if isinstance(ir_local, dict):
+                        self._atr_exit_ir_cache[code] = ir_local
+                        self._atr_exit_ir_cache_ts[code] = time.time()
+            except Exception:
+                pass
+            finally:
+                try:
+                    with self._atr_exit_ir_cache_lock:
+                        self._atr_exit_ir_inflight.discard(code)
+                except Exception:
+                    pass
+
+        try:
+            threading.Thread(
+                target=_worker, name=f"AtrIrCache-{code}", daemon=True
+            ).start()
+        except Exception:
+            try:
+                with self._atr_exit_ir_cache_lock:
+                    self._atr_exit_ir_inflight.discard(code)
+            except Exception:
+                pass
+
     def _compose_monitor_row_values(self, nk: str, info: Dict[str, Any]) -> Tuple[Any, ...]:
         """감시·보유 트리 한 행 values (컬럼 순서는 _setup_ui 와 동일)."""
         try:
@@ -2743,16 +2802,28 @@ class MonitorTab:
                         min_sec = max(1.0, min_sec)
 
                         ir = None
-                        if nk in self._atr_exit_ir_cache and nk in self._atr_exit_ir_cache_ts:
-                            age = now_ts - float(self._atr_exit_ir_cache_ts.get(nk, 0.0) or 0.0)
-                            if age <= min_sec:
-                                ir = self._atr_exit_ir_cache.get(nk)
+                        try:
+                            with self._atr_exit_ir_cache_lock:
+                                cached = self._atr_exit_ir_cache.get(nk)
+                                cached_ts = float(
+                                    self._atr_exit_ir_cache_ts.get(nk, 0.0) or 0.0
+                                )
+                            if cached is not None and (now_ts - cached_ts) <= min_sec:
+                                ir = cached
+                        except Exception:
+                            ir = None
 
                         if not ir:
-                            df_i = TradingStrategy.calculate_indicators(bd, self.app.settings)
-                            ir = df_i.iloc[-1].to_dict()
-                            self._atr_exit_ir_cache[nk] = ir
-                            self._atr_exit_ir_cache_ts[nk] = now_ts
+                            try:
+                                lr = bd.iloc[-1]
+                                ir = (
+                                    lr.to_dict()
+                                    if hasattr(lr, "to_dict")
+                                    else dict(lr)
+                                )
+                            except Exception:
+                                ir = {}
+                            self._schedule_atr_ir_recompute(nk, bd)
                     except Exception:
                         try:
                             lr = bd.iloc[-1]
@@ -2761,10 +2832,6 @@ class MonitorTab:
                                 if hasattr(lr, "to_dict")
                                 else dict(lr)
                             )
-                            # calculate_indicators 실패 시에도 캐시는 갱신(가능한 경우만)
-                            if isinstance(ir, dict):
-                                self._atr_exit_ir_cache[nk] = ir
-                                self._atr_exit_ir_cache_ts[nk] = time.time()
                         except Exception:
                             ir = {}
                     np_atr = float(now_p) if now_p > 0 else float(ir.get("Close", 0) or 0)

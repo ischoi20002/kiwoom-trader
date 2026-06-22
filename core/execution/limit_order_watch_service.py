@@ -210,6 +210,24 @@ class LimitOrderWatchService:
                     except Exception:
                         pass
 
+        # [버그픽스] 동일 chain_key 에 이미 예약된 타이머가 남아 있으면 먼저 취소한다.
+        # (취소 없이 새 after 만 등록하면 좀비 타이머가 누적되어 같은 주문에 대해
+        #  _on_touch_poll 워커가 중복 실행 → cancel/정정/체결확인 REST 경쟁 발생)
+        try:
+            with self._lock:
+                for _no, _m in self.limit_order_meta.items():
+                    if (
+                        _m.touch_mode
+                        and str(_m.touch_chain_key or "").strip() == ck
+                        and _m.after_id is not None
+                    ):
+                        try:
+                            root.after_cancel(_m.after_id)
+                        except Exception:
+                            pass
+                        _m.after_id = None
+        except Exception:
+            pass
         try:
             aid = root.after(ms, _cb)
         except Exception:
@@ -494,7 +512,7 @@ class LimitOrderWatchService:
             elif status == "pending":
                 if not bool(getattr(meta, "touch_pending_logged", False)):
                     meta.touch_pending_logged = True
-                    _sec = self._get_touch_confirm_poll_ms() // 1000
+                    _sec = self._get_touch_first_poll_ms() // 1000
                     self.log(
                         f"ℹ️ [터치호가] kt00007 미반영 — {_sec}초 후 재확인 "
                         f"(ord={current_ord})"
@@ -647,6 +665,29 @@ class LimitOrderWatchService:
                             pass
                         self._run_terminal_fill_confirm(meta, current_ord)
                         return
+            # [버그픽스] pending 구간에서는 touch_amend_attempts_done 가 증가하지 않아
+            # `touch_amend_attempts_done < max_a` 가 영원히 참 → self.timeout() 에 도달하지 못하고
+            # 30초마다 confirm 만 무한 재예약된다. kt00007 이 계속 미반영(모의/WS만 체결)이면
+            # exit_pending(매도)·s1_buy_pending_codes(매수) 가 영구 잠금되어 재매도/재매수 불가.
+            # 따라서 누적 pending 확인 횟수에 상한을 두고 초과 시 미체결 타임아웃으로 흡수한다.
+            try:
+                st = getattr(self.app, "settings", None) or {}
+                pending_confirm_max = int(
+                    float(st.get("touch_pending_confirm_max", 20))
+                )
+            except (TypeError, ValueError):
+                pending_confirm_max = 20
+            pending_confirm_max = max(4, min(pending_confirm_max, 200))
+            if pending_cnt >= pending_confirm_max:
+                try:
+                    self.log(
+                        f"⚠️ [터치호가] pending {pending_cnt}회 누적(상한 "
+                        f"{pending_confirm_max}) — 미체결 타임아웃 처리(ord={current_ord})"
+                    )
+                except Exception:
+                    pass
+                self.timeout(current_ord)
+                return
             try:
                 if meta.touch_amend_attempts_done < max_a:
                     self._schedule_touch_timer(chain_key, phase="confirm")

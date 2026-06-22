@@ -588,7 +588,11 @@ class FillConfirmationService:
                 return
             oid = str(order_no or "").strip()
             if str(side or "").lower() == "buy":
-                lws.clear(oid)
+                # [버그픽스] 매수도 '전량 체결'일 때만 watch/s1 pending 가드를 해제한다.
+                # 부분 체결에서 즉시 clear 하면 s1_buy_pending_codes 가 풀려 잔량이 호가에
+                # 남은 채 동일 종목 S1 재매수가 통과(이중 매수) → 초과 매입 위험.
+                if self.is_fully_applied(oid):
+                    lws.clear(oid)
             elif frs._should_clear_limit_order_watch_for_sell(code):
                 lws.clear(oid)
         except Exception:
