@@ -266,11 +266,19 @@ class MonitorTab:
         try:
             if bool(getattr(self, "_is_regular_session_active", False)):
                 return True
-            if bool(getattr(self, "_ws_has_explicit_fid215", False)):
-                return False
             from utils.krx_session import is_krx_regular_session
 
-            return bool(is_krx_regular_session())
+            pc_regular = bool(is_krx_regular_session())
+            # [버그픽스] PC 시각 기준 KRX 정규장(평일 09:00~15:30)이면, fid215 가
+            # 명시적 비정규(또는 모의/브로커가 보내는 비정상 코드)여도 틱을 차단하지 않는다.
+            # fid215 가 's'/'2'/'8' 등 신뢰할 수 없는 값으로 와서 정규장 내내 0B/0D 틱이
+            # 전량 스킵되면 실시간 신호·매매가 0건이 된다(BT-RT 불일치의 1차 원인).
+            # fid215 의 명시적 OFF 는 '정규장 시간 외'를 거를 때만 사용한다.
+            if pc_regular:
+                return True
+            if bool(getattr(self, "_ws_has_explicit_fid215", False)):
+                return False
+            return pc_regular
         except Exception:
             return bool(getattr(self, "_is_regular_session_active", False))
 
@@ -2281,6 +2289,23 @@ class MonitorTab:
                                 f"raw={op_code_raw!r} type(raw)={type(op_code_raw).__name__} "
                                 f"values키샘플={ks!r} → PC시각 KRX 정규장이면 체결 표시(폴백)"
                             )
+                    elif not op_code.isdigit():
+                        # [버그픽스] 숫자가 아닌 fid215(예: 's'/'u'/'e'/'b' 등 모의·비정상 값)는
+                        # 신뢰할 수 있는 장운영구분이 아니므로 '명시적 fid'로 확정하지 않는다.
+                        # 확정하면 정규장 시간에도 0B/0D 틱이 전량 스킵되어 매매가 0건이 된다.
+                        now_ts = time.time()
+                        if now_ts - float(
+                            getattr(self, "_ws_0s_diag_mismatch_last_ts", 0.0) or 0.0
+                        ) >= 90.0:
+                            self._ws_0s_diag_mismatch_last_ts = now_ts
+                            try:
+                                self.app.log(
+                                    "⚠️ [WS-0s 진단] fid215 비정상(비숫자) 무시 — "
+                                    f"raw={op_code_raw!r} type(raw)={type(op_code_raw).__name__} "
+                                    "→ PC시각 KRX 정규장 폴백 사용"
+                                )
+                            except Exception:
+                                pass
                     else:
                         self._ws_has_explicit_fid215 = True
                         prev_code = str(getattr(self, "_market_operation_code", "") or "")

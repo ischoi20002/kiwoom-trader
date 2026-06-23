@@ -46,11 +46,13 @@ DEFAULT_SETTINGS = {
     "realtime_closed_15m_official_replace_max_pages": 8,
     "realtime_closed_15m_official_replace_inter_retry_sec": 0.6,
     # ka10080 REST 전역 최소 호출 간격(초). 워밍업·M1폴러·15분확정 등 병렬 호출이 429 나지 않게 직렬화.
-    "realtime_ka10080_global_min_interval_sec": 0.35,
+    # [튜닝] 22종목 동시 폴링 시 0.35s 는 M1 분산 간격과 충돌해 429 상시 발생 → 0.5s 로 여유 확보.
+    "realtime_ka10080_global_min_interval_sec": 0.5,
     # 감시 종목: 매 분 ka10080(1분) 1페이지 — 분산·재시도·캐시(감시 중 항상)
-    "realtime_watchlist_m1_api_spread_sec": 8.0,
+    # [튜닝] 8s 에 22종목을 욱여넣으면 종목당 ~0.36s 로 글로벌 간격과 겹쳐 429 → 20s 로 분산(분당 40s 여유).
+    "realtime_watchlist_m1_api_spread_sec": 20.0,
     "realtime_watchlist_m1_api_max_retries": 3,
-    "realtime_watchlist_m1_api_backoff_base_sec": 0.45,
+    "realtime_watchlist_m1_api_backoff_base_sec": 0.6,
     "realtime_watchlist_m1_api_cache_max_entries": 4000,
     "use_api_warmup_backfill": True,
     # True: 감시 시작 워밍업마다 DB 검증 통과 여부와 무관하게 ka10080(15분) 조회·병합

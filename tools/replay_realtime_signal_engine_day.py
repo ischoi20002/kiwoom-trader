@@ -468,10 +468,13 @@ def run_dynamic_bt_one_day(day: str, settings: Dict[str, Any]) -> None:
     try:
         bt = DynamicBacktester(settings)
         bt.high_precision = True
-        ok = bt.run(day, day, interval="15m", callback=None, high_precision=True)
-        if not ok:
+        # [버그픽스] run() 은 bool 이 아니라 매매내역 DataFrame 을 반환한다.
+        # `if not ok:` 로 평가하면 "truth value of a DataFrame is ambiguous" 예외 발생.
+        trades_df = bt.run(day, day, interval="15m", callback=None, high_precision=True)
+        if trades_df is None:
             print("[replay] 동적 백테 run 실패(부트스트랩 등)")
             return
+        # 매수 요약은 list 인 trades_history 로 집계(DataFrame 진리값 평가 회피).
         buys = [
             t
             for t in (bt.trades_history or [])
