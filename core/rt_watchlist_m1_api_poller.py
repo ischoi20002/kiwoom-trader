@@ -332,6 +332,11 @@ class RtWatchlistM1ApiPoller:
         try:
             from core.realtime_official_bars_sync import schedule_official_sync_and_signal_eval
 
-            schedule_official_sync_and_signal_eval(self._app, nk)
+            # [버그픽스] 방금 가져온 공식 1분 종가/거래량을 평가 트리거에 직접 전달한다.
+            # WS 0B 틱이 없거나 끊긴 동안에도 매 분 공식 봉으로 신호 평가가 구동되어
+            # 백테스트와 동일 시점에 매수 신호가 잡힌다(틱 가격 0 → 평가 스킵 방지).
+            schedule_official_sync_and_signal_eval(
+                self._app, nk, now_price_fallback=c, volume_fallback=int(v)
+            )
         except Exception:
             pass

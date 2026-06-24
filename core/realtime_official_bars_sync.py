@@ -217,6 +217,38 @@ def _resolve_monitor_price(app: Any, nk: str, fallback: float) -> float:
     return float(fallback or 0.0)
 
 
+def _latest_bar_close(app: Any, nk: str) -> float:
+    """
+    형성 중(또는 마지막) 15분봉 Close 반환. 공식 1분(ka10080) 동기화가 반영된 값이다.
+
+    [버그픽스] WS 0B 틱이 없거나 끊긴 동안 ``monitor_info`` 의 틱 가격이 0 이면
+    ``schedule_official_sync_and_signal_eval`` 의 ``on_tick_received`` 트리거가
+    ``px>0`` 조건에 막혀 신호 평가가 통째로 스킵된다(M1 폴러가 공식 봉을 채워도 평가 안 됨).
+    틱 가격이 없을 때 공식 봉 종가로 평가를 구동하기 위한 폴백 가격원이다.
+    """
+    try:
+        bd = getattr(app, "bars_data", None)
+        if not isinstance(bd, dict):
+            return 0.0
+        lk = getattr(app, "_bars_data_lock", None)
+
+        def _read() -> float:
+            _k, df = resolve_bars_data_frame(bd, nk, migrate_alias=True)
+            if df is None or getattr(df, "empty", True):
+                return 0.0
+            try:
+                return float(df["Close"].iloc[-1])
+            except Exception:
+                return 0.0
+
+        if lk is not None:
+            with lk:
+                return _read()
+        return _read()
+    except Exception:
+        return 0.0
+
+
 def schedule_official_sync_and_signal_eval(
     app: Any,
     code: str,
@@ -236,6 +268,10 @@ def schedule_official_sync_and_signal_eval(
             maybe_roll_15m_slot_on_clock(app, nk)
             sync_forming_15m_last_row_from_official_m1(app, nk)
             px = _resolve_monitor_price(app, nk, now_price_fallback)
+            # [버그픽스] 틱 가격이 0(WS 끊김·차단)이면 공식 M1 동기화된 마지막 봉 Close 로
+            # 폴백해 평가를 구동한다(슬롯 워처·폴러 양쪽 경로 모두 보호).
+            if px <= 0:
+                px = _latest_bar_close(app, nk)
             eng = getattr(app, "signal_engine", None)
             if eng is not None and px > 0:
                 eng.on_tick_received(

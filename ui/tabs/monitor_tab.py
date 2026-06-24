@@ -220,6 +220,9 @@ class MonitorTab:
         self._stream_sub_cache_ts: float = 0.0
         # WS recv 타임아웃 누적(실시간 패킷 부재 시 막힘처럼 보일 때 터미널 추적용)
         self._ws_idle_recv_count: int = 0
+        # [WS 진단] 끊김 원인 분석용: 마지막 정상 수신 시각·누적 끊김 횟수
+        self._ws_last_recv_ts: float = 0.0
+        self._ws_disconnect_count: int = 0
         # 장운영구분(0s.fid215) 최신 코드 및 정규장 판별 상태
         self._market_operation_code: str = ""
         self._is_regular_session_active: bool = False
@@ -1837,7 +1840,12 @@ class MonitorTab:
                 self._last_ws_url = ws_url
                 terminal_trace(f"WS: connect → {ws_url!r}", app=self.app, component="WS")
                 
-                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
+                # [WS 안정화] ping_timeout 을 20s 로 늘려, 순간적 루프 점유·느린 pong 으로
+                # 정상 연결이 'no close frame'(비정상 종료)으로 끊기는 것을 줄인다.
+                # close_timeout 으로 종료 핸드셰이크 무한 대기를 방지.
+                async with websockets.connect(
+                    ws_url, ping_interval=20, ping_timeout=20, close_timeout=5
+                ) as ws:
                     self._ws_idle_recv_count = 0
                     self._ws_real_trace_count = 0
                     # 새 소켓마다 시그니처 초기화 — 재연결 직후 이전 세션과 비교하면 안 됨
@@ -1927,6 +1935,7 @@ class MonitorTab:
                                         )
                             msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
                             self._ws_idle_recv_count = 0
+                            self._ws_last_recv_ts = time.time()
                             raw_data = json.loads(msg)
                             data_list = raw_data if isinstance(raw_data, list) else [raw_data]
                             
@@ -2104,7 +2113,68 @@ class MonitorTab:
                                 )
                             continue
                         except Exception as e:
-                            self.app.log(f"⚠️ [시스템] 수신 에러: {e}")
+                            # [WS 진단] 끊김 원인을 다음 세션에서 특정할 수 있도록
+                            # 예외 종류·종료코드/사유·마지막 수신 후 경과(유휴)·누적 끊김 횟수를 남긴다.
+                            # ('no close frame' 이 서버 유휴 드롭인지 keepalive 타임아웃인지 구분)
+                            try:
+                                self._ws_disconnect_count = (
+                                    int(getattr(self, "_ws_disconnect_count", 0)) + 1
+                                )
+                            except Exception:
+                                self._ws_disconnect_count = 1
+                            try:
+                                idle_sec = round(
+                                    time.time()
+                                    - float(getattr(self, "_ws_last_recv_ts", 0.0) or 0.0),
+                                    1,
+                                )
+                            except Exception:
+                                idle_sec = -1.0
+                            etype = type(e).__name__
+                            # websockets 의 ConnectionClosed* 는 rcvd/sent(close 프레임) 보유
+                            close_code = None
+                            close_reason = None
+                            try:
+                                for _attr in ("rcvd", "sent"):
+                                    _f = getattr(e, _attr, None)
+                                    if _f is not None:
+                                        close_code = getattr(_f, "code", None)
+                                        close_reason = getattr(_f, "reason", None)
+                                        break
+                            except Exception:
+                                pass
+                            try:
+                                self._realtime_session_logger.log(
+                                    "ws_disconnect",
+                                    {
+                                        "etype": etype,
+                                        "err": str(e),
+                                        "close_code": close_code,
+                                        "close_reason": close_reason,
+                                        "idle_sec_since_last_recv": idle_sec,
+                                        "disconnect_count": self._ws_disconnect_count,
+                                        "idle_recv_count": int(
+                                            getattr(self, "_ws_idle_recv_count", 0) or 0
+                                        ),
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                self.app.log(
+                                    f"⚠️ [시스템] 수신 에러: {e} "
+                                    f"(종류={etype}, 종료코드={close_code}, "
+                                    f"마지막수신후 {idle_sec}s, 누적끊김 {self._ws_disconnect_count}회)"
+                                )
+                            except Exception:
+                                pass
+                            # [WS 안정화] 즉시 재접속 폭주를 막기 위한 소폭 백오프.
+                            # 연속 끊김이 잦으면 조금 더 길게 대기(최대 8초).
+                            try:
+                                _bk = min(2.0 + 0.5 * (self._ws_disconnect_count % 12), 8.0)
+                                await asyncio.sleep(_bk)
+                            except Exception:
+                                pass
                             break
                             
             except Exception as e:
