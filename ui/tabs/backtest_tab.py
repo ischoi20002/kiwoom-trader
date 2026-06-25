@@ -880,9 +880,41 @@ class BacktestTab:
             tester = db.DynamicBacktester(active)
             trades = tester.run(start, end, interval='15m', callback=update, high_precision=True)
             if trades is not None and not trades.empty:
-                self.gui_queue.put(lambda: self.lbl_bt_status.config(text="백테스트 완료!", foreground="#A3BE8C"))
+                n_trades = len(trades)
+                self.gui_queue.put(
+                    lambda n=n_trades: self.lbl_bt_status.config(
+                        text=f"백테스트 완료! (매매 {n}건)", foreground="#A3BE8C"
+                    )
+                )
                 report = os.path.abspath("dynamic_trade_report.html")
-                if os.path.exists(report): webbrowser.open(f"file://{report}")
+                if os.path.exists(report):
+                    self.gui_queue.put(lambda r=report: webbrowser.open(f"file://{r}"))
+            elif trades is not None:
+                # 매매 0건이어도 시뮬레이션은 정상 종료 — 미처리 시 상태가 '시계열 모의투자 중'에 멈춘 것처럼 보임
+                period = f"{start} ~ {end}"
+                self.gui_queue.put(
+                    lambda: self.lbl_bt_status.config(
+                        text="백테스트 완료 (매매 0건)", foreground="#EBCB8B"
+                    )
+                )
+                self.gui_queue.put(
+                    lambda p=period: messagebox.showinfo(
+                        "매매 없음",
+                        f"{p} 기간에 체결된 매매가 없습니다.\n"
+                        "감시 대상 종목·매수 신호·데이터 유무를 확인하세요.",
+                    )
+                )
+            else:
+                self.gui_queue.put(
+                    lambda: self.lbl_bt_status.config(
+                        text="백테스트 실패", foreground="#BF616A"
+                    )
+                )
+                self.gui_queue.put(
+                    lambda: messagebox.showerror(
+                        "오류", "백테스트가 중단되었습니다. 로그를 확인하세요."
+                    )
+                )
         except Exception as _err:
             # [v4.10.5] Absolute closure isolation
             _msg_str = str(_err)
