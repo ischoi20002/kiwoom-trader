@@ -43,6 +43,14 @@ def canonical_stock_code(code: object) -> str:
         if not s:
             return ""
         base = s.split("_")[0].strip()
+        # KRX 우선주 등 영문 포함 코드(예: 0126Z0) — 숫자만 추출하면 001260(남광토건)과 충돌
+        if any(ch.isalpha() for ch in base):
+            alnum = "".join(ch for ch in base if ch.isalnum()).upper()
+            if len(alnum) == 6:
+                return alnum
+            bu = base.upper()
+            if len(bu) == 6:
+                return bu
         # ``2380.0`` / ``002380`` 처럼 순수 숫자 표기 → 자릿수 복원 후 6자리
         try:
             if _NUMERIC_CODE_STR.match(base):
