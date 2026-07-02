@@ -17,7 +17,89 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from core.ka10080_spread import (
+    effective_m1_poll_spread_sec,
+    effective_rt15m_stagger_spread_sec,
+    _active_stream_code_count,
+)
+from utils.krx_bars import is_krx_15m_slot_end
 from utils.normalization import canonical_stock_code
+
+
+def _settings_bool(settings: Any, key: str, default: bool = True) -> bool:
+    try:
+        if settings is None:
+            return default
+        v = settings.get(key, default)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return default
+
+
+def compute_rt15m_official_replace_delay_sec(
+    app: Any,
+    code: str,
+    bar_ts: Any,
+    *,
+    fallback_delay_sec: float = 2.5,
+) -> float:
+    """
+    15분 확정 ka10080 조회 지연(초).
+
+    M1 폴러가 매 분 ``[0, m1_spread)`` 에 ka10080(1분)을 쓰므로, 15분 REST는
+    ``m1_spread + guard`` 이후부터 ``spread`` 구간에 종목별로 분산합니다.
+    (15분 슬롯 안에만 완료되면 됨 — M1과 경쟁하지 않도록.)
+    """
+    try:
+        settings = getattr(app, "settings", None) or {}
+    except Exception:
+        settings = {}
+
+    if not _settings_bool(
+        settings, "realtime_closed_15m_official_replace_stagger", True
+    ):
+        try:
+            return max(0.5, float(fallback_delay_sec))
+        except (TypeError, ValueError):
+            return 2.5
+
+    try:
+        n_codes = _active_stream_code_count(app)
+    except Exception:
+        n_codes = 1
+
+    m1_spread = effective_m1_poll_spread_sec(settings, n_codes)
+
+    try:
+        guard = float(settings.get("realtime_m1_ka10080_guard_sec", 12.0))
+    except (TypeError, ValueError):
+        guard = 12.0
+    guard = max(0.0, min(guard, 120.0))
+
+    try:
+        min_d = float(
+            settings.get("realtime_closed_15m_official_replace_min_delay_sec", 0.0)
+        )
+    except (TypeError, ValueError):
+        min_d = 0.0
+    floor_d = m1_spread + guard
+    if min_d <= 0.0:
+        min_d = floor_d
+    else:
+        min_d = max(min_d, floor_d)
+
+    spread = effective_rt15m_stagger_spread_sec(settings, n_codes)
+
+    try:
+        nk = canonical_stock_code(str(code).strip())
+        sk = _norm_bar_ts(bar_ts).strftime("%Y-%m-%d %H:%M:%S")
+        h = abs(hash((nk, sk)))
+        frac = (h % 1_000_003) / 1_000_003.0
+    except Exception:
+        frac = 0.0
+    return min_d + spread * frac
 
 
 def ts_to_slot_hhmm(ts: Any) -> str:
@@ -261,13 +343,19 @@ class RtClosed15mOfficialReplaceScheduler:
 
         def _delay() -> float:
             try:
-                return max(0.5, float(delay_sec))
-            except (TypeError, ValueError):
-                return 2.5
+                return compute_rt15m_official_replace_delay_sec(
+                    app, code, bar_ts, fallback_delay_sec=delay_sec
+                )
+            except Exception:
+                try:
+                    return max(0.5, float(delay_sec))
+                except (TypeError, ValueError):
+                    return 2.5
 
         def _worker() -> None:
             try:
-                time.sleep(_delay())
+                wait_s = _delay()
+                time.sleep(wait_s)
             except Exception:
                 pass
             try:

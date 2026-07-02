@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 from core.bt_hp_signal_bridge import ka10080_raw_rows_to_1m_df
+from core.ka10080_spread import effective_m1_poll_spread_sec
 from utils.krx_bars import m1_bar_open_label_for_just_completed_minute
 from utils.normalization import canonical_stock_code
 
@@ -188,15 +189,21 @@ class RtWatchlistM1ApiPoller:
                     continue
                 # 스케줄 확정(빈 라운드는 last 갱신 안 함)
                 self._last_scheduled_round = sk
+                n_codes = len(codes)
                 try:
-                    spread = float(
-                        self._settings().get(
-                            "realtime_watchlist_m1_api_spread_sec", 8.0
-                        )
+                    spread = effective_m1_poll_spread_sec(
+                        self._settings(), n_codes
                     )
-                except (TypeError, ValueError):
-                    spread = 8.0
-                spread = max(2.0, min(spread, 45.0))
+                except Exception:
+                    try:
+                        spread = float(
+                            self._settings().get(
+                                "realtime_watchlist_m1_api_spread_sec", 40.0
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        spread = 40.0
+                    spread = max(12.0, min(spread, 55.0))
                 # 종목별 [0, spread) 초 분산 — 해시로 흩뜨림
                 for cc in codes:
                     try:

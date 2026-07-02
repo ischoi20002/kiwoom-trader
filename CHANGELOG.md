@@ -13,6 +13,22 @@
 
 ---
 
+## 0.8.53 (2026-07-03)
+
+ka10080 M1·15분 REST 분산 — 감시 종목 수(3~40+)에 따라 spread 자동 스케일.
+
+- **M1**: ``spread = clamp(N × 2.5s, 12, 55)`` — 3종목 12s, 16종목 40s, 40종목 55s(cap).
+- **15분 확정**: ``spread = clamp(N × 22.5s, 90, 840)`` — 16종목 360s, 40종목 840s(14분, 슬롯 내).
+- ``core/ka10080_spread.py`` — M1 폴러·15분 스케줄러 공통.
+
+## 0.8.52 (2026-07-03)
+
+ka10080(1분·15분) REST 경쟁 완화 — M1 분산 확대·15분 확정 조회 M1 이후 분산 스케줄.
+
+- **M1 폴러 분산**: `realtime_watchlist_m1_api_spread_sec` 20→**40**초(매 분 0~40s 구간에 1분봉 조회).
+- **15분 확정 REST 분리**: 슬롯 직후 2.5s 일괄 조회 대신 `realtime_closed_15m_official_replace_stagger` ON — ``m1_spread+guard(52s)`` 이후 **360초**에 종목별 해시 분산(15분 슬롯 내 완료, M1과 ka10080 경쟁 최소화).
+- 설정: `realtime_m1_ka10080_guard_sec`, `realtime_closed_15m_official_replace_min_delay_sec`, `realtime_closed_15m_official_replace_spread_sec` (`core/rt_closed_15m_official_replace.py`, `core/defaults.py`).
+
 ## 0.8.51 (2026-06-25)
 
 한미약품(128940) 등 — 매수 직후 동일 호가 매도·오판 손절(진입 이전 M1 저가) 수정.

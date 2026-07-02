@@ -41,16 +41,28 @@ DEFAULT_SETTINGS = {
     "realtime_warmup_persist_to_rt15m_db": True,
     "realtime_bars_max_keep": 300,
     # 15분 슬롯 확정 직후 ka10080(15분)으로 완성 봉 OHLCV 덮어쓰기(틱 누락 완화, 항상 동작)
+    # [튜닝] 슬롯 직후 2.5s 일괄 조회는 M1(1분) 폴러와 ka10080 경쟁 → stagger 로 M1 이후 분산
     "realtime_closed_15m_official_replace_delay_sec": 2.5,
+    "realtime_closed_15m_official_replace_stagger": True,
+    # 0=자동(m1_spread+guard). 15분 REST는 슬롯 확정 후 최소 이 시각까지 대기
+    "realtime_closed_15m_official_replace_min_delay_sec": 0.0,
+    # 15분 REST는 min_delay 이후 spread 구간에 종목 분산(15분 슬롯 내 완료)
+    "realtime_closed_15m_official_replace_spread_per_code_sec": 22.5,
+    "realtime_closed_15m_official_replace_spread_min_sec": 90.0,
+    "realtime_closed_15m_official_replace_spread_max_sec": 840.0,
+    "realtime_closed_15m_official_replace_spread_sec": 360.0,
+    "realtime_m1_ka10080_guard_sec": 12.0,
     "realtime_closed_15m_official_replace_max_retries": 3,
     "realtime_closed_15m_official_replace_max_pages": 8,
     "realtime_closed_15m_official_replace_inter_retry_sec": 0.6,
     # ka10080 REST 전역 최소 호출 간격(초). 워밍업·M1폴러·15분확정 등 병렬 호출이 429 나지 않게 직렬화.
     # [튜닝] 22종목 동시 폴링 시 0.35s 는 M1 분산 간격과 충돌해 429 상시 발생 → 0.5s 로 여유 확보.
     "realtime_ka10080_global_min_interval_sec": 0.5,
-    # 감시 종목: 매 분 ka10080(1분) 1페이지 — 분산·재시도·캐시(감시 중 항상)
-    # [튜닝] 8s 에 22종목을 욱여넣으면 종목당 ~0.36s 로 글로벌 간격과 겹쳐 429 → 20s 로 분산(분당 40s 여유).
-    "realtime_watchlist_m1_api_spread_sec": 20.0,
+    # M1 ka10080 분산(종목 수 × per_code, cap 55s/분). 16종목≈40s, 40종목=55s
+    "realtime_watchlist_m1_api_spread_per_code_sec": 2.5,
+    "realtime_watchlist_m1_api_spread_min_sec": 12.0,
+    "realtime_watchlist_m1_api_spread_max_sec": 55.0,
+    "realtime_watchlist_m1_api_spread_sec": 40.0,
     "realtime_watchlist_m1_api_max_retries": 3,
     "realtime_watchlist_m1_api_backoff_base_sec": 0.6,
     "realtime_watchlist_m1_api_cache_max_entries": 4000,
