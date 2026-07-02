@@ -21,6 +21,7 @@ __all__ = [
     "m1_window_start_for_15m_end",
     "m1_index_bounds_for_15m_end",
     "m1_bar_open_label_for_just_completed_minute",
+    "is_krx_m1_closed_open_label",
     "resample_1m_ohlcv_to_15m_krx",
     "KRX_15M_RESAMPLE_KWARGS",
     "is_krx_15m_slot_end",
@@ -210,6 +211,26 @@ def m1_bar_open_label_for_just_completed_minute(
     t = pd.Timestamp(wall)
     floored = t.floor("min")
     return floored - pd.Timedelta(minutes=1)
+
+
+def is_krx_m1_closed_open_label(
+    closed_open: Union[pd.Timestamp, datetime, str],
+) -> bool:
+    """
+    ``m1_bar_open_label_for_just_completed_minute`` 로 구한 **닫힌 1분봉 시작 라벨**이
+    KRX 연속매매 1분 격자(평일 09:00~15:19)에 속하는지.
+
+    장전·장후·동시호가(15:20~)·주말은 False — ka10080(1분)에 해당 행이 없어
+    ``row_not_found`` 만 쌓이는 구간을 피할 때 사용한다.
+    """
+    try:
+        t = pd.Timestamp(closed_open).floor("min")
+        if t.weekday() >= 5:
+            return False
+        hm = t.hour * 60 + t.minute
+        return (9 * 60) <= hm <= (15 * 60 + 19)
+    except Exception:
+        return False
 
 
 def resample_1m_ohlcv_to_15m_krx(

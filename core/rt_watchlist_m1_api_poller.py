@@ -22,7 +22,10 @@ import pandas as pd
 
 from core.bt_hp_signal_bridge import ka10080_raw_rows_to_1m_df
 from core.ka10080_spread import effective_m1_poll_spread_sec
-from utils.krx_bars import m1_bar_open_label_for_just_completed_minute
+from utils.krx_bars import (
+    is_krx_m1_closed_open_label,
+    m1_bar_open_label_for_just_completed_minute,
+)
 from utils.normalization import canonical_stock_code
 
 CacheKey = Tuple[str, str]
@@ -181,6 +184,8 @@ class RtWatchlistM1ApiPoller:
                     continue
                 wall = datetime.now()
                 closed_lab = m1_bar_open_label_for_just_completed_minute(wall)
+                if not is_krx_m1_closed_open_label(closed_lab):
+                    continue
                 sk = closed_lab.strftime("%Y-%m-%d %H:%M:%S")
                 if sk == self._last_scheduled_round:
                     continue
@@ -254,6 +259,8 @@ class RtWatchlistM1ApiPoller:
         """Timer 스레드: 한 종목·한 닫힌 분."""
         try:
             if not self._monitoring():
+                return
+            if not is_krx_m1_closed_open_label(closed_lab):
                 return
             nk = canonical_stock_code(str(code).strip())
             if not nk:
