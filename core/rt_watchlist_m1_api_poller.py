@@ -58,6 +58,32 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             return {}
 
+    @staticmethod
+    def _settings_bool(settings: Dict[str, Any], key: str, default: bool = True) -> bool:
+        try:
+            v = settings.get(key, default)
+            if isinstance(v, bool):
+                return v
+            return str(v).strip().lower() in ("1", "true", "yes", "on")
+        except Exception:
+            return default
+
+    def _schedule_signal_eval(
+        self, nk: str, *, close_px: float = 0.0, volume: float = 0.0
+    ) -> None:
+        """공식 M1 반영 직후(또는 실패 폴백) 신호 재평가."""
+        try:
+            from core.realtime_official_bars_sync import schedule_official_sync_and_signal_eval
+
+            schedule_official_sync_and_signal_eval(
+                self._app,
+                nk,
+                now_price_fallback=float(close_px or 0.0),
+                volume_fallback=int(volume or 0),
+            )
+        except Exception:
+            pass
+
     def _monitoring(self) -> bool:
         try:
             tc = getattr(self._app, "trading_controller", None)
@@ -226,13 +252,35 @@ class RtWatchlistM1ApiPoller:
             if not nk:
                 return
             key: CacheKey = (nk, sk)
-            with self._cache_lock:
-                if key in self._cache:
-                    return
         except Exception:
             return
 
         st = self._settings()
+        eval_on_fail = self._settings_bool(
+            st, "realtime_m1_poller_eval_on_fetch_fail", True
+        )
+        eval_on_cache = self._settings_bool(
+            st, "realtime_m1_poller_eval_on_cache_hit", True
+        )
+        catchup_on = self._settings_bool(
+            st, "realtime_m1_poller_apply_chart_catchup", True
+        )
+        db_fb_on = self._settings_bool(st, "realtime_intrabar_m1_db_fallback", True)
+
+        cached_ohlcv: Optional[CacheVal] = None
+        try:
+            with self._cache_lock:
+                cached_ohlcv = self._cache.get(key)
+        except Exception:
+            cached_ohlcv = None
+
+        if cached_ohlcv is not None and eval_on_cache:
+            try:
+                _o, _h, _l, _c, _v = cached_ohlcv
+                self._schedule_signal_eval(nk, close_px=_c, volume=_v)
+            except Exception:
+                pass
+            return
         try:
             max_retries = int(
                 float(st.get("realtime_watchlist_m1_api_max_retries", 3))
@@ -260,6 +308,7 @@ class RtWatchlistM1ApiPoller:
             return
 
         row: Optional[pd.Series] = None
+        chart_df: Optional[pd.DataFrame] = None
         last_err: Optional[str] = None
         for attempt in range(max_retries):
             try:
@@ -278,6 +327,7 @@ class RtWatchlistM1ApiPoller:
                     last_err = "empty_raw"
                 else:
                     df = ka10080_raw_rows_to_1m_df(raw_list)
+                    chart_df = df
                     row = self._pick_row_for_closed_open(df, closed_lab)
                     if row is not None:
                         break
@@ -295,31 +345,61 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     pass
 
-        if row is None:
+        ohlcv: Optional[CacheVal] = None
+        if row is not None:
+            try:
+                ohlcv = (
+                    float(row["Open"]),
+                    float(row["High"]),
+                    float(row["Low"]),
+                    float(row["Close"]),
+                    float(row["Volume"]),
+                )
+            except Exception as e:
+                try:
+                    self._emit(f"⚠️ [M1Poll] {nk} {sk} 파싱 실패: {e!r}")
+                except Exception:
+                    pass
+                ohlcv = None
+
+        if ohlcv is None and db_fb_on:
+            try:
+                from core.realtime_m1_fallback import closed_minute_ohlcv_from_db
+
+                ohlcv = closed_minute_ohlcv_from_db(self._app, nk, closed_lab)
+            except Exception:
+                ohlcv = None
+
+        if ohlcv is None:
             try:
                 if last_err and last_err != "row_not_found":
                     self._emit(f"ℹ️ [M1Poll] {nk} {sk} 실패({last_err})")
             except Exception:
                 pass
+            if eval_on_fail:
+                self._schedule_signal_eval(nk)
             return
-        try:
-            o = float(row["Open"])
-            h = float(row["High"])
-            l_ = float(row["Low"])
-            c = float(row["Close"])
-            v = float(row["Volume"])
-        except Exception as e:
+
+        o, h, l_, c, v = ohlcv
+
+        if catchup_on and chart_df is not None:
             try:
-                self._emit(f"⚠️ [M1Poll] {nk} {sk} 파싱 실패: {e!r}")
+                from core.realtime_m1_fallback import apply_chart_catchup_to_m1_store
+
+                n_new = apply_chart_catchup_to_m1_store(
+                    self._app, nk, chart_df, closed_lab
+                )
+                if n_new > 1:
+                    self._emit(
+                        f"ℹ️ [M1Poll] {nk} 차트 catch-up {n_new}분 반영(목표 {sk})"
+                    )
             except Exception:
                 pass
-            return
+
         try:
             m1s = getattr(self._app, "rt_tick_m1_store", None)
             if m1s is not None:
-                m1s.apply_official_closed_minute(
-                    nk, closed_lab, o, h, l_, c, v
-                )
+                m1s.apply_official_closed_minute(nk, closed_lab, o, h, l_, c, v)
         except Exception as ex:
             try:
                 self._emit(f"⚠️ [M1Poll] {nk} RtTickM1Store 반영 실패: {ex!r}")
@@ -329,14 +409,6 @@ class RtWatchlistM1ApiPoller:
             self._remember_cache(key, (o, h, l_, c, v))
         except Exception:
             pass
-        try:
-            from core.realtime_official_bars_sync import schedule_official_sync_and_signal_eval
-
-            # [버그픽스] 방금 가져온 공식 1분 종가/거래량을 평가 트리거에 직접 전달한다.
-            # WS 0B 틱이 없거나 끊긴 동안에도 매 분 공식 봉으로 신호 평가가 구동되어
-            # 백테스트와 동일 시점에 매수 신호가 잡힌다(틱 가격 0 → 평가 스킵 방지).
-            schedule_official_sync_and_signal_eval(
-                self._app, nk, now_price_fallback=c, volume_fallback=int(v)
-            )
-        except Exception:
-            pass
+        # [버그픽스] 방금 가져온 공식 1분 종가/거래량을 평가 트리거에 직접 전달.
+        # API 502·WS 끊김 시에도 폴백 경로에서 매 분 신호 평가가 구동되어 BT 정합을 유지한다.
+        self._schedule_signal_eval(nk, close_px=c, volume=v)

@@ -294,11 +294,18 @@ class SignalEngine:
             if t_hi < t0:
                 return None
             try:
-                m1df = m1s.dataframe_for_window(
-                    nk, t0, t_hi, include_open_bucket=False
+                from core.realtime_m1_fallback import load_intrabar_m1_window
+
+                m1df = load_intrabar_m1_window(
+                    self.app, nk, t0, t_hi, include_open_bucket=False
                 )
-            except TypeError:
-                m1df = m1s.dataframe_for_window(nk, t0, t_hi)
+            except Exception:
+                try:
+                    m1df = m1s.dataframe_for_window(
+                        nk, t0, t_hi, include_open_bucket=False
+                    )
+                except TypeError:
+                    m1df = m1s.dataframe_for_window(nk, t0, t_hi)
             if m1df is None or getattr(m1df, "empty", True):
                 return None
             m1df = m1df.copy()
@@ -453,6 +460,30 @@ class SignalEngine:
                 pass
             return is_buy, last_sig, last_row
 
+    def _mirror_held_exit_blocked_pre_confirm(
+        self, nk: str, pos_live: Dict[str, Any]
+    ) -> bool:
+        """S1 미체결·확정 매수 이벤트 없음 — 인트라바 청산 미러 보류."""
+        try:
+            tc = getattr(self.app, "trading_controller", None)
+            if tc is not None:
+                getter = getattr(tc, "_s1_buy_order_pending_codes", None)
+                pending = getter() if callable(getter) else None
+                if isinstance(pending, (set, list, tuple)) and nk in pending:
+                    return True
+        except Exception:
+            pass
+        try:
+            pf = getattr(self.app, "portfolio", None)
+            if pf is not None:
+                if pf._is_synced_placeholder_position(pos_live):
+                    return True
+                if not pf._has_confirmed_buy_events(pos_live):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _realtime_gap_down_mirror_ok(
         self,
         nk: str,
@@ -576,6 +607,9 @@ class SignalEngine:
             if not isinstance(pos_live, dict):
                 return None
             if bool(pos_live.get("exit_pending", False)):
+                return {"action": "HOLD"}
+            # [버그픽스] S1 매수 미체결·잔고 선반영(SYNCED)만 있는 동안 청산 미러 금지
+            if self._mirror_held_exit_blocked_pre_confirm(nk, pos_live):
                 return {"action": "HOLD"}
             pair = self._intrabar_mirror_get_full15m_and_m1(nk, full_15m_src)
             if pair is None:

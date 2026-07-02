@@ -54,6 +54,14 @@ DEFAULT_SETTINGS = {
     "realtime_watchlist_m1_api_max_retries": 3,
     "realtime_watchlist_m1_api_backoff_base_sec": 0.6,
     "realtime_watchlist_m1_api_cache_max_entries": 4000,
+    # 인트라바 미러: RtTickM1Store 비었을 때 bars_1m DB 병합(장후·API 실패 정합)
+    "realtime_intrabar_m1_db_fallback": True,
+    # ka10080 성공 시 응답 차트 전체를 M1 store에 catch-up
+    "realtime_m1_poller_apply_chart_catchup": True,
+    # ka10080 실패(502 등) 시에도 슬롯·15m 동기화 후 신호 평가
+    "realtime_m1_poller_eval_on_fetch_fail": True,
+    # 동일 분 캐시 히트 시에도 평가 재트리거(이전 eval 누락 복구)
+    "realtime_m1_poller_eval_on_cache_hit": True,
     "use_api_warmup_backfill": True,
     # True: 감시 시작 워밍업마다 DB 검증 통과 여부와 무관하게 ka10080(15분) 조회·병합
     "realtime_warmup_force_api_refresh": True,

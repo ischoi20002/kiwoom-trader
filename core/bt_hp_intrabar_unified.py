@@ -106,6 +106,25 @@ def _m1_hi_for_maxp(m1_r: Any) -> float:
         return 0.0
 
 
+def _m1_is_before_position_entry(m1_time: Any, pos_sim: Dict[str, Any]) -> bool:
+    """
+    진입 시각 이전 1분봉인지 판별.
+
+    RT 인트라바 미러는 15분 슬롯 전체 M1을 한꺼번에 훑는데, 신규 진입 직후
+    **진입 이전** 분봉 저가(예: 13:47 423,500)로 SL이 오판되는 것을 막습니다.
+    동적 BT는 루프 중 ``h_info`` 가 생긴 뒤에만 청산하므로 영향 없음.
+    """
+    try:
+        et = pos_sim.get("entry_time") or pos_sim.get("entry_date")
+        if et is None or str(et).strip() == "":
+            return False
+        m1_lab = pd.Timestamp(m1_time).floor("min")
+        ent_lab = pd.Timestamp(et).floor("min")
+        return m1_lab < ent_lab
+    except (TypeError, ValueError):
+        return False
+
+
 def evaluate_bt_hp_intrabar_unified(
     settings: Dict[str, Any],
     code: str,
@@ -194,15 +213,17 @@ def evaluate_bt_hp_intrabar_unified(
 
             # --- 1) 청산(보유 시 최우선) ---
             if pos_sim is not None:
-                try:
-                    hi = _m1_hi_for_maxp(m1_r)
-                    mp = float(pos_sim.get("max_p", 0) or 0)
-                    if hi > mp:
-                        pos_sim["max_p"] = hi
-                except (TypeError, ValueError, KeyError):
-                    pass
+                before_entry = _m1_is_before_position_entry(m1_time, pos_sim)
+                if not before_entry:
+                    try:
+                        hi = _m1_hi_for_maxp(m1_r)
+                        mp = float(pos_sim.get("max_p", 0) or 0)
+                        if hi > mp:
+                            pos_sim["max_p"] = hi
+                    except (TypeError, ValueError, KeyError):
+                        pass
 
-                if not skip_holder_exit:
+                if not skip_holder_exit and not before_entry:
                     px_sell = m1_sell_price_conservative(m1_r)
                     px_sell = floor_sell_px_to_same_15m_bar(px_sell, curr_15m)
                     try:

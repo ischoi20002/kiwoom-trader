@@ -13,6 +13,22 @@
 
 ---
 
+## 0.8.51 (2026-06-25)
+
+한미약품(128940) 등 — 매수 직후 동일 호가 매도·오판 손절(진입 이전 M1 저가) 수정.
+
+- **오판 STOP_LOSS**: 인트라바 미러가 15분 슬롯 **전체** M1을 재생하면서, 13:59 진입(444,000) 직후 13:47 분봉 저가(423,500)로 SL -4.5% 판정 → 실제 시세 445k+ 인데 매도 발송. `evaluate_bt_hp_intrabar_unified` 에 진입 시각 이전 분봉 청산·max_p 갱신 스킵 추가.
+- **매수 미체결 중 매도**: S1 터치 매수 kt00007 미확정 상태에서 청산 미러가 동작. `s1_buy_pending`·SYNCED 선반영·확정 BUY 이벤트 없으면 보유 청산 미러 보류(`core/signal_engine.py`).
+
+## 0.8.50 (2026-06-25)
+
+2026-07-02 등 BT 6종목 매매 vs 실시간 1종목만 체결된 불일치 — M1(ka10080) 실패 시 인트라바 미러가 무력화되던 근본 원인 수정.
+
+- **근본 원인**: `realtime_s1_mirror_dynamic_intrabar` ON 시 S1 매수는 `evaluate_bt_hp_intrabar_unified` 경로인데, 이는 **공식 1분봉(RtTickM1Store)** 이 필수. `RtWatchlistM1ApiPoller`가 ka10080 502 등으로 실패하면 `return`만 하고 M1·신호 평가 모두 스킵 → 오전 BT 매수 6건이 RT에 0건. 128940만 오후 M1이 쌓인 뒤 체결된 것과 일치.
+- **M1 폴러 강화**: API 실패 시에도 `schedule_official_sync_and_signal_eval` 호출(`realtime_m1_poller_eval_on_fetch_fail`). 성공 시 ka10080 응답 차트 전체 catch-up(`realtime_m1_poller_apply_chart_catchup`). 실패·장후에는 `bars_1m` DB 폴백(`realtime_intrabar_m1_db_fallback`). 캐시 히트 시에도 평가 재트리거(`realtime_m1_poller_eval_on_cache_hit`).
+- **인트라바 미러 M1 폴백**: `_intrabar_mirror_get_full15m_and_m1`이 store만 보던 것을 `load_intrabar_m1_window`(store+DB 병합)로 변경(`core/realtime_m1_fallback.py`, `core/signal_engine.py`, `core/rt_watchlist_m1_api_poller.py`).
+- **검증**: `replay_realtime_signal_engine_day.py --day 2026-07-02 --drive db_1m_closes --dynamic-bt` → 동적 BT 6건(007070·030200·051900·081660·097950·139480)과 엔진 S1 매수 경로 정합 확인.
+
 ## 0.8.49 (2026-07-01)
 
 우선주 코드(0126Z0)가 남광토건(001260)으로 오인되어 감시·매매된 치명적 버그 수정 + KODEX200 유니버스 갱신.
