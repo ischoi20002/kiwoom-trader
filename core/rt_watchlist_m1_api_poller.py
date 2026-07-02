@@ -326,12 +326,33 @@ class RtWatchlistM1ApiPoller:
                     token = None
                 if not token:
                     last_err = "no_token"
+                    try:
+                        from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+                        ka10080_fetch_diag.record_fail(
+                            nk,
+                            tic_scope="1",
+                            context="m1_poll",
+                            reason="no_token",
+                            closed_minute=sk,
+                            attempt=attempt + 1,
+                        )
+                    except Exception:
+                        pass
                     break
                 raw_list, _nk = dm.fetch_kiwoom_minute_chart_page(
-                    nk, str(token).strip(), "", tic_scope="1"
+                    nk,
+                    str(token).strip(),
+                    "",
+                    tic_scope="1",
+                    fetch_context="m1_poll",
                 )
                 if not raw_list:
-                    last_err = "empty_raw"
+                    try:
+                        meta = getattr(dm, "last_ka10080_fetch_meta", None) or {}
+                        last_err = str(meta.get("reason") or "empty_raw")
+                    except Exception:
+                        last_err = "empty_raw"
                 else:
                     df = ka10080_raw_rows_to_1m_df(raw_list)
                     chart_df = df
@@ -379,8 +400,19 @@ class RtWatchlistM1ApiPoller:
 
         if ohlcv is None:
             try:
-                if last_err and last_err != "row_not_found":
-                    self._emit(f"ℹ️ [M1Poll] {nk} {sk} 실패({last_err})")
+                from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+                # HTTP 429/502 등은 data_manager 가 이미 기록. 여기서는 의미론적 실패만.
+                rsn = str(last_err or "")
+                if rsn == "row_not_found":
+                    ka10080_fetch_diag.record_fail(
+                        nk,
+                        tic_scope="1",
+                        context="m1_poll",
+                        reason="row_not_found",
+                        closed_minute=sk,
+                        detail="closed_minute_not_in_chart",
+                    )
             except Exception:
                 pass
             if eval_on_fail:

@@ -13,6 +13,25 @@
 
 ---
 
+## 0.8.55 (2026-07-03)
+
+인트라바 S1 — 같은 M1 ``지금 닫히면?`` 신호 재판정 (정적 Signal/Sig_Type 복사 제거).
+
+- **``core/bt_hp_signal_bridge.py``**: ``evaluate_close_now_s1_at_m1_idx`` — forming M1 OHLCV + intrabar RSI/MACD 로 마지막 15m 행 ``get_buy_signals_detailed`` 재실행.
+- **``evaluate_bt_hp_intrabar_unified``**: close-now ON 시 M1마다 재판정, ``df_with_ind`` 전달 시 재사용(백테는 ``full_15m`` 에서 1회 생성·캐시).
+- **``SignalEngine``**: forming-only S1 매수 직전 ``_confirm_s1_with_close_now`` — 불일치 시 ``intrabar_close_now_blocked`` JSONL.
+- 설정: ``realtime_intrabar_close_now_signals`` (기본 true).
+
+## 0.8.54 (2026-07-03)
+
+ka10080(1분·15분) 조회 실패 빈도·원인 분석용 진단 로그.
+
+- **`core/ka10080_fetch_diag.py`**: 실패/성공 누적, `fail_by_reason`·`fail_by_context`·종목별 Top, UI 90s 스로틀, 5분 JSONL 요약.
+- **`data_manager_v2.fetch_kiwoom_minute_chart_page`**: HTTP 429/502·빈 응답·네트워크 오류 시 `record_fail`, 성공 시 `record_ok`, `last_ka10080_fetch_meta` 저장.
+- **M1 폴러·15m 확정·워밍업·BT-HP 브리지**: `fetch_context` 전달, `row_not_found`·`no_token`·`merged_empty` 등 의미론적 실패 기록.
+- **session JSONL**: `ka10080_fetch_fail`(건당), `ka10080_fetch_stats`(주기 요약).
+- 설정: `realtime_ka10080_fail_log_ui_throttle_sec`, `realtime_ka10080_fail_summary_interval_sec`.
+
 ## 0.8.53 (2026-07-03)
 
 ka10080 M1·15분 REST 분산 — 감시 종목 수(3~40+)에 따라 spread 자동 스케일.

@@ -515,7 +515,7 @@ class WarmupService:
             nk_req = (nk or "").strip()
             try:
                 raw_list, nk = self.data_manager.fetch_kiwoom_minute_chart_page(
-                    code, token, nk_req, tic_scope=tic_scope
+                    code, token, nk_req, tic_scope=tic_scope, fetch_context="warmup"
                 )
             except Exception as e:
                 self.log(f"⚠️ [Warmup-API] {name}({code}) 페이지 조회 예외: {e}")
@@ -828,7 +828,7 @@ class WarmupService:
             slot_start, slot_end = rng
             try:
                 raw_list, _nk = self.data_manager.fetch_kiwoom_minute_chart_page(
-                    code, token, "", tic_scope="1"
+                    code, token, "", tic_scope="1", fetch_context="warmup"
                 )
             except Exception as e:
                 try:

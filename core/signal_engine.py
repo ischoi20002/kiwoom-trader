@@ -8,6 +8,10 @@ import time
 import traceback
 from backtest_engine import TradingStrategy
 from core.bt_hp_intrabar_unified import evaluate_bt_hp_intrabar_unified
+from core.bt_hp_signal_bridge import (
+    evaluate_close_now_s1_at_m1_idx,
+    intrabar_close_now_signals_enabled,
+)
 from core.bt_hp_signal_bridge import _apply_synthetic_metrics_m1
 from core.defaults import effective_min_15m_bars_for_monitoring
 from core.realtime_official_bars_sync import stream_slot_end_datetime
@@ -333,6 +337,86 @@ class SignalEngine:
             pass
         return {}
 
+    def _intrabar_close_now_enabled(self) -> bool:
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return intrabar_close_now_signals_enabled(st)
+        except Exception:
+            return True
+
+    def _confirm_s1_with_close_now(
+        self,
+        code: str,
+        info: Dict[str, Any],
+        df_with_ind: Any,
+        full_15m_src: Any,
+        last_sig: dict[str, Any],
+        *,
+        sel_track: str,
+    ) -> Tuple[bool, dict[str, Any]]:
+        """
+        forming 15m ``Signal`` 과 별도로, 같은 M1 close-now 재판정으로 S1 매수 확정.
+
+        Returns
+        -------
+        (confirmed, updated_last_sig)
+        """
+        try:
+            if not self._intrabar_close_now_enabled():
+                return True, last_sig
+            if df_with_ind is None or getattr(df_with_ind, "empty", True):
+                return True, last_sig
+            nk = str(code).strip().zfill(6)
+            pair = self._intrabar_mirror_get_full15m_and_m1(nk, full_15m_src)
+            if pair is None:
+                return True, last_sig
+            full_15m, m1df = pair
+            if m1df is None or getattr(m1df, "empty", True):
+                return True, last_sig
+            m1_idx = len(m1df) - 1
+            st = getattr(self.app, "settings", None) or {}
+            ct = str(sel_track or "AB").strip().upper()
+            cn = evaluate_close_now_s1_at_m1_idx(
+                st,
+                df_with_ind,
+                full_15m,
+                m1df,
+                m1_idx,
+                ct,
+                holdings={},
+            )
+            if bool(cn.get("can_execute")):
+                upd = dict(last_sig)
+                row_cn = cn.get("indicator_row")
+                if isinstance(row_cn, dict):
+                    upd.update(row_cn)
+                upd["Signal"] = True
+                upd["Ready"] = True
+                upd["Sig_Type"] = str(cn.get("sig_type") or upd.get("Sig_Type", "TYPE_B"))
+                return True, upd
+
+            # close-now 에서 탈락 — forming-only 신호(128940류) 차단
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl is not None and hasattr(sl, "log"):
+                    sl.log(
+                        "intrabar_close_now_blocked",
+                        {
+                            "code": nk,
+                            "name": str(info.get("name", "")),
+                            "forming_sig_type": str(
+                                last_sig.get("Sig_Type", "")
+                            ),
+                            "close_now_sig_type": str(cn.get("sig_type") or ""),
+                            "close_now_reason": str(cn.get("reason") or ""),
+                        },
+                    )
+            except Exception:
+                pass
+            return False, last_sig
+        except Exception:
+            return True, last_sig
+
     def _intrabar_mirror_s1_buy_pack(
         self,
         code: str,
@@ -359,7 +443,13 @@ class SignalEngine:
             if ct not in ("A", "B", "AB"):
                 ct = "AB"
             out = evaluate_bt_hp_intrabar_unified(
-                st, nk, full_15m, m1df, None, ct
+                st,
+                nk,
+                full_15m,
+                m1df,
+                None,
+                ct,
+                df_with_ind=df_with_ind,
             )
             if not isinstance(out, dict):
                 return None
@@ -1540,6 +1630,45 @@ class SignalEngine:
                         info["met_ratio"] = float(
                             self._to_scalar(last_sig.get("Met_Ratio"), 0.0)
                         )
+                    except Exception:
+                        pass
+
+                # forming 15m Signal 만 켜진 경우 close-now 로 최종 확정(128940류 필터)
+                if (
+                    is_buy
+                    and bars_ready
+                    and self._intrabar_close_now_enabled()
+                    and _mirror_df_ind is not None
+                ):
+                    try:
+                        _src_cn = _mirror_15m_src
+                        if _src_cn is None:
+                            _src_cn = (
+                                self.app.bars_data.get(bars_key)
+                                if bars_key
+                                else _bd
+                            )
+                        ok_cn, last_sig = self._confirm_s1_with_close_now(
+                            code,
+                            info,
+                            _mirror_df_ind,
+                            _src_cn,
+                            last_sig,
+                            sel_track=_sel_tr,
+                        )
+                        if not ok_cn:
+                            is_buy = False
+                            info["confluence"] = "close-now 불일치"
+                            info["met_ratio"] = 0.0
+                        else:
+                            info["last_sig_cache"] = last_sig
+                            _sel_tr = str(
+                                info.get("sel_track", info.get("SelTrack", "AB"))
+                                or "AB"
+                            ).strip().upper()
+                            info["confluence"] = self._format_s1_confluence_status_line(
+                                last_sig, _sel_tr
+                            )
                     except Exception:
                         pass
 

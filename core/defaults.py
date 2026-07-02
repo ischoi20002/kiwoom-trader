@@ -58,6 +58,9 @@ DEFAULT_SETTINGS = {
     # ka10080 REST 전역 최소 호출 간격(초). 워밍업·M1폴러·15분확정 등 병렬 호출이 429 나지 않게 직렬화.
     # [튜닝] 22종목 동시 폴링 시 0.35s 는 M1 분산 간격과 충돌해 429 상시 발생 → 0.5s 로 여유 확보.
     "realtime_ka10080_global_min_interval_sec": 0.5,
+    # ka10080 실패 로그: 동일 (경로|종목|원인) UI 스로틀(초), JSONL 요약 주기(초)
+    "realtime_ka10080_fail_log_ui_throttle_sec": 90.0,
+    "realtime_ka10080_fail_summary_interval_sec": 300.0,
     # M1 ka10080 분산(종목 수 × per_code, cap 55s/분). 16종목≈40s, 40종목=55s
     "realtime_watchlist_m1_api_spread_per_code_sec": 2.5,
     "realtime_watchlist_m1_api_spread_min_sec": 12.0,
@@ -110,6 +113,8 @@ DEFAULT_SETTINGS = {
     "realtime_s1_full_calc_fallback_sec": 120.0,
     # True: 미보유 S1·보유 청산·S2 를 동적 고정밀과 동일 `evaluate_bt_hp_intrabar_unified` 경로로 판정(공식 1분·합성 수급).
     "realtime_s1_mirror_dynamic_intrabar": True,
+    # True: 같은 M1에서 forming OHLCV+intrabar 지표로 get_buy_signals 재판정(정적 Signal 복사 제거)
+    "realtime_intrabar_close_now_signals": True,
     # 보유 청산·S2: ``evaluate_position`` / 인트라바 미러 호출 최소 간격(초). 너무 짧으면 매수 직후 과민 매도.
     "realtime_eval_position_min_interval_sec": 15.0,
     # 봉 부족 시 보유용 마지막 지표 행 재계산 최소 간격(초) — eval 과 동기 권장.

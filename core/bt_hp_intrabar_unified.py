@@ -20,6 +20,9 @@ from backtest_engine import TradingStrategy
 from core.bt_hp_signal_bridge import (
     compute_intrabar_indicator_step,
     evaluate_bt_hp_s1_new_entry_only,
+    evaluate_close_now_s1_at_m1_idx,
+    intrabar_close_now_signals_enabled,
+    resolve_df_with_ind_for_close_now,
 )
 
 
@@ -134,6 +137,7 @@ def evaluate_bt_hp_intrabar_unified(
     code_track: str,
     *,
     skip_holder_exit: bool = False,
+    df_with_ind: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     동적 백테 고정밀 인트라바 1회분과 동일한 시뮬레이션.
@@ -178,7 +182,14 @@ def evaluate_bt_hp_intrabar_unified(
             "initialized": False,
             "last_15m_dict": None,
             "prices_tail": None,
+            "df_with_ind_close_now": None,
         }
+
+        use_close_now = intrabar_close_now_signals_enabled(settings)
+        cn_df = resolve_df_with_ind_for_close_now(
+            settings, full_15m, df_with_ind, holder
+        )
+        sync_static_sig = not use_close_now or cn_df is None
 
         use_sb_a = bool(settings.get("use_smart_buy_a", False))
         use_sb_b = bool(settings.get("use_smart_buy_b", True))
@@ -206,6 +217,7 @@ def evaluate_bt_hp_intrabar_unified(
                     m1_chunk,
                     m1_idx,
                     holder,
+                    sync_static_signal_keys=sync_static_sig,
                 )
 
             ind_d = _row_to_dict(indicator_to_use)
@@ -278,21 +290,53 @@ def evaluate_bt_hp_intrabar_unified(
 
             # --- 2) 매수(S1 신규 / S2 추매) ---
             if ind_d is not None:
-                is_buy_signal = bool(ind_d.get("Signal", False)) and bool(
-                    ind_d.get("Ready", False)
-                )
                 is_addon_target = pos_sim is not None and int(
                     pos_sim.get("entry_n", pos_sim.get("stage", 1)) or 1
                 ) < 2
 
-                if is_buy_signal or is_addon_target:
-                    if pos_sim is None:
+                is_buy_signal = False
+                sig_type = "TYPE_B"
+
+                if pos_sim is None and use_close_now and cn_df is not None:
+                    cn = evaluate_close_now_s1_at_m1_idx(
+                        settings,
+                        cn_df,
+                        full_15m,
+                        m1_chunk,
+                        m1_idx,
+                        ct,
+                        holdings={},
+                    )
+                    if cn.get("can_execute"):
+                        is_buy_signal = True
+                        sig_type = str(cn.get("sig_type") or "TYPE_B")
+                        row_cn = cn.get("indicator_row")
+                        if isinstance(row_cn, dict):
+                            ind_d = {**ind_d, **row_cn}
+                elif not is_addon_target:
+                    is_buy_signal = bool(ind_d.get("Signal", False)) and bool(
+                        ind_d.get("Ready", False)
+                    )
+                    if is_buy_signal and pos_sim is None:
                         sig_type = str(
                             TradingStrategy.effective_s1_sig_type_for_buy(
                                 settings, ind_d, {}
                             )
                         )
-                    else:
+                elif is_addon_target:
+                    is_buy_signal = True
+                    sig_type = str(ind_d.get("Sig_Type", "TYPE_B"))
+
+                if is_buy_signal or is_addon_target:
+                    if pos_sim is None and not (
+                        use_close_now and cn_df is not None
+                    ):
+                        sig_type = str(
+                            TradingStrategy.effective_s1_sig_type_for_buy(
+                                settings, ind_d, {}
+                            )
+                        )
+                    elif is_addon_target:
                         sig_type = str(ind_d.get("Sig_Type", "TYPE_B"))
 
                     if (sig_type == "TYPE_A" and ct == "B") or (

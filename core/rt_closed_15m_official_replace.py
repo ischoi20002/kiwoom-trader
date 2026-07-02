@@ -230,7 +230,11 @@ def fetch_official_15m_row_for_timestamp(
             nk = ""
             for _page in range(mp):
                 raw_list, nk_out = data_manager.fetch_kiwoom_minute_chart_page(
-                    nc, token, nk, tic_scope=str(tic_scope).strip() or "15"
+                    nc,
+                    token,
+                    nk,
+                    tic_scope=str(tic_scope).strip() or "15",
+                    fetch_context="rt15m_official",
                 )
                 if not raw_list:
                     break
@@ -249,13 +253,43 @@ def fetch_official_15m_row_for_timestamp(
                 time.sleep(random.uniform(max(0.0, lo), hi))
 
             if not merged_rows:
+                if attempt + 1 >= retries:
+                    try:
+                        meta = getattr(data_manager, "last_ka10080_fetch_meta", None) or {}
+                        # HTTP 실패는 data_manager 가 기록 — 차트는 OK 인데 15m 병합만 비었을 때만 추가
+                        if bool(meta.get("ok")):
+                            from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+                            ka10080_fetch_diag.record_fail(
+                                nc,
+                                tic_scope=str(tic_scope or "15"),
+                                context="rt15m_official",
+                                reason="merged_empty",
+                                http_status=int(meta.get("http_status") or 0),
+                                detail=f"no_15m_rows bar={want}",
+                                attempt=attempt + 1,
+                            )
+                    except Exception:
+                        pass
                 break
             merged = pd.concat(merged_rows).sort_index()
             merged = merged[~merged.index.duplicated(keep="last")]
             row = _find_row_for_bar_end(merged, want)
             if row is None:
-                # 같은 슬롯/종목은 scheduler 쪽에서 쿨다운을 두지만,
-                # 여기서는 per-call 스팸을 더 줄이기 위해 "마지막 시도"에만 로그를 남깁니다.
+                if attempt + 1 >= retries:
+                    try:
+                        from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+                        ka10080_fetch_diag.record_fail(
+                            nc,
+                            tic_scope=str(tic_scope or "15"),
+                            context="rt15m_official",
+                            reason="row_not_found",
+                            detail=f"bar_ts={want} pages≤{mp}",
+                            attempt=attempt + 1,
+                        )
+                    except Exception:
+                        pass
                 if log and (attempt + 1 >= retries):
                     try:
                         log(
@@ -276,6 +310,20 @@ def fetch_official_15m_row_for_timestamp(
                 except Exception:
                     pass
         except Exception as e:
+            if attempt + 1 >= retries:
+                try:
+                    from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+                    ka10080_fetch_diag.record_fail(
+                        nc,
+                        tic_scope=str(tic_scope or "15"),
+                        context="rt15m_official",
+                        reason="exception",
+                        detail=repr(e),
+                        attempt=attempt + 1,
+                    )
+                except Exception:
+                    pass
             if log:
                 try:
                     log(

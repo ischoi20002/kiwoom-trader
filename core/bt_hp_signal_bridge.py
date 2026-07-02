@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-동적 백테스트 고정밀(15m pre-signal + 1m intrabar)과 **동일한** 인트라바 지표 행을 계산합니다.
+동적 백테스트 고정밀(15m pre-signal + 1m intrabar)과 **동일한** 인트라바 지표·신호 행을 계산합니다.
 
-- `dynamic_backtest._process_intra_bar_dynamic` 의 시뮬레이션 분기와 한 줄기를 유지합니다.
-- 실시간 감시 신호 경로에서는 본 브리지를 사용하지 않습니다(백테·분석 스크립트용).
+- `dynamic_backtest._process_intra_bar_dynamic` · 실시간 ``SignalEngine`` 인트라바 미러가 공유합니다.
+- ``realtime_intrabar_close_now_signals`` ON 시: 같은 M1에서 forming OHLCV + intrabar RSI/MACD로
+  ``get_buy_signals_detailed`` 를 재실행해 Signal/Sig_Type 을 정적 복사 없이 판정합니다.
 """
 
 from __future__ import annotations
@@ -34,6 +35,64 @@ _STATIC_SYNC_KEYS: Tuple[str, ...] = (
     "Vol_MA20",
 )
 
+# 정적 복사 시 신호만 제외(Volume·Prev_Day_Vol 등은 유지)
+_SIGNAL_STATIC_ONLY: Tuple[str, ...] = (
+    "Signal",
+    "Ready",
+    "Sig_Type",
+    "S1_Simultaneous_AB",
+)
+_INTRABAR_SIM_PRICE_KEYS: Tuple[str, ...] = (
+    "RSI",
+    "MACD",
+    "MACD_Sig",
+    "OSC",
+    "MA5",
+    "MA20",
+    "MA60",
+    "_ema12",
+    "_ema26",
+    "_macd_sig",
+    "_avg_gain",
+    "_avg_loss",
+)
+
+
+def intrabar_close_now_signals_enabled(settings: Optional[Dict[str, Any]]) -> bool:
+    """같은 M1 '지금 닫히면?' 신호 재판정 사용 여부."""
+    try:
+        return bool((settings or {}).get("realtime_intrabar_close_now_signals", True))
+    except Exception:
+        return True
+
+
+def _apply_ready_column_to_df(
+    df_ind: pd.DataFrame, settings: Dict[str, Any]
+) -> pd.DataFrame:
+    """백테·실시간 공통 Ready 열(``hp_causal_ready_min_bar_index``)."""
+    try:
+        if df_ind is None or getattr(df_ind, "empty", True):
+            return df_ind
+        ready_min = max(
+            0, int(float(settings.get("hp_causal_ready_min_bar_index", 19)))
+        )
+        out = df_ind.copy()
+        out["Ready"] = out.reset_index(drop=True).index >= ready_min
+        return out
+    except Exception:
+        return df_ind
+
+
+def _row_to_plain_dict(row: Any) -> Dict[str, Any]:
+    try:
+        if isinstance(row, dict):
+            return dict(row)
+        if hasattr(row, "to_dict"):
+            return dict(row.to_dict())
+    except Exception:
+        pass
+    return {}
+
 
 def _base_idx_for_curr_15m(full_15m: pd.DataFrame, curr_15m_time: Any) -> int:
     """full_15m.index 에서 curr_15m_time 위치(정수). slice 면 시작 정수."""
@@ -56,6 +115,8 @@ def compute_intrabar_indicator_step(
     m1_chunk: pd.DataFrame,
     m1_idx: int,
     holder: Dict[str, Any],
+    *,
+    sync_static_signal_keys: bool = True,
 ) -> Any:
     """
     `m1_chunk` 의 `m1_idx` 시점까지 동적 백테와 동일하게 `indicator_to_use` 를 갱신합니다.
@@ -65,6 +126,8 @@ def compute_intrabar_indicator_step(
     holder :
         `{"initialized": bool, "last_15m_dict": dict|None, "prices_tail": dict|None}` 형태.
         동일 슬롯·동일 청크 루프에서 재사용합니다.
+    sync_static_signal_keys :
+        False면 Signal/Ready/Sig_Type 정적 복사 생략(``close_now`` 재판정 경로).
     """
     indicator_to_use = curr_15m
     try:
@@ -101,12 +164,18 @@ def compute_intrabar_indicator_step(
         )
         if sim_15m is not None:
             try:
+                if sync_static_signal_keys:
+                    sync_keys = _STATIC_SYNC_KEYS
+                else:
+                    sync_keys = tuple(
+                        k for k in _STATIC_SYNC_KEYS if k not in _SIGNAL_STATIC_ONLY
+                    )
                 if hasattr(curr_15m, "index"):
-                    for k in _STATIC_SYNC_KEYS:
+                    for k in sync_keys:
                         if k in curr_15m.index:
                             sim_15m[k] = curr_15m[k]
                 elif isinstance(curr_15m, dict):
-                    for k in _STATIC_SYNC_KEYS:
+                    for k in sync_keys:
                         if k in curr_15m:
                             sim_15m[k] = curr_15m[k]
             except (TypeError, KeyError, ValueError):
@@ -115,6 +184,190 @@ def compute_intrabar_indicator_step(
     except (TypeError, KeyError, ValueError, IndexError, AttributeError):
         pass
     return indicator_to_use
+
+
+def _patch_forming_ohlcv_from_m1_subchunk(
+    df: pd.DataFrame, m1_sub: pd.DataFrame
+) -> None:
+    """마지막 15m 행 OHLCV = 슬롯 진행 중 완료 M1 누적(지금 닫히면)."""
+    try:
+        if (
+            df is None
+            or getattr(df, "empty", True)
+            or m1_sub is None
+            or getattr(m1_sub, "empty", True)
+        ):
+            return
+        last_ix = df.index[-1]
+        df.at[last_ix, "Open"] = float(m1_sub["Open"].iloc[0])
+        df.at[last_ix, "High"] = float(m1_sub["High"].max())
+        df.at[last_ix, "Low"] = float(m1_sub["Low"].min())
+        df.at[last_ix, "Close"] = float(m1_sub["Close"].iloc[-1])
+        df.at[last_ix, "Volume"] = float(m1_sub["Volume"].sum())
+    except Exception:
+        pass
+
+
+def _merge_intrabar_sim_into_df_last_row(
+    df: pd.DataFrame, sim_row: Dict[str, Any]
+) -> None:
+    """``simulate_intrabar_indicators`` 결과를 마지막 15m 행에 병합."""
+    try:
+        if df is None or getattr(df, "empty", True) or not sim_row:
+            return
+        last_ix = df.index[-1]
+        for k in _INTRABAR_SIM_PRICE_KEYS:
+            if k in sim_row:
+                try:
+                    df.at[last_ix, k] = sim_row[k]
+                except Exception:
+                    pass
+        # Close 는 M1 subchunk 와 일치
+        if "Close" in sim_row:
+            try:
+                df.at[last_ix, "Close"] = float(sim_row["Close"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def evaluate_close_now_s1_at_m1_idx(
+    settings: Dict[str, Any],
+    df_with_ind: pd.DataFrame,
+    full_15m: pd.DataFrame,
+    m1_chunk: pd.DataFrame,
+    m1_idx: int,
+    code_track: str,
+    *,
+    holdings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    같은 M1 시점: forming OHLCV + intrabar RSI/MACD 로 마지막 15m 행 ``get_buy_signals_detailed`` 재판정.
+
+    Returns
+    -------
+    dict
+        ok, signal, ready, sig_type, can_execute, reason, indicator_row
+    """
+    out: Dict[str, Any] = {
+        "ok": False,
+        "signal": False,
+        "ready": False,
+        "sig_type": "TYPE_B",
+        "can_execute": False,
+        "reason": "",
+        "indicator_row": None,
+    }
+    try:
+        if not intrabar_close_now_signals_enabled(settings):
+            out["reason"] = "disabled"
+            return out
+        if (
+            df_with_ind is None
+            or getattr(df_with_ind, "empty", True)
+            or m1_chunk is None
+            or getattr(m1_chunk, "empty", True)
+            or full_15m is None
+            or getattr(full_15m, "empty", True)
+        ):
+            out["reason"] = "empty_frame"
+            return out
+        mi = int(m1_idx)
+        if mi < 0 or mi >= len(m1_chunk):
+            out["reason"] = "bad_m1_idx"
+            return out
+
+        work = df_with_ind.copy()
+        m1_sub = m1_chunk.iloc[: mi + 1]
+        _patch_forming_ohlcv_from_m1_subchunk(work, m1_sub)
+
+        curr_15m = full_15m.iloc[-1]
+        sim_holder: Dict[str, Any] = {
+            "initialized": False,
+            "last_15m_dict": None,
+            "prices_tail": None,
+        }
+        sim_row = compute_intrabar_indicator_step(
+            settings,
+            full_15m,
+            curr_15m,
+            m1_chunk,
+            mi,
+            sim_holder,
+            sync_static_signal_keys=False,
+        )
+        sim_d = _row_to_plain_dict(sim_row)
+        _merge_intrabar_sim_into_df_last_row(work, sim_d)
+
+        work = _apply_ready_column_to_df(work, settings)
+        detailed = TradingStrategy.get_buy_signals_detailed(work, settings, "UP")
+        if detailed is None or getattr(detailed, "empty", True):
+            out["reason"] = "no_signals"
+            return out
+
+        last_ser = detailed.iloc[-1]
+        last_sig = (
+            last_ser.to_dict() if hasattr(last_ser, "to_dict") else dict(last_ser)
+        )
+        try:
+            signal_on = bool(last_sig.get("Signal", False))
+            ready_on = bool(last_sig.get("Ready", False))
+        except (TypeError, AttributeError):
+            signal_on, ready_on = False, False
+
+        sig_type = str(
+            TradingStrategy.effective_s1_sig_type_for_buy(
+                settings, last_sig, holdings or {}
+            )
+        )
+
+        ct = str(code_track or "AB").strip().upper()
+        track_ok = not (
+            (sig_type == "TYPE_A" and ct == "B")
+            or (sig_type == "TYPE_B" and ct == "A")
+        )
+
+        out["ok"] = True
+        out["signal"] = bool(signal_on)
+        out["ready"] = bool(ready_on)
+        out["sig_type"] = sig_type
+        out["indicator_row"] = last_sig
+        out["can_execute"] = bool(signal_on and ready_on and track_ok)
+        if not signal_on or not ready_on:
+            out["reason"] = "signal_off"
+        elif not track_ok:
+            out["reason"] = "track_mismatch"
+        else:
+            out["reason"] = "ok"
+        return out
+    except (TypeError, ValueError, KeyError, AttributeError) as e:
+        out["reason"] = f"error:{e!r}"
+        return out
+
+
+def resolve_df_with_ind_for_close_now(
+    settings: Dict[str, Any],
+    full_15m: pd.DataFrame,
+    df_with_ind: Optional[pd.DataFrame],
+    cache_holder: Optional[Dict[str, Any]],
+) -> Optional[pd.DataFrame]:
+    """close_now 용 지표 프레임 — 전달본 없으면 ``full_15m`` 에서 1회 생성·캐시."""
+    try:
+        if df_with_ind is not None and not getattr(df_with_ind, "empty", True):
+            return df_with_ind
+        if full_15m is None or getattr(full_15m, "empty", True):
+            return None
+        ch = cache_holder if isinstance(cache_holder, dict) else {}
+        cached = ch.get("df_with_ind_close_now")
+        if cached is not None and not getattr(cached, "empty", True):
+            return cached
+        built = TradingStrategy.calculate_indicators(full_15m.copy(), settings)
+        built = _apply_ready_column_to_df(built, settings)
+        ch["df_with_ind_close_now"] = built
+        return built
+    except Exception:
+        return df_with_ind
 
 
 def _read_sb_flags(settings: Dict[str, Any]) -> Tuple[bool, bool, float, float]:
@@ -165,12 +418,18 @@ def evaluate_bt_hp_s1_new_entry_only(
             return out
 
         curr_15m = full_15m.iloc[-1]
+        use_close_now = intrabar_close_now_signals_enabled(settings)
+        cn_df = resolve_df_with_ind_for_close_now(
+            settings, full_15m, None, {"df_with_ind_close_now": None}
+        )
+        sync_static_sig = not use_close_now or cn_df is None
         holder: Dict[str, Any] = {
             "initialized": False,
             "last_15m_dict": None,
             "prices_tail": None,
         }
         indicator_to_use: Any = None
+        last_m1_idx = len(m1_chunk) - 1
         for m1_idx in range(len(m1_chunk)):
             indicator_to_use = compute_intrabar_indicator_step(
                 settings,
@@ -179,6 +438,7 @@ def evaluate_bt_hp_s1_new_entry_only(
                 m1_chunk,
                 m1_idx,
                 holder,
+                sync_static_signal_keys=sync_static_sig,
             )
 
         if indicator_to_use is None:
@@ -186,10 +446,33 @@ def evaluate_bt_hp_s1_new_entry_only(
             return out
 
         ind = indicator_to_use
-        try:
-            sig_on = bool(ind.get("Signal", False)) and bool(ind.get("Ready", False))
-        except (TypeError, AttributeError):
-            sig_on = False
+        sig_on = False
+        sig_type = "TYPE_B"
+
+        if use_close_now and cn_df is not None and last_m1_idx >= 0:
+            cn = evaluate_close_now_s1_at_m1_idx(
+                settings,
+                cn_df,
+                full_15m,
+                m1_chunk,
+                last_m1_idx,
+                code_track,
+                holdings=holdings,
+            )
+            sig_on = bool(cn.get("can_execute"))
+            sig_type = str(cn.get("sig_type") or "TYPE_B")
+            row_cn = cn.get("indicator_row")
+            if isinstance(row_cn, dict):
+                ind = {**_row_to_plain_dict(ind), **row_cn}
+        else:
+            try:
+                sig_on = bool(ind.get("Signal", False)) and bool(ind.get("Ready", False))
+            except (TypeError, AttributeError):
+                sig_on = False
+            if sig_on:
+                sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
+                    settings, ind, holdings or {}
+                )
 
         out["ok"] = True
         out["is_buy_signal"] = bool(sig_on)
@@ -199,9 +482,6 @@ def evaluate_bt_hp_s1_new_entry_only(
             out["reason"] = "signal_off"
             return out
 
-        sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
-            settings, ind, holdings or {}
-        )
         out["sig_type"] = sig_type
 
         ct = str(code_track or "AB").strip().upper()
@@ -430,6 +710,7 @@ def fetch_m1_via_ka10080_1m(
                     str(token).strip(),
                     (nk or "").strip(),
                     tic_scope="1",
+                    fetch_context="bt_hp_bridge",
                 )
             except (TypeError, OSError, AttributeError, ValueError):
                 break

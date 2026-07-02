@@ -441,6 +441,19 @@ class KiwoomApp:
             except Exception:
                 pass
 
+    def _configure_ka10080_fetch_diag(self) -> None:
+        """ka10080 조회 실패·통계 진단 — session JSONL + 대시보드 로그 연결."""
+        try:
+            from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+            ka10080_fetch_diag.configure(
+                session_logger=getattr(self, "session_logger", None),
+                ui_log=self.log,
+                settings=getattr(self, "settings", None) or {},
+            )
+        except Exception:
+            pass
+
     def __init__(self, root, auto_start=False):
         self.root = root
         self._main_thread_id = threading.get_ident()
@@ -525,6 +538,7 @@ class KiwoomApp:
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         self._sync_ka10080_rest_pacing_from_settings()
+        self._configure_ka10080_fetch_diag()
         # Tick dispatch 주기는 SignalEngine이 메인 스레드를 과점유할 때 UI가 멎는 문제를 직접 줄이므로,
         # 애플리케이션 인스턴스에 모듈 상수값을 그대로 심어둔다.
         try:
@@ -771,6 +785,7 @@ class KiwoomApp:
     def reset_ui_tabs(self):
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         self._sync_ka10080_rest_pacing_from_settings()
+        self._configure_ka10080_fetch_diag()
         if hasattr(self, 'notebook'):
             curr_tab = self.notebook.index("current")
             for child in self.notebook.winfo_children(): child.destroy()

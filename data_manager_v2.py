@@ -159,6 +159,7 @@ class DataManagerV2:
         except Exception:
             print(f"DEBUG [DataManagerV2]: State DB (레거시) at {self.state_db_path}")
         self._init_db()
+        self.last_ka10080_fetch_meta: Dict[str, Any] = {}
         DataManagerV2._initialized = True
 
     def _get_connection(self):
@@ -2794,13 +2795,52 @@ class DataManagerV2:
         next_key: str = "",
         *,
         tic_scope: str = "1",
+        fetch_context: str = "",
     ) -> Tuple[Optional[List[Any]], str]:
         """
         키움 ka10080 주식분봉 1페이지 조회.
         tic_scope: 봉 주기(문자열). 예) "1"=1분, "15"=15분 — 키움 스펙에 따름.
+        fetch_context: 진단 로그용 경로(m1_poll, rt15m_official, warmup 등).
         next_key 가 비어 있으면 최초 조회, 있으면 연속조회(cont-yn=Y).
         반환: (분봉 레코드 리스트 또는 오류 시 None, 다음 페이지용 next_key)
         """
+        ctx = str(fetch_context or "").strip() or "unknown"
+        try:
+            from core.ka10080_fetch_diag import ka10080_fetch_diag
+        except Exception:
+            ka10080_fetch_diag = None  # type: ignore
+
+        def _set_meta(*, ok: bool, reason: str, http_status: int = 0, detail: str = "") -> None:
+            try:
+                self.last_ka10080_fetch_meta = {
+                    "ok": bool(ok),
+                    "reason": str(reason),
+                    "http_status": int(http_status or 0),
+                    "detail": str(detail or "")[:500],
+                    "context": ctx,
+                    "tic_scope": str(tic_scope or "1"),
+                    "code": str(code or "").strip(),
+                }
+            except Exception:
+                pass
+
+        def _fail(reason: str, *, http_status: int = 0, detail: str = "", attempt: int = 0) -> Tuple[None, str]:
+            _set_meta(ok=False, reason=reason, http_status=http_status, detail=detail)
+            if ka10080_fetch_diag is not None:
+                try:
+                    ka10080_fetch_diag.record_fail(
+                        str(code),
+                        tic_scope=str(tic_scope or "1"),
+                        context=ctx,
+                        reason=reason,
+                        http_status=http_status,
+                        detail=detail,
+                        attempt=attempt,
+                    )
+                except Exception:
+                    pass
+            return None, ""
+
         base = config.MOCK_URL if getattr(config, "USE_MOCK", False) else config.URL
         url = f"{base}/api/dostk/chart"
         ts = str(tic_scope).strip() if tic_scope is not None else "1"
@@ -2837,6 +2877,23 @@ class DataManagerV2:
                             nk_out = str(data.get("next-key") or "").strip()
                         except Exception:
                             nk_out = ""
+                    if not raw_list and not nk_in:
+                        return _fail(
+                            "empty_response",
+                            http_status=200,
+                            detail="status200_empty_body",
+                            attempt=attempt + 1,
+                        )
+                    _set_meta(ok=True, reason="ok")
+                    if ka10080_fetch_diag is not None:
+                        try:
+                            ka10080_fetch_diag.record_ok(
+                                str(code),
+                                tic_scope=str(tic_scope or "1"),
+                                context=ctx,
+                            )
+                        except Exception:
+                            pass
                     return raw_list, nk_out
                 if res.status_code == 429:
                     _ka10080_global_bump_cooldown(1.5 * (2**attempt))
@@ -2850,16 +2907,41 @@ class DataManagerV2:
                             time.sleep(2.5 * (attempt + 1))
                         continue
                     _log_ka10080_rate_limit_throttled(code, status_code=429)
-                    return None, ""
-                print(f"  [Error] ka10080 Status {res.status_code} ({code})")
-                return None, ""
+                    return _fail(
+                        "http_429",
+                        http_status=429,
+                        detail="rate_limit_exhausted",
+                        attempt=attempt + 1,
+                    )
+                try:
+                    print(f"  [Error] ka10080 Status {res.status_code} ({code})")
+                except Exception:
+                    pass
+                reason = (
+                    f"http_{int(res.status_code)}"
+                    if int(res.status_code) > 0
+                    else "http_error"
+                )
+                return _fail(
+                    reason,
+                    http_status=int(res.status_code),
+                    detail=(res.text or "")[:200],
+                    attempt=attempt + 1,
+                )
             except Exception as e:
                 if attempt + 1 < max_retries:
                     time.sleep(1.0)
                     continue
-                print(f"  [Error] ka10080 예외 ({code}): {e}")
-                return None, ""
-        return None, ""
+                try:
+                    print(f"  [Error] ka10080 예외 ({code}): {e}")
+                except Exception:
+                    pass
+                return _fail(
+                    "network_error",
+                    detail=repr(e),
+                    attempt=attempt + 1,
+                )
+        return _fail("unknown", detail="retry_exhausted", attempt=max_retries)
 
     def fetch_15m_bars_for_trading_day(
         self,
