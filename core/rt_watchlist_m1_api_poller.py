@@ -4,6 +4,8 @@
 
 - 분 경계 직후 ``realtime_watchlist_m1_api_spread_sec`` 안에 종목별 지연을 분산(초당 과다 호출 완화).
 - 동일 (종목, 닫힌 분 오픈라벨) 은 캐시 히트 시 REST 생략.
+- 매 분 **대표 종목 1건 프로브**로 차트가 목표 분까지 도달했는지 확인 후 전체 라운드를 스케줄.
+- 차트 ``max(cntr_tm)`` 이 목표 분 종료 시각 미만이면 ``minute_not_ready``(장전·개장 직후)로 조용히 생략.
 - 실패 시 지수 백오프 후 최대 ``realtime_watchlist_m1_api_max_retries`` 회 재시도.
 - 성공 시 ``RtTickM1Store.apply_official_closed_minute`` 로 **BT-HP·1분 창 계산**에 API OHLCV 를 반영합니다.
 
@@ -16,20 +18,21 @@ import random
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
 from core.bt_hp_signal_bridge import ka10080_raw_rows_to_1m_df
 from core.ka10080_spread import effective_m1_poll_spread_sec
 from utils.krx_bars import (
-    is_krx_m1_closed_open_label,
+    chart_covers_m1_closed_minute,
     m1_bar_open_label_for_just_completed_minute,
 )
 from utils.normalization import canonical_stock_code
 
 CacheKey = Tuple[str, str]
 CacheVal = Tuple[float, float, float, float, float]
+FetchResult = Tuple[Optional[pd.Series], Optional[pd.DataFrame], str]
 
 
 class RtWatchlistM1ApiPoller:
@@ -47,6 +50,9 @@ class RtWatchlistM1ApiPoller:
         self._cache: Dict[CacheKey, CacheVal] = {}
         self._cache_order: List[CacheKey] = []
         self._cache_lock = threading.Lock()
+        self._round_lock = threading.Lock()
+        self._dormant_rounds: Set[str] = set()
+        self._active_rounds: Set[str] = set()
 
     def _emit(self, msg: str) -> None:
         if self._log is None:
@@ -173,8 +179,32 @@ class RtWatchlistM1ApiPoller:
         """감시 중단 시 호출: 다음 장중 첫 라운드가 스케줄되도록 라운드 키를 비웁니다."""
         try:
             self._last_scheduled_round = ""
+            with self._round_lock:
+                self._dormant_rounds.clear()
+                self._active_rounds.clear()
         except Exception:
             pass
+
+    def _is_round_dormant(self, sk: str) -> bool:
+        with self._round_lock:
+            return sk in self._dormant_rounds
+
+    def _mark_round_dormant(self, sk: str) -> None:
+        with self._round_lock:
+            self._dormant_rounds.add(sk)
+            self._active_rounds.discard(sk)
+
+    def _mark_round_active(self, sk: str) -> None:
+        with self._round_lock:
+            self._active_rounds.add(sk)
+            self._dormant_rounds.discard(sk)
+
+    def _pick_probe_code(self, codes: List[str]) -> str:
+        """프로브용 대표 종목(정렬 첫 번째 — 재현 가능)."""
+        try:
+            return sorted(codes)[0]
+        except Exception:
+            return str(codes[0]) if codes else ""
 
     def _wake_loop(self) -> None:
         """새로 닫힌 1분 라벨이 바뀌었을 때만 라운드 스케줄."""
@@ -184,51 +214,74 @@ class RtWatchlistM1ApiPoller:
                     continue
                 wall = datetime.now()
                 closed_lab = m1_bar_open_label_for_just_completed_minute(wall)
-                if not is_krx_m1_closed_open_label(closed_lab):
-                    continue
                 sk = closed_lab.strftime("%Y-%m-%d %H:%M:%S")
                 if sk == self._last_scheduled_round:
                     continue
                 codes = self._active_codes()
                 if not codes:
                     continue
-                # 스케줄 확정(빈 라운드는 last 갱신 안 함)
                 self._last_scheduled_round = sk
-                n_codes = len(codes)
-                try:
-                    spread = effective_m1_poll_spread_sec(
-                        self._settings(), n_codes
-                    )
-                except Exception:
-                    try:
-                        spread = float(
-                            self._settings().get(
-                                "realtime_watchlist_m1_api_spread_sec", 40.0
-                            )
-                        )
-                    except (TypeError, ValueError):
-                        spread = 40.0
-                    spread = max(12.0, min(spread, 55.0))
-                # 종목별 [0, spread) 초 분산 — 해시로 흩뜨림
-                for cc in codes:
-                    try:
-                        h = abs(hash((cc, sk)))
-                        frac = (h % 1_000_003) / 1_000_003.0
-                        delay = spread * frac
-                    except Exception:
-                        delay = 0.0
-                    t = threading.Timer(
-                        delay,
-                        self._job_fetch_one,
-                        args=(cc, closed_lab, sk),
-                    )
-                    t.daemon = True
-                    t.start()
+                with self._round_lock:
+                    self._dormant_rounds = {
+                        x for x in self._dormant_rounds if x == sk
+                    }
+                    self._active_rounds = {
+                        x for x in self._active_rounds if x == sk
+                    }
+                if self._is_round_dormant(sk):
+                    continue
+                with self._round_lock:
+                    already_active = sk in self._active_rounds
+                if already_active:
+                    self._schedule_round_jobs(codes, closed_lab, sk)
+                    continue
+                t = threading.Timer(
+                    0.0,
+                    self._job_probe_round,
+                    args=(codes, closed_lab, sk, 0),
+                )
+                t.daemon = True
+                t.start()
             except Exception as e:
                 try:
                     self._emit(f"⚠️ [M1Poll] wake_loop 예외: {e!r}")
                 except Exception:
                     pass
+
+    def _schedule_round_jobs(
+        self, codes: List[str], closed_lab: pd.Timestamp, sk: str
+    ) -> None:
+        """프로브 통과 후 종목별 분산 폴링 타이머 등록."""
+        try:
+            n_codes = len(codes)
+            try:
+                spread = effective_m1_poll_spread_sec(self._settings(), n_codes)
+            except Exception:
+                try:
+                    spread = float(
+                        self._settings().get(
+                            "realtime_watchlist_m1_api_spread_sec", 40.0
+                        )
+                    )
+                except (TypeError, ValueError):
+                    spread = 40.0
+                spread = max(12.0, min(spread, 55.0))
+            for cc in codes:
+                try:
+                    h = abs(hash((cc, sk)))
+                    frac = (h % 1_000_003) / 1_000_003.0
+                    delay = spread * frac
+                except Exception:
+                    delay = 0.0
+                t = threading.Timer(
+                    delay,
+                    self._job_fetch_one,
+                    args=(cc, closed_lab, sk),
+                )
+                t.daemon = True
+                t.start()
+        except Exception:
+            pass
 
     def _pick_row_for_closed_open(
         self, df: pd.DataFrame, closed_open: pd.Timestamp
@@ -243,7 +296,6 @@ class RtWatchlistM1ApiPoller:
             end_ts = pd.Timestamp(closed_open) + pd.Timedelta(minutes=1)
             if end_ts in df.index:
                 return df.loc[end_ts]
-            # 근접 매칭(초 단위)
             want = end_ts.floor("s")
             for ix in df.index:
                 try:
@@ -255,53 +307,36 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             return None
 
-    def _job_fetch_one(self, code: str, closed_lab: pd.Timestamp, sk: str) -> None:
-        """Timer 스레드: 한 종목·한 닫힌 분."""
-        try:
-            if not self._monitoring():
-                return
-            if not is_krx_m1_closed_open_label(closed_lab):
-                return
-            nk = canonical_stock_code(str(code).strip())
-            if not nk:
-                return
-            key: CacheKey = (nk, sk)
-        except Exception:
-            return
+    def _classify_fetch_result(
+        self,
+        row: Optional[pd.Series],
+        chart_df: Optional[pd.DataFrame],
+        closed_lab: pd.Timestamp,
+        last_err: str,
+    ) -> str:
+        """``ok`` | ``minute_not_ready`` | ``row_not_found`` | ``fetch_error``."""
+        if row is not None:
+            return "ok"
+        if last_err in ("no_token", "empty_raw") or last_err.startswith("http_"):
+            return "fetch_error"
+        if chart_df is not None and not chart_df.empty:
+            if not chart_covers_m1_closed_minute(chart_df, closed_lab):
+                return "minute_not_ready"
+            return "row_not_found"
+        if last_err == "row_not_found":
+            return "row_not_found"
+        return "fetch_error"
 
+    def _fetch_closed_minute_row(
+        self,
+        nk: str,
+        closed_lab: pd.Timestamp,
+        sk: str,
+        *,
+        max_retries: int,
+    ) -> FetchResult:
+        """ka10080 1분 1페이지 조회 → (row, chart_df, last_err)."""
         st = self._settings()
-        eval_on_fail = self._settings_bool(
-            st, "realtime_m1_poller_eval_on_fetch_fail", True
-        )
-        eval_on_cache = self._settings_bool(
-            st, "realtime_m1_poller_eval_on_cache_hit", True
-        )
-        catchup_on = self._settings_bool(
-            st, "realtime_m1_poller_apply_chart_catchup", True
-        )
-        db_fb_on = self._settings_bool(st, "realtime_intrabar_m1_db_fallback", True)
-
-        cached_ohlcv: Optional[CacheVal] = None
-        try:
-            with self._cache_lock:
-                cached_ohlcv = self._cache.get(key)
-        except Exception:
-            cached_ohlcv = None
-
-        if cached_ohlcv is not None and eval_on_cache:
-            try:
-                _o, _h, _l, _c, _v = cached_ohlcv
-                self._schedule_signal_eval(nk, close_px=_c, volume=_v)
-            except Exception:
-                pass
-            return
-        try:
-            max_retries = int(
-                float(st.get("realtime_watchlist_m1_api_max_retries", 3))
-            )
-        except (TypeError, ValueError):
-            max_retries = 3
-        max_retries = max(1, min(max_retries, 8))
         try:
             base_backoff = float(
                 st.get("realtime_watchlist_m1_api_backoff_base_sec", 0.45)
@@ -319,12 +354,14 @@ class RtWatchlistM1ApiPoller:
 
         dm = getattr(self._app, "data_manager", None)
         if dm is None:
-            return
+            return None, None, "no_data_manager"
 
         row: Optional[pd.Series] = None
         chart_df: Optional[pd.DataFrame] = None
-        last_err: Optional[str] = None
-        for attempt in range(max_retries):
+        last_err = "unknown"
+        retries = max(1, min(int(max_retries), 8))
+
+        for attempt in range(retries):
             try:
                 token = None
                 try:
@@ -365,11 +402,19 @@ class RtWatchlistM1ApiPoller:
                     chart_df = df
                     row = self._pick_row_for_closed_open(df, closed_lab)
                     if row is not None:
+                        last_err = "ok"
+                        break
+                    if not chart_covers_m1_closed_minute(df, closed_lab):
+                        last_err = "minute_not_ready"
                         break
                     last_err = "row_not_found"
             except Exception as e:
                 last_err = repr(e)
-            if attempt + 1 < max_retries:
+
+            status = self._classify_fetch_result(row, chart_df, closed_lab, last_err)
+            if status in ("ok", "minute_not_ready"):
+                break
+            if attempt + 1 < retries:
                 try:
                     sleep_s = base_backoff * (2**attempt) + random.uniform(0, 0.12)
                     time.sleep(min(sleep_s, 8.0))
@@ -380,54 +425,82 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     pass
 
-        ohlcv: Optional[CacheVal] = None
-        if row is not None:
-            try:
-                ohlcv = (
-                    float(row["Open"]),
-                    float(row["High"]),
-                    float(row["Low"]),
-                    float(row["Close"]),
-                    float(row["Volume"]),
+        return row, chart_df, last_err
+
+    def _job_probe_round(
+        self,
+        codes: List[str],
+        closed_lab: pd.Timestamp,
+        sk: str,
+        attempt: int,
+    ) -> None:
+        """대표 종목 1건으로 차트 도달 여부를 확인한 뒤 라운드 전체를 스케줄하거나 생략."""
+        try:
+            if not self._monitoring():
+                return
+            if self._is_round_dormant(sk):
+                return
+            probe = self._pick_probe_code(codes)
+            nk = canonical_stock_code(str(probe).strip())
+            if not nk:
+                return
+            row, chart_df, last_err = self._fetch_closed_minute_row(
+                nk, closed_lab, sk, max_retries=2
+            )
+            status = self._classify_fetch_result(row, chart_df, closed_lab, last_err)
+
+            if status == "minute_not_ready":
+                self._mark_round_dormant(sk)
+                return
+
+            if status == "fetch_error" and attempt < 1:
+                t = threading.Timer(
+                    1.2,
+                    self._job_probe_round,
+                    args=(codes, closed_lab, sk, attempt + 1),
                 )
-            except Exception as e:
-                try:
-                    self._emit(f"⚠️ [M1Poll] {nk} {sk} 파싱 실패: {e!r}")
-                except Exception:
-                    pass
-                ohlcv = None
+                t.daemon = True
+                t.start()
+                return
 
-        if ohlcv is None and db_fb_on:
+            if status == "fetch_error":
+                return
+
+            self._mark_round_active(sk)
+            self._schedule_round_jobs(codes, closed_lab, sk)
+        except Exception:
+            pass
+
+    def _apply_fetch_success(
+        self,
+        nk: str,
+        closed_lab: pd.Timestamp,
+        sk: str,
+        key: CacheKey,
+        row: pd.Series,
+        chart_df: Optional[pd.DataFrame],
+    ) -> None:
+        """조회 성공 시 M1 저장·캐시·신호 평가."""
+        st = self._settings()
+        catchup_on = self._settings_bool(
+            st, "realtime_m1_poller_apply_chart_catchup", True
+        )
+        try:
+            ohlcv: CacheVal = (
+                float(row["Open"]),
+                float(row["High"]),
+                float(row["Low"]),
+                float(row["Close"]),
+                float(row["Volume"]),
+            )
+        except Exception as e:
             try:
-                from core.realtime_m1_fallback import closed_minute_ohlcv_from_db
-
-                ohlcv = closed_minute_ohlcv_from_db(self._app, nk, closed_lab)
-            except Exception:
-                ohlcv = None
-
-        if ohlcv is None:
-            try:
-                from core.ka10080_fetch_diag import ka10080_fetch_diag
-
-                # HTTP 429/502 등은 data_manager 가 이미 기록. 여기서는 의미론적 실패만.
-                rsn = str(last_err or "")
-                if rsn == "row_not_found":
-                    ka10080_fetch_diag.record_fail(
-                        nk,
-                        tic_scope="1",
-                        context="m1_poll",
-                        reason="row_not_found",
-                        closed_minute=sk,
-                        detail="closed_minute_not_in_chart",
-                    )
+                self._emit(f"⚠️ [M1Poll] {nk} {sk} 파싱 실패: {e!r}")
             except Exception:
                 pass
-            if eval_on_fail:
-                self._schedule_signal_eval(nk)
             return
 
         o, h, l_, c, v = ohlcv
-
         if catchup_on and chart_df is not None:
             try:
                 from core.realtime_m1_fallback import apply_chart_catchup_to_m1_store
@@ -455,6 +528,103 @@ class RtWatchlistM1ApiPoller:
             self._remember_cache(key, (o, h, l_, c, v))
         except Exception:
             pass
-        # [버그픽스] 방금 가져온 공식 1분 종가/거래량을 평가 트리거에 직접 전달.
-        # API 502·WS 끊김 시에도 폴백 경로에서 매 분 신호 평가가 구동되어 BT 정합을 유지한다.
+        self._schedule_signal_eval(nk, close_px=c, volume=v)
+
+    def _job_fetch_one(self, code: str, closed_lab: pd.Timestamp, sk: str) -> None:
+        """Timer 스레드: 한 종목·한 닫힌 분."""
+        try:
+            if not self._monitoring():
+                return
+            if self._is_round_dormant(sk):
+                return
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return
+            key: CacheKey = (nk, sk)
+        except Exception:
+            return
+
+        st = self._settings()
+        eval_on_fail = self._settings_bool(
+            st, "realtime_m1_poller_eval_on_fetch_fail", True
+        )
+        eval_on_cache = self._settings_bool(
+            st, "realtime_m1_poller_eval_on_cache_hit", True
+        )
+        db_fb_on = self._settings_bool(st, "realtime_intrabar_m1_db_fallback", True)
+
+        cached_ohlcv: Optional[CacheVal] = None
+        try:
+            with self._cache_lock:
+                cached_ohlcv = self._cache.get(key)
+        except Exception:
+            cached_ohlcv = None
+
+        if cached_ohlcv is not None and eval_on_cache:
+            try:
+                _o, _h, _l, _c, _v = cached_ohlcv
+                self._schedule_signal_eval(nk, close_px=_c, volume=_v)
+            except Exception:
+                pass
+            return
+
+        try:
+            max_retries = int(
+                float(st.get("realtime_watchlist_m1_api_max_retries", 3))
+            )
+        except (TypeError, ValueError):
+            max_retries = 3
+
+        row, chart_df, last_err = self._fetch_closed_minute_row(
+            nk, closed_lab, sk, max_retries=max_retries
+        )
+        status = self._classify_fetch_result(row, chart_df, closed_lab, last_err)
+
+        if status == "minute_not_ready":
+            self._mark_round_dormant(sk)
+            return
+
+        if status == "ok" and row is not None:
+            self._apply_fetch_success(nk, closed_lab, sk, key, row, chart_df)
+            return
+
+        ohlcv: Optional[CacheVal] = None
+        if db_fb_on:
+            try:
+                from core.realtime_m1_fallback import closed_minute_ohlcv_from_db
+
+                ohlcv = closed_minute_ohlcv_from_db(self._app, nk, closed_lab)
+            except Exception:
+                ohlcv = None
+
+        if ohlcv is None:
+            if status == "row_not_found":
+                try:
+                    from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+                    ka10080_fetch_diag.record_fail(
+                        nk,
+                        tic_scope="1",
+                        context="m1_poll",
+                        reason="row_not_found",
+                        closed_minute=sk,
+                        detail="closed_minute_not_in_chart",
+                    )
+                except Exception:
+                    pass
+            if eval_on_fail:
+                self._schedule_signal_eval(nk)
+            return
+
+        o, h, l_, c, v = ohlcv
+        try:
+            m1s = getattr(self._app, "rt_tick_m1_store", None)
+            if m1s is not None:
+                m1s.apply_official_closed_minute(nk, closed_lab, o, h, l_, c, v)
+        except Exception:
+            pass
+        try:
+            self._remember_cache(key, (o, h, l_, c, v))
+        except Exception:
+            pass
         self._schedule_signal_eval(nk, close_px=c, volume=v)

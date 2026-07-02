@@ -13,6 +13,13 @@
 
 ---
 
+## 0.8.57 (2026-07-03)
+
+ka10080 M1 폴러 — 시계 가드 대신 **차트 응답 기반** 판정·라운드 프로브.
+
+- **`utils/krx_bars.py`**: `m1_bar_end_ts_for_closed_open`, `chart_covers_m1_closed_minute` — ka10080 차트 `max(cntr_tm)` 이 목표 분 종료 시각 미만이면 ``minute_not_ready``(장전·개장 직후).
+- **`core/rt_watchlist_m1_api_poller.py`**: 매 분 대표 종목 1건 **프로브** 후 라운드 스케줄/생략. ``minute_not_ready`` 는 UI·진단 스팸 없이 조용히 생략, 차트는 도달했는데 행만 없을 때만 ``row_not_found`` 기록. 0.8.56 시계 가드(`is_krx_m1_closed_open_label`) 제거.
+
 ## 0.8.56 (2026-07-03)
 
 ka10080 M1 폴러 — 장전·장후 `row_not_found` 누적 방지.

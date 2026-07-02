@@ -21,6 +21,8 @@ __all__ = [
     "m1_window_start_for_15m_end",
     "m1_index_bounds_for_15m_end",
     "m1_bar_open_label_for_just_completed_minute",
+    "m1_bar_end_ts_for_closed_open",
+    "chart_covers_m1_closed_minute",
     "is_krx_m1_closed_open_label",
     "resample_1m_ohlcv_to_15m_krx",
     "KRX_15M_RESAMPLE_KWARGS",
@@ -213,6 +215,33 @@ def m1_bar_open_label_for_just_completed_minute(
     return floored - pd.Timedelta(minutes=1)
 
 
+def m1_bar_end_ts_for_closed_open(
+    closed_open: Union[pd.Timestamp, datetime, str],
+) -> pd.Timestamp:
+    """
+    닫힌 1분봉 시작 라벨 → ka10080 인덱스(cntr_tm = **봉 종가 시각**).
+    """
+    return pd.Timestamp(closed_open).floor("min") + pd.Timedelta(minutes=1)
+
+
+def chart_covers_m1_closed_minute(
+    chart_df: pd.DataFrame,
+    closed_open: Union[pd.Timestamp, datetime, str],
+) -> bool:
+    """
+    ka10080 1분 차트가 목표 닫힌 분(종료 시각)까지 데이터를 포함하는지.
+
+    ``max(cntr_tm) < 종료 시각`` 이면 아직 해당 분봉이 생성되지 않은 것(장전·개장 직후 지연).
+    """
+    try:
+        if chart_df is None or getattr(chart_df, "empty", True):
+            return False
+        end_ts = m1_bar_end_ts_for_closed_open(closed_open)
+        return pd.Timestamp(chart_df.index.max()).floor("s") >= end_ts.floor("s")
+    except Exception:
+        return False
+
+
 def is_krx_m1_closed_open_label(
     closed_open: Union[pd.Timestamp, datetime, str],
 ) -> bool:
@@ -220,8 +249,7 @@ def is_krx_m1_closed_open_label(
     ``m1_bar_open_label_for_just_completed_minute`` 로 구한 **닫힌 1분봉 시작 라벨**이
     KRX 연속매매 1분 격자(평일 09:00~15:19)에 속하는지.
 
-    장전·장후·동시호가(15:20~)·주말은 False — ka10080(1분)에 해당 행이 없어
-    ``row_not_found`` 만 쌓이는 구간을 피할 때 사용한다.
+    (레거시·보조) 실시간 M1 폴러는 ``chart_covers_m1_closed_minute`` 를 우선 사용한다.
     """
     try:
         t = pd.Timestamp(closed_open).floor("min")
