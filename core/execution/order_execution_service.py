@@ -579,16 +579,18 @@ class OrderExecutionService:
         try:
             sl = getattr(self.app, "session_logger", None)
             if sl:
-                sl.log(
-                    "strategy_action",
-                    {
-                        "code": code,
-                        "action": action,
-                        "reason": reason,
-                        "now_price": float(kwargs.get("now_price", 0) or 0),
-                        "profit_ratio": float(kwargs.get("profit_ratio", 0) or 0),
-                    },
-                )
+                row: Dict[str, Any] = {
+                    "code": code,
+                    "action": action,
+                    "reason": reason,
+                    "now_price": float(kwargs.get("now_price", 0) or 0),
+                    "profit_ratio": float(kwargs.get("profit_ratio", 0) or 0),
+                }
+                for _dk in ("m1_bar", "entry_time"):
+                    _dv = kwargs.get(_dk)
+                    if _dv is not None and str(_dv).strip():
+                        row[_dk] = str(_dv)
+                sl.log("strategy_action", row)
         except Exception:
             pass
 

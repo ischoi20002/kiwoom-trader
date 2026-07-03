@@ -109,23 +109,63 @@ def _m1_hi_for_maxp(m1_r: Any) -> float:
         return 0.0
 
 
+def resolve_position_entry_ts(pos: Dict[str, Any]) -> Optional[pd.Timestamp]:
+    """
+    포지션 진입 시각 — ``entry_time`` / ``entry_date`` / 첫 BUY 이벤트 순으로 해석.
+
+    SYNCED 선반영 뒤 체결 확정 전 ``entry_time`` 이 장전 동기화 시각으로 남는 경우,
+    확정 BUY 이벤트 시각이 더 늦으면 **이벤트 시각을 우선**합니다.
+    """
+    field_ts: Optional[pd.Timestamp] = None
+    try:
+        et = pos.get("entry_time") or pos.get("entry_date")
+        if et is not None and str(et).strip():
+            field_ts = pd.Timestamp(et)
+    except (TypeError, ValueError):
+        field_ts = None
+
+    buy_ts: Optional[pd.Timestamp] = None
+    try:
+        for ev in reversed(pos.get("events") or []):
+            if not isinstance(ev, dict):
+                continue
+            act = str(ev.get("action", "") or "")
+            if act.startswith("BUY_"):
+                t = ev.get("time")
+                if t is not None and str(t).strip():
+                    buy_ts = pd.Timestamp(t)
+                    break
+    except (TypeError, ValueError):
+        buy_ts = None
+
+    if field_ts is not None and buy_ts is not None:
+        try:
+            return max(field_ts, buy_ts)
+        except Exception:
+            return buy_ts
+    if buy_ts is not None:
+        return buy_ts
+    return field_ts
+
+
 def _m1_is_before_position_entry(m1_time: Any, pos_sim: Dict[str, Any]) -> bool:
     """
-    진입 시각 이전 1분봉인지 판별.
+    진입 시각 이전에 **완료된** 1분봉이면 True(청산 미러에서 제외).
 
-    RT 인트라바 미러는 15분 슬롯 전체 M1을 한꺼번에 훑는데, 신규 진입 직후
-    **진입 이전** 분봉 저가(예: 13:47 423,500)로 SL이 오판되는 것을 막습니다.
-    동적 BT는 루프 중 ``h_info`` 가 생긴 뒤에만 청산하므로 영향 없음.
+    분 단위 floor(예: 10:15)만 쓰면 같은 15분 슬롯의 진입 전 1분(10:01~10:14) 저가가
+    ATR SL에 걸리는 오판이 납니다. 1분봉 open 라벨 기준 **봉 종료 시각(open+1분)** 이
+    진입 시각 이하이면 해당 분은 제외합니다.
     """
     try:
-        et = pos_sim.get("entry_time") or pos_sim.get("entry_date")
-        if et is None or str(et).strip() == "":
-            return False
-        m1_lab = pd.Timestamp(m1_time).floor("min")
-        ent_lab = pd.Timestamp(et).floor("min")
-        return m1_lab < ent_lab
+        entry_ts = resolve_position_entry_ts(pos_sim)
+        if entry_ts is None:
+            # 진입 시각 미상 — 보수적으로 청산 미러에서 제외(오판 방지)
+            return True
+        m1_open = pd.Timestamp(m1_time).floor("min")
+        m1_close = m1_open + pd.Timedelta(minutes=1)
+        return m1_close <= entry_ts
     except (TypeError, ValueError):
-        return False
+        return True
 
 
 def evaluate_bt_hp_intrabar_unified(
@@ -284,6 +324,7 @@ def evaluate_bt_hp_intrabar_unified(
                             "profit_ratio": float(res.get("profit_ratio", 0) or 0),
                             "eval_price": float(px_sell),
                             "m1_idx": int(m1_idx),
+                            "m1_bar": str(m1_time),
                         }
                         out["reason"] = "exit"
                         return out

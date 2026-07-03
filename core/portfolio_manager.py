@@ -2109,11 +2109,13 @@ class PortfolioManager:
                         iq = self._to_i(qty)
                         fee_amt = fp * iq * buy_r
                         total_invested = fp * iq + fee_amt
+                        _fill_et = datetime.now().isoformat()
                         pos["name"] = reg_name
                         pos["avg_price"] = fp
                         pos["qty"] = iq
                         pos["stage"] = 1
                         pos["invested"] = total_invested
+                        pos["entry_time"] = _fill_et
                         pos["reason"] = reg_reason
                         pos["sig_type"] = _sig_type
                         try:
@@ -2141,7 +2143,7 @@ class PortfolioManager:
                             iq,
                             1,
                             total_invested,
-                            pos.get("entry_time") or datetime.now().isoformat(),
+                            _fill_et,
                             reg_reason,
                         )
                         _ord_sfx = f" ord={order_no}" if order_no else ""

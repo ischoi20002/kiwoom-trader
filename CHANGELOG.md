@@ -13,6 +13,15 @@
 
 ---
 
+## 0.8.60 (2026-07-03)
+
+인트라바 ATR SL — 진입 전 1분봉 오판 방지.
+
+- **`core/bt_hp_intrabar_unified.py`**: `resolve_position_entry_ts` 추가 — BUY 이벤트 시각이 `entry_time`보다 늦으면 이벤트 우선(SYNCED 장전 시각 잔존 대비). 청산 미러는 1분봉 **봉 종료 시각(open+1분) ≤ 진입 시각** 인 분만 제외.
+- **`core/portfolio_manager.py`**: SYNCED·미확정 S1 체결 확정 시 `entry_time`을 체결 시각으로 갱신(장전 동기화 시각 잔존 방지).
+- **`core/signal_engine.py`**: 진입 시각 없으면 인트라바 청산 미러 차단. `ATR_SL` 시 `m1_bar`·`entry_time`을 strategy_action 로그에 포함.
+- **`core/execution/order_execution_service.py`**: `strategy_action` JSONL에 `m1_bar`·`entry_time` 필드 전달.
+
 ## 0.8.59 (2026-07-03)
 
 정상 M1 폴러 동작 시 UI 로그 최소화.

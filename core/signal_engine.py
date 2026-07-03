@@ -7,7 +7,10 @@ from datetime import datetime
 import time
 import traceback
 from backtest_engine import TradingStrategy
-from core.bt_hp_intrabar_unified import evaluate_bt_hp_intrabar_unified
+from core.bt_hp_intrabar_unified import (
+    evaluate_bt_hp_intrabar_unified,
+    resolve_position_entry_ts,
+)
 from core.bt_hp_signal_bridge import (
     evaluate_close_now_s1_at_m1_idx,
     intrabar_close_now_signals_enabled,
@@ -572,6 +575,11 @@ class SignalEngine:
                     return True
         except Exception:
             pass
+        try:
+            if resolve_position_entry_ts(pos_live) is None:
+                return True
+        except Exception:
+            return True
         return False
 
     def _realtime_gap_down_mirror_ok(
@@ -748,12 +756,25 @@ class SignalEngine:
                     nk, pos_live, info, reason=rs
                 ):
                     return {"action": "HOLD"}
-                return {
+                exit_out: Dict[str, Any] = {
                     "action": "EXIT",
                     "reason": rs,
                     "profit_ratio": pr,
                     "now_price": ep,
                 }
+                try:
+                    _mb = ex.get("m1_bar")
+                    if _mb is not None and str(_mb).strip():
+                        exit_out["m1_bar"] = str(_mb)
+                except Exception:
+                    pass
+                try:
+                    _ets = resolve_position_entry_ts(pos_live)
+                    if _ets is not None:
+                        exit_out["entry_time"] = str(_ets)
+                except Exception:
+                    pass
+                return exit_out
             s2 = out.get("stage2_addon")
             if isinstance(s2, dict):
                 if bool(pos_live.get("s2_limit_order_pending", False)):
@@ -1978,6 +1999,19 @@ class SignalEngine:
                         _eff_np = float(now_price)
 
                     if res.get("action") != "HOLD":
+                        _act_kw: Dict[str, Any] = {
+                            "now_price": float(_eff_np),
+                            "profit_ratio": float(
+                                res.get("profit_ratio", 0) or 0
+                            ),
+                        }
+                        for _ak in ("m1_bar", "entry_time"):
+                            try:
+                                _av = res.get(_ak)
+                                if _av is not None and str(_av).strip():
+                                    _act_kw[_ak] = str(_av)
+                            except Exception:
+                                pass
                         if defer_main_callbacks:
                             try:
                                 self.app.enqueue_tick_main_action(
@@ -1986,12 +2020,7 @@ class SignalEngine:
                                         str(code).zfill(6),
                                         str(res.get("action") or ""),
                                         str(res.get("reason") or ""),
-                                        {
-                                            "now_price": float(_eff_np),
-                                            "profit_ratio": float(
-                                                res.get("profit_ratio", 0) or 0
-                                            ),
-                                        },
+                                        _act_kw,
                                     ),
                                 )
                             except Exception:
@@ -2001,8 +2030,7 @@ class SignalEngine:
                                 code,
                                 res.get("action"),
                                 res.get("reason"),
-                                now_price=_eff_np,
-                                profit_ratio=res.get("profit_ratio", 0),
+                                **_act_kw,
                             )
 
             # 관심목록 전용: 평단(기준가) 등록 시에만 S2-B 매도 신호 텔레그램 (미등록 시 매수만)
