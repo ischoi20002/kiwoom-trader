@@ -277,6 +277,69 @@ class OrderExecutionService:
                     pass
         return sell_q
 
+    def _s1_stale_signal_gap_block(
+        self,
+        code: Any,
+        name: Any,
+        sig_hint: float,
+        fresh_ask: float,
+        reason: Any,
+    ) -> bool:
+        """
+        S1 진입 stale 가드.
+
+        신호 평가가(``sig_hint``)와 주문 시점 신선 호가(``fresh_ask``, touch 매도1호가)의
+        괴리율이 임계치(``realtime_s1_stale_signal_max_gap_pct``, 기본 1.5%)를 넘으면 True(생략).
+
+        - 지연된 M1/틱 캐시로 눌림목(Type A) 등이 오탐되어, 백테스트엔 없는 진입이
+          실시간에서만 발생하는 현상을 방지한다.
+        - ``fresh_ask`` 가 없거나(비-touch) 값이 유효하지 않으면 가드하지 않는다.
+        """
+        try:
+            sh = float(sig_hint)
+            fa = float(fresh_ask)
+        except (TypeError, ValueError):
+            return False
+        if sh <= 0 or fa <= 0:
+            return False
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            thr = float(st.get("realtime_s1_stale_signal_max_gap_pct", 1.5))
+        except (TypeError, ValueError):
+            thr = 1.5
+        # 0 이하로 설정하면 가드 비활성화
+        if thr <= 0:
+            return False
+        gap_pct = abs(fa - sh) / sh * 100.0
+        if gap_pct <= thr:
+            return False
+        try:
+            self.log(
+                f"⚠️ [Skip] {name}({code}) S1 매수 생략: 신호가 {int(sh):,} vs 신선호가 "
+                f"{int(fa):,} 괴리 {gap_pct:.2f}% > {thr:.2f}% (지연 데이터 오탐 방지)"
+            )
+        except Exception:
+            pass
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "buy_skipped",
+                    {
+                        "code": str(code),
+                        "name": str(name),
+                        "reason": "stale_signal_price_gap",
+                        "signal_hint_price": float(sh),
+                        "fresh_ask": float(fa),
+                        "gap_pct": round(gap_pct, 3),
+                        "threshold_pct": float(thr),
+                        "sig_reason": str(reason),
+                    },
+                )
+        except Exception:
+            pass
+        return True
+
     def execute_buy_signal(self, code, name, price, reason="TYPE_A") -> bool:
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
         Returns True iff 주문 접수(ord_no) 또는 가상 체결까지 성공 — SignalEngine 쿨타임 갱신용.
@@ -291,6 +354,7 @@ class OrderExecutionService:
 
         ot, ex_style = self._realtime_live_order_spec()
         adj_price = 0
+        fresh_ask: float = 0.0
         try:
             if ex_style == "touch":
                 _nc = str(code).zfill(6)
@@ -313,7 +377,8 @@ class OrderExecutionService:
                     except Exception:
                         pass
                     return False
-                adj_price = int(round(float(_ask)))
+                fresh_ask = float(_ask)
+                adj_price = int(round(fresh_ask))
             else:
                 adj_price = int(
                     self.app.order_manager.get_adjusted_price(
@@ -343,6 +408,11 @@ class OrderExecutionService:
                 )
         except Exception:
             pass
+
+        # [Stale-Signal Guard] 신호 평가가(sig_hint)가 신선한 시장 호가(fresh_ask)와 크게 벌어지면
+        # 지연된 M1/틱으로 눌림목 등 신호가 오탐됐을 수 있으므로 진입을 생략한다(BT 대비 RT 과진입 방지).
+        if self._s1_stale_signal_gap_block(code, name, sig_hint, fresh_ask, reason):
+            return False
 
         if code in self.app.portfolio.virtual_positions:
             try:
