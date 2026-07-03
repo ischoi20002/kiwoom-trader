@@ -505,13 +505,9 @@ class RtWatchlistM1ApiPoller:
             try:
                 from core.realtime_m1_fallback import apply_chart_catchup_to_m1_store
 
-                n_new = apply_chart_catchup_to_m1_store(
+                apply_chart_catchup_to_m1_store(
                     self._app, nk, chart_df, closed_lab
                 )
-                if n_new > 1:
-                    self._emit(
-                        f"ℹ️ [M1Poll] {nk} 차트 catch-up {n_new}분 반영(목표 {sk})"
-                    )
             except Exception:
                 pass
 
