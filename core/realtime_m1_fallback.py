@@ -68,6 +68,8 @@ def apply_chart_catchup_to_m1_store(
     ka10080 차트에서 ``upto_closed_open`` 까지의 **완료 1분**을 RtTickM1Store 에 누락 없이 반영.
 
     ka10080 인덱스는 ``cntr_tm`` = **봉 종가 시각**(분 끝)이므로 오픈 라벨 = 종가 시각 − 1분.
+    RtTickM1Store 는 최근 N분만 보관하므로, 차트 1페이지 전체(약 900분)를 매번 재반영하지 않고
+    보관 가능한 최근 구간만 비교·반영한다.
     반환: 새로 반영한 분 수.
     """
     try:
@@ -78,18 +80,67 @@ def apply_chart_catchup_to_m1_store(
         if m1s is None:
             return 0
         upto = pd.Timestamp(upto_closed_open).floor("min")
+        try:
+            max_completed = int(getattr(m1s, "_max_c", 24) or 24)
+        except (TypeError, ValueError):
+            max_completed = 24
+        max_completed = max(8, min(max_completed, 64))
+        from_open = upto - pd.Timedelta(minutes=max_completed - 1)
+
+        existing = pd.DataFrame()
+        try:
+            existing = m1s.dataframe_for_window(
+                nk, from_open, upto, include_open_bucket=False
+            )
+            if existing is None:
+                existing = pd.DataFrame()
+            else:
+                existing = existing.copy()
+                existing.index = pd.to_datetime(existing.index).floor("min")
+        except Exception:
+            existing = pd.DataFrame()
+
+        def _same_existing_row(
+            open_lab: pd.Timestamp,
+            o: float,
+            h: float,
+            l_: float,
+            c: float,
+            v: float,
+        ) -> bool:
+            """이미 같은 공식 1분 OHLCV가 있으면 재반영하지 않는다."""
+            try:
+                if existing is None or existing.empty or open_lab not in existing.index:
+                    return False
+                erow = existing.loc[open_lab]
+                if isinstance(erow, pd.DataFrame):
+                    erow = erow.iloc[-1]
+                vals = (
+                    float(erow["Open"]),
+                    float(erow["High"]),
+                    float(erow["Low"]),
+                    float(erow["Close"]),
+                    float(erow.get("Volume", 0) or 0),
+                )
+                want = (o, h, l_, c, max(0.0, v))
+                return all(abs(vals[i] - want[i]) < 1e-9 for i in range(5))
+            except Exception:
+                return False
+
         applied = 0
         for end_ts, row in df_1m.sort_index().iterrows():
             try:
                 end_lab = pd.Timestamp(end_ts).floor("min")
                 open_lab = end_lab - pd.Timedelta(minutes=1)
-                if open_lab > upto:
+                if open_lab < from_open or open_lab > upto:
                     continue
                 o = float(row["Open"])
                 h = float(row["High"])
                 l_ = float(row["Low"])
                 c = float(row["Close"])
                 v = float(row.get("Volume", 0) or 0)
+                if _same_existing_row(open_lab, o, h, l_, c, v):
+                    continue
                 before = int(m1s.revision_for_code(nk))
                 m1s.apply_official_closed_minute(nk, open_lab, o, h, l_, c, v)
                 after = int(m1s.revision_for_code(nk))
