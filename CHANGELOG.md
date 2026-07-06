@@ -13,6 +13,13 @@
 
 ---
 
+## 0.8.62 (2026-07-06)
+
+실시간 S1 신호 진단 로깅 추가 (백테스트 대비 미진입 종목 원인 특정용).
+
+- **배경**: 2026-07-06 동적 백테스트는 352820(하이브)을 09:30봉 TYPE_A로 매수(→11:40 ATR_SL)했으나 실시간은 종일 미진입. 352820은 백테스트 유니버스(schedule_a rank3)·실시간 감시목록(`selected_targets.csv`) 양쪽에 정상 포함됐고, 신호 로직(`get_buy_signals_detailed`)도 동일하여 유니버스·신호 로직 차이가 아님이 확인됨. 남은 원인(장초반 라이브 15분봉 ≠ DB 확정봉, 또는 워밍업 `bars_ready` 미충족)은 실시간이 종목별 신호 평가를 로그에 남기지 않아 사후 특정이 불가했음.
+- **`core/signal_engine.py`**: `_log_s1_watch_diag` 추가 — 감시·비보유·비관심전용 종목의 S1 평가 상태(`bars_ready`·봉수·`signal_on`·`sig_type`·`is_buy`·`met_ratio`·`confluence`)를 `s1_watch_eval_diag`로 기록. 신호=ON인데 미매수면 즉시, 그 외에는 `realtime_s1_watch_diag_interval_sec`(기본 60초) 주기. 신호 판단 로직은 불변(관측 전용).
+
 ## 0.8.61 (2026-07-03)
 
 실시간 S1 진입 — 지연(stale) 신호가 오탐 진입 차단 (백테스트 대비 과진입 방지).

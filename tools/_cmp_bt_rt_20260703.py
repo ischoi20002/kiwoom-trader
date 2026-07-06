@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
-"""2026-07-03 동적 백테스트 리포트 vs 실시간 세션 로그 매매 대조(임시 진단용)."""
+"""동적 백테스트 리포트 vs 실시간 세션 로그 매매 대조(임시 진단용).
+
+사용법: python _cmp_bt_rt_20260703.py [YYYY-MM-DD]
+날짜 미지정 시 2026-07-03. RT 로그는 해당 날짜 폴더에서 읽고, BT 리포트는
+프로젝트 루트 dynamic_trade_report.html(가장 최근 실행분)을 사용한다.
+"""
 import re
+import sys
 import json
 from pathlib import Path
 
+_DAY = sys.argv[1] if len(sys.argv) > 1 else "2026-07-03"
 REPORT = Path(r"c:/vibe/dynamic_trade_report.html")
-RT = Path(r"c:/vibe/realtime_session_logs/2026-07-03/session_events.jsonl")
+RT = Path(rf"c:/vibe/realtime_session_logs/{_DAY}/session_events.jsonl")
 
 
 def parse_backtest() -> dict:

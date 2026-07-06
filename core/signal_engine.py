@@ -1141,6 +1141,91 @@ class SignalEngine:
         except Exception:
             return 0
 
+    def _log_s1_watch_diag(
+        self,
+        code: str,
+        *,
+        bars_ready: bool,
+        bar_count: int,
+        min_bars: int,
+        is_buy: bool,
+        info: Dict[str, Any],
+        now_price: float,
+    ) -> None:
+        """
+        [진단] 감시(신규 진입 후보) 종목의 S1 평가 상태를 세션 로그에 주기 기록.
+
+        백테스트에는 잡히는데 실시간은 매수하지 않는 종목의 원인
+        (봉 준비 미충족 / 신호 자체 미발생 / 신호는 떴으나 게이트 차단)을 사후 특정하기 위함.
+        신호 판단 로직은 건드리지 않고 관측만 한다.
+
+        - 대상: 감시목록에 있고, 관심목록 전용(wl_only)이 아니며, 현재 미보유 종목.
+        - 스로틀: 종목별 ``realtime_s1_watch_diag_interval_sec``(기본 60초).
+        - 신호(Signal)=True 인데 미매수인 경우는 스로틀과 무관하게 즉시 1회 기록.
+        """
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl is None:
+                return
+            try:
+                interval = float(
+                    self.app.settings.get("realtime_s1_watch_diag_interval_sec", 60.0)
+                )
+            except (TypeError, ValueError):
+                interval = 60.0
+            if interval <= 0:
+                return
+
+            last_sig = info.get("last_sig_cache") if isinstance(info, dict) else None
+            sig_on = False
+            sig_type = ""
+            try:
+                if isinstance(last_sig, dict):
+                    sig_on = bool(self._to_scalar(last_sig.get("Signal", False), False))
+                    sig_type = str(last_sig.get("Sig_Type", "") or "")
+            except Exception:
+                sig_on = False
+
+            store = getattr(self, "_s1_watch_diag_last_ts", None)
+            if store is None:
+                store = {}
+                self._s1_watch_diag_last_ts = store
+            now_t = time.time()
+            last_t = float(store.get(code, 0.0) or 0.0)
+            # 신호가 켜졌는데 미매수면(핵심 관측 대상) 즉시, 그 외에는 주기적으로만 기록
+            due = (now_t - last_t) >= interval
+            signal_but_no_buy = sig_on and not is_buy
+            if not (due or signal_but_no_buy):
+                return
+            store[code] = now_t
+
+            sl.log(
+                "s1_watch_eval_diag",
+                {
+                    "code": str(code).zfill(6),
+                    "name": str(info.get("name", "")) if isinstance(info, dict) else "",
+                    "bars_ready": bool(bars_ready),
+                    "bar_count": int(bar_count),
+                    "min_bars": int(min_bars),
+                    "signal_on": bool(sig_on),
+                    "sig_type": sig_type,
+                    "is_buy": bool(is_buy),
+                    "signal_but_no_buy": bool(signal_but_no_buy),
+                    "met_ratio": float(
+                        self._to_scalar(info.get("met_ratio", 0.0), 0.0)
+                    )
+                    if isinstance(info, dict)
+                    else 0.0,
+                    "confluence": str(info.get("confluence", ""))
+                    if isinstance(info, dict)
+                    else "",
+                    "now_price": float(now_price),
+                },
+            )
+        except Exception:
+            # 진단 로깅 실패는 매매/실시간 흐름을 절대 막지 않는다.
+            pass
+
     def on_tick_received(
         self,
         code,
@@ -1800,6 +1885,22 @@ class SignalEngine:
                     info["_bt_hp_bridge_res"] = None
                 except Exception:
                     pass
+
+            # [진단] 신규 진입 후보(감시·비보유·비관심전용)의 S1 평가 상태 기록.
+            # 백테스트엔 있고 실시간엔 없는 매매의 원인(봉 준비/신호 미발생/게이트 차단) 사후 특정용.
+            try:
+                if is_in_watchlist and (not is_wl_only) and (not self._code_in_virtual_positions(code)):
+                    self._log_s1_watch_diag(
+                        code,
+                        bars_ready=bool(bars_ready),
+                        bar_count=int(current_bar_count),
+                        min_bars=int(_min_sig_bars),
+                        is_buy=bool(is_buy),
+                        info=info,
+                        now_price=float(now_price),
+                    )
+            except Exception:
+                pass
 
             # 청산·S2 표시 공통: 마지막 지표 행 (봉 부족 시 보유면 보조 계산)
             eval_ind: Optional[dict] = None
