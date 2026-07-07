@@ -340,6 +340,121 @@ class OrderExecutionService:
             pass
         return True
 
+    def _log_buy_skip_d2_insufficient(
+        self,
+        code: Any,
+        name: Any,
+        *,
+        invest_amt: int,
+        adj_price: int,
+        reason_tag: str = "S1",
+    ) -> None:
+        """D+2 가용 한도로 1주도 살 수 없을 때 로그·JSONL."""
+        try:
+            pm = self.app.portfolio
+            d2v = float(pm._effective_d2_cash_for_buy())
+            reserved = float(pm._d2_pending_buy_reserve_total())
+        except Exception:
+            d2v = 0.0
+            reserved = 0.0
+        try:
+            nc_key = str(code).zfill(6)
+        except Exception:
+            nc_key = "000000"
+        lk = f"{nc_key}:d2_one_lot"
+        try:
+            _now = time.time()
+            _last = float(self._buy_skip_d2_one_lot_log_at.get(lk, 0.0) or 0.0)
+            if _now - _last >= 180.0:
+                self._buy_skip_d2_one_lot_log_at[lk] = _now
+                extra = (
+                    f", 미체결예약 {reserved:,.0f}원"
+                    if reserved > 0
+                    else ""
+                )
+                self.log(
+                    f"⚠️ [Skip] {name}({code}) {reason_tag} 매수 생략: D+2 가용 한도로 "
+                    f"지정가 기준 1주({adj_price:,}원)도 살 수 없음 "
+                    f"(투자원금 상한 {invest_amt:,}원, 가용 D+2≈{d2v:,.0f}원{extra})."
+                )
+        except Exception as _log_e:
+            try:
+                self.log(
+                    f"⚠️ [Skip] {name}({code}) {reason_tag} 매수 생략(D+2 한도) — "
+                    f"로그 처리 오류: {_log_e}"
+                )
+            except Exception:
+                pass
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "buy_skipped",
+                    {
+                        "code": code,
+                        "name": name,
+                        "reason": "d2_insufficient_for_one_lot",
+                        "invest_amt": int(invest_amt),
+                        "adj_price": int(adj_price),
+                        "d2_deposit": d2v,
+                        "d2_reserved": reserved,
+                        "reason_tag": reason_tag,
+                    },
+                )
+        except Exception:
+            pass
+
+    def _finalize_buy_qty_for_d2(
+        self,
+        code: Any,
+        name: Any,
+        *,
+        invest_amt: int,
+        adj_price: int,
+        reason_tag: str = "S1",
+    ) -> int:
+        """
+        D+2 가용(미체결 매수 예약 차감) 기준 최종 매수 주수.
+
+        Returns:
+            0 이면 주문 불가.
+        """
+        try:
+            ap = int(adj_price)
+        except (TypeError, ValueError):
+            ap = 0
+        if ap <= 0:
+            return 0
+        try:
+            ia = int(invest_amt)
+        except (TypeError, ValueError):
+            ia = 0
+        if ia <= 0:
+            return 0
+
+        qty = ia // ap
+        try:
+            pm = self.app.portfolio
+            max_qty = int(pm.max_buy_qty_for_d2(float(ap)))
+        except Exception:
+            max_qty = qty
+
+        if max_qty <= 0:
+            self._log_buy_skip_d2_insufficient(
+                code, name, invest_amt=ia, adj_price=ap, reason_tag=reason_tag
+            )
+            return 0
+        if qty > max_qty:
+            try:
+                self.log(
+                    f"ℹ️ [Risk] {name}({code}) {reason_tag} D+2 가용 한도로 수량 축소: "
+                    f"{qty} → {max_qty}주 (미체결 매수 예약 반영)"
+                )
+            except Exception:
+                pass
+            qty = max_qty
+        return int(qty)
+
     def execute_buy_signal(self, code, name, price, reason="TYPE_A") -> bool:
         """[v18.0/v4.5.4] 1단계 진입 시그널에 따른 매매 집행 (실전/가상 통합).
         Returns True iff 주문 접수(ord_no) 또는 가상 체결까지 성공 — SignalEngine 쿨타임 갱신용.
@@ -455,57 +570,15 @@ class OrderExecutionService:
             return False
             
         # 2. 주문 수량 및 가격 보정
-        # invest_amt는 D+2/(1+매수수수료율) 이하의 매수 원금 상한이다. (portfolio._max_buy_principal_cash_d2_limit)
-        # adj_price(호가+1틱) 기준으로 산출한 주수가 0이면, 1주도 살 돈이 없는 것이므로
-        # max(1, ...)로 1주를 강제하면 D+2 예수금이 마이너스(미수)로 간다 — 절대 금지.
-        try:
-            qty = int(invest_amt // int(adj_price))
-        except (TypeError, ValueError, ZeroDivisionError):
-            qty = 0
+        # invest_amt는 D+2/(1+매수수수료율) 이하의 매수 원금 상한(미체결 예약 차감).
+        qty = self._finalize_buy_qty_for_d2(
+            code,
+            name,
+            invest_amt=int(invest_amt),
+            adj_price=int(adj_price),
+            reason_tag="S1",
+        )
         if qty <= 0:
-            try:
-                d2v = float(getattr(self.app.portfolio, "d2_deposit", 0) or 0)
-            except (TypeError, ValueError):
-                d2v = 0.0
-            try:
-                try:
-                    nc_key = str(code).zfill(6)
-                except Exception:
-                    nc_key = "000000"
-                lk = f"{nc_key}:d2_one_lot"
-                _now = time.time()
-                _last = float(self._buy_skip_d2_one_lot_log_at.get(lk, 0.0) or 0.0)
-                if _now - _last >= 180.0:
-                    self._buy_skip_d2_one_lot_log_at[lk] = _now
-                    self.log(
-                        f"⚠️ [Skip] {name}({code}) S1 매수 생략: D+2 현금 한도로 "
-                        f"지정가 기준 1주({adj_price:,}원)도 살 수 없음 "
-                        f"(투자원금 상한 {invest_amt:,}원, D+2≈{d2v:,.0f}원). "
-                        f"고가주·잔고 부족 시 발생합니다."
-                    )
-            except Exception as _log_e:
-                try:
-                    self.log(
-                        f"⚠️ [Skip] {name}({code}) S1 매수 생략(D+2 한도, 1주 불가) — 로그 처리 오류: {_log_e}"
-                    )
-                except Exception:
-                    pass
-            try:
-                sl = getattr(self.app, "session_logger", None)
-                if sl:
-                    sl.log(
-                        "buy_skipped",
-                        {
-                            "code": code,
-                            "name": name,
-                            "reason": "d2_insufficient_for_one_lot",
-                            "invest_amt": int(invest_amt),
-                            "adj_price": int(adj_price),
-                            "d2_deposit": d2v,
-                        },
-                    )
-            except Exception:
-                pass
             return False
 
         try:
@@ -601,6 +674,13 @@ class OrderExecutionService:
             return False
 
         if allow_order and ord_no:
+            try:
+                outlay = self.app.portfolio.estimate_buy_cash_outlay(
+                    int(qty), float(adj_price)
+                )
+                self.app.portfolio.reserve_d2_for_buy_order(str(ord_no).strip(), outlay)
+            except Exception:
+                pass
             try:
                 self._register_limit_order_watch(
                     str(ord_no).strip(),
@@ -1073,8 +1153,14 @@ class OrderExecutionService:
                 adj_price = self.app.order_manager.get_adjusted_price(
                     order_ref_px, "buy"
                 )
-            add_qty = add_amt // adj_price
-            
+            add_qty = self._finalize_buy_qty_for_d2(
+                code,
+                pos.get("name", code),
+                invest_amt=int(add_amt),
+                adj_price=int(adj_price),
+                reason_tag="S2",
+            )
+
             if add_qty > 0:
                 if allow_order:
                     ord_no = None
@@ -1136,6 +1222,15 @@ class OrderExecutionService:
                     except Exception:
                         pass
                     if ord_no:
+                        try:
+                            outlay = self.app.portfolio.estimate_buy_cash_outlay(
+                                int(add_qty), float(adj_price)
+                            )
+                            self.app.portfolio.reserve_d2_for_buy_order(
+                                str(ord_no).strip(), outlay
+                            )
+                        except Exception:
+                            pass
                         pos["s2_limit_order_pending"] = True
                         pos["s2_pending_ord_no"] = str(ord_no).strip()
                         try:

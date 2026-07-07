@@ -56,6 +56,8 @@ class PortfolioManager:
         # D+2 축소 안내 로그 스로틀(틱마다 동일 메시지 반복 방지)
         self._d2_shrink_log_ts: float = 0.0
         self._d2_shrink_log_sig: Optional[Tuple[int, int]] = None
+        # 미체결 S1/S2 매수 주문이 점유하는 D+2 현금(로컬 예약 — 동기화 전 중복 매수 방지)
+        self._d2_pending_buy_reserve: Dict[str, float] = {}
         # 체결 직후 on_fill 연속 호출 시 포지션 탭 전체 리빌드를 한 번으로 묶음
         self._gui_cb_after_id: Any = None
         self._gui_cb_last_flush_ts: float = 0.0
@@ -1678,21 +1680,97 @@ class PortfolioManager:
             pass
         return 0.0
 
+    def _buy_fee_rate_decimal(self) -> float:
+        try:
+            buy_r, _ = fee_decimal_rates_live_trading(self.settings)
+            return float(buy_r)
+        except Exception:
+            return 0.0
+
+    def estimate_buy_cash_outlay(self, qty: int, unit_price: float) -> float:
+        """매수 체결 시 D+2 에서 빠질 추정 금액(매수대금+매수수수료)."""
+        try:
+            q = int(qty)
+            p = float(unit_price)
+            if q <= 0 or p <= 0:
+                return 0.0
+            return p * float(q) * (1.0 + self._buy_fee_rate_decimal())
+        except Exception:
+            return 0.0
+
+    def _d2_pending_buy_reserve_total(self) -> float:
+        try:
+            with self.lock:
+                return float(
+                    sum(float(v or 0) for v in self._d2_pending_buy_reserve.values())
+                )
+        except Exception:
+            return 0.0
+
+    def _effective_d2_cash_for_buy(self) -> float:
+        """미체결 매수 예약을 차감한 D+2 가용 현금."""
+        try:
+            d2 = float(getattr(self, "d2_deposit", 0) or 0)
+            reserved = self._d2_pending_buy_reserve_total()
+            return max(0.0, d2 - reserved)
+        except Exception:
+            return 0.0
+
+    def reserve_d2_for_buy_order(self, order_no: str, cash_outlay: float) -> None:
+        """매수 주문 접수 직후 D+2 가용 한도에서 예약(중복 매수 방지)."""
+        try:
+            oid = str(order_no or "").strip()
+            amt = max(0.0, float(cash_outlay))
+            if not oid or amt <= 0:
+                return
+            with self.lock:
+                self._d2_pending_buy_reserve[oid] = amt
+        except Exception:
+            pass
+
+    def release_d2_buy_reserve(self, order_no: str) -> None:
+        """체결·취소·타임아웃 시 예약 해제."""
+        try:
+            oid = str(order_no or "").strip()
+            if not oid:
+                return
+            with self.lock:
+                self._d2_pending_buy_reserve.pop(oid, None)
+        except Exception:
+            pass
+
+    def max_buy_qty_for_d2(self, unit_price: float) -> int:
+        """D+2 가용(미체결 예약 차감) 기준 최대 매수 가능 주수."""
+        try:
+            p = float(unit_price)
+            if p <= 0:
+                return 0
+            eff = self._effective_d2_cash_for_buy()
+            if eff <= 0:
+                return 0
+            den = 1.0 + self._buy_fee_rate_decimal()
+            if den <= 1e-12:
+                return 0
+            max_principal = eff / den
+            return int(max_principal // p)
+        except Exception:
+            return 0
+
     def _max_buy_principal_cash_d2_limit(self) -> int:
         """
         현금매수 전용 상한(원): D+2 예수금 범위에서만 매수(신용·주문가능 별도 한도 미사용).
         체결금액 P·수수료율 r일 때 총지출 = P*(1+r) ≤ D+2 → P ≤ D+2/(1+r).
         D+2 ≤ 0 이면 추가 매수 불가(0).
+        미체결 매수 주문 예약액은 가용 D+2 에서 선차감한다.
         """
         try:
-            d2 = float(getattr(self, "d2_deposit", 0) or 0)
-            if d2 <= 0:
+            eff = self._effective_d2_cash_for_buy()
+            if eff <= 0:
                 return 0
-            buy_r, _ = fee_decimal_rates_live_trading(self.settings)
-            den = 1.0 + float(buy_r)
+            den = 1.0 + self._buy_fee_rate_decimal()
             if den <= 1e-12:
                 return 0
-            return int(max(0.0, d2 / den))
+            return int(max(0.0, eff / den))
         except Exception:
             return 0
 
@@ -1725,11 +1803,18 @@ class PortfolioManager:
                 cap = self._max_buy_principal_cash_d2_limit()
                 if cap <= 0:
                     try:
-                        d2v = float(getattr(self, "d2_deposit", 0) or 0)
+                        d2v = self._effective_d2_cash_for_buy()
+                        reserved = self._d2_pending_buy_reserve_total()
                         if invest_amt > 0:
+                            extra = (
+                                f", 미체결예약 {reserved:,.0f}원"
+                                if reserved > 0
+                                else ""
+                            )
                             self.log(
                                 "❌ [Risk] D+2 예수금 한도 내 현금 매수 불가 "
-                                f"(D+2={d2v:,.0f}원). 계좌 동기화·입금을 확인하세요."
+                                f"(가용 D+2={d2v:,.0f}원{extra}). "
+                                "계좌 동기화·입금을 확인하세요."
                             )
                     except Exception:
                         if invest_amt > 0:
@@ -1750,8 +1835,9 @@ class PortfolioManager:
                         self._d2_shrink_log_sig = sig
                         self._d2_shrink_log_ts = now
                         self.log(
-                            f"ℹ️ [Risk] 투자금액을 D+2 현금 한도로 축소합니다: "
-                            f"{before_amt:,} → {invest_amt:,}원 (매수대금+매수수수료 ≤ D+2)"
+                            f"ℹ️ [Risk] 투자금액을 D+2 가용 한도로 축소합니다: "
+                            f"{before_amt:,} → {invest_amt:,}원 "
+                            f"(매수대금+매수수수료 ≤ 가용 D+2)"
                         )
             except Exception:
                 pass

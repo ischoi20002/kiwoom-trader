@@ -730,6 +730,12 @@ class LimitOrderWatchService:
         if meta is None:
             return
 
+        try:
+            if meta.kind in ("s1_buy", "s2_buy"):
+                self.app.portfolio.release_d2_buy_reserve(oid)
+        except Exception:
+            pass
+
         root = self._get_root()
         if root is not None:
             aid = getattr(meta, "after_id", None)
