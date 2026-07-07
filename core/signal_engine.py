@@ -1159,7 +1159,7 @@ class SignalEngine:
         (봉 준비 미충족 / 신호 자체 미발생 / 신호는 떴으나 게이트 차단)을 사후 특정하기 위함.
         신호 판단 로직은 건드리지 않고 관측만 한다.
 
-        - 대상: 감시목록에 있고, 관심목록 전용(wl_only)이 아니며, 현재 미보유 종목.
+        - 대상: 일일 감시·자동매매 후보(``monitor_info`` 등록, 관심목록 전용·보유 제외).
         - 스로틀: 종목별 ``realtime_s1_watch_diag_interval_sec``(기본 60초).
         - 신호(Signal)=True 인데 미매수인 경우는 스로틀과 무관하게 즉시 1회 기록.
         """
@@ -1886,10 +1886,11 @@ class SignalEngine:
                 except Exception:
                     pass
 
-            # [진단] 신규 진입 후보(감시·비보유·비관심전용)의 S1 평가 상태 기록.
-            # 백테스트엔 있고 실시간엔 없는 매매의 원인(봉 준비/신호 미발생/게이트 차단) 사후 특정용.
+            # [진단] 신규 진입 후보(일일 감시·비보유·비관심전용)의 S1 평가 상태 기록.
+            # ``is_in_watchlist``(관심목록 파일)가 아니라 monitor_info 등록 종목 기준 —
+            # 관심목록 0건이어도 일일 선정 23종목에 진단이 쌓여야 함.
             try:
-                if is_in_watchlist and (not is_wl_only) and (not self._code_in_virtual_positions(code)):
+                if (not is_wl_only) and (not self._code_in_virtual_positions(code)):
                     self._log_s1_watch_diag(
                         code,
                         bars_ready=bool(bars_ready),
