@@ -1160,8 +1160,9 @@ class SignalEngine:
         신호 판단 로직은 건드리지 않고 관측만 한다.
 
         - 대상: 일일 감시·자동매매 후보(``monitor_info`` 등록, 관심목록 전용·보유 제외).
-        - 스로틀: 종목별 ``realtime_s1_watch_diag_interval_sec``(기본 60초).
+        - 스로틀: 15분 슬롯 변경 시 1회 + 종목별 주기(``realtime_s1_watch_diag_interval_sec``, 기본 300초).
         - 신호(Signal)=True 인데 미매수인 경우는 스로틀과 무관하게 즉시 1회 기록.
+        - JSONL 기록은 데몬 스레드로 넘겨 틱·UI 스레드 I/O 블로킹을 방지한다.
         """
         try:
             sl = getattr(self.app, "session_logger", None)
@@ -1169,10 +1170,10 @@ class SignalEngine:
                 return
             try:
                 interval = float(
-                    self.app.settings.get("realtime_s1_watch_diag_interval_sec", 60.0)
+                    self.app.settings.get("realtime_s1_watch_diag_interval_sec", 300.0)
                 )
             except (TypeError, ValueError):
-                interval = 60.0
+                interval = 300.0
             if interval <= 0:
                 return
 
@@ -1186,42 +1187,73 @@ class SignalEngine:
             except Exception:
                 sig_on = False
 
+            # 15분 슬롯 변경 시에도 1회 기록(백테스트 슬롯 대비 진단용)
+            slot_key = ""
+            try:
+                _bk, _bdf = self._bars_key_and_frame(code)
+                slot_key = self._current_slot_key_from_bars(_bdf)
+            except Exception:
+                slot_key = ""
+            slot_store = getattr(self, "_s1_watch_diag_last_slot", None)
+            if slot_store is None:
+                slot_store = {}
+                self._s1_watch_diag_last_slot = slot_store
+            last_slot = str(slot_store.get(code, "") or "")
+            slot_changed = bool(slot_key) and slot_key != last_slot
+
             store = getattr(self, "_s1_watch_diag_last_ts", None)
             if store is None:
                 store = {}
                 self._s1_watch_diag_last_ts = store
             now_t = time.time()
             last_t = float(store.get(code, 0.0) or 0.0)
-            # 신호가 켜졌는데 미매수면(핵심 관측 대상) 즉시, 그 외에는 주기적으로만 기록
-            due = (now_t - last_t) >= interval
             signal_but_no_buy = sig_on and not is_buy
-            if not (due or signal_but_no_buy):
+            due = (now_t - last_t) >= interval
+            if not (signal_but_no_buy or slot_changed or due):
                 return
-            store[code] = now_t
 
-            sl.log(
-                "s1_watch_eval_diag",
-                {
-                    "code": str(code).zfill(6),
-                    "name": str(info.get("name", "")) if isinstance(info, dict) else "",
-                    "bars_ready": bool(bars_ready),
-                    "bar_count": int(bar_count),
-                    "min_bars": int(min_bars),
-                    "signal_on": bool(sig_on),
-                    "sig_type": sig_type,
-                    "is_buy": bool(is_buy),
-                    "signal_but_no_buy": bool(signal_but_no_buy),
-                    "met_ratio": float(
-                        self._to_scalar(info.get("met_ratio", 0.0), 0.0)
-                    )
-                    if isinstance(info, dict)
-                    else 0.0,
-                    "confluence": str(info.get("confluence", ""))
-                    if isinstance(info, dict)
-                    else "",
-                    "now_price": float(now_price),
-                },
+            # 전역 버스트 제한 — 동시 다종목 틱 시 JSONL 락 경합 완화
+            global_last = float(
+                getattr(self, "_s1_watch_diag_global_last_ts", 0.0) or 0.0
             )
+            if not signal_but_no_buy and (now_t - global_last) < 0.25:
+                return
+
+            store[code] = now_t
+            if slot_changed:
+                slot_store[code] = slot_key
+            self._s1_watch_diag_global_last_ts = now_t
+
+            payload = {
+                "code": str(code).zfill(6),
+                "name": str(info.get("name", "")) if isinstance(info, dict) else "",
+                "bars_ready": bool(bars_ready),
+                "bar_count": int(bar_count),
+                "min_bars": int(min_bars),
+                "signal_on": bool(sig_on),
+                "sig_type": sig_type,
+                "is_buy": bool(is_buy),
+                "signal_but_no_buy": bool(signal_but_no_buy),
+                "slot_key": slot_key,
+                "slot_changed": bool(slot_changed),
+                "met_ratio": float(
+                    self._to_scalar(info.get("met_ratio", 0.0), 0.0)
+                )
+                if isinstance(info, dict)
+                else 0.0,
+                "confluence": str(info.get("confluence", ""))
+                if isinstance(info, dict)
+                else "",
+                "now_price": float(now_price),
+            }
+
+            def _write() -> None:
+                try:
+                    sl.log("s1_watch_eval_diag", payload)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_write, daemon=True).start()
         except Exception:
             # 진단 로깅 실패는 매매/실시간 흐름을 절대 막지 않는다.
             pass
