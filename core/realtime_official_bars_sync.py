@@ -280,8 +280,24 @@ def schedule_official_sync_and_signal_eval(
             # 폴백해 평가를 구동한다(슬롯 워처·폴러 양쪽 경로 모두 보호).
             if px <= 0:
                 px = _latest_bar_close(app, nk)
+            if px <= 0:
+                return
+            # 메인 스레드에서 SignalEngine 풀계산을 직접 호출하면 Tk UI가 멈출 수 있음.
+            # 웹소켓 틱과 동일하게 tick_dispatch → 워커 경로로 위임합니다.
+            disp = getattr(app, "tick_dispatch_service", None)
+            if disp is not None:
+                try:
+                    disp.on_tick_received(
+                        nk,
+                        float(px),
+                        int(volume_fallback),
+                        0.0,
+                    )
+                    return
+                except Exception:
+                    pass
             eng = getattr(app, "signal_engine", None)
-            if eng is not None and px > 0:
+            if eng is not None:
                 try:
                     from core.krx_market_halt_slots import (
                         should_suppress_s1_eval_for_code,
@@ -298,7 +314,7 @@ def schedule_official_sync_and_signal_eval(
                         px,
                         int(volume_fallback),
                         0.0,
-                        defer_main_callbacks=False,
+                        defer_main_callbacks=True,
                     )
         except Exception:
             pass

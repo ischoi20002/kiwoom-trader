@@ -1422,7 +1422,23 @@ class KiwoomApp:
             if self._update_timer_active:
                 # 렌더가 이미 메인 스레드에서 돌고 있으면 after(0) 중복 예약 금지(폭주·멈춤 악화)
                 if bool(getattr(self, "_ui_render_in_progress", False)):
-                    return
+                    try:
+                        now_ts = time.time()
+                        last_enter = float(
+                            getattr(self, "_ui_render_last_enter_ts", 0.0) or 0.0
+                        )
+                        stale_sec = float(
+                            (getattr(self, "settings", None) or {}).get(
+                                "ui_render_stale_rearm_sec", 2.5
+                            )
+                        )
+                        stale_sec = max(1.0, min(stale_sec, 15.0))
+                        if (now_ts - last_enter) < stale_sec:
+                            return
+                        # 렌더 진입 후 오래 멈춘 것으로 보이면 플래그를 풀고 재무장
+                        self._ui_render_in_progress = False
+                    except Exception:
+                        return
                 # 타이머 플래그가 True인데 실제 렌더 진입이 오래 없으면 고착 상태로 판단해 강제 재무장
                 try:
                     now_ts = time.time()
@@ -1529,6 +1545,7 @@ class KiwoomApp:
                         except Exception:
                             pass
                         self._update_timer_active = False
+                        self._ui_render_in_progress = False
                         self.ensure_monitor_tree_refresh_scheduled(immediate=True)
         except Exception:
             pass
@@ -2630,6 +2647,7 @@ class KiwoomApp:
                 pass
             return
 
+        recalc_key: Optional[str] = None
         try:
             with lk:
                 nk, df = resolve_bars_data_frame(bd, cc, migrate_alias=True)
@@ -2690,18 +2708,30 @@ class KiwoomApp:
                 except Exception:
                     pass
                 bd[use_key] = df
+                recalc_key = use_key
+            if recalc_key:
+                import threading
+
+                def _bg_recalc() -> None:
+                    try:
+                        self.strategy_engine.recalculate_indicators(
+                            recalc_key, bd, self.settings
+                        )
+                    except Exception:
+                        pass
+
+                threading.Thread(
+                    target=_bg_recalc,
+                    name="rt15m-ind-recalc",
+                    daemon=True,
+                ).start()
+            if recalc_key:
                 try:
-                    self.strategy_engine.recalculate_indicators(
-                        use_key, bd, self.settings
+                    self.realtime_monitor_bars_store.upsert_completed_bar(
+                        recalc_key, want, open_, high, low, close, volume
                     )
                 except Exception:
                     pass
-            try:
-                self.realtime_monitor_bars_store.upsert_completed_bar(
-                    use_key, want, open_, high, low, close, volume
-                )
-            except Exception:
-                pass
         except Exception as e:
             try:
                 self.log(f"⚠️ [RT15m-Official] _apply_official_closed_15m_bar 예외: {e!r}")

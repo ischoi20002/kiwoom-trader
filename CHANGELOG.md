@@ -13,6 +13,14 @@
 
 ---
 
+## 0.8.67 (2026-07-07)
+
+실시간 UI 멈춤 완화 — 슬롯 경계 신호평가를 워커로 위임.
+
+- **원인**: ``schedule_official_sync_and_signal_eval`` 이 메인 스레드 ``after(0)`` 에서 ``on_tick_received(defer=False)`` 를 호출 → 15분 슬롯 전환 시 26종목×지표 풀계산이 Tk 이벤트 루프를 장시간 점유(세션 로그 15:08:51 이후 정지).
+- **`core/realtime_official_bars_sync.py`**: ``tick_dispatch_service`` 경로로 위임(워커 스레드).
+- **`k_trader_gui.py`**: 공식 15m 반영 시 ``recalculate_indicators`` 를 락 밖·백그라운드 스레드로 이동. UI 렌더 ``_ui_render_in_progress`` 고착 시 강제 재무장.
+
 ## 0.8.66 (2026-07-07)
 
 시장중단 15분 슬롯 — 지연 공식봉(ka10080) 재조회로 플레이스홀더 복구.
