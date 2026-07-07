@@ -586,6 +586,15 @@ class KiwoomApp:
                 sched = getattr(self, "rt_closed_15m_official_scheduler", None)
                 if sched is not None:
                     try:
+                        from core.krx_market_halt_slots import (
+                            should_skip_rt15m_official_replace,
+                        )
+
+                        if should_skip_rt15m_official_replace(self, ts):
+                            return
+                    except Exception:
+                        pass
+                    try:
                         dly = float(
                             (self.settings or {}).get(
                                 "realtime_closed_15m_official_replace_delay_sec",

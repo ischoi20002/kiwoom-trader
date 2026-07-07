@@ -13,6 +13,24 @@
 
 ---
 
+## 0.8.66 (2026-07-07)
+
+시장중단 15분 슬롯 — 지연 공식봉(ka10080) 재조회로 플레이스홀더 복구.
+
+- **배경**: 서킷브레이커 직후 14:00 슬롯은 즉시 ``row_not_found`` 이나, CB 해제 후에는 API에 공식 15분봉이 생길 수 있음. M1 역산 없이 **지연 재조회**로 ``bars_data``·지표를 복구.
+- **`core/krx_market_halt_slots.py`**: 등록 시 3분 후 1차·이후 슬롯 경계마다(최소 10분 간격) 감시 종목 전체 ``force_halt_retry`` 스케줄. 3종목 이상(또는 거래량>0 1종목) 확보 시 ``market_halt_15m_recovered`` 기록·S1 억제 해제.
+- **`core/rt_closed_15m_official_replace.py`**: ``force_halt_retry`` 경로 — 시장중단 스킵·짧은 실패 쿨다운만 적용.
+- **`core/realtime_official_bars_sync.py`**: ``Rt15mSlotBoundaryWatcher`` 에서 미복구 슬롯 재조회 트리거.
+
+## 0.8.65 (2026-07-07)
+
+서킷브레이커·시장중단 15분 슬롯 감지 — 공식 15m 보정·S1 평가 억제.
+
+- **배경**: 서킷브레이커 발동 구간(예: 2026-07-07 14:00 슬롯)에 ka10080(15분) 공식봉이 없어 전 종목 ``row_not_found`` → 26종목 연속 REST 재조회·실패 로그·S1 오판 유발.
+- **`core/krx_market_halt_slots.py`** (신규): M1 거래 정적 프로브·공식 15m 다종목 미발견 누적 시 **시장중단 슬롯** 등록, ``market_halt_15m_slot`` JSONL 기록.
+- **`core/rt_closed_15m_official_replace.py`**: 시장중단 슬롯은 공식 REST 스킵·``row_not_found`` 실패 로그 생략·종목별 재시도 쿨다운 미적용.
+- **`core/realtime_official_bars_sync.py`**, **`k_trader_gui.py`**, **`core/signal_engine.py`**: 해당 슬롯 S1 신호평가 억제(confluence ``시장중단(15m)``).
+
 ## 0.8.64 (2026-07-07)
 
 실시간 UI 멈춤 완화 — S1 진단 로깅 I/O 부하 감소.

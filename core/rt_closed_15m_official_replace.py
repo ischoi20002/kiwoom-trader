@@ -210,6 +210,7 @@ def fetch_official_15m_row_for_timestamp(
     max_retries: int = 3,
     inter_retry_sec: float = 0.6,
     log: Optional[Callable[[str], None]] = None,
+    app: Any = None,
 ) -> Optional[Tuple[float, float, float, float, float]]:
     """
     ka10080(15분) 연속조회로 ``bar_ts`` 에 해당하는 완성 봉 한 줄을 찾습니다.
@@ -277,27 +278,44 @@ def fetch_official_15m_row_for_timestamp(
             row = _find_row_for_bar_end(merged, want)
             if row is None:
                 if attempt + 1 >= retries:
+                    halt_slot = False
                     try:
-                        from core.ka10080_fetch_diag import ka10080_fetch_diag
+                        if app is not None:
+                            from core.krx_market_halt_slots import (
+                                is_market_halt_15m_slot,
+                                record_rt15m_official_miss_and_maybe_halt,
+                            )
 
-                        ka10080_fetch_diag.record_fail(
-                            nc,
-                            tic_scope=str(tic_scope or "15"),
-                            context="rt15m_official",
-                            reason="row_not_found",
-                            detail=f"bar_ts={want} pages≤{mp}",
-                            attempt=attempt + 1,
-                        )
+                            halt_slot = (
+                                is_market_halt_15m_slot(app, want)
+                                or record_rt15m_official_miss_and_maybe_halt(
+                                    app, want, nc
+                                )
+                            )
                     except Exception:
-                        pass
-                if log and (attempt + 1 >= retries):
-                    try:
-                        log(
-                            f"ℹ️ [RT15m-Official] {nc} {want} 행 미발견 "
-                            f"(pages≤{mp}, attempt {attempt + 1}/{retries})"
-                        )
-                    except Exception:
-                        pass
+                        halt_slot = False
+                    if not halt_slot:
+                        try:
+                            from core.ka10080_fetch_diag import ka10080_fetch_diag
+
+                            ka10080_fetch_diag.record_fail(
+                                nc,
+                                tic_scope=str(tic_scope or "15"),
+                                context="rt15m_official",
+                                reason="row_not_found",
+                                detail=f"bar_ts={want} pages≤{mp}",
+                                attempt=attempt + 1,
+                            )
+                        except Exception:
+                            pass
+                        if log:
+                            try:
+                                log(
+                                    f"ℹ️ [RT15m-Official] {nc} {want} 행 미발견 "
+                                    f"(pages≤{mp}, attempt {attempt + 1}/{retries})"
+                                )
+                            except Exception:
+                                pass
             else:
                 try:
                     o = float(row["Open"])
@@ -369,6 +387,9 @@ class RtClosed15mOfficialReplaceScheduler:
         code: str,
         bar_ts: Any,
         delay_sec: float,
+        force_halt_retry: bool = False,
+        halt_retry_fail_cooldown_sec: float = 60.0,
+        prepend_delay_sec: float = 0.0,
     ) -> None:
         """이미 동일 종목·동일 봉 시각이 예약돼 있으면 무시합니다."""
         try:
@@ -380,14 +401,26 @@ class RtClosed15mOfficialReplaceScheduler:
         with self._lock:
             if self._scheduled.get(k):
                 return
+            if not force_halt_retry:
+                try:
+                    now_m = time.monotonic()
+                    until = float(self._fail_cooldown_until.get(k, 0.0) or 0.0)
+                    if until > now_m:
+                        return
+                except Exception:
+                    pass
+            self._scheduled[k] = True
+
+        if not force_halt_retry:
             try:
-                now_m = time.monotonic()
-                until = float(self._fail_cooldown_until.get(k, 0.0) or 0.0)
-                if until > now_m:
+                from core.krx_market_halt_slots import should_skip_rt15m_official_replace
+
+                if should_skip_rt15m_official_replace(app, bar_ts):
+                    with self._lock:
+                        self._scheduled.pop(k, None)
                     return
             except Exception:
                 pass
-            self._scheduled[k] = True
 
         def _delay() -> float:
             try:
@@ -402,6 +435,12 @@ class RtClosed15mOfficialReplaceScheduler:
 
         def _worker() -> None:
             try:
+                try:
+                    pre = max(0.0, float(prepend_delay_sec))
+                except (TypeError, ValueError):
+                    pre = 0.0
+                if pre > 0.0:
+                    time.sleep(pre)
                 wait_s = _delay()
                 time.sleep(wait_s)
             except Exception:
@@ -503,20 +542,54 @@ class RtClosed15mOfficialReplaceScheduler:
                     max_retries=mr,
                     inter_retry_sec=ir,
                     log=self._log,
+                    app=app,
                 )
                 root = getattr(app, "root", None)
                 if tup is None or root is None:
+                    try:
+                        from core.krx_market_halt_slots import is_market_halt_15m_slot
+
+                        if is_market_halt_15m_slot(app, bar_ts) and not force_halt_retry:
+                            with self._lock:
+                                self._scheduled.pop(k, None)
+                            return
+                    except Exception:
+                        pass
                     # 행 미발견/메인 root 없음 등 실패는 즉시 재스케줄 루프가 생길 수 있으므로
                     # 동일 키에 대해 쿨다운을 둡니다.
                     with self._lock:
-                        cnt = int(self._fail_counts.get(k, 0) or 0) + 1
-                        self._fail_counts[k] = cnt
-                        delay = min(900.0, 60.0 * (2 ** max(0, cnt - 1)))  # 1분 → 2분 → 4분 … (최대 15분)
-                        self._fail_cooldown_until[k] = time.monotonic() + delay
-                    with self._lock:
+                        if force_halt_retry:
+                            try:
+                                cd = max(
+                                    15.0, float(halt_retry_fail_cooldown_sec)
+                                )
+                            except (TypeError, ValueError):
+                                cd = 60.0
+                            self._fail_cooldown_until[k] = time.monotonic() + cd
+                        else:
+                            cnt = int(self._fail_counts.get(k, 0) or 0) + 1
+                            self._fail_counts[k] = cnt
+                            delay = min(
+                                900.0, 60.0 * (2 ** max(0, cnt - 1))
+                            )  # 1분 → 2분 → 4분 … (최대 15분)
+                            self._fail_cooldown_until[k] = time.monotonic() + delay
                         self._scheduled.pop(k, None)
                     return
                 o, h, l_, c, v = tup
+
+                if force_halt_retry:
+                    try:
+                        from core.krx_market_halt_slots import (
+                            is_market_halt_15m_slot,
+                            notify_halt_official_retry_success,
+                        )
+
+                        if is_market_halt_15m_slot(app, bar_ts):
+                            notify_halt_official_retry_success(
+                                app, bar_ts, code, volume=v
+                            )
+                    except Exception:
+                        pass
 
                 def _apply_main() -> None:
                     try:

@@ -165,6 +165,16 @@ class SignalEngine:
         except Exception:
             return True
 
+    def _market_halt_suppresses_s1(self, code: str) -> Optional[str]:
+        """서킷브레이커·시장중단 15m 슬롯이면 S1 평가 억제 사유, 아니면 None."""
+        try:
+            from core.krx_market_halt_slots import should_suppress_s1_eval_for_code
+
+            suppressed, reason = should_suppress_s1_eval_for_code(self.app, code)
+            return reason if suppressed else None
+        except Exception:
+            return None
+
     def _hp_causal_ready_min_bar_index(self) -> int:
         """동적 고정밀 ``_prepare_15m_cached_data`` 의 Ready 최소 봉 인덱스."""
         try:
@@ -1470,7 +1480,12 @@ class SignalEngine:
 
             is_buy = False
             last_row = None
-            if bars_ready:
+            halt_s1_msg = self._market_halt_suppresses_s1(code) if bars_ready else None
+            if bars_ready and halt_s1_msg:
+                info["confluence"] = halt_s1_msg
+                info["met_ratio"] = 0.0
+                is_buy = False
+            elif bars_ready:
                 now_ts = time.time()
                 fp_s1 = self._s1_fingerprint_15m_tail(_bd)
                 try:

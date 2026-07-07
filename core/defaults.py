@@ -77,6 +77,22 @@ DEFAULT_SETTINGS = {
     "realtime_m1_poller_eval_on_fetch_fail": True,
     # 동일 분 캐시 히트 시에도 평가 재트리거(이전 eval 누락 복구)
     "realtime_m1_poller_eval_on_cache_hit": True,
+    # 서킷브레이커·시장중단 15분 슬롯: 공식 REST 보정·S1 평가 억제
+    "realtime_market_halt_slot_detection": True,
+    "realtime_market_halt_skip_official_replace": True,
+    "realtime_market_halt_suppress_s1_eval": True,
+    "realtime_market_halt_m1_quiet_ratio": 0.70,
+    "realtime_market_halt_m1_max_volume": 50.0,
+    "realtime_market_halt_m1_min_codes": 6,
+    "realtime_market_halt_official_miss_min_codes": 6,
+    "realtime_market_halt_official_miss_window_sec": 180.0,
+    # 시장중단 슬롯: 즉시 REST 스킵 후 지연 공식봉(ka10080) 재조회
+    "realtime_market_halt_official_retry_enabled": True,
+    "realtime_market_halt_official_retry_first_delay_sec": 180.0,
+    "realtime_market_halt_official_retry_min_interval_sec": 600.0,
+    "realtime_market_halt_official_retry_max_attempts": 8,
+    "realtime_market_halt_official_retry_min_codes_to_clear": 3,
+    "realtime_market_halt_official_retry_fail_cooldown_sec": 60.0,
     "use_api_warmup_backfill": True,
     # True: 감시 시작 워밍업마다 DB 검증 통과 여부와 무관하게 ka10080(15분) 조회·병합
     "realtime_warmup_force_api_refresh": True,

@@ -86,6 +86,14 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
                     o = h = l_ = c = v = 0.0
                 # 장외·야간 등 비정상 인덱스는 공식 REST 대상이 아니므로 콜백 생략
                 if is_krx_15m_slot_end(last_ix):
+                    try:
+                        from core.krx_market_halt_slots import (
+                            probe_and_maybe_mark_halt_slot,
+                        )
+
+                        probe_and_maybe_mark_halt_slot(app, last_ix)
+                    except Exception:
+                        pass
                     _on_bar_closed_safe(app, use_key, last_ix, o, h, l_, c, v)
                 try:
                     nxt = next_krx_15m_slot_end(last_ix)
@@ -274,13 +282,24 @@ def schedule_official_sync_and_signal_eval(
                 px = _latest_bar_close(app, nk)
             eng = getattr(app, "signal_engine", None)
             if eng is not None and px > 0:
-                eng.on_tick_received(
-                    nk,
-                    px,
-                    int(volume_fallback),
-                    0.0,
-                    defer_main_callbacks=False,
-                )
+                try:
+                    from core.krx_market_halt_slots import (
+                        should_suppress_s1_eval_for_code,
+                    )
+
+                    suppressed, _halt_msg = should_suppress_s1_eval_for_code(
+                        app, nk
+                    )
+                except Exception:
+                    suppressed = False
+                if not suppressed:
+                    eng.on_tick_received(
+                        nk,
+                        px,
+                        int(volume_fallback),
+                        0.0,
+                        defer_main_callbacks=False,
+                    )
         except Exception:
             pass
 
@@ -355,6 +374,14 @@ class Rt15mSlotBoundaryWatcher:
                             self._emit(f"⚠️ [RT15mWatch] {c!r}: {e!r}")
                         except Exception:
                             pass
+                try:
+                    from core.krx_market_halt_slots import (
+                        maybe_schedule_halt_slot_official_retries,
+                    )
+
+                    maybe_schedule_halt_slot_official_retries(self._app)
+                except Exception:
+                    pass
             except Exception as e:
                 try:
                     self._emit(f"⚠️ [RT15mWatch] 루프 예외: {e!r}")
