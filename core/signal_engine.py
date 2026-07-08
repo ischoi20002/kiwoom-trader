@@ -1239,7 +1239,7 @@ class SignalEngine:
             global_last = float(
                 getattr(self, "_s1_watch_diag_global_last_ts", 0.0) or 0.0
             )
-            burst_sec = 0.75 if signal_but_no_buy else 0.25
+            burst_sec = 0.75 if signal_but_no_buy else (2.5 if slot_changed else 0.25)
             if (now_t - global_last) < burst_sec:
                 return
 

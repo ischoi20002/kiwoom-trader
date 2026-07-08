@@ -84,6 +84,8 @@ DEFAULT_SETTINGS = {
     "realtime_market_halt_m1_quiet_ratio": 0.70,
     "realtime_market_halt_m1_max_volume": 50.0,
     "realtime_market_halt_m1_min_codes": 6,
+    "realtime_market_halt_m1_min_bars_per_code": 8,
+    "realtime_market_halt_m1_scale_volume_by_bars": True,
     "realtime_market_halt_official_miss_min_codes": 6,
     "realtime_market_halt_official_miss_window_sec": 180.0,
     # 시장중단 슬롯: 즉시 REST 스킵 후 지연 공식봉(ka10080) 재조회
@@ -127,6 +129,10 @@ DEFAULT_SETTINGS = {
     "realtime_s1_watch_diag_signal_no_buy_min_sec": 30.0,
     # 감시 트리 렌더 1프레임 최대 점유(초) — 초과 시 나머지는 다음 프레임으로 이월
     "realtime_monitor_render_frame_budget_sec": 0.045,
+    # pending 이 이 값 이상이면 ui_force_row_refresh(강제 inject) 생략
+    "ui_force_row_refresh_skip_when_pending_ge": 22,
+    # 보유 탭 행 reorder 최소 간격(초) — 틱마다 Treeview.move 시 UI 멈춤 완화
+    "virtual_tab_active_reorder_min_sec": 5.0,
     # (레거시) 예전에는 S1 풀계산 최소 간격으로 사용. 현재는 15m 꼬리·M1 리비전 트리거가 우선.
     "realtime_s1_full_calc_min_interval_sec": 1.0,
     # S1 풀계산: 15m/M1 지문이 안 바뀌어도 이 간격(초)마다 한 번은 재계산(안전망).

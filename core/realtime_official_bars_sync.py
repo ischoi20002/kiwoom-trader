@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -257,6 +258,144 @@ def _latest_bar_close(app: Any, nk: str) -> float:
         return 0.0
 
 
+def peek_15m_slot_roll_needed(app: Any, code: str) -> bool:
+    """슬롯 롤 필요 여부(읽기 전용). 워처 스레드에서 bars_data 직접 수정 금지."""
+    nk = canonical_stock_code(str(code).strip())
+    if not nk:
+        return False
+    lk = getattr(app, "_bars_data_lock", None)
+    bd = getattr(app, "bars_data", None)
+    if lk is None or not isinstance(bd, dict):
+        return False
+    try:
+        with lk:
+            _k, df = resolve_bars_data_frame(bd, nk, migrate_alias=True)
+            if df is None or getattr(df, "empty", True):
+                return False
+            last_ix = pd.Timestamp(df.index[-1])
+            want = stream_slot_end_datetime(datetime.now())
+            return bool(last_ix < want)
+    except Exception:
+        return False
+
+
+_slot_sync_queue: "queue.SimpleQueue[Tuple[Any, str, float, int]]" = (
+    queue.SimpleQueue()
+)
+_slot_sync_pending: Set[str] = set()
+_slot_sync_pending_lock = threading.Lock()
+_slot_sync_thread: Optional[threading.Thread] = None
+_slot_sync_thread_lock = threading.Lock()
+
+
+def _run_official_sync_and_signal_eval_job(
+    app: Any,
+    nk: str,
+    *,
+    now_price_fallback: float = 0.0,
+    volume_fallback: int = 0,
+) -> None:
+    """슬롯 롤·M1 반영·신호 재평가(전용 워커 스레드)."""
+    try:
+        maybe_roll_15m_slot_on_clock(app, nk)
+        sync_forming_15m_last_row_from_official_m1(app, nk)
+        px = _resolve_monitor_price(app, nk, now_price_fallback)
+        if px <= 0:
+            px = _latest_bar_close(app, nk)
+        if px <= 0:
+            return
+        disp = getattr(app, "tick_dispatch_service", None)
+        if disp is not None:
+            disp.on_tick_received(
+                nk,
+                float(px),
+                int(volume_fallback),
+                0.0,
+            )
+            return
+        eng = getattr(app, "signal_engine", None)
+        if eng is not None:
+            try:
+                from core.krx_market_halt_slots import should_suppress_s1_eval_for_code
+
+                suppressed, _halt_msg = should_suppress_s1_eval_for_code(app, nk)
+            except Exception:
+                suppressed = False
+            if not suppressed:
+                eng.on_tick_received(
+                    nk,
+                    px,
+                    int(volume_fallback),
+                    0.0,
+                    defer_main_callbacks=True,
+                )
+    except Exception:
+        pass
+
+
+def _slot_sync_worker_loop() -> None:
+    while True:
+        try:
+            app, nk, px_fb, vol_fb = _slot_sync_queue.get()
+        except Exception:
+            continue
+        try:
+            _run_official_sync_and_signal_eval_job(
+                app,
+                nk,
+                now_price_fallback=float(px_fb),
+                volume_fallback=int(vol_fb),
+            )
+        except Exception:
+            pass
+        finally:
+            try:
+                with _slot_sync_pending_lock:
+                    _slot_sync_pending.discard(nk)
+            except Exception:
+                pass
+
+
+def _ensure_slot_sync_worker_started() -> None:
+    global _slot_sync_thread
+    with _slot_sync_thread_lock:
+        if _slot_sync_thread is not None and _slot_sync_thread.is_alive():
+            return
+        _slot_sync_thread = threading.Thread(
+            target=_slot_sync_worker_loop,
+            name="Rt15mOfficialSyncWorker",
+            daemon=True,
+        )
+        _slot_sync_thread.start()
+
+
+def enqueue_official_sync_and_signal_eval(
+    app: Any,
+    code: str,
+    *,
+    now_price_fallback: float = 0.0,
+    volume_fallback: int = 0,
+) -> None:
+    nk = canonical_stock_code(str(code).strip())
+    if not nk:
+        return
+    try:
+        with _slot_sync_pending_lock:
+            if nk in _slot_sync_pending:
+                return
+            _slot_sync_pending.add(nk)
+        _slot_sync_queue.put(
+            (app, nk, float(now_price_fallback), int(volume_fallback))
+        )
+        _ensure_slot_sync_worker_started()
+    except Exception:
+        try:
+            with _slot_sync_pending_lock:
+                _slot_sync_pending.discard(nk)
+        except Exception:
+            pass
+
+
 def schedule_official_sync_and_signal_eval(
     app: Any,
     code: str,
@@ -265,71 +404,14 @@ def schedule_official_sync_and_signal_eval(
     volume_fallback: int = 0,
 ) -> None:
     """
-    Tk 메인 스레드에서: 슬롯 롤 → 1분 집계 반영 → ``_signal_skip_bar_update`` 신호 재평가.
+    슬롯 롤 → 1분 집계 반영 → 신호 재평가(전용 워커 큐).
     """
-    nk = canonical_stock_code(str(code).strip())
-    if not nk:
-        return
-
-    def _job() -> None:
-        try:
-            maybe_roll_15m_slot_on_clock(app, nk)
-            sync_forming_15m_last_row_from_official_m1(app, nk)
-            px = _resolve_monitor_price(app, nk, now_price_fallback)
-            # [버그픽스] 틱 가격이 0(WS 끊김·차단)이면 공식 M1 동기화된 마지막 봉 Close 로
-            # 폴백해 평가를 구동한다(슬롯 워처·폴러 양쪽 경로 모두 보호).
-            if px <= 0:
-                px = _latest_bar_close(app, nk)
-            if px <= 0:
-                return
-            # 메인 스레드에서 SignalEngine 풀계산을 직접 호출하면 Tk UI가 멈출 수 있음.
-            # 웹소켓 틱과 동일하게 tick_dispatch → 워커 경로로 위임합니다.
-            disp = getattr(app, "tick_dispatch_service", None)
-            if disp is not None:
-                try:
-                    disp.on_tick_received(
-                        nk,
-                        float(px),
-                        int(volume_fallback),
-                        0.0,
-                    )
-                    return
-                except Exception:
-                    pass
-            eng = getattr(app, "signal_engine", None)
-            if eng is not None:
-                try:
-                    from core.krx_market_halt_slots import (
-                        should_suppress_s1_eval_for_code,
-                    )
-
-                    suppressed, _halt_msg = should_suppress_s1_eval_for_code(
-                        app, nk
-                    )
-                except Exception:
-                    suppressed = False
-                if not suppressed:
-                    eng.on_tick_received(
-                        nk,
-                        px,
-                        int(volume_fallback),
-                        0.0,
-                        defer_main_callbacks=True,
-                    )
-        except Exception:
-            pass
-
-    try:
-        root = getattr(app, "root", None)
-        if root is not None and hasattr(root, "after"):
-            root.after(0, _job)
-        else:
-            _job()
-    except Exception:
-        try:
-            _job()
-        except Exception:
-            pass
+    enqueue_official_sync_and_signal_eval(
+        app,
+        code,
+        now_price_fallback=now_price_fallback,
+        volume_fallback=volume_fallback,
+    )
 
 
 class Rt15mSlotBoundaryWatcher:
@@ -383,7 +465,7 @@ class Rt15mSlotBoundaryWatcher:
                         nk = canonical_stock_code(str(c).strip())
                         if not nk:
                             continue
-                        if maybe_roll_15m_slot_on_clock(self._app, nk):
+                        if peek_15m_slot_roll_needed(self._app, nk):
                             schedule_official_sync_and_signal_eval(self._app, nk)
                     except Exception as e:
                         try:

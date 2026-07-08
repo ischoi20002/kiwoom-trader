@@ -3255,6 +3255,16 @@ class MonitorTab:
                 except (TypeError, ValueError):
                     frame_budget_sec = 0.045
                 frame_budget_sec = max(0.015, min(frame_budget_sec, 0.25))
+                try:
+                    outer_pending = len(
+                        getattr(self.app, "pending_tree_updates", {}) or {}
+                    )
+                except Exception:
+                    outer_pending = len(items)
+                if outer_pending >= 12:
+                    frame_budget_sec = max(frame_budget_sec, 0.10)
+                    max_items = max(max_items, min(outer_pending, 35))
+                self._render_skip_tags_backlog = outer_pending >= 14
                 if len(items) > max_items:
                     remain = items[max_items:]
                     items = items[:max_items]
@@ -3277,6 +3287,44 @@ class MonitorTab:
 
                 processed_in_frame = 0
                 for iid_raw, (values, tag, _) in items:
+                    if processed_in_frame > 0 and (
+                        time.perf_counter() - t0
+                    ) >= frame_budget_sec:
+                        try:
+                            tail = items[processed_in_frame:]
+                            for rest_iid, rest_val in tail:
+                                updates[rest_iid] = rest_val
+                        except Exception:
+                            pass
+                        try:
+                            sl = getattr(self, "_realtime_session_logger", None)
+                            if sl is not None:
+                                now_ts = time.time()
+                                last = float(
+                                    getattr(
+                                        self, "_render_budget_log_last_ts", 0.0
+                                    )
+                                    or 0.0
+                                )
+                                if now_ts - last >= 15.0:
+                                    self._render_budget_log_last_ts = now_ts
+                                    sl.log(
+                                        "monitor_tab_update_view_budget_yield",
+                                        {
+                                            "budget_sec": float(frame_budget_sec),
+                                            "processed": int(processed_in_frame),
+                                            "remain": int(len(items) - processed_in_frame),
+                                        },
+                                    )
+                        except Exception:
+                            pass
+                        break
+                    processed_in_frame += 1
+                    try:
+                        if processed_in_frame % 2 == 0:
+                            self.tree_monitor.update_idletasks()
+                    except Exception:
+                        pass
                     # pending 키·monitor_info 키가 3490/003490로 섞여도 트리 iid는 항상 6자리로 통일
                     iid = str(iid_raw).split("_")[0].zfill(6)
                     cid = iid
@@ -3427,10 +3475,16 @@ class MonitorTab:
                         target_tree.insert("", tk.END, iid=iid, values=values)
                     
                     # [Composite Tag Selection] v4.6.5
-                    _step_log("target_tree_index_call")
-                    idx = target_tree.index(iid)
-                    is_even = (idx % 2 == 0)
-                    row_type = "even" if is_even else "odd"
+                    # Treeview.index()는 행 수에 비례해 O(n)이며, Windows ttk에서 간헐적 멈춤을 유발할 수 있어 캐시 사용
+                    _step_log("target_tree_stripe_resolve")
+                    stripe_cache = getattr(self, "_monitor_row_stripe_cache", None)
+                    if not isinstance(stripe_cache, dict):
+                        stripe_cache = {}
+                        self._monitor_row_stripe_cache = stripe_cache
+                    row_type = stripe_cache.get(iid)
+                    if row_type not in ("even", "odd"):
+                        row_type = "even" if (len(stripe_cache) % 2 == 0) else "odd"
+                        stripe_cache[iid] = row_type
                     
                     # 방향 결정
                     if "price_up" in str(tag): direction = "up"
@@ -3508,6 +3562,10 @@ class MonitorTab:
                                     tag_update_enabled = bool(
                                         st_tag.get("enable_monitor_row_tag_update", True)
                                     )
+                                    if bool(
+                                        getattr(self, "_render_skip_tags_backlog", False)
+                                    ):
+                                        tag_update_enabled = False
                                 except Exception:
                                     tag_update_enabled = True
                                 if tag_update_enabled:
@@ -3521,37 +3579,6 @@ class MonitorTab:
                                 _step_log("target_tree_item_update_exception", {"final_tag": str(final_tag)})
                             except Exception:
                                 pass
-                    processed_in_frame += 1
-                    if (time.perf_counter() - t0) >= frame_budget_sec:
-                        try:
-                            for rest_iid, rest_val in items[processed_in_frame:]:
-                                updates[rest_iid] = rest_val
-                        except Exception:
-                            pass
-                        try:
-                            sl = getattr(self, "_realtime_session_logger", None)
-                            if sl is not None:
-                                now_ts = time.time()
-                                last = float(
-                                    getattr(
-                                        self, "_render_budget_log_last_ts", 0.0
-                                    )
-                                    or 0.0
-                                )
-                                if now_ts - last >= 15.0:
-                                    self._render_budget_log_last_ts = now_ts
-                                    sl.log(
-                                        "monitor_tab_update_view_budget_yield",
-                                        {
-                                            "budget_sec": float(frame_budget_sec),
-                                            "processed": int(processed_in_frame),
-                                            "remain": int(len(items) - processed_in_frame),
-                                        },
-                                    )
-                        except Exception:
-                            pass
-                        break
-                # update_view 본문이 너무 오래 걸리면 Tk 이벤트 루프가 막혀 화면이 멈춘 것처럼 보일 수 있음
                 try:
                     dt = time.perf_counter() - t0
                     if dt >= 0.50 and debug_seen:

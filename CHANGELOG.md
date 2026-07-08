@@ -13,6 +13,34 @@
 
 ---
 
+## 0.8.72 (2026-07-08)
+
+시장중단 15분 슬롯 M1 정적 프로브 오탐 완화.
+
+- **원인(12:06:43)**: 12:00 슬롯 처리 지연 중 일부 종목 M1 창에 1~2개 분봉만 들어온 상태에서도 거래량 합계가 작으면 “서킷브레이커·시장중단”으로 오탐 가능.
+- **`core/krx_market_halt_slots.py`**: 15분 창 내 최소 M1 분봉 수(기본 8개) 미만 종목은 quiet 판정 대상에서 제외하고, quiet 비율 분모도 충분한 커버리지 종목만 사용.
+- **`core/defaults.py`**: ``realtime_market_halt_m1_min_bars_per_code`` / ``realtime_market_halt_m1_scale_volume_by_bars`` 기본값 추가.
+- **UI 로그 문구**: M1 프로브 사유를 “M1 거래 정적(자동 추정, 오탐 가능)”으로 완화.
+
+## 0.8.71 (2026-07-08)
+
+15분 슬롯 경계 UI 멈춤 수정 — 메인 after(0) 폭주 제거.
+
+- **원인(12:00:04)**: ``Rt15mSlotBoundaryWatcher`` 가 27종목 슬롯 전환 시 ``maybe_roll`` + ``after(0)`` ×27 을 메인에 쌓아 ``ui_render`` 정지.
+- **`core/realtime_official_bars_sync.py`**: ``peek_15m_slot_roll_needed`` + ``Rt15mOfficialSyncWorker`` 단일 워커 큐(종목 중복 제거).
+- **`ui/tabs/monitor_tab.py`**: pending 백로그 시 프레임 예산·처리량 상향, 태그 갱신 생략.
+- **`core/signal_engine.py`**: ``slot_changed`` 진단 전역 스로틀 2.5초.
+
+## 0.8.70 (2026-07-08)
+
+실시간 UI 멈춤 추가 완화 — Treeview.index 제거·렌더 체인 복구.
+
+- **원인(11:49 재시작)**: 0.8.69 적용 후에도 감시 시작 직후 ``slot_changed`` 진단·``Treeview.index()``·inject 큐 폭주로 두 번째 ``ui_render``(pending 7)에서 메인 스레드 고착.
+- **`ui/tabs/monitor_tab.py`**: ``index(iid)`` 제거(줄무늬 캐시), 프레임 예산·``update_idletasks`` 강화.
+- **`k_trader_gui.py`**: pending 많을 때 inject 생략, ``finally``에서 렌더 체인 재예약, 워치독 0.8초.
+- **`core/signal_engine.py`**: ``slot_changed`` 진단 전역 스로틀 1.5초.
+- **`ui/tabs/virtual_tab.py`**: 보유 트리 ``reorder`` 5초 스로틀.
+
 ## 0.8.69 (2026-07-08)
 
 실시간 UI 멈춤 근본 완화 — 전일 시장중단 오탐·진단 폭주·렌더 점유 상한.

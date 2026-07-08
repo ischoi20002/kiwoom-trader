@@ -880,7 +880,7 @@ class KiwoomApp:
             # UI 루프가 끊긴 상태(_update_timer_active만 True로 고정 등)를 자동 복구
             if self._ui_watchdog_after_id is None:
                 self._ui_watchdog_after_id = self.root.after(
-                    1200, self._ui_render_watchdog_tick
+                    800, self._ui_render_watchdog_tick
                 )
         except Exception:
             pass
@@ -1528,7 +1528,7 @@ class KiwoomApp:
                 if not bool(getattr(self, "_update_timer_active", False)):
                     self.ensure_monitor_tree_refresh_scheduled(immediate=True)
                 else:
-                    stale_sec = 3.5
+                    stale_sec = 2.0
                     if (now_ts - last_enter) >= stale_sec:
                         try:
                             sl = getattr(self, "session_logger", None)
@@ -1554,7 +1554,7 @@ class KiwoomApp:
                 r = getattr(self, "root", None)
                 if r is not None and r.winfo_exists():
                     self._ui_watchdog_after_id = r.after(
-                        1200, self._ui_render_watchdog_tick
+                        800, self._ui_render_watchdog_tick
                     )
             except Exception:
                 self._ui_watchdog_after_id = None
@@ -1603,11 +1603,28 @@ class KiwoomApp:
             if not monitoring:
                 self._update_timer_active = False
                 return
-            # 안전망: pending 업데이트가 비거나 누락되는 구간에서도 monitor_info 숫자열을 주기적으로 강제 반영
+            next_delay_ms = REALTIME_TREE_UI_REFRESH_MS
             try:
-                self._inject_min_monitor_updates_from_monitor_info()
+                pending_now = len(getattr(self, "pending_tree_updates", {}) or {})
             except Exception:
-                pass
+                pending_now = 0
+            # pending 이 많을 때 inject 가 큐를 더 키워 렌더가 밀리는 것을 방지
+            try:
+                inject_skip_pending = int(
+                    float(
+                        (getattr(self, "settings", None) or {}).get(
+                            "ui_force_row_refresh_skip_when_pending_ge", 22
+                        )
+                    )
+                )
+            except (TypeError, ValueError):
+                inject_skip_pending = 22
+            inject_skip_pending = max(8, min(inject_skip_pending, 200))
+            if pending_now < inject_skip_pending:
+                try:
+                    self._inject_min_monitor_updates_from_monitor_info()
+                except Exception:
+                    pass
             self.monitor_tab.update_view(
                 self.pending_tree_updates, self.portfolio.virtual_positions
             )
@@ -1630,7 +1647,6 @@ class KiwoomApp:
                 pending_after = 0
             backlog_size = max(int(pending_size), int(pending_after))
 
-            next_delay_ms = REALTIME_TREE_UI_REFRESH_MS
             try:
                 st = getattr(self, "settings", None) or {}
                 base_ms = int(float(st.get("realtime_tree_ui_refresh_ms_base", 220)))
@@ -1647,14 +1663,11 @@ class KiwoomApp:
             idle_ms = max(base_ms, min(idle_ms, 2000))
             busy_threshold = max(5, min(busy_threshold, 500))
             if backlog_size >= busy_threshold:
-                # 대기 큐가 많은 프레임에서는 주기를 잠시 줄여 최신가 지연을 완화합니다.
                 next_delay_ms = busy_ms
             elif backlog_size <= 0:
-                # 대기 큐가 비어 있으면 기본보다 살짝 느리게 돌려 메인 루프 점유를 낮춥니다.
                 next_delay_ms = idle_ms
             else:
                 next_delay_ms = base_ms
-            self.root.after(next_delay_ms, self._render_tree_updates)
         except Exception as e:
             try:
                 self.log(f"⚠️ [UI] _render_tree_updates: {e}")
@@ -1676,6 +1689,24 @@ class KiwoomApp:
         finally:
             try:
                 self._ui_render_in_progress = False
+            except Exception:
+                pass
+            try:
+                monitoring_fin = bool(self.is_monitoring) or bool(
+                    getattr(self.trading_controller, "is_monitoring", False)
+                )
+                r_fin = getattr(self, "root", None)
+                if monitoring_fin and r_fin is not None:
+                    try:
+                        if r_fin.winfo_exists():
+                            delay_fin = int(
+                                locals().get("next_delay_ms", REALTIME_TREE_UI_REFRESH_MS)
+                            )
+                            delay_fin = max(20, min(delay_fin, 2000))
+                            r_fin.after(delay_fin, self._render_tree_updates)
+                            self._update_timer_active = True
+                    except Exception:
+                        pass
             except Exception:
                 pass
             try:

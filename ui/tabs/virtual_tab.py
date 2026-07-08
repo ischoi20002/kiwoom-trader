@@ -2930,7 +2930,25 @@ class VirtualTab:
                     idx, nk, pos, info, total_eval_weight
                 )
                 self._upsert_active_tree_row(nk, vals, row_tags)
-            self._reorder_active_tree_rows()
+            try:
+                import time as _time_reord
+
+                now_r = _time_reord.time()
+                last_r = float(getattr(self, "_active_reorder_last_ts", 0.0) or 0.0)
+                reorder_sec = 5.0
+                try:
+                    st_r = getattr(self.app, "settings", None) or {}
+                    reorder_sec = float(
+                        st_r.get("virtual_tab_active_reorder_min_sec", 5.0)
+                    )
+                except (TypeError, ValueError):
+                    reorder_sec = 5.0
+                reorder_sec = max(1.0, min(reorder_sec, 60.0))
+                if now_r - last_r >= reorder_sec:
+                    self._reorder_active_tree_rows()
+                    self._active_reorder_last_ts = now_r
+            except Exception:
+                pass
         except Exception as e:
             try:
                 print(f"[UI Error] _render_real_data: {e}")
