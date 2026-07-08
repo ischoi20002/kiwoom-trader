@@ -473,6 +473,17 @@ class TradingController:
                 pass
 
             self.is_monitoring = True
+            if n_ready == 1:
+                try:
+                    from core.krx_market_halt_slots import purge_stale_market_halt_slots
+
+                    n_purged = purge_stale_market_halt_slots(self.app)
+                    if n_purged > 0:
+                        self.log(
+                            f"ℹ️ [시장중단] 전일 이전 슬롯 {n_purged}건 정리"
+                        )
+                except Exception:
+                    pass
             try:
                 terminal_trace(
                     f"_apply_warmup_ready_stock code={code} n_ready={n_ready} "

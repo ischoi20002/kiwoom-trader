@@ -47,6 +47,23 @@ def norm_halt_slot_ts(bar_ts: Any) -> pd.Timestamp:
         return pd.Timestamp(bar_ts)
 
 
+def _halt_probe_bar_on_current_session_day(bar_ts: Any) -> bool:
+    """
+    M1 정적 프로브·당일 S1 억제는 **오늘(KRX 달력일) 슬롯**에만 적용합니다.
+
+    장 시작 직후 슬롯 롤업이 전일 15:30을 지나갈 때, 당일 M1 스토어가 비어 있으면
+    전일 마지막 슬롯을 오탐(시장중단)하는 것을 막습니다.
+    """
+    try:
+        from datetime import datetime
+
+        slot = norm_halt_slot_ts(bar_ts).normalize()
+        today = pd.Timestamp(datetime.now()).normalize()
+        return slot >= today
+    except Exception:
+        return False
+
+
 def _slot_key(bar_ts: Any) -> str:
     try:
         return norm_halt_slot_ts(bar_ts).strftime("%Y-%m-%d %H:%M:%S")
@@ -75,6 +92,28 @@ class KrxMarketHaltSlotRegistry:
                 return sk in self._halt_slots
         except Exception:
             return False
+
+    def purge_slots_before_day(self, day0: Any) -> int:
+        """``day0`` 이전 날짜의 시장중단 슬롯·재조회 상태를 제거합니다."""
+        try:
+            cutoff = pd.Timestamp(day0).normalize()
+            cutoff_key = cutoff.strftime("%Y-%m-%d")
+            removed = 0
+            with self._lock:
+                for sk in list(self._halt_slots.keys()):
+                    try:
+                        if str(sk)[:10] < cutoff_key:
+                            self._halt_slots.pop(sk, None)
+                            self._official_miss_codes.pop(sk, None)
+                            self._official_miss_first_at.pop(sk, None)
+                            self._halt_retry_state.pop(sk, None)
+                            self._ui_logged_slots.discard(sk)
+                            removed += 1
+                    except Exception:
+                        continue
+            return removed
+        except Exception:
+            return 0
 
     def mark(
         self,
@@ -348,11 +387,24 @@ def mark_market_halt_15m_slot(
     return True
 
 
+def purge_stale_market_halt_slots(app: Any) -> int:
+    """당일 이전에 등록된 시장중단 슬롯을 정리합니다(세션 시작·감시 재개 시)."""
+    try:
+        from datetime import datetime
+
+        reg = get_market_halt_registry(app)
+        return reg.purge_slots_before_day(pd.Timestamp(datetime.now()).normalize())
+    except Exception:
+        return 0
+
+
 def probe_m1_quiet_market_halt(app: Any, bar_ts: Any) -> bool:
     """
     감시 종목 M1 합산 거래량이 극히 적으면 서킷브레이커 등 시장중단으로 판단.
     """
     if not market_halt_detection_enabled(app):
+        return False
+    if not _halt_probe_bar_on_current_session_day(bar_ts):
         return False
     try:
         st = getattr(app, "settings", None) or {}
@@ -381,6 +433,7 @@ def probe_m1_quiet_market_halt(app: Any, bar_ts: Any) -> bool:
 
     quiet = 0
     checked = 0
+    with_m1_rows = 0
     for c in codes:
         try:
             nk = canonical_stock_code(str(c).strip())
@@ -393,6 +446,7 @@ def probe_m1_quiet_market_halt(app: Any, bar_ts: Any) -> bool:
             checked += 1
             vol_sum = 0.0
             if m1df is not None and not getattr(m1df, "empty", True):
+                with_m1_rows += 1
                 try:
                     vol_sum = float(m1df["Volume"].sum())
                 except Exception:
@@ -403,6 +457,9 @@ def probe_m1_quiet_market_halt(app: Any, bar_ts: Any) -> bool:
             continue
 
     if checked < min_codes:
+        return False
+    # M1 구간에 행 자체가 없으면 '거래 정적'이 아니라 아직 미수집(장 시작·롤업 직후)
+    if with_m1_rows < min_codes:
         return False
     try:
         return (float(quiet) / float(checked)) >= ratio_need
@@ -466,6 +523,8 @@ def record_rt15m_official_miss_and_maybe_halt(
 
 def probe_and_maybe_mark_halt_slot(app: Any, bar_ts: Any) -> bool:
     """M1 거래 정적 프로브 후 필요 시 시장중단 슬롯 등록."""
+    if not _halt_probe_bar_on_current_session_day(bar_ts):
+        return False
     if is_market_halt_15m_slot(app, bar_ts):
         return True
     if not probe_m1_quiet_market_halt(app, bar_ts):
@@ -550,6 +609,10 @@ def should_suppress_s1_eval_for_code(app: Any, code: str) -> Tuple[bool, str]:
 
     closed_ts = last_closed_15m_bar_ts(app, code)
     if closed_ts is None:
+        return False, ""
+
+    # 전일(이전 달력일) 확정봉에 걸린 시장중단은 당일 S1 억제에 쓰지 않음
+    if not _halt_probe_bar_on_current_session_day(closed_ts):
         return False, ""
 
     if is_market_halt_15m_slot(app, closed_ts):

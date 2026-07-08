@@ -3246,6 +3246,15 @@ class MonitorTab:
                 busy_max_items = max(max_items, min(busy_max_items, 250))
                 if len(items) >= busy_threshold:
                     max_items = busy_max_items
+                frame_budget_sec = 0.045
+                try:
+                    st_budget = getattr(self.app, "settings", None) or {}
+                    frame_budget_sec = float(
+                        st_budget.get("realtime_monitor_render_frame_budget_sec", 0.045)
+                    )
+                except (TypeError, ValueError):
+                    frame_budget_sec = 0.045
+                frame_budget_sec = max(0.015, min(frame_budget_sec, 0.25))
                 if len(items) > max_items:
                     remain = items[max_items:]
                     items = items[:max_items]
@@ -3266,6 +3275,7 @@ class MonitorTab:
                         except Exception:
                             pass
 
+                processed_in_frame = 0
                 for iid_raw, (values, tag, _) in items:
                     # pending 키·monitor_info 키가 3490/003490로 섞여도 트리 iid는 항상 6자리로 통일
                     iid = str(iid_raw).split("_")[0].zfill(6)
@@ -3511,6 +3521,36 @@ class MonitorTab:
                                 _step_log("target_tree_item_update_exception", {"final_tag": str(final_tag)})
                             except Exception:
                                 pass
+                    processed_in_frame += 1
+                    if (time.perf_counter() - t0) >= frame_budget_sec:
+                        try:
+                            for rest_iid, rest_val in items[processed_in_frame:]:
+                                updates[rest_iid] = rest_val
+                        except Exception:
+                            pass
+                        try:
+                            sl = getattr(self, "_realtime_session_logger", None)
+                            if sl is not None:
+                                now_ts = time.time()
+                                last = float(
+                                    getattr(
+                                        self, "_render_budget_log_last_ts", 0.0
+                                    )
+                                    or 0.0
+                                )
+                                if now_ts - last >= 15.0:
+                                    self._render_budget_log_last_ts = now_ts
+                                    sl.log(
+                                        "monitor_tab_update_view_budget_yield",
+                                        {
+                                            "budget_sec": float(frame_budget_sec),
+                                            "processed": int(processed_in_frame),
+                                            "remain": int(len(items) - processed_in_frame),
+                                        },
+                                    )
+                        except Exception:
+                            pass
+                        break
                 # update_view 본문이 너무 오래 걸리면 Tk 이벤트 루프가 막혀 화면이 멈춘 것처럼 보일 수 있음
                 try:
                     dt = time.perf_counter() - t0

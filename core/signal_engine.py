@@ -1171,7 +1171,7 @@ class SignalEngine:
 
         - 대상: 일일 감시·자동매매 후보(``monitor_info`` 등록, 관심목록 전용·보유 제외).
         - 스로틀: 15분 슬롯 변경 시 1회 + 종목별 주기(``realtime_s1_watch_diag_interval_sec``, 기본 300초).
-        - 신호(Signal)=True 인데 미매수인 경우는 스로틀과 무관하게 즉시 1회 기록.
+        - 신호(Signal)=True 인데 미매수인 경우는 짧은 주기(``realtime_s1_watch_diag_signal_no_buy_min_sec``, 기본 30초)로 기록.
         - JSONL 기록은 데몬 스레드로 넘겨 틱·UI 스레드 I/O 블로킹을 방지한다.
         """
         try:
@@ -1219,14 +1219,28 @@ class SignalEngine:
             last_t = float(store.get(code, 0.0) or 0.0)
             signal_but_no_buy = sig_on and not is_buy
             due = (now_t - last_t) >= interval
+            # 신호=True·미매수도 틱마다 기록하면 JSONL·데몬 스레드가 폭주해 UI가 멈출 수 있음
+            if signal_but_no_buy:
+                try:
+                    nb_sec = float(
+                        self.app.settings.get(
+                            "realtime_s1_watch_diag_signal_no_buy_min_sec", 30.0
+                        )
+                    )
+                except (TypeError, ValueError):
+                    nb_sec = 30.0
+                nb_sec = max(5.0, min(nb_sec, interval))
+                if (now_t - last_t) < nb_sec and not slot_changed:
+                    return
             if not (signal_but_no_buy or slot_changed or due):
                 return
 
-            # 전역 버스트 제한 — 동시 다종목 틱 시 JSONL 락 경합 완화
+            # 전역 버스트 제한 — 동시 다종목·signal_but_no_buy 틱 폭주 시 JSONL 락 경합 완화
             global_last = float(
                 getattr(self, "_s1_watch_diag_global_last_ts", 0.0) or 0.0
             )
-            if not signal_but_no_buy and (now_t - global_last) < 0.25:
+            burst_sec = 0.75 if signal_but_no_buy else 0.25
+            if (now_t - global_last) < burst_sec:
                 return
 
             store[code] = now_t

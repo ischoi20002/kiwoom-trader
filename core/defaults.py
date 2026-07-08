@@ -123,6 +123,10 @@ DEFAULT_SETTINGS = {
     "ws_reg_max_codes_per_chunk": 80,
     "realtime_tree_first_refresh_delay_ms": 48,
     "realtime_rsi_calc_min_interval_sec": 1.0,
+    # S1 감시 진단: 신호=True·미매수 시 최소 기록 간격(초). 틱마다 기록 시 UI·JSONL 폭주.
+    "realtime_s1_watch_diag_signal_no_buy_min_sec": 30.0,
+    # 감시 트리 렌더 1프레임 최대 점유(초) — 초과 시 나머지는 다음 프레임으로 이월
+    "realtime_monitor_render_frame_budget_sec": 0.045,
     # (레거시) 예전에는 S1 풀계산 최소 간격으로 사용. 현재는 15m 꼬리·M1 리비전 트리거가 우선.
     "realtime_s1_full_calc_min_interval_sec": 1.0,
     # S1 풀계산: 15m/M1 지문이 안 바뀌어도 이 간격(초)마다 한 번은 재계산(안전망).
