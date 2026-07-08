@@ -13,6 +13,22 @@
 
 ---
 
+## 0.8.74 (2026-07-08)
+
+보유 청산·S2 평가 주기를 M1 리비전(S2)과 통일.
+
+- **변경**: 15초 ``exit_due`` 청산 주기 폐기(인트라바 미러 ON 시). 완료 1분봉이 ``RtTickM1Store`` 에 반영될 때만 청산·S2 동시 평가(Stage 1·2 공통).
+- **`core/signal_engine.py`**: ``realtime_eval_position_on_m1_revision_only``(기본 True), ``skip_exit`` 분기 제거. M1 없을 때만 ``realtime_eval_position_min_interval_sec`` 시간 폴백.
+- **0.8.73 틱 폴백**: M1 평가 시점에 forming 분 ATR SL 보완 유지.
+- **`backtest_engine.py`**: ATR 표시 ``compute_atr_exit_display_text`` 에 ``_cached_bars_peak_high`` 적용 — 청산·표시 공통 peak 캐시로 봉 스캔 부하 완화.
+
+## 0.8.73 (2026-07-08)
+
+실시간 ATR SL 미매도 수정 — 인트라바 미러 청산에 틱가 폴백.
+
+- **원인**: 감시 화면 ATR SL은 **실시간 틱가**로 표시하지만, ``realtime_s1_mirror_dynamic_intrabar`` 청산은 **완료 M1 저가**만 검사. forming 분에 37,025원까지 내려와도 직전 완료 분 저가가 37,555원 위면 HOLD → 매도 누락.
+- **`core/signal_engine.py`**: M1 미러가 EXIT 없이 HOLD일 때 동일 포지션·지표로 **틱가 1회 청산 폴백** 추가.
+
 ## 0.8.72 (2026-07-08)
 
 시장중단 15분 슬롯 M1 정적 프로브 오탐 완화.

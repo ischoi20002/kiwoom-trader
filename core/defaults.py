@@ -141,7 +141,9 @@ DEFAULT_SETTINGS = {
     "realtime_s1_mirror_dynamic_intrabar": True,
     # True: 같은 M1에서 forming OHLCV+intrabar 지표로 get_buy_signals 재판정(정적 Signal 복사 제거)
     "realtime_intrabar_close_now_signals": True,
-    # 보유 청산·S2: ``evaluate_position`` / 인트라바 미러 호출 최소 간격(초). 너무 짧으면 매수 직후 과민 매도.
+    # True: 보유 청산·S2를 M1 리비전(완료 1분 반영) 시점에만 평가 — 인트라바 미러 ON일 때 기본.
+    "realtime_eval_position_on_m1_revision_only": True,
+    # M1 스토어 없을 때(또는 on_m1_revision_only=False) 보유 평가 시간 폴백(초).
     "realtime_eval_position_min_interval_sec": 15.0,
     # 봉 부족 시 보유용 마지막 지표 행 재계산 최소 간격(초) — eval 과 동기 권장.
     "realtime_exit_indicator_min_interval_sec": 15.0,

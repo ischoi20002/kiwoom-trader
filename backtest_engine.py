@@ -1105,6 +1105,43 @@ class TradingStrategy:
         return float(max(bests))
 
     @staticmethod
+    def _cached_bars_peak_high(pos: dict, bars_df: Any) -> Optional[float]:
+        """
+        진입·추매 앵커 이후 ``bars_df`` High 상한(Flash/ATR 고점 보강).
+
+        ``evaluate_position`` 과 ATR 표시가 동일한 ``_rt_bars_peak_cache`` 를 재사용해
+        봉 전체 스캔을 줄입니다.
+        """
+        try:
+            if bars_df is None or getattr(bars_df, "empty", True):
+                return None
+            anchor = TradingStrategy._peak_anchor_timestamp_for_bars(pos)
+            try:
+                lk = int(len(bars_df))
+                li = bars_df.index[-1]
+                last_hi = float(
+                    pd.to_numeric(bars_df["High"], errors="coerce").iloc[-1]
+                )
+            except Exception:
+                lk, li, last_hi = -1, None, float("nan")
+            try:
+                ck = (lk, li, last_hi, repr(anchor))
+            except Exception:
+                ck = (lk, None, last_hi, "")
+            cached = (pos or {}).get("_rt_bars_peak_cache")
+            if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == ck:
+                return cached[1]
+            peak = TradingStrategy._peak_high_from_bars_df(bars_df, since=anchor)
+            try:
+                if isinstance(pos, dict):
+                    pos["_rt_bars_peak_cache"] = (ck, peak)
+            except Exception:
+                pass
+            return peak
+        except Exception:
+            return None
+
+    @staticmethod
     def compute_atr_exit_display_text(
         pos: dict,
         settings: dict,
@@ -1139,8 +1176,7 @@ class TradingStrategy:
             avg_p = float(pos.get("avg_p", pos.get("avg_price", now_price)) or now_price)
             if avg_p <= 0:
                 avg_p = float(now_price)
-            _anchor_disp = TradingStrategy._peak_anchor_timestamp_for_bars(pos)
-            bh = TradingStrategy._peak_high_from_bars_df(bars_df, since=_anchor_disp)
+            bh = TradingStrategy._cached_bars_peak_high(pos, bars_df)
             max_p = float(
                 TradingStrategy._peak_price_from_position(
                     pos, float(now_price), bars_peak_high=bh
@@ -1355,46 +1391,12 @@ class TradingStrategy:
         profit_ratio = (now_price / avg_p - 1) * 100
         
         # 2. 최고가 갱신 — 키가 없던 포지션도 매 틱 누적해야 트레일 무장·Flash 가 맞음
-        # 실시간: evaluate_position 이 초당 호출될 때 `_peak_high_from_bars_df` 가
-        # 봉 인덱스 전체를 매번 순회하면 UI·틱 스레드 부하가 커짐. 봉 길이·마지막 슬롯·
-        # 마지막 봉 High·진입 앵커가 동일하면 산출값이 같으므로 포지션에 캐시한다.
         bars_peak = None
         if kwargs:
             try:
-                _anchor = TradingStrategy._peak_anchor_timestamp_for_bars(pos)
-                bd = kwargs.get("bars_df")
-                if bd is not None and not getattr(bd, "empty", True):
-                    try:
-                        lk = int(len(bd))
-                        li = bd.index[-1]
-                        last_hi = float(
-                            pd.to_numeric(bd["High"], errors="coerce").iloc[-1]
-                        )
-                    except Exception:
-                        lk, li, last_hi = -1, None, float("nan")
-                    try:
-                        ck = (lk, li, last_hi, repr(_anchor))
-                    except Exception:
-                        ck = (lk, None, last_hi, "")
-                    cached = pos.get("_rt_bars_peak_cache")
-                    if (
-                        isinstance(cached, tuple)
-                        and len(cached) == 2
-                        and cached[0] == ck
-                    ):
-                        bars_peak = cached[1]
-                    else:
-                        bars_peak = TradingStrategy._peak_high_from_bars_df(
-                            bd, since=_anchor
-                        )
-                        try:
-                            pos["_rt_bars_peak_cache"] = (ck, bars_peak)
-                        except Exception:
-                            pass
-                else:
-                    bars_peak = TradingStrategy._peak_high_from_bars_df(
-                        kwargs.get("bars_df"), since=_anchor
-                    )
+                bars_peak = TradingStrategy._cached_bars_peak_high(
+                    pos, kwargs.get("bars_df")
+                )
             except Exception:
                 bars_peak = None
         max_p = TradingStrategy._peak_price_from_position(

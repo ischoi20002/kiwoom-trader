@@ -115,7 +115,7 @@ class SignalEngine:
         self._s1_last_m1_revision: dict[str, int] = {}
 
         self._s1_full_calc_last_ts: dict[str, float] = {}
-        # 보유: 청산 평가(레거시·미러 exit 경로) 최소 간격 앵커
+        # 보유: M1 스토어 없을 때 시간 폴백 앵커(레거시·on_m1_revision_only=False)
         self._eval_exit_last_ts: dict[str, float] = {}
         # 보유 S2: 공식 M1 반영 리비전과 동기(``RtTickM1Store.revision_for_code``)
         self._held_s2_last_m1_rev: dict[str, int] = {}
@@ -271,6 +271,20 @@ class SignalEngine:
         try:
             st = getattr(self.app, "settings", None) or {}
             return bool(st.get("realtime_s1_mirror_dynamic_intrabar", True))
+        except Exception:
+            return True
+
+    def _held_eval_on_m1_revision_only(self) -> bool:
+        """
+        True면 보유 청산·S2 평가를 M1 리비전(완료 1분 반영) 시점에만 수행합니다.
+
+        인트라바 미러가 꺼져 있으면 레거시 시간 주기(``realtime_eval_position_min_interval_sec``)를 유지합니다.
+        """
+        try:
+            if not self._realtime_s1_mirror_dynamic_intrabar_enabled():
+                return False
+            st = getattr(self.app, "settings", None) or {}
+            return bool(st.get("realtime_eval_position_on_m1_revision_only", True))
         except Exception:
             return True
 
@@ -812,6 +826,74 @@ class SignalEngine:
                     "profit_ratio": pr_s2,
                     "now_price": fill_px,
                 }
+            # forming 분 저가는 완료 M1에 없음 — 화면(틱가) ATR SL과 청산 판정 불일치 방지
+            if not skip_exit:
+                try:
+                    live_px = float(
+                        self._to_scalar(
+                            info.get("price") or info.get("last_price"),
+                            0.0,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    live_px = 0.0
+                if live_px > 0:
+                    ind_tick = out.get("indicator_last")
+                    if ind_tick is None:
+                        try:
+                            ind_tick = self._indicator_row_to_plain_dict(
+                                full_15m.iloc[-1]
+                            )
+                        except Exception:
+                            ind_tick = None
+                    try:
+                        ba_m = float(
+                            self._to_scalar(info.get("bid_ask_ratio"), 1.0)
+                        )
+                        ab_m = float(
+                            self._to_scalar(info.get("ask_bid_ratio"), 1.0)
+                        )
+                        vp_m = float(
+                            self._to_scalar(info.get("vol_power"), 100.0)
+                        )
+                    except (TypeError, ValueError):
+                        ba_m, ab_m, vp_m = 1.0, 1.0, 100.0
+                    try:
+                        tick_res = TradingStrategy.evaluate_position(
+                            nk,
+                            live_px,
+                            pos_sim,
+                            st,
+                            indicator_row=ind_tick,
+                            current_time=datetime.now(),
+                            is_realtime=True,
+                            kwargs={
+                                "bid_ask_ratio": ba_m,
+                                "ask_bid_ratio": ab_m,
+                                "vol_power": vp_m,
+                                "sel_track": ct,
+                                "bars_df": full_15m,
+                            },
+                        )
+                    except Exception:
+                        tick_res = None
+                    if (
+                        isinstance(tick_res, dict)
+                        and str(tick_res.get("action") or "") == "EXIT"
+                    ):
+                        rs = str(tick_res.get("reason") or "EXIT")
+                        if not self._realtime_gap_down_mirror_ok(
+                            nk, pos_live, info, reason=rs
+                        ):
+                            return {"action": "HOLD"}
+                        return {
+                            "action": "EXIT",
+                            "reason": rs,
+                            "profit_ratio": float(
+                                tick_res.get("profit_ratio", 0) or 0
+                            ),
+                            "now_price": live_px,
+                        }
             return {"action": "HOLD"}
         except Exception as e:
             try:
@@ -2033,7 +2115,7 @@ class SignalEngine:
                 now_ts = time.time()
                 exit_interval = float(self._realtime_eval_position_min_interval_sec)
                 last_exit_ts = float(self._eval_exit_last_ts.get(code, 0.0) or 0.0)
-                exit_due = (now_ts - last_exit_ts) >= exit_interval
+                time_fallback_due = (now_ts - last_exit_ts) >= exit_interval
 
                 bars_key_m, _bd_m = self._bars_key_and_frame(code)
                 _src_m = (
@@ -2058,17 +2140,38 @@ class SignalEngine:
                 except Exception:
                     has_m1_store = False
 
-                s2_m1_due = False
-                if int(stg_h) == 1:
-                    if has_m1_store:
-                        s2_m1_due = prev_m1r is None or int(prev_m1r) != int(m1_rev_h)
-                    else:
-                        s2_m1_due = exit_due
+                m1_rev_changed = False
+                if has_m1_store:
+                    try:
+                        m1_rev_changed = (
+                            prev_m1r is None or int(prev_m1r) != int(m1_rev_h)
+                        )
+                    except (TypeError, ValueError):
+                        m1_rev_changed = False
 
-                if exit_due or s2_m1_due:
+                on_m1_schedule = self._held_eval_on_m1_revision_only()
+                exit_due = False
+                s2_m1_due = False
+                if on_m1_schedule:
+                    # 청산·S2 모두 M1 리비전(완료 1분 반영)에 맞춤 — Stage 1·2 공통
+                    held_eval_due = m1_rev_changed if has_m1_store else time_fallback_due
+                    need_skip_exit = False
+                    run_s2_legacy = int(stg_h) == 1 and held_eval_due
+                else:
+                    # 레거시: 15초 청산 + Stage1 M1 S2 (미러 OFF 또는 설정 OFF)
+                    exit_due = time_fallback_due
+                    if int(stg_h) == 1:
+                        if has_m1_store:
+                            s2_m1_due = m1_rev_changed
+                        else:
+                            s2_m1_due = exit_due
+                    held_eval_due = exit_due or s2_m1_due
+                    need_skip_exit = bool(s2_m1_due and not exit_due)
+                    run_s2_legacy = bool(s2_m1_due)
+
+                if held_eval_due:
                     res: Dict[str, Any] = {"action": "HOLD"}
                     mirrored: Optional[Dict[str, Any]] = None
-                    need_skip_exit = bool(s2_m1_due and not exit_due)
 
                     try:
                         if self._realtime_s1_mirror_dynamic_intrabar_enabled():
@@ -2078,16 +2181,18 @@ class SignalEngine:
                     except Exception:
                         mirrored = None
 
+                    run_exit_legacy = held_eval_due if on_m1_schedule else bool(exit_due)
+
                     if mirrored is not None:
                         res = (
                             mirrored
                             if isinstance(mirrored, dict)
                             else {"action": "HOLD"}
                         )
-                        if exit_due:
+                        if run_exit_legacy and (not on_m1_schedule or not has_m1_store):
                             self._eval_exit_last_ts[code] = now_ts
                     else:
-                        if exit_due:
+                        if run_exit_legacy:
                             try:
                                 res = self.app.strategy_engine.evaluate_position_scoped(
                                     code,
@@ -2117,9 +2222,10 @@ class SignalEngine:
                                     )
                                 except Exception:
                                     res = {"action": "HOLD"}
-                            self._eval_exit_last_ts[code] = now_ts
+                            if not on_m1_schedule or not has_m1_store:
+                                self._eval_exit_last_ts[code] = now_ts
 
-                        if (res.get("action") == "HOLD") and s2_m1_due:
+                        if (res.get("action") == "HOLD") and run_s2_legacy:
                             try:
                                 res2 = self.app.strategy_engine.evaluate_position_scoped(
                                     code,
@@ -2140,7 +2246,7 @@ class SignalEngine:
                             except Exception:
                                 pass
 
-                    if exit_due or s2_m1_due:
+                    if held_eval_due and has_m1_store:
                         try:
                             self._held_s2_last_m1_rev[code] = int(m1_rev_h)
                         except Exception:
