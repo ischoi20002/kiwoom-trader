@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>일일 결산 — 2026-04-17</title>
+    <script>window.__DAILY_REPORT_PLOTLY_CDN__ = "https://cdn.plot.ly/plotly-3.5.0.min.js";</script>
+    <script type="application/json" id="daily-report-meta">{"report_date": "2026-04-17", "generated_at": "2026-05-01 22:48:22", "status": "complete", "session_buffer_minutes": 10, "generation_marked_complete": true, "chart_failed_codes": [], "warnings": [], "schema_version": 2, "total_assets_close": 9314695.0, "plotly_py_version": "6.7.0", "plotly_js_cdn": "https://cdn.plot.ly/plotly-3.5.0.min.js"}</script>
+    <style>
+        :root {
+            --bg: #2E3440;
+            --fg: #ECEFF4;
+            --muted: #88C0D0;
+            --bd: #4C566A;
+            --plus: #A3BE8C;
+            --minus: #BF616A;
+        }
+        body {
+            font-family: 'Malgun Gothic', 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            margin: 0;
+            padding: 24px;
+            line-height: 1.5;
+        }
+        .container { max-width: 1100px; margin: 0 auto; }
+        h1 { font-weight: 600; color: var(--muted); margin-top: 0; }
+        h2 { font-size: 1.1rem; color: var(--muted); border-bottom: 1px solid var(--bd); padding-bottom: 8px; }
+        .muted { color: #81A1C1; font-weight: normal; }
+        .navbtn { color: #88C0D0; text-decoration: none; margin: 0 8px; }
+        .navbtn:hover { text-decoration: underline; }
+        table.summary { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+        table.summary td { padding: 8px 12px; border-bottom: 1px solid var(--bd); }
+        table.summary td:first-child { color: #D8DEE9; width: 40%; }
+        .num { text-align: right; font-variant-numeric: tabular-nums; }
+        .card {
+            background: #3B4252;
+            border: 1px solid var(--bd);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .banner.warn {
+            background: #4C566A;
+            border: 1px solid #BF616A;
+            color: #ECEFF4;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+        p.warn { color: #BF616A; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 6px 8px; border-bottom: 1px solid #434C5E; text-align: left; }
+        th { color: var(--muted); }
+        .chartwrap { overflow-x: auto; }
+        /* 종목 카드 안: 이 종목 15분봉만 버튼으로 펼침 */
+        .stock-chart-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 16px;
+            padding-top: 12px;
+            border-top: 1px solid var(--bd);
+        }
+        .stock-chart-toolbar-label { font-size: 0.9rem; }
+        .chart-toggle-btn {
+            background: #88C0D0;
+            color: #2E3440;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .chart-toggle-btn:hover { filter: brightness(1.08); }
+        .chart-toggle-btn:focus-visible { outline: 2px solid #ECEFF4; outline-offset: 2px; }
+        .chart-panel-collapsible { margin-top: 12px; }
+        .chart-details-body {
+            padding-top: 4px;
+            border-top: 1px solid var(--bd);
+        }
+        footer { margin-top: 32px; font-size: 12px; color: #81A1C1; text-align: center; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <nav style="margin-bottom:16px;"><a class="navbtn" href="../2026-04-16/daily_settlement.html">◀ 이전 거래일</a> <span class="muted">2026-04-17</span> <a class="navbtn" href="../2026-04-20/daily_settlement.html">다음 거래일 ▶</a></nav>
+    <h1>일일 결산 리포트 <span class="muted">2026-04-17</span></h1>
+    <p class="muted">생성 시각: 2026-05-01 22:48:22 — 상태: complete — 완료판정(장마감+버퍼): 예</p>
+    <p class="muted" style="font-size:12px;margin-top:-6px;">차트 데이터는 HTML에 포함되어 <code>file://</code> 로 열어도 동작합니다. 펼칠 때만 Plotly로 그립니다(초기 로드 시 plotly.js CDN은 첫 펼침 때만 로드).</p>
+    
+
+    <h2>요약</h2>
+    <table class="summary">
+        <tr><td>총 자산 (D+2+주식평가, 포지션 관리 탭과 동일)</td><td class="num">9,314,695 원</td></tr>
+        <tr><td>예수금 (가용)</td><td class="num">947,683 원</td></tr>
+        <tr><td>예수금 D+1</td><td class="num">4,004,965 원</td></tr>
+        <tr><td>예수금 D+2</td><td class="num">4,004,965 원</td></tr>
+        <tr><td>주식 평가금 (보유 합)</td><td class="num">5,309,730 원</td></tr>
+        <tr><td>금일 실현 (당일 청산·청산일 기준)</td><td class="num">+0 원</td></tr>
+        <tr><td>미실현 손익 (보유·누적)</td><td class="num">+72,167 원</td></tr>
+        <tr><td>금일 손익 (직전 장마감 시세 기준 추정 총자산 대비)</td><td class="num">+24,723 원 (+0.27%) <span class="muted">(전일 9,289,972원 대비)</span></td></tr>
+        <tr><td>누적 수익률 (참고·초기자본 대비)</td><td class="num">-6.85%</td></tr>
+    </table>
+
+    <h2>종목별 리포트 (주문 · 체결 · 15분봉 차트)</h2>
+    <p class="muted" style="margin-top:-8px;margin-bottom:16px;">각 종목 카드 하단의 버튼으로 <b>해당 종목</b> 15분봉 차트만 펼칠 수 있습니다.</p>
+    <p class="muted">해당 일자 주문 기록이 없습니다.</p>
+
+    <footer>K-Trader 실시간 감시 일일 결산</footer>
+</div>
+<script>
+
+(function () {
+  /**
+   * - plotly.js: **첫 차트 펼칠 때만** CDN 주입.
+   * - 차트 데이터: HTML 내 `<script type="application/json" class="plotly-fig-json">` (file:// 호환).
+   * - 구버전 HTML: `plotly-fig-b64` (base64) 폴백.
+   */
+  var plotlyCdn = window.__DAILY_REPORT_PLOTLY_CDN__ || "";
+  var plotlyLoadQueue = null;
+
+  function ensurePlotlyJs(cb) {
+    if (window.Plotly) {
+      cb();
+      return;
+    }
+    if (plotlyLoadQueue) {
+      plotlyLoadQueue.push(cb);
+      return;
+    }
+    plotlyLoadQueue = [cb];
+    if (!plotlyCdn) {
+      var fns = plotlyLoadQueue;
+      plotlyLoadQueue = null;
+      fns.forEach(function (fn) {
+        try {
+          fn();
+        } catch (e1) {}
+      });
+      return;
+    }
+    var s = document.createElement("script");
+    s.src = plotlyCdn;
+    s.crossOrigin = "anonymous";
+    s.onload = function () {
+      var fns = plotlyLoadQueue;
+      plotlyLoadQueue = null;
+      fns.forEach(function (fn) {
+        try {
+          fn();
+        } catch (e2) {}
+      });
+    };
+    s.onerror = function () {
+      plotlyLoadQueue = null;
+      try {
+        console.warn("Plotly.js 로드 실패:", plotlyCdn);
+      } catch (e3) {}
+    };
+    document.head.appendChild(s);
+  }
+
+  function renderDeferredPlotlyIn(root, done) {
+    ensurePlotlyJs(function () {
+      if (!window.Plotly || !root) {
+        if (done) done();
+        return;
+      }
+      var wraps = root.querySelectorAll('.plotly-deferred-wrap[data-plotly-rendered="0"]');
+      var n = wraps.length;
+      if (n === 0) {
+        if (done) done();
+        return;
+      }
+      var left = n;
+      function oneDone() {
+        left--;
+        if (left <= 0 && done) done();
+      }
+      function plotFromFig(w, gd, fig) {
+        try {
+          Plotly.newPlot(gd, fig.data, fig.layout, fig.config || {});
+          w.setAttribute("data-plotly-rendered", "1");
+        } catch (e4) {
+          try {
+            gd.innerHTML =
+              '<p class="warn" style="padding:12px;">차트 렌더 오류. 브라우저 콘솔을 확인하세요.</p>';
+          } catch (e5) {}
+        }
+      }
+      for (var i = 0; i < wraps.length; i++) {
+        (function (w) {
+          var gd = w.querySelector(".plotly-graph-div");
+          if (!gd) {
+            oneDone();
+            return;
+          }
+          var scJ = w.querySelector("script.plotly-fig-json");
+          if (scJ) {
+            setTimeout(function () {
+              try {
+                var txt = (scJ.textContent || scJ.innerText || "").trim();
+                if (txt) {
+                  var fig = JSON.parse(txt);
+                  plotFromFig(w, gd, fig);
+                }
+              } catch (e6) {
+                try {
+                  gd.innerHTML =
+                    '<p class="warn" style="padding:12px;">차트 JSON 파싱 오류</p>';
+                } catch (e7) {}
+              }
+              oneDone();
+            }, 0);
+            return;
+          }
+          var sc = w.querySelector("script.plotly-fig-b64");
+          var tid = sc ? sc.getAttribute("data-plotly-target") : null;
+          var gdx = tid ? document.getElementById(tid) : gd;
+          if (sc && gdx) {
+            setTimeout(function () {
+              try {
+                var b64 = (sc.textContent || "").trim();
+                if (b64) {
+                  var fig = JSON.parse(atob(b64));
+                  plotFromFig(w, gdx, fig);
+                }
+              } catch (e8) {}
+              oneDone();
+            }, 0);
+            return;
+          }
+          oneDone();
+        })(wraps[i]);
+      }
+    });
+  }
+
+  function resizePlotlyInside(root) {
+    if (!window.Plotly || !root) return;
+    try {
+      var nodes = root.querySelectorAll(".plotly-graph-div");
+      if (!nodes.length) nodes = root.querySelectorAll(".js-plotly-plot");
+      for (var i = 0; i < nodes.length; i++) {
+        var gd = nodes[i];
+        try {
+          if (typeof Plotly.Plots !== "undefined" && Plotly.Plots.resize) {
+            Plotly.Plots.resize(gd);
+          } else if (typeof Plotly.resize === "function") {
+            Plotly.resize(gd);
+          }
+        } catch (e5) {}
+      }
+    } catch (e6) {}
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll(".chart-toggle-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var panelId = btn.getAttribute("aria-controls");
+        var panel = panelId ? document.getElementById(panelId) : null;
+        if (!panel) return;
+        var opening = panel.hasAttribute("hidden");
+        var openText = btn.getAttribute("data-text-open") || "접기";
+        var closedText = btn.getAttribute("data-text-closed") || "펼치기";
+        if (opening) {
+          panel.removeAttribute("hidden");
+          btn.setAttribute("aria-expanded", "true");
+          btn.textContent = openText;
+          requestAnimationFrame(function () {
+            renderDeferredPlotlyIn(panel, function () {
+              resizePlotlyInside(panel);
+            });
+          });
+          setTimeout(function () {
+            resizePlotlyInside(panel);
+          }, 120);
+          setTimeout(function () {
+            resizePlotlyInside(panel);
+          }, 400);
+        } else {
+          panel.setAttribute("hidden", "");
+          btn.setAttribute("aria-expanded", "false");
+          btn.textContent = closedText;
+        }
+      });
+    });
+  });
+})();
+
+</script>
+</body>
+</html>

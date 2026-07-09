@@ -64,7 +64,8 @@ class RtTickM1Store:
     ) -> None:
         """
         레거시 호환용 빈 구현입니다.
-        실시간 1분은 ka10080(``RtWatchlistM1ApiPoller``)만으로 적재합니다.
+        실시간 1분·진행 중 버킷은 ka10080(``RtWatchlistM1ApiPoller``)만으로 적재합니다.
+        (틱으로 진행 중 버킷을 덮어쓰면 인트라바 청산·S2 평가가 공식 1분과 어긋납니다.)
         """
         return
 
@@ -155,6 +156,48 @@ class RtTickM1Store:
                 return int(self._revision.get(nk, 0))
         except (TypeError, ValueError):
             return 0
+
+    def last_completed_close(self, code: str) -> float:
+        """완료 공식 1분 중 가장 최근 종가. 없으면 0."""
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return 0.0
+            with self._lock:
+                st = self._st.get(nk)
+                if not st:
+                    return 0.0
+                dq = st.get("completed")
+                if not dq:
+                    return 0.0
+                _ol, _o, _h, _l, c, _v = dq[-1]
+                return float(c) if float(c) > 0 else 0.0
+        except (TypeError, ValueError, KeyError, IndexError):
+            return 0.0
+
+    def forming_minute_ohlc(
+        self, code: str
+    ) -> Tuple[float, float, float, float]:
+        """진행 중 1분 (O, H, L, C). 없으면 0."""
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return 0.0, 0.0, 0.0, 0.0
+            with self._lock:
+                st = self._st.get(nk)
+                if not st:
+                    return 0.0, 0.0, 0.0, 0.0
+                o = float(st.get("O", 0) or 0)
+                h = float(st.get("H", 0) or 0)
+                l_ = float(st.get("L", 0) or 0)
+                c = float(st.get("C", 0) or 0)
+                if c <= 0:
+                    return 0.0, 0.0, 0.0, 0.0
+                if l_ <= 0:
+                    l_ = c
+                return o, h, l_, c
+        except (TypeError, ValueError, KeyError):
+            return 0.0, 0.0, 0.0, 0.0
 
     def dataframe_for_window(
         self,

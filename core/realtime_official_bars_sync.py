@@ -215,7 +215,7 @@ def _resolve_monitor_price(app: Any, nk: str, fallback: float) -> float:
         for key, info in mi.items():
             try:
                 if str(key).split("_")[0].zfill(6) == nk:
-                    for fld in ("last_price", "price", "Close"):
+                    for fld in ("price", "last_price", "Close"):
                         v = info.get(fld)
                         if v is not None and float(v) > 0:
                             return float(v)
@@ -311,6 +311,7 @@ def _run_official_sync_and_signal_eval_job(
                 float(px),
                 int(volume_fallback),
                 0.0,
+                _official_sync_eval=True,
             )
             return
         eng = getattr(app, "signal_engine", None)
@@ -328,6 +329,7 @@ def _run_official_sync_and_signal_eval_job(
                     int(volume_fallback),
                     0.0,
                     defer_main_callbacks=True,
+                    _official_sync_eval=True,
                 )
     except Exception:
         pass

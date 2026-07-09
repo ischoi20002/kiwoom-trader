@@ -152,6 +152,12 @@ DEFAULT_SETTINGS = {
     "vp_price_stub_grace_sec": 45.0,
     # 실시간 인트라바 미러 GAP_DOWN: M1 저가만으로 청산하지 않고 틱 현재가도 한도 이하여야 함
     "realtime_gap_down_tick_confirm": True,
+    # WS fid10(현재가) 단일 틱 이상치 필터 — 기본 OFF(오탐·기준가 고착 방지). 극단 스파이크만 쓸 때 True.
+    "realtime_tick_price_guard_enabled": False,
+    # 필터 ON 시 직전 수용가·공식 1분 종가 모두에서 이탈할 때만 거절(호가 단위)
+    "realtime_tick_max_single_jump_ticks": 30,
+    # 필터 ON 시 직전 대비 허용 최대 변동(%). tick·pct 중 넓은 쪽 적용
+    "realtime_tick_max_single_jump_pct": 1.5,
     # 진입 직후 N초 동안 미러 GAP_DOWN 억제(매수 직후 M1 저가 오판 방지)
     "realtime_gap_down_entry_grace_sec": 90.0,
     # 감시 트리 보유행 ATR 지표행 캐시(초) — calculate_indicators 메인 호출 최소화

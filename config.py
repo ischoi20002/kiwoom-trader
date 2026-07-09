@@ -8,8 +8,8 @@ import os
 DATA_GO_KR_SERVICE_KEY = os.environ.get("DATA_GO_KR_SERVICE_KEY", "").strip()
 
 # 1. 본인의 정보를 입력하세요 (따옴표 안에 넣으세요)
-APP_KEY = "3qV0WGDfHHTDrievzvsl0Yvt-7u6VLSOwS469J_AYP0"
-APP_SECRET = "-TZiGwo1WpQSTPDnoDJAAblpcbkuCqpPpCC9mPlFA80"
+APP_KEY = "YR6wsaXU9xdjuQ8-1EBwpvZOnrsFsNszV7iVTYGZrGg"
+APP_SECRET = "WrP8PBGLB2H_6nEQI7yUlhBbZLopPWirP-W-gGYIxQI"
 
 # 2. 거래 서버 설정 (실전/모의)
 REAL_URL = "https://api.kiwoom.com"
@@ -23,8 +23,8 @@ URL = MOCK_URL if USE_MOCK else REAL_URL
 # KiwoomApp 기동 시 settings 의 realtime_ka10080_global_min_interval_sec 로 덮어씁니다.
 KA10080_GLOBAL_MIN_INTERVAL_SEC = 0.35
 
-MOCK_APP_KEY = "5-_eJyH9IVD8SFmAqXMHas0jaTCS0O9nJ-_ivKx4KLI"                     # 모의투자용 App Key
-MOCK_APP_SECRET = "NFlzCETCLsvRQ_BwghdIlLW_h0p39YlZZANiimKeF-E"                  # 모의투자용 Secret Key
+MOCK_APP_KEY = "_DEvzqasQ0lFUKbu6A9EHx-skXc_J9G76aEWMrHDk7g"                     # 모의투자용 App Key
+MOCK_APP_SECRET = "DXgiHjuukHF9LFKi6CtLwDeWvKgr6dE0K34zMYy2Gyo"                  # 모의투자용 Secret Key
 ALLOW_MOCK_ORDER = True # 모의투자 주문 허용 여부
 ALLOW_REAL_ORDER = False # 실전투자 주문 허용 여부 (매우 주의!)
 

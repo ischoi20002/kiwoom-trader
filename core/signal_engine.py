@@ -596,7 +596,9 @@ class SignalEngine:
                 if pf._is_synced_placeholder_position(pos_live):
                     return True
                 if not pf._has_confirmed_buy_events(pos_live):
-                    return True
+                    # DB 복구·재시작 포지션은 events=[] 이어도 reason+진입시각 있으면 청산 허용
+                    if not self._position_has_strategy_entry_reason(pos_live):
+                        return True
         except Exception:
             pass
         try:
@@ -604,6 +606,21 @@ class SignalEngine:
                 return True
         except Exception:
             return True
+        return False
+
+    @staticmethod
+    def _position_has_strategy_entry_reason(pos: Dict[str, Any]) -> bool:
+        """전략 진입 reason(TYPE_A/B 등) — DB active_positions 복구 시 events 없어도 청산 가능."""
+        try:
+            rs = str(pos.get("reason", "")).strip().upper()
+            if rs in ("TYPE_A", "TYPE_B"):
+                return True
+            if "TYPE_A" in rs or "TYPE_B" in rs:
+                return True
+            if rs.startswith("S1_") or rs.startswith("S2_"):
+                return True
+        except Exception:
+            pass
         return False
 
     def _realtime_gap_down_mirror_ok(
@@ -732,7 +749,7 @@ class SignalEngine:
                 return {"action": "HOLD"}
             # [버그픽스] S1 매수 미체결·잔고 선반영(SYNCED)만 있는 동안 청산 미러 금지
             if self._mirror_held_exit_blocked_pre_confirm(nk, pos_live):
-                return {"action": "HOLD"}
+                return None
             pair = self._intrabar_mirror_get_full15m_and_m1(nk, full_15m_src)
             if pair is None:
                 return None
@@ -1118,6 +1135,26 @@ class SignalEngine:
             pass
         return ("0.00%", 0.0)
 
+    @staticmethod
+    def monitor_display_price(info: dict, fallback: float) -> float:
+        """
+        감시 트리 「현재가」 표시용. WS가 먼저 갱신하는 ``price`` 를 ``last_price`` 보다 우선한다.
+        """
+        for fld in ("price", "last_price"):
+            try:
+                v = info.get(fld)
+                if v in (None, "", 0):
+                    continue
+                fv = float(v)
+                if fv > 0:
+                    return fv
+            except (TypeError, ValueError):
+                continue
+        try:
+            return float(fallback)
+        except (TypeError, ValueError):
+            return 0.0
+
     def ratio_cell_display_for_monitor_tree(
         self, info: dict, now_price: float
     ) -> str:
@@ -1415,12 +1452,22 @@ class SignalEngine:
                     pass
                 return
             info = self.app.monitor_info[mi_key]
+            official_sync_eval = bool(kwargs.get("_official_sync_eval", False))
             # 지정가 주문 시세 검증용: 틱 단가로 캐시를 매 틱 동기화 (화면·주문 기준 불일치 방지)
+            # 공식 M1 평가 경로는 신호만 재계산하고, 이미 살아 있는 WS 틱가를 덮어쓰지 않는다.
             try:
-                info["last_price"] = float(now_price)
-                info["price"] = float(now_price)
-            except (TypeError, ValueError):
-                pass
+                live_px = self.monitor_display_price(info, 0.0)
+            except Exception:
+                live_px = 0.0
+            if official_sync_eval and live_px > 0:
+                display_price = float(live_px)
+            else:
+                try:
+                    info["last_price"] = float(now_price)
+                    info["price"] = float(now_price)
+                    display_price = float(now_price)
+                except (TypeError, ValueError):
+                    display_price = float(now_price) if now_price else 0.0
             try:
                 clear_vp_price_stub_if_expired(info)
             except Exception:
@@ -2153,8 +2200,12 @@ class SignalEngine:
                 exit_due = False
                 s2_m1_due = False
                 if on_m1_schedule:
-                    # 청산·S2 모두 M1 리비전(완료 1분 반영)에 맞춤 — Stage 1·2 공통
-                    held_eval_due = m1_rev_changed if has_m1_store else time_fallback_due
+                    # 청산·S2: M1 완성 시 즉시 + M1 정체 시 15초마다 틱 재검사
+                    # (화면 ATR SL은 틱가 기준인데 미러만 보면 forming 분봉 저가로 HOLD 될 수 있음)
+                    if has_m1_store:
+                        held_eval_due = bool(m1_rev_changed or time_fallback_due)
+                    else:
+                        held_eval_due = time_fallback_due
                     need_skip_exit = False
                     run_s2_legacy = int(stg_h) == 1 and held_eval_due
                 else:
@@ -2189,6 +2240,25 @@ class SignalEngine:
                             if isinstance(mirrored, dict)
                             else {"action": "HOLD"}
                         )
+                        # 미러 HOLD( M1 저가 미충족 등) 시 레거시 틱 청산 폴백
+                        if run_exit_legacy and str(res.get("action") or "") == "HOLD":
+                            try:
+                                leg = self.app.strategy_engine.evaluate_position_scoped(
+                                    code,
+                                    now_price,
+                                    scope="exit_only",
+                                    ind=eval_ind,
+                                    is_power_exhausted=is_power_exhausted,
+                                    bid_ask_ratio=bid_ask_ratio,
+                                    ask_bid_ratio=ask_bid_ratio,
+                                    vol_power=vol_power,
+                                    sel_track=info.get("sel_track")
+                                    or info.get("SelTrack"),
+                                )
+                                if isinstance(leg, dict) and leg.get("action") != "HOLD":
+                                    res = leg
+                            except Exception:
+                                pass
                         if run_exit_legacy and (not on_m1_schedule or not has_m1_store):
                             self._eval_exit_last_ts[code] = now_ts
                     else:
@@ -2251,6 +2321,13 @@ class SignalEngine:
                             self._held_s2_last_m1_rev[code] = int(m1_rev_h)
                         except Exception:
                             pass
+                    if (
+                        held_eval_due
+                        and on_m1_schedule
+                        and has_m1_store
+                        and time_fallback_due
+                    ):
+                        self._eval_exit_last_ts[code] = now_ts
 
                     try:
                         _raw_np = res.get("now_price")
@@ -2328,7 +2405,7 @@ class SignalEngine:
             #         가격/거래량이 UI에서 갱신되지 않음
             # - 현재: wl_only도 최소 트리 갱신(Price/Volume/기본 열)을 수행하도록 허용
             try:
-                np_f = float(now_price)
+                np_f = float(display_price)
             except (TypeError, ValueError):
                 np_f = 0.0
 

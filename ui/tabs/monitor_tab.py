@@ -2434,14 +2434,27 @@ class MonitorTab:
             def get_val(fid, default=0):
                 v = vals.get(str(fid))
                 if v is None or v == "":
+                    v = vals.get(fid)
+                if v is None or v == "":
                     return default
                 try:
-                    return float(str(v).replace("+", "").replace("-", "").strip())
+                    return float(str(v).replace(",", "").replace("+", "").replace("-", "").strip())
                 except Exception:
                     return default
 
             if p_type == "0b":
-                now_price = int(get_val(10))
+                from core.tick_price_sanity import (
+                    maybe_log_rejected_tick,
+                    parse_ws_current_price,
+                    should_accept_ws_tick_price,
+                )
+
+                raw_fid10 = vals.get("10")
+                if raw_fid10 is None:
+                    raw_fid10 = vals.get(10)
+                now_price = parse_ws_current_price(raw_fid10)
+                if now_price is None:
+                    now_price = 0
                 # 체결 전·장 시작 직후 fid 10 이 0인 패킷이 섞일 수 있음.
                 # return 이면 같은 REAL 배치의 다른 종목 틱까지 전부 버려지므로 continue.
                 debug_codes = {"267250", "454910", "016360", "042700"}
@@ -2498,6 +2511,27 @@ class MonitorTab:
                         pass
                     continue
                 volume = int(get_val(13))
+                try:
+                    st = getattr(self.app, "settings", None) or {}
+                    m1s = getattr(self.app, "rt_tick_m1_store", None)
+                    ok_px, rej_reason = should_accept_ws_tick_price(
+                        code,
+                        int(now_price),
+                        info,
+                        m1_store=m1s,
+                        settings=st,
+                    )
+                    if not ok_px:
+                        maybe_log_rejected_tick(
+                            self.app,
+                            code,
+                            raw_fid10,
+                            int(now_price),
+                            rej_reason,
+                        )
+                        continue
+                except Exception:
+                    pass
                 trde_val = int(get_val(26) // 1000)
                 # fid 11(diff), 12(ratio)는 websocket payload에서 keys 타입이
                 # 문자열('11','12') 또는 정수(11,12)로 올 수 있다.
@@ -2547,6 +2581,7 @@ class MonitorTab:
                 except Exception:
                     pass
                 info['price'] = now_price
+                info['last_price'] = now_price
                 info['ratio'] = ratio_val
                 info['diff'] = diff_val
                 info['volume'] = volume

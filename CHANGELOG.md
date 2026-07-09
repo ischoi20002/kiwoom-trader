@@ -13,6 +13,25 @@
 
 ---
 
+## 0.8.76 (2026-07-09)
+
+DB 복구 보유 포지션의 실시간 청산 미발송 수정.
+
+- **원인**: 재시작·재인증으로 `active_positions` DB에서 복구된 보유 포지션은 `events=[]`(확정 매수 이벤트 없음)이라 `_mirror_held_exit_blocked_pre_confirm` 이 인트라바 미러 청산을 전면 차단. 미러가 `{"action": "HOLD"}` 만 반환하고 레거시 틱 청산으로도 넘어가지 않아, 화면상 ATR SL 이탈(예: 한국전력 35,350 < SL 37,553)에도 매도 신호 0건.
+- **`core/signal_engine.py`**:
+  - `_mirror_held_exit_blocked_pre_confirm` — `events` 없어도 진입 `reason`(`TYPE_A`/`TYPE_B`/`S1_`/`S2_`) + 진입시각이 있으면 청산 허용(`_position_has_strategy_entry_reason` 신설).
+  - 미러 청산 차단 시 `{"action": "HOLD"}` 대신 `None` 반환 → 레거시 틱 청산 폴백 경로 복원.
+  - 미러가 `HOLD` 를 반환해도 틱 기반 `evaluate_position_scoped(exit_only)` 로 1회 재검사.
+  - `realtime_eval_position_on_m1_revision_only=True` 경로에서도 M1 정체 시 15초(`realtime_eval_position_min_interval_sec`)마다 틱 재평가.
+
+## 0.8.75 (2026-07-09)
+
+실시간 감시 현재가가 M1 평가 틱과 WS 틱 사이에서 널뛰는 현상 완화.
+
+- **`core/signal_engine.py`**: 공식 M1 평가 경로(`_official_sync_eval`)에서는 살아 있는 WS `price` 를 덮어쓰지 않음. 트리 「현재가」는 `monitor_display_price()` 로 표시.
+- **`core/realtime_official_bars_sync.py`**: M1·슬롯 롤 후 신호 재평가 시 `_official_sync_eval=True` 전달. `_resolve_monitor_price` 는 `price` → `last_price` 순.
+- **`ui/tabs/monitor_tab.py`**: WS 0B 수신 시 `last_price` 도 함께 갱신.
+
 ## 0.8.74 (2026-07-08)
 
 보유 청산·S2 평가 주기를 M1 리비전(S2)과 통일.

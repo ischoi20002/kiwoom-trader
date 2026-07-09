@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>일일 결산 — 2026-04-22</title>
+    <script>window.__DAILY_REPORT_PLOTLY_CDN__ = "https://cdn.plot.ly/plotly-3.5.0.min.js";</script>
+    <script type="application/json" id="daily-report-meta">{"report_date": "2026-04-22", "generated_at": "2026-05-01 22:48:27", "status": "complete", "session_buffer_minutes": 10, "generation_marked_complete": true, "chart_failed_codes": [], "warnings": [], "schema_version": 2, "total_assets_close": 9314695.0, "plotly_py_version": "6.7.0", "plotly_js_cdn": "https://cdn.plot.ly/plotly-3.5.0.min.js"}</script>
+    <style>
+        :root {
+            --bg: #2E3440;
+            --fg: #ECEFF4;
+            --muted: #88C0D0;
+            --bd: #4C566A;
+            --plus: #A3BE8C;
+            --minus: #BF616A;
+        }
+        body {
+            font-family: 'Malgun Gothic', 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            margin: 0;
+            padding: 24px;
+            line-height: 1.5;
+        }
+        .container { max-width: 1100px; margin: 0 auto; }
+        h1 { font-weight: 600; color: var(--muted); margin-top: 0; }
+        h2 { font-size: 1.1rem; color: var(--muted); border-bottom: 1px solid var(--bd); padding-bottom: 8px; }
+        .muted { color: #81A1C1; font-weight: normal; }
+        .navbtn { color: #88C0D0; text-decoration: none; margin: 0 8px; }
+        .navbtn:hover { text-decoration: underline; }
+        table.summary { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+        table.summary td { padding: 8px 12px; border-bottom: 1px solid var(--bd); }
+        table.summary td:first-child { color: #D8DEE9; width: 40%; }
+        .num { text-align: right; font-variant-numeric: tabular-nums; }
+        .card {
+            background: #3B4252;
+            border: 1px solid var(--bd);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .banner.warn {
+            background: #4C566A;
+            border: 1px solid #BF616A;
+            color: #ECEFF4;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+        p.warn { color: #BF616A; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 6px 8px; border-bottom: 1px solid #434C5E; text-align: left; }
+        th { color: var(--muted); }
+        .chartwrap { overflow-x: auto; }
+        /* 종목 카드 안: 이 종목 15분봉만 버튼으로 펼침 */
+        .stock-chart-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 16px;
+            padding-top: 12px;
+            border-top: 1px solid var(--bd);
+        }
+        .stock-chart-toolbar-label { font-size: 0.9rem; }
+        .chart-toggle-btn {
+            background: #88C0D0;
+            color: #2E3440;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .chart-toggle-btn:hover { filter: brightness(1.08); }
+        .chart-toggle-btn:focus-visible { outline: 2px solid #ECEFF4; outline-offset: 2px; }
+        .chart-panel-collapsible { margin-top: 12px; }
+        .chart-details-body {
+            padding-top: 4px;
+            border-top: 1px solid var(--bd);
+        }
+        footer { margin-top: 32px; font-size: 12px; color: #81A1C1; text-align: center; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <nav style="margin-bottom:16px;"><a class="navbtn" href="../2026-04-21/daily_settlement.html">◀ 이전 거래일</a> <span class="muted">2026-04-22</span> <a class="navbtn" href="../2026-04-23/daily_settlement.html">다음 거래일 ▶</a></nav>
+    <h1>일일 결산 리포트 <span class="muted">2026-04-22</span></h1>
+    <p class="muted">생성 시각: 2026-05-01 22:48:27 — 상태: complete — 완료판정(장마감+버퍼): 예</p>
+    <p class="muted" style="font-size:12px;margin-top:-6px;">차트 데이터는 HTML에 포함되어 <code>file://</code> 로 열어도 동작합니다. 펼칠 때만 Plotly로 그립니다(초기 로드 시 plotly.js CDN은 첫 펼침 때만 로드).</p>
+    
+
+    <h2>요약</h2>
+    <table class="summary">
+        <tr><td>총 자산 (D+2+주식평가, 포지션 관리 탭과 동일)</td><td class="num">9,314,695 원</td></tr>
+        <tr><td>예수금 (가용)</td><td class="num">947,683 원</td></tr>
+        <tr><td>예수금 D+1</td><td class="num">4,004,965 원</td></tr>
+        <tr><td>예수금 D+2</td><td class="num">4,004,965 원</td></tr>
+        <tr><td>주식 평가금 (보유 합)</td><td class="num">5,309,730 원</td></tr>
+        <tr><td>금일 실현 (당일 청산·청산일 기준)</td><td class="num">-46,971 원</td></tr>
+        <tr><td>미실현 손익 (보유·누적)</td><td class="num">+72,167 원</td></tr>
+        <tr><td>금일 손익 (직전 장마감 시세 기준 추정 총자산 대비)</td><td class="num">+26,610 원 (+0.29%) <span class="muted">(전일 9,288,085원 대비)</span></td></tr>
+        <tr><td>누적 수익률 (참고·초기자본 대비)</td><td class="num">-6.85%</td></tr>
+    </table>
+
+    <h2>종목별 리포트 (주문 · 체결 · 15분봉 차트)</h2>
+    <p class="muted" style="margin-top:-8px;margin-bottom:16px;">각 종목 카드 하단의 버튼으로 <b>해당 종목</b> 15분봉 차트만 펼칠 수 있습니다.</p>
+    
+        <div class="card stock-report-card" id="stock-report-010060">
+            <h3>OCI홀딩스 <span class="muted">(010060)</span></h3>
+            <p class="muted" style="margin:4px 0 12px 0;">ATR 청산 기준가 (리포트일 15분 종가·보유 시): 리포트 시점 비보유</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>시각</th><th>구분</th><th>수량</th><th>주문가</th><th>체결가</th><th>체결수량</th>
+                        <th>수수료</th><th>매수금액</th><th>매도금액</th>
+                        <th>수익률(순)</th><th>누적실현(순)</th>
+                        <th>체결강(주문)</th><th>호가(주문)</th>
+                        <th>상태</th><th>주문번호</th><th>사유</th>
+                    </tr>
+                </thead>
+                <tbody><tr>
+                <td>2026-04-22 09:21:53</td>
+                <td>sell</td>
+                <td class="num">7</td>
+                <td class="num">290,000</td>
+                <td class="num">290000</td>
+                <td class="num">7</td>
+                <td class="num">11,165</td>
+                <td class="num">—</td>
+                <td class="num">2,030,000</td>
+                <td class="num">+1.73%</td>
+                <td class="num">34,414</td>
+                <td class="num">67.8%</td>
+                <td>516 / 4,977 (0.1)</td>
+                <td>FILLED</td>
+                <td>0037527</td>
+                <td>EXIT_FLASH_EXIT</td>
+            </tr><tr>
+                <td>2026-04-22 15:19:49</td>
+                <td>buy</td>
+                <td class="num">6</td>
+                <td class="num">316,500</td>
+                <td class="num">315583</td>
+                <td class="num">6</td>
+                <td class="num">6,627</td>
+                <td class="num">1,893,498</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">113.2%</td>
+                <td>9,432 / 912 (10.3)</td>
+                <td>FILLED</td>
+                <td>0181261</td>
+                <td>TYPE_B</td>
+            </tr></tbody>
+            </table>
+            <div class="stock-chart-toolbar">
+                <span class="muted stock-chart-toolbar-label">15분봉 · 주문 시각</span>
+                <button type="button" class="chart-toggle-btn"
+                    aria-expanded="false"
+                    aria-controls="chart-panel-010060"
+                    data-text-open="OCI홀딩스 15분봉 차트 접기"
+                    data-text-closed="OCI홀딩스 15분봉 차트 펼치기">OCI홀딩스 15분봉 차트 펼치기</button>
+            </div>
+            <div class="chart-panel-collapsible" id="chart-panel-010060" hidden>
+                <div class="chart-details-body"><div class="chartwrap"><div class="plotly-deferred-wrap" data-plotly-rendered="0"><div id="plotly-ecef043267d94482bf42b9a4915ec3fc" class="plotly-graph-div" style="height:480px;width:100%;"></div><script type="application/json" class="plotly-fig-json" data-plotly-target="plotly-ecef043267d94482bf42b9a4915ec3fc">{"data":[{"close":{"dtype":"f8","bdata":"AAAAAMDxEUEAAAAAwPERQQAAAADoFBJBAAAAAIDSEUEAAAAAkPkRQQAAAAAQOBJBAAAAAEAwEkEAAAAAIF8SQQAAAACwRxJBAAAAAIBPEkEAAAAA4D8SQQAAAAAAjhJBAAAAADCGEkEAAAAAwG4SQQAAAACQdhJBAAAAANCVEkEAAAAAcKUSQQAAAAAg3BJBAAAAAOC8EkEAAAAAYPsSQQAAAABAKhNBAAAAAOC8EkEAAAAAINwSQQAAAADAbhJBAAAAAPDjEkEAAAAAQCoTQQAAAABAKhNB"},"decreasing":{"fillcolor":"#5E81AC","line":{"color":"#5E81AC"}},"high":{"dtype":"f8","bdata":"AAAAANAYEkEAAAAAwPERQQAAAAAQOBJBAAAAAEAwEkEAAAAAYAESQQAAAAAQOBJBAAAAAIBPEkEAAAAAwOsSQQAAAAAAjhJBAAAAACBfEkEAAAAAUFcSQQAAAAAAjhJBAAAAANCVEkEAAAAAAI4SQQAAAABgfhJBAAAAABC1EkEAAAAA8OMSQQAAAADA6xJBAAAAAPDjEkEAAAAAcJ8TQQAAAADgORNBAAAAAOA5E0EAAAAAwOsSQQAAAAAg3BJBAAAAAHj3EkEAAAAAIFkTQQAAAABAKhNB"},"increasing":{"fillcolor":"#BF616A","line":{"color":"#BF616A"}},"low":{"dtype":"f8","bdata":"AAAAAODCEUEAAAAAELsRQQAAAAAg4hFBAAAAALDKEUEAAAAAAJQRQQAAAACA0hFBAAAAAGABEkEAAAAAoCASQQAAAAAQOBJBAAAAAEAwEkEAAAAAWCwSQQAAAABAMBJBAAAAAPBmEkEAAAAAIF8SQQAAAAAgXxJBAAAAAMBuEkEAAAAAkHYSQQAAAADQlRJBAAAAAECtEkEAAAAA4LwSQQAAAADw4xJBAAAAABC1EkEAAAAAQK0SQQAAAAAgXxJBAAAAAPBmEkEAAAAAINwSQQAAAABAKhNB"},"name":"15m","open":{"dtype":"f8","bdata":"AAAAAMDxEUEAAAAAwPERQQAAAADw6RFBAAAAANAYEkEAAAAAgNIRQQAAAACQ+RFBAAAAAEAwEkEAAAAAQDASQQAAAAAgXxJBAAAAAIBPEkEAAAAAgE8SQQAAAADgPxJBAAAAAACOEkEAAAAAMIYSQQAAAADAbhJBAAAAAJB2EkEAAAAAAI4SQQAAAACgnRJBAAAAACDcEkEAAAAA4LwSQQAAAAAYBxNBAAAAAEAqE0EAAAAA4LwSQQAAAAAg3BJBAAAAAMBuEkEAAAAAINwSQQAAAABAKhNB"},"x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"type":"candlestick","xaxis":"x","yaxis":"y"},{"hoverinfo":"skip","line":{"color":"#EBCB8B","width":1},"name":"MA5","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAMDxEUEAAAAAwPERQQAAAAB4\u002fRFBAAAAALryEUEAAAAAGPQRQQAAAAAoAhJBAAAAAKgOEkEAAAAAgB0SQQAAAADwNBJBAAAAACBGEkEAAAAAsEcSQQAAAABwWhJBAAAAAEBiEkEAAAAAEGoSQQAAAADgcRJBAAAAABCDEkEAAAAAwIcSQQAAAADwmBJBAAAAAJCoEkEAAAAAIMMSQQAAAADQ4BJBAAAAAIDlEkEAAAAAgOUSQQAAAADg1RJBAAAAADDREkEAAAAAMNESQQAAAAAQ5xJB"},"type":"scatter","xaxis":"x","yaxis":"y"},{"hoverinfo":"skip","line":{"color":"#88C0D0","width":1},"name":"MA20","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAMDxEUEAAAAAwPERQQAAAAB4\u002fRFBAAAAALryEUEAAAAAGPQRQQAAAABs\u002fxFBt23btmUGEkEAAAAAfRESQauqqqqCFxJBAAAAABwdEkF00UUXRSASQQAAAABqKRJB7MRO7IwwEkFJkiRJ\u002fjQSQVVVVVVdORJBAAAAgCQ\u002fEkHx8PDwKEUSQQAAAACMTRJBAAAAAGhTEkEAAAAAzlsSQQAAAABuaxJBAAAAAJZ1EkEAAAAAjH8SQQAAAABchxJBAAAAABSTEkEAAAAAMJ8SQQAAAACwqxJB"},"type":"scatter","xaxis":"x","yaxis":"y"},{"marker":{"color":["#BF616A","#BF616A","#BF616A","#5E81AC","#BF616A","#BF616A","#BF616A","#BF616A","#5E81AC","#BF616A","#5E81AC","#BF616A","#5E81AC","#5E81AC","#BF616A","#BF616A","#BF616A","#BF616A","#5E81AC","#BF616A","#BF616A","#5E81AC","#BF616A","#5E81AC","#BF616A","#BF616A","#BF616A"]},"name":"Volume","opacity":0.7,"orientation":"v","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAMAA2UAAAAAAAADEQAAAAADAe9JAAAAAAIBU0kAAAAAAgEnSQAAAAACAfslAAAAAAMBl3EAAAAAA4H3rQAAAAACAO81AAAAAAIB0w0AAAAAAAIe3QAAAAAAAY7lAAAAAAIBowEAAAAAAAKG5QAAAAAAAGbhAAAAAAIA\u002fy0AAAAAAgK3WQAAAAACA3dZAAAAAAAAaykAAAAAAMFj+QAAAAACgseFAAAAAAACQ2kAAAAAAgFnQQAAAAADAT9lAAAAAAMDn2UAAAAAAIOXlQAAAAAAAIGRA"},"type":"bar","xaxis":"x2","yaxis":"y2"}],"layout":{"template":{"data":{"barpolar":[{"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"barpolar"}],"bar":[{"error_x":{"color":"#f2f5fa"},"error_y":{"color":"#f2f5fa"},"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"bar"}],"carpet":[{"aaxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"baxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"type":"carpet"}],"choropleth":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"choropleth"}],"contourcarpet":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"contourcarpet"}],"contour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"contour"}],"heatmap":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"heatmap"}],"histogram2dcontour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2dcontour"}],"histogram2d":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2d"}],"histogram":[{"marker":{"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"histogram"}],"mesh3d":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"mesh3d"}],"parcoords":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"parcoords"}],"pie":[{"automargin":true,"type":"pie"}],"scatter3d":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatter3d"}],"scattercarpet":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattercarpet"}],"scattergeo":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattergeo"}],"scattergl":[{"marker":{"line":{"color":"#283442"}},"type":"scattergl"}],"scattermapbox":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattermapbox"}],"scattermap":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattermap"}],"scatterpolargl":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolargl"}],"scatterpolar":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolar"}],"scatter":[{"marker":{"line":{"color":"#283442"}},"type":"scatter"}],"scatterternary":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterternary"}],"surface":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"surface"}],"table":[{"cells":{"fill":{"color":"#506784"},"line":{"color":"rgb(17,17,17)"}},"header":{"fill":{"color":"#2a3f5f"},"line":{"color":"rgb(17,17,17)"}},"type":"table"}]},"layout":{"annotationdefaults":{"arrowcolor":"#f2f5fa","arrowhead":0,"arrowwidth":1},"autotypenumbers":"strict","coloraxis":{"colorbar":{"outlinewidth":0,"ticks":""}},"colorscale":{"diverging":[[0,"#8e0152"],[0.1,"#c51b7d"],[0.2,"#de77ae"],[0.3,"#f1b6da"],[0.4,"#fde0ef"],[0.5,"#f7f7f7"],[0.6,"#e6f5d0"],[0.7,"#b8e186"],[0.8,"#7fbc41"],[0.9,"#4d9221"],[1,"#276419"]],"sequential":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"sequentialminus":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]},"colorway":["#636efa","#EF553B","#00cc96","#ab63fa","#FFA15A","#19d3f3","#FF6692","#B6E880","#FF97FF","#FECB52"],"font":{"color":"#f2f5fa"},"geo":{"bgcolor":"rgb(17,17,17)","lakecolor":"rgb(17,17,17)","landcolor":"rgb(17,17,17)","showlakes":true,"showland":true,"subunitcolor":"#506784"},"hoverlabel":{"align":"left"},"hovermode":"closest","mapbox":{"style":"dark"},"paper_bgcolor":"rgb(17,17,17)","plot_bgcolor":"rgb(17,17,17)","polar":{"angularaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","radialaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"scene":{"xaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"yaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"zaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"}},"shapedefaults":{"line":{"color":"#f2f5fa"}},"sliderdefaults":{"bgcolor":"#C8D4E3","bordercolor":"rgb(17,17,17)","borderwidth":1,"tickwidth":0},"ternary":{"aaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"baxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","caxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"title":{"x":0.05},"updatemenudefaults":{"bgcolor":"#506784","borderwidth":0},"xaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2},"yaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2}}},"xaxis":{"anchor":"y","domain":[0.0,1.0],"matches":"x2","showticklabels":false,"rangeslider":{"visible":false},"type":"date","showspikes":true,"spikemode":"across","spikesnap":"cursor","spikedash":"solid"},"yaxis":{"anchor":"x","domain":[0.3608,1.0]},"xaxis2":{"anchor":"y2","domain":[0.0,1.0],"type":"date","showspikes":true,"spikemode":"across","spikesnap":"cursor","spikedash":"solid"},"yaxis2":{"anchor":"x2","domain":[0.0,0.3008]},"annotations":[{"font":{"size":16},"showarrow":false,"text":"OCI\ud640\ub529\uc2a4 (010060) 15\ubd84 \u00b7 2026-04-22","x":0.5,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"\uac70\ub798\ub7c9","x":0.5,"xanchor":"center","xref":"paper","y":0.3008,"yanchor":"bottom","yref":"paper"}],"shapes":[{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T09:21:53","x1":"2026-04-22T09:21:53","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T09:21:53","x1":"2026-04-22T09:21:53","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"},{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T15:19:49","x1":"2026-04-22T15:19:49","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T15:19:49","x1":"2026-04-22T15:19:49","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"}],"margin":{"l":48,"r":24,"t":48,"b":40},"legend":{"orientation":"h","yanchor":"bottom","y":1.02,"x":0},"paper_bgcolor":"#2E3440","plot_bgcolor":"#3B4252","height":480,"hovermode":"x unified","dragmode":false,"showlegend":true}}</script></div></div></div>
+            </div>
+        </div>
+        <div class="card stock-report-card" id="stock-report-034220">
+            <h3>LG디스플레이 <span class="muted">(034220)</span></h3>
+            <p class="muted" style="margin:4px 0 12px 0;">ATR 청산 기준가 (리포트일 15분 종가·보유 시): 리포트 시점 비보유</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>시각</th><th>구분</th><th>수량</th><th>주문가</th><th>체결가</th><th>체결수량</th>
+                        <th>수수료</th><th>매수금액</th><th>매도금액</th>
+                        <th>수익률(순)</th><th>누적실현(순)</th>
+                        <th>체결강(주문)</th><th>호가(주문)</th>
+                        <th>상태</th><th>주문번호</th><th>사유</th>
+                    </tr>
+                </thead>
+                <tbody><tr>
+                <td>2026-04-22 12:28:26</td>
+                <td>buy</td>
+                <td class="num">129</td>
+                <td class="num">15,470</td>
+                <td class="num">15470</td>
+                <td class="num">129</td>
+                <td class="num">6,985</td>
+                <td class="num">1,995,630</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">160.0%</td>
+                <td>219,845 / 31,422 (7.0)</td>
+                <td>FILLED</td>
+                <td>0131928</td>
+                <td>TYPE_B</td>
+            </tr><tr>
+                <td>2026-04-22 12:28:30</td>
+                <td>sell</td>
+                <td class="num">50</td>
+                <td class="num">15,370</td>
+                <td class="num">15370</td>
+                <td class="num">50</td>
+                <td class="num">4,227</td>
+                <td class="num">—</td>
+                <td class="num">768,500</td>
+                <td class="num">-1.22%</td>
+                <td class="num">-9,425</td>
+                <td class="num">160.0%</td>
+                <td>219,395 / 28,371 (7.7)</td>
+                <td>FILLED</td>
+                <td>0131938</td>
+                <td>EXIT_FLASH_EXIT</td>
+            </tr><tr>
+                <td>2026-04-22 13:28:32</td>
+                <td>sell</td>
+                <td class="num">79</td>
+                <td class="num">15,410</td>
+                <td class="num">15410</td>
+                <td class="num">79</td>
+                <td class="num">6,696</td>
+                <td class="num">—</td>
+                <td class="num">1,217,390</td>
+                <td class="num">-0.96%</td>
+                <td class="num">-21,175</td>
+                <td class="num">160.4%</td>
+                <td>246,584 / 39,146 (6.3)</td>
+                <td>FILLED</td>
+                <td>0147613</td>
+                <td>EXIT_FLASH_EXIT</td>
+            </tr></tbody>
+            </table>
+            <div class="stock-chart-toolbar">
+                <span class="muted stock-chart-toolbar-label">15분봉 · 주문 시각</span>
+                <button type="button" class="chart-toggle-btn"
+                    aria-expanded="false"
+                    aria-controls="chart-panel-034220"
+                    data-text-open="LG디스플레이 15분봉 차트 접기"
+                    data-text-closed="LG디스플레이 15분봉 차트 펼치기">LG디스플레이 15분봉 차트 펼치기</button>
+            </div>
+            <div class="chart-panel-collapsible" id="chart-panel-034220" hidden>
+                <div class="chart-details-body"><div class="chartwrap"><div class="plotly-deferred-wrap" data-plotly-rendered="0"><div id="plotly-105458d298a74e67b84dccb3f25ae62c" class="plotly-graph-div" style="height:480px;width:100%;"></div><script type="application/json" class="plotly-fig-json" data-plotly-target="plotly-105458d298a74e67b84dccb3f25ae62c">{"data":[{"close":{"dtype":"f8","bdata":"AAAAAABvzUAAAAAAAOzNQAAAAAAAeM5AAAAAAAAtzkAAAAAAAKvNQAAAAAAAl81AAAAAAAC1zUAAAAAAAOLNQAAAAAAA8c1AAAAAAAAAzkAAAAAAAPvNQAAAAAAA3c1AAAAAAADJzUAAAAAAAB7OQAAAAAAAI85AAAAAAABBzkAAAAAAAEHOQAAAAAAALc5AAAAAAAD7zUAAAAAAAPbNQAAAAAAACs5AAAAAAAAtzkAAAAAAADzOQAAAAAAAMs5AAAAAAAAtzkAAAAAAADzOQAAAAAAAPM5A"},"decreasing":{"fillcolor":"#5E81AC","line":{"color":"#5E81AC"}},"high":{"dtype":"f8","bdata":"AAAAAABvzUAAAAAAAC3OQAAAAAAA3M5AAAAAAACMzkAAAAAAAEHOQAAAAAAAsM1AAAAAAADTzUAAAAAAAOzNQAAAAAAA8c1AAAAAAAAAzkAAAAAAAArOQAAAAAAAAM5AAAAAAADizUAAAAAAACPOQAAAAAAAQc5AAAAAAABGzkAAAAAAAEbOQAAAAAAAQc5AAAAAAAAyzkAAAAAAAPvNQAAAAAAACs5AAAAAAAA3zkAAAAAAAEHOQAAAAAAAQc5AAAAAAABBzkAAAAAAADzOQAAAAAAAPM5A"},"increasing":{"fillcolor":"#BF616A","line":{"color":"#BF616A"}},"low":{"dtype":"f8","bdata":"AAAAAADKzEAAAAAAAGXNQAAAAAAA581AAAAAAAAUzkAAAAAAAKHNQAAAAAAAdM1AAAAAAAB+zUAAAAAAAKvNQAAAAAAAtc1AAAAAAADYzUAAAAAAAOzNQAAAAAAA2M1AAAAAAADEzUAAAAAAAMTNQAAAAAAAFM5AAAAAAAAezkAAAAAAADLOQAAAAAAAHs5AAAAAAADxzUAAAAAAAN3NQAAAAAAA7M1AAAAAAAAFzkAAAAAAACjOQAAAAAAALc5AAAAAAAAozkAAAAAAAC3OQAAAAAAAPM5A"},"name":"15m","open":{"dtype":"f8","bdata":"AAAAAADPzEAAAAAAAGrNQAAAAAAA8c1AAAAAAAB9zkAAAAAAACjOQAAAAAAAq81AAAAAAACXzUAAAAAAALXNQAAAAAAA4s1AAAAAAADxzUAAAAAAAADOQAAAAAAA+81AAAAAAADYzUAAAAAAAMnNQAAAAAAAHs5AAAAAAAAezkAAAAAAAEHOQAAAAAAAQc5AAAAAAAAtzkAAAAAAAPvNQAAAAAAA9s1AAAAAAAAKzkAAAAAAAC3OQAAAAAAAPM5AAAAAAAAyzkAAAAAAADLOQAAAAAAAPM5A"},"x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"type":"candlestick","xaxis":"x","yaxis":"y"},{"hoverinfo":"skip","line":{"color":"#EBCB8B","width":1},"name":"MA5","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAABvzUAAAAAAgK3NQAAAAAAA8c1AAAAAAAAAzkAAAAAAAO\u002fNQAAAAAAA981AAAAAAADszUAAAAAAAM7NQAAAAAAAws1AAAAAAADTzUAAAAAAAOfNQAAAAAAA781AAAAAAADqzUAAAAAAAPPNQAAAAAAA+s1AAAAAAAAIzkAAAAAAABzOQAAAAAAAMM5AAAAAAAApzkAAAAAAACDOQAAAAAAAFc5AAAAAAAARzkAAAAAAABTOQAAAAAAAH85AAAAAAAAqzkAAAAAAADTOQAAAAAAAN85A"},"type":"scatter","xaxis":"x","yaxis":"y"},{"hoverinfo":"skip","line":{"color":"#88C0D0","width":1},"name":"MA20","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAABvzUAAAAAAgK3NQAAAAAAA8c1AAAAAAAAAzkAAAAAAAO\u002fNQFVVVVVV4M1AkiRJkiTazUAAAAAAINvNQDmO4ziO3c1AAAAAAADhzUB00UUXXePNQFVVVVXV4s1AntiJndjgzUDbtm3bNuXNQFVVVVVV6c1AAAAAANDuzUCmpaWlpfPNQFVVVVXV9s1AUV5DeQ33zUAAAAAAAPfNQAAAAADA\u002fs1AAAAAAAACzkAAAAAAAP\u002fNQAAAAABA\u002f81AAAAAAMAFzkAAAAAAAA7OQAAAAADAFM5A"},"type":"scatter","xaxis":"x","yaxis":"y"},{"marker":{"color":["#BF616A","#BF616A","#BF616A","#5E81AC","#5E81AC","#5E81AC","#BF616A","#BF616A","#BF616A","#BF616A","#5E81AC","#5E81AC","#5E81AC","#BF616A","#BF616A","#BF616A","#BF616A","#5E81AC","#5E81AC","#5E81AC","#BF616A","#BF616A","#BF616A","#5E81AC","#5E81AC","#BF616A","#BF616A"]},"name":"Volume","opacity":0.7,"orientation":"v","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAAhVM0EAAAAAUCk4QQAAAIDIr0JBAAAAAAwdJUEAAAAACKkhQQAAAABQhxZBAAAAADDeEEEAAAAAcDgFQQAAAAAggwVBAAAAAGB7BkEAAAAAKHAFQQAAAABgtwFBAAAAADDW+kAAAAAAGMISQQAAAADQbAlBAAAAAEjDB0EAAAAAQI8HQQAAAAAA7AFBAAAAALhjBUEAAAAAoEkJQQAAAACYGgRBAAAAABhBCUEAAAAAcJ4MQQAAAACw2ghBAAAAAFy7EEEAAAAAOEgTQQAAAAAAf81A"},"type":"bar","xaxis":"x2","yaxis":"y2"}],"layout":{"template":{"data":{"barpolar":[{"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"barpolar"}],"bar":[{"error_x":{"color":"#f2f5fa"},"error_y":{"color":"#f2f5fa"},"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"bar"}],"carpet":[{"aaxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"baxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"type":"carpet"}],"choropleth":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"choropleth"}],"contourcarpet":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"contourcarpet"}],"contour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"contour"}],"heatmap":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"heatmap"}],"histogram2dcontour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2dcontour"}],"histogram2d":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2d"}],"histogram":[{"marker":{"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"histogram"}],"mesh3d":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"mesh3d"}],"parcoords":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"parcoords"}],"pie":[{"automargin":true,"type":"pie"}],"scatter3d":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatter3d"}],"scattercarpet":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattercarpet"}],"scattergeo":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattergeo"}],"scattergl":[{"marker":{"line":{"color":"#283442"}},"type":"scattergl"}],"scattermapbox":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattermapbox"}],"scattermap":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattermap"}],"scatterpolargl":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolargl"}],"scatterpolar":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolar"}],"scatter":[{"marker":{"line":{"color":"#283442"}},"type":"scatter"}],"scatterternary":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterternary"}],"surface":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"surface"}],"table":[{"cells":{"fill":{"color":"#506784"},"line":{"color":"rgb(17,17,17)"}},"header":{"fill":{"color":"#2a3f5f"},"line":{"color":"rgb(17,17,17)"}},"type":"table"}]},"layout":{"annotationdefaults":{"arrowcolor":"#f2f5fa","arrowhead":0,"arrowwidth":1},"autotypenumbers":"strict","coloraxis":{"colorbar":{"outlinewidth":0,"ticks":""}},"colorscale":{"diverging":[[0,"#8e0152"],[0.1,"#c51b7d"],[0.2,"#de77ae"],[0.3,"#f1b6da"],[0.4,"#fde0ef"],[0.5,"#f7f7f7"],[0.6,"#e6f5d0"],[0.7,"#b8e186"],[0.8,"#7fbc41"],[0.9,"#4d9221"],[1,"#276419"]],"sequential":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"sequentialminus":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]},"colorway":["#636efa","#EF553B","#00cc96","#ab63fa","#FFA15A","#19d3f3","#FF6692","#B6E880","#FF97FF","#FECB52"],"font":{"color":"#f2f5fa"},"geo":{"bgcolor":"rgb(17,17,17)","lakecolor":"rgb(17,17,17)","landcolor":"rgb(17,17,17)","showlakes":true,"showland":true,"subunitcolor":"#506784"},"hoverlabel":{"align":"left"},"hovermode":"closest","mapbox":{"style":"dark"},"paper_bgcolor":"rgb(17,17,17)","plot_bgcolor":"rgb(17,17,17)","polar":{"angularaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","radialaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"scene":{"xaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"yaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"zaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"}},"shapedefaults":{"line":{"color":"#f2f5fa"}},"sliderdefaults":{"bgcolor":"#C8D4E3","bordercolor":"rgb(17,17,17)","borderwidth":1,"tickwidth":0},"ternary":{"aaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"baxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","caxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"title":{"x":0.05},"updatemenudefaults":{"bgcolor":"#506784","borderwidth":0},"xaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2},"yaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2}}},"xaxis":{"anchor":"y","domain":[0.0,1.0],"matches":"x2","showticklabels":false,"rangeslider":{"visible":false},"type":"date","showspikes":true,"spikemode":"across","spikesnap":"cursor","spikedash":"solid"},"yaxis":{"anchor":"x","domain":[0.3608,1.0]},"xaxis2":{"anchor":"y2","domain":[0.0,1.0],"type":"date","showspikes":true,"spikemode":"across","spikesnap":"cursor","spikedash":"solid"},"yaxis2":{"anchor":"x2","domain":[0.0,0.3008]},"annotations":[{"font":{"size":16},"showarrow":false,"text":"LG\ub514\uc2a4\ud50c\ub808\uc774 (034220) 15\ubd84 \u00b7 2026-04-22","x":0.5,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"\uac70\ub798\ub7c9","x":0.5,"xanchor":"center","xref":"paper","y":0.3008,"yanchor":"bottom","yref":"paper"}],"shapes":[{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T12:28:26","x1":"2026-04-22T12:28:26","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T12:28:26","x1":"2026-04-22T12:28:26","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"},{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T12:28:30","x1":"2026-04-22T12:28:30","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T12:28:30","x1":"2026-04-22T12:28:30","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"},{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T13:28:32","x1":"2026-04-22T13:28:32","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T13:28:32","x1":"2026-04-22T13:28:32","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"}],"margin":{"l":48,"r":24,"t":48,"b":40},"legend":{"orientation":"h","yanchor":"bottom","y":1.02,"x":0},"paper_bgcolor":"#2E3440","plot_bgcolor":"#3B4252","height":480,"hovermode":"x unified","dragmode":false,"showlegend":true}}</script></div></div></div>
+            </div>
+        </div>
+        <div class="card stock-report-card" id="stock-report-443060">
+            <h3>HD현대마린솔루션 <span class="muted">(443060)</span></h3>
+            <p class="muted" style="margin:4px 0 12px 0;">ATR 청산 기준가 (리포트일 15분 종가·보유 시): ATR미사용</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>시각</th><th>구분</th><th>수량</th><th>주문가</th><th>체결가</th><th>체결수량</th>
+                        <th>수수료</th><th>매수금액</th><th>매도금액</th>
+                        <th>수익률(순)</th><th>누적실현(순)</th>
+                        <th>체결강(주문)</th><th>호가(주문)</th>
+                        <th>상태</th><th>주문번호</th><th>사유</th>
+                    </tr>
+                </thead>
+                <tbody><tr>
+                <td>2026-04-22 12:31:13</td>
+                <td>buy</td>
+                <td class="num">8</td>
+                <td class="num">228,500</td>
+                <td class="num">228500</td>
+                <td class="num">8</td>
+                <td class="num">6,398</td>
+                <td class="num">1,828,000</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">149.7%</td>
+                <td>5,770 / 1,473 (3.9)</td>
+                <td>FILLED</td>
+                <td>0132701</td>
+                <td>TYPE_B</td>
+            </tr><tr>
+                <td>2026-04-22 13:07:35</td>
+                <td>sell</td>
+                <td class="num">8</td>
+                <td class="num">223,000</td>
+                <td class="num">223000</td>
+                <td class="num">8</td>
+                <td class="num">9,812</td>
+                <td class="num">—</td>
+                <td class="num">1,784,000</td>
+                <td class="num">-3.28%</td>
+                <td class="num">-60,210</td>
+                <td class="num">176.0%</td>
+                <td>13,254 / 4,823 (2.7)</td>
+                <td>FILLED</td>
+                <td>0142512</td>
+                <td>EXIT_STOP_LOSS|SL%=2</td>
+            </tr><tr>
+                <td>2026-04-22 13:20:13</td>
+                <td>buy</td>
+                <td class="num">8</td>
+                <td class="num">229,000</td>
+                <td class="num">229000</td>
+                <td class="num">8</td>
+                <td class="num">6,412</td>
+                <td class="num">1,832,000</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">190.0%</td>
+                <td>7,316 / 1,452 (5.0)</td>
+                <td>FILLED</td>
+                <td>0145712</td>
+                <td>TYPE_B</td>
+            </tr></tbody>
+            </table>
+            <div class="stock-chart-toolbar">
+                <span class="muted stock-chart-toolbar-label">15분봉 · 주문 시각</span>
+                <button type="button" class="chart-toggle-btn"
+                    aria-expanded="false"
+                    aria-controls="chart-panel-443060"
+                    data-text-open="HD현대마린솔루션 15분봉 차트 접기"
+                    data-text-closed="HD현대마린솔루션 15분봉 차트 펼치기">HD현대마린솔루션 15분봉 차트 펼치기</button>
+            </div>
+            <div class="chart-panel-collapsible" id="chart-panel-443060" hidden>
+                <div class="chart-details-body"><div class="chartwrap"><div class="plotly-deferred-wrap" data-plotly-rendered="0"><div id="plotly-e4f4048763da40a7a1898d110d4144b3" class="plotly-graph-div" style="height:480px;width:100%;"></div><script type="application/json" class="plotly-fig-json" data-plotly-target="plotly-e4f4048763da40a7a1898d110d4144b3">{"data":[{"close":{"dtype":"f8","bdata":"AAAAAEB9CkEAAAAAwLsKQQAAAAAA2wpBAAAAAKDqCkEAAAAAANsKQQAAAAAgrApBAAAAAICcCkEAAAAA4IwKQQAAAABA+gpBAAAAAKDqCkEAAAAAoOoKQQAAAACAGQtBAAAAAMC1C0EAAAAAYMULQQAAAADAtQtBAAAAAICWC0EAAAAA4IYLQQAAAAAA1QtBAAAAAOCADEEAAAAAgA0NQQAAAACADQ1BAAAAAHDmDEEAAAAAIB0NQQAAAAAAzwxBAAAAAOCADEEAAAAAoGEMQQAAAACgYQxB"},"decreasing":{"fillcolor":"#5E81AC","line":{"color":"#5E81AC"}},"high":{"dtype":"f8","bdata":"AAAAAEB3C0EAAAAAYMsKQQAAAABA+gpBAAAAAIAZC0EAAAAA4AkLQQAAAABA+gpBAAAAAMC7CkEAAAAAIKwKQQAAAACAGQtBAAAAAMA4C0EAAAAAICkLQQAAAAAgKQtBAAAAAED0C0EAAAAAANULQQAAAACAEwxBAAAAAED0C0EAAAAAgJYLQQAAAACg5AtBAAAAAICQDEEAAAAAoFsNQQAAAABAaw1BAAAAAKBbDUEAAAAAYDwNQQAAAABgPA1BAAAAAEDuDEEAAAAAgJAMQQAAAACgYQxB"},"increasing":{"fillcolor":"#BF616A","line":{"color":"#BF616A"}},"low":{"dtype":"f8","bdata":"AAAAAICiCUEAAAAAwD4KQQAAAAAgrApBAAAAAMC7CkEAAAAAIKwKQQAAAACAnApBAAAAAKBtCkEAAAAAAF4KQQAAAABAfQpBAAAAAGDLCkEAAAAAYMsKQQAAAABgywpBAAAAAOAJC0EAAAAA4IYLQQAAAAAgpgtBAAAAAABYC0EAAAAAICkLQQAAAAAAWAtBAAAAAADVC0EAAAAAQHEMQQAAAACg3gxBAAAAAKDeDEEAAAAAoN4MQQAAAADArwxBAAAAAEBxDEEAAAAAYEIMQQAAAACgYQxB"},"name":"15m","open":{"dtype":"f8","bdata":"AAAAAEB3C0EAAAAAAF4KQQAAAADAuwpBAAAAAGDLCkEAAAAAoOoKQQAAAAAA2wpBAAAAACCsCkEAAAAA4IwKQQAAAADgjApBAAAAAED6CkEAAAAAoOoKQQAAAABA+gpBAAAAAIAZC0EAAAAAwLULQQAAAABgxQtBAAAAAMC1C0EAAAAA4IYLQQAAAADghgtBAAAAAADVC0EAAAAAgJAMQQAAAADALA1BAAAAAIANDUEAAAAAcOYMQQAAAAAgHQ1BAAAAAADPDEEAAAAAgJAMQQAAAACgYQxB"},"x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"type":"candlestick","xaxis":"x","yaxis":"y"},{"hoverinfo":"skip","line":{"color":"#EBCB8B","width":1},"name":"MA5","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAEB9CkEAAAAAgJwKQVVVVVVVsQpBAAAAAKi\u002fCkEAAAAAIMUKQQAAAACAzgpBAAAAAEDICkEAAAAAoLgKQQAAAADAuwpBAAAAAOC+CkEAAAAAYMsKQQAAAABg5ApBAAAAAMAfC0EAAAAAYEgLQQAAAAAAcQtBAAAAAGCTC0EAAAAAQKkLQQAAAACArwtBAAAAAADVC0EAAAAAwBkMQQAAAADAZAxBAAAAABCrDEEAAAAAsOwMQQAAAABQ\u002fAxBAAAAADDgDEEAAAAA0L0MQQAAAABAowxB"},"type":"scatter","xaxis":"x","yaxis":"y"},{"hoverinfo":"skip","line":{"color":"#88C0D0","width":1},"name":"MA20","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAEB9CkEAAAAAgJwKQVVVVVVVsQpBAAAAAKi\u002fCkEAAAAAIMUKQVVVVVX1wApBAAAAAMC7CkEAAAAA5LUKQXIcx3F8vQpBAAAAAADCCkFGF110scUKQVVVVVWtzApBFDuxE5veCkHbtm3bFu8KQVVVVVVV\u002fApBAAAAAPgFC0EtLS0tjQ0LQcdxHMehGAtBDeU1lJcrC0EAAAAAsEMLQQAAAACAZAtBAAAAADyAC0EAAAAAJJ0LQQAAAABctQtBAAAAAHTKC0EAAAAAVOALQQAAAAD89gtB"},"type":"scatter","xaxis":"x","yaxis":"y"},{"marker":{"color":["#5E81AC","#BF616A","#BF616A","#BF616A","#5E81AC","#5E81AC","#5E81AC","#BF616A","#BF616A","#5E81AC","#BF616A","#BF616A","#BF616A","#BF616A","#5E81AC","#5E81AC","#BF616A","#BF616A","#BF616A","#BF616A","#5E81AC","#5E81AC","#BF616A","#5E81AC","#5E81AC","#5E81AC","#BF616A"]},"name":"Volume","opacity":0.7,"orientation":"v","x":["2026-04-22T09:15:00.000000000","2026-04-22T09:30:00.000000000","2026-04-22T09:45:00.000000000","2026-04-22T10:00:00.000000000","2026-04-22T10:15:00.000000000","2026-04-22T10:30:00.000000000","2026-04-22T10:45:00.000000000","2026-04-22T11:00:00.000000000","2026-04-22T11:15:00.000000000","2026-04-22T11:30:00.000000000","2026-04-22T11:45:00.000000000","2026-04-22T12:00:00.000000000","2026-04-22T12:15:00.000000000","2026-04-22T12:30:00.000000000","2026-04-22T12:45:00.000000000","2026-04-22T13:00:00.000000000","2026-04-22T13:15:00.000000000","2026-04-22T13:30:00.000000000","2026-04-22T13:45:00.000000000","2026-04-22T14:00:00.000000000","2026-04-22T14:15:00.000000000","2026-04-22T14:30:00.000000000","2026-04-22T14:45:00.000000000","2026-04-22T15:00:00.000000000","2026-04-22T15:15:00.000000000","2026-04-22T15:30:00.000000000","2026-04-22T15:45:00.000000000"],"y":{"dtype":"f8","bdata":"AAAAAKAi60AAAAAAQODSQAAAAAAAQ9FAAAAAAEAH0EAAAAAAAALTQAAAAAAAXr5AAAAAAADhuEAAAAAAAKS7QAAAAACAutVAAAAAAEDa1EAAAAAAQEfUQAAAAAAAStJAAAAAAEBc3kAAAAAAQG\u002fTQAAAAAAAktdAAAAAAEAR2UAAAAAAQBDYQAAAAAAA0eBAAAAAAKCz4EAAAAAAIDrtQAAAAADAquBAAAAAAECZ3kAAAAAAgJzcQAAAAAAA4dpAAAAAAMBr2UAAAAAAgNXZQAAAAAAAACBA"},"type":"bar","xaxis":"x2","yaxis":"y2"}],"layout":{"template":{"data":{"barpolar":[{"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"barpolar"}],"bar":[{"error_x":{"color":"#f2f5fa"},"error_y":{"color":"#f2f5fa"},"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"bar"}],"carpet":[{"aaxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"baxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"type":"carpet"}],"choropleth":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"choropleth"}],"contourcarpet":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"contourcarpet"}],"contour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"contour"}],"heatmap":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"heatmap"}],"histogram2dcontour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2dcontour"}],"histogram2d":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2d"}],"histogram":[{"marker":{"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"histogram"}],"mesh3d":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"mesh3d"}],"parcoords":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"parcoords"}],"pie":[{"automargin":true,"type":"pie"}],"scatter3d":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatter3d"}],"scattercarpet":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattercarpet"}],"scattergeo":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattergeo"}],"scattergl":[{"marker":{"line":{"color":"#283442"}},"type":"scattergl"}],"scattermapbox":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattermapbox"}],"scattermap":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattermap"}],"scatterpolargl":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolargl"}],"scatterpolar":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolar"}],"scatter":[{"marker":{"line":{"color":"#283442"}},"type":"scatter"}],"scatterternary":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterternary"}],"surface":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"surface"}],"table":[{"cells":{"fill":{"color":"#506784"},"line":{"color":"rgb(17,17,17)"}},"header":{"fill":{"color":"#2a3f5f"},"line":{"color":"rgb(17,17,17)"}},"type":"table"}]},"layout":{"annotationdefaults":{"arrowcolor":"#f2f5fa","arrowhead":0,"arrowwidth":1},"autotypenumbers":"strict","coloraxis":{"colorbar":{"outlinewidth":0,"ticks":""}},"colorscale":{"diverging":[[0,"#8e0152"],[0.1,"#c51b7d"],[0.2,"#de77ae"],[0.3,"#f1b6da"],[0.4,"#fde0ef"],[0.5,"#f7f7f7"],[0.6,"#e6f5d0"],[0.7,"#b8e186"],[0.8,"#7fbc41"],[0.9,"#4d9221"],[1,"#276419"]],"sequential":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"sequentialminus":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]},"colorway":["#636efa","#EF553B","#00cc96","#ab63fa","#FFA15A","#19d3f3","#FF6692","#B6E880","#FF97FF","#FECB52"],"font":{"color":"#f2f5fa"},"geo":{"bgcolor":"rgb(17,17,17)","lakecolor":"rgb(17,17,17)","landcolor":"rgb(17,17,17)","showlakes":true,"showland":true,"subunitcolor":"#506784"},"hoverlabel":{"align":"left"},"hovermode":"closest","mapbox":{"style":"dark"},"paper_bgcolor":"rgb(17,17,17)","plot_bgcolor":"rgb(17,17,17)","polar":{"angularaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","radialaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"scene":{"xaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"yaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"zaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"}},"shapedefaults":{"line":{"color":"#f2f5fa"}},"sliderdefaults":{"bgcolor":"#C8D4E3","bordercolor":"rgb(17,17,17)","borderwidth":1,"tickwidth":0},"ternary":{"aaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"baxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","caxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"title":{"x":0.05},"updatemenudefaults":{"bgcolor":"#506784","borderwidth":0},"xaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2},"yaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2}}},"xaxis":{"anchor":"y","domain":[0.0,1.0],"matches":"x2","showticklabels":false,"rangeslider":{"visible":false},"type":"date","showspikes":true,"spikemode":"across","spikesnap":"cursor","spikedash":"solid"},"yaxis":{"anchor":"x","domain":[0.3608,1.0]},"xaxis2":{"anchor":"y2","domain":[0.0,1.0],"type":"date","showspikes":true,"spikemode":"across","spikesnap":"cursor","spikedash":"solid"},"yaxis2":{"anchor":"x2","domain":[0.0,0.3008]},"annotations":[{"font":{"size":16},"showarrow":false,"text":"HD\ud604\ub300\ub9c8\ub9b0\uc194\ub8e8\uc158 (443060) 15\ubd84 \u00b7 2026-04-22","x":0.5,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"\uac70\ub798\ub7c9","x":0.5,"xanchor":"center","xref":"paper","y":0.3008,"yanchor":"bottom","yref":"paper"}],"shapes":[{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T12:31:13","x1":"2026-04-22T12:31:13","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T12:31:13","x1":"2026-04-22T12:31:13","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"},{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T13:07:35","x1":"2026-04-22T13:07:35","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#BF616A","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T13:07:35","x1":"2026-04-22T13:07:35","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"},{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.55,"type":"line","x0":"2026-04-22T13:20:13","x1":"2026-04-22T13:20:13","xref":"x","y0":0,"y1":1,"yref":"y domain"},{"line":{"color":"#88C0D0","dash":"dot","width":1},"opacity":0.35,"type":"line","x0":"2026-04-22T13:20:13","x1":"2026-04-22T13:20:13","xref":"x2","y0":0,"y1":1,"yref":"y2 domain"}],"margin":{"l":48,"r":24,"t":48,"b":40},"legend":{"orientation":"h","yanchor":"bottom","y":1.02,"x":0},"paper_bgcolor":"#2E3440","plot_bgcolor":"#3B4252","height":480,"hovermode":"x unified","dragmode":false,"showlegend":true}}</script></div></div></div>
+            </div>
+        </div>
+
+    <footer>K-Trader 실시간 감시 일일 결산</footer>
+</div>
+<script>
+
+(function () {
+  /**
+   * - plotly.js: **첫 차트 펼칠 때만** CDN 주입.
+   * - 차트 데이터: HTML 내 `<script type="application/json" class="plotly-fig-json">` (file:// 호환).
+   * - 구버전 HTML: `plotly-fig-b64` (base64) 폴백.
+   */
+  var plotlyCdn = window.__DAILY_REPORT_PLOTLY_CDN__ || "";
+  var plotlyLoadQueue = null;
+
+  function ensurePlotlyJs(cb) {
+    if (window.Plotly) {
+      cb();
+      return;
+    }
+    if (plotlyLoadQueue) {
+      plotlyLoadQueue.push(cb);
+      return;
+    }
+    plotlyLoadQueue = [cb];
+    if (!plotlyCdn) {
+      var fns = plotlyLoadQueue;
+      plotlyLoadQueue = null;
+      fns.forEach(function (fn) {
+        try {
+          fn();
+        } catch (e1) {}
+      });
+      return;
+    }
+    var s = document.createElement("script");
+    s.src = plotlyCdn;
+    s.crossOrigin = "anonymous";
+    s.onload = function () {
+      var fns = plotlyLoadQueue;
+      plotlyLoadQueue = null;
+      fns.forEach(function (fn) {
+        try {
+          fn();
+        } catch (e2) {}
+      });
+    };
+    s.onerror = function () {
+      plotlyLoadQueue = null;
+      try {
+        console.warn("Plotly.js 로드 실패:", plotlyCdn);
+      } catch (e3) {}
+    };
+    document.head.appendChild(s);
+  }
+
+  function renderDeferredPlotlyIn(root, done) {
+    ensurePlotlyJs(function () {
+      if (!window.Plotly || !root) {
+        if (done) done();
+        return;
+      }
+      var wraps = root.querySelectorAll('.plotly-deferred-wrap[data-plotly-rendered="0"]');
+      var n = wraps.length;
+      if (n === 0) {
+        if (done) done();
+        return;
+      }
+      var left = n;
+      function oneDone() {
+        left--;
+        if (left <= 0 && done) done();
+      }
+      function plotFromFig(w, gd, fig) {
+        try {
+          Plotly.newPlot(gd, fig.data, fig.layout, fig.config || {});
+          w.setAttribute("data-plotly-rendered", "1");
+        } catch (e4) {
+          try {
+            gd.innerHTML =
+              '<p class="warn" style="padding:12px;">차트 렌더 오류. 브라우저 콘솔을 확인하세요.</p>';
+          } catch (e5) {}
+        }
+      }
+      for (var i = 0; i < wraps.length; i++) {
+        (function (w) {
+          var gd = w.querySelector(".plotly-graph-div");
+          if (!gd) {
+            oneDone();
+            return;
+          }
+          var scJ = w.querySelector("script.plotly-fig-json");
+          if (scJ) {
+            setTimeout(function () {
+              try {
+                var txt = (scJ.textContent || scJ.innerText || "").trim();
+                if (txt) {
+                  var fig = JSON.parse(txt);
+                  plotFromFig(w, gd, fig);
+                }
+              } catch (e6) {
+                try {
+                  gd.innerHTML =
+                    '<p class="warn" style="padding:12px;">차트 JSON 파싱 오류</p>';
+                } catch (e7) {}
+              }
+              oneDone();
+            }, 0);
+            return;
+          }
+          var sc = w.querySelector("script.plotly-fig-b64");
+          var tid = sc ? sc.getAttribute("data-plotly-target") : null;
+          var gdx = tid ? document.getElementById(tid) : gd;
+          if (sc && gdx) {
+            setTimeout(function () {
+              try {
+                var b64 = (sc.textContent || "").trim();
+                if (b64) {
+                  var fig = JSON.parse(atob(b64));
+                  plotFromFig(w, gdx, fig);
+                }
+              } catch (e8) {}
+              oneDone();
+            }, 0);
+            return;
+          }
+          oneDone();
+        })(wraps[i]);
+      }
+    });
+  }
+
+  function resizePlotlyInside(root) {
+    if (!window.Plotly || !root) return;
+    try {
+      var nodes = root.querySelectorAll(".plotly-graph-div");
+      if (!nodes.length) nodes = root.querySelectorAll(".js-plotly-plot");
+      for (var i = 0; i < nodes.length; i++) {
+        var gd = nodes[i];
+        try {
+          if (typeof Plotly.Plots !== "undefined" && Plotly.Plots.resize) {
+            Plotly.Plots.resize(gd);
+          } else if (typeof Plotly.resize === "function") {
+            Plotly.resize(gd);
+          }
+        } catch (e5) {}
+      }
+    } catch (e6) {}
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll(".chart-toggle-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var panelId = btn.getAttribute("aria-controls");
+        var panel = panelId ? document.getElementById(panelId) : null;
+        if (!panel) return;
+        var opening = panel.hasAttribute("hidden");
+        var openText = btn.getAttribute("data-text-open") || "접기";
+        var closedText = btn.getAttribute("data-text-closed") || "펼치기";
+        if (opening) {
+          panel.removeAttribute("hidden");
+          btn.setAttribute("aria-expanded", "true");
+          btn.textContent = openText;
+          requestAnimationFrame(function () {
+            renderDeferredPlotlyIn(panel, function () {
+              resizePlotlyInside(panel);
+            });
+          });
+          setTimeout(function () {
+            resizePlotlyInside(panel);
+          }, 120);
+          setTimeout(function () {
+            resizePlotlyInside(panel);
+          }, 400);
+        } else {
+          panel.setAttribute("hidden", "");
+          btn.setAttribute("aria-expanded", "false");
+          btn.textContent = closedText;
+        }
+      });
+    });
+  });
+})();
+
+</script>
+</body>
+</html>
