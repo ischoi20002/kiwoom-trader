@@ -3356,7 +3356,7 @@ class MonitorTab:
                         break
                     processed_in_frame += 1
                     try:
-                        if processed_in_frame % 2 == 0:
+                        if processed_in_frame % 8 == 0:
                             self.tree_monitor.update_idletasks()
                     except Exception:
                         pass

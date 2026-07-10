@@ -734,7 +734,7 @@ class FillConfirmationService:
         except Exception:
             trust_first = True
 
-        if trust_first and side_l == "sell":
+        if trust_first and side_l in ("buy", "sell"):
             if self.apply_trusted_fill_on_no_open_qty(
                 code=nc,
                 order_no=oid,

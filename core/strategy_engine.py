@@ -103,7 +103,13 @@ class StrategyEngine:
         vol_power = kwargs.get("vol_power", 100.0)
         ask_bid_ratio = kwargs.get("ask_bid_ratio", 1.0)
 
-        stage = int(pos.get("entry_n", pos.get("stage", 1)) or 1)
+        try:
+            stage = int(pos.get("entry_n", pos.get("stage", 1)) or 1)
+            pf = getattr(self.app, "portfolio", None)
+            if pf is not None and hasattr(pf, "position_effective_stage"):
+                stage = int(pf.position_effective_stage(pos))
+        except Exception:
+            stage = 1
         if stage == 1:
             if pos.get("s2_limit_order_pending", False):
                 return {"action": "HOLD"}

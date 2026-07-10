@@ -120,6 +120,15 @@ class RealtimeTickDispatchService:
 
     def _worker_loop(self) -> None:
         """배치 단위로 SignalEngine 을 워커에서 호출합니다."""
+        max_per_batch = 6
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            max_per_batch = int(
+                float(st.get("realtime_tick_worker_max_ticks_per_batch", 6))
+            )
+        except (TypeError, ValueError):
+            max_per_batch = 6
+        max_per_batch = max(1, min(max_per_batch, 24))
         while not self._worker_stop.is_set():
             try:
                 batch_list = self._worker_batch_queue.get_nowait()
@@ -129,7 +138,14 @@ class RealtimeTickDispatchService:
                 continue
             if not batch_list:
                 continue
-            for tup in batch_list:
+            head = batch_list[:max_per_batch]
+            tail = batch_list[max_per_batch:]
+            if tail:
+                try:
+                    self._worker_batch_queue.put(tail)
+                except Exception:
+                    pass
+            for i, tup in enumerate(head):
                 if self._worker_stop.is_set():
                     break
                 try:
@@ -140,6 +156,11 @@ class RealtimeTickDispatchService:
                 except Exception as e:
                     try:
                         self.log(f"⚠️ [Tick] 워커 처리 예외: {e}")
+                    except Exception:
+                        pass
+                if i % 2 == 1:
+                    try:
+                        time.sleep(0.001)
                     except Exception:
                         pass
             try:

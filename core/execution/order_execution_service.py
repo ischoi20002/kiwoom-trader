@@ -1127,6 +1127,28 @@ class OrderExecutionService:
 
         elif action == "STAGE2":
             # [Audit] Stage 2 Scale-in Execution
+            try:
+                _stg = self.app.portfolio.position_effective_stage(pos)
+            except Exception:
+                _stg = int(pos.get("entry_n", pos.get("stage", 1)) or 1)
+            if _stg >= 2:
+                try:
+                    self.log(
+                        f"ℹ️ [Scale-in] {pos.get('name', code)}({code}) "
+                        f"2차 생략 — 이미 추매 완료(stage={_stg})"
+                    )
+                except Exception:
+                    pass
+                return
+            if bool(pos.get("s2_limit_order_pending", False)):
+                try:
+                    self.log(
+                        f"ℹ️ [Scale-in] {pos.get('name', code)}({code}) "
+                        f"2차 생략 — S2 미체결 주문 대기 중"
+                    )
+                except Exception:
+                    pass
+                return
             add_amt = self.app.portfolio.calculate_order_quantity(stage=2, is_simulation=not allow_order)
             if add_amt <= 0: return
 

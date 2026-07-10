@@ -133,6 +133,11 @@ class SignalEngine:
             0.05, min(self._realtime_monitor_atr_display_min_interval_sec, 5.0)
         )
         self._monitor_atr_cache_ts: dict[str, float] = {}
+        self._monitor_atr_bg_inflight: set[str] = set()
+        self._monitor_atr_bg_lock = threading.Lock()
+        # 감시 트리 UI enqueue 스로틀(종목별) — 틱마다 pending 적재 시 Tk 메인 부하 완화
+        self._ui_tree_enqueue_last_ts: dict[str, float] = {}
+        self._ui_tree_enqueued_codes: set[str] = set()
         # 15분 슬롯 내 S1 pre-signal( Signal/Ready/Sig_Type )을 고정해
         # 틱마다 지표가 흔들리며 매수 신호가 on/off 되는 현상을 줄입니다.
         # key: code, value: {"slot_key": str, "signal": bool, "ready": bool, "sig_type": str}
@@ -821,6 +826,12 @@ class SignalEngine:
                 if bool(pos_live.get("s2_limit_order_pending", False)):
                     return {"action": "HOLD"}
                 stg = int(pos_live.get("entry_n", pos_live.get("stage", 1)) or 1)
+                try:
+                    pf = getattr(self.app, "portfolio", None)
+                    if pf is not None and hasattr(pf, "position_effective_stage"):
+                        stg = int(pf.position_effective_stage(pos_live))
+                except Exception:
+                    pass
                 if stg >= 2:
                     return {"action": "HOLD"}
                 fill_px = float(s2.get("fill_price", 0) or 0)
@@ -1155,6 +1166,94 @@ class SignalEngine:
         except (TypeError, ValueError):
             return 0.0
 
+    def _monitor_ui_enqueue_min_interval_sec(self) -> float:
+        try:
+            v = float(
+                (getattr(self.app, "settings", None) or {}).get(
+                    "realtime_monitor_ui_enqueue_min_sec", 0.20
+                )
+            )
+        except (TypeError, ValueError):
+            v = 0.20
+        return max(0.05, min(v, 2.0))
+
+    def _should_enqueue_monitor_tree_ui(
+        self,
+        nk: str,
+        *,
+        force: bool = False,
+        is_buy: bool = False,
+    ) -> bool:
+        """가격 틱마다 트리 pending 을 쌓지 않도록 종목별 스로틀."""
+        if force or is_buy:
+            return True
+        try:
+            code = str(nk).split("_")[0].zfill(6)
+        except Exception:
+            return True
+        now_t = time.time()
+        iv = self._monitor_ui_enqueue_min_interval_sec()
+        last_t = float(self._ui_tree_enqueue_last_ts.get(code, 0.0) or 0.0)
+        if (now_t - last_t) < iv:
+            return False
+        self._ui_tree_enqueue_last_ts[code] = now_t
+        return True
+
+    def _schedule_monitor_atr_row_cache_bg(self, code: str, bars_df: Any) -> None:
+        """보유행 ATR 표시용 지표행을 백그라운드에서 계산(틱 경로에서 calculate_indicators 금지)."""
+        try:
+            nk = str(code).split("_")[0].zfill(6)
+            if not nk or bars_df is None or getattr(bars_df, "empty", True):
+                return
+            with self._monitor_atr_bg_lock:
+                if nk in self._monitor_atr_bg_inflight:
+                    return
+                self._monitor_atr_bg_inflight.add(nk)
+        except Exception:
+            return
+
+        settings = getattr(self.app, "settings", None) or {}
+        bd_copy = bars_df
+
+        def _worker() -> None:
+            row_local: Optional[dict] = None
+            try:
+                df_i = TradingStrategy.calculate_indicators(bd_copy, settings)
+                row_local = df_i.iloc[-1].to_dict()
+            except Exception:
+                row_local = None
+            try:
+                if isinstance(row_local, dict):
+                    mi = getattr(self.app, "monitor_info", None) or {}
+                    for key, info in mi.items():
+                        try:
+                            if str(key).split("_")[0].zfill(6) != nk:
+                                continue
+                            if isinstance(info, dict):
+                                info["_monitor_atr_row_cache"] = row_local
+                        except Exception:
+                            continue
+                    self._monitor_atr_cache_ts[nk] = time.time()
+            except Exception:
+                pass
+            finally:
+                try:
+                    with self._monitor_atr_bg_lock:
+                        self._monitor_atr_bg_inflight.discard(nk)
+                except Exception:
+                    pass
+
+        try:
+            threading.Thread(
+                target=_worker, name=f"MonitorAtrCache-{nk}", daemon=True
+            ).start()
+        except Exception:
+            try:
+                with self._monitor_atr_bg_lock:
+                    self._monitor_atr_bg_inflight.discard(nk)
+            except Exception:
+                pass
+
     def ratio_cell_display_for_monitor_tree(
         self, info: dict, now_price: float
     ) -> str:
@@ -1219,6 +1318,12 @@ class SignalEngine:
                         continue
             if not isinstance(pos_live, dict):
                 return 1
+            try:
+                pf = getattr(self.app, "portfolio", None)
+                if pf is not None and hasattr(pf, "position_effective_stage"):
+                    return int(pf.position_effective_stage(pos_live))
+            except Exception:
+                pass
             return int(pos_live.get("entry_n", pos_live.get("stage", 1)) or 1)
         except Exception:
             return 1
@@ -1358,7 +1463,7 @@ class SignalEngine:
             global_last = float(
                 getattr(self, "_s1_watch_diag_global_last_ts", 0.0) or 0.0
             )
-            burst_sec = 0.75 if signal_but_no_buy else (2.5 if slot_changed else 0.25)
+            burst_sec = 0.75 if signal_but_no_buy else (2.5 if slot_changed else 3.0)
             if (now_t - global_last) < burst_sec:
                 return
 
@@ -1419,6 +1524,7 @@ class SignalEngine:
         """
         # UI/디버그 목적용 특정 종목만 예외 정보를 JSONL로 남깁니다.
         debug_codes: set[str] = {"016360", "042700", "267250", "454910"}
+        self._ui_tree_enqueued_codes.clear()
         try:
             if now_price <= 0: return # [v2.2] 유효하지 않은 가격 데이터 로직 진입 차단
             code = canonical_stock_code(code)
@@ -2508,24 +2614,17 @@ class SignalEngine:
                                     self._monitor_atr_cache_ts.get(code, 0.0) or 0.0
                                 )
                                 _cached_atr = info.get("_monitor_atr_row_cache")
-                                if (
-                                    isinstance(_cached_atr, dict)
-                                    and (_now_atr - _last_atr) < _atr_iv
+                                if isinstance(_cached_atr, dict) and (
+                                    (_now_atr - _last_atr) < _atr_iv
+                                    or (_now_atr - _last_atr) < 30.0
                                 ):
                                     row_for_atr = _cached_atr
                                 else:
-                                    try:
-                                        df_i = TradingStrategy.calculate_indicators(
-                                            _bd_atr, self.app.settings
-                                        )
-                                        row_for_atr = df_i.iloc[-1].to_dict()
-                                        try:
-                                            info["_monitor_atr_row_cache"] = row_for_atr
-                                        except Exception:
-                                            pass
-                                        self._monitor_atr_cache_ts[code] = _now_atr
-                                    except Exception:
-                                        row_for_atr = None
+                                    if isinstance(_cached_atr, dict):
+                                        row_for_atr = _cached_atr
+                                    self._schedule_monitor_atr_row_cache_bg(
+                                        code, _bd_atr
+                                    )
                         if row_for_atr is not None:
                             atr_cell = TradingStrategy.compute_atr_exit_display_text(
                                 pos,
@@ -2550,7 +2649,7 @@ class SignalEngine:
                     code,
                     info["name"],
                     strat_label,
-                    f"{int(now_price):,}",
+                    f"{int(np_f):,}",
                     atr_cell,
                     self._format_monitor_vs_prev_cell(info),
                     ratio_cell,
@@ -2573,9 +2672,39 @@ class SignalEngine:
 
                 # 가격 태그를 가장 뒤에 추가하여 최우선 적용
                 final_tags.append(p_tag)
-                    
-                # [v27.9] is_blink 플래그를 항상 False로 전달
-                self.app.pending_tree_updates[code] = (full_values, tuple(final_tags), False)
+
+                nk_ui = str(code).split("_")[0].zfill(6)
+                _buy_ui = bool(is_buy and not self._code_in_virtual_positions(code))
+                if self._should_enqueue_monitor_tree_ui(
+                    nk_ui, force=False, is_buy=_buy_ui
+                ):
+                    # [v27.9] is_blink 플래그를 항상 False로 전달
+                    self.app.pending_tree_updates[code] = (
+                        full_values,
+                        tuple(final_tags),
+                        False,
+                    )
+                    self._ui_tree_enqueued_codes.add(nk_ui)
+
+                    if defer_main_callbacks:
+                        try:
+                            self.app.mark_tick_worker_ui_dirty()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.app.ensure_monitor_tree_refresh_scheduled(
+                                immediate=False
+                            )
+                        except Exception:
+                            try:
+                                if not self.app._update_timer_active:
+                                    self.app._update_timer_active = True
+                                    self.app.root.after(
+                                        100, self.app._render_tree_updates
+                                    )
+                            except Exception:
+                                pass
 
                 # [진단] UI가 멈춘 듯 보일 때 pending_tree_updates가 실제로 쌓이는지 확인
                 try:
@@ -2605,22 +2734,6 @@ class SignalEngine:
                                 )
                 except Exception:
                     pass
-
-                if defer_main_callbacks:
-                    try:
-                        self.app.mark_tick_worker_ui_dirty()
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        self.app.ensure_monitor_tree_refresh_scheduled(immediate=False)
-                    except Exception:
-                        try:
-                            if not self.app._update_timer_active:
-                                self.app._update_timer_active = True
-                                self.app.root.after(100, self.app._render_tree_updates)
-                        except Exception:
-                            pass
             else:
                 # wl_only(관심목록만) 종목도 대비(vs_prev) 등이 고정되지 않도록 최소 숫자 열을 갱신한다.
                 # (ATR/전략라벨 등은 wl_only에선 무의미하거나 비용이 크므로 생략)
@@ -2642,8 +2755,7 @@ class SignalEngine:
                 if skip_enqueue:
                     # on_tick_received 전체를 종료하지 말고, UI 큐잉만 스킵한다.
                     pass
-                else:
-
+                elif self._should_enqueue_monitor_tree_ui(nk, force=False, is_buy=False):
                     try:
                         _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
                     except Exception:
@@ -2660,7 +2772,7 @@ class SignalEngine:
                         nk,
                         _nm,
                         "—",
-                        f"{int(float(now_price)):,}",
+                        f"{int(float(np_f)):,}",
                         "—",
                         self._format_monitor_vs_prev_cell(info),
                         ratio_cell,
@@ -2691,6 +2803,7 @@ class SignalEngine:
                         tuple(final_tags),
                         False,
                     )
+                    self._ui_tree_enqueued_codes.add(nk)
 
                     if defer_main_callbacks:
                         try:
@@ -2699,61 +2812,11 @@ class SignalEngine:
                             pass
                     else:
                         try:
-                            self.app.ensure_monitor_tree_refresh_scheduled(immediate=False)
+                            self.app.ensure_monitor_tree_refresh_scheduled(
+                                immediate=False
+                            )
                         except Exception:
                             pass
-            # 안전망: 감시 대상 종목은 조건 분기와 무관하게 최소 숫자열 enqueue를 주기적으로 강제
-            # (특정 코드만 pending enqueue가 누락되어 숫자가 영구 정지되는 현상 우회)
-            try:
-                nk = str(code).split("_")[0].zfill(6)
-                mc = getattr(getattr(self.app, "trading_controller", None), "monitor_codes", None) or []
-                mc_set = {str(c).split("_")[0].zfill(6) for c in mc}
-                if nk in mc_set:
-                    now_t = time.time()
-                    last_t = float(self._ui_force_min_enqueue_last_ts.get(nk, 0.0) or 0.0)
-                    if now_t - last_t >= 0.25:
-                        self._ui_force_min_enqueue_last_ts[nk] = now_t
-                        try:
-                            _nm = str(info.get("name") or nk)
-                        except Exception:
-                            _nm = nk
-                        try:
-                            _vp_str = f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%"
-                        except Exception:
-                            _vp_str = "—"
-                        min_values = (
-                            f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
-                            nk,
-                            _nm,
-                            "—",
-                            f"{int(float(now_price)):,}",
-                            "—",
-                            self._format_monitor_vs_prev_cell(info),
-                            self.ratio_cell_display_for_monitor_tree(
-                                info, float(now_price)
-                            ),
-                            str(monitor_signal_status_display_text(info)),
-                            _vp_str,
-                            self._format_monitor_bid_ask_cell(info),
-                            f"{int(float(volume)):,}",
-                        )
-                        self.app.pending_tree_updates[nk] = (
-                            min_values,
-                            ("status_low", p_tag if "p_tag" in locals() else "price_stable"),
-                            False,
-                        )
-                        if defer_main_callbacks:
-                            try:
-                                self.app.mark_tick_worker_ui_dirty()
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                self.app.ensure_monitor_tree_refresh_scheduled(immediate=False)
-                            except Exception:
-                                pass
-            except Exception:
-                pass
             # 보유 종목이 있으면 포지션 관리 탭 실시간 평가·요약 갱신 (스로틀은 앱 쪽)
             if self._code_in_virtual_positions(code):
                 if defer_main_callbacks:

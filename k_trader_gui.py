@@ -657,6 +657,9 @@ class KiwoomApp:
         self._tick_main_actions_queue: "queue.SimpleQueue[tuple]" = queue.SimpleQueue()
         self._tick_worker_ui_dirty: bool = False
         self._tick_worker_virtual_dirty: bool = False
+        # 렌더 타이머가 이미 돌 때도 틱 갱신 요청을 잃지 않도록 더티 플래그
+        self._monitor_tree_dirty: bool = False
+        self._inject_min_last_ts: float = 0.0
         self._tick_main_poller_after_id: Optional[Any] = None
         self._tick_main_poller_lock = threading.Lock()
         # 주문 액션 디스패처는 OrderActionDispatcher 가 담당 (아래에서 초기화)
@@ -1152,6 +1155,14 @@ class KiwoomApp:
         """워커가 감시 트리 갱신이 필요함을 표시합니다."""
         try:
             self._tick_worker_ui_dirty = True
+            self._monitor_tree_dirty = True
+        except Exception:
+            pass
+
+    def mark_monitor_tree_dirty(self) -> None:
+        """감시 트리에 반영할 변경이 있음을 표시합니다(렌더 체인 가동 중에도 유실 방지)."""
+        try:
+            self._monitor_tree_dirty = True
         except Exception:
             pass
 
@@ -1420,6 +1431,11 @@ class KiwoomApp:
         """
         try:
             if self._update_timer_active:
+                # 체인이 돌고 있어도 더티만 표시 — 다음 프레임에서 pending 반영
+                try:
+                    self._monitor_tree_dirty = True
+                except Exception:
+                    pass
                 # 렌더가 이미 메인 스레드에서 돌고 있으면 after(0) 중복 예약 금지(폭주·멈춤 악화)
                 if bool(getattr(self, "_ui_render_in_progress", False)):
                     try:
@@ -1662,9 +1678,15 @@ class KiwoomApp:
             busy_ms = max(20, min(busy_ms, base_ms))
             idle_ms = max(base_ms, min(idle_ms, 2000))
             busy_threshold = max(5, min(busy_threshold, 500))
-            if backlog_size >= busy_threshold:
+            tree_dirty = bool(getattr(self, "_monitor_tree_dirty", False))
+            if tree_dirty:
+                try:
+                    self._monitor_tree_dirty = False
+                except Exception:
+                    pass
+            if backlog_size >= busy_threshold or tree_dirty:
                 next_delay_ms = busy_ms
-            elif backlog_size <= 0:
+            elif backlog_size <= 0 and not tree_dirty:
                 next_delay_ms = idle_ms
             else:
                 next_delay_ms = base_ms
@@ -1728,6 +1750,18 @@ class KiwoomApp:
         - 가격 변화가 있거나 일정 시간(기본 3초) 경과 시에만 enqueue
         """
         try:
+            inject_iv = 2.5
+            try:
+                st_iv = getattr(self, "settings", None) or {}
+                inject_iv = float(st_iv.get("ui_inject_min_interval_sec", 2.5))
+            except (TypeError, ValueError):
+                inject_iv = 2.5
+            inject_iv = max(0.8, min(inject_iv, 30.0))
+            now_gate = time.time()
+            if now_gate - float(getattr(self, "_inject_min_last_ts", 0.0) or 0.0) < inject_iv:
+                return
+            self._inject_min_last_ts = now_gate
+
             mi = getattr(self, "monitor_info", None) or {}
             if not isinstance(mi, dict) or not mi:
                 return

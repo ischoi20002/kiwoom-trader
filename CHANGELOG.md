@@ -13,6 +13,25 @@
 
 ---
 
+## 0.8.78 (2026-07-10)
+
+KB금융 등 Stage 2(추매) 중복 주문 방지.
+
+- **원인**: 모의투자 RC4033(미체결 없음=전량체결) 시 매수는 `confirm_after_no_open_qty` 에서 즉시 신뢰 반영이 없고 kt00007 지연만 재시도 → `on_fill` 미호출·`stage` 1 유지. ka10085 잔고 동기화는 수량만 갱신. `events=[]` DB 복구 포지션은 S2 체결도 S1 리셋 분기로 빠질 수 있음. 7/9·7/10 KB금융 S2 주문(0147053·0014890)이 이 경로로 stage 미갱신 후 재추매.
+- **`core/execution/fill_confirmation_service.py`**: RC4033·no_open_qty 시 **매수도** `apply_trusted_fill_on_no_open_qty` 즉시 반영(매도와 동일).
+- **`core/portfolio_manager.py`**: `position_effective_stage`·S2 reason 판별·`on_fill` S2 전용 분기(이벤트 없음·잔고 선반영·중복 체결 방지)·S2 체결 시 `entry_n`/pending 해제·DB 로드 시 `entry_n` 동기화.
+- **`core/execution/order_execution_service.py`**: `STAGE2` 집행 전 stage≥2·미체결 대기 차단.
+- **`core/signal_engine.py`**, **`core/strategy_engine.py`**: 실효 stage 참조 통일.
+
+## 0.8.77 (2026-07-10)
+
+실시간 감시 UI 멈춤(틱·렌더 경로) 구조적 완화.
+
+- **`core/signal_engine.py`**: 틱마다 `calculate_indicators` 로 ATR 표시 계산하던 경로 제거 → 백그라운드 캐시만. 종목별 UI enqueue 스로틀(0.2초). 중복 force-min enqueue 제거. S1 진단 로그 전역 버스트 완화.
+- **`core/realtime_tick_dispatch_service.py`**: 워커 배치당 최대 6틱·GIL 양보로 메인 Tk 이벤트 루프 기아 완화.
+- **`k_trader_gui.py`**: 렌더 체인 가동 중에도 `_monitor_tree_dirty` 로 갱신 유실 방지. inject 강제 갱신 2.5초 스로틀.
+- **`core/defaults.py`**: 틱 flush·ATR 표시·inject·UI enqueue 기본값 조정.
+
 ## 0.8.76 (2026-07-09)
 
 DB 복구 보유 포지션의 실시간 청산 미발송 수정.
@@ -25,8 +44,6 @@ DB 복구 보유 포지션의 실시간 청산 미발송 수정.
   - `realtime_eval_position_on_m1_revision_only=True` 경로에서도 M1 정체 시 15초(`realtime_eval_position_min_interval_sec`)마다 틱 재평가.
 
 ## 0.8.75 (2026-07-09)
-
-실시간 감시 현재가가 M1 평가 틱과 WS 틱 사이에서 널뛰는 현상 완화.
 
 - **`core/signal_engine.py`**: 공식 M1 평가 경로(`_official_sync_eval`)에서는 살아 있는 WS `price` 를 덮어쓰지 않음. 트리 「현재가」는 `monitor_display_price()` 로 표시.
 - **`core/realtime_official_bars_sync.py`**: M1·슬롯 롤 후 신호 재평가 시 `_official_sync_eval=True` 전달. `_resolve_monitor_price` 는 `price` → `last_price` 순.

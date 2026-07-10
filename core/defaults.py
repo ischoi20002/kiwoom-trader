@@ -116,10 +116,11 @@ DEFAULT_SETTINGS = {
     "monitor_pre_selection_rebuild_sleep_sec": 0.02,
     "incremental_warmup_stream": False,
     # 실시간 틱·UI: 메인스레드 부하 완화 (settings.json 과 동기 권장)
-    "realtime_tick_flush_ms": 150,
-    "realtime_tick_flush_max_codes_per_slice": 8,
-    "realtime_tick_flush_slice_yield_ms": 2,
+    "realtime_tick_flush_ms": 200,
+    "realtime_tick_flush_max_codes_per_slice": 6,
+    "realtime_tick_flush_slice_yield_ms": 3,
     "use_realtime_tick_worker_thread": True,
+    "realtime_tick_worker_max_ticks_per_batch": 6,
     "realtime_tick_main_queue_burst": 48,
     "realtime_tick_main_poller_ms": 16,
     "ws_reg_max_codes_per_chunk": 80,
@@ -131,6 +132,8 @@ DEFAULT_SETTINGS = {
     "realtime_monitor_render_frame_budget_sec": 0.045,
     # pending 이 이 값 이상이면 ui_force_row_refresh(강제 inject) 생략
     "ui_force_row_refresh_skip_when_pending_ge": 22,
+    "ui_inject_min_interval_sec": 2.5,
+    "realtime_monitor_ui_enqueue_min_sec": 0.20,
     # 보유 탭 행 reorder 최소 간격(초) — 틱마다 Treeview.move 시 UI 멈춤 완화
     "virtual_tab_active_reorder_min_sec": 5.0,
     # (레거시) 예전에는 S1 풀계산 최소 간격으로 사용. 현재는 15m 꼬리·M1 리비전 트리거가 우선.
@@ -147,7 +150,7 @@ DEFAULT_SETTINGS = {
     "realtime_eval_position_min_interval_sec": 15.0,
     # 봉 부족 시 보유용 마지막 지표 행 재계산 최소 간격(초) — eval 과 동기 권장.
     "realtime_exit_indicator_min_interval_sec": 15.0,
-    "realtime_monitor_atr_display_min_interval_sec": 0.5,
+    "realtime_monitor_atr_display_min_interval_sec": 5.0,
     # 보유 직후 monitor_info 스텁 유지(초) — 첫 틱에 즉시 해제하지 않아 메인 REST·UI 멈춤 완화
     "vp_price_stub_grace_sec": 45.0,
     # 실시간 인트라바 미러 GAP_DOWN: M1 저가만으로 청산하지 않고 틱 현재가도 한도 이하여야 함

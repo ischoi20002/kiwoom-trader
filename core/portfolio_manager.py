@@ -517,6 +517,131 @@ class PortfolioManager:
             pass
         return False
 
+    @staticmethod
+    def _is_s2_fill_reason(reason: Optional[str]) -> bool:
+        """체결·주문 reason 문자열이 Stage 2 추매인지 판별."""
+        try:
+            r = str(reason or "").upper()
+        except Exception:
+            return False
+        return any(
+            tok in r
+            for tok in (
+                "STAGE 2",
+                "STAGE2",
+                "BUY_2ND",
+                "ADDON(S2)",
+                "SCALING",
+                "S2_",
+            )
+        )
+
+    def position_effective_stage(self, pos: Dict[str, Any]) -> int:
+        """entry_n·stage·BUY_S2 이벤트를 종합한 실효 단계(1 또는 2+)."""
+        try:
+            st = max(
+                int(pos.get("entry_n", 0) or 0),
+                int(pos.get("stage", 1) or 1),
+            )
+            if st >= 2:
+                return st
+            for ev in pos.get("events") or []:
+                if isinstance(ev, dict) and str(ev.get("action", "")).upper() == "BUY_S2":
+                    return 2
+        except Exception:
+            pass
+        return 1
+
+    def _resolve_fill_is_s2(
+        self,
+        code: str,
+        reason: Optional[str],
+        order_no: Optional[str],
+    ) -> bool:
+        """on_fill 매수가 S2 추매 체결인지 reason·주문메타·주문번호로 판별."""
+        if self._is_s2_fill_reason(reason):
+            return True
+        try:
+            meta = self.data_manager.get_latest_order_meta(code)
+            if meta and self._is_s2_fill_reason(meta[1] if len(meta) > 1 else None):
+                return True
+        except Exception:
+            pass
+        oid = str(order_no or "").strip()
+        if oid:
+            try:
+                row = self.data_manager.get_order_history_row_by_order_no(oid)
+                if isinstance(row, dict) and self._is_s2_fill_reason(
+                    row.get("reason")
+                ):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _position_has_buy_s2_event(self, pos: Dict[str, Any]) -> bool:
+        try:
+            for ev in pos.get("events") or []:
+                if isinstance(ev, dict) and str(ev.get("action", "")).upper() == "BUY_S2":
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _ensure_s1_event_before_s2_fill(
+        self,
+        pos: Dict[str, Any],
+        *,
+        fill_qty: int,
+        now_str: str,
+        code: str,
+        snapshot: Any,
+        reg_reason: str,
+    ) -> None:
+        """S2 체결인데 BUY_S1 이벤트가 없으면(동기화·DB 유실) 기존 보유로 S1 이벤트를 복원."""
+        if self._has_confirmed_buy_events(pos):
+            return
+        try:
+            cur_q = self._to_i(pos.get("qty", 0))
+            fq = max(0, self._to_i(fill_qty))
+            s1_q = cur_q - fq if cur_q > fq else cur_q
+            if s1_q <= 0:
+                return
+            s1_p = self._to_f(pos.get("avg_price", 0))
+            if s1_p <= 0:
+                return
+            _snap = self._ensure_fill_snapshot(code, s1_p, snapshot, str(reg_reason))
+            pos.setdefault("events", []).append(
+                {
+                    "time": now_str,
+                    "action": "BUY_S1",
+                    "price": s1_p,
+                    "qty": s1_q,
+                    "snapshot": _snap,
+                }
+            )
+        except Exception:
+            pass
+
+    def _finalize_s2_fill_state(
+        self, pos: Dict[str, Any], *, fill_price: float, fill_qty: int, now_str: str
+    ) -> None:
+        """S2 체결 후 stage·entry_n·pending 플래그를 확정."""
+        pos["stage"] = 2
+        pos["entry_n"] = 2
+        pos.pop("s2_limit_order_pending", None)
+        pos.pop("s2_pending_ord_no", None)
+        if not self._position_has_buy_s2_event(pos):
+            pos.setdefault("events", []).append(
+                {
+                    "time": now_str,
+                    "action": "BUY_S2",
+                    "price": float(fill_price),
+                    "qty": int(fill_qty),
+                    "snapshot": {},
+                }
+            )
+
     def _is_synced_placeholder_position(self, pos: Dict[str, Any]) -> bool:
         """ka10085 선반영(SYNCED) — on_fill 전 임시 포지션."""
         try:
@@ -938,6 +1063,11 @@ class PortfolioManager:
                                 "sig_type": _sig,
                                 "events": [], "max_now": float(row[2])
                             }
+                            try:
+                                if int(new_pos.get("stage", 1) or 1) >= 2:
+                                    new_pos["entry_n"] = 2
+                            except (TypeError, ValueError):
+                                pass
                             try:
                                 _old = prev_by_base.get(_nk)
                                 if isinstance(_old, dict):
@@ -2169,9 +2299,138 @@ class PortfolioManager:
                     pos = self.virtual_positions[code]
                     synced_ph = self._is_synced_placeholder_position(pos)
                     has_buy_ev = self._has_confirmed_buy_events(pos)
+                    is_s2_fill = self._resolve_fill_is_s2(code, reason, order_no)
+                    eff_stage = self.position_effective_stage(pos)
+
+                    # 이미 추매 완료(stage>=2)인데 S2 체결·주문이 또 오면 수량 중복 반영 방지
+                    if is_s2_fill and eff_stage >= 2:
+                        _ord_sfx = f" ord={order_no}" if order_no else ""
+                        self.log(
+                            f"⚠️ [Portfolio] {pos.get('name', code)}({code}) "
+                            f"S2 중복 체결 생략 — 이미 추매 완료(stage={eff_stage}){_ord_sfx}"
+                        )
+                    elif is_s2_fill:
+                        # S2 추매 — events 없음(DB 복구)·잔고 선반영이어도 S1 리셋하지 않음
+                        s2_handled = False
+                        self._ensure_s1_event_before_s2_fill(
+                            pos,
+                            fill_qty=self._to_i(qty),
+                            now_str=now_str,
+                            code=code,
+                            snapshot=snapshot,
+                            reg_reason=str(
+                                reason or pos.get("reason") or "Stage 2 Scaling"
+                            ),
+                        )
+                        cur_q = self._to_i(pos.get("qty", 0))
+                        fill_q = self._to_i(qty)
+                        # ka10085 선반영으로 수량만 먼저 늘었으면 stage·이벤트만 보정
+                        if (
+                            cur_q >= fill_q
+                            and not self._position_has_buy_s2_event(pos)
+                            and self._has_confirmed_buy_events(pos)
+                        ):
+                            try:
+                                _ev_q = self._cost_basis_from_buy_events(pos)
+                                _leg_q = int(_ev_q[2]) if _ev_q is not None else 0
+                            except Exception:
+                                _leg_q = 0
+                            if _leg_q > 0 and cur_q >= _leg_q + fill_q:
+                                _fp = self._to_f(price)
+                                self._finalize_s2_fill_state(
+                                    pos,
+                                    fill_price=_fp,
+                                    fill_qty=fill_q,
+                                    now_str=now_str,
+                                )
+                                self.data_manager.save_active_position(
+                                    code,
+                                    pos["name"],
+                                    float(pos.get("avg_price", 0)),
+                                    cur_q,
+                                    2,
+                                    float(pos.get("invested", 0) or 0),
+                                    pos.get("entry_time"),
+                                    pos.get("reason"),
+                                )
+                                _ord_sfx = f" ord={order_no}" if order_no else ""
+                                self.log(
+                                    f"[Portfolio] {pos['name']}({code}) S2 추매 확정 · "
+                                    f"잔고 선반영 {cur_q}주 (stage→2){_ord_sfx}"
+                                )
+                                s2_handled = True
+
+                        if not s2_handled:
+                            old_qty = self._to_i(pos.get("qty", 0))
+                            old_avg = self._to_f(pos.get("avg_price", 0.0))
+                            new_total_qty = old_qty + self._to_i(qty)
+                            new_avg_price = (
+                                ((old_avg * old_qty) + (self._to_f(price) * self._to_i(qty)))
+                                / new_total_qty
+                                if new_total_qty > 0
+                                else self._to_f(price)
+                            )
+
+                            pos["qty"] = new_total_qty
+                            pos["avg_price"] = new_avg_price
+                            _p2 = self._to_f(price)
+                            _q2 = self._to_i(qty)
+                            _snap_s2 = self._ensure_fill_snapshot(
+                                code,
+                                _p2,
+                                snapshot,
+                                str(reason or pos.get("reason") or "S2"),
+                            )
+                            pos.setdefault("events", []).append(
+                                {
+                                    "time": now_str,
+                                    "action": "BUY_S2",
+                                    "price": _p2,
+                                    "qty": _q2,
+                                    "snapshot": _snap_s2,
+                                }
+                            )
+                            self._finalize_s2_fill_state(
+                                pos,
+                                fill_price=_p2,
+                                fill_qty=_q2,
+                                now_str=now_str,
+                            )
+                            _tup_ev = self._cost_basis_from_buy_events(pos)
+                            if _tup_ev is not None:
+                                _w_avg_ev, _inv_ev, _ev_q = _tup_ev
+                                if _ev_q == new_total_qty:
+                                    pos["avg_price"] = float(_w_avg_ev)
+                                    pos["invested"] = float(_inv_ev)
+                                else:
+                                    _fee2 = _p2 * float(_q2) * buy_r
+                                    pos["invested"] = float(
+                                        pos.get("invested", 0) or 0
+                                    ) + _p2 * float(_q2) + _fee2
+                            else:
+                                _fee2 = _p2 * float(_q2) * buy_r
+                                pos["invested"] = float(
+                                    pos.get("invested", 0) or 0
+                                ) + _p2 * float(_q2) + _fee2
+
+                            self.data_manager.save_active_position(
+                                code,
+                                pos["name"],
+                                pos["avg_price"],
+                                new_total_qty,
+                                2,
+                                pos["invested"],
+                                pos["entry_time"],
+                                pos["reason"],
+                            )
+                            _ord_sfx = f" ord={order_no}" if order_no else ""
+                            self.log(
+                                f"[Portfolio] {pos['name']}({code}) S2 추매 · "
+                                f"+{_q2}주 (합계 {new_total_qty}주, 평단 {int(new_avg_price):,}원){_ord_sfx}"
+                            )
 
                     # S1 첫 체결: SYNCED 선반영·이벤트 없음 — 수량 합산하지 않음
-                    if synced_ph or not has_buy_ev:
+                    elif synced_ph or not has_buy_ev:
                         meta = self.data_manager.get_latest_order_meta(code)
                         reg_name = name or str(pos.get("name") or "") or (
                             meta[0] if meta else "Unknown"
@@ -2252,7 +2511,6 @@ class PortfolioManager:
 
                         pos['qty'] = new_total_qty
                         pos['avg_price'] = new_avg_price
-                        pos['stage'] = 2
                         _p2 = self._to_f(price)
                         _q2 = self._to_i(qty)
                         _snap_s2 = self._ensure_fill_snapshot(
@@ -2266,6 +2524,12 @@ class PortfolioManager:
                                 "qty": _q2,
                                 "snapshot": _snap_s2,
                             }
+                        )
+                        self._finalize_s2_fill_state(
+                            pos,
+                            fill_price=_p2,
+                            fill_qty=_q2,
+                            now_str=now_str,
                         )
                         # invested: S1과 동일하게 매수수수료 포함(이벤트 합산 우선, 실패 시 추매 다리만 수수료 반영)
                         _tup_ev = self._cost_basis_from_buy_events(pos)
