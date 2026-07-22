@@ -13,6 +13,18 @@
 
 ---
 
+## 0.9.0 (2026-07-23)
+
+감시종목 선정 품질 개선 — 시장 브레드스 게이트 신설 및 선정 필터 복구.
+
+- **원인**: 실시간 감시 승률이 매우 낮았고(모의 기준 16% 수준·손절의 45%가 진입 15분 내 발생), 근본 원인은 (1) 약세장에서도 롱 진입을 무차별 허용(시장 레짐 필터 부재), (2) Track B 상대강도 필터 사실상 비활성(`sel_b_rs_rank_min=0.0`)·RSI 상한 밴드/캡 미적용(`buy_rsi_max_a/b=100`)·유동성/거래량 폭발 기준 과완화였음. FDR(실시간) vs DB(백테스트) 선정 겹침률은 100%로 데이터 소스 불일치는 아님을 확인.
+- **`strategy_selector.py`**: 지수 재도입 없이 유니버스 자체의 MA20 상회 비율로 시장 폭(브레드스)을 산출하는 경량 게이트 신설.
+  - `compute_market_breadth()` / `classify_breadth_regime()` 공용 헬퍼 추가(실시간·백테스트 대칭).
+  - `_apply_breadth_gate_to_df()` — DOWN 레짐 시 진입 차단, NEUTRAL 시 감시 슬롯 축소·Track B 선택적 차단.
+  - `select_monitoring_targets()`(실시간)·`prepare_dynamic_universe()`(백테스트 일별 스케줄)에 게이트 적용.
+- **`settings.json`·`core/defaults.py`**: 브레드스 게이트 키 신설(`use_market_breadth_gate`, `breadth_down_pct=0.30`, `breadth_up_pct`, `breadth_neutral_block_track_b`, `breadth_neutral_slot_scale`). 선정 필터 복구/강화(`sel_b_rs_rank_min` 0.0→0.45, `buy_rsi_max_a` 72, `buy_rsi_max_b` 80, `sel_b_rsi_max` 78, `sel_a/b_require_sel_rsi_band` true, `min_trde_val` 30→60, `vol_ratio` 1.15→1.5, `vol_lookback` 3→5).
+- **`ui/tabs/settings_tab.py`**: 설정 탭에 「시장 브레드스 게이트」 섹션 추가 — 게이트 on/off·Track B 차단·`breadth_down_pct`/`breadth_up_pct`/`breadth_neutral_slot_scale` 입력 위젯.
+
 ## 0.8.78 (2026-07-10)
 
 KB금융 등 Stage 2(추매) 중복 주문 방지.

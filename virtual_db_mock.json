@@ -5398,6 +5398,306 @@
             "exit_time": "12:29:24",
             "exit_datetime": "2026-07-09 12:29:24",
             "code": "138040"
+        },
+        {
+            "name": "KB금융",
+            "avg_price": 174651.0,
+            "qty": 37,
+            "stage": 1,
+            "invested": 6484704.3045,
+            "entry_time": "2026-07-07T14:41:15.073808",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-07-10 09:13:19",
+                    "action": "SELL",
+                    "price": 183400.0,
+                    "qty": 37,
+                    "snapshot": {
+                        "time": "2026-07-10 09:13:19",
+                        "price": 183400.0,
+                        "market_trend": "N/A",
+                        "vol_power": 199.35,
+                        "reason": "EXIT_FLASH_EXIT",
+                        "rsi": 68.7,
+                        "macd": 727.05,
+                        "osc": 421.17,
+                        "adx": 14.5,
+                        "ma_alignment": "정배열(Bull)",
+                        "bid_ask_ratio": 0.64
+                    }
+                }
+            ],
+            "max_now": 171700.0,
+            "ka_cur_prc": 178200.0,
+            "ka_evlu_amt": 6593400.0,
+            "ka_evlu_pfls_amt": 131300.0,
+            "ka_prft_rt": 2.0318472323238574,
+            "ka_pur_amt": 6462100.0,
+            "ka_sync_iso": "2026-07-10T09:05:52.648659",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-07-10T09:15:00",
+                    183700.0,
+                    "Timestamp('2026-07-07 14:41:15.073808+0900', tz='Asia/Seoul')"
+                ],
+                183700.0
+            ],
+            "max_p": 182000.0,
+            "max_price": 182000.0,
+            "current_price": 177700,
+            "s2_limit_order_pending": true,
+            "s2_pending_ord_no": "0014890",
+            "exit_pending": true,
+            "exit_reason": "EXIT_FLASH_EXIT",
+            "pending_exit_ord_no": "0025727",
+            "final_pnl_pct": 4.067630274474608,
+            "realized_pnl_amt": 263773.7955,
+            "exit_price": 183400.0,
+            "exit_date": "2026-07-10",
+            "exit_time": "09:13:19",
+            "exit_datetime": "2026-07-10 09:13:19",
+            "code": "105560"
+        },
+        {
+            "name": "크래프톤",
+            "avg_price": 249500.0,
+            "qty": 7,
+            "stage": 1,
+            "invested": 1752612.75,
+            "entry_time": "2026-07-10T09:15:32.845332",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-07-13 09:00:54",
+                    "action": "SELL",
+                    "price": 240000.0,
+                    "qty": 7,
+                    "snapshot": {
+                        "time": "2026-07-13 09:00:54",
+                        "price": 240000.0,
+                        "market_trend": "N/A",
+                        "vol_power": 67.21,
+                        "reason": "EXIT_ATR_SL",
+                        "rsi": 41.3,
+                        "macd": -346.68,
+                        "osc": -536.53,
+                        "adx": 13.7,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.57
+                    }
+                }
+            ],
+            "max_now": 249500.0,
+            "ka_cur_prc": 238500.0,
+            "ka_evlu_amt": 1669500.0,
+            "ka_evlu_pfls_amt": -77000.0,
+            "ka_prft_rt": -4.408817635270541,
+            "ka_pur_amt": 1746500.0,
+            "ka_sync_iso": "2026-07-13T08:33:31.735216",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-07-10T15:30:00",
+                    238000.0,
+                    "Timestamp('2026-07-10 09:15:32.845332+0900', tz='Asia/Seoul')"
+                ],
+                null
+            ],
+            "max_p": 249500.0,
+            "max_price": 249500.0,
+            "exit_pending": true,
+            "exit_reason": "EXIT_ATR_SL",
+            "pending_exit_ord_no": "0004722",
+            "final_pnl_pct": -4.670327201488178,
+            "realized_pnl_amt": -81852.75,
+            "exit_price": 240000.0,
+            "exit_date": "2026-07-13",
+            "exit_time": "09:00:54",
+            "exit_datetime": "2026-07-13 09:00:54",
+            "code": "259960"
+        },
+        {
+            "name": "한국항공우주",
+            "avg_price": 149142.0,
+            "qty": 12,
+            "stage": 1,
+            "invested": 1795967.964,
+            "entry_time": "2026-07-10T09:01:20.764211",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-07-13 09:01:08",
+                    "action": "SELL",
+                    "price": 144600.0,
+                    "qty": 12,
+                    "snapshot": {
+                        "time": "2026-07-13 09:01:08",
+                        "price": 144600.0,
+                        "market_trend": "N/A",
+                        "vol_power": 85.94,
+                        "reason": "EXIT_ATR_SL",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 11.04
+                    }
+                }
+            ],
+            "max_now": 149142.0,
+            "ka_cur_prc": 146700.0,
+            "ka_evlu_amt": 1760400.0,
+            "ka_evlu_pfls_amt": -29300.0,
+            "ka_prft_rt": -1.637145890372688,
+            "ka_pur_amt": 1789700.0,
+            "ka_sync_iso": "2026-07-13T08:33:31.733569",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-07-13T09:15:00",
+                    145900.0,
+                    "Timestamp('2026-07-10 09:01:20.764211+0900', tz='Asia/Seoul')"
+                ],
+                145900.0
+            ],
+            "max_p": 149142.0,
+            "max_price": 149142.0,
+            "current_price": 145400,
+            "exit_pending": true,
+            "exit_reason": "EXIT_ATR_SL",
+            "pending_exit_ord_no": "0005329",
+            "final_pnl_pct": -3.914967605736202,
+            "realized_pnl_amt": -70311.56400000001,
+            "exit_price": 144600.0,
+            "exit_date": "2026-07-13",
+            "exit_time": "09:01:08",
+            "exit_datetime": "2026-07-13 09:01:08",
+            "code": "047810"
+        },
+        {
+            "name": "KT&G",
+            "avg_price": 180800.0,
+            "qty": 10,
+            "stage": 1,
+            "invested": 1814328.0,
+            "entry_time": "2026-07-10T09:15:32.191336",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-07-13 09:01:11",
+                    "action": "SELL",
+                    "price": 173600.0,
+                    "qty": 10,
+                    "snapshot": {
+                        "time": "2026-07-13 09:01:11",
+                        "price": 173600.0,
+                        "market_trend": "N/A",
+                        "vol_power": 46.08,
+                        "reason": "EXIT_ATR_SL",
+                        "rsi": 36.4,
+                        "macd": -1282.24,
+                        "osc": -171.69,
+                        "adx": 26.0,
+                        "ma_alignment": "역배열(Bear)",
+                        "bid_ask_ratio": 0.48
+                    }
+                }
+            ],
+            "max_now": 180800.0,
+            "ka_cur_prc": 175100.0,
+            "ka_evlu_amt": 1751000.0,
+            "ka_evlu_pfls_amt": -57000.0,
+            "ka_prft_rt": -3.1526548672566372,
+            "ka_pur_amt": 1808000.0,
+            "ka_sync_iso": "2026-07-13T08:33:31.730304",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-07-10T15:30:00",
+                    173500.0,
+                    "Timestamp('2026-07-10 09:15:32.191336+0900', tz='Asia/Seoul')"
+                ],
+                null
+            ],
+            "max_p": 180800.0,
+            "max_price": 180800.0,
+            "exit_pending": true,
+            "exit_reason": "EXIT_ATR_SL",
+            "pending_exit_ord_no": "0005465",
+            "final_pnl_pct": -4.84344616849875,
+            "realized_pnl_amt": -87876.0,
+            "exit_price": 173600.0,
+            "exit_date": "2026-07-13",
+            "exit_time": "09:01:11",
+            "exit_datetime": "2026-07-13 09:01:11",
+            "code": "033780"
+        },
+        {
+            "name": "크래프톤",
+            "avg_price": 239500.0,
+            "qty": 8,
+            "stage": 1,
+            "invested": 1922706.0,
+            "entry_time": "2026-07-13T14:16:30.866549",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-07-14 13:13:13",
+                    "action": "SELL",
+                    "price": 232500.0,
+                    "qty": 8,
+                    "snapshot": {
+                        "time": "2026-07-14 13:13:13",
+                        "price": 232500.0,
+                        "market_trend": "N/A",
+                        "vol_power": 73.68,
+                        "reason": "EXIT_ATR_SL",
+                        "rsi": 49.3,
+                        "macd": -665.04,
+                        "osc": -206.86,
+                        "adx": 19.1,
+                        "ma_alignment": "역배열(Bear)",
+                        "bid_ask_ratio": 0.6
+                    }
+                }
+            ],
+            "max_now": 239500.0,
+            "ka_cur_prc": 241000.0,
+            "ka_evlu_amt": 1928000.0,
+            "ka_evlu_pfls_amt": 12000.0,
+            "ka_prft_rt": 0.6263048016701461,
+            "ka_pur_amt": 1916000.0,
+            "ka_sync_iso": "2026-07-14T10:02:57.193569",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-07-14T13:15:00",
+                    237000.0,
+                    "Timestamp('2026-07-13 14:16:30.866549+0900', tz='Asia/Seoul')"
+                ],
+                242000.0
+            ],
+            "max_p": 242000.0,
+            "max_price": 242000.0,
+            "current_price": 241000,
+            "exit_pending": true,
+            "exit_reason": "EXIT_ATR_SL",
+            "pending_exit_ord_no": "0122361",
+            "final_pnl_pct": -3.7934036717001978,
+            "realized_pnl_amt": -72936.0,
+            "exit_price": 232500.0,
+            "exit_date": "2026-07-14",
+            "exit_time": "13:13:13",
+            "exit_datetime": "2026-07-14 13:13:13",
+            "code": "259960"
         }
     ],
     "pending_exit_snapshots": {}

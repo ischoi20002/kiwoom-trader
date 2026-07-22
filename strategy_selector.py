@@ -982,6 +982,185 @@ def _merge_dual_track_picks(
     return final
 
 
+def compute_market_breadth(
+    rows_or_df: Union[List[dict], pd.DataFrame],
+) -> Dict[str, float]:
+    """
+    유니버스 스냅샷(선정 스캔 결과 행 목록 또는 일자별 DataFrame)에서 시장 브레드스를 계산한다.
+
+    외부 지수 데이터 없이, 선정 단계에서 이미 계산된 종가·MA20·MA60만으로 시장 폭을 측정한다.
+
+    입력:
+        - list[dict]: 실시간 선정 경로. 각 행은 ``Price``(또는 ``close``)·``MA20``·``MA60`` 보유.
+        - pd.DataFrame: 백테스트 일별 패널. ``close``·``MA20``·``MA60`` 컬럼 보유.
+
+    반환:
+        - ``ma20_above``: 종가 ≥ MA20 인 종목 비율(0~1). 표본 없으면 ``float('nan')``.
+        - ``ma20_gt_ma60``: MA20 > MA60 비율(0~1).
+        - ``n``: 유효 표본 종목 수.
+    """
+    nan = float("nan")
+    result: Dict[str, float] = {"ma20_above": nan, "ma20_gt_ma60": nan, "n": 0.0}
+    try:
+        if isinstance(rows_or_df, pd.DataFrame):
+            df = rows_or_df
+            if df is None or df.empty:
+                return result
+            close_col = (
+                "close"
+                if "close" in df.columns
+                else ("Price" if "Price" in df.columns else None)
+            )
+            if close_col is None or "MA20" not in df.columns:
+                return result
+            close = pd.to_numeric(df[close_col], errors="coerce")
+            ma20 = pd.to_numeric(df["MA20"], errors="coerce")
+            ma60 = (
+                pd.to_numeric(df["MA60"], errors="coerce")
+                if "MA60" in df.columns
+                else pd.Series(np.nan, index=df.index)
+            )
+            valid = close.notna() & ma20.notna() & (ma20 > 0)
+            n = int(valid.sum())
+            if n <= 0:
+                return result
+            above = float((close[valid] >= ma20[valid]).mean())
+            v60 = valid & ma60.notna() & (ma60 > 0)
+            gt60 = float((ma20[v60] > ma60[v60]).mean()) if int(v60.sum()) > 0 else nan
+            return {"ma20_above": above, "ma20_gt_ma60": gt60, "n": float(n)}
+
+        # list[dict] 경로
+        rows = rows_or_df or []
+        above_cnt = 0
+        gt60_cnt = 0
+        gt60_den = 0
+        n = 0
+        for r in rows:
+            try:
+                price = r.get("Price", r.get("close", None))
+                ma20 = r.get("MA20", None)
+                ma60 = r.get("MA60", None)
+                if price is None or ma20 is None:
+                    continue
+                price_f = float(price)
+                ma20_f = float(ma20)
+                if not (np.isfinite(price_f) and np.isfinite(ma20_f)) or ma20_f <= 0:
+                    continue
+                n += 1
+                if price_f >= ma20_f:
+                    above_cnt += 1
+                if ma60 is not None:
+                    ma60_f = float(ma60)
+                    if np.isfinite(ma60_f) and ma60_f > 0:
+                        gt60_den += 1
+                        if ma20_f > ma60_f:
+                            gt60_cnt += 1
+            except (TypeError, ValueError):
+                continue
+        if n <= 0:
+            return result
+        return {
+            "ma20_above": above_cnt / n,
+            "ma20_gt_ma60": (gt60_cnt / gt60_den) if gt60_den > 0 else nan,
+            "n": float(n),
+        }
+    except Exception:
+        return result
+
+
+def classify_breadth_regime(breadth: Dict[str, float], settings: dict) -> str:
+    """
+    브레드스(MA20 위 종목 비율)로 시장 레짐을 분류한다.
+
+    반환: ``"DOWN"`` / ``"NEUTRAL"`` / ``"UP"``.
+    표본이 부족(NaN)하거나 게이트 기준이 비정상이면 ``"UP"``(허용)로 폴백한다.
+    """
+    try:
+        b = breadth.get("ma20_above") if breadth else None
+        if b is None or not np.isfinite(float(b)):
+            return "UP"
+        b = float(b)
+        down = float(settings.get("breadth_down_pct", 0.35))
+        up = float(settings.get("breadth_up_pct", 0.50))
+        if up < down:
+            down, up = up, down
+        if b < down:
+            return "DOWN"
+        if b < up:
+            return "NEUTRAL"
+        return "UP"
+    except Exception:
+        return "UP"
+
+
+def _apply_breadth_gate_to_df(
+    df_result: pd.DataFrame,
+    regime: str,
+    settings: dict,
+    logger_callback: Callable[..., None],
+) -> pd.DataFrame:
+    """
+    실시간 선정 결과(df_result)에 시장 레짐 게이트를 적용한다.
+
+    - DOWN: 빈 DataFrame 반환(그날 신규 감시 없음).
+    - NEUTRAL: (옵션) Track B(순수 돌파) 제거 + 슬롯 축소.
+    - UP: 원본 그대로.
+    """
+    try:
+        if df_result is None or df_result.empty:
+            return df_result
+        if regime == "DOWN":
+            try:
+                logger_callback(
+                    "[Breadth] 시장 레짐 DOWN — 신규 감시목록을 비웁니다(약세장 진입 차단)."
+                )
+            except Exception:
+                pass
+            return df_result.iloc[:0].copy()
+
+        if regime == "NEUTRAL":
+            out = df_result.copy()
+            if _settings_bool_sel(settings, "breadth_neutral_block_track_b", True):
+                if "SelTrack" in out.columns:
+                    track = out["SelTrack"].astype(str).str.upper().str.strip()
+                    before = len(out)
+                    out = out[track != "B"].copy()
+                    dropped = before - len(out)
+                    if dropped > 0:
+                        try:
+                            logger_callback(
+                                f"[Breadth] NEUTRAL — Track B(순수 돌파) {dropped}종 제외."
+                            )
+                        except Exception:
+                            pass
+            try:
+                scale = float(settings.get("breadth_neutral_slot_scale", 0.5))
+            except (TypeError, ValueError):
+                scale = 0.5
+            scale = min(max(scale, 0.0), 1.0)
+            if scale < 1.0 and not out.empty:
+                cap = max(1, int(round(len(out) * scale)))
+                if len(out) > cap:
+                    sort_col = "Score" if "Score" in out.columns else None
+                    if sort_col is not None:
+                        out = out.sort_values(by=sort_col, ascending=False)
+                    out = out.head(cap).copy()
+                    try:
+                        logger_callback(
+                            f"[Breadth] NEUTRAL — 슬롯 축소(×{scale:g}) → {len(out)}종."
+                        )
+                    except Exception:
+                        pass
+            return out
+        return df_result
+    except Exception as e:
+        try:
+            logger_callback(f"⚠️ [Breadth] 게이트 적용 실패(원본 유지): {e}")
+        except Exception:
+            pass
+        return df_result
+
+
 def select_monitoring_targets(
     settings: dict[str, Any],
     logger_callback: Callable[..., None],
@@ -1522,6 +1701,27 @@ def select_monitoring_targets(
         raw_results = list(executor.map(process_code, [row for _, row in df_top.iterrows()]))
 
     selected = [r[0] for r in raw_results if r[0] is not None]
+
+    # [Breadth] 시장 레짐 측정 — 교차섹션 필터 이전의 유니버스 전체 스냅샷 기준
+    breadth_gate_on = _settings_bool_sel(settings, "use_market_breadth_gate", True)
+    breadth_regime = "UP"
+    if breadth_gate_on:
+        try:
+            breadth_info = compute_market_breadth(selected)
+            breadth_regime = classify_breadth_regime(breadth_info, settings)
+            _b = breadth_info.get("ma20_above")
+            _b_str = f"{_b*100:.1f}%" if _b is not None and np.isfinite(_b) else "N/A"
+            logger_callback(
+                f"[Breadth] 유니버스 MA20 상회 비율 {_b_str} "
+                f"(표본 {int(breadth_info.get('n', 0))}종) → 레짐 {breadth_regime}"
+            )
+        except Exception as e:
+            try:
+                logger_callback(f"⚠️ [Breadth] 시장 레짐 측정 실패(UP 폴백): {e}")
+            except Exception:
+                pass
+            breadth_regime = "UP"
+
     try:
         if _settings_bool_sel(settings, "use_sel_track_a", True):
             selected = _apply_sel_a_live_cross_section(selected, settings)
@@ -1552,6 +1752,13 @@ def select_monitoring_targets(
 
     merged_rows = _merge_dual_track_picks(selected, settings, logger_callback)
     df_result = pd.DataFrame(merged_rows)
+
+    # [Breadth] 시장 레짐 게이트 — 약세장(DOWN) 진입 차단, 중립(NEUTRAL) 시 Track B 제외·슬롯 축소
+    if breadth_gate_on and breadth_regime in ("DOWN", "NEUTRAL"):
+        df_result = _apply_breadth_gate_to_df(
+            df_result, breadth_regime, settings, logger_callback
+        )
+
     if not df_result.empty:
         # 캐시 저장: 실시간 + API/DB혼합 경로만 (db_only 는 CLI 등에서 별도 경로로 저장)
         if not target_date and not db_only_no_fdr:
@@ -2122,6 +2329,16 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     df_sim = df_all[df_all['time'] >= pd.to_datetime(start_date)].copy()
     
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
+
+    # [Breadth] 백테스트 대칭: 일별 시장 레짐 게이트 (실시간 select_monitoring_targets 와 동일 규칙)
+    breadth_gate_on = _settings_bool_sel(settings, "use_market_breadth_gate", True)
+    block_b_on_neutral = _settings_bool_sel(settings, "breadth_neutral_block_track_b", True)
+    try:
+        neutral_scale = min(max(float(settings.get("breadth_neutral_slot_scale", 0.5)), 0.0), 1.0)
+    except (TypeError, ValueError):
+        neutral_scale = 0.5
+    breadth_down_days = 0
+    breadth_neutral_days = 0
     
     for d_str in trading_days_list:
         if duration_days < 180:
@@ -2130,6 +2347,28 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             universe = get_monthly_universe(pd.to_datetime(d_str))
         
         day_mask = (df_sim['time'] == pd.to_datetime(d_str)) & (df_sim['code'].isin(universe))
+
+        # [Breadth] 당일 유니버스 전체(Valid 이전) 기준 시장 레짐 판정
+        regime = "UP"
+        if breadth_gate_on:
+            try:
+                day_all = df_sim[day_mask]
+                regime = classify_breadth_regime(
+                    compute_market_breadth(day_all), settings
+                )
+            except Exception:
+                regime = "UP"
+            if regime == "DOWN":
+                # 약세장: 그날 신규 감시 없음 (schedule 미기록)
+                breadth_down_days += 1
+                continue
+            if regime == "NEUTRAL":
+                breadth_neutral_days += 1
+
+        # 중립장 슬롯 축소 (Track A 상한만; Track B 는 아래에서 별도 차단)
+        day_max_a = max_s_a
+        if breadth_gate_on and regime == "NEUTRAL" and neutral_scale < 1.0:
+            day_max_a = max(1, int(round(max_s_a * neutral_scale)))
         
         # Track A 스케줄
         day_a = df_sim[day_mask & df_sim['Valid_A']]
@@ -2139,15 +2378,16 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                     day_a,
                     score_col="Score_A",
                     code_col="code",
-                    max_n=max_s_a,
+                    max_n=day_max_a,
                     settings=settings,
                     min_score_floor=floor_sa,
                 )["code"]
                 .tolist()
             )
 
-        # Track B 스케줄
-        day_b = df_sim[day_mask & df_sim['Valid_B']]
+        # Track B 스케줄 (중립장 + block_track_b 이면 생략)
+        skip_b = breadth_gate_on and regime == "NEUTRAL" and block_b_on_neutral
+        day_b = df_sim[day_mask & df_sim['Valid_B']] if not skip_b else df_sim.iloc[:0]
         if not day_b.empty:
             schedule_b[d_str] = (
                 _df_top_by_score_slot_band(
@@ -2165,6 +2405,12 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         combined = list(dict.fromkeys(schedule_a.get(d_str, []) + schedule_b.get(d_str, [])))
         if combined:
             schedule[d_str] = combined
+
+    if breadth_gate_on and (breadth_down_days or breadth_neutral_days):
+        logger_callback(
+            f"  [Breadth] 시장 레짐 게이트: DOWN {breadth_down_days}일(감시 스킵), "
+            f"NEUTRAL {breadth_neutral_days}일(Track B 제외·슬롯 축소)"
+        )
 
     a_days = len(schedule_a)
     b_days = len(schedule_b)

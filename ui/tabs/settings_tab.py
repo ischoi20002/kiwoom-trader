@@ -570,6 +570,53 @@ class SettingsTab:
         )
         kospi_n_cmb.grid(row=1, column=1, sticky='w', padx=(5, 10), pady=(4, 0))
 
+        # ── 시장 브레드스 게이트 (약세장 진입 차단) ──
+        # 외부 지수 없이 유니버스의 MA20 상회 비율로 시장 레짐을 판정해
+        # 약세장(DOWN)이면 감시목록을 비우고, 중립(NEUTRAL)이면 Track B 제외·슬롯 축소.
+        breadth_f = ttk.LabelFrame(
+            _univ_root,
+            text=' 🌊 시장 브레드스 게이트 (약세장 진입 차단) ',
+            padding='15',
+        )
+        breadth_f.pack(fill=tk.X, expand=False, pady=(0, 12))
+        add_param_row(
+            breadth_f,
+            '브레드스 게이트 사용',
+            None,
+            '',
+            'ON: 유니버스 MA20 상회 비율로 시장 레짐 판정. 실시간 선정·동적 백테 공통 적용',
+            toggle_key='use_market_breadth_gate',
+        )
+        add_param_row(
+            breadth_f,
+            'DOWN 임계(하한)',
+            'breadth_down_pct',
+            '',
+            '0~1. MA20 상회 비율이 이 값 미만이면 DOWN → 그날 신규 감시목록 비움(진입 차단)',
+        )
+        add_param_row(
+            breadth_f,
+            'UP 임계(상한)',
+            'breadth_up_pct',
+            '',
+            '0~1. 이 값 이상이면 UP(정상 선정). DOWN~UP 사이는 NEUTRAL',
+        )
+        add_param_row(
+            breadth_f,
+            'NEUTRAL 시 Track B 제외',
+            None,
+            '',
+            'ON: 중립장에서 순수 돌파(Track B) 종목을 감시목록에서 제외',
+            toggle_key='breadth_neutral_block_track_b',
+        )
+        add_param_row(
+            breadth_f,
+            'NEUTRAL 슬롯 배율',
+            'breadth_neutral_slot_scale',
+            '',
+            '0~1. 중립장에서 Track A 감시 슬롯 수에 곱하는 축소 배율',
+        )
+
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')
         sel_f.pack(fill=tk.X, expand=False, pady=(0, 12))
         add_param_row(
