@@ -306,9 +306,13 @@ class BacktestTab:
         self.btn_start_dynamic.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_row_bt, text="📊 백테스트결과 리포트", width=18, command=self._open_dynamic_trade_report).pack(side=tk.LEFT, padx=2)
 
-        # RT 정합 / 고속: 다크 테마에서 체크박스 가독성이 낮아 ON·OFF 토글 버튼 사용
+        # 고정밀 / RT정합 / 고속: 다크 테마에서 ON·OFF 토글 버튼 사용
         parity_row = ttk.Frame(bt_lf)
         parity_row.pack(pady=(8, 0), fill=tk.X)
+        try:
+            _hp_default = bool(self.app.settings.get("bt_high_precision", True))
+        except Exception:
+            _hp_default = True
         try:
             _parity_default = bool(self.app.settings.get("bt_rt_parity_intrabar", False))
         except Exception:
@@ -317,15 +321,23 @@ class BacktestTab:
             _fast_default = bool(self.app.settings.get("bt_rt_parity_fast", True))
         except Exception:
             _fast_default = True
+        self.bt_high_precision_var = tk.BooleanVar(value=_hp_default)
         self.bt_rt_parity_var = tk.BooleanVar(value=_parity_default)
         self.bt_rt_parity_fast_var = tk.BooleanVar(value=_fast_default)
+        self.btn_high_precision = self._make_on_off_toggle(
+            parity_row,
+            "고정밀(1분)",
+            self.bt_high_precision_var,
+            on_change=self._sync_bt_precision_widget_state,
+        )
+        self.btn_high_precision.pack(side=tk.LEFT)
         self.btn_rt_parity = self._make_on_off_toggle(
             parity_row,
             "RT정합(전종목1분)",
             self.bt_rt_parity_var,
             on_change=self._sync_rt_parity_fast_widget_state,
         )
-        self.btn_rt_parity.pack(side=tk.LEFT)
+        self.btn_rt_parity.pack(side=tk.LEFT, padx=(10, 0))
         self.btn_rt_parity_fast = self._make_on_off_toggle(
             parity_row,
             "고속 하이브리드",
@@ -334,16 +346,11 @@ class BacktestTab:
         self.btn_rt_parity_fast.pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(
             parity_row,
-            text="초록=ON / 회색=OFF · 고속=close-now 사전필터",
+            text="초록=ON · 고정밀 OFF=15분만(저정밀)",
             font=("Segoe UI", 8),
             foreground="#88C0D0",
         ).pack(side=tk.LEFT, padx=(8, 0))
-        self._sync_rt_parity_fast_widget_state()
-        
-        # [v31.4] Portfolio Simulation (High Precision & Synthetic Indicators Enabled by Default)
-        lbl_info = ttk.Label(bt_lf, text="✨ 1분봉 고정밀 및 가상 실시간 지표 상시 적용", 
-                             font=("Segoe UI", 8), foreground="#EBCB8B")
-        lbl_info.pack(pady=(5, 0))
+        self._sync_bt_precision_widget_state()
 
         # ---중단: 진행 상태 (Full-Width Notification Bar)---
         status_lf = ttk.LabelFrame(self.parent, text=" 🔔 실시간 진행 상태 ", padding="10")
@@ -963,10 +970,55 @@ class BacktestTab:
         setattr(btn, "_on_off_label", label)
         return btn
 
-    def _sync_rt_parity_fast_widget_state(self) -> None:
-        """RT정합 OFF면 고속 토글을 비활성화하고 흐리게 표시."""
+    def _dim_on_off_toggle(self, btn: Optional[tk.Widget], fallback_label: str) -> None:
+        """ON/OFF 토글을 비활성·흐리게 표시."""
+        if btn is None:
+            return
         try:
-            on = bool(self.bt_rt_parity_var.get())
+            label = str(getattr(btn, "_on_off_label", fallback_label))
+            btn.config(
+                state=tk.DISABLED,
+                text=f"{label}  · —",
+                bg="#3B4252",
+                fg="#6B7280",
+                disabledforeground="#6B7280",
+            )
+        except Exception:
+            pass
+
+    def _sync_bt_precision_widget_state(self) -> None:
+        """고정밀 OFF면 RT정합·고속 토글 비활성(15분 전용 저정밀)."""
+        try:
+            hp_on = bool(self.bt_high_precision_var.get())
+        except Exception:
+            hp_on = True
+        btn_parity = getattr(self, "btn_rt_parity", None)
+        if not hp_on:
+            try:
+                self.bt_rt_parity_var.set(False)
+            except Exception:
+                pass
+            self._dim_on_off_toggle(btn_parity, "RT정합(전종목1분)")
+            self._sync_rt_parity_fast_widget_state()
+            return
+        if btn_parity is not None:
+            try:
+                btn_parity.config(state=tk.NORMAL)
+                paint = getattr(btn_parity, "_paint_on_off", None)
+                if callable(paint):
+                    paint()
+            except Exception:
+                pass
+        self._sync_rt_parity_fast_widget_state()
+
+    def _sync_rt_parity_fast_widget_state(self) -> None:
+        """RT정합 OFF(또는 고정밀 OFF)면 고속 토글을 비활성화하고 흐리게 표시."""
+        try:
+            hp_on = bool(self.bt_high_precision_var.get())
+        except Exception:
+            hp_on = True
+        try:
+            on = bool(self.bt_rt_parity_var.get()) and hp_on
         except Exception:
             on = False
         btn = getattr(self, "btn_rt_parity_fast", None)
@@ -979,14 +1031,7 @@ class BacktestTab:
                 if callable(paint):
                     paint()
             else:
-                label = str(getattr(btn, "_on_off_label", "고속 하이브리드"))
-                btn.config(
-                    state=tk.DISABLED,
-                    text=f"{label}  · —",
-                    bg="#3B4252",
-                    fg="#6B7280",
-                    disabledforeground="#6B7280",
-                )
+                self._dim_on_off_toggle(btn, "고속 하이브리드")
         except Exception:
             pass
 
@@ -1004,10 +1049,19 @@ class BacktestTab:
             self.app.settings['bt_start_date'] = start
             self.app.settings['bt_end_date'] = end
             try:
+                self.app.settings['bt_high_precision'] = bool(
+                    self.bt_high_precision_var.get()
+                )
+            except Exception:
+                self.app.settings['bt_high_precision'] = True
+            try:
                 self.app.settings['bt_rt_parity_intrabar'] = bool(
                     self.bt_rt_parity_var.get()
                 )
             except Exception:
+                self.app.settings['bt_rt_parity_intrabar'] = False
+            # 저정밀(15분)에서는 RT정합 무의미 → 강제 OFF
+            if not self.app.settings.get('bt_high_precision', True):
                 self.app.settings['bt_rt_parity_intrabar'] = False
             try:
                 self.app.settings['bt_rt_parity_fast'] = bool(
@@ -1018,7 +1072,9 @@ class BacktestTab:
             self.app._final_save_settings()
             
             self.btn_start_dynamic.config(state=tk.DISABLED)
-            if self.app.settings.get("bt_rt_parity_intrabar"):
+            if not self.app.settings.get("bt_high_precision", True):
+                mode_lbl = "저정밀(15분)"
+            elif self.app.settings.get("bt_rt_parity_intrabar"):
                 mode_lbl = (
                     "RT정합고속"
                     if self.app.settings.get("bt_rt_parity_fast", True)
@@ -1040,12 +1096,20 @@ class BacktestTab:
                 self.gui_queue.put(lambda text=msg: self.lbl_bt_status.config(text=text))
             active = self.app.settings.copy()
             if override_params: active.update(override_params)
+            try:
+                use_hp = bool(active.get("bt_high_precision", True))
+            except Exception:
+                use_hp = True
             tester = db.DynamicBacktester(active)
-            trades = tester.run(start, end, interval='15m', callback=update, high_precision=True)
+            trades = tester.run(start, end, interval='15m', callback=update, high_precision=use_hp)
             try:
                 elapsed = float(getattr(tester, "last_run_elapsed_sec", 0.0) or 0.0)
             except Exception:
                 elapsed = 0.0
+            try:
+                hp_on = bool(getattr(tester, "high_precision", use_hp))
+            except Exception:
+                hp_on = use_hp
             try:
                 rt_parity = bool(getattr(tester, "rt_parity_intrabar", False))
             except Exception:
@@ -1054,7 +1118,9 @@ class BacktestTab:
                 rt_fast = bool(getattr(tester, "rt_parity_fast", False))
             except Exception:
                 rt_fast = bool(active.get("bt_rt_parity_fast", True)) and rt_parity
-            if rt_parity:
+            if not hp_on:
+                mode_lbl = "저정밀"
+            elif rt_parity:
                 mode_lbl = "RT정합고속" if rt_fast else "RT정합"
             else:
                 mode_lbl = "고정밀"

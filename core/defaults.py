@@ -33,6 +33,8 @@ DEFAULT_SETTINGS = {
     "high_precision_causal_lookback_bars": 400,
     # 고정밀 인과 S1: 전역 15분 봉 인덱스 i 가 이 값 이상일 때만 Ready(벡터 루프와 동일하게 기본 19).
     "hp_causal_ready_min_bar_index": 19,
+    # 동적 백테: True=1분봉 고정밀(보유·Signal 종목 intrabar). False=15분봉만(저정밀·빠름).
+    "bt_high_precision": True,
     # 동적 백테 고정밀: True면 감시 전 종목을 매 15분 슬롯마다 evaluate_bt_hp_intrabar_unified(RT 미러와 동일).
     # False(기본)=보유·15분 Signal 종목만 1분 루프(기존 빠른 고정밀).
     "bt_rt_parity_intrabar": False,
@@ -40,7 +42,7 @@ DEFAULT_SETTINGS = {
     "bt_rt_parity_fast": True,
     "bt_rt_parity_fast_rsi_delta": 0.35,
     "bt_rt_parity_fast_osc_delta": 0.08,
-    "bt_rt_parity_fast_osc_abs_max": 8.0,
+    "bt_rt_parity_fast_osc_abs_max": 0.0,
     "s1_buy_signal_cooldown_sec": 1800.0,
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,

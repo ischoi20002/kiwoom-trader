@@ -13,6 +13,23 @@
 
 ---
 
+## 0.9.5 (2026-07-24)
+
+성과 검증 백테에 저정밀(15분) 모드 UI 복구.
+
+- **`bt_high_precision`**(기본 true): OFF면 1분 intrabar 없이 15분봉만 매매·청산(기존 엔진 `high_precision=False` 경로).
+- **`ui/tabs/backtest_tab.py`**: 「고정밀(1분)」 ON/OFF 토글. OFF 시 RT정합·고속 토글 비활성. 「상시 적용」 안내 문구 제거.
+- 상태 표시: `저정밀` / `고정밀` / `RT정합(고속)`.
+
+## 0.9.4 (2026-07-24)
+
+RT정합 매수 0건 버그 — close-now Ready 오판 및 OSC 고속필터 과차단.
+
+- **원인1**: `evaluate_close_now_s1_at_m1_idx`가 `get_buy_signals_detailed` 결과에서 Ready를 읽었으나 해당 API는 Ready 열을 반환하지 않음 → Ready 항상 False → `can_execute` 전면 실패(완성봉 Signal=True여도 매수 0).
+- **원인2**: 고속 하이브리드 `bt_rt_parity_fast_osc_abs_max=8`이 가격 스케일 OSC(수백~수천)를 거의 전부 스킵.
+- **수정**: Ready는 `_apply_ready_column_to_df`가 붙인 `work["Ready"]`를 사용. OSC 절대값 게이트 기본 비활성(0). RSI 밴드 사전필터만 유지.
+- **참고**: 기존 고정밀 `1M_SIG+0m`은 완성 15분 Signal을 슬롯 첫 분에 정적 복사하는 구조라 RT close-now와 건수가 다를 수 있음(미래참조성).
+
 ## 0.9.3 (2026-07-24)
 
 RT정합 백테 고속 하이브리드 — close-now 병목 완화(실시간 미러 무영향).

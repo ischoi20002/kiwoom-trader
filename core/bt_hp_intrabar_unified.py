@@ -217,11 +217,13 @@ def close_now_fast_prefilter_ok(settings: Dict[str, Any], ind_d: Any) -> bool:
     lo, hi = rmin - 12.0, rmax + 12.0
     if np.isfinite(rsi) and (rsi < lo or rsi > hi):
         return False
+    # OSC 절대값 게이트는 가격 스케일 OSC(수백~수천)에서 거의 항상 실패하므로
+    # bt_rt_parity_fast_osc_abs_max <= 0 이면 비활성(기본 0).
     try:
-        osc_abs_max = float(settings.get("bt_rt_parity_fast_osc_abs_max", 8.0))
+        osc_abs_max = float(settings.get("bt_rt_parity_fast_osc_abs_max", 0.0))
     except (TypeError, ValueError):
-        osc_abs_max = 8.0
-    if np.isfinite(osc) and abs(osc) > max(1.0, osc_abs_max):
+        osc_abs_max = 0.0
+    if osc_abs_max > 0 and np.isfinite(osc) and abs(osc) > osc_abs_max:
         return False
     return True
 

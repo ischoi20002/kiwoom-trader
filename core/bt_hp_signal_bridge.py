@@ -321,9 +321,21 @@ def evaluate_close_now_s1_at_m1_idx(
         )
         try:
             signal_on = bool(last_sig.get("Signal", False))
-            ready_on = bool(last_sig.get("Ready", False))
         except (TypeError, AttributeError):
-            signal_on, ready_on = False, False
+            signal_on = False
+        # get_buy_signals_detailed 는 Ready 열을 반환하지 않음 → work 의 Ready 를 권위로 사용
+        # (미적용 시 Ready 가 항상 False → RT정합/close-now 매수 0건)
+        try:
+            if work is not None and "Ready" in work.columns and len(work) > 0:
+                ready_on = bool(work["Ready"].iloc[-1])
+            else:
+                ready_on = bool(last_sig.get("Ready", False))
+        except (TypeError, AttributeError, IndexError, KeyError):
+            ready_on = False
+        try:
+            last_sig["Ready"] = bool(ready_on)
+        except Exception:
+            pass
 
         sig_type = str(
             TradingStrategy.effective_s1_sig_type_for_buy(
@@ -343,8 +355,10 @@ def evaluate_close_now_s1_at_m1_idx(
         out["sig_type"] = sig_type
         out["indicator_row"] = last_sig
         out["can_execute"] = bool(signal_on and ready_on and track_ok)
-        if not signal_on or not ready_on:
+        if not signal_on:
             out["reason"] = "signal_off"
+        elif not ready_on:
+            out["reason"] = "ready_off"
         elif not track_ok:
             out["reason"] = "track_mismatch"
         else:
