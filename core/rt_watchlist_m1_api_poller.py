@@ -2,10 +2,11 @@
 """
 감시 종목(_active_stream_codes)에 대해 매 분 ka10080(1분)으로 **방금 닫힌 1분봉** 한 줄을 조회합니다.
 
+- **정규장 연속매매 1분 격자(평일 09:00~15:19)만** 폴링한다. 장전·장후·동시호가 분은 REST 자체를 생략.
 - 분 경계 직후 ``realtime_watchlist_m1_api_spread_sec`` 안에 종목별 지연을 분산(초당 과다 호출 완화).
 - 동일 (종목, 닫힌 분 오픈라벨) 은 캐시 히트 시 REST 생략.
 - 매 분 **대표 종목 1건 프로브**로 차트가 목표 분까지 도달했는지 확인 후 전체 라운드를 스케줄.
-- 차트 ``max(cntr_tm)`` 이 목표 분 종료 시각 미만이면 ``minute_not_ready``(장전·개장 직후)로 조용히 생략.
+- 차트 ``max(cntr_tm)`` 이 목표 분 종료 시각 미만이면 ``minute_not_ready``(개장 직후 지연)로 조용히 생략.
 - 실패 시 지수 백오프 후 최대 ``realtime_watchlist_m1_api_max_retries`` 회 재시도.
 - 성공 시 ``RtTickM1Store.apply_official_closed_minute`` 로 **BT-HP·1분 창 계산**에 API OHLCV 를 반영합니다.
 
@@ -26,6 +27,7 @@ from core.bt_hp_signal_bridge import ka10080_raw_rows_to_1m_df
 from core.ka10080_spread import effective_m1_poll_spread_sec
 from utils.krx_bars import (
     chart_covers_m1_closed_minute,
+    is_krx_m1_closed_open_label,
     m1_bar_open_label_for_just_completed_minute,
 )
 from utils.normalization import canonical_stock_code
@@ -206,6 +208,18 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             return str(codes[0]) if codes else ""
 
+    @staticmethod
+    def _is_pollable_m1_label(closed_lab: pd.Timestamp) -> bool:
+        """
+        KRX 연속매매 1분봉이 실제로 존재하는 라벨만 True.
+
+        장전·장후·주말·15:20 이후 동시호가 분은 False → ka10080 조회 생략.
+        """
+        try:
+            return bool(is_krx_m1_closed_open_label(closed_lab))
+        except Exception:
+            return False
+
     def _wake_loop(self) -> None:
         """새로 닫힌 1분 라벨이 바뀌었을 때만 라운드 스케줄."""
         while not self._stop.wait(0.25):
@@ -216,6 +230,10 @@ class RtWatchlistM1ApiPoller:
                 closed_lab = m1_bar_open_label_for_just_completed_minute(wall)
                 sk = closed_lab.strftime("%Y-%m-%d %H:%M:%S")
                 if sk == self._last_scheduled_round:
+                    continue
+                # 장전 empty_response·장후 row_not_found 방지: 존재하지 않는 분은 REST 자체를 안 함
+                if not self._is_pollable_m1_label(closed_lab):
+                    self._last_scheduled_round = sk
                     continue
                 codes = self._active_codes()
                 if not codes:
@@ -438,6 +456,8 @@ class RtWatchlistM1ApiPoller:
         try:
             if not self._monitoring():
                 return
+            if not self._is_pollable_m1_label(closed_lab):
+                return
             if self._is_round_dormant(sk):
                 return
             probe = self._pick_probe_code(codes)
@@ -530,6 +550,8 @@ class RtWatchlistM1ApiPoller:
         """Timer 스레드: 한 종목·한 닫힌 분."""
         try:
             if not self._monitoring():
+                return
+            if not self._is_pollable_m1_label(closed_lab):
                 return
             if self._is_round_dormant(sk):
                 return
