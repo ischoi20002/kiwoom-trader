@@ -13,6 +13,14 @@
 
 ---
 
+## 0.9.6 (2026-07-24)
+
+고정밀(RT정합 OFF) S1: 15분 Signal은 속도 게이트만, 매수는 close-now.
+
+- **의도 복구**: 완성 15분 `Signal=False`면 1분 루프 생략(속도). `Signal=True`여도 완성봉 Signal을 분에 정적 복사하지 않고 `evaluate_bt_hp_intrabar_unified`(close-now)로 재판정.
+- **구현**: 고정밀·RT정합 모두 `_process_intra_bar_rt_parity` 사용. 차이는 대상 집합만(보유·Signal 후보 vs 전 감시). 고속 하이브리드는 RT정합 ON일 때만.
+- **효과**: 구형 `1M_SIG+0m` 조기매수(미래참조) 제거. 예: 현대차 2024-06-18 09:30봉 Track B는 close-now TYPE_B 시점(`+9m`)에 체결.
+
 ## 0.9.5 (2026-07-24)
 
 성과 검증 백테에 저정밀(15분) 모드 UI 복구.

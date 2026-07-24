@@ -346,7 +346,7 @@ class BacktestTab:
         self.btn_rt_parity_fast.pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(
             parity_row,
-            text="초록=ON · 고정밀 OFF=15분만(저정밀)",
+            text="고정밀OFF=15분 · RT정합OFF=Signal후보만 close-now",
             font=("Segoe UI", 8),
             foreground="#88C0D0",
         ).pack(side=tk.LEFT, padx=(8, 0))

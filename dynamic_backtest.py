@@ -503,7 +503,10 @@ class DynamicBacktester:
                 # [v23.0] 고정밀 모드 처리 (지연 로딩 및 타켓팅 최적화)
                 m1_processed = set()
                 if self.high_precision:
-                    # 기존: 보유·Signal 종목만. RT정합: 감시 목록 전부(실시간 미러와 동일 입구)
+                    # 대상 선정만 분기. 인트라바 판정은 항상 close-now(unified).
+                    # - 고정밀(RT정합 OFF): 보유·완성 15분 Signal 종목만 1분 루프
+                    #   → Signal=False면 스킵(속도). Signal=True여도 매수는 close-now 재판정.
+                    # - RT정합 ON: 감시 목록 전부(실시간 미러와 동일 입구)
                     if self.rt_parity_intrabar:
                         m1_targets = list(monitoring_list)
                     else:
@@ -518,15 +521,10 @@ class DynamicBacktester:
                             )
                         ]
 
-                    _intra_fn = (
-                        self._process_intra_bar_rt_parity
-                        if self.rt_parity_intrabar
-                        else self._process_intra_bar_dynamic
-                    )
                     for code in m1_targets:
                         m1_chunk = self._get_m1_chunk_on_demand(code, current_day, curr_time)
                         if m1_chunk is not None and not m1_chunk.empty:
-                            _intra_fn(
+                            self._process_intra_bar_rt_parity(
                                 code, m1_chunk, day_data.get(code), today_sells, curr_time
                             )
                             m1_processed.add(code)
@@ -1102,9 +1100,11 @@ class DynamicBacktester:
         curr_15m_time: Any,
     ) -> None:
         """
-        실시간 미러와 동일: ``evaluate_bt_hp_intrabar_unified`` 로 EXIT/S2/S1 판정 후 체결 반영.
+        고정밀·RT정합 공통 인트라바: ``evaluate_bt_hp_intrabar_unified``(close-now)로
+        EXIT/S2/S1 판정 후 체결 반영.
 
-        기존 ``_process_intra_bar_dynamic``(15분 Signal 정적 복사)과 달리 close-now 인트라바를 사용한다.
+        호출 측에서 종목 집합만 좁힌다(완성 15분 Signal 게이트 vs 전 감시).
+        완성봉 Signal을 1분에 정적 복사해 ``+0m`` 조기매수하던 구형 경로는 사용하지 않는다.
         """
         try:
             if code in today_sells:
@@ -1129,6 +1129,10 @@ class DynamicBacktester:
             if ct not in ("A", "B", "AB"):
                 ct = "AB"
 
+            # 고속 하이브리드는 RT정합 ON일 때만 (고정밀 게이트 경로에서는 완전 close-now)
+            use_fast = bool(getattr(self, "rt_parity_intrabar", False)) and bool(
+                getattr(self, "rt_parity_fast", False)
+            )
             out = evaluate_bt_hp_intrabar_unified(
                 self.settings,
                 str(code).strip(),
@@ -1136,9 +1140,7 @@ class DynamicBacktester:
                 m1_chunk,
                 pos,
                 ct,
-                close_now_fast_skip=bool(
-                    getattr(self, "rt_parity_fast", False)
-                ),
+                close_now_fast_skip=use_fast,
             )
             if not isinstance(out, dict):
                 return
@@ -1236,7 +1238,20 @@ class DynamicBacktester:
                 pass
 
     def _process_intra_bar_dynamic(self, code, m1_chunk, day_df_15m, today_sells, curr_15m_time):
-        """[v36.2] 통합된 1분봉 정밀 시뮬레이션 (매도/매수 순차 처리 및 지표 동기화)"""
+        """
+        [호환] 고정밀 메인·검증 스크립트용 진입점.
+
+        완성 15분 Signal 정적 복사 구형 루프는 쓰지 않고,
+        close-now ``_process_intra_bar_rt_parity`` 로 위임한다.
+        """
+        return self._process_intra_bar_rt_parity(
+            code, m1_chunk, day_df_15m, today_sells, curr_15m_time
+        )
+
+    def _process_intra_bar_dynamic_legacy(
+        self, code, m1_chunk, day_df_15m, today_sells, curr_15m_time
+    ):
+        """[v36.2][legacy] Signal 정적 복사 1분 루프(비상·비교용, 메인 미사용)."""
         # [v37.8] 전달받은 curr_15m_time을 사용하여 15분봉 데이터 매칭 (m1_dt_first 대신 사용)
         curr_15m = day_df_15m.loc[curr_15m_time] if day_df_15m is not None and curr_15m_time in day_df_15m.index else None
         

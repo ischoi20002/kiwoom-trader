@@ -35,8 +35,8 @@ DEFAULT_SETTINGS = {
     "hp_causal_ready_min_bar_index": 19,
     # 동적 백테: True=1분봉 고정밀(보유·Signal 종목 intrabar). False=15분봉만(저정밀·빠름).
     "bt_high_precision": True,
-    # 동적 백테 고정밀: True면 감시 전 종목을 매 15분 슬롯마다 evaluate_bt_hp_intrabar_unified(RT 미러와 동일).
-    # False(기본)=보유·15분 Signal 종목만 1분 루프(기존 빠른 고정밀).
+    # 동적 백테 고정밀: True면 감시 전 종목을 매 15분 슬롯마다 evaluate_bt_hp_intrabar_unified.
+    # False(기본)=보유·완성 15분 Signal 종목만 동일 close-now 루프(Signal은 속도 게이트).
     "bt_rt_parity_intrabar": False,
     # RT정합 ON일 때 close-now 사전필터·스로틀(백테 전용). 실시간 미러에는 영향 없음.
     "bt_rt_parity_fast": True,
