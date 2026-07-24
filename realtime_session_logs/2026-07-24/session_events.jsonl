@@ -5546,3 +5546,635 @@
 {"ts": "2026-07-24 13:06:39", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
 {"ts": "2026-07-24 13:06:41", "kind": "s1_watch_eval_diag", "data": {"code": "457190", "name": "이수스페셜티케미컬", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 58400.0}}
 {"ts": "2026-07-24 13:06:44", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:06:46", "kind": "s1_watch_eval_diag", "data": {"code": "267260", "name": "HD현대일렉트릭", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 831500.0}}
+{"ts": "2026-07-24 13:06:49", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 12, "remain": 8}}
+{"ts": "2026-07-24 13:06:49", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:06:50", "kind": "s1_watch_eval_diag", "data": {"code": "443060", "name": "HD현대마린솔루션", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 213500.0}}
+{"ts": "2026-07-24 13:06:54", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:06:59", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:07:01", "kind": "s1_watch_eval_diag", "data": {"code": "052690", "name": "한전기술", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 96700.0}}
+{"ts": "2026-07-24 13:07:04", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:07:07", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:07:09", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:07:14", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:07:20", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:07:24", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:07:28", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 11, "remain": 4}}
+{"ts": "2026-07-24 13:07:30", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:07:34", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:07:40", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:07:44", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:07:50", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:07:54", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:07:56", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 14, "remain": 4}}
+{"ts": "2026-07-24 13:08:00", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:08:04", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:08:10", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:08:14", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:08:20", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:08:24", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:08:27", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 7, "remain": 6}}
+{"ts": "2026-07-24 13:08:31", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:08:35", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:08:41", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:08:45", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:08:48", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 5, "remain": 10}}
+{"ts": "2026-07-24 13:08:51", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:08:55", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:09:01", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:09:04", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 11, "remain": 5}}
+{"ts": "2026-07-24 13:09:05", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:09:11", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:09:15", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:09:21", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:09:25", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:09:27", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 15, "remain": 1}}
+{"ts": "2026-07-24 13:09:31", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:09:35", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:09:41", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:09:42", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 15, "remain": 1}}
+{"ts": "2026-07-24 13:09:45", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:09:51", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:09:55", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:09:58", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 4, "remain": 11}}
+{"ts": "2026-07-24 13:10:02", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:10:05", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:10:12", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:10:15", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:10:16", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 12, "remain": 2}}
+{"ts": "2026-07-24 13:10:17", "kind": "s1_watch_eval_diag", "data": {"code": "003670", "name": "포스코퓨처엠", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 144300.0}}
+{"ts": "2026-07-24 13:10:22", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:10:26", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:10:30", "kind": "s1_watch_eval_diag", "data": {"code": "078930", "name": "GS", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "추세B 3/6", "now_price": 94700.0}}
+{"ts": "2026-07-24 13:10:32", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 13, "remain": 3}}
+{"ts": "2026-07-24 13:10:32", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:10:36", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:10:37", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 409000.0}}
+{"ts": "2026-07-24 13:10:41", "kind": "s1_watch_eval_diag", "data": {"code": "034220", "name": "LG디스플레이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 10030.0}}
+{"ts": "2026-07-24 13:10:42", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:10:46", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:10:46", "kind": "s1_watch_eval_diag", "data": {"code": "010130", "name": "고려아연", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 1032000.0}}
+{"ts": "2026-07-24 13:10:52", "kind": "s1_watch_eval_diag", "data": {"code": "006400", "name": "삼성SDI", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 444250.0}}
+{"ts": "2026-07-24 13:10:52", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:10:53", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 6, "remain": 6}}
+{"ts": "2026-07-24 13:10:55", "kind": "s1_watch_eval_diag", "data": {"code": "377300", "name": "카카오페이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 42350.0}}
+{"ts": "2026-07-24 13:10:56", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:10:59", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 72900.0}}
+{"ts": "2026-07-24 13:11:02", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:11:05", "kind": "s1_watch_eval_diag", "data": {"code": "066570", "name": "LG전자", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 179400.0}}
+{"ts": "2026-07-24 13:11:06", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:11:08", "kind": "s1_watch_eval_diag", "data": {"code": "064400", "name": "LG씨엔에스", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 66100.0}}
+{"ts": "2026-07-24 13:11:12", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:11:16", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:11:16", "kind": "s1_watch_eval_diag", "data": {"code": "161390", "name": "한국타이어앤테크놀로지", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "추세B 4/6", "now_price": 70800.0}}
+{"ts": "2026-07-24 13:11:17", "kind": "ka10080_fetch_stats", "data": {"ok_total": 5616, "fail_total": 1, "fail_by_reason": {"empty_response": 1}, "fail_by_context": {"m1_poll": 1}, "fail_by_code_top": {"003230": 1}}}
+{"ts": "2026-07-24 13:11:20", "kind": "s1_watch_eval_diag", "data": {"code": "204320", "name": "HL만도", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 44600.0}}
+{"ts": "2026-07-24 13:11:22", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:11:26", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:11:26", "kind": "s1_watch_eval_diag", "data": {"code": "483650", "name": "달바글로벌", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.0, "confluence": "추세B 0/6", "now_price": 245000.0}}
+{"ts": "2026-07-24 13:11:29", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 4, "remain": 8}}
+{"ts": "2026-07-24 13:11:31", "kind": "s1_watch_eval_diag", "data": {"code": "022100", "name": "포스코DX", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 19400.0}}
+{"ts": "2026-07-24 13:11:33", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:11:35", "kind": "s1_watch_eval_diag", "data": {"code": "450080", "name": "에코프로머티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 35450.0}}
+{"ts": "2026-07-24 13:11:36", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:11:40", "kind": "s1_watch_eval_diag", "data": {"code": "003230", "name": "삼양식품", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.7142857142857143, "confluence": "눌림A 5/7", "now_price": 1132000.0}}
+{"ts": "2026-07-24 13:11:43", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:11:44", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 4, "remain": 10}}
+{"ts": "2026-07-24 13:11:45", "kind": "s1_watch_eval_diag", "data": {"code": "051910", "name": "LG화학", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 262500.0}}
+{"ts": "2026-07-24 13:11:46", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:11:53", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:11:56", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:11:59", "kind": "s1_watch_eval_diag", "data": {"code": "097950", "name": "CJ제일제당", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 193300.0}}
+{"ts": "2026-07-24 13:12:00", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 11, "remain": 8}}
+{"ts": "2026-07-24 13:12:03", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:12:06", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:12:07", "kind": "s1_watch_eval_diag", "data": {"code": "267260", "name": "HD현대일렉트릭", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 838000.0}}
+{"ts": "2026-07-24 13:12:13", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:12:17", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:12:18", "kind": "s1_watch_eval_diag", "data": {"code": "457190", "name": "이수스페셜티케미컬", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 58300.0}}
+{"ts": "2026-07-24 13:12:21", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 13, "remain": 4}}
+{"ts": "2026-07-24 13:12:23", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:12:27", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:12:27", "kind": "s1_watch_eval_diag", "data": {"code": "052690", "name": "한전기술", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 96800.0}}
+{"ts": "2026-07-24 13:12:33", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:12:34", "kind": "s1_watch_eval_diag", "data": {"code": "120110", "name": "코오롱인더", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 55000.0}}
+{"ts": "2026-07-24 13:12:37", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:12:39", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 9, "remain": 3}}
+{"ts": "2026-07-24 13:12:43", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:12:47", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:12:54", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:12:57", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:13:04", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:13:05", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 4, "remain": 13}}
+{"ts": "2026-07-24 13:13:07", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:13:14", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:13:17", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:13:22", "kind": "s1_watch_eval_diag", "data": {"code": "443060", "name": "HD현대마린솔루션", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 214000.0}}
+{"ts": "2026-07-24 13:13:23", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 9, "remain": 7}}
+{"ts": "2026-07-24 13:13:24", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:13:27", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:13:34", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:13:37", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:13:38", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 12, "remain": 5}}
+{"ts": "2026-07-24 13:13:44", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:13:47", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:13:54", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 9, "remain": 3}}
+{"ts": "2026-07-24 13:13:54", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:13:57", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:14:04", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:14:08", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:14:09", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 6, "remain": 10}}
+{"ts": "2026-07-24 13:14:14", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:14:18", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:14:25", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:14:28", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:14:33", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 7, "remain": 9}}
+{"ts": "2026-07-24 13:14:35", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:14:38", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:14:45", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:14:48", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:14:48", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 7, "remain": 9}}
+{"ts": "2026-07-24 13:14:55", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:14:58", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:15:06", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:15:08", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:15:16", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:15:18", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:15:25", "kind": "s1_watch_eval_diag", "data": {"code": "003670", "name": "포스코퓨처엠", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 144500.0}}
+{"ts": "2026-07-24 13:15:26", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:15:28", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:15:35", "kind": "s1_watch_eval_diag", "data": {"code": "078930", "name": "GS", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "추세B 3/6", "now_price": 94800.0}}
+{"ts": "2026-07-24 13:15:36", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:15:38", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:15:40", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 13, "remain": 5}}
+{"ts": "2026-07-24 13:15:46", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:15:47", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 409000.0}}
+{"ts": "2026-07-24 13:15:48", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:15:56", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:15:57", "kind": "s1_watch_eval_diag", "data": {"code": "006400", "name": "삼성SDI", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.0, "confluence": "눌림A 0/7", "now_price": 444000.0}}
+{"ts": "2026-07-24 13:15:59", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:16:01", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 73000.0}}
+{"ts": "2026-07-24 13:16:04", "kind": "s1_watch_eval_diag", "data": {"code": "377300", "name": "카카오페이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.0, "confluence": "눌림A 0/7", "now_price": 42300.0}}
+{"ts": "2026-07-24 13:16:06", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:16:08", "kind": "s1_watch_eval_diag", "data": {"code": "066570", "name": "LG전자", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 175400.0}}
+{"ts": "2026-07-24 13:16:08", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 12, "remain": 3}}
+{"ts": "2026-07-24 13:16:09", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:16:12", "kind": "s1_watch_eval_diag", "data": {"code": "064400", "name": "LG씨엔에스", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.0, "confluence": "눌림A 0/7", "now_price": 66100.0}}
+{"ts": "2026-07-24 13:16:17", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:16:19", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:16:19", "kind": "s1_watch_eval_diag", "data": {"code": "010130", "name": "고려아연", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 1037000.0}}
+{"ts": "2026-07-24 13:16:24", "kind": "s1_watch_eval_diag", "data": {"code": "204320", "name": "HL만도", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 44650.0}}
+{"ts": "2026-07-24 13:16:27", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:16:29", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:16:30", "kind": "s1_watch_eval_diag", "data": {"code": "161390", "name": "한국타이어앤테크놀로지", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "추세B 2/6", "now_price": 71100.0}}
+{"ts": "2026-07-24 13:16:34", "kind": "s1_watch_eval_diag", "data": {"code": "034220", "name": "LG디스플레이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 10030.0}}
+{"ts": "2026-07-24 13:16:37", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:16:39", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:16:42", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 9, "remain": 8}}
+{"ts": "2026-07-24 13:16:42", "kind": "s1_watch_eval_diag", "data": {"code": "022100", "name": "포스코DX", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 19420.0}}
+{"ts": "2026-07-24 13:16:47", "kind": "s1_watch_eval_diag", "data": {"code": "483650", "name": "달바글로벌", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "추세B 1/6", "now_price": 248000.0}}
+{"ts": "2026-07-24 13:16:47", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:16:49", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:16:53", "kind": "s1_watch_eval_diag", "data": {"code": "450080", "name": "에코프로머티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 35300.0}}
+{"ts": "2026-07-24 13:16:57", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:16:59", "kind": "s1_watch_eval_diag", "data": {"code": "003230", "name": "삼양식품", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.7142857142857143, "confluence": "눌림A 5/7", "now_price": 1131000.0}}
+{"ts": "2026-07-24 13:16:59", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:17:00", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 11, "remain": 6}}
+{"ts": "2026-07-24 13:17:00", "kind": "ka10080_fetch_stats", "data": {"ok_total": 5673, "fail_total": 1, "fail_by_reason": {"empty_response": 1}, "fail_by_context": {"m1_poll": 1}, "fail_by_code_top": {"003230": 1}}}
+{"ts": "2026-07-24 13:17:07", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:17:08", "kind": "s1_watch_eval_diag", "data": {"code": "267260", "name": "HD현대일렉트릭", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 845000.0}}
+{"ts": "2026-07-24 13:17:09", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:17:13", "kind": "s1_watch_eval_diag", "data": {"code": "051910", "name": "LG화학", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 262500.0}}
+{"ts": "2026-07-24 13:17:15", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 9, "remain": 8}}
+{"ts": "2026-07-24 13:17:17", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:17:19", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:17:27", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:17:29", "kind": "s1_watch_eval_diag", "data": {"code": "052690", "name": "한전기술", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 97600.0}}
+{"ts": "2026-07-24 13:17:29", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:17:33", "kind": "s1_watch_eval_diag", "data": {"code": "457190", "name": "이수스페셜티케미컬", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 58400.0}}
+{"ts": "2026-07-24 13:17:33", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 5, "remain": 13}}
+{"ts": "2026-07-24 13:17:38", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:17:39", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:17:42", "kind": "s1_watch_eval_diag", "data": {"code": "097950", "name": "CJ제일제당", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 193000.0}}
+{"ts": "2026-07-24 13:17:48", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:17:49", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 14, "remain": 4}}
+{"ts": "2026-07-24 13:17:50", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:17:51", "kind": "s1_watch_eval_diag", "data": {"code": "120110", "name": "코오롱인더", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 54900.0}}
+{"ts": "2026-07-24 13:17:58", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:18:00", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:18:08", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:18:10", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:18:18", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:18:20", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:18:25", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 12, "remain": 5}}
+{"ts": "2026-07-24 13:18:28", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:18:30", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:18:38", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:18:40", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:18:45", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 5, "remain": 8}}
+{"ts": "2026-07-24 13:18:48", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:18:50", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:18:58", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:19:00", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:19:08", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:19:09", "kind": "s1_watch_eval_diag", "data": {"code": "443060", "name": "HD현대마린솔루션", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 213500.0}}
+{"ts": "2026-07-24 13:19:10", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:19:18", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:19:20", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:19:29", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:19:30", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:19:37", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 11}}
+{"ts": "2026-07-24 13:19:39", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:19:40", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:19:49", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:19:50", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:19:57", "kind": "s1_watch_eval_diag", "data": {"code": "010130", "name": "고려아연", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 1036000.0}}
+{"ts": "2026-07-24 13:19:59", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:20:00", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:20:06", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 9, "remain": 5}}
+{"ts": "2026-07-24 13:20:06", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 405000.0}}
+{"ts": "2026-07-24 13:20:09", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:20:10", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 72400.0}}
+{"ts": "2026-07-24 13:20:10", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:20:14", "kind": "s1_watch_eval_diag", "data": {"code": "034220", "name": "LG디스플레이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 10030.0}}
+{"ts": "2026-07-24 13:20:16", "kind": "s1_watch_eval_diag", "data": {"code": "483650", "name": "달바글로벌", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.0, "confluence": "추세B 0/6", "now_price": 245500.0}}
+{"ts": "2026-07-24 13:20:19", "kind": "s1_watch_eval_diag", "data": {"code": "066570", "name": "LG전자", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 175300.0}}
+{"ts": "2026-07-24 13:20:19", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:20:20", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:20:23", "kind": "s1_watch_eval_diag", "data": {"code": "097950", "name": "CJ제일제당", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 193200.0}}
+{"ts": "2026-07-24 13:20:27", "kind": "s1_watch_eval_diag", "data": {"code": "120110", "name": "코오롱인더", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 54900.0}}
+{"ts": "2026-07-24 13:20:30", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:20:30", "kind": "s1_watch_eval_diag", "data": {"code": "052690", "name": "한전기술", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 97000.0}}
+{"ts": "2026-07-24 13:20:31", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:20:31", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 12, "remain": 2}}
+{"ts": "2026-07-24 13:20:35", "kind": "s1_watch_eval_diag", "data": {"code": "457190", "name": "이수스페셜티케미컬", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 58300.0}}
+{"ts": "2026-07-24 13:20:39", "kind": "s1_watch_eval_diag", "data": {"code": "078930", "name": "GS", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:15:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "추세B 3/6", "now_price": 93700.0}}
+{"ts": "2026-07-24 13:20:40", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:20:41", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:20:42", "kind": "s1_watch_eval_diag", "data": {"code": "003670", "name": "포스코퓨처엠", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 144400.0}}
+{"ts": "2026-07-24 13:20:46", "kind": "s1_watch_eval_diag", "data": {"code": "006400", "name": "삼성SDI", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.0, "confluence": "눌림A 0/7", "now_price": 447000.0}}
+{"ts": "2026-07-24 13:20:48", "kind": "s1_watch_eval_diag", "data": {"code": "051910", "name": "LG화학", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 263000.0}}
+{"ts": "2026-07-24 13:20:50", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:20:50", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 9, "remain": 5}}
+{"ts": "2026-07-24 13:20:51", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:20:51", "kind": "s1_watch_eval_diag", "data": {"code": "078930", "name": "GS", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "추세B 3/6", "now_price": 95300.0}}
+{"ts": "2026-07-24 13:20:54", "kind": "s1_watch_eval_diag", "data": {"code": "064400", "name": "LG씨엔에스", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 66100.0}}
+{"ts": "2026-07-24 13:20:58", "kind": "s1_watch_eval_diag", "data": {"code": "022100", "name": "포스코DX", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 19420.0}}
+{"ts": "2026-07-24 13:21:00", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:21:01", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:21:01", "kind": "s1_watch_eval_diag", "data": {"code": "204320", "name": "HL만도", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 44650.0}}
+{"ts": "2026-07-24 13:21:05", "kind": "s1_watch_eval_diag", "data": {"code": "003230", "name": "삼양식품", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 1130000.0}}
+{"ts": "2026-07-24 13:21:07", "kind": "s1_watch_eval_diag", "data": {"code": "161390", "name": "한국타이어앤테크놀로지", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "추세B 1/6", "now_price": 71200.0}}
+{"ts": "2026-07-24 13:21:08", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 18, "remain": 1}}
+{"ts": "2026-07-24 13:21:10", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:21:11", "kind": "s1_watch_eval_diag", "data": {"code": "450080", "name": "에코프로머티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 35450.0}}
+{"ts": "2026-07-24 13:21:11", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:21:15", "kind": "s1_watch_eval_diag", "data": {"code": "377300", "name": "카카오페이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 42300.0}}
+{"ts": "2026-07-24 13:21:20", "kind": "s1_watch_eval_diag", "data": {"code": "267260", "name": "HD현대일렉트릭", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 831000.0}}
+{"ts": "2026-07-24 13:21:20", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:21:21", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:21:30", "kind": "s1_watch_eval_diag", "data": {"code": "443060", "name": "HD현대마린솔루션", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 213500.0}}
+{"ts": "2026-07-24 13:21:30", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:21:31", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:21:31", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 13, "remain": 3}}
+{"ts": "2026-07-24 13:21:40", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:21:41", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:21:50", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:21:51", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:22:00", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:22:01", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:22:03", "kind": "ka10080_fetch_stats", "data": {"ok_total": 5711, "fail_total": 1, "fail_by_reason": {"empty_response": 1}, "fail_by_context": {"m1_poll": 1}, "fail_by_code_top": {"003230": 1}}}
+{"ts": "2026-07-24 13:22:10", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 1, "remain": 14}}
+{"ts": "2026-07-24 13:22:11", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:22:11", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:22:21", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:22:22", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:22:31", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:22:32", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:22:41", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:22:42", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:22:51", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:22:52", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:23:01", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:23:02", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:23:10", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 5, "remain": 12}}
+{"ts": "2026-07-24 13:23:11", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:23:12", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:23:21", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:23:22", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:23:25", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 12, "remain": 8}}
+{"ts": "2026-07-24 13:23:31", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:23:32", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:23:42", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:23:42", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:23:52", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:23:52", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:24:02", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:24:02", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:24:12", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:24:12", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:24:22", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:24:23", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:24:29", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 11, "remain": 3}}
+{"ts": "2026-07-24 13:24:32", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:24:33", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:24:42", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:24:43", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:24:45", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 16, "remain": 4}}
+{"ts": "2026-07-24 13:24:52", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:24:53", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:25:02", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:25:03", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:25:03", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 10, "remain": 2}}
+{"ts": "2026-07-24 13:25:09", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 405000.0}}
+{"ts": "2026-07-24 13:25:13", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:25:13", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:25:13", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 72200.0}}
+{"ts": "2026-07-24 13:25:17", "kind": "s1_watch_eval_diag", "data": {"code": "034220", "name": "LG디스플레이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 10190.0}}
+{"ts": "2026-07-24 13:26:41", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:26:41", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 15}}
+{"ts": "2026-07-24 13:26:42", "kind": "s1_watch_eval_diag", "data": {"code": "022100", "name": "포스코DX", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 19450.0}}
+{"ts": "2026-07-24 13:26:42", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:26:44", "kind": "s1_watch_eval_diag", "data": {"code": "483650", "name": "달바글로벌", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "추세B 2/6", "now_price": 238000.0}}
+{"ts": "2026-07-24 13:26:47", "kind": "s1_watch_eval_diag", "data": {"code": "064400", "name": "LG씨엔에스", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.0, "confluence": "눌림A 0/7", "now_price": 64800.0}}
+{"ts": "2026-07-24 13:26:50", "kind": "s1_watch_eval_diag", "data": {"code": "066570", "name": "LG전자", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 170400.0}}
+{"ts": "2026-07-24 13:26:51", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:26:52", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:26:52", "kind": "s1_watch_eval_diag", "data": {"code": "051910", "name": "LG화학", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 263000.0}}
+{"ts": "2026-07-24 13:26:55", "kind": "s1_watch_eval_diag", "data": {"code": "267260", "name": "HD현대일렉트릭", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 816000.0}}
+{"ts": "2026-07-24 13:26:57", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:26:57", "kind": "s1_watch_eval_diag", "data": {"code": "450080", "name": "에코프로머티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 34750.0}}
+{"ts": "2026-07-24 13:27:00", "kind": "s1_watch_eval_diag", "data": {"code": "161390", "name": "한국타이어앤테크놀로지", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "추세B 2/6", "now_price": 71800.0}}
+{"ts": "2026-07-24 13:27:02", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:27:02", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:27:03", "kind": "s1_watch_eval_diag", "data": {"code": "034220", "name": "LG디스플레이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.0, "confluence": "눌림A 0/7", "now_price": 9840.0}}
+{"ts": "2026-07-24 13:27:07", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 72300.0}}
+{"ts": "2026-07-24 13:27:10", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 398000.0}}
+{"ts": "2026-07-24 13:27:12", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:27:12", "kind": "s1_watch_eval_diag", "data": {"code": "443060", "name": "HD현대마린솔루션", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 209500.0}}
+{"ts": "2026-07-24 13:27:12", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 3}}
+{"ts": "2026-07-24 13:27:12", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:27:15", "kind": "s1_watch_eval_diag", "data": {"code": "006400", "name": "삼성SDI", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 435500.0}}
+{"ts": "2026-07-24 13:27:18", "kind": "s1_watch_eval_diag", "data": {"code": "003670", "name": "포스코퓨처엠", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 142900.0}}
+{"ts": "2026-07-24 13:27:22", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:27:23", "kind": "s1_watch_eval_diag", "data": {"code": "078930", "name": "GS", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.0, "confluence": "추세B 2/6", "now_price": 99000.0}}
+{"ts": "2026-07-24 13:27:23", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:27:28", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 2, "remain": 13}}
+{"ts": "2026-07-24 13:27:28", "kind": "s1_watch_eval_diag", "data": {"code": "003230", "name": "삼양식품", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 1163000.0}}
+{"ts": "2026-07-24 13:27:32", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:27:33", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:27:36", "kind": "s1_watch_eval_diag", "data": {"code": "052690", "name": "한전기술", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 99900.0}}
+{"ts": "2026-07-24 13:27:42", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:27:43", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:27:43", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:27:47", "kind": "s1_watch_eval_diag", "data": {"code": "097950", "name": "CJ제일제당", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.7142857142857143, "confluence": "눌림A 5/7", "now_price": 194500.0}}
+{"ts": "2026-07-24 13:27:52", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:27:53", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:27:55", "kind": "s1_watch_eval_diag", "data": {"code": "204320", "name": "HL만도", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 44900.0}}
+{"ts": "2026-07-24 13:28:00", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 7}}
+{"ts": "2026-07-24 13:28:02", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 5}}
+{"ts": "2026-07-24 13:28:03", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:28:08", "kind": "s1_watch_eval_diag", "data": {"code": "010130", "name": "고려아연", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 1077000.0}}
+{"ts": "2026-07-24 13:28:12", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:28:13", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:28:15", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:28:22", "kind": "s1_watch_eval_diag", "data": {"code": "377300", "name": "카카오페이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 42050.0}}
+{"ts": "2026-07-24 13:28:22", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:28:24", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:28:26", "kind": "s1_watch_eval_diag", "data": {"code": "457190", "name": "이수스페셜티케미컬", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 57900.0}}
+{"ts": "2026-07-24 13:28:31", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 3}}
+{"ts": "2026-07-24 13:28:32", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:28:34", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:28:43", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:28:44", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:28:47", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:28:53", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:28:54", "kind": "s1_watch_eval_diag", "data": {"code": "120110", "name": "코오롱인더", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 53800.0}}
+{"ts": "2026-07-24 13:28:54", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:29:02", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 5}}
+{"ts": "2026-07-24 13:29:03", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:29:04", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:29:13", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:29:14", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:29:18", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 5, "remain": 7}}
+{"ts": "2026-07-24 13:29:23", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:29:24", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:29:33", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:29:33", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 7}}
+{"ts": "2026-07-24 13:29:35", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:29:43", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:29:45", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:29:49", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 6}}
+{"ts": "2026-07-24 13:29:53", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:29:55", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:30:03", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:30:05", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-07-24 13:30:05", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:30:13", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:30:15", "kind": "s1_watch_eval_diag", "data": {"code": "450080", "name": "에코프로머티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 34800.0}}
+{"ts": "2026-07-24 13:30:16", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:30:20", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 12}}
+{"ts": "2026-07-24 13:30:23", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:30:26", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:30:34", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 8}}
+{"ts": "2026-07-24 13:30:34", "kind": "s1_watch_eval_diag", "data": {"code": "051910", "name": "LG화학", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 262500.0}}
+{"ts": "2026-07-24 13:30:36", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 7}}
+{"ts": "2026-07-24 13:30:36", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:30:44", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:30:46", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:30:52", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 6}}
+{"ts": "2026-07-24 13:30:54", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:30:56", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:31:04", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:31:07", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:31:07", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 5}}
+{"ts": "2026-07-24 13:31:14", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:31:17", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:31:22", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-07-24 13:31:24", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:31:27", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:31:34", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:31:37", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:31:38", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-07-24 13:31:44", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:31:47", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:31:49", "kind": "s1_watch_eval_diag", "data": {"code": "064400", "name": "LG씨엔에스", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.0, "confluence": "눌림A 0/7", "now_price": 65000.0}}
+{"ts": "2026-07-24 13:31:53", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:31:53", "kind": "s1_watch_eval_diag", "data": {"code": "066570", "name": "LG전자", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 170500.0}}
+{"ts": "2026-07-24 13:31:54", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:31:57", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:32:04", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:32:07", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 72500.0}}
+{"ts": "2026-07-24 13:32:07", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:32:09", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:32:15", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:32:15", "kind": "s1_watch_eval_diag", "data": {"code": "078930", "name": "GS", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "추세B 3/6", "now_price": 99300.0}}
+{"ts": "2026-07-24 13:32:18", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 398500.0}}
+{"ts": "2026-07-24 13:32:18", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:32:22", "kind": "s1_watch_eval_diag", "data": {"code": "161390", "name": "한국타이어앤테크놀로지", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "추세B 2/6", "now_price": 71900.0}}
+{"ts": "2026-07-24 13:32:24", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 3}}
+{"ts": "2026-07-24 13:32:25", "kind": "s1_watch_eval_diag", "data": {"code": "267260", "name": "HD현대일렉트릭", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 817000.0}}
+{"ts": "2026-07-24 13:32:25", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:32:27", "kind": "s1_watch_eval_diag", "data": {"code": "120110", "name": "코오롱인더", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 53900.0}}
+{"ts": "2026-07-24 13:32:28", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:32:30", "kind": "s1_watch_eval_diag", "data": {"code": "204320", "name": "HL만도", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 44950.0}}
+{"ts": "2026-07-24 13:32:33", "kind": "s1_watch_eval_diag", "data": {"code": "003230", "name": "삼양식품", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 1164000.0}}
+{"ts": "2026-07-24 13:32:35", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:32:37", "kind": "s1_watch_eval_diag", "data": {"code": "066570", "name": "LG전자", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 170500.0}}
+{"ts": "2026-07-24 13:32:38", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:32:40", "kind": "s1_watch_eval_diag", "data": {"code": "003670", "name": "포스코퓨처엠", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:30:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 143200.0}}
+{"ts": "2026-07-24 13:32:40", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 3}}
+{"ts": "2026-07-24 13:32:43", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 397500.0}}
+{"ts": "2026-07-24 13:32:45", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:32:46", "kind": "s1_watch_eval_diag", "data": {"code": "034220", "name": "LG디스플레이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 9840.0}}
+{"ts": "2026-07-24 13:32:48", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:32:49", "kind": "s1_watch_eval_diag", "data": {"code": "022100", "name": "포스코DX", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 19470.0}}
+{"ts": "2026-07-24 13:32:52", "kind": "s1_watch_eval_diag", "data": {"code": "064400", "name": "LG씨엔에스", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 65000.0}}
+{"ts": "2026-07-24 13:32:55", "kind": "s1_watch_eval_diag", "data": {"code": "457190", "name": "이수스페셜티케미컬", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 57900.0}}
+{"ts": "2026-07-24 13:32:55", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:32:56", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 8}}
+{"ts": "2026-07-24 13:32:57", "kind": "s1_watch_eval_diag", "data": {"code": "097950", "name": "CJ제일제당", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 194100.0}}
+{"ts": "2026-07-24 13:32:58", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:33:00", "kind": "s1_watch_eval_diag", "data": {"code": "161390", "name": "한국타이어앤테크놀로지", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "추세B 1/6", "now_price": 71800.0}}
+{"ts": "2026-07-24 13:33:04", "kind": "s1_watch_eval_diag", "data": {"code": "003670", "name": "포스코퓨처엠", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 143200.0}}
+{"ts": "2026-07-24 13:33:05", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:33:07", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 72500.0}}
+{"ts": "2026-07-24 13:33:08", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:33:11", "kind": "s1_watch_eval_diag", "data": {"code": "006400", "name": "삼성SDI", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 435500.0}}
+{"ts": "2026-07-24 13:33:11", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 8}}
+{"ts": "2026-07-24 13:33:14", "kind": "s1_watch_eval_diag", "data": {"code": "003230", "name": "삼양식품", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 1164000.0}}
+{"ts": "2026-07-24 13:33:15", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:33:18", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:33:23", "kind": "s1_watch_eval_diag", "data": {"code": "483650", "name": "달바글로벌", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "추세B 1/6", "now_price": 238500.0}}
+{"ts": "2026-07-24 13:33:25", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:33:27", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-07-24 13:33:28", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:33:30", "kind": "s1_watch_eval_diag", "data": {"code": "052690", "name": "한전기술", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 100200.0}}
+{"ts": "2026-07-24 13:33:35", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:33:36", "kind": "s1_watch_eval_diag", "data": {"code": "443060", "name": "HD현대마린솔루션", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 209500.0}}
+{"ts": "2026-07-24 13:33:38", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:33:43", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 3}}
+{"ts": "2026-07-24 13:33:44", "kind": "s1_watch_eval_diag", "data": {"code": "010130", "name": "고려아연", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 1079000.0}}
+{"ts": "2026-07-24 13:33:45", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:33:48", "kind": "s1_watch_eval_diag", "data": {"code": "377300", "name": "카카오페이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": true, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 42050.0}}
+{"ts": "2026-07-24 13:33:49", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:33:55", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:33:58", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:33:59", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:34:05", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 2}}
+{"ts": "2026-07-24 13:34:09", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:34:14", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 7}}
+{"ts": "2026-07-24 13:34:16", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:34:19", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:34:26", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:34:29", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:34:30", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:34:36", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:34:39", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:34:45", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 8}}
+{"ts": "2026-07-24 13:34:46", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:34:49", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:34:56", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:34:59", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:35:01", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:35:06", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 6}}
+{"ts": "2026-07-24 13:35:09", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:35:16", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:35:16", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:35:18", "kind": "s1_watch_eval_diag", "data": {"code": "450080", "name": "에코프로머티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 34850.0}}
+{"ts": "2026-07-24 13:35:19", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:35:26", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:35:30", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:35:32", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 7}}
+{"ts": "2026-07-24 13:35:36", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:35:38", "kind": "s1_watch_eval_diag", "data": {"code": "051910", "name": "LG화학", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 264000.0}}
+{"ts": "2026-07-24 13:35:40", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:35:46", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:35:47", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-07-24 13:35:50", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:35:56", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:36:00", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:36:02", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 8}}
+{"ts": "2026-07-24 13:36:07", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:36:10", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:36:17", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:36:18", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:36:20", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:36:27", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:36:30", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:36:33", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 3}}
+{"ts": "2026-07-24 13:36:37", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:36:41", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:36:47", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:36:49", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 5}}
+{"ts": "2026-07-24 13:36:51", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:36:57", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:37:01", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:37:04", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 6}}
+{"ts": "2026-07-24 13:37:07", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:37:11", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:37:15", "kind": "s1_watch_eval_diag", "data": {"code": "078930", "name": "GS", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "추세B 3/6", "now_price": 99300.0}}
+{"ts": "2026-07-24 13:37:17", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 7}}
+{"ts": "2026-07-24 13:37:20", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 7}}
+{"ts": "2026-07-24 13:37:21", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:37:27", "kind": "s1_watch_eval_diag", "data": {"code": "267260", "name": "HD현대일렉트릭", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 820000.0}}
+{"ts": "2026-07-24 13:37:27", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 7}}
+{"ts": "2026-07-24 13:37:31", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:37:35", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 10}}
+{"ts": "2026-07-24 13:37:36", "kind": "s1_watch_eval_diag", "data": {"code": "204320", "name": "HL만도", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 45000.0}}
+{"ts": "2026-07-24 13:37:37", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:37:42", "kind": "s1_watch_eval_diag", "data": {"code": "066570", "name": "LG전자", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 170700.0}}
+{"ts": "2026-07-24 13:37:42", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:37:46", "kind": "s1_watch_eval_diag", "data": {"code": "034220", "name": "LG디스플레이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 9850.0}}
+{"ts": "2026-07-24 13:37:48", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:37:50", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-07-24 13:37:51", "kind": "s1_watch_eval_diag", "data": {"code": "005380", "name": "현대차", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 399000.0}}
+{"ts": "2026-07-24 13:37:52", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:37:55", "kind": "s1_watch_eval_diag", "data": {"code": "064400", "name": "LG씨엔에스", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 65100.0}}
+{"ts": "2026-07-24 13:37:58", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:37:59", "kind": "s1_watch_eval_diag", "data": {"code": "097950", "name": "CJ제일제당", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 194100.0}}
+{"ts": "2026-07-24 13:38:02", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:38:03", "kind": "s1_watch_eval_diag", "data": {"code": "161390", "name": "한국타이어앤테크놀로지", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "추세B 1/6", "now_price": 71900.0}}
+{"ts": "2026-07-24 13:38:06", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:38:06", "kind": "s1_watch_eval_diag", "data": {"code": "120110", "name": "코오롱인더", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 53800.0}}
+{"ts": "2026-07-24 13:38:08", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:38:11", "kind": "s1_watch_eval_diag", "data": {"code": "022100", "name": "포스코DX", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 19450.0}}
+{"ts": "2026-07-24 13:38:12", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:38:15", "kind": "s1_watch_eval_diag", "data": {"code": "034020", "name": "두산에너빌리티", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 72400.0}}
+{"ts": "2026-07-24 13:38:18", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:38:19", "kind": "s1_watch_eval_diag", "data": {"code": "006400", "name": "삼성SDI", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.14285714285714285, "confluence": "눌림A 1/7", "now_price": 435500.0}}
+{"ts": "2026-07-24 13:38:21", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 6}}
+{"ts": "2026-07-24 13:38:22", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:38:24", "kind": "s1_watch_eval_diag", "data": {"code": "483650", "name": "달바글로벌", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "추세B 1/6", "now_price": 238500.0}}
+{"ts": "2026-07-24 13:38:28", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-07-24 13:38:28", "kind": "s1_watch_eval_diag", "data": {"code": "003670", "name": "포스코퓨처엠", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 143500.0}}
+{"ts": "2026-07-24 13:38:32", "kind": "s1_watch_eval_diag", "data": {"code": "457190", "name": "이수스페셜티케미컬", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 58100.0}}
+{"ts": "2026-07-24 13:38:32", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:38:37", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:38:38", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:38:43", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:38:46", "kind": "s1_watch_eval_diag", "data": {"code": "003230", "name": "삼양식품", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 1167000.0}}
+{"ts": "2026-07-24 13:38:48", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:38:50", "kind": "s1_watch_eval_diag", "data": {"code": "010130", "name": "고려아연", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 1080000.0}}
+{"ts": "2026-07-24 13:38:53", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 5}}
+{"ts": "2026-07-24 13:38:53", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:38:54", "kind": "s1_watch_eval_diag", "data": {"code": "052690", "name": "한전기술", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.2857142857142857, "confluence": "눌림A 2/7", "now_price": 100400.0}}
+{"ts": "2026-07-24 13:38:58", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:39:03", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:39:08", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 7}}
+{"ts": "2026-07-24 13:39:09", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 7}}
+{"ts": "2026-07-24 13:39:13", "kind": "s1_watch_eval_diag", "data": {"code": "443060", "name": "HD현대마린솔루션", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.5714285714285714, "confluence": "눌림A 4/7", "now_price": 210500.0}}
+{"ts": "2026-07-24 13:39:13", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:39:19", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:39:21", "kind": "s1_watch_eval_diag", "data": {"code": "377300", "name": "카카오페이", "bars_ready": true, "bar_count": 300, "min_bars": 100, "signal_on": false, "sig_type": "NONE", "is_buy": false, "signal_but_no_buy": false, "slot_key": "2026-07-24 13:45:00", "slot_changed": false, "met_ratio": 0.42857142857142855, "confluence": "눌림A 3/7", "now_price": 42100.0}}
+{"ts": "2026-07-24 13:39:23", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:39:24", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-07-24 13:39:29", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:39:33", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:39:39", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:39:39", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 4}}
+{"ts": "2026-07-24 13:39:43", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:39:49", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 1}}
+{"ts": "2026-07-24 13:39:54", "kind": "ui_update_timer_already_active", "data": {"immediate": false, "_update_timer_active": true}}
+{"ts": "2026-07-24 13:39:55", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 8}}
+{"ts": "2026-07-24 13:39:59", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}

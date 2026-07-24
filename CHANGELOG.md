@@ -13,6 +13,15 @@
 
 ---
 
+## 0.9.2 (2026-07-24)
+
+동적 백테에 RT 정합(전종목 1분) 선택 옵션 추가 — 기존 고정밀과 속도·체결 비교용.
+
+- **`bt_rt_parity_intrabar`**(기본 false): ON이면 감시 종목 전부를 매 15분 슬롯마다 `evaluate_bt_hp_intrabar_unified`로 평가(실시간 미러와 동일). OFF면 기존처럼 보유·15분 Signal 종목만 `_process_intra_bar_dynamic`.
+- **`dynamic_backtest.py`**: `_process_intra_bar_rt_parity` 신설, `last_run_elapsed_sec`·모드 로그.
+- **`ui/tabs/backtest_tab.py`**: 「RT정합(전종목1분)」 체크박스, 완료 상태에 모드·소요 초 표시.
+- Bayesian 최적화 경로는 변경 없음(느린 RT정합 미적용).
+
 ## 0.9.1 (2026-07-24)
 
 M1 폴러를 정규장 연속매매 1분 격자에서만 동작하도록 복구.

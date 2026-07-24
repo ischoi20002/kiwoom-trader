@@ -1,6 +1,8 @@
 import pandas as pd
 import os
+import re
 import time
+import copy
 from datetime import datetime, timedelta
 from data_manager_v2 import DataManagerV2
 import strategy.signals
@@ -25,6 +27,7 @@ from utils.fee_rates import fee_decimal_rates_backtest
 from utils.krx_bars import m1_window_start_for_15m_end
 from core.bt_hp_signal_bridge import compute_intrabar_indicator_step
 from core.bt_hp_intrabar_unified import (
+    evaluate_bt_hp_intrabar_unified,
     floor_sell_px_to_same_15m_bar,
     m1_buy_price_conservative,
     m1_float_ohlc,
@@ -116,6 +119,9 @@ class DynamicBacktester:
         self.start_date = None
         self.end_date = None
         self.high_precision = False  # [v20.0] 고정밀 모드 플래그
+        # RT 정합: 감시 전 종목 × evaluate_bt_hp_intrabar_unified (기본 False=기존 Signal 게이트)
+        self.rt_parity_intrabar = False
+        self.last_run_elapsed_sec: float = 0.0
         self.cached_1m_data = {}     # [v20.0] 1분봉 데이터 캐시
         
         # [Perf] Pre-init cached settings placeholders (v33.8)
@@ -342,7 +348,15 @@ class DynamicBacktester:
 
     def run(self, start_date, end_date, interval='15m', callback=None, high_precision=False):
         """메인 시뮬레이션 루프 (일단위 유니버스 갱신 + 분단위/15분단위 체결)"""
+        _run_t0 = time.time()
+        self.last_run_elapsed_sec = 0.0
         self.high_precision = high_precision
+        try:
+            self.rt_parity_intrabar = bool(
+                high_precision and self.settings.get("bt_rt_parity_intrabar", False)
+            )
+        except Exception:
+            self.rt_parity_intrabar = False
         # [v18.8] Date Normalization (YYYY-MM-DD)
         start_date = pd.to_datetime(start_date).strftime('%Y-%m-%d')
         end_date = pd.to_datetime(end_date).strftime('%Y-%m-%d')
@@ -357,6 +371,10 @@ class DynamicBacktester:
         if callback: callback("백테스트 준비 중...", 0)
         
         if not self._bootstrap_portfolio_data(start_date, end_date, callback):
+            try:
+                self.last_run_elapsed_sec = float(time.time() - _run_t0)
+            except Exception:
+                self.last_run_elapsed_sec = 0.0
             return None
 
         trading_days = self._bt_trading_days
@@ -476,14 +494,32 @@ class DynamicBacktester:
                 # [v23.0] 고정밀 모드 처리 (지연 로딩 및 타켓팅 최적화)
                 m1_processed = set()
                 if self.high_precision:
-                    # 보유 종목이거나 매수 신호가 있는 종목만 1분봉 시뮬레이션 수행
-                    m1_targets = [c for c in monitoring_list if (c in self.holdings) or 
-                                  (day_signals.get(c) is not None and curr_time in day_signals[c].index and day_signals[c].loc[curr_time, 'Signal'])]
-                    
+                    # 기존: 보유·Signal 종목만. RT정합: 감시 목록 전부(실시간 미러와 동일 입구)
+                    if self.rt_parity_intrabar:
+                        m1_targets = list(monitoring_list)
+                    else:
+                        m1_targets = [
+                            c
+                            for c in monitoring_list
+                            if (c in self.holdings)
+                            or (
+                                day_signals.get(c) is not None
+                                and curr_time in day_signals[c].index
+                                and day_signals[c].loc[curr_time, "Signal"]
+                            )
+                        ]
+
+                    _intra_fn = (
+                        self._process_intra_bar_rt_parity
+                        if self.rt_parity_intrabar
+                        else self._process_intra_bar_dynamic
+                    )
                     for code in m1_targets:
                         m1_chunk = self._get_m1_chunk_on_demand(code, current_day, curr_time)
                         if m1_chunk is not None and not m1_chunk.empty:
-                            self._process_intra_bar_dynamic(code, m1_chunk, day_data.get(code), today_sells, curr_time)
+                            _intra_fn(
+                                code, m1_chunk, day_data.get(code), today_sells, curr_time
+                            )
                             m1_processed.add(code)
 
                 # 2-4-1. 매도 감시 (보유 중인 종목)
@@ -670,6 +706,17 @@ class DynamicBacktester:
                     })
         try:
             flush_trade_csv_buffer()
+        except Exception:
+            pass
+        try:
+            self.last_run_elapsed_sec = float(time.time() - _run_t0)
+        except Exception:
+            self.last_run_elapsed_sec = 0.0
+        try:
+            _mode = "RT정합" if self.rt_parity_intrabar else ("고정밀" if self.high_precision else "15분")
+            print(
+                f"[Dynamic] 모드={_mode} 소요={self.last_run_elapsed_sec:.1f}초"
+            )
         except Exception:
             pass
         return self._finalize_backtest(interval)
@@ -1010,6 +1057,160 @@ class DynamicBacktester:
     def _prepare_1m_data(self, universe_schedule, start_date, end_date, callback):
         # [REMOVED] v23.0부터는 지연 로딩을 사용하므로 사전 로드가 불필요함
         return {}
+
+    def _indicator_at_m1_idx_for_parity(
+        self,
+        full_hist: pd.DataFrame,
+        curr_15m: Any,
+        m1_chunk: pd.DataFrame,
+        m1_idx: int,
+    ) -> Any:
+        """RT 정합 경로: 체결 시각의 인트라바 지표 행(실패 시 15분 행 폴백)."""
+        holder: dict[str, Any] = {
+            "initialized": False,
+            "last_15m_dict": None,
+            "prices_tail": None,
+        }
+        try:
+            return compute_intrabar_indicator_step(
+                self.settings, full_hist, curr_15m, m1_chunk, m1_idx, holder
+            )
+        except Exception:
+            return curr_15m
+
+    def _process_intra_bar_rt_parity(
+        self,
+        code: str,
+        m1_chunk: pd.DataFrame,
+        day_df_15m: Any,
+        today_sells: Any,
+        curr_15m_time: Any,
+    ) -> None:
+        """
+        실시간 미러와 동일: ``evaluate_bt_hp_intrabar_unified`` 로 EXIT/S2/S1 판정 후 체결 반영.
+
+        기존 ``_process_intra_bar_dynamic``(15분 Signal 정적 복사)과 달리 close-now 인트라바를 사용한다.
+        """
+        try:
+            if code in today_sells:
+                return
+            if m1_chunk is None or getattr(m1_chunk, "empty", True):
+                return
+            if day_df_15m is None or curr_15m_time not in day_df_15m.index:
+                return
+
+            curr_15m = day_df_15m.loc[curr_15m_time]
+            full = self.cached_15m_data.get(code)
+            if full is None or getattr(full, "empty", True):
+                return
+            try:
+                full_slice = full.loc[:curr_15m_time].copy()
+            except (TypeError, KeyError):
+                return
+
+            h = self.holdings.get(code)
+            pos = copy.deepcopy(h) if isinstance(h, dict) else None
+            ct = str(getattr(self, "_current_track_map", {}).get(code, "AB"))
+            if ct not in ("A", "B", "AB"):
+                ct = "AB"
+
+            out = evaluate_bt_hp_intrabar_unified(
+                self.settings, str(code).strip(), full_slice, m1_chunk, pos, ct
+            )
+            if not isinstance(out, dict):
+                return
+
+            ex = out.get("exit_first")
+            if isinstance(ex, dict) and h is not None:
+                try:
+                    m1_idx = int(ex.get("m1_idx", 0))
+                except (TypeError, ValueError):
+                    return
+                if m1_idx < 0 or m1_idx >= len(m1_chunk):
+                    return
+                m1_time = m1_chunk.index[m1_idx]
+                px = float(ex.get("eval_price", 0) or 0)
+                if px <= 0:
+                    return
+                ind = self._indicator_at_m1_idx_for_parity(
+                    full, curr_15m, m1_chunk, m1_idx
+                )
+                rs = str(ex.get("reason", "EXIT"))
+                reason = f"1M_{rs}+{m1_idx}m"
+                self._execute_sell(code, px, m1_time, reason, indicator_row=ind)
+                try:
+                    today_sells.add(code)
+                except Exception:
+                    pass
+                return
+
+            s2 = out.get("stage2_addon")
+            if isinstance(s2, dict) and h is not None:
+                try:
+                    m1_idx = int(s2.get("m1_idx", 0))
+                except (TypeError, ValueError):
+                    return
+                if m1_idx < 0 or m1_idx >= len(m1_chunk):
+                    return
+                m1_r = m1_chunk.iloc[m1_idx]
+                m1_time = m1_chunk.index[m1_idx]
+                fill = float(s2.get("fill_price", 0) or 0)
+                if fill <= 0:
+                    return
+                ind = self._indicator_at_m1_idx_for_parity(
+                    full, curr_15m, m1_chunk, m1_idx
+                )
+                sig_type = str(h.get("sig_type", "TYPE_A"))
+                reason = str(s2.get("reason", "1M_ADDON(S2)"))
+                self._handle_buy_execution(
+                    code,
+                    {"reason": reason, "Sig_Type": sig_type},
+                    m1_time,
+                    m1_r,
+                    indicator_row=ind,
+                    fill_price=fill,
+                )
+                return
+
+            if str(out.get("reason") or "") == "s1_executed_intrabar" and h is None:
+                se = out.get("s1_eval")
+                if not isinstance(se, dict):
+                    return
+                reason_s = str(se.get("reason", ""))
+                m = re.search(r"\+(\d+)m$", reason_s)
+                try:
+                    m1_idx = int(m.group(1)) if m else max(0, len(m1_chunk) - 1)
+                except (TypeError, ValueError, AttributeError):
+                    m1_idx = max(0, len(m1_chunk) - 1)
+                if m1_idx < 0 or m1_idx >= len(m1_chunk):
+                    return
+                m1_r = m1_chunk.iloc[m1_idx]
+                m1_time = m1_chunk.index[m1_idx]
+                ind = se.get("indicator_to_use")
+                if not isinstance(ind, dict):
+                    ind = self._indicator_at_m1_idx_for_parity(
+                        full, curr_15m, m1_chunk, m1_idx
+                    )
+                sig_type = str(se.get("sig_type", "TYPE_A"))
+                fill_px = float(m1_buy_price_conservative(m1_r))
+                self._handle_buy_execution(
+                    code,
+                    {"reason": reason_s or "1M_SIG", "Sig_Type": sig_type},
+                    m1_time,
+                    m1_r,
+                    indicator_row=ind,
+                    fill_price=fill_px,
+                )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            try:
+                print(
+                    f"[Dynamic] RT정합 인트라바 실패 ({code} @ {curr_15m_time}): {e!r}",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
     def _process_intra_bar_dynamic(self, code, m1_chunk, day_df_15m, today_sells, curr_15m_time):
         """[v36.2] 통합된 1분봉 정밀 시뮬레이션 (매도/매수 순차 처리 및 지표 동기화)"""

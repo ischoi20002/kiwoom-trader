@@ -305,6 +305,26 @@ class BacktestTab:
         self.btn_start_dynamic = ttk.Button(btn_row_bt, text="백테스트 시작", width=15, command=self._on_btn_start_dynamic_backtest)
         self.btn_start_dynamic.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_row_bt, text="📊 백테스트결과 리포트", width=18, command=self._open_dynamic_trade_report).pack(side=tk.LEFT, padx=2)
+
+        # RT 정합: 감시 전 종목 1분 인트라바(evaluate_bt_hp_intrabar_unified) — 기본 OFF(기존 고정밀)
+        parity_row = ttk.Frame(bt_lf)
+        parity_row.pack(pady=(8, 0), fill=tk.X)
+        try:
+            _parity_default = bool(self.app.settings.get("bt_rt_parity_intrabar", False))
+        except Exception:
+            _parity_default = False
+        self.bt_rt_parity_var = tk.BooleanVar(value=_parity_default)
+        ttk.Checkbutton(
+            parity_row,
+            text="RT정합(전종목1분)",
+            variable=self.bt_rt_parity_var,
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            parity_row,
+            text="ON=실시간 미러와 동일(느림) / OFF=Signal게이트 고정밀",
+            font=("Segoe UI", 8),
+            foreground="#88C0D0",
+        ).pack(side=tk.LEFT, padx=(8, 0))
         
         # [v31.4] Portfolio Simulation (High Precision & Synthetic Indicators Enabled by Default)
         lbl_info = ttk.Label(bt_lf, text="✨ 1분봉 고정밀 및 가상 실시간 지표 상시 적용", 
@@ -862,10 +882,23 @@ class BacktestTab:
             # [v4.10.8] Persist dates for future sessions
             self.app.settings['bt_start_date'] = start
             self.app.settings['bt_end_date'] = end
+            try:
+                self.app.settings['bt_rt_parity_intrabar'] = bool(
+                    self.bt_rt_parity_var.get()
+                )
+            except Exception:
+                self.app.settings['bt_rt_parity_intrabar'] = False
             self.app._final_save_settings()
             
             self.btn_start_dynamic.config(state=tk.DISABLED)
-            self.lbl_bt_status.config(text="백테스트 실행 중...", foreground="orange")
+            mode_lbl = (
+                "RT정합"
+                if self.app.settings.get("bt_rt_parity_intrabar")
+                else "고정밀"
+            )
+            self.lbl_bt_status.config(
+                text=f"백테스트 실행 중... ({mode_lbl})", foreground="orange"
+            )
             threading.Thread(target=self._run_dynamic_backtest_thread, args=(start, end, override_params), daemon=True).start()
         except Exception as _err: 
             self._show_copyable_error("오류", f"날짜 형식을 확인하세요:\n{str(_err)}\n\n{traceback.format_exc()}")
@@ -879,11 +912,21 @@ class BacktestTab:
             if override_params: active.update(override_params)
             tester = db.DynamicBacktester(active)
             trades = tester.run(start, end, interval='15m', callback=update, high_precision=True)
+            try:
+                elapsed = float(getattr(tester, "last_run_elapsed_sec", 0.0) or 0.0)
+            except Exception:
+                elapsed = 0.0
+            try:
+                rt_parity = bool(getattr(tester, "rt_parity_intrabar", False))
+            except Exception:
+                rt_parity = bool(active.get("bt_rt_parity_intrabar", False))
+            mode_lbl = "RT정합" if rt_parity else "고정밀"
             if trades is not None and not trades.empty:
                 n_trades = len(trades)
                 self.gui_queue.put(
-                    lambda n=n_trades: self.lbl_bt_status.config(
-                        text=f"백테스트 완료! (매매 {n}건)", foreground="#A3BE8C"
+                    lambda n=n_trades, m=mode_lbl, e=elapsed: self.lbl_bt_status.config(
+                        text=f"백테스트 완료! ({m} 매매 {n}건 / {e:.1f}초)",
+                        foreground="#A3BE8C",
                     )
                 )
                 report = os.path.abspath("dynamic_trade_report.html")
@@ -893,8 +936,9 @@ class BacktestTab:
                 # 매매 0건이어도 시뮬레이션은 정상 종료 — 미처리 시 상태가 '시계열 모의투자 중'에 멈춘 것처럼 보임
                 period = f"{start} ~ {end}"
                 self.gui_queue.put(
-                    lambda: self.lbl_bt_status.config(
-                        text="백테스트 완료 (매매 0건)", foreground="#EBCB8B"
+                    lambda m=mode_lbl, e=elapsed: self.lbl_bt_status.config(
+                        text=f"백테스트 완료 ({m} 매매 0건 / {e:.1f}초)",
+                        foreground="#EBCB8B",
                     )
                 )
                 self.gui_queue.put(
