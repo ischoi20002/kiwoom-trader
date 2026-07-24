@@ -306,25 +306,39 @@ class BacktestTab:
         self.btn_start_dynamic.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_row_bt, text="📊 백테스트결과 리포트", width=18, command=self._open_dynamic_trade_report).pack(side=tk.LEFT, padx=2)
 
-        # RT 정합: 감시 전 종목 1분 인트라바(evaluate_bt_hp_intrabar_unified) — 기본 OFF(기존 고정밀)
+        # RT 정합 / 고속: 다크 테마에서 체크박스 가독성이 낮아 ON·OFF 토글 버튼 사용
         parity_row = ttk.Frame(bt_lf)
         parity_row.pack(pady=(8, 0), fill=tk.X)
         try:
             _parity_default = bool(self.app.settings.get("bt_rt_parity_intrabar", False))
         except Exception:
             _parity_default = False
+        try:
+            _fast_default = bool(self.app.settings.get("bt_rt_parity_fast", True))
+        except Exception:
+            _fast_default = True
         self.bt_rt_parity_var = tk.BooleanVar(value=_parity_default)
-        ttk.Checkbutton(
+        self.bt_rt_parity_fast_var = tk.BooleanVar(value=_fast_default)
+        self.btn_rt_parity = self._make_on_off_toggle(
             parity_row,
-            text="RT정합(전종목1분)",
-            variable=self.bt_rt_parity_var,
-        ).pack(side=tk.LEFT)
+            "RT정합(전종목1분)",
+            self.bt_rt_parity_var,
+            on_change=self._sync_rt_parity_fast_widget_state,
+        )
+        self.btn_rt_parity.pack(side=tk.LEFT)
+        self.btn_rt_parity_fast = self._make_on_off_toggle(
+            parity_row,
+            "고속 하이브리드",
+            self.bt_rt_parity_fast_var,
+        )
+        self.btn_rt_parity_fast.pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(
             parity_row,
-            text="ON=실시간 미러와 동일(느림) / OFF=Signal게이트 고정밀",
+            text="초록=ON / 회색=OFF · 고속=close-now 사전필터",
             font=("Segoe UI", 8),
             foreground="#88C0D0",
         ).pack(side=tk.LEFT, padx=(8, 0))
+        self._sync_rt_parity_fast_widget_state()
         
         # [v31.4] Portfolio Simulation (High Precision & Synthetic Indicators Enabled by Default)
         lbl_info = ttk.Label(bt_lf, text="✨ 1분봉 고정밀 및 가상 실시간 지표 상시 적용", 
@@ -869,6 +883,113 @@ class BacktestTab:
             ent.pack(side=tk.LEFT, padx=5)
             entries[k] = ent
 
+    def _make_on_off_toggle(
+        self,
+        parent: tk.Misc,
+        label: str,
+        var: tk.BooleanVar,
+        on_change=None,
+    ) -> tk.Button:
+        """
+        다크 테마에서 ON/OFF가 한눈에 보이도록 색·문구가 바뀌는 토글 버튼.
+        ON=초록(#A3BE8C), OFF=회색(#4C566A).
+        """
+        btn = tk.Button(
+            parent,
+            relief=tk.FLAT,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+            bd=0,
+            highlightthickness=0,
+        )
+
+        def _paint(*_args: object) -> None:
+            try:
+                on = bool(var.get())
+            except Exception:
+                on = False
+            try:
+                if str(btn.cget("state")) == "disabled" and not on:
+                    # disabled+OFF 는 sync에서 별도 페인팅
+                    pass
+                if on:
+                    btn.config(
+                        text=f"{label}  · ON",
+                        bg="#A3BE8C",
+                        fg="#2E3440",
+                        activebackground="#B4CF9E",
+                        activeforeground="#2E3440",
+                        disabledforeground="#2E3440",
+                    )
+                else:
+                    btn.config(
+                        text=f"{label}  · OFF",
+                        bg="#4C566A",
+                        fg="#ECEFF4",
+                        activebackground="#5E81AC",
+                        activeforeground="#ECEFF4",
+                        disabledforeground="#D8DEE9",
+                    )
+            except Exception:
+                pass
+
+        def _toggle() -> None:
+            try:
+                if str(btn.cget("state")) == "disabled":
+                    return
+            except Exception:
+                pass
+            try:
+                var.set(not bool(var.get()))
+            except Exception:
+                return
+            _paint()
+            if on_change is not None:
+                try:
+                    on_change()
+                except Exception:
+                    pass
+
+        btn.configure(command=_toggle)
+        try:
+            var.trace_add("write", lambda *_a: _paint())
+        except Exception:
+            pass
+        _paint()
+        # sync 등 외부에서 다시 칠할 수 있게 보관
+        setattr(btn, "_paint_on_off", _paint)
+        setattr(btn, "_on_off_label", label)
+        return btn
+
+    def _sync_rt_parity_fast_widget_state(self) -> None:
+        """RT정합 OFF면 고속 토글을 비활성화하고 흐리게 표시."""
+        try:
+            on = bool(self.bt_rt_parity_var.get())
+        except Exception:
+            on = False
+        btn = getattr(self, "btn_rt_parity_fast", None)
+        if btn is None:
+            return
+        try:
+            if on:
+                btn.config(state=tk.NORMAL)
+                paint = getattr(btn, "_paint_on_off", None)
+                if callable(paint):
+                    paint()
+            else:
+                label = str(getattr(btn, "_on_off_label", "고속 하이브리드"))
+                btn.config(
+                    state=tk.DISABLED,
+                    text=f"{label}  · —",
+                    bg="#3B4252",
+                    fg="#6B7280",
+                    disabledforeground="#6B7280",
+                )
+        except Exception:
+            pass
+
     def _on_btn_start_dynamic_backtest(self, override_params=None):
         if self.app.is_monitoring:
             messagebox.showwarning("경고", "모니터링 중에는 백테스트가 불가합니다.")
@@ -888,14 +1009,23 @@ class BacktestTab:
                 )
             except Exception:
                 self.app.settings['bt_rt_parity_intrabar'] = False
+            try:
+                self.app.settings['bt_rt_parity_fast'] = bool(
+                    self.bt_rt_parity_fast_var.get()
+                )
+            except Exception:
+                self.app.settings['bt_rt_parity_fast'] = True
             self.app._final_save_settings()
             
             self.btn_start_dynamic.config(state=tk.DISABLED)
-            mode_lbl = (
-                "RT정합"
-                if self.app.settings.get("bt_rt_parity_intrabar")
-                else "고정밀"
-            )
+            if self.app.settings.get("bt_rt_parity_intrabar"):
+                mode_lbl = (
+                    "RT정합고속"
+                    if self.app.settings.get("bt_rt_parity_fast", True)
+                    else "RT정합"
+                )
+            else:
+                mode_lbl = "고정밀"
             self.lbl_bt_status.config(
                 text=f"백테스트 실행 중... ({mode_lbl})", foreground="orange"
             )
@@ -920,7 +1050,14 @@ class BacktestTab:
                 rt_parity = bool(getattr(tester, "rt_parity_intrabar", False))
             except Exception:
                 rt_parity = bool(active.get("bt_rt_parity_intrabar", False))
-            mode_lbl = "RT정합" if rt_parity else "고정밀"
+            try:
+                rt_fast = bool(getattr(tester, "rt_parity_fast", False))
+            except Exception:
+                rt_fast = bool(active.get("bt_rt_parity_fast", True)) and rt_parity
+            if rt_parity:
+                mode_lbl = "RT정합고속" if rt_fast else "RT정합"
+            else:
+                mode_lbl = "고정밀"
             if trades is not None and not trades.empty:
                 n_trades = len(trades)
                 self.gui_queue.put(

@@ -241,9 +241,15 @@ def evaluate_close_now_s1_at_m1_idx(
     code_track: str,
     *,
     holdings: Optional[Dict[str, Any]] = None,
+    precomputed_sim: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     같은 M1 시점: forming OHLCV + intrabar RSI/MACD 로 마지막 15m 행 ``get_buy_signals_detailed`` 재판정.
+
+    Parameters
+    ----------
+    precomputed_sim
+        호출측이 이미 ``compute_intrabar_indicator_step`` 한 dict. 있으면 중복 지표 계산을 생략.
 
     Returns
     -------
@@ -282,22 +288,25 @@ def evaluate_close_now_s1_at_m1_idx(
         m1_sub = m1_chunk.iloc[: mi + 1]
         _patch_forming_ohlcv_from_m1_subchunk(work, m1_sub)
 
-        curr_15m = full_15m.iloc[-1]
-        sim_holder: Dict[str, Any] = {
-            "initialized": False,
-            "last_15m_dict": None,
-            "prices_tail": None,
-        }
-        sim_row = compute_intrabar_indicator_step(
-            settings,
-            full_15m,
-            curr_15m,
-            m1_chunk,
-            mi,
-            sim_holder,
-            sync_static_signal_keys=False,
-        )
-        sim_d = _row_to_plain_dict(sim_row)
+        if isinstance(precomputed_sim, dict) and precomputed_sim:
+            sim_d = dict(precomputed_sim)
+        else:
+            curr_15m = full_15m.iloc[-1]
+            sim_holder: Dict[str, Any] = {
+                "initialized": False,
+                "last_15m_dict": None,
+                "prices_tail": None,
+            }
+            sim_row = compute_intrabar_indicator_step(
+                settings,
+                full_15m,
+                curr_15m,
+                m1_chunk,
+                mi,
+                sim_holder,
+                sync_static_signal_keys=False,
+            )
+            sim_d = _row_to_plain_dict(sim_row)
         _merge_intrabar_sim_into_df_last_row(work, sim_d)
 
         work = _apply_ready_column_to_df(work, settings)

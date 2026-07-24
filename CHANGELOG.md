@@ -13,6 +13,15 @@
 
 ---
 
+## 0.9.3 (2026-07-24)
+
+RT정합 백테 고속 하이브리드 — close-now 병목 완화(실시간 미러 무영향).
+
+- **원인**: RT정합은 전 종목×매 1분 `get_buy_signals_detailed`(close-now)가 지배적 비용.
+- **`bt_rt_parity_fast`(기본 true)**: 백테 RT정합에서만 S1 close-now 전에 넓은 RSI/OSC 사전필터 + 미체결 시 RSI/OSC 변화량 스로틀. `evaluate_close_now_s1_at_m1_idx`에 `precomputed_sim`으로 지표 중복 계산 제거.
+- **`ui/tabs/backtest_tab.py`**: 「고속 하이브리드」 체크(RT정합 ON일 때만 활성). 해제 시 완전 정합(느림). RT정합·고속 옵션은 다크 테마에서 구분이 쉬운 **초록 ON / 회색 OFF 토글 버튼**으로 표시.
+- 실시간 `SignalEngine`은 `close_now_fast_skip=False` 유지.
+
 ## 0.9.2 (2026-07-24)
 
 동적 백테에 RT 정합(전종목 1분) 선택 옵션 추가 — 기존 고정밀과 속도·체결 비교용.

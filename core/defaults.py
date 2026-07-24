@@ -36,6 +36,11 @@ DEFAULT_SETTINGS = {
     # 동적 백테 고정밀: True면 감시 전 종목을 매 15분 슬롯마다 evaluate_bt_hp_intrabar_unified(RT 미러와 동일).
     # False(기본)=보유·15분 Signal 종목만 1분 루프(기존 빠른 고정밀).
     "bt_rt_parity_intrabar": False,
+    # RT정합 ON일 때 close-now 사전필터·스로틀(백테 전용). 실시간 미러에는 영향 없음.
+    "bt_rt_parity_fast": True,
+    "bt_rt_parity_fast_rsi_delta": 0.35,
+    "bt_rt_parity_fast_osc_delta": 0.08,
+    "bt_rt_parity_fast_osc_abs_max": 8.0,
     "s1_buy_signal_cooldown_sec": 1800.0,
     "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
     "realtime_warmup_15m_query_limit": 7000,

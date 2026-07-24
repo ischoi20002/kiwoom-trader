@@ -168,6 +168,101 @@ def _m1_is_before_position_entry(m1_time: Any, pos_sim: Dict[str, Any]) -> bool:
         return True
 
 
+def _safe_float_ind(ind: Any, key: str, default: float = float("nan")) -> float:
+    """지표 dict/Series에서 float 안전 추출."""
+    try:
+        if ind is None:
+            return float(default)
+        v = ind.get(key) if hasattr(ind, "get") else None
+        if v is None and hasattr(ind, "__contains__") and key in ind:
+            try:
+                v = ind[key]
+            except Exception:
+                v = None
+        if v is None or (isinstance(v, float) and not np.isfinite(v)):
+            return float(default)
+        f = float(v)
+        return f if np.isfinite(f) else float(default)
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return float(default)
+
+
+def close_now_fast_prefilter_ok(settings: Dict[str, Any], ind_d: Any) -> bool:
+    """
+    close-now(무거움) 호출 전 싼 게이트.
+
+    매수 RSI 밴드보다 넓게 열어 두어 경계 신호는 거의 놓치지 않게 한다.
+    """
+    try:
+        if hasattr(ind_d, "get"):
+            ready = ind_d.get("Ready", None)
+            if ready is not None and not bool(ready):
+                return False
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    rsi = _safe_float_ind(ind_d, "RSI")
+    osc = _safe_float_ind(ind_d, "OSC", 0.0)
+    try:
+        rmin = float(settings.get("buy_rsi_min", 40.0))
+    except (TypeError, ValueError):
+        rmin = 40.0
+    try:
+        rmax = max(
+            float(settings.get("buy_rsi_max_a", 72.0)),
+            float(settings.get("buy_rsi_max_b", 80.0)),
+        )
+    except (TypeError, ValueError):
+        rmax = 80.0
+    lo, hi = rmin - 12.0, rmax + 12.0
+    if np.isfinite(rsi) and (rsi < lo or rsi > hi):
+        return False
+    try:
+        osc_abs_max = float(settings.get("bt_rt_parity_fast_osc_abs_max", 8.0))
+    except (TypeError, ValueError):
+        osc_abs_max = 8.0
+    if np.isfinite(osc) and abs(osc) > max(1.0, osc_abs_max):
+        return False
+    return True
+
+
+def close_now_fast_throttle_skip(
+    holder: Dict[str, Any], ind_d: Any, settings: Dict[str, Any]
+) -> bool:
+    """
+    직전 close-now가 미체결이고 RSI/OSC 변화가 미미하면 True → 이번 분 skip.
+    """
+    try:
+        if bool(holder.get("cn_last_can_execute", False)):
+            return False
+    except Exception:
+        pass
+    try:
+        dr = float(settings.get("bt_rt_parity_fast_rsi_delta", 0.35))
+    except (TypeError, ValueError):
+        dr = 0.35
+    try:
+        do = float(settings.get("bt_rt_parity_fast_osc_delta", 0.08))
+    except (TypeError, ValueError):
+        do = 0.08
+    rsi = _safe_float_ind(ind_d, "RSI")
+    osc = _safe_float_ind(ind_d, "OSC", 0.0)
+    prev_r = holder.get("cn_last_rsi")
+    prev_o = holder.get("cn_last_osc")
+    try:
+        if prev_r is None and prev_o is None:
+            return False
+        if prev_r is not None and np.isfinite(rsi) and np.isfinite(float(prev_r)):
+            if abs(rsi - float(prev_r)) > dr:
+                return False
+        if prev_o is not None and np.isfinite(osc) and np.isfinite(float(prev_o)):
+            if abs(osc - float(prev_o)) > do:
+                return False
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def evaluate_bt_hp_intrabar_unified(
     settings: Dict[str, Any],
     code: str,
@@ -178,6 +273,7 @@ def evaluate_bt_hp_intrabar_unified(
     *,
     skip_holder_exit: bool = False,
     df_with_ind: Optional[pd.DataFrame] = None,
+    close_now_fast_skip: bool = False,
 ) -> Dict[str, Any]:
     """
     동적 백테 고정밀 인트라바 1회분과 동일한 시뮬레이션.
@@ -187,6 +283,9 @@ def evaluate_bt_hp_intrabar_unified(
     skip_holder_exit
         True면 보유 구간에서 ``TradingStrategy.evaluate_position`` 청산 판정만 생략하고
         max_p 갱신·S2 등은 그대로 진행한다(실시간: S2만 M1 주기에 맞출 때).
+    close_now_fast_skip
+        True면(백테 RT정합 고속) S1 close-now 전에 RSI/OSC 사전필터·스로틀 적용.
+        실시간 미러는 False 유지.
 
     Returns
     -------
@@ -339,21 +438,41 @@ def evaluate_bt_hp_intrabar_unified(
                 sig_type = "TYPE_B"
 
                 if pos_sim is None and use_close_now and cn_df is not None:
-                    cn = evaluate_close_now_s1_at_m1_idx(
-                        settings,
-                        cn_df,
-                        full_15m,
-                        m1_chunk,
-                        m1_idx,
-                        ct,
-                        holdings={},
-                    )
-                    if cn.get("can_execute"):
-                        is_buy_signal = True
-                        sig_type = str(cn.get("sig_type") or "TYPE_B")
-                        row_cn = cn.get("indicator_row")
-                        if isinstance(row_cn, dict):
-                            ind_d = {**ind_d, **row_cn}
+                    run_cn = True
+                    if close_now_fast_skip:
+                        try:
+                            if not close_now_fast_prefilter_ok(settings, ind_d):
+                                run_cn = False
+                            elif close_now_fast_throttle_skip(holder, ind_d, settings):
+                                run_cn = False
+                        except Exception:
+                            run_cn = True
+                    cn_can = False
+                    if run_cn:
+                        cn = evaluate_close_now_s1_at_m1_idx(
+                            settings,
+                            cn_df,
+                            full_15m,
+                            m1_chunk,
+                            m1_idx,
+                            ct,
+                            holdings={},
+                            precomputed_sim=ind_d if isinstance(ind_d, dict) else None,
+                        )
+                        cn_can = bool(cn.get("can_execute"))
+                        if cn_can:
+                            is_buy_signal = True
+                            sig_type = str(cn.get("sig_type") or "TYPE_B")
+                            row_cn = cn.get("indicator_row")
+                            if isinstance(row_cn, dict):
+                                ind_d = {**ind_d, **row_cn}
+                    if close_now_fast_skip:
+                        try:
+                            holder["cn_last_rsi"] = _safe_float_ind(ind_d, "RSI")
+                            holder["cn_last_osc"] = _safe_float_ind(ind_d, "OSC", 0.0)
+                            holder["cn_last_can_execute"] = bool(cn_can)
+                        except Exception:
+                            pass
                 elif not is_addon_target:
                     is_buy_signal = bool(ind_d.get("Signal", False)) and bool(
                         ind_d.get("Ready", False)

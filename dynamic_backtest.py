@@ -121,6 +121,8 @@ class DynamicBacktester:
         self.high_precision = False  # [v20.0] 고정밀 모드 플래그
         # RT 정합: 감시 전 종목 × evaluate_bt_hp_intrabar_unified (기본 False=기존 Signal 게이트)
         self.rt_parity_intrabar = False
+        # RT 정합 고속 하이브리드(close-now 사전필터·스로틀). 실시간에는 미적용.
+        self.rt_parity_fast = False
         self.last_run_elapsed_sec: float = 0.0
         self.cached_1m_data = {}     # [v20.0] 1분봉 데이터 캐시
         
@@ -357,6 +359,13 @@ class DynamicBacktester:
             )
         except Exception:
             self.rt_parity_intrabar = False
+        try:
+            self.rt_parity_fast = bool(
+                self.rt_parity_intrabar
+                and self.settings.get("bt_rt_parity_fast", True)
+            )
+        except Exception:
+            self.rt_parity_fast = bool(self.rt_parity_intrabar)
         # [v18.8] Date Normalization (YYYY-MM-DD)
         start_date = pd.to_datetime(start_date).strftime('%Y-%m-%d')
         end_date = pd.to_datetime(end_date).strftime('%Y-%m-%d')
@@ -713,7 +722,13 @@ class DynamicBacktester:
         except Exception:
             self.last_run_elapsed_sec = 0.0
         try:
-            _mode = "RT정합" if self.rt_parity_intrabar else ("고정밀" if self.high_precision else "15분")
+            _mode = "RT정합고속" if (
+                self.rt_parity_intrabar and getattr(self, "rt_parity_fast", False)
+            ) else (
+                "RT정합" if self.rt_parity_intrabar else (
+                    "고정밀" if self.high_precision else "15분"
+                )
+            )
             print(
                 f"[Dynamic] 모드={_mode} 소요={self.last_run_elapsed_sec:.1f}초"
             )
@@ -1115,7 +1130,15 @@ class DynamicBacktester:
                 ct = "AB"
 
             out = evaluate_bt_hp_intrabar_unified(
-                self.settings, str(code).strip(), full_slice, m1_chunk, pos, ct
+                self.settings,
+                str(code).strip(),
+                full_slice,
+                m1_chunk,
+                pos,
+                ct,
+                close_now_fast_skip=bool(
+                    getattr(self, "rt_parity_fast", False)
+                ),
             )
             if not isinstance(out, dict):
                 return
