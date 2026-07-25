@@ -696,15 +696,47 @@ class TradingStrategy:
 
     @staticmethod
     def effective_s1_sig_type_for_buy(settings: dict, row, holdings: dict) -> str:
-        """15분 행·실시간 last_sig 등에서 Sig_Type 확정(동시신호+동점 시 B 우선)."""
+        """15분 행·실시간 last_sig 등에서 Sig_Type 확정.
+
+        동시신호(S1_Simultaneous_AB)면 현재 same_bar / 브레드스 런타임 우선순위로
+        TYPE_A·B를 재결정한 뒤, 보유 동수 타이브레이크(B 우선)를 적용한다.
+        """
         try:
             if row is None:
                 return "TYPE_B"
-            if hasattr(row, "get"):
-                base = str(row.get("Sig_Type", "TYPE_B"))
-                sim = bool(row.get("S1_Simultaneous_AB", False))
-            else:
+            if not hasattr(row, "get"):
                 return "TYPE_B"
+            base = str(row.get("Sig_Type", "TYPE_B"))
+            sim = bool(row.get("S1_Simultaneous_AB", False))
+            s = settings or {}
+            use_a = bool(s.get("use_type_a", True))
+            use_b = bool(s.get("use_type_b", False))
+            if sim and use_a and use_b:
+                try:
+                    from strategy.signals import _normalize_same_bar_priority
+
+                    pri = _normalize_same_bar_priority(s)
+                except Exception:
+                    pri = "confluence"
+                if pri == "prefer_b":
+                    base = "TYPE_B"
+                elif pri == "prefer_a":
+                    base = "TYPE_A"
+                else:
+                    # confluence: Met_A/Tot_A vs Met_B/Tot_B
+                    try:
+                        ma = float(row.get("Met_A", row.get("met_a", 0)) or 0)
+                        ta = float(row.get("Tot_A", row.get("tot_a", 1)) or 1)
+                        mb = float(row.get("Met_B", row.get("met_b", 0)) or 0)
+                        tb = float(row.get("Tot_B", row.get("tot_b", 1)) or 1)
+                        ra = ma / ta if ta > 0 else 0.0
+                        rb = mb / tb if tb > 0 else 0.0
+                        if rb > ra:
+                            base = "TYPE_B"
+                        else:
+                            base = "TYPE_A"
+                    except Exception:
+                        pass
             out = TradingStrategy._s1_sig_type_simultaneous_balance_tie_b(
                 settings, base, sim, holdings
             )
@@ -713,7 +745,6 @@ class TradingStrategy:
                 return "TYPE_A"
             if u == "TYPE_B":
                 return "TYPE_B"
-            # 신호 DF에 NONE 등이 남는 경우 주문·내역 사유 컬럼에 'NONE'이 찍히지 않도록
             return "TYPE_B"
         except Exception:
             return "TYPE_B"
@@ -1646,7 +1677,28 @@ class TradingStrategy:
                             )
                             trail_armed = peak_pct >= tp_arm_pct
 
-                        if use_sl_atr and now_price <= avg_p - (sl_mult * entry_atr):
+                        # [초단기 유예] 당일 또는 N시간 동안 SL 배수 확대
+                        eff_sl_mult = sl_mult
+                        try:
+                            grace_mult = float(s.get("atr_sl_entry_grace_mult", 0) or 0)
+                            grace_same_day = bool(s.get("atr_sl_entry_grace_same_day", False))
+                            grace_h = float(s.get("atr_sl_entry_grace_hours", 0) or 0)
+                            if grace_mult > sl_mult and current_time is not None:
+                                et_raw = pos.get("entry_date") or pos.get("entry_time")
+                                if et_raw is not None:
+                                    _ct = pd.to_datetime(current_time)
+                                    _et = pd.to_datetime(et_raw)
+                                    if grace_same_day:
+                                        if _ct.normalize() == _et.normalize():
+                                            eff_sl_mult = grace_mult
+                                    elif grace_h > 0:
+                                        _age_h = (_ct - _et).total_seconds() / 3600.0
+                                        if 0.0 <= float(_age_h) < grace_h:
+                                            eff_sl_mult = grace_mult
+                        except Exception:
+                            eff_sl_mult = sl_mult
+
+                        if use_sl_atr and now_price <= avg_p - (eff_sl_mult * entry_atr):
                             is_exit, exit_reason = True, "ATR_SL"
                         elif use_trail_atr and trail_armed and now_price <= max_p - (trail_mult * curr_atr):
                             is_exit, exit_reason = True, "ATR_TRAIL"

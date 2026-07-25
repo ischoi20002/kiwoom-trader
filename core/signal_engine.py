@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import threading
 import contextlib
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import traceback
 from backtest_engine import TradingStrategy
@@ -38,6 +38,8 @@ class SignalEngine:
         self.app = app
         self._last_realtime_err = None
         self.last_buy_sig_time = {} # [v1.0] 중복 시그널 방지용 쿨타임 관리
+        # ATR_SL 청산 후 동일종목 S1 재진입 금지 만료(일자 normalize)
+        self._atr_sl_reentry_until: Dict[str, datetime] = {}
         self._wl_buy_last_tm = {}
         self._wl_sell_last_tm = {}
         # monitor_info 누락 코드가 틱에서 들어올 때 스킵되는 상황 확인용(과도 로그 방지: 최대 N개만)
@@ -154,6 +156,51 @@ class SignalEngine:
         except (TypeError, ValueError):
             v = 1800.0
         return float(max(10.0, min(v, 86400.0)))
+
+    def _atr_sl_reentry_cooldown_days(self) -> int:
+        """ATR_SL 청산 후 동일종목 S1 재진입 금지 일수(0=비활성)."""
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return max(0, int(float(st.get("atr_sl_reentry_cooldown_days", 0) or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _note_atr_sl_exit_for_reentry_cooldown(self, code: str, reason: Any = None) -> None:
+        """ATR_SL 청산 시 재진입 쿨다운 만료일 기록(실시간)."""
+        try:
+            days = self._atr_sl_reentry_cooldown_days()
+            if days <= 0:
+                return
+            rs = str(reason or "").upper()
+            if "ATR_SL" not in rs:
+                return
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            until = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            until = until + timedelta(days=int(days))
+            if not hasattr(self, "_atr_sl_reentry_until") or self._atr_sl_reentry_until is None:
+                self._atr_sl_reentry_until = {}
+            self._atr_sl_reentry_until[nk] = until
+        except Exception:
+            pass
+
+    def _s1_blocked_by_atr_sl_reentry(self, code: str) -> bool:
+        """ATR_SL 재진입 쿨다운 중이면 True."""
+        try:
+            if self._atr_sl_reentry_cooldown_days() <= 0:
+                return False
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            until = (getattr(self, "_atr_sl_reentry_until", None) or {}).get(nk)
+            if until is None:
+                return False
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            u = until
+            if hasattr(u, "to_pydatetime"):
+                u = u.to_pydatetime()
+            if hasattr(u, "replace"):
+                u = u.replace(hour=0, minute=0, second=0, microsecond=0)
+            return bool(today <= u)
+        except Exception:
+            return False
 
     def _use_fixed_s1_presignal_gate(self) -> bool:
         """
@@ -809,6 +856,10 @@ class SignalEngine:
                     "now_price": ep,
                 }
                 try:
+                    self._note_atr_sl_exit_for_reentry_cooldown(nk, rs)
+                except Exception:
+                    pass
+                try:
                     _mb = ex.get("m1_bar")
                     if _mb is not None and str(_mb).strip():
                         exit_out["m1_bar"] = str(_mb)
@@ -914,6 +965,10 @@ class SignalEngine:
                             nk, pos_live, info, reason=rs
                         ):
                             return {"action": "HOLD"}
+                        try:
+                            self._note_atr_sl_exit_for_reentry_cooldown(nk, rs)
+                        except Exception:
+                            pass
                         return {
                             "action": "EXIT",
                             "reason": rs,
@@ -2085,6 +2140,14 @@ class SignalEngine:
                     info["confluence"] = "⏳ 정규장 외(실시간 체결 미진행) · 봉 준비"
                     info["met_ratio"] = 0.0
                     is_buy = False
+
+                # ATR_SL 이후 동일종목 재진입 쿨다운
+                try:
+                    if is_buy and self._s1_blocked_by_atr_sl_reentry(code):
+                        is_buy = False
+                        info["confluence"] = "⏳ ATR_SL 재진입 쿨다운"
+                except Exception:
+                    pass
 
                 # 쿨타임 및 중복 진입 방지
                 _cool_sec = self._s1_buy_signal_cooldown_sec()

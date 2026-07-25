@@ -925,22 +925,34 @@ def _merge_dual_track_picks(
     selected_rows: list,
     settings: dict,
     logger_callback,
+    max_a: Optional[int] = None,
+    max_b: Optional[int] = None,
 ) -> list:
     """
     Track A 상위 max_slots_a + Track B 상위 max_slots_b 를 합치되,
     양쪽에 모두 든 종목은 SelTrack=AB·Score=max 로 1행만 유지.
+
+    ``max_a`` / ``max_b`` 가 주어지면(브레드스 레짐 슬롯) 설정의 max_slots_* 대신 사용.
     """
-    max_a = max(0, int(settings.get("max_slots_a", 20)))
-    max_b = max(0, int(settings.get("max_slots_b", 10)))
+    max_a_i = (
+        max(0, int(max_a))
+        if max_a is not None
+        else max(0, int(settings.get("max_slots_a", 20)))
+    )
+    max_b_i = (
+        max(0, int(max_b))
+        if max_b is not None
+        else max(0, int(settings.get("max_slots_b", 10)))
+    )
     floor_a = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
     floor_b = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
     cand_a = [d for d in selected_rows if d.get("_valid_a")]
     cand_b = [d for d in selected_rows if d.get("_valid_b")]
     picked_a = _sorted_dict_rows_top_with_slot_band(
-        cand_a, "_score_a", max_a, settings, min_score_floor=floor_a
+        cand_a, "_score_a", max_a_i, settings, min_score_floor=floor_a
     )
     picked_b = _sorted_dict_rows_top_with_slot_band(
-        cand_b, "_score_b", max_b, settings, min_score_floor=floor_b
+        cand_b, "_score_b", max_b_i, settings, min_score_floor=floor_b
     )
     code_to_sb = {str(d["Code"]).zfill(6): float(d.get("_score_b", 0)) for d in picked_b}
     seen = set()
@@ -1068,6 +1080,94 @@ def compute_market_breadth(
         return result
 
 
+def _clamp_nonneg_int(value: Any, default: int) -> int:
+    """설정값을 0 이상 정수로 안전 변환."""
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def _normalize_breadth_sig_priority(raw: Any, default: str = "confluence") -> str:
+    """레짐별 동시신호 우선순위 정규화."""
+    try:
+        p = str(raw or default).strip().lower()
+    except Exception:
+        p = str(default).strip().lower()
+    if p in ("prefer_a", "prefer_b", "confluence"):
+        return p
+    return "confluence"
+
+
+def resolve_breadth_regime_policy(regime: str, settings: Optional[dict] = None) -> Dict[str, Any]:
+    """
+    시장 레짐별 감시 슬롯·동시신호 우선순위를 반환한다.
+
+    정책:
+      - UP: Type B 비중 확대 (기본 슬롯 A↓ B↑, prefer_b)
+      - NEUTRAL: Type A/B 동등 슬롯 (기본 동일 개수, confluence)
+      - DOWN: 신규 감시 전부 차단 (slots=0)
+
+    반환 키: ``slots_a``, ``slots_b``, ``block_all``, ``sig_priority``, ``regime``.
+    """
+    s = settings or {}
+    try:
+        max_a = _clamp_nonneg_int(s.get("max_slots_a", 20), 20)
+        max_b = _clamp_nonneg_int(s.get("max_slots_b", 15), 15)
+    except Exception:
+        max_a, max_b = 20, 15
+
+    reg = str(regime or "UP").strip().upper()
+    if reg not in ("UP", "NEUTRAL", "DOWN"):
+        reg = "UP"
+
+    if reg == "DOWN":
+        return {
+            "regime": "DOWN",
+            "slots_a": 0,
+            "slots_b": 0,
+            "block_all": True,
+            "sig_priority": "prefer_a",
+        }
+
+    if reg == "UP":
+        # 기본: A 60%·B는 max_b와 20 중 큰 쪽(강세장 B 확대)
+        default_a = max(1, int(round(max_a * 0.6))) if max_a > 0 else 0
+        default_b = max(max_b, 20) if max_b > 0 else 20
+        slots_a = _clamp_nonneg_int(s.get("breadth_up_slots_a", default_a), default_a)
+        slots_b = _clamp_nonneg_int(s.get("breadth_up_slots_b", default_b), default_b)
+        pri = _normalize_breadth_sig_priority(
+            s.get("breadth_up_sig_priority", "prefer_b"), "prefer_b"
+        )
+        return {
+            "regime": "UP",
+            "slots_a": slots_a,
+            "slots_b": slots_b,
+            "block_all": False,
+            "sig_priority": pri,
+        }
+
+    # NEUTRAL: A/B 동등 (기본 min(max_a,max_b), 없으면 12)
+    eq = min(max_a, max_b) if (max_a > 0 and max_b > 0) else max(max_a, max_b, 12)
+    if eq <= 0:
+        eq = 12
+    slots_a = _clamp_nonneg_int(s.get("breadth_neutral_slots_a", eq), eq)
+    slots_b = _clamp_nonneg_int(s.get("breadth_neutral_slots_b", eq), eq)
+    # 레거시: 중립 Track B 완전 차단 토글이 켜져 있으면 B=0
+    if _settings_bool_sel(s, "breadth_neutral_block_track_b", False):
+        slots_b = 0
+    pri = _normalize_breadth_sig_priority(
+        s.get("breadth_neutral_sig_priority", "confluence"), "confluence"
+    )
+    return {
+        "regime": "NEUTRAL",
+        "slots_a": slots_a,
+        "slots_b": slots_b,
+        "block_all": False,
+        "sig_priority": pri,
+    }
+
+
 def classify_breadth_regime(breadth: Dict[str, float], settings: dict) -> str:
     """
     브레드스(MA20 위 종목 비율)로 시장 레짐을 분류한다.
@@ -1102,14 +1202,15 @@ def _apply_breadth_gate_to_df(
     """
     실시간 선정 결과(df_result)에 시장 레짐 게이트를 적용한다.
 
-    - DOWN: 빈 DataFrame 반환(그날 신규 감시 없음).
-    - NEUTRAL: (옵션) Track B(순수 돌파) 제거 + 슬롯 축소.
-    - UP: 원본 그대로.
+    - DOWN: 빈 DataFrame (신규 감시 없음).
+    - UP / NEUTRAL: resolve_breadth_regime_policy 슬롯으로 Track A/B 재상한.
+      (레거시 breadth_neutral_block_track_b 는 policy 쪽에서 B=0 처리)
     """
     try:
         if df_result is None or df_result.empty:
             return df_result
-        if regime == "DOWN":
+        policy = resolve_breadth_regime_policy(regime, settings)
+        if policy.get("block_all"):
             try:
                 logger_callback(
                     "[Breadth] 시장 레짐 DOWN — 신규 감시목록을 비웁니다(약세장 진입 차단)."
@@ -1118,47 +1219,65 @@ def _apply_breadth_gate_to_df(
                 pass
             return df_result.iloc[:0].copy()
 
-        if regime == "NEUTRAL":
-            out = df_result.copy()
-            if _settings_bool_sel(settings, "breadth_neutral_block_track_b", True):
-                if "SelTrack" in out.columns:
-                    track = out["SelTrack"].astype(str).str.upper().str.strip()
-                    before = len(out)
-                    out = out[track != "B"].copy()
-                    dropped = before - len(out)
-                    if dropped > 0:
-                        try:
-                            logger_callback(
-                                f"[Breadth] NEUTRAL — Track B(순수 돌파) {dropped}종 제외."
-                            )
-                        except Exception:
-                            pass
+        slots_a = int(policy.get("slots_a", 0) or 0)
+        slots_b = int(policy.get("slots_b", 0) or 0)
+        out = df_result.copy()
+        if "SelTrack" not in out.columns:
+            cap = max(slots_a + slots_b, 1)
+            sort_col = "Score" if "Score" in out.columns else None
+            if sort_col is not None and len(out) > cap:
+                out = out.sort_values(by=sort_col, ascending=False).head(cap).copy()
             try:
-                scale = float(settings.get("breadth_neutral_slot_scale", 0.5))
-            except (TypeError, ValueError):
-                scale = 0.5
-            scale = min(max(scale, 0.0), 1.0)
-            if scale < 1.0 and not out.empty:
-                cap = max(1, int(round(len(out) * scale)))
-                if len(out) > cap:
-                    sort_col = "Score" if "Score" in out.columns else None
-                    if sort_col is not None:
-                        out = out.sort_values(by=sort_col, ascending=False)
-                    out = out.head(cap).copy()
-                    try:
-                        logger_callback(
-                            f"[Breadth] NEUTRAL — 슬롯 축소(×{scale:g}) → {len(out)}종."
-                        )
-                    except Exception:
-                        pass
+                logger_callback(
+                    f"[Breadth] {policy['regime']} — 슬롯 A={slots_a}/B={slots_b} "
+                    f"(SelTrack 없음, 합산 상한 {cap}) → {len(out)}종"
+                )
+            except Exception:
+                pass
             return out
-        return df_result
+
+        track = out["SelTrack"].astype(str).str.upper().str.strip()
+        a_mask = track.isin(["A", "AB"])
+        b_mask = track.isin(["B", "AB"])
+        sort_col = "Score" if "Score" in out.columns else None
+
+        def _top(mask: pd.Series, n: int) -> pd.DataFrame:
+            if n <= 0:
+                return out.iloc[:0].copy()
+            sub = out.loc[mask]
+            if sub.empty:
+                return sub
+            if sort_col is not None:
+                sub = sub.sort_values(by=sort_col, ascending=False)
+            return sub.head(n).copy()
+
+        part_a = _top(a_mask, slots_a)
+        part_b = _top(b_mask, slots_b)
+        if part_a.empty and part_b.empty:
+            capped = out.iloc[:0].copy()
+        else:
+            capped = pd.concat([part_a, part_b], axis=0)
+            if "Code" in capped.columns:
+                capped = capped.drop_duplicates(subset=["Code"], keep="first")
+            else:
+                capped = capped[~capped.index.duplicated(keep="first")]
+
+        try:
+            logger_callback(
+                f"[Breadth] {policy['regime']} — 슬롯 A={slots_a}/B={slots_b}, "
+                f"신호우선={policy.get('sig_priority')} → {len(capped)}종 "
+                f"(적용 전 {len(out)}종)"
+            )
+        except Exception:
+            pass
+        return capped
     except Exception as e:
         try:
             logger_callback(f"⚠️ [Breadth] 게이트 적용 실패(원본 유지): {e}")
         except Exception:
             pass
         return df_result
+
 
 
 def select_monitoring_targets(
@@ -1750,11 +1869,45 @@ def select_monitoring_targets(
         f"수렴: {stats['trend']}, RSI: {stats['rsi']}, 분출: {stats['vol']}"
     )
 
-    merged_rows = _merge_dual_track_picks(selected, settings, logger_callback)
+    # [Breadth] 레짐별 슬롯·동시신호 우선순위 적용
+    merge_max_a = None
+    merge_max_b = None
+    if breadth_gate_on:
+        try:
+            _pol = resolve_breadth_regime_policy(breadth_regime, settings)
+            settings["breadth_runtime_regime"] = str(_pol.get("regime", breadth_regime))
+            settings["breadth_runtime_sig_priority"] = str(_pol.get("sig_priority", "confluence"))
+            if _pol.get("block_all"):
+                merge_max_a, merge_max_b = 0, 0
+            else:
+                merge_max_a = int(_pol.get("slots_a", 0) or 0)
+                merge_max_b = int(_pol.get("slots_b", 0) or 0)
+            logger_callback(
+                f"[Breadth] 정책 {_pol.get('regime')}: 슬롯 A={merge_max_a}/B={merge_max_b}, "
+                f"신호우선={_pol.get('sig_priority')}"
+            )
+        except Exception as e:
+            try:
+                logger_callback(f"⚠️ [Breadth] 레짐 정책 적용 실패(기본 슬롯): {e}")
+            except Exception:
+                pass
+            settings.pop("breadth_runtime_sig_priority", None)
+            settings.pop("breadth_runtime_regime", None)
+    else:
+        settings.pop("breadth_runtime_sig_priority", None)
+        settings.pop("breadth_runtime_regime", None)
+
+    merged_rows = _merge_dual_track_picks(
+        selected,
+        settings,
+        logger_callback,
+        max_a=merge_max_a,
+        max_b=merge_max_b,
+    )
     df_result = pd.DataFrame(merged_rows)
 
-    # [Breadth] 시장 레짐 게이트 — 약세장(DOWN) 진입 차단, 중립(NEUTRAL) 시 Track B 제외·슬롯 축소
-    if breadth_gate_on and breadth_regime in ("DOWN", "NEUTRAL"):
+    # DOWN 등 block_all 이거나 슬롯 재검증이 필요할 때 게이트 재적용
+    if breadth_gate_on and breadth_regime == "DOWN":
         df_result = _apply_breadth_gate_to_df(
             df_result, breadth_regime, settings, logger_callback
         )
@@ -2330,23 +2483,20 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
 
-    # [Breadth] 백테스트 대칭: 일별 시장 레짐 게이트 (실시간 select_monitoring_targets 와 동일 규칙)
+    # [Breadth] 백테스트 대칭: 일별 시장 레짐 게이트 (실시간 select 와 동일 정책)
     breadth_gate_on = _settings_bool_sel(settings, "use_market_breadth_gate", True)
-    block_b_on_neutral = _settings_bool_sel(settings, "breadth_neutral_block_track_b", True)
-    try:
-        neutral_scale = min(max(float(settings.get("breadth_neutral_slot_scale", 0.5)), 0.0), 1.0)
-    except (TypeError, ValueError):
-        neutral_scale = 0.5
     breadth_down_days = 0
     breadth_neutral_days = 0
-    
+    breadth_up_days = 0
+    regime_by_day: Dict[str, str] = {}
+
     for d_str in trading_days_list:
         if duration_days < 180:
-            universe = all_codes 
+            universe = all_codes
         else:
             universe = get_monthly_universe(pd.to_datetime(d_str))
-        
-        day_mask = (df_sim['time'] == pd.to_datetime(d_str)) & (df_sim['code'].isin(universe))
+
+        day_mask = (df_sim["time"] == pd.to_datetime(d_str)) & (df_sim["code"].isin(universe))
 
         # [Breadth] 당일 유니버스 전체(Valid 이전) 기준 시장 레짐 판정
         regime = "UP"
@@ -2358,21 +2508,25 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 )
             except Exception:
                 regime = "UP"
+            regime_by_day[d_str] = regime
             if regime == "DOWN":
-                # 약세장: 그날 신규 감시 없음 (schedule 미기록)
                 breadth_down_days += 1
                 continue
             if regime == "NEUTRAL":
                 breadth_neutral_days += 1
+            else:
+                breadth_up_days += 1
+            policy = resolve_breadth_regime_policy(regime, settings)
+            day_max_a = int(policy.get("slots_a", max_s_a) or 0)
+            day_max_b = int(policy.get("slots_b", max_s_b) or 0)
+        else:
+            regime_by_day[d_str] = "UP"
+            day_max_a = max_s_a
+            day_max_b = max_s_b
 
-        # 중립장 슬롯 축소 (Track A 상한만; Track B 는 아래에서 별도 차단)
-        day_max_a = max_s_a
-        if breadth_gate_on and regime == "NEUTRAL" and neutral_scale < 1.0:
-            day_max_a = max(1, int(round(max_s_a * neutral_scale)))
-        
         # Track A 스케줄
-        day_a = df_sim[day_mask & df_sim['Valid_A']]
-        if not day_a.empty:
+        day_a = df_sim[day_mask & df_sim["Valid_A"]]
+        if not day_a.empty and day_max_a > 0:
             schedule_a[d_str] = (
                 _df_top_by_score_slot_band(
                     day_a,
@@ -2385,31 +2539,30 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 .tolist()
             )
 
-        # Track B 스케줄 (중립장 + block_track_b 이면 생략)
-        skip_b = breadth_gate_on and regime == "NEUTRAL" and block_b_on_neutral
-        day_b = df_sim[day_mask & df_sim['Valid_B']] if not skip_b else df_sim.iloc[:0]
-        if not day_b.empty:
+        # Track B 스케줄 (NEUTRAL에서도 동등 슬롯 허용 — block은 policy.slots_b=0 일 때만)
+        day_b = df_sim[day_mask & df_sim["Valid_B"]]
+        if not day_b.empty and day_max_b > 0:
             schedule_b[d_str] = (
                 _df_top_by_score_slot_band(
                     day_b,
                     score_col="Score_B",
                     code_col="code",
-                    max_n=max_s_b,
+                    max_n=day_max_b,
                     settings=settings,
                     min_score_floor=floor_sb,
                 )["code"]
                 .tolist()
             )
-        
-        # 기존 호환 스케줄 (합집합, 중복 제거 — 일별로 이미 A/B 각각 상한 적용됨)
+
         combined = list(dict.fromkeys(schedule_a.get(d_str, []) + schedule_b.get(d_str, [])))
         if combined:
             schedule[d_str] = combined
 
-    if breadth_gate_on and (breadth_down_days or breadth_neutral_days):
+    if breadth_gate_on and (breadth_down_days or breadth_neutral_days or breadth_up_days):
         logger_callback(
-            f"  [Breadth] 시장 레짐 게이트: DOWN {breadth_down_days}일(감시 스킵), "
-            f"NEUTRAL {breadth_neutral_days}일(Track B 제외·슬롯 축소)"
+            f"  [Breadth] 레짐 게이트: DOWN {breadth_down_days}일(감시 스킵), "
+            f"NEUTRAL {breadth_neutral_days}일(A/B 동등 슬롯), "
+            f"UP {breadth_up_days}일(B 비중 확대)"
         )
 
     a_days = len(schedule_a)
@@ -2418,7 +2571,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         logger_callback("  [Warning] 조건에 맞는 종목이 한 건도 추출되지 않았습니다. 필터 설정을 확인하세요.")
     else:
         logger_callback(f"[Batch] 완료. Track A: {a_days}일, Track B: {b_days}일, 합산: {len(schedule)}일")
-    return schedule, schedule_a, schedule_b
+    return schedule, schedule_a, schedule_b, regime_by_day
 
 
 def diagnose_dynamic_universe_selection_by_trading_day(

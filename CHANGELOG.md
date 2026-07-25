@@ -13,6 +13,15 @@
 
 ---
 
+## 0.10.0 (2026-07-26)
+
+ATR_SL 재진입 쿨다운·브레드스 레짐 슬롯·전략 디폴트 동기화.
+
+- **`atr_sl_reentry_cooldown_days`(기본 3)**: ATR_SL 청산 후 동일 종목 S1 신규매수를 N일(달력일) 차단. 동적 백테·실시간 `SignalEngine`·설정 탭 「⑥ 청산」에 반영.
+- **ATR_SL 진입 유예**: `atr_sl_entry_grace_hours` / `atr_sl_entry_grace_mult` / `atr_sl_entry_grace_same_day` — 진입 직후 조기 ATR_SL 완화(`backtest_engine.evaluate_position`).
+- **브레드스 레짐 정책**: UP/NEUTRAL별 A·B 슬롯·신호 우선순위(`prefer_b`/`confluence`), DOWN 차단. `strategy_selector.resolve_breadth_regime_policy` → 실시간 선정·`prepare_dynamic_universe`·동적 백테 `same_bar` 연동. 설정 UI 확장.
+- **디폴트**: 현재 `settings.json`(Type B·A SL×2.8·TP 6%·브레드스 OFF·재진입 3일 등)을 `core/defaults.py`에 동기화.
+
 ## 0.9.6 (2026-07-24)
 
 고정밀(RT정합 OFF) S1: 15분 Signal은 속도 게이트만, 매수는 close-now.

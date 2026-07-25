@@ -37,7 +37,7 @@ from strategy.synthetic_realtime_fill import (
     synthesize_bid_ask_ratio_vectorized,
     synthesize_vol_power_vectorized,
 )
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 def _dual_track_new_candidates(
@@ -152,6 +152,10 @@ class DynamicBacktester:
         # 백테스트 첫 day(start_date)가 단일(예: start_date==end_date)인 경우에도
         # ref_day(선정 기준일)를 항상 "직전 영업일"로 맞추기 위한 값
         self._bt_ref_day_for_first: Optional[str] = None
+        # prepare_dynamic_universe 4번째 반환값 — 일별 브레드스 레짐
+        self.breadth_regime_by_day: dict[str, str] = {}
+        # ATR_SL 청산 후 동일종목 S1 재진입 금지 만료일(일자 normalize)
+        self._atr_sl_reentry_until: Dict[str, pd.Timestamp] = {}
 
     def _cache_run_hot_settings(self) -> None:
         """run / 진단 공통: 루프에서 자주 읽는 설정·임계값 캐시"""
@@ -182,6 +186,41 @@ class DynamicBacktester:
         )
         self.use_type_b = s.get('use_type_b', False)
         self.gap_down_lmt = float(s.get("gap_down_limit_a", s.get("gap_down_limit", -5.0)))
+        try:
+            self.atr_sl_reentry_cooldown_days = max(
+                0, int(float(s.get("atr_sl_reentry_cooldown_days", 0) or 0))
+            )
+        except (TypeError, ValueError):
+            self.atr_sl_reentry_cooldown_days = 0
+
+    def _s1_blocked_by_atr_sl_cooldown(self, code: str, curr_time: Any) -> bool:
+        """ATR_SL 이후 설정 일수 동안 동일 종목 S1 신규 진입 차단."""
+        try:
+            if int(getattr(self, "atr_sl_reentry_cooldown_days", 0) or 0) <= 0:
+                return False
+            until = (getattr(self, "_atr_sl_reentry_until", None) or {}).get(code)
+            if until is None:
+                return False
+            cur_d = pd.to_datetime(curr_time).normalize()
+            return bool(cur_d <= pd.to_datetime(until).normalize())
+        except Exception:
+            return False
+
+    def _note_atr_sl_exit_for_reentry_cooldown(self, code: str, curr_time: Any, reason: Any) -> None:
+        """ATR_SL 청산 시 재진입 쿨다운 만료일을 기록."""
+        try:
+            days = int(getattr(self, "atr_sl_reentry_cooldown_days", 0) or 0)
+            if days <= 0:
+                return
+            rs = str(reason or "").upper()
+            if "ATR_SL" not in rs:
+                return
+            exit_d = pd.to_datetime(curr_time).normalize()
+            if not hasattr(self, "_atr_sl_reentry_until") or self._atr_sl_reentry_until is None:
+                self._atr_sl_reentry_until = {}
+            self._atr_sl_reentry_until[str(code).zfill(6)] = exit_d + pd.Timedelta(days=int(days))
+        except Exception:
+            pass
     def _effective_s1_sig_type_for_buy(self, row: Any) -> str:
         """15분 행·1분 indicator dict 등에서 Sig_Type 확정(동시신호+보유 A/B 동점 시 B 우선)."""
         return TradingStrategy.effective_s1_sig_type_for_buy(self.settings, row, self.holdings)
@@ -238,12 +277,19 @@ class DynamicBacktester:
         _result = strategy_selector.prepare_dynamic_universe(
             self.settings, sched_start, end_date, self.db, callback if callback else print
         )
-        if isinstance(_result, tuple) and len(_result) == 3:
-            universe_schedule, self.schedule_a, self.schedule_b = _result
+        if isinstance(_result, tuple) and len(_result) >= 3:
+            universe_schedule = _result[0]
+            self.schedule_a = _result[1]
+            self.schedule_b = _result[2]
+            try:
+                self.breadth_regime_by_day = dict(_result[3]) if len(_result) >= 4 else {}
+            except Exception:
+                self.breadth_regime_by_day = {}
         else:
             universe_schedule = _result
             self.schedule_a = universe_schedule
             self.schedule_b = {}
+            self.breadth_regime_by_day = {}
         t_duration = time.time() - t_start
         msg = f"사전 계산 완료 ({t_duration:.2f}초)"
         print(f"[Done] {msg}")
@@ -374,6 +420,10 @@ class DynamicBacktester:
         self.end_date = end_date
         
         self._cache_run_hot_settings()
+        try:
+            self._atr_sl_reentry_until = {}
+        except Exception:
+            self._atr_sl_reentry_until = {}
         idx_choice = self.settings.get("universe_index_choice", "KODEX200")
         self.stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         
@@ -421,6 +471,30 @@ class DynamicBacktester:
             top_codes_a = self.schedule_a.get(ref_day, [])
             top_codes_b = self.schedule_b.get(ref_day, [])
             top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
+
+            # [Breadth] 당일(또는 선정 기준일) 레짐 → 동시신호 우선순위 런타임 반영
+            try:
+                if bool(self.settings.get("use_market_breadth_gate", False)):
+                    _reg_map = getattr(self, "breadth_regime_by_day", None) or {}
+                    _reg = str(
+                        _reg_map.get(current_day)
+                        or _reg_map.get(ref_day)
+                        or "UP"
+                    )
+                    _pol = strategy_selector.resolve_breadth_regime_policy(
+                        _reg, self.settings
+                    )
+                    self.settings["breadth_runtime_regime"] = str(
+                        _pol.get("regime", _reg)
+                    )
+                    self.settings["breadth_runtime_sig_priority"] = str(
+                        _pol.get("sig_priority", "confluence")
+                    )
+                else:
+                    self.settings.pop("breadth_runtime_sig_priority", None)
+                    self.settings.pop("breadth_runtime_regime", None)
+            except Exception:
+                pass
 
             # Track A/B 소속 맵 (매수 시 sig_type 검증용, 1분봉 정밀 모드에서도 사용)
             track_map: dict[str, str] = {}
@@ -781,6 +855,12 @@ class DynamicBacktester:
 
         if h_info is None:
             sig_type = str(sig_res.get("Sig_Type", "TYPE_A"))
+            # ATR_SL 재진입 쿨다운
+            try:
+                if self._s1_blocked_by_atr_sl_cooldown(str(code).zfill(6), curr_time):
+                    return False
+            except Exception:
+                pass
             if self.cash < s1_amt * 0.5:
                 return False
             target_amt = s1_amt
@@ -870,6 +950,10 @@ class DynamicBacktester:
             'Reason': reason, 'Return': ret, 'Cash': self.cash, 'Sig_Type': sig_type
         })
         self._log_trade_to_csv(curr_time, code, action, price, sell_qty, reason, ret=ret, fee=fee, sig_type=sig_type)
+        try:
+            self._note_atr_sl_exit_for_reentry_cooldown(str(code).zfill(6), curr_time, reason)
+        except Exception:
+            pass
 
     def _log_trade_to_csv(self, dt, code, action, price, qty, reason, ret=0, fee=0, sig_type=None):
         """매매 한 건을 메모리 버퍼에 적재. 일 단위로 flush_trade_csv_buffer 호출됨."""

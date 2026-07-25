@@ -157,7 +157,7 @@ def main() -> None:
     try:
         sch_union, sch_a, sch_b = strategy_selector.prepare_dynamic_universe(
             settings, bt_start, bt_end, dm, _noop_log
-        )
+        )[:3]
     except Exception as e:
         print(f"  prepare_dynamic_universe 실패: {e}")
         sch_union, sch_a, sch_b = {}, {}, {}

@@ -1527,6 +1527,14 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "ATR 트레일: 목표 익절% 이후만 (B-S2) — 토글",
         "use_atr_trail_only_after_tp_s2_b",
     ),
+    SettingUiRow(
+        7580,
+        "⑦ 청산 · 리스크 (A/B)",
+        "ATR_SL 재진입 쿨다운 (A/B 공통)",
+        "공통",
+        "ATR_SL 후 재진입 금지 — 일수",
+        "atr_sl_reentry_cooldown_days",
+    ),
 )
 
 
