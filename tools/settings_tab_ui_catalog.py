@@ -1535,6 +1535,22 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "ATR_SL 후 재진입 금지 — 일수",
         "atr_sl_reentry_cooldown_days",
     ),
+    SettingUiRow(
+        7582,
+        "⑦ 청산 · 리스크 (A/B)",
+        "ATR_SL 재진입 쿨다운 (A/B 공통)",
+        "공통",
+        "연속 SL 조회 기간 — 일수",
+        "atr_sl_streak_lookback_days",
+    ),
+    SettingUiRow(
+        7584,
+        "⑦ 청산 · 리스크 (A/B)",
+        "ATR_SL 재진입 쿨다운 (A/B 공통)",
+        "공통",
+        "연속 SL 시 재진입 금지 — 일수",
+        "atr_sl_streak_cooldown_days",
+    ),
 )
 
 

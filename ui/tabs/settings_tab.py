@@ -462,6 +462,36 @@ class SettingsTab:
         add_header(cap_f, '포지션 사이징 (배분 방식)')
         add_sizing_row(cap_f, '1단계(정찰) 비중', 'stage1_amt', 's1_equity_pct', 's1_sizing_unit')
         add_sizing_row(cap_f, '2단계(본대) 비중', 'stage2_amt', 's2_equity_pct', 's2_sizing_unit')
+        add_header(cap_f, 'DD 연동 리스크 (백테·방어용)')
+        add_param_row(
+            cap_f,
+            '고점 대비 낙폭 시 비중 축소',
+            None,
+            '',
+            'ON이면 자산이 고점 대비 임계% 이상 하락했을 때 신규/추매 금액·(선택)슬롯 축소',
+            toggle_key='use_dd_sizing',
+        )
+        add_param_row(
+            cap_f,
+            'DD 발동 임계',
+            'dd_sizing_trigger_pct',
+            '%',
+            '고점 대비 낙폭이 이 값 이상이면 축소 적용(예: 10)',
+        )
+        add_param_row(
+            cap_f,
+            'DD 시 금액 배율',
+            'dd_sizing_scale',
+            '배',
+            '0.5=절반 비중. 1.0에 가까울수록 축소 약함',
+        )
+        add_param_row(
+            cap_f,
+            'DD 시 슬롯 배율',
+            'dd_slots_scale',
+            '배',
+            '1.0=슬롯 유지. 0.6이면 Track A/B 감시 슬롯 축소',
+        )
         add_header(cap_f, '거래 수수료 요율 (체결금액 대비 %)')
         add_param_row(
             cap_f,
@@ -1656,6 +1686,20 @@ class SettingsTab:
             '일',
             '0=비활성. ATR_SL 청산 후 동일 종목 S1 신규매수를 N일(달력일) 동안 차단. 권장 3',
         )
+        add_param_row(
+            exit_cd_f,
+            '연속 SL 조회 기간',
+            'atr_sl_streak_lookback_days',
+            '일',
+            '이 기간 안 ATR_SL 횟수를 세어 연속 손절 판정(기본 10)',
+        )
+        add_param_row(
+            exit_cd_f,
+            '연속 SL 시 재진입 금지',
+            'atr_sl_streak_cooldown_days',
+            '일',
+            '0=비활성. 조회기간 내 ATR_SL 2회 이상이면 기본 N일 대신 이 일수로 연장(권장 5~7)',
+        )
 
         # 초기 표시: 첫 번째 사이드바 항목
         _show_settings_section('fund')
@@ -1750,6 +1794,8 @@ class SettingsTab:
                     'breadth_up_slots_a', 'breadth_up_slots_b',
                     'breadth_neutral_slots_a', 'breadth_neutral_slots_b',
                     'atr_sl_reentry_cooldown_days',
+                    'atr_sl_streak_lookback_days',
+                    'atr_sl_streak_cooldown_days',
                     'atr_period', 'atr_period_a', 'atr_period_b',
                     'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
                     'gc_window', 'rsi_window',

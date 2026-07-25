@@ -40,6 +40,8 @@ class SignalEngine:
         self.last_buy_sig_time = {} # [v1.0] 중복 시그널 방지용 쿨타임 관리
         # ATR_SL 청산 후 동일종목 S1 재진입 금지 만료(일자 normalize)
         self._atr_sl_reentry_until: Dict[str, datetime] = {}
+        # 종목별 ATR_SL 청산일(연속 손절 쿨다운 판정용)
+        self._atr_sl_exit_dates: Dict[str, list] = {}
         self._wl_buy_last_tm = {}
         self._wl_sell_last_tm = {}
         # monitor_info 누락 코드가 틱에서 들어올 때 스킵되는 상황 확인용(과도 로그 방지: 최대 N개만)
@@ -165,29 +167,70 @@ class SignalEngine:
         except (TypeError, ValueError):
             return 0
 
-    def _note_atr_sl_exit_for_reentry_cooldown(self, code: str, reason: Any = None) -> None:
-        """ATR_SL 청산 시 재진입 쿨다운 만료일 기록(실시간)."""
+    def _atr_sl_streak_params(self) -> tuple[int, int, int]:
+        """연속 ATR_SL 쿨다운: (lookback_days, streak_cooldown_days, min_count)."""
+        st = getattr(self.app, "settings", None) or {}
         try:
-            days = self._atr_sl_reentry_cooldown_days()
-            if days <= 0:
+            lookback = max(1, int(float(st.get("atr_sl_streak_lookback_days", 10) or 10)))
+        except (TypeError, ValueError):
+            lookback = 10
+        try:
+            streak = max(0, int(float(st.get("atr_sl_streak_cooldown_days", 0) or 0)))
+        except (TypeError, ValueError):
+            streak = 0
+        try:
+            min_count = max(2, int(float(st.get("atr_sl_streak_min_count", 2) or 2)))
+        except (TypeError, ValueError):
+            min_count = 2
+        return lookback, streak, min_count
+
+    def _note_atr_sl_exit_for_reentry_cooldown(self, code: str, reason: Any = None) -> None:
+        """ATR_SL 청산 시 재진입 쿨다운 만료일 기록(실시간, 연속 손절 시 연장)."""
+        try:
+            base_days = self._atr_sl_reentry_cooldown_days()
+            if base_days <= 0:
                 return
             rs = str(reason or "").upper()
             if "ATR_SL" not in rs:
                 return
             nk = str(canonical_stock_code(code) or code).zfill(6)
-            until = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            until = until + timedelta(days=int(days))
+            exit_d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            lookback, streak_days, min_count = self._atr_sl_streak_params()
+
+            if not hasattr(self, "_atr_sl_exit_dates") or self._atr_sl_exit_dates is None:
+                self._atr_sl_exit_dates = {}
+            hist = list(self._atr_sl_exit_dates.get(nk) or [])
+            hist.append(exit_d)
+            cutoff = exit_d - timedelta(days=int(lookback))
+            hist = [d for d in hist if isinstance(d, datetime) and d >= cutoff]
+            self._atr_sl_exit_dates[nk] = hist
+
+            days = int(base_days)
+            if streak_days > base_days and len(hist) >= min_count:
+                days = int(streak_days)
+
+            new_until = exit_d + timedelta(days=int(days))
             if not hasattr(self, "_atr_sl_reentry_until") or self._atr_sl_reentry_until is None:
                 self._atr_sl_reentry_until = {}
-            self._atr_sl_reentry_until[nk] = until
+            prev = self._atr_sl_reentry_until.get(nk)
+            if prev is not None:
+                try:
+                    p = prev
+                    if hasattr(p, "to_pydatetime"):
+                        p = p.to_pydatetime()
+                    if hasattr(p, "replace"):
+                        p = p.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if p > new_until:
+                        return
+                except Exception:
+                    pass
+            self._atr_sl_reentry_until[nk] = new_until
         except Exception:
             pass
 
     def _s1_blocked_by_atr_sl_reentry(self, code: str) -> bool:
         """ATR_SL 재진입 쿨다운 중이면 True."""
         try:
-            if self._atr_sl_reentry_cooldown_days() <= 0:
-                return False
             nk = str(canonical_stock_code(code) or code).zfill(6)
             until = (getattr(self, "_atr_sl_reentry_until", None) or {}).get(nk)
             if until is None:

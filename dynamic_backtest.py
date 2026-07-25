@@ -156,6 +156,10 @@ class DynamicBacktester:
         self.breadth_regime_by_day: dict[str, str] = {}
         # ATR_SL 청산 후 동일종목 S1 재진입 금지 만료일(일자 normalize)
         self._atr_sl_reentry_until: Dict[str, pd.Timestamp] = {}
+        # 종목별 ATR_SL 청산일(연속 손절 쿨다운 판정용)
+        self._atr_sl_exit_dates: Dict[str, List[pd.Timestamp]] = {}
+        # DD 연동 사이징용 고점 자산
+        self._equity_peak: float = 0.0
 
     def _cache_run_hot_settings(self) -> None:
         """run / 진단 공통: 루프에서 자주 읽는 설정·임계값 캐시"""
@@ -192,12 +196,47 @@ class DynamicBacktester:
             )
         except (TypeError, ValueError):
             self.atr_sl_reentry_cooldown_days = 0
+        try:
+            self.atr_sl_streak_lookback_days = max(
+                1, int(float(s.get("atr_sl_streak_lookback_days", 10) or 10))
+            )
+        except (TypeError, ValueError):
+            self.atr_sl_streak_lookback_days = 10
+        try:
+            self.atr_sl_streak_cooldown_days = max(
+                0, int(float(s.get("atr_sl_streak_cooldown_days", 0) or 0))
+            )
+        except (TypeError, ValueError):
+            self.atr_sl_streak_cooldown_days = 0
+        try:
+            self.atr_sl_streak_min_count = max(
+                2, int(float(s.get("atr_sl_streak_min_count", 2) or 2))
+            )
+        except (TypeError, ValueError):
+            self.atr_sl_streak_min_count = 2
+        # DD(고점 대비 낙폭) 시 신규 매수 비중 축소
+        try:
+            self.use_dd_sizing = bool(s.get("use_dd_sizing", False))
+        except Exception:
+            self.use_dd_sizing = False
+        try:
+            self.dd_sizing_trigger_pct = abs(float(s.get("dd_sizing_trigger_pct", 10.0) or 10.0))
+        except (TypeError, ValueError):
+            self.dd_sizing_trigger_pct = 10.0
+        try:
+            self.dd_sizing_scale = float(s.get("dd_sizing_scale", 0.5) or 0.5)
+            self.dd_sizing_scale = max(0.05, min(1.0, self.dd_sizing_scale))
+        except (TypeError, ValueError):
+            self.dd_sizing_scale = 0.5
+        try:
+            self.dd_slots_scale = float(s.get("dd_slots_scale", 1.0) or 1.0)
+            self.dd_slots_scale = max(0.1, min(1.0, self.dd_slots_scale))
+        except (TypeError, ValueError):
+            self.dd_slots_scale = 1.0
 
     def _s1_blocked_by_atr_sl_cooldown(self, code: str, curr_time: Any) -> bool:
         """ATR_SL 이후 설정 일수 동안 동일 종목 S1 신규 진입 차단."""
         try:
-            if int(getattr(self, "atr_sl_reentry_cooldown_days", 0) or 0) <= 0:
-                return False
             until = (getattr(self, "_atr_sl_reentry_until", None) or {}).get(code)
             if until is None:
                 return False
@@ -207,20 +246,109 @@ class DynamicBacktester:
             return False
 
     def _note_atr_sl_exit_for_reentry_cooldown(self, code: str, curr_time: Any, reason: Any) -> None:
-        """ATR_SL 청산 시 재진입 쿨다운 만료일을 기록."""
+        """ATR_SL 청산 시 재진입 쿨다운 만료일을 기록(연속 손절 시 연장 가능)."""
         try:
-            days = int(getattr(self, "atr_sl_reentry_cooldown_days", 0) or 0)
-            if days <= 0:
+            base_days = int(getattr(self, "atr_sl_reentry_cooldown_days", 0) or 0)
+            if base_days <= 0:
                 return
             rs = str(reason or "").upper()
             if "ATR_SL" not in rs:
                 return
+            nk = str(code).zfill(6)
             exit_d = pd.to_datetime(curr_time).normalize()
+            lookback = int(getattr(self, "atr_sl_streak_lookback_days", 10) or 10)
+            streak_days = int(getattr(self, "atr_sl_streak_cooldown_days", 0) or 0)
+            min_count = int(getattr(self, "atr_sl_streak_min_count", 2) or 2)
+
+            if not hasattr(self, "_atr_sl_exit_dates") or self._atr_sl_exit_dates is None:
+                self._atr_sl_exit_dates = {}
+            hist = list(self._atr_sl_exit_dates.get(nk) or [])
+            hist.append(exit_d)
+            cutoff = exit_d - pd.Timedelta(days=int(lookback))
+            hist = [pd.to_datetime(d).normalize() for d in hist if pd.to_datetime(d).normalize() >= cutoff]
+            self._atr_sl_exit_dates[nk] = hist
+
+            days = int(base_days)
+            if streak_days > base_days and len(hist) >= min_count:
+                days = int(streak_days)
+
+            new_until = exit_d + pd.Timedelta(days=int(days))
             if not hasattr(self, "_atr_sl_reentry_until") or self._atr_sl_reentry_until is None:
                 self._atr_sl_reentry_until = {}
-            self._atr_sl_reentry_until[str(code).zfill(6)] = exit_d + pd.Timedelta(days=int(days))
+            prev = self._atr_sl_reentry_until.get(nk)
+            if prev is not None and pd.to_datetime(prev).normalize() > new_until:
+                return
+            self._atr_sl_reentry_until[nk] = new_until
         except Exception:
             pass
+
+    def _portfolio_equity_now(self) -> float:
+        """현금 + 보유평가(last_p 우선, 없으면 평단)."""
+        try:
+            holdings_value = 0.0
+            for _c, h in self.holdings.items():
+                try:
+                    px = float(h.get("last_p", h.get("avg_p", 0)) or 0)
+                    holdings_value += float(h.get("qty", 0) or 0) * px
+                except (TypeError, ValueError):
+                    continue
+            return float(self.cash) + float(holdings_value)
+        except Exception:
+            try:
+                return float(self.cash)
+            except Exception:
+                return 0.0
+
+    def _update_equity_peak(self, equity: Optional[float] = None) -> float:
+        """고점 자산 갱신 후 현재 자산 반환."""
+        try:
+            eq = float(self._portfolio_equity_now() if equity is None else equity)
+        except (TypeError, ValueError):
+            eq = 0.0
+        try:
+            peak = float(getattr(self, "_equity_peak", 0) or 0)
+            if eq > peak:
+                self._equity_peak = eq
+        except Exception:
+            self._equity_peak = eq
+        return eq
+
+    def _dd_risk_scale(self) -> float:
+        """
+        고점 대비 낙폭이 임계 이상이면 dd_sizing_scale, 아니면 1.0.
+        use_dd_sizing=False 이면 항상 1.0.
+        """
+        try:
+            if not bool(getattr(self, "use_dd_sizing", False)):
+                return 1.0
+            eq = self._update_equity_peak()
+            peak = float(getattr(self, "_equity_peak", 0) or 0)
+            if peak <= 0:
+                return 1.0
+            dd_pct = (peak - eq) / peak * 100.0
+            trig = float(getattr(self, "dd_sizing_trigger_pct", 10.0) or 10.0)
+            if dd_pct >= trig:
+                return float(getattr(self, "dd_sizing_scale", 0.5) or 0.5)
+            return 1.0
+        except Exception:
+            return 1.0
+
+    def _dd_effective_max_slots(self, max_sa: int, max_sb: int) -> tuple[int, int]:
+        """DD 중이면 감시 슬롯도 축소(dd_slots_scale<1일 때)."""
+        try:
+            if not bool(getattr(self, "use_dd_sizing", False)):
+                return int(max_sa), int(max_sb)
+            scale = float(getattr(self, "dd_slots_scale", 1.0) or 1.0)
+            if scale >= 0.999:
+                return int(max_sa), int(max_sb)
+            # 사이징과 동일 트리거일 때만 슬롯 축소
+            if self._dd_risk_scale() >= 0.999:
+                return int(max_sa), int(max_sb)
+            sa = max(1, int(round(int(max_sa) * scale)))
+            sb = max(1, int(round(int(max_sb) * scale)))
+            return sa, sb
+        except Exception:
+            return int(max_sa), int(max_sb)
     def _effective_s1_sig_type_for_buy(self, row: Any) -> str:
         """15분 행·1분 indicator dict 등에서 Sig_Type 확정(동시신호+보유 A/B 동점 시 B 우선)."""
         return TradingStrategy.effective_s1_sig_type_for_buy(self.settings, row, self.holdings)
@@ -422,8 +550,12 @@ class DynamicBacktester:
         self._cache_run_hot_settings()
         try:
             self._atr_sl_reentry_until = {}
+            self._atr_sl_exit_dates = {}
+            self._equity_peak = float(getattr(self, "initial_cash", 0) or 0)
         except Exception:
             self._atr_sl_reentry_until = {}
+            self._atr_sl_exit_dates = {}
+            self._equity_peak = 0.0
         idx_choice = self.settings.get("universe_index_choice", "KODEX200")
         self.stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         
@@ -530,6 +662,10 @@ class DynamicBacktester:
             # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보: Track A/B 각각 max_slots_a·max_slots_b)
             max_sa = int(self.settings.get("max_slots_a", 20))
             max_sb = int(self.settings.get("max_slots_b", 10))
+            try:
+                max_sa, max_sb = self._dd_effective_max_slots(max_sa, max_sb)
+            except Exception:
+                pass
             holdings_codes = list(self.holdings.keys())
             if top_codes_a or top_codes_b:
                 new_candidates = _dual_track_new_candidates(
@@ -754,6 +890,10 @@ class DynamicBacktester:
                     except (TypeError, ValueError, KeyError):
                         pass
             current_equity = self.cash + holdings_mv
+            try:
+                self._update_equity_peak(current_equity)
+            except Exception:
+                pass
             self.daily_equity.append({'date': current_day, 'equity': current_equity, 'cash': self.cash, 'holdings_n': len(self.holdings)})
             
             # [Perf] 매매 CSV 버퍼 일괄 flush (하루 단위로 디스크 I/O 감소)
@@ -852,6 +992,15 @@ class DynamicBacktester:
             if s2_unit == '%':
                 s2_pct = float(self.settings.get('s2_equity_pct', 20.0))
                 s2_amt = total_equity * (s2_pct / 100.0)
+
+        # DD 연동: 고점 대비 낙폭 시 신규/추매 금액 축소
+        try:
+            _dd_sc = float(self._dd_risk_scale())
+            if _dd_sc < 0.999:
+                s1_amt = float(s1_amt) * _dd_sc
+                s2_amt = float(s2_amt) * _dd_sc
+        except Exception:
+            pass
 
         if h_info is None:
             sig_type = str(sig_res.get("Sig_Type", "TYPE_A"))
