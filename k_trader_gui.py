@@ -582,6 +582,25 @@ class KiwoomApp:
                     self.log(f"⚠️ [RT15mDB] 확정봉 저장 실패: {ex}")
                 except Exception:
                     pass
+            # 로컬 15분 확정 → S1·S2·청산 즉시 평가(공식 REST 교체와 무관, 비동기)
+            try:
+                st = self.settings or {}
+                if bool(st.get("realtime_s1_eval_on_local_15m_close", True)):
+                    def _run_closed_15m_eval() -> None:
+                        try:
+                            se = getattr(self, "signal_engine", None)
+                            if se is not None:
+                                se.eval_on_completed_15m(code, ts)
+                        except Exception:
+                            pass
+
+                    threading.Thread(
+                        target=_run_closed_15m_eval,
+                        name=f"closed15m_{code}",
+                        daemon=True,
+                    ).start()
+            except Exception:
+                pass
             try:
                 sched = getattr(self, "rt_closed_15m_official_scheduler", None)
                 if sched is not None:

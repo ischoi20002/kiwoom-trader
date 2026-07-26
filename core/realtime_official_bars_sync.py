@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-실시간 **신호용** 15분봉: 틱으로 OHLCV를 쌓지 않고, 공식 1분(ka10080)만으로
-형성 중 마지막 15분 행을 갱신합니다. 15분 슬롯 전환은 벽시계 기준으로
-``bars_data`` 행을 추가하고 확정 콜백(전용 DB·공식 15분 덮어쓰기 스케줄)을 호출합니다.
+실시간 **신호용** 15분봉: 앞 구간은 공식 1분(ka10080), 슬롯 **마지막 1분**은
+틱 합성(``realtime_15m_last_minute_from_ticks``)으로 보완할 수 있습니다.
+15분 슬롯 전환은 벽시계 기준으로 ``bars_data`` 행을 추가하고 확정 콜백
+(전용 DB·공식 15분 덮어쓰기 스케줄)을 호출합니다.
 
 - 감시 트리·체결가 등 UI/주문용 틱 가격은 ``SignalEngine.on_tick_received`` 가 별도 처리합니다.
+- 슬롯 확정 콜백에서 ``SignalEngine.eval_s1_on_completed_15m`` 이 로컬 완성봉으로
+  S1을 즉시 평가할 수 있습니다(설정 ``realtime_s1_eval_on_local_15m_close``).
+  공식 15분 REST 교체는 위생용이며 신호 평가를 막지 않습니다.
 - 본 모듈은 ``_signal_skip_bar_update=True`` 로 신호 재평가만 트리거할 때 사용합니다.
 """
 
@@ -33,6 +37,122 @@ from utils.normalization import canonical_stock_code
 def stream_slot_end_datetime(now: datetime) -> pd.Timestamp:
     """KRX 장중 15분봉 종가 라벨(야간·장외 슬롯 생성 없음)."""
     return krx_stream_slot_end_datetime(now)
+
+
+def _last_minute_from_ticks_enabled(app: Any) -> bool:
+    try:
+        st = getattr(app, "settings", None) or {}
+        return bool(st.get("realtime_15m_last_minute_from_ticks", True))
+    except Exception:
+        return True
+
+
+def compose_local_15m_ohlcv(
+    app: Any, code: str, slot_end: Any
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """
+    로컬 15분 OHLCV 합성.
+
+    - 앞 14분: 공식 완료 1분(ka10080)
+    - 마지막 1분: 설정 ON 이면 틱 버킷 우선, 없으면 공식 1분 폴백
+    """
+    try:
+        nk = canonical_stock_code(str(code).strip())
+        if not nk:
+            return None
+        slot = pd.Timestamp(slot_end)
+        t0 = m1_window_start_for_15m_end(slot)
+        last_open = slot - pd.Timedelta(minutes=1)
+        m1s = getattr(app, "rt_tick_m1_store", None)
+        if m1s is None:
+            return None
+
+        use_tick = _last_minute_from_ticks_enabled(app)
+        tick_bar = None
+        if use_tick:
+            try:
+                tick_bar = m1s.tick_minute_ohlcv(nk, last_open)
+            except Exception:
+                tick_bar = None
+
+        # 앞 14분: open ∈ [t0, last_open)
+        head_hi = last_open - pd.Timedelta(minutes=1)
+        try:
+            if head_hi >= t0:
+                head = m1s.dataframe_for_window(
+                    nk, t0, head_hi, include_open_bucket=False
+                )
+            else:
+                head = None
+        except Exception:
+            head = None
+
+        opens: list[float] = []
+        highs: list[float] = []
+        lows: list[float] = []
+        closes: list[float] = []
+        vols: list[float] = []
+        if head is not None and not getattr(head, "empty", True):
+            try:
+                opens.extend([float(x) for x in head["Open"].tolist()])
+                highs.extend([float(x) for x in head["High"].tolist()])
+                lows.extend([float(x) for x in head["Low"].tolist()])
+                closes.extend([float(x) for x in head["Close"].tolist()])
+                vols.extend([float(x) for x in head["Volume"].tolist()])
+            except Exception:
+                pass
+
+        # 마지막 1분
+        if tick_bar is not None:
+            to, th, tl, tc, tv = tick_bar
+            opens.append(float(to))
+            highs.append(float(th))
+            lows.append(float(tl))
+            closes.append(float(tc))
+            vols.append(max(0.0, float(tv)))
+        else:
+            try:
+                tail = m1s.dataframe_for_window(
+                    nk, last_open, last_open, include_open_bucket=False
+                )
+                if tail is not None and not getattr(tail, "empty", True):
+                    opens.append(float(tail["Open"].iloc[-1]))
+                    highs.append(float(tail["High"].iloc[-1]))
+                    lows.append(float(tail["Low"].iloc[-1]))
+                    closes.append(float(tail["Close"].iloc[-1]))
+                    vols.append(max(0.0, float(tail["Volume"].iloc[-1])))
+            except Exception:
+                pass
+
+        if not closes:
+            # 폴백: 가능한 전체 공식 1분 구간
+            try:
+                full = m1s.dataframe_for_window(
+                    nk, t0, last_open, include_open_bucket=False
+                )
+                if full is None or getattr(full, "empty", True):
+                    return None
+                o = float(full["Open"].iloc[0])
+                h = float(full["High"].max())
+                l_ = float(full["Low"].min())
+                c = float(full["Close"].iloc[-1])
+                v = float(full["Volume"].sum())
+                if c <= 0:
+                    return None
+                return o, h, l_, c, max(0.0, v)
+            except Exception:
+                return None
+
+        o = float(opens[0])
+        h = float(max(highs)) if highs else o
+        l_ = float(min(x for x in lows if x > 0)) if any(x > 0 for x in lows) else o
+        c = float(closes[-1])
+        v = float(sum(max(0.0, x) for x in vols))
+        if c <= 0:
+            return None
+        return o, h, l_, c, v
+    except Exception:
+        return None
 
 
 def _on_bar_closed_safe(app: Any, code: str, ts: Any, o: float, h: float, l: float, c: float, v: float) -> None:
@@ -85,6 +205,20 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
                     v = float(df.at[last_ix, "Volume"])
                 except Exception:
                     o = h = l_ = c = v = 0.0
+                # 확정 직전: 앞14분 공식1분 + 마지막1분 틱 재합성
+                try:
+                    composed = compose_local_15m_ohlcv(app, use_key, last_ix)
+                    if composed is not None:
+                        o, h, l_, c, v = composed
+                        df.at[last_ix, "Open"] = o
+                        df.at[last_ix, "High"] = h
+                        df.at[last_ix, "Low"] = l_
+                        df.at[last_ix, "Close"] = c
+                        df.at[last_ix, "Volume"] = v
+                        bd[use_key] = df
+                        changed = True
+                except Exception:
+                    pass
                 # 장외·야간 등 비정상 인덱스는 공식 REST 대상이 아니므로 콜백 생략
                 if is_krx_15m_slot_end(last_ix):
                     try:
@@ -140,11 +274,10 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
 
 def sync_forming_15m_last_row_from_official_m1(app: Any, code: str) -> bool:
     """
-    ``RtTickM1Store`` 에 쌓인 **완료 공식 1분**만으로 현재 슬롯의 마지막 15분 행 OHLCV를 재작성합니다.
-    (진행 중 1분 버킷은 사용하지 않음)
+    현재 슬롯의 마지막 15분 행 OHLCV를 재작성합니다.
 
-    Returns:
-        마지막 행이 갱신되었으면 True.
+    - 기본: 공식 완료 1분 집계
+    - ``realtime_15m_last_minute_from_ticks`` ON 이면 마지막 1분은 틱 버킷 우선
     """
     nk = canonical_stock_code(str(code).strip())
     if not nk:
@@ -169,29 +302,35 @@ def sync_forming_15m_last_row_from_official_m1(app: Any, code: str) -> bool:
                 return False
             if last_ix != slot_end:
                 return False
-            t0 = m1_window_start_for_15m_end(slot_end)
-            try:
-                wall = datetime.now()
-                closed_open = m1_bar_open_label_for_just_completed_minute(wall)
-                t_hi = min(slot_end, closed_open + pd.Timedelta(minutes=1))
-            except Exception:
-                wall2 = datetime.now()
-                t_hi = min(slot_end, pd.Timestamp(wall2).floor("min"))
-            if t_hi < t0:
-                return False
-            try:
-                m1df = m1s.dataframe_for_window(
-                    nk, t0, t_hi, include_open_bucket=False
-                )
-            except TypeError:
-                m1df = m1s.dataframe_for_window(nk, t0, t_hi)
-            if m1df is None or getattr(m1df, "empty", True):
-                return False
-            o = float(m1df["Open"].iloc[0])
-            h = float(m1df["High"].max())
-            l_ = float(m1df["Low"].min())
-            c = float(m1df["Close"].iloc[-1])
-            v = float(m1df["Volume"].sum())
+
+            composed = compose_local_15m_ohlcv(app, use_key, slot_end)
+            if composed is not None:
+                o, h, l_, c, v = composed
+            else:
+                t0 = m1_window_start_for_15m_end(slot_end)
+                try:
+                    wall = datetime.now()
+                    closed_open = m1_bar_open_label_for_just_completed_minute(wall)
+                    t_hi = min(slot_end, closed_open + pd.Timedelta(minutes=1))
+                except Exception:
+                    wall2 = datetime.now()
+                    t_hi = min(slot_end, pd.Timestamp(wall2).floor("min"))
+                if t_hi < t0:
+                    return False
+                try:
+                    m1df = m1s.dataframe_for_window(
+                        nk, t0, t_hi, include_open_bucket=False
+                    )
+                except TypeError:
+                    m1df = m1s.dataframe_for_window(nk, t0, t_hi)
+                if m1df is None or getattr(m1df, "empty", True):
+                    return False
+                o = float(m1df["Open"].iloc[0])
+                h = float(m1df["High"].max())
+                l_ = float(m1df["Low"].min())
+                c = float(m1df["Close"].iloc[-1])
+                v = float(m1df["Volume"].sum())
+
             li = df.index[-1]
             df.at[li, "Open"] = o
             df.at[li, "High"] = h

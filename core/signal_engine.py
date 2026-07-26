@@ -146,6 +146,8 @@ class SignalEngine:
         # 틱마다 지표가 흔들리며 매수 신호가 on/off 되는 현상을 줄입니다.
         # key: code, value: {"slot_key": str, "signal": bool, "ready": bool, "sig_type": str}
         self._s1_slot_gate_cache: dict[str, dict[str, Any]] = {}
+        # 로컬 15분 확정 슬롯당 S1 1회 평가 중복 방지: (code, slot_key) → monotonic ts
+        self._s1_closed_slot_done: Dict[str, float] = {}
 
     def _s1_buy_signal_cooldown_sec(self) -> float:
         """
@@ -356,18 +358,34 @@ class SignalEngine:
         except Exception:
             return ""
 
+    def _s1_eval_on_local_15m_close_enabled(self) -> bool:
+        """
+        True면 로컬 15분 슬롯 확정 콜백에서 S1·S2·청산을 평가한다(저정밀 백테 정합).
+        틱 주기 EXIT/STAGE2 주문은 생략한다.
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return bool(st.get("realtime_s1_eval_on_local_15m_close", True))
+        except Exception:
+            return True
+
     def _realtime_s1_mirror_dynamic_intrabar_enabled(self) -> bool:
         """
         동적 고정밀과 동일한 인트라바 판정 사용 여부.
 
         - 미보유: S1 신규(기존)
         - 보유: 청산(EXIT)·추매(S2) — ``evaluate_bt_hp_intrabar_unified`` 분기
+
+        로컬 15분 완성 S1 모드가 켜져 있으면 인트라바 S1/청산 미러는 끕니다
+        (청산은 ``StrategyEngine`` 주기 평가 경로 사용).
         """
         try:
+            if self._s1_eval_on_local_15m_close_enabled():
+                return False
             st = getattr(self.app, "settings", None) or {}
-            return bool(st.get("realtime_s1_mirror_dynamic_intrabar", True))
+            return bool(st.get("realtime_s1_mirror_dynamic_intrabar", False))
         except Exception:
-            return True
+            return False
 
     def _held_eval_on_m1_revision_only(self) -> bool:
         """
@@ -461,10 +479,490 @@ class SignalEngine:
 
     def _intrabar_close_now_enabled(self) -> bool:
         try:
+            if self._s1_eval_on_local_15m_close_enabled():
+                return False
             st = getattr(self.app, "settings", None) or {}
             return intrabar_close_now_signals_enabled(st)
         except Exception:
+            return False
+
+    def _mark_s1_closed_slot_done(
+        self, code: str, slot_key: str, *, prefix: str = "s1"
+    ) -> bool:
+        """
+        슬롯당 1회만 True(첫 호출). 이미 처리됐으면 False.
+        ``prefix``: ``s1`` / ``held`` 등 평가 종류 구분.
+        """
+        try:
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            key = f"{prefix}|{nk}|{slot_key}"
+            done = getattr(self, "_s1_closed_slot_done", None)
+            if not isinstance(done, dict):
+                self._s1_closed_slot_done = {}
+                done = self._s1_closed_slot_done
+            if key in done:
+                return False
+            now_m = time.monotonic()
+            done[key] = now_m
+            # 오래된 키 정리(약 1거래일분)
+            if len(done) > 4000:
+                cutoff = now_m - 86400.0
+                for k in list(done.keys()):
+                    try:
+                        if float(done.get(k, 0) or 0) < cutoff:
+                            done.pop(k, None)
+                    except Exception:
+                        done.pop(k, None)
             return True
+        except Exception:
+            return True
+
+    def eval_s1_on_completed_15m(self, code: str, bar_ts: Any) -> None:
+        """
+        로컬 15분 슬롯 확정 직후 S1 1회 평가(저정밀 백테 정합).
+
+        - ``bars_data`` 를 ``bar_ts`` 이하로 잘라 완성봉 기준으로 지표·신호 계산
+        - 공식 ka10080 15분 교체를 기다리지 않음
+        - 보유·관심전용·정규장 외·쿨다운·ATR_SL 재진입은 기존과 동일하게 차단
+        """
+        try:
+            if not self._s1_eval_on_local_15m_close_enabled():
+                return
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            if len(nk) != 6:
+                return
+            try:
+                slot_ts = pd.Timestamp(bar_ts)
+                slot_key = slot_ts.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return
+            if not self._mark_s1_closed_slot_done(nk, slot_key):
+                return
+
+            try:
+                if not is_krx_regular_session(datetime.now()):
+                    return
+            except Exception:
+                pass
+            try:
+                halt = self._market_halt_suppresses_s1(nk)
+                if halt:
+                    return
+            except Exception:
+                pass
+            if self._code_in_virtual_positions(nk):
+                return
+            try:
+                wl_only = nk in self._watchlist_only_codes()
+            except Exception:
+                wl_only = False
+            if wl_only:
+                return
+
+            # monitor_info 확보
+            mi = getattr(self.app, "monitor_info", None)
+            if not isinstance(mi, dict):
+                return
+            info = None
+            mi_key = None
+            for k in (nk, str(code), code):
+                if k in mi and isinstance(mi.get(k), dict):
+                    info = mi[k]
+                    mi_key = k
+                    break
+            if info is None:
+                # 감시 목록에 없으면 스킵(일일 선정 외)
+                return
+
+            # bars: bar_ts 이하만 (새 forming 행 제외)
+            lk = getattr(self.app, "_bars_data_lock", None)
+            bd_root = getattr(self.app, "bars_data", None)
+            if not isinstance(bd_root, dict):
+                return
+            src_df = None
+            try:
+                if lk is not None:
+                    with lk:
+                        _k, df = resolve_bars_data_frame(bd_root, nk, migrate_alias=True)
+                        if df is not None and not getattr(df, "empty", True):
+                            src_df = df.copy()
+                else:
+                    _k, df = resolve_bars_data_frame(bd_root, nk, migrate_alias=True)
+                    if df is not None and not getattr(df, "empty", True):
+                        src_df = df.copy()
+            except Exception:
+                src_df = None
+            if src_df is None or getattr(src_df, "empty", True):
+                return
+            try:
+                closed_df = src_df.loc[src_df.index <= slot_ts].copy()
+            except Exception:
+                try:
+                    closed_df = src_df[src_df.index <= slot_ts].copy()
+                except Exception:
+                    return
+            if closed_df is None or getattr(closed_df, "empty", True):
+                return
+            try:
+                if pd.Timestamp(closed_df.index[-1]) != slot_ts:
+                    # 확정 시각 행이 없으면 평가하지 않음(부분 데이터)
+                    return
+            except Exception:
+                pass
+
+            try:
+                min_bars = effective_min_15m_bars_for_monitoring(
+                    getattr(self.app, "settings", None) or {}
+                )
+            except Exception:
+                min_bars = 60
+            bar_count = int(len(closed_df))
+            if bar_count < int(min_bars):
+                try:
+                    info["confluence"] = f"봉 충전 {bar_count}/{min_bars} (15분 확정 대기)"
+                except Exception:
+                    pass
+                return
+
+            settings = getattr(self.app, "settings", None) or {}
+            df_ind = TradingStrategy.calculate_indicators(closed_df, settings)
+            df_ind = self._apply_ready_column_to_indicators(df_ind)
+            detailed = TradingStrategy.get_buy_signals_detailed(df_ind, settings, "UP")
+            last_ser = detailed.iloc[-1]
+            last_sig = (
+                last_ser.to_dict() if hasattr(last_ser, "to_dict") else dict(last_ser)
+            )
+            last_sig = self._merge_ready_into_sig(last_sig, bar_count)
+            is_buy = self._s1_buy_from_sig_dict(last_sig, bar_count)
+            _sel_tr = str(
+                info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+            ).strip().upper()
+            info["last_sig_cache"] = last_sig
+            info["last_row_cache"] = df_ind.iloc[-1].to_dict()
+            info["last_bar_count"] = bar_count
+            info["confluence"] = self._format_s1_confluence_status_line(last_sig, _sel_tr)
+            info["met_ratio"] = float(self._to_scalar(last_sig.get("Met_Ratio"), 0.0))
+            info["s1_closed_slot_key"] = slot_key
+
+            if not is_buy:
+                return
+            try:
+                if self._s1_blocked_by_atr_sl_reentry(nk):
+                    info["confluence"] = "⏳ ATR_SL 재진입 쿨다운"
+                    return
+            except Exception:
+                pass
+
+            _cool_sec = self._s1_buy_signal_cooldown_sec()
+            if nk in self.last_buy_sig_time:
+                try:
+                    if (
+                        datetime.now() - self.last_buy_sig_time[nk]
+                    ).total_seconds() < _cool_sec:
+                        return
+                except Exception:
+                    pass
+            # code 키 변형도 쿨다운 확인
+            for ck in (mi_key, code, str(code)):
+                if ck and ck in self.last_buy_sig_time and ck != nk:
+                    try:
+                        if (
+                            datetime.now() - self.last_buy_sig_time[ck]
+                        ).total_seconds() < _cool_sec:
+                            return
+                    except Exception:
+                        pass
+
+            try:
+                now_price = float(
+                    self._to_scalar(
+                        info.get("price") or info.get("last_price") or closed_df["Close"].iloc[-1],
+                        0.0,
+                    )
+                )
+            except Exception:
+                now_price = 0.0
+            if now_price <= 0:
+                try:
+                    now_price = float(closed_df["Close"].iloc[-1])
+                except Exception:
+                    return
+            if now_price <= 0:
+                return
+
+            last_row = info.get("last_row_cache") or {}
+            try:
+                rsi_sig = float(self._to_scalar(last_row.get("RSI_Sig", last_row.get("RSI", 0)), 0.0))
+            except Exception:
+                rsi_sig = 0.0
+            try:
+                macd_val = float(self._to_scalar(last_row.get("MACD", 0), 0.0))
+            except Exception:
+                macd_val = 0.0
+            try:
+                osc_val = float(self._to_scalar(last_row.get("OSC", 0), 0.0))
+            except Exception:
+                osc_val = 0.0
+            try:
+                ma60 = float(self._to_scalar(last_row.get("MA60", 0), 0.0))
+                ma60_ratio = (now_price / ma60 - 1.0) * 100.0 if ma60 > 0 else 0.0
+            except Exception:
+                ma60_ratio = 0.0
+
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "signal_s1_closed_15m",
+                        {
+                            "code": nk,
+                            "name": str(info.get("name", "")),
+                            "slot": slot_key,
+                            "price": float(now_price),
+                            "met_ratio": float(
+                                self._to_scalar(info.get("met_ratio", 0.0), 0.0)
+                            ),
+                            "confluence": str(info.get("confluence", "")),
+                        },
+                    )
+            except Exception:
+                pass
+
+            # 주문 큐(메인 콜백) — 틱 경로와 동일
+            try:
+                self.last_buy_sig_time[nk] = datetime.now()
+                if mi_key and mi_key != nk:
+                    self.last_buy_sig_time[mi_key] = self.last_buy_sig_time[nk]
+                enq = getattr(self.app, "enqueue_tick_main_action", None)
+                if callable(enq):
+                    enq(
+                        "buy_signal",
+                        (
+                            nk,
+                            float(now_price),
+                            float(rsi_sig),
+                            float(macd_val),
+                            float(osc_val),
+                            float(ma60_ratio),
+                        ),
+                    )
+                else:
+                    self.app._on_buy_signal_received(
+                        nk,
+                        now_price,
+                        rsi_sig,
+                        macd_val,
+                        osc_val,
+                        ma60_ratio,
+                    )
+            except Exception as e:
+                try:
+                    print(f"[SignalEngine] eval_s1_on_completed_15m 주문 실패 ({nk}): {e}")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                print(f"[SignalEngine] eval_s1_on_completed_15m 실패 ({code}): {e}")
+            except Exception:
+                pass
+
+    def eval_held_on_completed_15m(self, code: str, bar_ts: Any) -> None:
+        """
+        로컬 15분 슬롯 확정 직후 보유 종목 청산·S2 평가(저정밀 백테 정합).
+
+        틱/15초 주기 평가 대신, 완성 15분 종가·지표 행으로 ``evaluate_position_scoped(full)`` 1회.
+        """
+        try:
+            if not self._s1_eval_on_local_15m_close_enabled():
+                return
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            if len(nk) != 6:
+                return
+            try:
+                slot_ts = pd.Timestamp(bar_ts)
+                slot_key = slot_ts.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return
+            if not self._mark_s1_closed_slot_done(nk, slot_key, prefix="held"):
+                return
+
+            try:
+                if not is_krx_regular_session(datetime.now()):
+                    return
+            except Exception:
+                pass
+            if not self._code_in_virtual_positions(nk):
+                return
+
+            # bars ≤ bar_ts
+            lk = getattr(self.app, "_bars_data_lock", None)
+            bd_root = getattr(self.app, "bars_data", None)
+            if not isinstance(bd_root, dict):
+                return
+            src_df = None
+            try:
+                if lk is not None:
+                    with lk:
+                        _k, df = resolve_bars_data_frame(bd_root, nk, migrate_alias=True)
+                        if df is not None and not getattr(df, "empty", True):
+                            src_df = df.copy()
+                else:
+                    _k, df = resolve_bars_data_frame(bd_root, nk, migrate_alias=True)
+                    if df is not None and not getattr(df, "empty", True):
+                        src_df = df.copy()
+            except Exception:
+                src_df = None
+            if src_df is None or getattr(src_df, "empty", True):
+                return
+            try:
+                closed_df = src_df.loc[src_df.index <= slot_ts].copy()
+            except Exception:
+                try:
+                    closed_df = src_df[src_df.index <= slot_ts].copy()
+                except Exception:
+                    return
+            if closed_df is None or getattr(closed_df, "empty", True):
+                return
+            try:
+                if pd.Timestamp(closed_df.index[-1]) != slot_ts:
+                    return
+            except Exception:
+                pass
+
+            settings = getattr(self.app, "settings", None) or {}
+            df_ind = TradingStrategy.calculate_indicators(closed_df, settings)
+            last_row = df_ind.iloc[-1].to_dict()
+            try:
+                close_px = float(self._to_scalar(last_row.get("Close"), 0.0))
+            except Exception:
+                close_px = 0.0
+            if close_px <= 0:
+                try:
+                    close_px = float(closed_df["Close"].iloc[-1])
+                except Exception:
+                    return
+            if close_px <= 0:
+                return
+
+            # monitor_info 수급(없으면 중립)
+            ba = ab = 1.0
+            vp = 100.0
+            try:
+                mi = getattr(self.app, "monitor_info", None) or {}
+                info = None
+                for k in (nk, str(code), code):
+                    if k in mi and isinstance(mi.get(k), dict):
+                        info = mi[k]
+                        break
+                if isinstance(info, dict):
+                    ba = float(self._to_scalar(info.get("bid_ask_ratio"), 1.0))
+                    ab = float(self._to_scalar(info.get("ask_bid_ratio"), 1.0))
+                    vp = float(self._to_scalar(info.get("vol_power"), 100.0))
+                    info["last_row_cache"] = last_row
+                    info["s1_closed_slot_key"] = slot_key
+            except Exception:
+                info = None
+
+            se = getattr(self.app, "strategy_engine", None)
+            if se is None:
+                return
+            try:
+                res = se.evaluate_position_scoped(
+                    nk,
+                    float(close_px),
+                    scope="full",
+                    ind=last_row,
+                    bid_ask_ratio=ba,
+                    ask_bid_ratio=ab,
+                    vol_power=vp,
+                    sel_track=(info or {}).get("sel_track")
+                    or (info or {}).get("SelTrack"),
+                )
+            except Exception:
+                # 키 변형 재시도
+                try:
+                    res = se.evaluate_position_scoped(
+                        code,
+                        float(close_px),
+                        scope="full",
+                        ind=last_row,
+                        bid_ask_ratio=ba,
+                        ask_bid_ratio=ab,
+                        vol_power=vp,
+                    )
+                except Exception as e:
+                    try:
+                        print(f"[SignalEngine] eval_held_on_completed_15m 평가 실패 ({nk}): {e}")
+                    except Exception:
+                        pass
+                    return
+
+            if not isinstance(res, dict):
+                return
+            act = str(res.get("action") or "HOLD")
+            if act == "HOLD":
+                return
+
+            _act_kw: Dict[str, Any] = {
+                "now_price": float(close_px),
+                "profit_ratio": float(res.get("profit_ratio", 0) or 0),
+            }
+            try:
+                sl = getattr(self.app, "session_logger", None)
+                if sl:
+                    sl.log(
+                        "signal_held_closed_15m",
+                        {
+                            "code": nk,
+                            "slot": slot_key,
+                            "action": act,
+                            "reason": str(res.get("reason") or ""),
+                            "price": float(close_px),
+                        },
+                    )
+            except Exception:
+                pass
+
+            try:
+                enq = getattr(self.app, "enqueue_tick_main_action", None)
+                if callable(enq):
+                    enq(
+                        "strategy_action",
+                        (
+                            nk,
+                            act,
+                            str(res.get("reason") or ""),
+                            _act_kw,
+                        ),
+                    )
+                else:
+                    self.app._on_strategy_action_needed(
+                        nk,
+                        act,
+                        res.get("reason"),
+                        **_act_kw,
+                    )
+            except Exception as e:
+                try:
+                    print(f"[SignalEngine] eval_held_on_completed_15m 액션 실패 ({nk}): {e}")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                print(f"[SignalEngine] eval_held_on_completed_15m 실패 ({code}): {e}")
+            except Exception:
+                pass
+
+    def eval_on_completed_15m(self, code: str, bar_ts: Any) -> None:
+        """로컬 15분 확정: S1(미보유) + 청산/S2(보유) 일괄."""
+        try:
+            self.eval_s1_on_completed_15m(code, bar_ts)
+        except Exception:
+            pass
+        try:
+            self.eval_held_on_completed_15m(code, bar_ts)
+        except Exception:
+            pass
 
     def _confirm_s1_with_close_now(
         self,
@@ -1711,7 +2209,28 @@ class SignalEngine:
             except Exception:
                 pass
 
-            # 1. 15분 OHLCV는 ``realtime_official_bars_sync``(공식 1분·슬롯 롤)만 갱신. 틱으로 봉을 바꾸지 않음.
+            # 15분 슬롯 마지막 1분: 틱으로 OHLCV 버킷 갱신(공식 1분과 분리)
+            try:
+                if (
+                    not is_orderbook_only
+                    and not bool(kwargs.get("_official_sync_eval", False))
+                    and bool(
+                        (getattr(self.app, "settings", None) or {}).get(
+                            "realtime_15m_last_minute_from_ticks", True
+                        )
+                    )
+                ):
+                    m1s = getattr(self.app, "rt_tick_m1_store", None)
+                    if m1s is not None:
+                        m1s.feed_tick(
+                            code,
+                            float(now_price),
+                            float(volume) if volume is not None else 0.0,
+                        )
+            except Exception:
+                pass
+
+            # 1. 15분 OHLCV 본체는 ``realtime_official_bars_sync``(공식 1분 + 마지막1분 틱 합성).
             # 2. 실시간 지표 추출 (RSI, MACD 등)
             rsi_val = self._calculate_realtime_rsi(code)
             
@@ -2200,57 +2719,61 @@ class SignalEngine:
                         is_cool = False
                 
                 if is_buy and is_cool and (not is_wl_only) and code not in self.app.virtual_positions:
-                    try:
-                        sl = getattr(self.app, "session_logger", None)
-                        if sl:
-                            sl.log(
-                                "signal_s1_raw",
-                                {
-                                    "code": code,
-                                    "name": str(info.get("name", "")),
-                                    "price": float(now_price),
-                                    "met_ratio": float(
-                                        self._to_scalar(info.get("met_ratio", 0.0), 0.0)
-                                    ),
-                                    "confluence": str(info.get("confluence", "")),
-                                },
-                            )
-                    except Exception:
+                    # 로컬 15분 확정 모드: 틱/형성봉 경로에서는 주문하지 않음(확정 콜백만)
+                    if self._s1_eval_on_local_15m_close_enabled():
                         pass
-                    buy_ok = False
-                    if defer_main_callbacks:
-                        try:
-                            # 메인 처리 전 동일 종목이 연속 큐 적재되는 것을 막기 위해 쿨타임 앵커를 먼저 둡니다.
-                            self.last_buy_sig_time[code] = datetime.now()
-                            self.app.enqueue_tick_main_action(
-                                "buy_signal",
-                                (
-                                    str(code).zfill(6),
-                                    float(now_price),
-                                    float(rsi_sig),
-                                    float(macd_val),
-                                    float(osc_val),
-                                    float(ma60_ratio),
-                                ),
-                            )
-                        except Exception:
-                            pass
                     else:
                         try:
-                            buy_ok = bool(
-                                self.app._on_buy_signal_received(
-                                    code,
-                                    now_price,
-                                    rsi_sig,
-                                    macd_val,
-                                    osc_val,
-                                    ma60_ratio,
+                            sl = getattr(self.app, "session_logger", None)
+                            if sl:
+                                sl.log(
+                                    "signal_s1_raw",
+                                    {
+                                        "code": code,
+                                        "name": str(info.get("name", "")),
+                                        "price": float(now_price),
+                                        "met_ratio": float(
+                                            self._to_scalar(info.get("met_ratio", 0.0), 0.0)
+                                        ),
+                                        "confluence": str(info.get("confluence", "")),
+                                    },
                                 )
-                            )
                         except Exception:
-                            buy_ok = False
-                        if buy_ok:
-                            self.last_buy_sig_time[code] = datetime.now()
+                            pass
+                        buy_ok = False
+                        if defer_main_callbacks:
+                            try:
+                                # 메인 처리 전 동일 종목이 연속 큐 적재되는 것을 막기 위해 쿨타임 앵커를 먼저 둡니다.
+                                self.last_buy_sig_time[code] = datetime.now()
+                                self.app.enqueue_tick_main_action(
+                                    "buy_signal",
+                                    (
+                                        str(code).zfill(6),
+                                        float(now_price),
+                                        float(rsi_sig),
+                                        float(macd_val),
+                                        float(osc_val),
+                                        float(ma60_ratio),
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                buy_ok = bool(
+                                    self.app._on_buy_signal_received(
+                                        code,
+                                        now_price,
+                                        rsi_sig,
+                                        macd_val,
+                                        osc_val,
+                                        ma60_ratio,
+                                    )
+                                )
+                            except Exception:
+                                buy_ok = False
+                            if buy_ok:
+                                self.last_buy_sig_time[code] = datetime.now()
 
                 # 관심목록(감시 제외): 평단 미등록 시에만 매수 신호 텔레그램 (등록 시 매도만 감시)
                 if is_wl_only and is_buy and is_cool and not has_wl_avg:
@@ -2324,6 +2847,9 @@ class SignalEngine:
                         info["exit_last_row_cache"] = eval_ind
                         self._exit_indicator_last_ts[code] = now_ts
 
+            # 저정밀 정합: 보유 청산·S2 주문은 15분 확정 콜백에서만 (틱 경로는 합치도 UI만)
+            _lp_held_orders = self._s1_eval_on_local_15m_close_enabled()
+
             # 보유 중이면 신호상태는 S1 합치도 대신 S2 추매 합치도
             if self._code_in_virtual_positions(code) and eval_ind is not None:
                 try:
@@ -2366,11 +2892,17 @@ class SignalEngine:
                     pass
 
             # 7. 실시간 보유 포지션: 청산·S2 (지표 행 확보 시; 봉 수 부족 시에도 보유면 보조 행 사용)
+            # 저정밀(로컬 15분 확정) 모드면 주문성 평가는 확정 콜백으로만 — 틱 주기 EXIT/S2 생략
             bid_ask_ratio = float(self._to_scalar(info.get('bid_ask_ratio', 1.0), 1.0))
             ask_bid_ratio = float(self._to_scalar(info.get('ask_bid_ratio', 1.0), 1.0))
             vol_power = float(self._to_scalar(info.get('vol_power', 100.0), 100.0))
 
-            if eval_ind is not None and not is_wl_only and _session_ok:
+            if (
+                eval_ind is not None
+                and not is_wl_only
+                and _session_ok
+                and (not _lp_held_orders)
+            ):
                 now_ts = time.time()
                 exit_interval = float(self._realtime_eval_position_min_interval_sec)
                 last_exit_ts = float(self._eval_exit_last_ts.get(code, 0.0) or 0.0)

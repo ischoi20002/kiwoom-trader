@@ -1188,6 +1188,30 @@ class SettingsTab:
             '초',
             '직전 S1 매수 성공 시각 기준 최소 간격(틱 중복·연속 주문 방지). 기본 1800=30분',
         )
+        add_param_row(
+            strat_f,
+            'S1: 로컬 15분 확정 시 평가',
+            None,
+            '',
+            'ON=저정밀 백테 정합: 완성 15분에서 S1·S2·청산 평가(틱 주기 주문 없음). 공식 REST 교체 대기 없음',
+            toggle_key='realtime_s1_eval_on_local_15m_close',
+        )
+        add_param_row(
+            strat_f,
+            '15분 마지막 1분 틱 합성',
+            None,
+            '',
+            'ON=슬롯 마지막 1분만 틱 OHLCV, 앞 14분은 공식 1분. 슬롯 확정 직후 지연·누락 완화',
+            toggle_key='realtime_15m_last_minute_from_ticks',
+        )
+        add_param_row(
+            strat_f,
+            'S1: 인트라바(고정밀) 미러',
+            None,
+            '',
+            '연구용. 로컬 15분 확정 모드 ON이면 자동 비활성. ON 시 1분 close-now 경로',
+            toggle_key='realtime_s1_mirror_dynamic_intrabar',
+        )
 
         # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지
         add_header(strat_f, '── Type A: 눌림목 진입 조건 ──')

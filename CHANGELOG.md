@@ -13,6 +13,15 @@
 
 ---
 
+## 0.12.0 (2026-07-27)
+
+실시간 S1/S2/청산을 저정밀(완성 15분) 백테와 정합.
+
+- **`realtime_s1_eval_on_local_15m_close`(기본 ON)**: 로컬 15분 슬롯 확정 시 S1·S2·청산 평가. 틱 주기 EXIT/STAGE2 주문 생략. 공식 15분 REST 교체는 위생용(신호 비차단).
+- **`realtime_15m_last_minute_from_ticks`(기본 ON)**: 슬롯 앞 구간은 공식 1분, **마지막 1분만 틱** 합성 — 슬롯 직후 지연·누락 완화.
+- 인트라바/close-now S1 미러 기본 OFF. 설정 탭 「③ Stage 1」 토글·현재 `settings.json`→`defaults` 동기화.
+- S1/S2 비중 그리드 비교 스크립트(`tools/compare_s1_s2_sizing.py`) — 현행 20%/25%가 총수익 최적.
+
 ## 0.11.0 (2026-07-26)
 
 트레일 B 완화·DD 연동 사이징 반영, 쿨다운/갭/연속SL 비교 검증.
