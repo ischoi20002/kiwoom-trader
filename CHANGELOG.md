@@ -13,6 +13,14 @@
 
 ---
 
+## 0.13.3 (2026-07-27)
+
+레짐 계산 FDR 전환, 모의 예수금 파싱, 운영 배포 보조.
+
+- **레짐 FDR**: 실시간·30일 이력 레짐을 `bars_1d` DB 대신 FDR 일봉 병렬 조회로 계산 (`_fetch_daily_ohlcv_batch_fdr`, `_compute_transition_regime_map_fdr`).
+- **예수금상세(kt00001)**: 모의 SDK 우선·루트/output 병합 파싱·`cont-yn` 헤더 — D+1/D+2 파싱 실패 경고 완화.
+- **운영 배포**: `tools/deploy_production.py`, `install_k_trader.bat`, `requirements.txt` (kiwoom-rest-api, websockets).
+
 ## 0.13.2 (2026-07-27)
 
 GUI 헤더 B 추세 레짐 표시 및 최근 영업일 이력.

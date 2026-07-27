@@ -32,7 +32,7 @@ def open_regime_history_dialog(
         try:
             messagebox.showinfo(
                 "레짐 이력",
-                "표시할 레짐 데이터가 없습니다.\n일봉 DB 동기화 후 다시 시도하세요.",
+                "표시할 레짐 데이터가 없습니다.\n네트워크 연결 후 FDR 일봉 조회를 다시 시도하세요.",
                 parent=parent,
             )
         except Exception:

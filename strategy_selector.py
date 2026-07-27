@@ -1406,21 +1406,148 @@ def is_chop_regime_day(
         return False
 
 
+def _fetch_daily_ohlcv_batch_fdr(
+    data_manager: Any,
+    codes: List[str],
+    fetch_start: str,
+    end_date: str,
+    logger_callback: Optional[Callable[..., None]] = None,
+    *,
+    max_workers: int = 12,
+) -> pd.DataFrame:
+    """
+    레짐·전환 게이트용: 유니버스 종목 일봉을 FDR에서 병렬 조회한다.
+    ``bars_1d`` DB 동기화 없이도 동작한다.
+    """
+    empty = pd.DataFrame(
+        columns=["code", "time", "open", "high", "low", "close", "volume"]
+    )
+    log = logger_callback or (lambda *_a, **_k: None)
+    if data_manager is None or not codes:
+        return empty
+    fetch_fn = getattr(data_manager, "fetch_fdr_daily_dataframe", None)
+    if not callable(fetch_fn):
+        try:
+            log("⚠️ [Transition] data_manager.fetch_fdr_daily_dataframe 없음")
+        except Exception:
+            pass
+        return empty
+
+    norm_codes = [str(c).strip().zfill(6) for c in codes if str(c).strip()]
+    if not norm_codes:
+        return empty
+
+    def _one(code: str) -> Optional[pd.DataFrame]:
+        try:
+            raw = fetch_fn(code, fetch_start, end_date)
+            if raw is None or raw.empty:
+                return None
+            part = raw.copy()
+            part["code"] = code
+            part["time"] = pd.to_datetime(part["datetime"], errors="coerce")
+            for col in ("open", "high", "low", "close", "volume"):
+                if col not in part.columns:
+                    if col == "volume":
+                        part[col] = 0
+                    else:
+                        part[col] = part.get("close", np.nan)
+                part[col] = pd.to_numeric(part[col], errors="coerce")
+            part = part.dropna(subset=["time", "close"])
+            if part.empty:
+                return None
+            return part[["code", "time", "open", "high", "low", "close", "volume"]]
+        except Exception:
+            return None
+
+    parts: List[pd.DataFrame] = []
+    workers = max(1, min(int(max_workers or 12), 24))
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for df_part in pool.map(_one, norm_codes):
+                if df_part is not None and not df_part.empty:
+                    parts.append(df_part)
+    except Exception as ex:
+        try:
+            log(f"⚠️ [Transition] FDR 일괄 조회 실패: {ex}")
+        except Exception:
+            pass
+        return empty
+
+    if not parts:
+        try:
+            log(
+                f"⚠️ [Transition] FDR 일봉 0건 ({fetch_start}~{end_date}, "
+                f"요청 {len(norm_codes)}종목)"
+            )
+        except Exception:
+            pass
+        return empty
+
+    out = pd.concat(parts, ignore_index=True)
+    out = out.sort_values(["code", "time"]).reset_index(drop=True)
+    try:
+        log(
+            f"[Transition] FDR 일봉 {len(out)}행 / "
+            f"{out['code'].nunique()}종목 ({fetch_start}~{end_date})"
+        )
+    except Exception:
+        pass
+    return out
+
+
+def _fdr_index_daily_close_df(
+    data_manager: Any,
+    index_code: str,
+    fetch_start: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """지수·ETF 일봉 close 시계열 (FDR 우선)."""
+    empty = pd.DataFrame(columns=["time", "close"])
+    if data_manager is None:
+        return empty
+    fetch_fn = getattr(data_manager, "fetch_fdr_daily_dataframe", None)
+    if callable(fetch_fn):
+        try:
+            raw = fetch_fn(index_code, fetch_start, end_date)
+            if raw is not None and not raw.empty:
+                tmp = raw.copy()
+                tmp["time"] = pd.to_datetime(tmp["datetime"], errors="coerce")
+                tmp["close"] = pd.to_numeric(tmp["close"], errors="coerce")
+                tmp = tmp.dropna(subset=["time", "close"])
+                if not tmp.empty:
+                    return tmp[["time", "close"]].copy()
+        except Exception:
+            pass
+    try:
+        df = data_manager.get_daily_bars(index_code, fetch_start, end_date)
+        if df is not None and not df.empty:
+            tmp = df.copy()
+            if "Close" in tmp.columns:
+                tmp.rename(columns={"Close": "close"}, inplace=True)
+            tmp["time"] = pd.to_datetime(tmp["time"], errors="coerce")
+            tmp["close"] = pd.to_numeric(tmp["close"], errors="coerce")
+            tmp = tmp.dropna(subset=["time", "close"])
+            if not tmp.empty:
+                return tmp[["time", "close"]].copy()
+    except Exception:
+        pass
+    return empty
+
+
 def _build_index_vol_by_day(
     data_manager: Any,
     fetch_start: str,
     end_date: str,
 ) -> Dict[str, Dict[str, float]]:
-    """KODEX200(069500) 일봉 기준 연환산 변동성(rvol_5/20) 일별 맵."""
+    """KODEX200(069500) 일봉 기준 연환산 변동성(rvol_5/20) 일별 맵 — FDR 우선."""
     out: Dict[str, Dict[str, float]] = {}
     try:
-        df = data_manager.get_daily_bars("069500", fetch_start, end_date)
+        df = _fdr_index_daily_close_df(data_manager, "069500", fetch_start, end_date)
         if df is None or df.empty:
             return out
         tmp = df.copy()
         tmp["d"] = pd.to_datetime(tmp["time"], errors="coerce").dt.normalize()
-        close_col = "Close" if "Close" in tmp.columns else "close"
-        close = pd.to_numeric(tmp[close_col], errors="coerce")
+        close = pd.to_numeric(tmp["close"], errors="coerce")
         ret = close.pct_change()
         tmp["rvol_20"] = ret.rolling(20).std() * np.sqrt(252.0) * 100.0
         tmp["rvol_5"] = ret.rolling(5).std() * np.sqrt(252.0) * 100.0
@@ -1439,6 +1566,127 @@ def _build_index_vol_by_day(
     except Exception:
         return out
     return out
+
+
+def _compute_transition_regime_map_fdr(
+    settings: dict,
+    data_manager: Any,
+    start_date: str,
+    end_date: str,
+    logger_callback: Optional[Callable[..., None]] = None,
+) -> Dict[str, str]:
+    """
+    FDR 일봉 기반 일별 transition 레짐 맵.
+    ``prepare_dynamic_universe`` 의 레짐 분류와 동일 로직, DB ``bars_1d`` 미사용.
+    """
+    log = logger_callback or (lambda *_a, **_k: None)
+    regime_map: Dict[str, str] = {}
+    try:
+        start_s = pd.to_datetime(start_date).strftime("%Y-%m-%d")
+        end_s = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+        idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+        top_n = int(settings.get("kospi_top_n", 200) or 200)
+        codes = (
+            load_kospi_universe_codes(logger_callback=log, top_n=top_n)
+            if idx_choice == "KOSPI200"
+            else load_kodex200_universe_codes(logger_callback=log)
+        )
+        if not codes:
+            return regime_map
+
+        fetch_start = (pd.to_datetime(start_s) - timedelta(days=120)).strftime("%Y-%m-%d")
+        df_all = _fetch_daily_ohlcv_batch_fdr(
+            data_manager, codes, fetch_start, end_s, log
+        )
+        if df_all is None or df_all.empty:
+            return regime_map
+
+        _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
+        df_sim = df_all[df_all["time"] >= pd.to_datetime(start_s)].copy()
+        if df_sim.empty:
+            return regime_map
+
+        trading_days_list = df_sim["time"].dt.strftime("%Y-%m-%d").unique().tolist()
+
+        xs_ret_std_by_day: Dict[str, float] = {}
+        try:
+            _xs_df = df_sim.sort_values(["code", "time"]).copy()
+            _xs_df["ret1"] = _xs_df.groupby("code")["close"].pct_change()
+            _xs_s = _xs_df.groupby("time")["ret1"].std() * 100.0
+            for t_idx, val in _xs_s.items():
+                if val is not None and np.isfinite(float(val)):
+                    xs_ret_std_by_day[pd.Timestamp(t_idx).strftime("%Y-%m-%d")] = float(
+                        val
+                    )
+        except Exception:
+            xs_ret_std_by_day = {}
+
+        fetch_start_iv = (pd.to_datetime(start_s) - timedelta(days=60)).strftime(
+            "%Y-%m-%d"
+        )
+        index_vol_by_day = _build_index_vol_by_day(data_manager, fetch_start_iv, end_s)
+
+        transition_stats_by_day: Dict[str, Dict[str, float]] = {}
+        try:
+            _t_rows: List[Dict[str, Any]] = []
+            for _d_str in trading_days_list:
+                _day = df_sim[df_sim["time"] == pd.to_datetime(_d_str)]
+                _va = int(_day["Valid_A"].astype(bool).sum()) if "Valid_A" in _day.columns else 0
+                _vb = int(_day["Valid_B"].astype(bool).sum()) if "Valid_B" in _day.columns else 0
+                _tot = _va + _vb
+                _share = (_vb / _tot * 100.0) if _tot > 0 else 0.0
+                _t_rows.append({"d": _d_str, "va": _va, "vb": _vb, "share": _share})
+            _tdf = pd.DataFrame(_t_rows)
+            if not _tdf.empty:
+                _tdf["share_delta5"] = _tdf["share"] - _tdf["share"].shift(5)
+                _tdf["share_delta3"] = _tdf["share"] - _tdf["share"].shift(3)
+                for _, _tr in _tdf.iterrows():
+                    transition_stats_by_day[str(_tr["d"])] = {
+                        "va": float(_tr["va"]),
+                        "vb": float(_tr["vb"]),
+                        "share": float(_tr["share"]),
+                        "share_delta5": (
+                            float(_tr["share_delta5"])
+                            if pd.notna(_tr["share_delta5"])
+                            else float("nan")
+                        ),
+                        "share_delta3": (
+                            float(_tr["share_delta3"])
+                            if pd.notna(_tr["share_delta3"])
+                            else float("nan")
+                        ),
+                    }
+        except Exception:
+            transition_stats_by_day = {}
+
+        for d_str in trading_days_list:
+            try:
+                _ts = transition_stats_by_day.get(d_str, {})
+                _va = int(_ts.get("va", 0))
+                _vb = int(_ts.get("vb", 0))
+                _share = float(_ts.get("share", 0.0))
+                _d5 = _ts.get("share_delta5")
+                _d3 = _ts.get("share_delta3")
+                _xs = xs_ret_std_by_day.get(d_str)
+                _iv = index_vol_by_day.get(d_str, {})
+                regime_map[d_str] = classify_transition_regime(
+                    _va,
+                    _vb,
+                    _share,
+                    _d5,
+                    _d3,
+                    settings,
+                    index_rvol_20=_iv.get("rvol_20"),
+                    xs_ret_std=_xs,
+                )
+            except Exception:
+                regime_map[d_str] = "OFF"
+    except Exception as ex:
+        try:
+            log(f"⚠️ [Transition] FDR 레짐 맵 실패: {ex}")
+        except Exception:
+            pass
+    return regime_map
 
 
 def classify_transition_regime(
@@ -1568,7 +1816,7 @@ def resolve_transition_gate_for_live(
     """
     실시간 선정용 transition 레짐·슬롯·차단 플래그.
 
-    DB bars_1d 로 최근 구간을 스코어해 당일 레짐을 판정한다.
+    FDR 일봉으로 최근 구간을 스코어해 당일 레짐을 판정한다 (``bars_1d`` DB 불필요).
     """
     log = logger_callback or (lambda *_a, **_k: None)
     max_a = int(settings.get("max_slots_a", 20))
@@ -1599,18 +1847,12 @@ def resolve_transition_gate_for_live(
         if not codes:
             return result
         fetch_start = (as_of_dt - timedelta(days=120)).strftime("%Y-%m-%d")
-        ph = ",".join(["?"] * len(codes))
-        q = f"""
-            SELECT code, datetime as time, open, high, low, close, volume
-            FROM bars_1d WHERE code IN ({ph}) AND datetime BETWEEN ? AND ?
-            ORDER BY code, datetime
-        """
-        with data_manager._get_connection() as conn:
-            df_all = pd.read_sql_query(q, conn, params=list(codes) + [fetch_start, end_s])
+        df_all = _fetch_daily_ohlcv_batch_fdr(
+            data_manager, codes, fetch_start, end_s, log
+        )
         if df_all is None or df_all.empty:
-            log("⚠️ [Transition] bars_1d 부족 — 게이트 OFF")
+            log("⚠️ [Transition] FDR 일봉 부족 — 게이트 OFF")
             return result
-        df_all["time"] = pd.to_datetime(df_all["time"])
         _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
         df_day = df_all[df_all["time"].dt.normalize() == as_of_dt]
         if df_day.empty:
@@ -3087,13 +3329,8 @@ def compute_transition_regime_history(
         def _silent(*_a: Any, **_k: Any) -> None:
             pass
 
-        _result = prepare_dynamic_universe(st, start_s, end_s, data_manager, _silent)
-        regime_map: Dict[str, str] = {}
-        if isinstance(_result, tuple) and len(_result) >= 4:
-            try:
-                regime_map = dict(_result[3] or {})
-            except Exception:
-                regime_map = {}
+        _result = _compute_transition_regime_map_fdr(st, data_manager, start_s, end_s, _silent)
+        regime_map: Dict[str, str] = dict(_result or {})
 
         try:
             td_list = list(data_manager.get_trading_days(start_s, end_s) or [])

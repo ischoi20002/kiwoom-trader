@@ -1055,31 +1055,44 @@ class OrderManager:
         """
         키움 REST 단건(예수금상세 등) 응답에서 레코드 dict 한 개를 꺼낸다.
         ``output`` 만 dict 인 줄 알고 파싱하면 ``output1`` 리스트 형태일 때 전부 실패해 D+1/D+2가 0으로 남을 수 있다.
+        루트·output 병합(모의 kt00001 등)도 처리한다.
         """
+        _DEP_KEYS = (
+            "d1_entra",
+            "d2_entra",
+            "d1_entra_amt",
+            "d2_entra_amt",
+            "d1_samt",
+            "d2_samt",
+            "entr",
+            "pymn_alow_amt",
+            "ord_alow_amt",
+            "nstd_re_ib_amt",
+        )
         try:
             if not isinstance(data, dict):
                 return None
+            merged: dict = {}
+            skip = frozenset(
+                ("output", "output1", "output2", "data", "acnt_bal", "return_msg")
+            )
+            for k, v in data.items():
+                if k in skip or k.startswith("return_") or k in ("rt_cd", "return_cd"):
+                    continue
+                if isinstance(v, (dict, list)):
+                    continue
+                merged[k] = v
             for key in ("output", "output1", "output2", "data", "acnt_bal"):
                 ob = data.get(key)
                 if isinstance(ob, dict) and ob:
-                    return dict(ob)
-                if isinstance(ob, list) and ob:
+                    merged = {**merged, **ob}
+                elif isinstance(ob, list) and ob:
                     first = ob[0]
                     if isinstance(first, dict) and first:
-                        return dict(first)
-            if any(
-                k in data
-                for k in (
-                    "d1_entra",
-                    "d2_entra",
-                    "d1_entra_amt",
-                    "d2_entra_amt",
-                    "d1_samt",
-                    "d2_samt",
-                    "pymn_alow_amt",
-                    "ord_alow_amt",
-                )
-            ):
+                        merged = {**merged, **first}
+            if merged and any(k in merged for k in _DEP_KEYS):
+                return merged
+            if any(k in data for k in _DEP_KEYS):
                 return dict(data)
         except Exception as e:
             try:
@@ -1087,6 +1100,119 @@ class OrderManager:
             except Exception:
                 pass
         return None
+
+    def _deposit_fields_from_body(
+        self, out_body: dict, *, qry_tp: str
+    ) -> Optional[Dict[str, Any]]:
+        """예수금상세 레코드 dict → 표준 deposit_detail dict."""
+        try:
+            if not isinstance(out_body, dict) or not out_body:
+                return None
+
+            def _pick(*keys: str) -> float:
+                for k in keys:
+                    v = out_body.get(k)
+                    if v is not None and str(v).strip() not in ("", "-"):
+                        return self._safe_float(v)
+                return 0.0
+
+            def _pick_with_key(*keys: str) -> Tuple[float, str]:
+                for k in keys:
+                    v = out_body.get(k)
+                    if v is not None and str(v).strip() not in ("", "-"):
+                        return self._safe_float(v), k
+                return 0.0, ""
+
+            d1, d1_src = _pick_with_key(
+                "d1_samt",
+                "d1_entra",
+                "d1_entra_amt",
+                "entr_d1",
+                "d1_entr",
+                "d1_pymn_alow_amt",
+            )
+            d2, d2_src = _pick_with_key(
+                "d2_samt",
+                "d2_entra",
+                "d2_entra_amt",
+                "entr_d2",
+                "d2_entr",
+                "d2entra",
+                "d2_pymn_alow_amt",
+            )
+            entr = _pick("entr")
+            ord_alow = _pick(
+                "ord_alow_amt",
+                "ord_alow_amt_entr",
+                "nstd_re_ib_amt",
+            )
+            pymn = _pick(
+                "pymn_alow_amt",
+                "pymn_alow_amt_entr",
+                "pymn_alow",
+                "d2_pymn_alow_amt",
+                "d1_pymn_alow_amt",
+            )
+            return {
+                "d1": d1,
+                "d2": d2,
+                "entr": entr,
+                "ord_alow": ord_alow,
+                "pymn_alow": pymn,
+                "qry_tp_used": qry_tp,
+                "d1_src": d1_src,
+                "d2_src": d2_src,
+            }
+        except Exception:
+            return None
+
+    def _fetch_deposit_detail_payload(self, qry_tp: str) -> Optional[dict]:
+        """예수금상세 TR 1회 호출 — 모의는 공식 Account SDK 우선."""
+        use_mock = getattr(config, "USE_MOCK", False)
+        if use_mock and self.account_api is not None:
+            try:
+                fn = getattr(
+                    self.account_api,
+                    "deposit_detail_status_request_kt00001",
+                    None,
+                )
+                if callable(fn):
+                    data = fn(qry_tp=str(qry_tp))
+                    if isinstance(data, dict):
+                        return data
+            except Exception as ex:
+                try:
+                    self.logger.debug("kt00001 SDK qry_tp=%s: %s", qry_tp, ex)
+                except Exception:
+                    pass
+
+        api_id = "kt00001" if use_mock else "ka10001"
+        host = config.MOCK_URL if use_mock else config.URL
+        token = self.app.auth_manager.get_auth_token()
+        if not token:
+            return None
+        url = f"{host}/api/dostk/acnt"
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "authorization": f"Bearer {token}",
+            "api-id": api_id,
+            "cont-yn": "N",
+            "next-key": "",
+        }
+        try:
+            res = requests.post(
+                url, headers=headers, json={"qry_tp": str(qry_tp)}, timeout=12
+            )
+            if res.status_code != 200:
+                return None
+            data = res.json()
+            return data if isinstance(data, dict) else None
+        except Exception as ex:
+            try:
+                self.logger.debug("예수금상세 REST qry_tp=%s: %s", qry_tp, ex)
+            except Exception:
+                pass
+            return None
 
     def _summarize_holdings_qty_positive(self, holdings: list) -> tuple[int, str]:
         """
@@ -1328,30 +1454,16 @@ class OrderManager:
         qry_tp: 3=추정조회(추정 예수 우선), 2=일반조회.
         """
         use_mock = getattr(config, "USE_MOCK", False)
-        api_id = "kt00001" if use_mock else "ka10001"
-        host = config.MOCK_URL if use_mock else config.URL
-        token = self.app.auth_manager.get_auth_token()
-        if not token:
-            return None
-        url = f"{host}/api/dostk/acnt"
-        headers = {
-            "Content-Type": "application/json;charset=UTF-8",
-            "authorization": f"Bearer {token}",
-            "api-id": api_id,
-        }
+        mode = "kt00001" if use_mock else "ka10001"
+        last_msg = ""
         for qry_tp in ("3", "2"):
             try:
-                res = requests.post(
-                    url, headers=headers, json={"qry_tp": qry_tp}, timeout=12
-                )
-                if res.status_code != 200:
-                    continue
-                try:
-                    data = res.json()
-                except Exception:
-                    continue
+                data = self._fetch_deposit_detail_payload(qry_tp)
                 if not isinstance(data, dict):
                     continue
+                last_msg = str(
+                    data.get("return_msg", data.get("msg", "")) or last_msg
+                )
                 rc = data.get("return_code", data.get("rt_cd", data.get("return_cd")))
                 try:
                     if rc is not None and int(str(rc).strip()) != 0:
@@ -1369,61 +1481,9 @@ class OrderManager:
                 except (TypeError, ValueError):
                     pass
 
-                def _pick(*keys: str) -> float:
-                    for k in keys:
-                        v = out_body.get(k)
-                        if v is not None and str(v).strip() not in ("", "-"):
-                            return self._safe_float(v)
-                    return 0.0
-
-                def _pick_with_key(*keys: str) -> Tuple[float, str]:
-                    """
-                    키우선순위에 따라 첫 유효값을 선택합니다.
-                    - float value와 함께 선택된 키를 반환해, 덮어쓰기 오류 원인 추적에 도움을 줍니다.
-                    """
-                    for k in keys:
-                        v = out_body.get(k)
-                        if v is not None and str(v).strip() not in ("", "-"):
-                            return self._safe_float(v), k
-                    return 0.0, ""
-
-                # [중요] d1/d2에서 *_entra는 "추정 유입(증분/예상)" 성격일 수 있어,
-                # UI의 "D+1/D+2 예상 예수금(총액)"에는 *_samt(현재 잔액/총액) 우선이 안전합니다.
-                d1, d1_src = _pick_with_key(
-                    "d1_samt",
-                    "d1_entra",
-                    "d1_entra_amt",
-                    "entr_d1",
-                    "d1_entr",
-                )
-                d2, d2_src = _pick_with_key(
-                    "d2_samt",
-                    "d2_entra",
-                    "d2_entra_amt",
-                    "entr_d2",
-                    "d2_entr",
-                    "d2entra",
-                )
-                entr = _pick("entr")
-                ord_alow = _pick(
-                    "ord_alow_amt",
-                    "ord_alow_amt_entr",
-                    "nstd_re_ib_amt",
-                )
-                pymn = _pick("pymn_alow_amt", "pymn_alow_amt_entr", "pymn_alow")
-
-                # return_code 정상이면 반환 (D+2 추정예수가 음수인 경우도 있음 — any(x>0)로 두면 조회 실패로 떨어져 ka10085 잔여값이 남음)
-                # 선택 키까지 반환(호출부는 관심 없으면 무시해도 됩니다).
-                return {
-                    "d1": d1,
-                    "d2": d2,
-                    "entr": entr,
-                    "ord_alow": ord_alow,
-                    "pymn_alow": pymn,
-                    "qry_tp_used": qry_tp,
-                    "d1_src": d1_src,
-                    "d2_src": d2_src,
-                }
+                parsed = self._deposit_fields_from_body(out_body, qry_tp=qry_tp)
+                if parsed is not None:
+                    return parsed
             except Exception as e:
                 try:
                     self.logger.debug("예수금상세 qry_tp=%s 실패: %s", qry_tp, e)
@@ -1431,9 +1491,10 @@ class OrderManager:
                     pass
                 continue
         try:
+            extra = f" ({last_msg})" if last_msg else ""
             self.app.log(
-                "⚠️ [계좌] 예수금상세(ka10001/kt00001) 파싱 실패 — 응답 형식이 바뀌었거나 output이 비어 있습니다. "
-                "D+1/D+2·출금가능이 0으로 보일 수 있습니다."
+                f"⚠️ [계좌] 예수금상세({mode}) 파싱 실패{extra} — "
+                "잔고(ka10085)는 반영됐을 수 있으나 D+1/D+2·출금가능은 ka10085 값으로 표시됩니다."
             )
         except Exception:
             pass

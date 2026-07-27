@@ -11,3 +11,5 @@ optuna>=4.0.0
 deprecated>=1.2.0
 multipledispatch>=1.0.0
 openpyxl>=3.0.0
+kiwoom-rest-api>=0.1.12
+websockets>=16.0
