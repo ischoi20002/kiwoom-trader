@@ -810,13 +810,12 @@ class DynamicBacktester:
                                     can_execute = False
                             
                             if can_execute and not is_addon_target:
-                                # [Phase 2] Track-Signal 교차 검증: 신호 유형이 종목 트랙과 일치하는지 확인
-                                # 동시 A/B 신호 + 보유 A/B 동점 시 B 우선(트랙·스마트바이·체결 일치)
+                                # [Phase 2] Track-Signal 교차 검증 (enforce_track_signal_match)
                                 sig_type = self._effective_s1_sig_type_for_buy(last_sig)
                                 code_track = track_map.get(code, 'A')
-                                if sig_type == 'TYPE_A' and code_track == 'B':
-                                    can_execute = False
-                                elif sig_type == 'TYPE_B' and code_track == 'A':
+                                if not TradingStrategy.track_signal_match_allows(
+                                    self.settings, sig_type, code_track
+                                ):
                                     can_execute = False
                                 
                                 # [v31.5] Smart Buy (Supply/Demand Confirmation)
@@ -1555,8 +1554,9 @@ class DynamicBacktester:
                     
                     # [Phase 2] Track-Signal 교차 검증 (1분봉 경로)
                     code_track = getattr(self, '_current_track_map', {}).get(code, 'A')
-                    if (sig_type == 'TYPE_A' and code_track == 'B') or \
-                       (sig_type == 'TYPE_B' and code_track == 'A'):
+                    if not TradingStrategy.track_signal_match_allows(
+                        self.settings, sig_type, code_track
+                    ):
                         continue
                     
                     use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \

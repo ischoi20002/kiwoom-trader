@@ -18,7 +18,7 @@ import queue
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -397,8 +397,83 @@ def _latest_bar_close(app: Any, nk: str) -> float:
         return 0.0
 
 
+def iter_slot_roll_watch_codes(app: Any) -> List[str]:
+    """15분 슬롯 롤 감시 대상 종목(감시·스트림·보유)을 중복 없이 반환."""
+    seen: Set[str] = set()
+    out: List[str] = []
+
+    def _add(raw: Any) -> None:
+        try:
+            nk = canonical_stock_code(str(raw).strip())
+        except Exception:
+            return
+        if not nk or nk in seen:
+            return
+        seen.add(nk)
+        out.append(nk)
+
+    try:
+        tc = getattr(app, "trading_controller", None)
+        if tc is not None:
+            for c in getattr(tc, "monitor_codes", None) or []:
+                _add(c)
+    except Exception:
+        pass
+    try:
+        for c in getattr(app, "_active_stream_codes", None) or []:
+            _add(c)
+    except Exception:
+        pass
+    try:
+        mi = getattr(app, "monitor_info", None) or {}
+        for key in mi:
+            try:
+                _add(str(key).split("_")[0])
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        vp = getattr(app, "virtual_positions", None) or {}
+        for c in vp:
+            _add(c)
+    except Exception:
+        pass
+    return out
+
+
+_slot_roll_tick_last: Dict[str, float] = {}
+_slot_roll_tick_lock = threading.Lock()
+_SLOT_ROLL_TICK_MIN_INTERVAL_SEC = 0.25
+
+
+def try_roll_15m_slot_on_tick(app: Any, code: str) -> bool:
+    """
+    틱 수신 시 슬롯 롤이 필요하면 즉시 수행(종목별 스로틀).
+    워커 큐 적체와 무관하게 15분 확정 콜백을 앞당깁니다.
+    """
+    nk = canonical_stock_code(str(code).strip())
+    if not nk:
+        return False
+    if not peek_15m_slot_roll_needed(app, nk):
+        return False
+    try:
+        now_m = time.monotonic()
+        with _slot_roll_tick_lock:
+            last = float(_slot_roll_tick_last.get(nk, 0.0))
+            if now_m - last < _SLOT_ROLL_TICK_MIN_INTERVAL_SEC:
+                return False
+            _slot_roll_tick_last[nk] = now_m
+    except Exception:
+        pass
+    try:
+        return bool(maybe_roll_15m_slot_on_clock(app, nk))
+    except Exception:
+        return False
+
+
 def peek_15m_slot_roll_needed(app: Any, code: str) -> bool:
-    """슬롯 롤 필요 여부(읽기 전용). 워처 스레드에서 bars_data 직접 수정 금지."""
+    """슬롯 롤 필요 여부(읽기 전용)."""
     nk = canonical_stock_code(str(code).strip())
     if not nk:
         return False
@@ -418,7 +493,7 @@ def peek_15m_slot_roll_needed(app: Any, code: str) -> bool:
         return False
 
 
-_slot_sync_queue: "queue.SimpleQueue[Tuple[Any, str, float, int]]" = (
+_slot_sync_queue: "queue.SimpleQueue[Tuple[Any, str, float, int, bool]]" = (
     queue.SimpleQueue()
 )
 _slot_sync_pending: Set[str] = set()
@@ -433,10 +508,12 @@ def _run_official_sync_and_signal_eval_job(
     *,
     now_price_fallback: float = 0.0,
     volume_fallback: int = 0,
+    skip_roll: bool = False,
 ) -> None:
     """슬롯 롤·M1 반영·신호 재평가(전용 워커 스레드)."""
     try:
-        maybe_roll_15m_slot_on_clock(app, nk)
+        if not skip_roll:
+            maybe_roll_15m_slot_on_clock(app, nk)
         sync_forming_15m_last_row_from_official_m1(app, nk)
         px = _resolve_monitor_price(app, nk, now_price_fallback)
         if px <= 0:
@@ -477,7 +554,7 @@ def _run_official_sync_and_signal_eval_job(
 def _slot_sync_worker_loop() -> None:
     while True:
         try:
-            app, nk, px_fb, vol_fb = _slot_sync_queue.get()
+            app, nk, px_fb, vol_fb, skip_roll = _slot_sync_queue.get()
         except Exception:
             continue
         try:
@@ -486,6 +563,7 @@ def _slot_sync_worker_loop() -> None:
                 nk,
                 now_price_fallback=float(px_fb),
                 volume_fallback=int(vol_fb),
+                skip_roll=bool(skip_roll),
             )
         except Exception:
             pass
@@ -516,17 +594,31 @@ def enqueue_official_sync_and_signal_eval(
     *,
     now_price_fallback: float = 0.0,
     volume_fallback: int = 0,
+    skip_roll: bool = False,
 ) -> None:
     nk = canonical_stock_code(str(code).strip())
     if not nk:
         return
+    # 워커 큐 적체·pending 중복 차단과 무관하게 슬롯 롤은 즉시 수행
+    if not skip_roll:
+        try:
+            if peek_15m_slot_roll_needed(app, nk):
+                maybe_roll_15m_slot_on_clock(app, nk)
+        except Exception:
+            pass
     try:
         with _slot_sync_pending_lock:
             if nk in _slot_sync_pending:
                 return
             _slot_sync_pending.add(nk)
         _slot_sync_queue.put(
-            (app, nk, float(now_price_fallback), int(volume_fallback))
+            (
+                app,
+                nk,
+                float(now_price_fallback),
+                int(volume_fallback),
+                bool(skip_roll),
+            )
         )
         _ensure_slot_sync_worker_started()
     except Exception:
@@ -543,6 +635,7 @@ def schedule_official_sync_and_signal_eval(
     *,
     now_price_fallback: float = 0.0,
     volume_fallback: int = 0,
+    skip_roll: bool = False,
 ) -> None:
     """
     슬롯 롤 → 1분 집계 반영 → 신호 재평가(전용 워커 큐).
@@ -552,12 +645,15 @@ def schedule_official_sync_and_signal_eval(
         code,
         now_price_fallback=now_price_fallback,
         volume_fallback=volume_fallback,
+        skip_roll=skip_roll,
     )
 
 
 class Rt15mSlotBoundaryWatcher:
     """
-    감시 중 5초마다 슬롯 전진을 확인합니다. 전진 시 공식 동기화·신호 재평가를 예약합니다.
+    감시 중 주기적으로 슬롯 전진을 확인합니다.
+
+    롤은 워커 큐에 맡기지 않고 **즉시** 수행한 뒤, M1 동기화·형성봉 평가만 큐에 넣습니다.
     """
 
     def __init__(self, app: Any, log: Optional[Callable[[str], None]] = None) -> None:
@@ -594,23 +690,32 @@ class Rt15mSlotBoundaryWatcher:
         except Exception:
             pass
 
+    def _watch_interval_sec(self) -> float:
+        try:
+            st = getattr(self._app, "settings", None) or {}
+            v = float(st.get("realtime_15m_slot_watch_sec", 1.0))
+            return max(0.5, min(5.0, v))
+        except Exception:
+            return 1.0
+
     def _loop(self) -> None:
-        while not self._stop.wait(5.0):
+        while not self._stop.wait(self._watch_interval_sec()):
             try:
                 tc = getattr(self._app, "trading_controller", None)
                 if tc is None or not getattr(tc, "is_monitoring", False):
                     continue
-                codes = list(getattr(self._app, "_active_stream_codes", None) or [])
-                for c in codes:
+                codes = iter_slot_roll_watch_codes(self._app)
+                for nk in codes:
                     try:
-                        nk = canonical_stock_code(str(c).strip())
-                        if not nk:
+                        if not peek_15m_slot_roll_needed(self._app, nk):
                             continue
-                        if peek_15m_slot_roll_needed(self._app, nk):
-                            schedule_official_sync_and_signal_eval(self._app, nk)
+                        maybe_roll_15m_slot_on_clock(self._app, nk)
+                        schedule_official_sync_and_signal_eval(
+                            self._app, nk, skip_roll=True
+                        )
                     except Exception as e:
                         try:
-                            self._emit(f"⚠️ [RT15mWatch] {c!r}: {e!r}")
+                            self._emit(f"⚠️ [RT15mWatch] {nk!r}: {e!r}")
                         except Exception:
                             pass
                 try:

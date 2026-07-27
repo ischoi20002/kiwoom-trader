@@ -695,6 +695,30 @@ class TradingStrategy:
         return sig_type
 
     @staticmethod
+    def track_signal_match_allows(
+        settings: Optional[dict], sig_type: Any, code_track: Any
+    ) -> bool:
+        """
+        Track A/B 선정과 S1 Sig_Type 교차 허용 여부.
+        ``enforce_track_signal_match`` 가 False 이면 항상 True (미스매치 허용).
+        """
+        try:
+            if not bool((settings or {}).get("enforce_track_signal_match", True)):
+                return True
+        except Exception:
+            pass
+        try:
+            st = str(sig_type or "").upper()
+            ct = str(code_track or "A").strip().upper()
+            if st == "TYPE_A" and ct == "B":
+                return False
+            if st == "TYPE_B" and ct == "A":
+                return False
+            return True
+        except Exception:
+            return True
+
+    @staticmethod
     def effective_s1_sig_type_for_buy(settings: dict, row, holdings: dict) -> str:
         """15분 행·실시간 last_sig 등에서 Sig_Type 확정.
 

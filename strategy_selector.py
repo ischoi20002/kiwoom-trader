@@ -446,6 +446,279 @@ def _sel_b_ma5_close_mult(settings: dict) -> float:
         return max(1e-9, 1.0 - 0.005)
 
 
+def _sel_score_mode(settings: Optional[dict]) -> str:
+    """선정 Score 모드: ``legacy`` | ``fwd_aligned_v1`` | ``s1_pnl_aligned_v1`` | ``b_s1_pnl_aligned_v1``."""
+    try:
+        m = str((settings or {}).get("sel_score_mode", "legacy") or "legacy").strip().lower()
+        if m in ("fwd_aligned_v1", "fwd_aligned", "aligned"):
+            return "fwd_aligned_v1"
+        if m in ("b_s1_pnl_aligned_v1", "b_only_s1", "b_s1_aligned"):
+            return "b_s1_pnl_aligned_v1"
+        if m in ("s1_pnl_aligned_v1", "s1_pnl", "s1_aligned"):
+            return "s1_pnl_aligned_v1"
+        return "legacy"
+    except Exception:
+        return "legacy"
+
+
+def _use_score_a_s1_pnl_aligned(mode: str) -> bool:
+    """Track A에 S1손익 정렬 스코어를 쓸지."""
+    return mode == "s1_pnl_aligned_v1"
+
+
+def _use_score_b_s1_pnl_aligned(mode: str) -> bool:
+    """Track B에 S1손익 정렬 스코어를 쓸지 (B-only 모드 포함)."""
+    return mode in ("s1_pnl_aligned_v1", "b_s1_pnl_aligned_v1")
+
+
+def _sel_s1_pnl_signs(settings: Optional[dict]) -> Dict[str, float]:
+    """S1 손익 정렬용 피처 부호 (+1=높을수록 유리, -1=낮을수록 유리)."""
+    try:
+        raw = (settings or {}).get("sel_s1_pnl_signs")
+        if isinstance(raw, dict) and raw:
+            out: Dict[str, float] = {}
+            for k, v in raw.items():
+                try:
+                    out[str(k)] = float(v)
+                except Exception:
+                    out[str(k)] = 0.0
+            return out
+    except Exception:
+        pass
+    return {}
+
+
+def _signed_band_score(val: Any, lo: float, hi: float, sign: float) -> float:
+    """sign>0: 높을수록 고점, sign<0: 낮을수록 고점, sign=0: 중립 50."""
+    try:
+        s = float(sign)
+    except Exception:
+        s = 0.0
+    if abs(s) < 1e-12:
+        return 50.0
+    if s > 0:
+        return _band_high_is_better(val, lo, hi)
+    return _band_low_is_better(val, lo, hi)
+
+
+def _score_a_s1_pnl_aligned_series(df: pd.DataFrame, settings: dict) -> pd.Series:
+    """Valid_A 순위 — S1 체결 손익 상관 부호(sel_s1_pnl_signs) 반영."""
+    try:
+        signs = _sel_s1_pnl_signs(settings)
+        if not signs or all(abs(float(v)) < 1e-12 for v in signs.values()):
+            return _score_a_fwd_aligned_series(df, settings)
+        pb_lo = float(settings.get("sel_a_pb_min_pct", 5.0))
+        pb_hi = float(settings.get("sel_a_pb_max_pct", 16.0))
+        atr_lo = float(settings.get("sel_a_atr_pct_min", 0.01))
+        atr_hi = float(settings.get("sel_a_atr_pct_max", 0.085))
+        rk_lo = float(settings.get("sel_a_rs_rank_min", 0.35))
+        rk_hi = float(settings.get("sel_a_rs_rank_max", 0.8))
+        parts: List[pd.Series] = []
+        weights: List[float] = []
+
+        def _add(series: pd.Series, w: float) -> None:
+            parts.append(series.fillna(50.0))
+            weights.append(abs(float(w)))
+
+        if abs(float(signs.get("a_pb", 0))) > 0:
+            pb = pd.to_numeric(df.get("_sel_pb_pct"), errors="coerce")
+            _add(
+                pb.apply(lambda x: _signed_band_score(x, pb_lo, pb_hi, signs.get("a_pb", 0))),
+                0.30,
+            )
+        if abs(float(signs.get("a_atr", 0))) > 0:
+            atr = pd.to_numeric(df.get("_sel_atr_pct"), errors="coerce")
+            _add(
+                atr.apply(lambda x: _signed_band_score(x, atr_lo, atr_hi, signs.get("a_atr", 0))),
+                0.20,
+            )
+        if abs(float(signs.get("a_ma_diff", 0))) > 0 and "MA_Diff" in df.columns:
+            conv = max(float(settings.get("ma_convergence", 5.0)), 1e-6)
+            md = pd.to_numeric(df["MA_Diff"], errors="coerce").abs()
+            # sign+: 큰 MA_Diff 유리 → md/conv, sign-: 작은 유리
+            if float(signs.get("a_ma_diff", 0)) > 0:
+                ma_s = (md / conv).clip(0.0, 1.0) * 100.0
+            else:
+                ma_s = (1.0 - (md / conv)).clip(0.0, 1.0) * 100.0
+            _add(ma_s, 0.20)
+        if abs(float(signs.get("a_liq", 0))) > 0:
+            if "AvgVal5" in df.columns:
+                liq = pd.to_numeric(df["AvgVal5"], errors="coerce").fillna(0.0)
+                liq_s = (liq / 50000000000.0 * 100.0).clip(upper=100.0)
+            else:
+                liq = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
+                liq_s = (liq / 500.0 * 100.0).clip(upper=100.0)
+            if float(signs.get("a_liq", 0)) < 0:
+                liq_s = 100.0 - liq_s
+            _add(liq_s, 0.15)
+        if abs(float(signs.get("a_rs", 0))) > 0 and "_sel_rs_pct" in df.columns:
+            rs = pd.to_numeric(df["_sel_rs_pct"], errors="coerce")
+            _add(
+                rs.apply(lambda x: _signed_band_score(x, rk_lo, rk_hi, signs.get("a_rs", 0))),
+                0.15,
+            )
+        if not parts:
+            return _score_a_fwd_aligned_series(df, settings)
+        wsum = sum(weights) or 1.0
+        sc = sum(p * (w / wsum) for p, w in zip(parts, weights))
+        return sc.fillna(0.0).clip(0.0, 100.0)
+    except Exception:
+        return pd.Series(0.0, index=df.index)
+
+
+def _score_b_s1_pnl_aligned_series(df: pd.DataFrame, settings: dict) -> pd.Series:
+    """Valid_B 순위 — S1 체결 손익 상관 부호 반영."""
+    try:
+        signs = _sel_s1_pnl_signs(settings)
+        if not signs or all(abs(float(v)) < 1e-12 for v in signs.values()):
+            return _score_b_fwd_aligned_series(df, settings)
+        hi_lo = float(settings.get("sel_b_hi_min_pct", 92.0))
+        hi_hi = float(settings.get("sel_b_hi_max_pct", 99.7))
+        atr_lo = float(settings.get("sel_b_atr_pct_min", 0.005))
+        atr_hi = float(settings.get("sel_b_atr_pct_max", 0.09))
+        parts: List[pd.Series] = []
+        weights: List[float] = []
+
+        def _add(series: pd.Series, w: float) -> None:
+            parts.append(series.fillna(50.0))
+            weights.append(abs(float(w)))
+
+        if abs(float(signs.get("b_rs", 0))) > 0 and "_sel_b_rs_pct" in df.columns:
+            rs = pd.to_numeric(df["_sel_b_rs_pct"], errors="coerce").fillna(0.0)
+            if float(signs.get("b_rs", 0)) > 0:
+                rs_s = rs * 100.0
+            else:
+                rs_s = (1.0 - rs) * 100.0
+            _add(rs_s, 0.30)
+        if abs(float(signs.get("b_hi", 0))) > 0:
+            hip = pd.to_numeric(df.get("_sel_b_hi_pct"), errors="coerce")
+            _add(
+                hip.apply(lambda x: _signed_band_score(x, hi_lo, hi_hi, signs.get("b_hi", 0))),
+                0.25,
+            )
+        if abs(float(signs.get("b_atr", 0))) > 0:
+            atr = pd.to_numeric(df.get("_sel_b_atr_pct"), errors="coerce")
+            _add(
+                atr.apply(lambda x: _signed_band_score(x, atr_lo, atr_hi, signs.get("b_atr", 0))),
+                0.15,
+            )
+        if abs(float(signs.get("b_liq", 0))) > 0:
+            if "AvgVal5" in df.columns:
+                liq = pd.to_numeric(df["AvgVal5"], errors="coerce").fillna(0.0)
+                liq_s = (liq / 50000000000.0 * 100.0).clip(upper=100.0)
+            else:
+                liq = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
+                liq_s = (liq / 500.0 * 100.0).clip(upper=100.0)
+            if float(signs.get("b_liq", 0)) < 0:
+                liq_s = 100.0 - liq_s
+            _add(liq_s, 0.15)
+        if abs(float(signs.get("b_osc", 0))) > 0:
+            osc = pd.to_numeric(df.get("OSC", 0), errors="coerce").fillna(0.0)
+            # 교차섹션 분위
+            try:
+                osc_pct = osc.rank(pct=True)
+            except Exception:
+                osc_pct = (osc > 0).astype(float)
+            if float(signs.get("b_osc", 0)) > 0:
+                osc_s = osc_pct * 100.0
+            else:
+                osc_s = (1.0 - osc_pct) * 100.0
+            _add(osc_s, 0.15)
+        if not parts:
+            return _score_b_fwd_aligned_series(df, settings)
+        wsum = sum(weights) or 1.0
+        sc = sum(p * (w / wsum) for p, w in zip(parts, weights))
+        return sc.fillna(0.0).clip(0.0, 100.0)
+    except Exception:
+        return pd.Series(0.0, index=df.index)
+
+
+def _band_low_is_better(val: Any, lo: float, hi: float) -> float:
+    """밴드 [lo,hi]에서 낮을수록 100점에 가깝게."""
+    try:
+        x = float(val)
+        span = max(float(hi) - float(lo), 1e-9)
+        return float(np.clip((float(hi) - x) / span, 0.0, 1.0) * 100.0)
+    except Exception:
+        return 0.0
+
+
+def _band_high_is_better(val: Any, lo: float, hi: float) -> float:
+    """밴드 [lo,hi]에서 높을수록 100점에 가깝게."""
+    try:
+        x = float(val)
+        span = max(float(hi) - float(lo), 1e-9)
+        return float(np.clip((x - float(lo)) / span, 0.0, 1.0) * 100.0)
+    except Exception:
+        return 0.0
+
+
+def _score_a_fwd_aligned_series(df: pd.DataFrame, settings: dict) -> pd.Series:
+    """
+    Valid_A 후보 순위용 — 선행수익과 부호가 맞게(얕은 되돌림·낮은 ATR·낮은 MA갭·유동성).
+    Valid 게이트는 호출 측에서 적용.
+    """
+    try:
+        pb_lo = float(settings.get("sel_a_pb_min_pct", 5.0))
+        pb_hi = float(settings.get("sel_a_pb_max_pct", 16.0))
+        atr_lo = float(settings.get("sel_a_atr_pct_min", 0.01))
+        atr_hi = float(settings.get("sel_a_atr_pct_max", 0.085))
+        pb = pd.to_numeric(df.get("_sel_pb_pct"), errors="coerce")
+        atr = pd.to_numeric(df.get("_sel_atr_pct"), errors="coerce")
+        pb_s = ((pb_hi - pb) / max(pb_hi - pb_lo, 1e-9)).clip(0.0, 1.0) * 100.0
+        atr_s = ((atr_hi - atr) / max(atr_hi - atr_lo, 1e-9)).clip(0.0, 1.0) * 100.0
+        if "MA_Diff" in df.columns:
+            conv = max(float(settings.get("ma_convergence", 5.0)), 1e-6)
+            md = pd.to_numeric(df["MA_Diff"], errors="coerce").abs()
+            ma_s = (1.0 - (md / conv)).clip(0.0, 1.0) * 100.0
+        else:
+            ma_s = pd.Series(50.0, index=df.index)
+        if "AvgVal5" in df.columns:
+            liq = pd.to_numeric(df["AvgVal5"], errors="coerce").fillna(0.0)
+            liq_s = (liq / 50000000000.0 * 100.0).clip(upper=100.0)
+        else:
+            liq = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
+            liq_s = (liq / 500.0 * 100.0).clip(upper=100.0)
+        sc = pb_s * 0.40 + atr_s * 0.20 + ma_s * 0.20 + liq_s * 0.20
+        return sc.fillna(0.0).clip(0.0, 100.0)
+    except Exception:
+        return pd.Series(0.0, index=df.index)
+
+
+def _score_b_fwd_aligned_series(df: pd.DataFrame, settings: dict) -> pd.Series:
+    """
+    Valid_B 후보 순위용 — RS 추격 비중을 뒤집고(낮은 RS% 우대),
+    고점 근접·유동성·OSC·낮은 ATR을 가점.
+    """
+    try:
+        hi_lo = float(settings.get("sel_b_hi_min_pct", 92.0))
+        hi_hi = float(settings.get("sel_b_hi_max_pct", 99.7))
+        atr_lo = float(settings.get("sel_b_atr_pct_min", 0.005))
+        atr_hi = float(settings.get("sel_b_atr_pct_max", 0.09))
+        rs = pd.to_numeric(df.get("_sel_b_rs_pct"), errors="coerce").fillna(0.0)
+        rs_inv = (1.0 - rs) * 100.0
+        hip = pd.to_numeric(df.get("_sel_b_hi_pct"), errors="coerce")
+        hi_s = ((hip - hi_lo) / max(hi_hi - hi_lo, 1e-9)).clip(0.0, 1.0) * 100.0
+        atr = pd.to_numeric(df.get("_sel_b_atr_pct"), errors="coerce")
+        atr_s = ((atr_hi - atr) / max(atr_hi - atr_lo, 1e-9)).clip(0.0, 1.0) * 100.0
+        if "AvgVal5" in df.columns:
+            liq = pd.to_numeric(df["AvgVal5"], errors="coerce").fillna(0.0)
+            liq_s = (liq / 50000000000.0 * 100.0).clip(upper=100.0)
+        else:
+            liq = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
+            liq_s = (liq / 500.0 * 100.0).clip(upper=100.0)
+        osc = pd.to_numeric(df.get("OSC", 0), errors="coerce").fillna(0.0)
+        if "OSC_Prev" in df.columns:
+            osc_p = pd.to_numeric(df["OSC_Prev"], errors="coerce").fillna(osc)
+            osc_s = (osc > osc_p).astype(float) * 70.0 + (osc > 0).astype(float) * 30.0
+        else:
+            osc_s = (osc > 0).astype(float) * 100.0
+        sc = rs_inv * 0.40 + hi_s * 0.25 + atr_s * 0.15 + liq_s * 0.10 + osc_s * 0.10
+        return sc.fillna(0.0).clip(0.0, 100.0)
+    except Exception:
+        return pd.Series(0.0, index=df.index)
+
+
 def _compute_sel_a_aux_from_daily_tail(
     df_valid: pd.DataFrame,
     last_row: pd.Series,
@@ -594,8 +867,14 @@ def _apply_sel_a_live_cross_section(rows: list, settings: dict) -> list:
         liq_raw = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
         liq_part = (liq_raw / 500.0 * 100.0).clip(upper=100.0) * 0.12
         osc_bonus = 10.0  # 동적 배치와 유사: 우상향 가점은 일괄 경로에서 생략·단순화
-        sc = (rs_part + pb_part + ma_part + liq_part).fillna(0.0) + osc_bonus
-        sc = sc.clip(lower=0.0, upper=100.0)
+        mode = _sel_score_mode(settings)
+        if _use_score_a_s1_pnl_aligned(mode):
+            sc = _score_a_s1_pnl_aligned_series(df, settings)
+        elif mode == "fwd_aligned_v1":
+            sc = _score_a_fwd_aligned_series(df, settings)
+        else:
+            sc = (rs_part + pb_part + ma_part + liq_part).fillna(0.0) + osc_bonus
+            sc = sc.clip(lower=0.0, upper=100.0)
         df["_valid_a"] = va.fillna(False).values
         df["_score_a"] = np.where(va.fillna(False), np.round(sc, 1), 0.0)
         return df.to_dict("records")
@@ -780,8 +1059,14 @@ def _apply_sel_b_live_cross_section(rows: list, settings: dict) -> list:
             osc_bonus = (osc_r > osc_p).astype(float) * 10.0
         except Exception:
             osc_bonus = 0.0
-        sc = (rs_part + hi_part + tr_part + slope_bonus + liq_part + osc_bonus).fillna(0.0)
-        sc = sc.clip(lower=0.0, upper=100.0)
+        mode = _sel_score_mode(settings)
+        if _use_score_b_s1_pnl_aligned(mode):
+            sc = _score_b_s1_pnl_aligned_series(df, settings)
+        elif mode == "fwd_aligned_v1":
+            sc = _score_b_fwd_aligned_series(df, settings)
+        else:
+            sc = (rs_part + hi_part + tr_part + slope_bonus + liq_part + osc_bonus).fillna(0.0)
+            sc = sc.clip(lower=0.0, upper=100.0)
         df["_valid_b"] = vb.fillna(False).values
         df["_score_b"] = np.where(vb.fillna(False), np.round(sc, 1), 0.0)
         return df.to_dict("records")
@@ -2046,7 +2331,13 @@ def _apply_sel_track_a_batch_v2(
             (df_all["AvgVal5"] / 50000000000.0 * 100.0).clip(upper=100.0) * 0.12
         )
         osc_b = (df_all["OSC"] > df_all["OSC_Prev"]).astype(float) * 10.0
-        sc = (rs_part + pb_part + ma_part + liq_part + osc_b).clip(lower=0.0, upper=100.0)
+        mode = _sel_score_mode(settings)
+        if _use_score_a_s1_pnl_aligned(mode):
+            sc = _score_a_s1_pnl_aligned_series(df_all, settings)
+        elif mode == "fwd_aligned_v1":
+            sc = _score_a_fwd_aligned_series(df_all, settings)
+        else:
+            sc = (rs_part + pb_part + ma_part + liq_part + osc_b).clip(lower=0.0, upper=100.0)
         df_all["Score_A"] = np.where(df_all["Valid_A"], np.round(sc, 1), 0.0)
     except Exception as e:
         try:
@@ -2212,9 +2503,15 @@ def _apply_sel_track_b_batch_v2(
             (df_all["AvgVal5"] / 50000000000.0 * 100.0).clip(upper=100.0) * 0.12
         )
         osc_b = (df_all["OSC"] > df_all["OSC_Prev"]).astype(float) * 10.0
-        sc = (rs_part + hi_part + tr_part + slope_bonus + liq_part + osc_b).clip(
-            lower=0.0, upper=100.0
-        )
+        mode = _sel_score_mode(settings)
+        if _use_score_b_s1_pnl_aligned(mode):
+            sc = _score_b_s1_pnl_aligned_series(df_all, settings)
+        elif mode == "fwd_aligned_v1":
+            sc = _score_b_fwd_aligned_series(df_all, settings)
+        else:
+            sc = (rs_part + hi_part + tr_part + slope_bonus + liq_part + osc_b).clip(
+                lower=0.0, upper=100.0
+            )
         df_all["Score_B"] = np.where(df_all["Valid_B"], np.round(sc, 1), 0.0)
         if with_b_debug:
             try:

@@ -40,25 +40,34 @@ class SignalCallbacksService:
             name = str(info.get("name", "Unknown"))
 
             detailed = info.get("last_detailed_sig")
-            if detailed is None or getattr(detailed, "empty", True):
-                self.log(f"⚠️ [Skip] {code} 신호 캐시 없음")
-                try:
-                    sl = getattr(self.app, "session_logger", None)
-                    if sl:
-                        sl.log(
-                            "signal_buy_skipped",
-                            {"code": code, "name": name, "reason": "no_signal_cache"},
-                        )
-                except Exception:
-                    pass
-                return False
-
-            last_sig = detailed.iloc[-1]
-            row = (
-                last_sig.to_dict()
-                if hasattr(last_sig, "to_dict")
-                else dict(last_sig)
-            )
+            row: dict = {}
+            if detailed is not None and not getattr(detailed, "empty", True):
+                last_ser = detailed.iloc[-1]
+                row = (
+                    last_ser.to_dict()
+                    if hasattr(last_ser, "to_dict")
+                    else dict(last_ser)
+                )
+            else:
+                cached = info.get("last_sig_cache")
+                if isinstance(cached, dict) and cached:
+                    row = dict(cached)
+                else:
+                    self.log(f"⚠️ [Skip] {code} 신호 캐시 없음")
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "signal_buy_skipped",
+                                {
+                                    "code": code,
+                                    "name": name,
+                                    "reason": "no_signal_cache",
+                                },
+                            )
+                    except Exception:
+                        pass
+                    return False
             sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
                 self.app.settings, row, self.app.portfolio.virtual_positions
             )

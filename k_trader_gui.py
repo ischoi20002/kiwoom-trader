@@ -1272,9 +1272,45 @@ class KiwoomApp:
                 processed += 1
                 try:
                     if kind == "buy_signal" and isinstance(payload, tuple):
-                        self._enqueue_order_action("buy_signal", payload)
+                        if not self._enqueue_order_action("buy_signal", payload):
+                            try:
+                                bcode = (
+                                    str(payload[0]).zfill(6)
+                                    if len(payload) > 0
+                                    else ""
+                                )
+                                sl = getattr(self, "session_logger", None)
+                                if sl is not None:
+                                    sl.log(
+                                        "signal_buy_skipped",
+                                        {
+                                            "code": bcode,
+                                            "reason": "order_action_enqueue_rejected",
+                                        },
+                                    )
+                            except Exception:
+                                pass
                     elif kind == "strategy_action" and isinstance(payload, tuple):
-                        self._enqueue_order_action("strategy_action", payload)
+                        if not self._enqueue_order_action(
+                            "strategy_action", payload
+                        ):
+                            try:
+                                scode = (
+                                    str(payload[0]).zfill(6)
+                                    if len(payload) > 0
+                                    else ""
+                                )
+                                sl = getattr(self, "session_logger", None)
+                                if sl is not None:
+                                    sl.log(
+                                        "strategy_action_skipped",
+                                        {
+                                            "code": scode,
+                                            "reason": "order_action_enqueue_rejected",
+                                        },
+                                    )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
         except Exception:

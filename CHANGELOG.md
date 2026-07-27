@@ -13,6 +13,16 @@
 
 ---
 
+## 0.13.0 (2026-07-27)
+
+실시간 S1 주문·15분 슬롯 롤 타이밍 수정, 선정 Score 모드 확장.
+
+- **S1 주문 파이프라인**: 15분 확정 평가 후 `last_detailed_sig`·메인 액션 폴러 깨우기. 캐시 폴백·`signal_buy_skipped`/`strategy_action_skipped` JSONL.
+- **15분 슬롯 롤**: 워처 1초·감시 전 종목·큐 적체 시에도 동기 롤. 틱 경로 `try_roll_15m_slot_on_tick` (`realtime_15m_slot_watch_sec`).
+- **`sel_score_mode`**: `legacy` / `fwd_aligned_v1` / `s1_pnl_aligned_v1` / `b_s1_pnl_aligned_v1` — S1 손익 정렬 선정 스코어.
+- **`enforce_track_signal_match`**: Track·Sig_Type 교차 거절 토글(기본 ON). `TradingStrategy.track_signal_match_allows` 공용화.
+- 비교·진단 스크립트: `tools/compare_score_modes*.py`, `compare_s1_pnl_rank.py`, `diagnose_type_*_exit_risk.py` 등.
+
 ## 0.12.0 (2026-07-27)
 
 실시간 S1/S2/청산을 저정밀(완성 15분) 백테와 정합.

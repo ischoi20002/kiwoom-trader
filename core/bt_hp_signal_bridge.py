@@ -344,10 +344,7 @@ def evaluate_close_now_s1_at_m1_idx(
         )
 
         ct = str(code_track or "AB").strip().upper()
-        track_ok = not (
-            (sig_type == "TYPE_A" and ct == "B")
-            or (sig_type == "TYPE_B" and ct == "A")
-        )
+        track_ok = TradingStrategy.track_signal_match_allows(settings, sig_type, ct)
 
         out["ok"] = True
         out["signal"] = bool(signal_on)
@@ -508,7 +505,7 @@ def evaluate_bt_hp_s1_new_entry_only(
         out["sig_type"] = sig_type
 
         ct = str(code_track or "AB").strip().upper()
-        if (sig_type == "TYPE_A" and ct == "B") or (sig_type == "TYPE_B" and ct == "A"):
+        if not TradingStrategy.track_signal_match_allows(settings, sig_type, ct):
             out["reason"] = "track_mismatch"
             return out
 

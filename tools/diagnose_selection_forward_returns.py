@@ -129,6 +129,8 @@ def _get_monthly_universe(
     dt: pd.Timestamp,
     cache: Dict[str, frozenset[str]],
     universe_index_choice: str,
+    *,
+    kospi_top_n: int = 200,
 ) -> frozenset[str]:
     mk = pd.Timestamp(dt).strftime("%Y%m")
     if mk not in cache:
@@ -139,7 +141,7 @@ def _get_monthly_universe(
             tlist = (
                 load_kospi_universe_codes(
                     logger_callback=None,
-                    top_n=int(settings.get("kospi_top_n", 200)),
+                    top_n=int(kospi_top_n),
                 )
                 if idx_choice == "KOSPI200"
                 else load_kodex200_universe_codes(logger_callback=None)
@@ -243,11 +245,22 @@ def _build_schedule_a_b(
     floor_sa = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
     floor_sb = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
     u_all = {str(c).zfill(6) for c in all_codes}
+    idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+    if idx_choice not in ("KODEX200", "KOSPI200"):
+        idx_choice = "KODEX200"
+    top_n = int(settings.get("kospi_top_n", 200))
     for d_str in df_sim["time"].dt.strftime("%Y-%m-%d").drop_duplicates().sort_values():
         if duration_days < 180:
             u_set = u_all
         else:
-            u_set = set(_get_monthly_universe(pd.to_datetime(d_str), univ_cache))
+            u_set = set(
+                _get_monthly_universe(
+                    pd.to_datetime(d_str),
+                    univ_cache,
+                    idx_choice,
+                    kospi_top_n=top_n,
+                )
+            )
         day_mask = (df_sim["time"] == pd.to_datetime(d_str)) & (df_sim["code"].isin(u_set))
         day_a = df_sim.loc[day_mask & df_sim["Valid_A"]]
         if not day_a.empty:
@@ -370,11 +383,17 @@ def run_diagnosis(
     univ_cache: Dict[str, frozenset[str]] = {}
     # 행별 유니버스(장기 백테 시 월 구성원 필터)
     if duration_days >= 180:
-        mk = df_sim["time"].dt.strftime("%Y%m")
-        for mkey in mk.unique():
-            _get_monthly_universe(pd.Timestamp(mkey + "01"), univ_cache, idx_choice)
+        top_n = int(settings.get("kospi_top_n", 200))
+        for mkey in df_sim["time"].dt.strftime("%Y%m").unique():
+            _get_monthly_universe(
+                pd.Timestamp(str(mkey) + "01"),
+                univ_cache,
+                idx_choice,
+                kospi_top_n=top_n,
+            )
         df_sim["_in_univ"] = [
-            str(c).zfill(6) in _get_monthly_universe(t, univ_cache, idx_choice)
+            str(c).zfill(6)
+            in _get_monthly_universe(t, univ_cache, idx_choice, kospi_top_n=top_n)
             for c, t in zip(df_sim["code"], df_sim["time"])
         ]
     else:

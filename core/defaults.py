@@ -187,6 +187,8 @@ DEFAULT_SETTINGS = {
     "macd_sig_entry": 9,
     "use_rsi_sig_filter": True,
     "rsi_sig_period": 9.0,
+    # Track A/B 선정과 S1 Sig_Type 교차 거절 (False면 감시목록 안에서는 타입 자유)
+    "enforce_track_signal_match": True,
     "use_type_a": True,
     "buy_rsi_max_a": 70.0,
     "use_smart_buy_a": False,
@@ -316,6 +318,9 @@ DEFAULT_SETTINGS = {
     "sel_track_min_score_a": 0.0,
     "sel_track_min_score_b": 0.0,
     "sel_track_min_score_fallback_topn": False,
+    # legacy: 기존 Score / fwd_aligned_v1: 일봉 선행수익 정렬 / s1_pnl_aligned_v1: S1손익 정렬
+    "sel_score_mode": "legacy",
+    "sel_s1_pnl_signs": {},
     "sel_a_use_new_stack": True,
     "sel_a_rs_lookback": 5.0,
     "sel_a_rs_rank_min": 0.35,

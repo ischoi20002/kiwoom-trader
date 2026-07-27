@@ -369,6 +369,15 @@ class SignalEngine:
         except Exception:
             return True
 
+    def _wake_tick_main_action_poller(self) -> None:
+        """백그라운드 스레드에서 큐 적재 후 메인 폴러를 깨웁니다."""
+        try:
+            fn = getattr(self.app, "_ensure_tick_main_action_poller", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
+
     def _realtime_s1_mirror_dynamic_intrabar_enabled(self) -> bool:
         """
         동적 고정밀과 동일한 인트라바 판정 사용 여부.
@@ -638,6 +647,7 @@ class SignalEngine:
                 info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
             ).strip().upper()
             info["last_sig_cache"] = last_sig
+            info["last_detailed_sig"] = detailed
             info["last_row_cache"] = df_ind.iloc[-1].to_dict()
             info["last_bar_count"] = bar_count
             info["confluence"] = self._format_s1_confluence_status_line(last_sig, _sel_tr)
@@ -746,6 +756,7 @@ class SignalEngine:
                             float(ma60_ratio),
                         ),
                     )
+                    self._wake_tick_main_action_poller()
                 else:
                     self.app._on_buy_signal_received(
                         nk,
@@ -935,6 +946,7 @@ class SignalEngine:
                             _act_kw,
                         ),
                     )
+                    self._wake_tick_main_action_poller()
                 else:
                     self.app._on_strategy_action_needed(
                         nk,
@@ -2155,6 +2167,15 @@ class SignalEngine:
                 return
             info = self.app.monitor_info[mi_key]
             official_sync_eval = bool(kwargs.get("_official_sync_eval", False))
+
+            # 슬롯 경계: 워커 큐 적체 시에도 15분 확정 콜백을 앞당김
+            if not official_sync_eval and not bool(kwargs.get("_orderbook_only", False)):
+                try:
+                    from core.realtime_official_bars_sync import try_roll_15m_slot_on_tick
+
+                    try_roll_15m_slot_on_tick(self.app, code)
+                except Exception:
+                    pass
             # 지정가 주문 시세 검증용: 틱 단가로 캐시를 매 틱 동기화 (화면·주문 기준 불일치 방지)
             # 공식 M1 평가 경로는 신호만 재계산하고, 이미 살아 있는 WS 틱가를 덮어쓰지 않는다.
             try:
