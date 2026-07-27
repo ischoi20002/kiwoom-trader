@@ -96,6 +96,7 @@ DEFAULT_SETTINGS = {
     "use_intraday_api_backfill": True,
     "require_full_warmup_for_monitoring": False,
     "continuous_monitor_eod_buffer_minutes": 15,
+    "regime_display_eod_buffer_minutes": 30,
     "continuous_monitor_stop_settle_sec": 5.0,
     "monitor_pre_selection_bars_1d_source": "fdr",
     "monitor_pre_selection_rebuild_sleep_sec": 0.02,

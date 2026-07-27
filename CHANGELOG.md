@@ -13,6 +13,14 @@
 
 ---
 
+## 0.13.2 (2026-07-27)
+
+GUI 헤더 B 추세 레짐 표시 및 최근 영업일 이력.
+
+- **헤더 중앙 레짐 표시**: `RegimeDisplayService` — 기동 시·장마감+30분 후 갱신, 유지/약화/붕괴 색상 구분.
+- **「30일」 이력 버튼**: 최근 ~22영업일 일별 레짐 막대 타임라인 + 표 (`ui/regime_history_dialog.py`).
+- **`compute_transition_regime_history`**: `prepare_dynamic_universe`와 동일 분류로 이력 일괄 산출.
+
 ## 0.13.1 (2026-07-27)
 
 브레드스 레짐 제거, TRANS_S8_NS2 전환 게이트 반영.

@@ -53,6 +53,7 @@ from core.post_fill_account_sync_service import PostFillAccountSyncService
 from core.realtime_tick_dispatch_service import RealtimeTickDispatchService
 from core.eod_equity_snapshot_service import EodEquitySnapshotService
 from core.continuous_monitor_service import ContinuousMonitorService
+from core.regime_display_service import RegimeDisplayService
 from core.rest_auth_retry_service import RestAuthRetryService
 from core.fill_reconciliation_service import FillReconciliationService
 from core.execution.order_execution_service import OrderExecutionService
@@ -491,6 +492,9 @@ class KiwoomApp:
         self.continuous_monitor_service = ContinuousMonitorService(
             self, log_func=self.log
         )
+        self.regime_display_service = RegimeDisplayService(
+            self, log_func=self.log
+        )
 
         self.notebook = None
         self.status_label = None
@@ -801,6 +805,10 @@ class KiwoomApp:
             self._start_eod_equity_snapshot_scheduler()
         except Exception:
             pass
+        try:
+            self.regime_display_service.start()
+        except Exception:
+            pass
 
         # RemoteCommander는 인증 성공 후 RestAuthRetryService에서 1회만 기동합니다.
         if self.auto_start:
@@ -831,14 +839,41 @@ class KiwoomApp:
         if not hasattr(self, 'notebook') or self.notebook is None or not self.notebook.winfo_exists():
             self.header_frame = ttk.Frame(self.root, padding=(15, 8))
             self.header_frame.pack(side=tk.TOP, fill=tk.X)
-            
+            self.header_frame.columnconfigure(0, weight=1)
+            self.header_frame.columnconfigure(1, weight=0)
+            self.header_frame.columnconfigure(2, weight=1)
+
             self.lbl_header_title = ttk.Label(
                 self.header_frame,
                 text=f"K-Trader v{APP_VERSION}",
                 font=("Malgun Gothic", 10, "bold"),
                 foreground=self.colors["primary"],
             )
-            self.lbl_header_title.pack(side=tk.LEFT)
+            self.lbl_header_title.grid(row=0, column=0, sticky="w")
+
+            self.regime_header_box = tk.Frame(
+                self.header_frame,
+                bg=self.colors["bg"],
+            )
+            self.regime_header_box.grid(row=0, column=1, padx=12)
+
+            self.lbl_regime_status = tk.Label(
+                self.regime_header_box,
+                text="B 추세 레짐: —",
+                font=("Malgun Gothic", 12, "bold"),
+                fg=self.colors["primary"],
+                bg=self.colors["bg"],
+                anchor="center",
+            )
+            self.lbl_regime_status.pack(side=tk.LEFT)
+
+            self.btn_regime_history = ttk.Button(
+                self.regime_header_box,
+                text="30일",
+                width=4,
+                command=self._on_regime_history_clicked,
+            )
+            self.btn_regime_history.pack(side=tk.LEFT, padx=(6, 0))
 
             status_frame = ttk.Frame(self.root)
             status_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
@@ -2625,6 +2660,12 @@ class KiwoomApp:
         except Exception:
             pass
         try:
+            rds = getattr(self, "regime_display_service", None)
+            if rds is not None:
+                rds.shutdown()
+        except Exception:
+            pass
+        try:
             self._cancel_post_fill_sync_jobs()
         except Exception:
             pass
@@ -2658,6 +2699,18 @@ class KiwoomApp:
             pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()
         self.root.destroy()
+
+    def _on_regime_history_clicked(self) -> None:
+        """헤더 「30일」 — 최근 영업일 레짐 이력 창."""
+        try:
+            svc = getattr(self, "regime_display_service", None)
+            if svc is not None:
+                svc.open_history_async()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [레짐표시] 이력 버튼 오류: {e}")
+            except Exception:
+                pass
 
     def _start_eod_equity_snapshot_scheduler(self) -> None:
         # 기존 구현을 서비스로 위임

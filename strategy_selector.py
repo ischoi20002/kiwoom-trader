@@ -3062,6 +3062,69 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     return schedule, schedule_a, schedule_b, transition_regime_by_day
 
 
+def compute_transition_regime_history(
+    settings: dict,
+    data_manager: Any,
+    *,
+    lookback_trading_days: int = 22,
+    end_date: Optional[Union[str, datetime]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    최근 N영업일 일별 transition 레짐 이력.
+
+    ``prepare_dynamic_universe`` 와 동일 분류 로직(게이트 ON으로 일시 강제).
+    GUI 이력 차트용 — 실전 ``use_transition_gate`` 와 무관하게 분류 결과를 반환한다.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        n = max(5, min(int(lookback_trading_days or 22), 60))
+        end_s = pd.to_datetime(end_date or datetime.now()).strftime("%Y-%m-%d")
+        start_s = (pd.to_datetime(end_s) - timedelta(days=75)).strftime("%Y-%m-%d")
+
+        st = dict(settings or {})
+        st["use_transition_gate"] = True
+
+        def _silent(*_a: Any, **_k: Any) -> None:
+            pass
+
+        _result = prepare_dynamic_universe(st, start_s, end_s, data_manager, _silent)
+        regime_map: Dict[str, str] = {}
+        if isinstance(_result, tuple) and len(_result) >= 4:
+            try:
+                regime_map = dict(_result[3] or {})
+            except Exception:
+                regime_map = {}
+
+        try:
+            td_list = list(data_manager.get_trading_days(start_s, end_s) or [])
+        except Exception:
+            td_list = sorted(regime_map.keys())
+
+        display_days = [d for d in td_list if d in regime_map][-n:]
+        if not display_days:
+            display_days = sorted(regime_map.keys())[-n:]
+
+        labels = {
+            "OFF": "유지",
+            "TRANSITION": "약화",
+            "HARD": "붕괴",
+        }
+        for d in display_days:
+            reg = str(regime_map.get(d, "OFF")).strip().upper()
+            if reg not in ("OFF", "TRANSITION", "HARD"):
+                reg = "OFF"
+            out.append(
+                {
+                    "date": d,
+                    "regime": reg,
+                    "label": labels.get(reg, reg),
+                }
+            )
+    except Exception:
+        return out
+    return out
+
+
 def diagnose_dynamic_universe_selection_by_trading_day(
     settings: dict,
     start_date: Union[str, datetime],
