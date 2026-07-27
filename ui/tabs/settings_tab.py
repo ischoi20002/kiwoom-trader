@@ -600,102 +600,132 @@ class SettingsTab:
         )
         kospi_n_cmb.grid(row=1, column=1, sticky='w', padx=(5, 10), pady=(4, 0))
 
-        # ── 시장 브레드스 게이트 (약세장 진입 차단) ──
-        # UP: Type B 비중 확대 / NEUTRAL: A·B 동등 슬롯 / DOWN: 신규 감시 전부 차단
-        breadth_f = ttk.LabelFrame(
+        # ── 레짐 전환 게이트 (TRANS_S8_NS2: B-share 급락 + 변동성) ──
+        transition_f = ttk.LabelFrame(
             _univ_root,
-            text=' 🌊 시장 브레드스 게이트 (레짐별 A/B 비중) ',
+            text=' 🔄 레짐 전환 게이트 (Valid A/B · B-share) ',
             padding='15',
         )
-        breadth_f.pack(fill=tk.X, expand=False, pady=(0, 12))
+        transition_f.pack(fill=tk.X, expand=False, pady=(0, 12))
         add_param_row(
-            breadth_f,
-            '브레드스 게이트 사용',
+            transition_f,
+            '전환 게이트 사용',
             None,
             '',
-            'ON: 유니버스 MA20 상회 비율로 UP/NEUTRAL/DOWN 판정. 실시간 선정·동적 백테 공통',
-            toggle_key='use_market_breadth_gate',
+            'ON: Valid_B 비중 급락 + 변동성 확인 시 TRANSITION/HARD. 실시간·동적 백테 공통',
+            toggle_key='use_transition_gate',
         )
         add_param_row(
-            breadth_f,
-            'DOWN 임계(하한)',
-            'breadth_down_pct',
-            '',
-            '0~1. MA20 상회 비율이 이 값 미만이면 DOWN → 그날 신규 감시 전부 차단',
-        )
-        add_param_row(
-            breadth_f,
-            'UP 임계(상한)',
-            'breadth_up_pct',
-            '',
-            '0~1. 이 값 이상이면 UP(B 비중↑). DOWN~UP 사이는 NEUTRAL(A/B 동등)',
-        )
-        add_param_row(
-            breadth_f,
-            'UP 슬롯 A',
-            'breadth_up_slots_a',
-            '',
-            '강세장 Track A 감시 상한 (기본 12, max_slots_a보다 작게 권장)',
-        )
-        add_param_row(
-            breadth_f,
-            'UP 슬롯 B',
-            'breadth_up_slots_b',
-            '',
-            '강세장 Track B 감시 상한 (기본 20 — Type B 비중 확대)',
-        )
-        add_param_row(
-            breadth_f,
-            'NEUTRAL 슬롯 A',
-            'breadth_neutral_slots_a',
-            '',
-            '중립장 Track A 상한 (B와 같게 두면 A/B 동등)',
-        )
-        add_param_row(
-            breadth_f,
-            'NEUTRAL 슬롯 B',
-            'breadth_neutral_slots_b',
-            '',
-            '중립장 Track B 상한 (A와 같게 두면 A/B 동등)',
-        )
-        # UP / NEUTRAL 동시신호 우선순위 콤보
-        try:
-            _pri_vals = ('prefer_b', 'prefer_a', 'confluence')
-            for _bk, _blabel, _bdef in (
-                ('breadth_up_sig_priority', 'UP 동시신호 우선', 'prefer_b'),
-                ('breadth_neutral_sig_priority', 'NEUTRAL 동시신호 우선', 'confluence'),
-            ):
-                if _bk not in self.conf_vars:
-                    _dv = str(self.default_settings.get(_bk, _bdef))
-                    self.conf_vars[_bk] = tk.StringVar(
-                        value=str(self.app.settings.get(_bk, _dv)).strip().lower()
-                    )
-                if self.conf_vars[_bk].get() not in _pri_vals:
-                    self.conf_vars[_bk].set(_bdef)
-                _row = ttk.Frame(breadth_f)
-                _row.pack(fill=tk.X, pady=2)
-                ttk.Label(_row, text=_blabel, width=22).pack(side=tk.LEFT)
-                ttk.Combobox(
-                    _row,
-                    textvariable=self.conf_vars[_bk],
-                    values=_pri_vals,
-                    state='readonly',
-                    width=14,
-                ).pack(side=tk.LEFT, padx=5)
-                ttk.Label(
-                    _row,
-                    text='A+B 동시 신호 시 Sig_Type',
-                    foreground='#88C0D0',
-                ).pack(side=tk.LEFT, padx=4)
-        except Exception:
-            pass
-        add_param_row(
-            breadth_f,
-            'NEUTRAL 시 Track B 제외(레거시)',
+            transition_f,
+            'Tiered 응답',
             None,
             '',
-            'ON: 중립장에서 Track B 슬롯을 0으로 강제(신규 정책에서는 OFF 권장)',
-            toggle_key='breadth_neutral_block_track_b',
+            'ON: TRANSITION=슬롯만 축소(기본). OFF: TRANSITION에서도 S1 차단 가능',
+            toggle_key='transition_tiered_response',
+        )
+        add_header(transition_f, '── 전환(TRANSITION) 감지 ──')
+        add_param_row(
+            transition_f,
+            '선행 B-share 하한(%)',
+            'transition_prior_share_min',
+            '%',
+            '5일 전 B-share가 이 값 이상이었을 때만 전환 후보',
+        )
+        add_param_row(
+            transition_f,
+            'B-share 5일 변화 상한',
+            'transition_share_delta5_max',
+            '%p',
+            '음수. 5일간 B-share 하락폭이 이 값 이하(더 큰 하락)이면 후보',
+        )
+        add_param_row(
+            transition_f,
+            'B-share 3일 변화 상한',
+            'transition_share_delta3_max',
+            '%p',
+            '음수. 3일 경로 보조 조건',
+        )
+        add_param_row(
+            transition_f,
+            '지수 rvol20 하한',
+            'transition_rvol_min',
+            '',
+            'KODEX200 연환산 20일 변동성(%). 이 값 이상이면 변동성 확인',
+        )
+        add_param_row(
+            transition_f,
+            '교차섹션 ret std 하한',
+            'transition_xs_ret_std_min',
+            '',
+            '유니버스 일간 수익률 표준편차(%). 지수 rvol 결측 시 보조',
+        )
+        add_header(transition_f, '── TRANSITION 시 슬롯·차단 ──')
+        add_param_row(
+            transition_f,
+            'SOFT 슬롯 A',
+            'transition_soft_slots_a',
+            '개',
+            'TRANSITION일 Track A 감시 상한 (기본 8, TRANS_S8_NS2)',
+        )
+        add_param_row(
+            transition_f,
+            'SOFT 슬롯 B',
+            'transition_soft_slots_b',
+            '개',
+            'TRANSITION일 Track B 감시 상한',
+        )
+        add_param_row(
+            transition_f,
+            'TRANSITION 시 S1 차단',
+            None,
+            '',
+            'Tiered OFF 또는 강한 차단 시. TRANS_S8_NS2는 OFF 권장',
+            toggle_key='transition_block_s1_on_soft',
+        )
+        add_param_row(
+            transition_f,
+            'TRANSITION 시 S2 차단',
+            None,
+            '',
+            'TRANS_S8_NS2: OFF(HARD만 S2 차단). ON이면 TRANSITION에서도 추매 중단',
+            toggle_key='transition_block_s2_on_soft',
+        )
+        add_param_row(
+            transition_f,
+            'TRANSITION 무시',
+            None,
+            '',
+            'ON: TRANSITION 판정을 OFF로 간주(슬롯·차단 미적용)',
+            toggle_key='transition_ignore_soft',
+        )
+        add_header(transition_f, '── HARD(chop) 임계 ──')
+        add_param_row(
+            transition_f,
+            'Valid_A 하한 (chop)',
+            'chop_valid_a_min',
+            '개',
+            'A 과밀: Valid_A≥이 값 & Valid_B≤b_max → HARD',
+        )
+        add_param_row(
+            transition_f,
+            'Valid_B 상한 (chop)',
+            'chop_valid_b_max',
+            '개',
+            'B 고갈 조건',
+        )
+        add_param_row(
+            transition_f,
+            'B-share 상한 (%)',
+            'chop_valid_b_share_max_pct',
+            '%',
+            'B-share≤이 값 & Valid_A≥floor → HARD',
+        )
+        add_param_row(
+            transition_f,
+            'Valid_A floor (chop)',
+            'chop_valid_a_floor',
+            '개',
+            'B-share 상한 조건용 Valid_A 최소',
         )
 
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')
@@ -1815,8 +1845,8 @@ class SettingsTab:
                 if k in [
                     'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b',
                     'max_slots_band_extra_cap',
-                    'breadth_up_slots_a', 'breadth_up_slots_b',
-                    'breadth_neutral_slots_a', 'breadth_neutral_slots_b',
+                    'transition_soft_slots_a', 'transition_soft_slots_b',
+                    'chop_valid_a_min', 'chop_valid_b_max', 'chop_valid_a_floor',
                     'atr_sl_reentry_cooldown_days',
                     'atr_sl_streak_lookback_days',
                     'atr_sl_streak_cooldown_days',

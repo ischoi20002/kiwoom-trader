@@ -3,20 +3,10 @@ import numpy as np
 
 
 def _normalize_same_bar_priority(settings: dict | None) -> str:
-    """동일 봉 A+B 동시 신호 시 Sig_Type 우선순위 (settings 키: same_bar_sig_priority).
-
-    브레드스 게이트 ON 시 선정/백테스트가 넣는 ``breadth_runtime_sig_priority`` 가 있으면 우선.
-    """
+    """동일 봉 A+B 동시 신호 시 Sig_Type 우선순위 (settings 키: same_bar_sig_priority)."""
     try:
         if settings is None:
             return "confluence"
-        # 레짐 런타임 우선순위 (UP→prefer_b, NEUTRAL→confluence 등)
-        if bool(settings.get("use_market_breadth_gate", False)):
-            rt = settings.get("breadth_runtime_sig_priority")
-            if rt is not None and str(rt).strip() != "":
-                p_rt = str(rt).strip().lower()
-                if p_rt in ("prefer_b", "prefer_a", "confluence"):
-                    return p_rt
         raw = settings.get("same_bar_sig_priority", "confluence")
         p = str(raw).strip().lower()
         if p in ("prefer_b", "prefer_a", "confluence"):

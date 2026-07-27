@@ -13,6 +13,16 @@
 
 ---
 
+## 0.13.1 (2026-07-27)
+
+브레드스 레짐 제거, TRANS_S8_NS2 전환 게이트 반영.
+
+- **레짐 전환 게이트**: Valid B-share 급락 + 변동성 확인 → TRANSITION(슬롯 축소) / HARD(chop·S1·S2 차단). `strategy_selector`·`dynamic_backtest`·실시간 선정 공통.
+- **TRANS_S8_NS2 디폴트**: soft 슬롯 8/8, TRANSITION 시 S2 유지(`transition_block_s2_on_soft` OFF), chop HARD 임계 사전 설정.
+- **GUI 설정 탭**: 브레드스 게이트 UI 제거 → 「레짐 전환 게이트」LabelFrame 및 파라미터 토글.
+- **런타임**: `transition_runtime_block_s1/s2` — 실시간 S1 매수·S2 추매 차단 (`signal_callbacks_service`, `strategy_engine`).
+- **제거**: 브레드스/chop/stress 독립 게이트 및 `breadth_runtime_sig_priority` 동시신호 우선순위.
+
 ## 0.13.0 (2026-07-27)
 
 실시간 S1 주문·15분 슬롯 롤 타이밍 수정, 선정 Score 모드 확장.

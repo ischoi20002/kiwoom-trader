@@ -1373,196 +1373,327 @@ def _clamp_nonneg_int(value: Any, default: int) -> int:
         return max(0, int(default))
 
 
-def _normalize_breadth_sig_priority(raw: Any, default: str = "confluence") -> str:
-    """레짐별 동시신호 우선순위 정규화."""
-    try:
-        p = str(raw or default).strip().lower()
-    except Exception:
-        p = str(default).strip().lower()
-    if p in ("prefer_a", "prefer_b", "confluence"):
-        return p
-    return "confluence"
-
-
-def resolve_breadth_regime_policy(regime: str, settings: Optional[dict] = None) -> Dict[str, Any]:
+def is_chop_regime_day(
+    valid_a: int,
+    valid_b: int,
+    settings: Optional[dict] = None,
+) -> bool:
     """
-    시장 레짐별 감시 슬롯·동시신호 우선순위를 반환한다.
+    A 과밀·B 고갈 횡보(chop) 레짐 여부.
 
-    정책:
-      - UP: Type B 비중 확대 (기본 슬롯 A↓ B↑, prefer_b)
-      - NEUTRAL: Type A/B 동등 슬롯 (기본 동일 개수, confluence)
-      - DOWN: 신규 감시 전부 차단 (slots=0)
+    조건 (OR):
+      1) valid_a >= chop_valid_a_min AND valid_b <= chop_valid_b_max
+      2) valid_b_share <= chop_valid_b_share_max_pct AND valid_a >= chop_valid_a_floor
 
-    반환 키: ``slots_a``, ``slots_b``, ``block_all``, ``sig_priority``, ``regime``.
+    선정 스케줄 생성 시 A 슬롯만 축소하는 데 사용한다.
     """
     s = settings or {}
     try:
-        max_a = _clamp_nonneg_int(s.get("max_slots_a", 20), 20)
-        max_b = _clamp_nonneg_int(s.get("max_slots_b", 15), 15)
+        va = max(0, int(valid_a))
+        vb = max(0, int(valid_b))
+        a_min = max(0, int(float(s.get("chop_valid_a_min", 15) or 15)))
+        b_max = max(0, int(float(s.get("chop_valid_b_max", 3) or 3)))
+        share_max = float(s.get("chop_valid_b_share_max_pct", 15.0) or 15.0)
+        a_floor = max(0, int(float(s.get("chop_valid_a_floor", 10) or 10)))
+        total = va + vb
+        share = (vb / total * 100.0) if total > 0 else 100.0
+        if va >= a_min and vb <= b_max:
+            return True
+        if va >= a_floor and share <= share_max:
+            return True
+        return False
     except Exception:
-        max_a, max_b = 20, 15
-
-    reg = str(regime or "UP").strip().upper()
-    if reg not in ("UP", "NEUTRAL", "DOWN"):
-        reg = "UP"
-
-    if reg == "DOWN":
-        return {
-            "regime": "DOWN",
-            "slots_a": 0,
-            "slots_b": 0,
-            "block_all": True,
-            "sig_priority": "prefer_a",
-        }
-
-    if reg == "UP":
-        # 기본: A 60%·B는 max_b와 20 중 큰 쪽(강세장 B 확대)
-        default_a = max(1, int(round(max_a * 0.6))) if max_a > 0 else 0
-        default_b = max(max_b, 20) if max_b > 0 else 20
-        slots_a = _clamp_nonneg_int(s.get("breadth_up_slots_a", default_a), default_a)
-        slots_b = _clamp_nonneg_int(s.get("breadth_up_slots_b", default_b), default_b)
-        pri = _normalize_breadth_sig_priority(
-            s.get("breadth_up_sig_priority", "prefer_b"), "prefer_b"
-        )
-        return {
-            "regime": "UP",
-            "slots_a": slots_a,
-            "slots_b": slots_b,
-            "block_all": False,
-            "sig_priority": pri,
-        }
-
-    # NEUTRAL: A/B 동등 (기본 min(max_a,max_b), 없으면 12)
-    eq = min(max_a, max_b) if (max_a > 0 and max_b > 0) else max(max_a, max_b, 12)
-    if eq <= 0:
-        eq = 12
-    slots_a = _clamp_nonneg_int(s.get("breadth_neutral_slots_a", eq), eq)
-    slots_b = _clamp_nonneg_int(s.get("breadth_neutral_slots_b", eq), eq)
-    # 레거시: 중립 Track B 완전 차단 토글이 켜져 있으면 B=0
-    if _settings_bool_sel(s, "breadth_neutral_block_track_b", False):
-        slots_b = 0
-    pri = _normalize_breadth_sig_priority(
-        s.get("breadth_neutral_sig_priority", "confluence"), "confluence"
-    )
-    return {
-        "regime": "NEUTRAL",
-        "slots_a": slots_a,
-        "slots_b": slots_b,
-        "block_all": False,
-        "sig_priority": pri,
-    }
+        return False
 
 
-def classify_breadth_regime(breadth: Dict[str, float], settings: dict) -> str:
-    """
-    브레드스(MA20 위 종목 비율)로 시장 레짐을 분류한다.
-
-    반환: ``"DOWN"`` / ``"NEUTRAL"`` / ``"UP"``.
-    표본이 부족(NaN)하거나 게이트 기준이 비정상이면 ``"UP"``(허용)로 폴백한다.
-    """
+def _build_index_vol_by_day(
+    data_manager: Any,
+    fetch_start: str,
+    end_date: str,
+) -> Dict[str, Dict[str, float]]:
+    """KODEX200(069500) 일봉 기준 연환산 변동성(rvol_5/20) 일별 맵."""
+    out: Dict[str, Dict[str, float]] = {}
     try:
-        b = breadth.get("ma20_above") if breadth else None
-        if b is None or not np.isfinite(float(b)):
-            return "UP"
-        b = float(b)
-        down = float(settings.get("breadth_down_pct", 0.35))
-        up = float(settings.get("breadth_up_pct", 0.50))
-        if up < down:
-            down, up = up, down
-        if b < down:
-            return "DOWN"
-        if b < up:
-            return "NEUTRAL"
-        return "UP"
-    except Exception:
-        return "UP"
-
-
-def _apply_breadth_gate_to_df(
-    df_result: pd.DataFrame,
-    regime: str,
-    settings: dict,
-    logger_callback: Callable[..., None],
-) -> pd.DataFrame:
-    """
-    실시간 선정 결과(df_result)에 시장 레짐 게이트를 적용한다.
-
-    - DOWN: 빈 DataFrame (신규 감시 없음).
-    - UP / NEUTRAL: resolve_breadth_regime_policy 슬롯으로 Track A/B 재상한.
-      (레거시 breadth_neutral_block_track_b 는 policy 쪽에서 B=0 처리)
-    """
-    try:
-        if df_result is None or df_result.empty:
-            return df_result
-        policy = resolve_breadth_regime_policy(regime, settings)
-        if policy.get("block_all"):
-            try:
-                logger_callback(
-                    "[Breadth] 시장 레짐 DOWN — 신규 감시목록을 비웁니다(약세장 진입 차단)."
-                )
-            except Exception:
-                pass
-            return df_result.iloc[:0].copy()
-
-        slots_a = int(policy.get("slots_a", 0) or 0)
-        slots_b = int(policy.get("slots_b", 0) or 0)
-        out = df_result.copy()
-        if "SelTrack" not in out.columns:
-            cap = max(slots_a + slots_b, 1)
-            sort_col = "Score" if "Score" in out.columns else None
-            if sort_col is not None and len(out) > cap:
-                out = out.sort_values(by=sort_col, ascending=False).head(cap).copy()
-            try:
-                logger_callback(
-                    f"[Breadth] {policy['regime']} — 슬롯 A={slots_a}/B={slots_b} "
-                    f"(SelTrack 없음, 합산 상한 {cap}) → {len(out)}종"
-                )
-            except Exception:
-                pass
+        df = data_manager.get_daily_bars("069500", fetch_start, end_date)
+        if df is None or df.empty:
             return out
+        tmp = df.copy()
+        tmp["d"] = pd.to_datetime(tmp["time"], errors="coerce").dt.normalize()
+        close_col = "Close" if "Close" in tmp.columns else "close"
+        close = pd.to_numeric(tmp[close_col], errors="coerce")
+        ret = close.pct_change()
+        tmp["rvol_20"] = ret.rolling(20).std() * np.sqrt(252.0) * 100.0
+        tmp["rvol_5"] = ret.rolling(5).std() * np.sqrt(252.0) * 100.0
+        for _, row in tmp.iterrows():
+            d_raw = row.get("d")
+            if pd.isna(d_raw):
+                continue
+            d_str = pd.Timestamp(d_raw).strftime("%Y-%m-%d")
+            entry: Dict[str, float] = {}
+            for key in ("rvol_20", "rvol_5"):
+                val = row.get(key)
+                if val is not None and np.isfinite(float(val)):
+                    entry[key] = float(val)
+            if entry:
+                out[d_str] = entry
+    except Exception:
+        return out
+    return out
 
-        track = out["SelTrack"].astype(str).str.upper().str.strip()
-        a_mask = track.isin(["A", "AB"])
-        b_mask = track.isin(["B", "AB"])
-        sort_col = "Score" if "Score" in out.columns else None
 
-        def _top(mask: pd.Series, n: int) -> pd.DataFrame:
-            if n <= 0:
-                return out.iloc[:0].copy()
-            sub = out.loc[mask]
-            if sub.empty:
-                return sub
-            if sort_col is not None:
-                sub = sub.sort_values(by=sort_col, ascending=False)
-            return sub.head(n).copy()
+def classify_transition_regime(
+    valid_a: int,
+    valid_b: int,
+    vb_share: float,
+    vb_share_delta5: Optional[float],
+    vb_share_delta3: Optional[float],
+    settings: Optional[dict] = None,
+    index_rvol_20: Optional[float] = None,
+    xs_ret_std: Optional[float] = None,
+) -> str:
+    """
+    B-share 급락(레짐 전환) + 변동성 확인.
 
-        part_a = _top(a_mask, slots_a)
-        part_b = _top(b_mask, slots_b)
-        if part_a.empty and part_b.empty:
-            capped = out.iloc[:0].copy()
-        else:
-            capped = pd.concat([part_a, part_b], axis=0)
-            if "Code" in capped.columns:
-                capped = capped.drop_duplicates(subset=["Code"], keep="first")
-            else:
-                capped = capped[~capped.index.duplicated(keep="first")]
+    반환: ``OFF`` / ``TRANSITION`` / ``HARD``
+      - TRANSITION/HARD: 신규 S1 차단 + S2 중단 (런타임)
+    """
+    s = settings or {}
+    try:
+        if is_chop_regime_day(valid_a, valid_b, settings):
+            return "HARD"
 
-        try:
-            logger_callback(
-                f"[Breadth] {policy['regime']} — 슬롯 A={slots_a}/B={slots_b}, "
-                f"신호우선={policy.get('sig_priority')} → {len(capped)}종 "
-                f"(적용 전 {len(out)}종)"
+        va = max(0, int(valid_a))
+        vb = max(0, int(valid_b))
+        share = float(vb_share)
+        d5 = float(vb_share_delta5) if vb_share_delta5 is not None and np.isfinite(vb_share_delta5) else None
+        d3 = float(vb_share_delta3) if vb_share_delta3 is not None and np.isfinite(vb_share_delta3) else None
+
+        delta5_thr = float(s.get("transition_share_delta5_max", -15.0) or -15.0)
+        delta3_thr = float(s.get("transition_share_delta3_max", -10.0) or -10.0)
+        prior_min = float(s.get("transition_prior_share_min", 45.0) or 45.0)
+        rvol_min = float(s.get("transition_rvol_min", 35.0) or 35.0)
+        xs_min = float(s.get("transition_xs_ret_std_min", 3.5) or 3.5)
+
+        r20 = (
+            float(index_rvol_20)
+            if index_rvol_20 is not None and np.isfinite(float(index_rvol_20))
+            else None
+        )
+        xs = (
+            float(xs_ret_std)
+            if xs_ret_std is not None and np.isfinite(float(xs_ret_std))
+            else None
+        )
+
+        def _vol_ok() -> bool:
+            if r20 is not None and r20 >= rvol_min:
+                return True
+            if xs is not None and xs >= xs_min:
+                return True
+            # 지수 rvol 결측(2026-04~) 구간: B-share 급락만으로 전환 허용
+            if r20 is None and d5 is not None and d5 <= delta5_thr - 5.0:
+                return True
+            return False
+
+        if d5 is not None and d5 <= delta5_thr:
+            prior = share - d5
+            if prior >= prior_min and _vol_ok():
+                return "TRANSITION"
+
+        if d3 is not None and d3 <= delta3_thr:
+            prior3 = share - d3
+            if prior3 >= prior_min and _vol_ok():
+                return "TRANSITION"
+
+        # 지수 없는 구간 fallback: A 과밀 + B 고갈
+        if va >= 15 and vb <= 4 and share <= 20.0:
+            return "TRANSITION"
+        return "OFF"
+    except Exception:
+        return "OFF"
+
+
+def resolve_transition_regime_policy(
+    level: str,
+    day_max_a: int,
+    day_max_b: int,
+    settings: Optional[dict] = None,
+) -> Tuple[int, int]:
+    """
+    Transition 레짐별 슬롯 상한.
+
+    - HARD: 0/0 (신규 감시 없음)
+    - TRANSITION: transition_soft_slots (기본 6/6) — tiered 모드용
+    """
+    s = settings or {}
+    try:
+        lv = str(level or "OFF").strip().upper()
+        if lv == "HARD":
+            return 0, 0
+        if lv == "TRANSITION":
+            sa = _clamp_nonneg_int(s.get("transition_soft_slots_a", 6), 6)
+            sb = _clamp_nonneg_int(s.get("transition_soft_slots_b", 6), 6)
+            return min(day_max_a, sa), min(day_max_b, sb)
+        return day_max_a, day_max_b
+    except Exception:
+        return day_max_a, day_max_b
+
+
+def resolve_transition_runtime_blocks(
+    regime: str,
+    settings: Optional[dict] = None,
+) -> Tuple[bool, bool]:
+    """레짐별 실시간·백테스트 S1/S2 차단 플래그 (TRANS_S8_NS2 tiered)."""
+    s = settings or {}
+    try:
+        r = str(regime or "OFF").strip().upper()
+        if r == "HARD":
+            return True, True
+        if r == "TRANSITION":
+            tiered = bool(s.get("transition_tiered_response", True))
+            block_s1 = (not tiered) and bool(s.get("transition_block_s1_on_soft", False))
+            block_s2 = bool(s.get("transition_block_s2_on_soft", True))
+            return block_s1, block_s2
+        return False, False
+    except Exception:
+        return False, False
+
+
+def resolve_transition_gate_for_live(
+    settings: dict,
+    data_manager: Any,
+    as_of: Optional[datetime] = None,
+    logger_callback: Optional[Callable[..., None]] = None,
+) -> Dict[str, Any]:
+    """
+    실시간 선정용 transition 레짐·슬롯·차단 플래그.
+
+    DB bars_1d 로 최근 구간을 스코어해 당일 레짐을 판정한다.
+    """
+    log = logger_callback or (lambda *_a, **_k: None)
+    max_a = int(settings.get("max_slots_a", 20))
+    max_b = int(settings.get("max_slots_b", 15))
+    result: Dict[str, Any] = {
+        "regime": "OFF",
+        "slots_a": max_a,
+        "slots_b": max_b,
+        "block_s1": False,
+        "block_s2": False,
+    }
+    if not _settings_bool_sel(settings, "use_transition_gate", False):
+        return result
+    if data_manager is None:
+        log("⚠️ [Transition] data_manager 없음 — 게이트 OFF")
+        return result
+    try:
+        as_of_dt = pd.to_datetime(as_of or datetime.now()).normalize()
+        end_s = as_of_dt.strftime("%Y-%m-%d")
+        start_s = (as_of_dt - timedelta(days=30)).strftime("%Y-%m-%d")
+        idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+        top_n = int(settings.get("kospi_top_n", 200) or 200)
+        codes = (
+            load_kospi_universe_codes(logger_callback=log, top_n=top_n)
+            if idx_choice == "KOSPI200"
+            else load_kodex200_universe_codes(logger_callback=log)
+        )
+        if not codes:
+            return result
+        fetch_start = (as_of_dt - timedelta(days=120)).strftime("%Y-%m-%d")
+        ph = ",".join(["?"] * len(codes))
+        q = f"""
+            SELECT code, datetime as time, open, high, low, close, volume
+            FROM bars_1d WHERE code IN ({ph}) AND datetime BETWEEN ? AND ?
+            ORDER BY code, datetime
+        """
+        with data_manager._get_connection() as conn:
+            df_all = pd.read_sql_query(q, conn, params=list(codes) + [fetch_start, end_s])
+        if df_all is None or df_all.empty:
+            log("⚠️ [Transition] bars_1d 부족 — 게이트 OFF")
+            return result
+        df_all["time"] = pd.to_datetime(df_all["time"])
+        _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
+        df_day = df_all[df_all["time"].dt.normalize() == as_of_dt]
+        if df_day.empty:
+            last_t = df_all["time"].max()
+            df_day = df_all[df_all["time"].dt.normalize() == pd.Timestamp(last_t).normalize()]
+            end_s = pd.Timestamp(last_t).strftime("%Y-%m-%d")
+        va = int(df_day["Valid_A"].astype(bool).sum()) if "Valid_A" in df_day.columns else 0
+        vb = int(df_day["Valid_B"].astype(bool).sum()) if "Valid_B" in df_day.columns else 0
+        tot = va + vb
+        share = (vb / tot * 100.0) if tot > 0 else 0.0
+        # share delta: 최근 6영업일
+        days = sorted(df_all["time"].dt.normalize().unique())
+        share_by_d: Dict[str, float] = {}
+        for d in days:
+            g = df_all[df_all["time"].dt.normalize() == d]
+            t2 = int(g["Valid_A"].astype(bool).sum()) + int(g["Valid_B"].astype(bool).sum())
+            vb2 = int(g["Valid_B"].astype(bool).sum())
+            share_by_d[pd.Timestamp(d).strftime("%Y-%m-%d")] = (
+                (vb2 / t2 * 100.0) if t2 > 0 else 0.0
             )
-        except Exception:
-            pass
-        return capped
-    except Exception as e:
+        d5 = None
+        d3 = None
+        if end_s in share_by_d:
+            keys = sorted(share_by_d.keys())
+            idx = keys.index(end_s) if end_s in keys else len(keys) - 1
+            if idx >= 5:
+                d5 = share - share_by_d[keys[idx - 5]]
+            if idx >= 3:
+                d3 = share - share_by_d[keys[idx - 3]]
+        xs = np.nan
         try:
-            logger_callback(f"⚠️ [Breadth] 게이트 적용 실패(원본 유지): {e}")
+            _xsdf = df_all.sort_values(["code", "time"]).copy()
+            _xsdf["ret1"] = _xsdf.groupby("code")["close"].pct_change()
+            xs_s = _xsdf.groupby("time")["ret1"].std() * 100.0
+            xs = float(xs_s.loc[as_of_dt]) if as_of_dt in xs_s.index else float("nan")
+        except Exception:
+            xs = np.nan
+        iv = _build_index_vol_by_day(
+            data_manager,
+            (as_of_dt - timedelta(days=60)).strftime("%Y-%m-%d"),
+            end_s,
+        ).get(end_s, {})
+        regime = classify_transition_regime(
+            va,
+            vb,
+            share,
+            d5,
+            d3,
+            settings,
+            index_rvol_20=iv.get("rvol_20"),
+            xs_ret_std=xs if np.isfinite(xs) else None,
+        )
+        if regime == "TRANSITION" and bool(settings.get("transition_ignore_soft", False)):
+            regime = "OFF"
+        slots_a, slots_b = max_a, max_b
+        if regime == "HARD":
+            slots_a, slots_b = 0, 0
+        elif regime == "TRANSITION":
+            slots_a, slots_b = resolve_transition_regime_policy(
+                "TRANSITION", max_a, max_b, settings
+            )
+        block_s1, block_s2 = resolve_transition_runtime_blocks(regime, settings)
+        log(
+            f"[Transition] {end_s} 레짐={regime} Valid_A={va} Valid_B={vb} "
+            f"share={share:.1f}% d5={d5 if d5 is not None else 'n/a'} "
+            f"→ 슬롯 A={slots_a}/B={slots_b} S1차단={block_s1} S2차단={block_s2}"
+        )
+        result.update(
+            {
+                "regime": regime,
+                "slots_a": slots_a,
+                "slots_b": slots_b,
+                "block_s1": block_s1,
+                "block_s2": block_s2,
+            }
+        )
+        return result
+    except Exception as ex:
+        try:
+            log(f"⚠️ [Transition] 레짐 판정 실패(OFF): {ex}")
         except Exception:
             pass
-        return df_result
-
+        return result
 
 
 def select_monitoring_targets(
@@ -2106,26 +2237,6 @@ def select_monitoring_targets(
 
     selected = [r[0] for r in raw_results if r[0] is not None]
 
-    # [Breadth] 시장 레짐 측정 — 교차섹션 필터 이전의 유니버스 전체 스냅샷 기준
-    breadth_gate_on = _settings_bool_sel(settings, "use_market_breadth_gate", True)
-    breadth_regime = "UP"
-    if breadth_gate_on:
-        try:
-            breadth_info = compute_market_breadth(selected)
-            breadth_regime = classify_breadth_regime(breadth_info, settings)
-            _b = breadth_info.get("ma20_above")
-            _b_str = f"{_b*100:.1f}%" if _b is not None and np.isfinite(_b) else "N/A"
-            logger_callback(
-                f"[Breadth] 유니버스 MA20 상회 비율 {_b_str} "
-                f"(표본 {int(breadth_info.get('n', 0))}종) → 레짐 {breadth_regime}"
-            )
-        except Exception as e:
-            try:
-                logger_callback(f"⚠️ [Breadth] 시장 레짐 측정 실패(UP 폴백): {e}")
-            except Exception:
-                pass
-            breadth_regime = "UP"
-
     try:
         if _settings_bool_sel(settings, "use_sel_track_a", True):
             selected = _apply_sel_a_live_cross_section(selected, settings)
@@ -2154,33 +2265,42 @@ def select_monitoring_targets(
         f"수렴: {stats['trend']}, RSI: {stats['rsi']}, 분출: {stats['vol']}"
     )
 
-    # [Breadth] 레짐별 슬롯·동시신호 우선순위 적용
+    # [Transition] B-share 급락 + 변동성 레짐 게이트
     merge_max_a = None
     merge_max_b = None
-    if breadth_gate_on:
+    settings.pop("transition_runtime_regime", None)
+    settings.pop("transition_runtime_block_s1", None)
+    settings.pop("transition_runtime_block_s2", None)
+    if _settings_bool_sel(settings, "use_transition_gate", False):
         try:
-            _pol = resolve_breadth_regime_policy(breadth_regime, settings)
-            settings["breadth_runtime_regime"] = str(_pol.get("regime", breadth_regime))
-            settings["breadth_runtime_sig_priority"] = str(_pol.get("sig_priority", "confluence"))
-            if _pol.get("block_all"):
-                merge_max_a, merge_max_b = 0, 0
-            else:
-                merge_max_a = int(_pol.get("slots_a", 0) or 0)
-                merge_max_b = int(_pol.get("slots_b", 0) or 0)
-            logger_callback(
-                f"[Breadth] 정책 {_pol.get('regime')}: 슬롯 A={merge_max_a}/B={merge_max_b}, "
-                f"신호우선={_pol.get('sig_priority')}"
+            _tg = resolve_transition_gate_for_live(
+                settings,
+                data_manager,
+                target_date,
+                logger_callback,
             )
+            _reg = str(_tg.get("regime", "OFF"))
+            settings["transition_runtime_regime"] = _reg
+            settings["transition_runtime_block_s1"] = bool(_tg.get("block_s1", False))
+            settings["transition_runtime_block_s2"] = bool(_tg.get("block_s2", False))
+            merge_max_a = int(_tg.get("slots_a", 0))
+            merge_max_b = int(_tg.get("slots_b", 0))
+            if _reg == "HARD":
+                logger_callback(
+                    f"[Transition] HARD — 신규 감시 0 (S1·S2 차단)"
+                )
         except Exception as e:
             try:
-                logger_callback(f"⚠️ [Breadth] 레짐 정책 적용 실패(기본 슬롯): {e}")
+                logger_callback(f"⚠️ [Transition] 정책 적용 실패(기본 슬롯): {e}")
             except Exception:
                 pass
-            settings.pop("breadth_runtime_sig_priority", None)
-            settings.pop("breadth_runtime_regime", None)
+            settings.pop("transition_runtime_regime", None)
+            settings.pop("transition_runtime_block_s1", None)
+            settings.pop("transition_runtime_block_s2", None)
     else:
-        settings.pop("breadth_runtime_sig_priority", None)
-        settings.pop("breadth_runtime_regime", None)
+        settings.pop("transition_runtime_regime", None)
+        settings.pop("transition_runtime_block_s1", None)
+        settings.pop("transition_runtime_block_s2", None)
 
     merged_rows = _merge_dual_track_picks(
         selected,
@@ -2190,12 +2310,6 @@ def select_monitoring_targets(
         max_b=merge_max_b,
     )
     df_result = pd.DataFrame(merged_rows)
-
-    # DOWN 등 block_all 이거나 슬롯 재검증이 필요할 때 게이트 재적용
-    if breadth_gate_on and breadth_regime == "DOWN":
-        df_result = _apply_breadth_gate_to_df(
-            df_result, breadth_regime, settings, logger_callback
-        )
 
     if not df_result.empty:
         # 캐시 저장: 실시간 + API/DB혼합 경로만 (db_only 는 CLI 등에서 별도 경로로 저장)
@@ -2780,12 +2894,77 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
 
-    # [Breadth] 백테스트 대칭: 일별 시장 레짐 게이트 (실시간 select 와 동일 정책)
-    breadth_gate_on = _settings_bool_sel(settings, "use_market_breadth_gate", True)
-    breadth_down_days = 0
-    breadth_neutral_days = 0
-    breadth_up_days = 0
-    regime_by_day: Dict[str, str] = {}
+    # 일별 교차-section 수익률 표준편차(%)
+    xs_ret_std_by_day: Dict[str, float] = {}
+    try:
+        _xs_df = df_sim.sort_values(["code", "time"]).copy()
+        _xs_df["ret1"] = _xs_df.groupby("code")["close"].pct_change()
+        _xs_s = _xs_df.groupby("time")["ret1"].std() * 100.0
+        for t_idx, val in _xs_s.items():
+            if val is not None and np.isfinite(float(val)):
+                xs_ret_std_by_day[pd.Timestamp(t_idx).strftime("%Y-%m-%d")] = float(val)
+    except Exception:
+        xs_ret_std_by_day = {}
+
+    # [Transition] 백테스트: 일별 레짐 게이트
+    transition_gate_on = _settings_bool_sel(settings, "use_transition_gate", False)
+    transition_days = 0
+    transition_hard_days = 0
+    transition_regime_by_day: Dict[str, str] = {}
+
+    index_vol_by_day: Dict[str, Dict[str, float]] = {}
+    if transition_gate_on:
+        try:
+            fetch_start_iv = (
+                pd.to_datetime(start_date) - timedelta(days=60)
+            ).strftime("%Y-%m-%d")
+            index_vol_by_day = _build_index_vol_by_day(
+                data_manager, fetch_start_iv, end_date
+            )
+        except Exception:
+            index_vol_by_day = {}
+
+    # Transition: 일별 valid/share → 5일·3일 변화율
+    transition_stats_by_day: Dict[str, Dict[str, float]] = {}
+    if transition_gate_on:
+        try:
+            _t_rows: List[Dict[str, Any]] = []
+            for _d_str in trading_days_list:
+                if duration_days < 180:
+                    _univ = all_codes
+                else:
+                    _univ = get_monthly_universe(pd.to_datetime(_d_str))
+                _dm = (df_sim["time"] == pd.to_datetime(_d_str)) & (
+                    df_sim["code"].isin(_univ)
+                )
+                _day = df_sim[_dm]
+                _va = int(_day["Valid_A"].astype(bool).sum()) if "Valid_A" in _day.columns else 0
+                _vb = int(_day["Valid_B"].astype(bool).sum()) if "Valid_B" in _day.columns else 0
+                _tot = _va + _vb
+                _share = (_vb / _tot * 100.0) if _tot > 0 else 0.0
+                _t_rows.append({"d": _d_str, "va": _va, "vb": _vb, "share": _share})
+            _tdf = pd.DataFrame(_t_rows)
+            if not _tdf.empty:
+                _tdf["share_delta5"] = _tdf["share"] - _tdf["share"].shift(5)
+                _tdf["share_delta3"] = _tdf["share"] - _tdf["share"].shift(3)
+                for _, _tr in _tdf.iterrows():
+                    transition_stats_by_day[str(_tr["d"])] = {
+                        "va": float(_tr["va"]),
+                        "vb": float(_tr["vb"]),
+                        "share": float(_tr["share"]),
+                        "share_delta5": (
+                            float(_tr["share_delta5"])
+                            if pd.notna(_tr["share_delta5"])
+                            else float("nan")
+                        ),
+                        "share_delta3": (
+                            float(_tr["share_delta3"])
+                            if pd.notna(_tr["share_delta3"])
+                            else float("nan")
+                        ),
+                    }
+        except Exception:
+            transition_stats_by_day = {}
 
     for d_str in trading_days_list:
         if duration_days < 180:
@@ -2795,31 +2974,45 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
         day_mask = (df_sim["time"] == pd.to_datetime(d_str)) & (df_sim["code"].isin(universe))
 
-        # [Breadth] 당일 유니버스 전체(Valid 이전) 기준 시장 레짐 판정
-        regime = "UP"
-        if breadth_gate_on:
+        day_max_a = max_s_a
+        day_max_b = max_s_b
+
+        # [Transition] B-share 급락 + 변동성
+        if transition_gate_on:
             try:
-                day_all = df_sim[day_mask]
-                regime = classify_breadth_regime(
-                    compute_market_breadth(day_all), settings
+                _ts = transition_stats_by_day.get(d_str, {})
+                _va = int(_ts.get("va", 0))
+                _vb = int(_ts.get("vb", 0))
+                _share = float(_ts.get("share", 0.0))
+                _d5 = _ts.get("share_delta5")
+                _d3 = _ts.get("share_delta3")
+                _xs = xs_ret_std_by_day.get(d_str)
+                _iv = index_vol_by_day.get(d_str, {})
+                _tl = classify_transition_regime(
+                    _va,
+                    _vb,
+                    _share,
+                    _d5,
+                    _d3,
+                    settings,
+                    index_rvol_20=_iv.get("rvol_20"),
+                    xs_ret_std=_xs,
                 )
+                transition_regime_by_day[d_str] = _tl
+                _ignore_soft = bool(settings.get("transition_ignore_soft", False))
+                if _tl == "HARD":
+                    day_max_a, day_max_b = 0, 0
+                    transition_hard_days += 1
+                elif _tl == "TRANSITION" and not _ignore_soft:
+                    day_max_a, day_max_b = resolve_transition_regime_policy(
+                        "TRANSITION", day_max_a, day_max_b, settings
+                    )
+                    transition_days += 1
             except Exception:
-                regime = "UP"
-            regime_by_day[d_str] = regime
-            if regime == "DOWN":
-                breadth_down_days += 1
-                continue
-            if regime == "NEUTRAL":
-                breadth_neutral_days += 1
-            else:
-                breadth_up_days += 1
-            policy = resolve_breadth_regime_policy(regime, settings)
-            day_max_a = int(policy.get("slots_a", max_s_a) or 0)
-            day_max_b = int(policy.get("slots_b", max_s_b) or 0)
-        else:
-            regime_by_day[d_str] = "UP"
-            day_max_a = max_s_a
-            day_max_b = max_s_b
+                transition_regime_by_day[d_str] = "OFF"
+
+        if transition_gate_on and day_max_a <= 0 and day_max_b <= 0:
+            continue
 
         # Track A 스케줄
         day_a = df_sim[day_mask & df_sim["Valid_A"]]
@@ -2855,11 +3048,9 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         if combined:
             schedule[d_str] = combined
 
-    if breadth_gate_on and (breadth_down_days or breadth_neutral_days or breadth_up_days):
+    if transition_gate_on and (transition_days or transition_hard_days):
         logger_callback(
-            f"  [Breadth] 레짐 게이트: DOWN {breadth_down_days}일(감시 스킵), "
-            f"NEUTRAL {breadth_neutral_days}일(A/B 동등 슬롯), "
-            f"UP {breadth_up_days}일(B 비중 확대)"
+            f"  [Transition] 레짐 전환: TRANSITION {transition_days}일, HARD {transition_hard_days}일"
         )
 
     a_days = len(schedule_a)
@@ -2868,7 +3059,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         logger_callback("  [Warning] 조건에 맞는 종목이 한 건도 추출되지 않았습니다. 필터 설정을 확인하세요.")
     else:
         logger_callback(f"[Batch] 완료. Track A: {a_days}일, Track B: {b_days}일, 합산: {len(schedule)}일")
-    return schedule, schedule_a, schedule_b, regime_by_day
+    return schedule, schedule_a, schedule_b, transition_regime_by_day
 
 
 def diagnose_dynamic_universe_selection_by_trading_day(

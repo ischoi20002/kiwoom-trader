@@ -111,6 +111,8 @@ class StrategyEngine:
         except Exception:
             stage = 1
         if stage == 1:
+            if bool(s.get("transition_runtime_block_s2", False)):
+                return {"action": "HOLD"}
             if pos.get("s2_limit_order_pending", False):
                 return {"action": "HOLD"}
             pos_s2 = dict(pos)

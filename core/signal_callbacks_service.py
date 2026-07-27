@@ -83,6 +83,25 @@ class SignalCallbacksService:
             if tr == "B" and sig_type == "TYPE_A":
                 return False
 
+            if bool(self.app.settings.get("transition_runtime_block_s1", False)):
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "signal_buy_skipped",
+                            {
+                                "code": code,
+                                "name": name,
+                                "reason": "transition_block_s1",
+                                "regime": str(
+                                    self.app.settings.get("transition_runtime_regime", "")
+                                ),
+                            },
+                        )
+                except Exception:
+                    pass
+                return False
+
             try:
                 sl = getattr(self.app, "session_logger", None)
                 if sl:

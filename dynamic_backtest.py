@@ -152,8 +152,8 @@ class DynamicBacktester:
         # 백테스트 첫 day(start_date)가 단일(예: start_date==end_date)인 경우에도
         # ref_day(선정 기준일)를 항상 "직전 영업일"로 맞추기 위한 값
         self._bt_ref_day_for_first: Optional[str] = None
-        # prepare_dynamic_universe 4번째 반환값 — 일별 브레드스 레짐
-        self.breadth_regime_by_day: dict[str, str] = {}
+        # prepare_dynamic_universe 4번째 반환값 — 일별 transition 레짐
+        self.transition_regime_by_day: dict[str, str] = {}
         # ATR_SL 청산 후 동일종목 S1 재진입 금지 만료일(일자 normalize)
         self._atr_sl_reentry_until: Dict[str, pd.Timestamp] = {}
         # 종목별 ATR_SL 청산일(연속 손절 쿨다운 판정용)
@@ -410,14 +410,14 @@ class DynamicBacktester:
             self.schedule_a = _result[1]
             self.schedule_b = _result[2]
             try:
-                self.breadth_regime_by_day = dict(_result[3]) if len(_result) >= 4 else {}
+                self.transition_regime_by_day = dict(_result[3]) if len(_result) >= 4 else {}
             except Exception:
-                self.breadth_regime_by_day = {}
+                self.transition_regime_by_day = {}
         else:
             universe_schedule = _result
             self.schedule_a = universe_schedule
             self.schedule_b = {}
-            self.breadth_regime_by_day = {}
+            self.transition_regime_by_day = {}
         t_duration = time.time() - t_start
         msg = f"사전 계산 완료 ({t_duration:.2f}초)"
         print(f"[Done] {msg}")
@@ -604,27 +604,29 @@ class DynamicBacktester:
             top_codes_b = self.schedule_b.get(ref_day, [])
             top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
 
-            # [Breadth] 당일(또는 선정 기준일) 레짐 → 동시신호 우선순위 런타임 반영
+            # [Transition] 레짐 전환일: tiered — TRANSITION=S2 선택, HARD=S1+S2
             try:
-                if bool(self.settings.get("use_market_breadth_gate", False)):
-                    _reg_map = getattr(self, "breadth_regime_by_day", None) or {}
-                    _reg = str(
-                        _reg_map.get(current_day)
-                        or _reg_map.get(ref_day)
-                        or "UP"
+                if bool(self.settings.get("use_transition_gate", False)):
+                    _tr_map = getattr(self, "transition_regime_by_day", None) or {}
+                    _tr = str(
+                        _tr_map.get(ref_day)
+                        or _tr_map.get(current_day)
+                        or "OFF"
                     )
-                    _pol = strategy_selector.resolve_breadth_regime_policy(
-                        _reg, self.settings
+                    if _tr == "TRANSITION" and bool(
+                        self.settings.get("transition_ignore_soft", False)
+                    ):
+                        _tr = "OFF"
+                    _block_s1, _block_s2 = strategy_selector.resolve_transition_runtime_blocks(
+                        _tr, self.settings
                     )
-                    self.settings["breadth_runtime_regime"] = str(
-                        _pol.get("regime", _reg)
-                    )
-                    self.settings["breadth_runtime_sig_priority"] = str(
-                        _pol.get("sig_priority", "confluence")
-                    )
+                    self.settings["transition_runtime_regime"] = _tr
+                    self.settings["transition_runtime_block_s1"] = _block_s1
+                    self.settings["transition_runtime_block_s2"] = _block_s2
                 else:
-                    self.settings.pop("breadth_runtime_sig_priority", None)
-                    self.settings.pop("breadth_runtime_regime", None)
+                    self.settings.pop("transition_runtime_regime", None)
+                    self.settings.pop("transition_runtime_block_s1", None)
+                    self.settings.pop("transition_runtime_block_s2", None)
             except Exception:
                 pass
 
@@ -639,7 +641,7 @@ class DynamicBacktester:
                     track_map[c] = 'B'
             self._current_track_map = track_map
             
-            if not top_codes:
+            if not top_codes and not bool(self.settings.get("transition_runtime_block_s1", False)):
                 # [v4.7] 폴백: select_monitoring_targets 결과에서 Track A/B 구분 시도
                 prev_day_dt = datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=1)
                 candidates_df = strategy_selector.select_monitoring_targets(
@@ -653,7 +655,6 @@ class DynamicBacktester:
                     for _, row in candidates_df.head(max_fb).iterrows():
                         c = row['Code']
                         top_codes.append(c)
-                        # Valid_B 컬럼이 있으면 B 트랙 여부를 판별, 없으면 A로 기본 처리
                         if use_b_fb and row.get('Valid_B', False):
                             track_map[c] = 'B' if row.get('Valid_A', True) is False else 'AB'
                         else:
@@ -792,8 +793,9 @@ class DynamicBacktester:
                             reason = "SIG" # 일관성 있게 backtest_engine의 기본 SIG와 통일
                             
                             if is_addon_target:
-                                # 추매 승인 조건 체크 (TradingStrategy 통합 로직 사용)
-                                if self._check_s2_approval(code, h_info, last_sig, market_trend="UP"):
+                                if bool(self.settings.get("transition_runtime_block_s2", False)):
+                                    can_execute = False
+                                elif self._check_s2_approval(code, h_info, last_sig, market_trend="UP"):
                                     # [v33.9] Stage 2 Smart Buy Filter
                                     can_execute_s2 = True
                                     if (self.use_sb_s2_b if "TYPE_B" in str(h_info.get("sig_type", "")) else self.use_sb_s2_a):
@@ -810,6 +812,8 @@ class DynamicBacktester:
                                     can_execute = False
                             
                             if can_execute and not is_addon_target:
+                                if bool(self.settings.get("transition_runtime_block_s1", False)):
+                                    can_execute = False
                                 # [Phase 2] Track-Signal 교차 검증 (enforce_track_signal_match)
                                 sig_type = self._effective_s1_sig_type_for_buy(last_sig)
                                 code_track = track_map.get(code, 'A')
@@ -1547,6 +1551,10 @@ class DynamicBacktester:
                 is_addon_target = (h_info is not None and h_info['entry_n'] < 2)
                 
                 if is_buy_signal or is_addon_target:
+                    if (not is_addon_target) and bool(
+                        self.settings.get("transition_runtime_block_s1", False)
+                    ):
+                        continue
                     if h_info is None:
                         sig_type = self._effective_s1_sig_type_for_buy(indicator_to_use)
                     else:
@@ -1633,6 +1641,8 @@ class DynamicBacktester:
         curr_dt_for_delay: Any = None,
     ) -> bool:
         """2차 매수 승인 — TradingStrategy._check_s2_approval과 동일 규칙(Type A/B 파라미터 완전 분리)."""
+        if bool(self.settings.get("transition_runtime_block_s2", False)):
+            return False
         ind = indicator_row if indicator_row is not None else last_row
         if ind is None:
             return True
