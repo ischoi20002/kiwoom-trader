@@ -39,25 +39,58 @@ class RemoteCommander:
                     elif command == "/select":
                         self._handle_remote_select()
                     elif command == "/start":
-                        self.app.root.after(0, self.app.trading_controller.start)
+                        ens = getattr(
+                            self.app, "ensure_fresh_selection_then_start", None
+                        )
+                        if callable(ens):
+                            self.app.root.after(0, ens)
+                        else:
+                            self.app.root.after(
+                                0, self.app.trading_controller.start
+                            )
                     # 처리된 명령은 DB에서 삭제됨
             except Exception as e:
                 self.log(f"[Error] [Remote] 명령 폴링 오류: {e}")
             time.sleep(5)
 
+    def _resolve_remote_update_script(self) -> str | None:
+        """원격 업데이트 배치 (개발 루트 c:\\vibe 우선)."""
+        try:
+            candidates = (
+                os.path.join(r"c:\vibe", "remote_update.bat"),
+                os.path.join(os.getcwd(), "remote_update.bat"),
+            )
+            for path in candidates:
+                if os.path.isfile(path):
+                    return path
+        except Exception:
+            pass
+        return None
+
+    def _resolve_restart_script(self) -> str | None:
+        """운영 재시작 배치 (c:\\k-trader 우선)."""
+        try:
+            candidates = (
+                os.path.join(r"c:\k-trader", "run_k_trader.bat"),
+                os.path.join(os.getcwd(), "run_k_trader.bat"),
+            )
+            for path in candidates:
+                if os.path.isfile(path):
+                    return path
+        except Exception:
+            pass
+        return None
+
     def _handle_remote_update(self):
         """원격 업데이트 실행 (Git Pull & Re-launch)"""
         self.log("[Remote] 원격 업데이트 시퀀스 시작...")
         try:
-            # 1. deploy.bat 또는 update.ps1 실행
-            # Windows 환경이므로 .bat 파일 호출
-            update_script = os.path.join(os.getcwd(), "remote_update.bat")
-            if os.path.exists(update_script):
+            update_script = self._resolve_remote_update_script()
+            if update_script:
                 subprocess.Popen(["cmd", "/c", update_script], shell=True)
                 self.log("[Ok] [Remote] 업데이트 스크립트 실행 완료 (프로그램 재시작 예정)")
-                # 프로그램 종료 시퀀스는 스크립트가 담당하거나 여기서 sys.exit()
             else:
-                self.log("[Error] [Remote] 업데이트 스크립트(remote_update.bat)를 찾을 수 없습니다.")
+                self.log("[Error] [Remote] remote_update.bat(c:\\vibe)를 찾을 수 없습니다.")
         except Exception as e:
             self.log(f"[Error] [Remote] 업데이트 중 치명적 오류: {e}")
 
@@ -65,12 +98,16 @@ class RemoteCommander:
         """단순 재시작 실행"""
         self.log("[Remote] 프로그램 재시작 시퀀스 시작...")
         try:
-            restart_script = os.path.join(os.getcwd(), "run_app.bat")
-            if os.path.exists(restart_script):
-                subprocess.Popen(["cmd", "/c", restart_script, "--auto-start"], shell=True)
+            restart_script = self._resolve_restart_script()
+            if restart_script:
+                subprocess.Popen(
+                    ["cmd", "/c", restart_script, "--auto-start"], shell=True
+                )
                 sys.exit(0)
             else:
-                self.log("[Error] [Remote] 실행 스크립트(run_app.bat)를 찾을 수 없습니다.")
+                self.log(
+                    "[Error] [Remote] run_k_trader.bat(c:\\k-trader)를 찾을 수 없습니다."
+                )
         except Exception as e:
             self.log(f"[Error] [Remote] 재시작 중 오류: {e}")
 

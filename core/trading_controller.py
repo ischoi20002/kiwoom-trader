@@ -138,8 +138,15 @@ class TradingController:
         else:
             return self.stop()
 
-    def start(self):
-        """실시간 감시 엔진을 시작합니다."""
+    def start(self, *, skip_selection_fresh_check: bool = False):
+        """실시간 감시 엔진을 시작합니다.
+
+        Parameters
+        ----------
+        skip_selection_fresh_check
+            True 이면 ``selected_targets.csv`` 신선도 검사를 건너뜁니다
+            (직전 일일 선정 직후 재시작 등).
+        """
         if self.monitor_thread and self.monitor_thread.is_alive():
             return False
         if getattr(self, "_run_start_sequence_active", False):
@@ -153,8 +160,41 @@ class TradingController:
                 )
             return False
 
-        # 1. 선정 종목 유효성 확인
+        # 1. 선정 종목 유효성·신선도 확인
         target_cache = "selected_targets.csv"
+        if not skip_selection_fresh_check:
+            try:
+                from core.selection_freshness import (
+                    is_selected_targets_fresh,
+                    selection_freshness_status,
+                )
+
+                st = getattr(self.app, "settings", None) or {}
+                if not is_selected_targets_fresh(target_cache, settings=st):
+                    _ok, detail = selection_freshness_status(target_cache, settings=st)
+                    try:
+                        self.log(
+                            f"🔄 [Check] 일일 감시목록 갱신 필요 — {detail}. "
+                            "선정을 먼저 수행합니다."
+                        )
+                    except Exception:
+                        pass
+                    ens = getattr(self.app, "ensure_fresh_selection_then_start", None)
+                    if callable(ens):
+                        return ens()
+                    self.log("⚠️ [Check] 먼저 종목 선정을 수행해주세요.")
+                    if self.status_cb:
+                        self.status_cb(
+                            "SHOW_WARNING",
+                            "일일 감시목록이 만료되었습니다. 종목 선정 후 다시 시작하세요.",
+                        )
+                    return False
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ [Check] 선정 신선도 검사 생략: {e}")
+                except Exception:
+                    pass
+
         if not os.path.exists(target_cache):
             self.log("⚠️ [Check] 먼저 종목 선정을 수행해주세요.")
             if self.status_cb: self.status_cb("SHOW_WARNING", "먼저 종목 선정을 수행해주세요.")
@@ -162,6 +202,36 @@ class TradingController:
 
         try:
             df_targets = pd.read_csv(target_cache, dtype={'Code': str})
+            if df_targets is None or getattr(df_targets, "empty", True):
+                self.log(
+                    "⚠️ [Check] 감시 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
+                )
+                if self.status_cb:
+                    self.status_cb(
+                        "SHOW_WARNING",
+                        "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
+                    )
+                return False
+            codes = []
+            try:
+                if "Code" in df_targets.columns:
+                    codes = [
+                        str(c).strip()
+                        for c in df_targets["Code"].tolist()
+                        if str(c).strip() and str(c).strip().lower() != "nan"
+                    ]
+            except Exception:
+                codes = []
+            if len(codes) <= 0:
+                self.log(
+                    "⚠️ [Check] 감시 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
+                )
+                if self.status_cb:
+                    self.status_cb(
+                        "SHOW_WARNING",
+                        "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
+                    )
+                return False
             self.monitor_codes = df_targets['Code'].tolist()
             self._initialize_monitor_info(df_targets)
             

@@ -999,13 +999,6 @@ class MonitorTab:
             command=self.app.toggle_monitoring,
             style="Accent.TButton",
         )
-        self.btn_continuous_monitor = ttk.Button(
-            self.ctrl_frame,
-            text="🔄 연속 감시 시작",
-            width=_monitor_ctrl_btn_w,
-            command=self.app.toggle_continuous_monitoring,
-            style="Action.TButton",
-        )
         self.lbl_monitor_status = ttk.Label(
             self.ctrl_frame,
             text="상태: 대기 중",
@@ -1014,9 +1007,9 @@ class MonitorTab:
         )
         # 오른쪽 묶음: 읽기 순서(왼→오) = 상태 | 실시간 감시 | 일일 감시목록 선정 | 백테스팅 선정목록
         # side=RIGHT 는 먼저 pack 한 위젯이 부모의 오른쪽에 붙고, 다음은 그 왼쪽에 이어 붙음.
+        # 실시간 감시 ON 시 장마감 후 연속전환(중단→선정→재시작)은 ContinuousMonitorService 가 자동 수행.
         self.btn_compare_bt_sel.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
-        self.btn_continuous_monitor.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 8))
         self.lbl_monitor_status.pack(side=tk.RIGHT, padx=(4, 0))
 

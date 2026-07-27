@@ -821,8 +821,30 @@ class KiwoomApp:
 
         # RemoteCommander는 인증 성공 후 RestAuthRetryService에서 1회만 기동합니다.
         if self.auto_start:
-            self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
-            self.root.after(8000, self.toggle_monitoring)
+            try:
+                cms = getattr(self, "continuous_monitor_service", None)
+                if cms is not None:
+                    cms.arm()
+                    ms = int(cms.ms_until_auto_start())
+                    hm = cms._auto_start_hhmm_str()
+                    if ms <= 0:
+                        self.log(
+                            f"[Auto] 장전 시작 시각({hm}) 경과 — "
+                            "실시간 감시를 곧 시작합니다..."
+                        )
+                        self.root.after(1000, self.ensure_fresh_selection_then_start)
+                    else:
+                        self.log(
+                            f"[Auto] 연속 스케줄 활성화 — "
+                            f"감시 시작 {hm} (약 {ms // 1000}초 후), "
+                            f"장마감 선정 {cms._format_eod_hhmm()}"
+                        )
+                else:
+                    self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
+                    self.root.after(8000, self.ensure_fresh_selection_then_start)
+            except Exception:
+                self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
+                self.root.after(8000, self.ensure_fresh_selection_then_start)
         
     def _final_save_settings(self):
         if self.config_handler.save_settings(self.settings):
@@ -2470,7 +2492,12 @@ class KiwoomApp:
             pass
 
     def toggle_monitoring(self):
-        """일반 실시간 감시 토글(연속 감시 자동 전환 없음)."""
+        """
+        실시간 감시 토글.
+
+        시작 시 일일 감시목록이 만료·없으면 선정을 먼저 수행한 뒤 감시를 시작합니다.
+        ContinuousMonitorService 가 연동되어 장마감 후 중단→선정→재시작을 자동 수행합니다.
+        """
         tc = self.trading_controller
         try:
             if bool(getattr(tc, "is_monitoring", False)):
@@ -2483,51 +2510,194 @@ class KiwoomApp:
                 return tc.stop()
         except Exception:
             pass
-        return tc.toggle()
+        return self.ensure_fresh_selection_then_start()
 
-    def toggle_continuous_monitoring(self) -> None:
-        """연속 감시: 장마감 후 자동 중단→선정→재시작."""
+    def ensure_fresh_selection_then_start(self) -> bool:
+        """
+        ``selected_targets.csv`` 가 신선하면 즉시 감시 시작,
+        만료·없으면 일일 선정 후 시작합니다.
+        """
+        tc = self.trading_controller
         try:
-            svc = self.continuous_monitor_service
-            tc = self.trading_controller
-            if svc.armed:
-                svc.disarm(manual=True)
-                if bool(getattr(tc, "is_monitoring", False)):
-                    tc.stop()
-                self._sync_continuous_monitor_ui()
-                return
-            svc.arm()
-            if not bool(getattr(tc, "is_monitoring", False)):
-                if not bool(tc.start()):
-                    svc.disarm(manual=False)
+            if bool(getattr(tc, "is_monitoring", False)):
+                return False
+            if bool(getattr(tc, "_run_start_sequence_active", False)):
+                try:
+                    self.log(
+                        "⚠️ [감시] 시작 절차가 이미 진행 중입니다. 잠시 후 다시 시도하세요."
+                    )
+                except Exception:
+                    pass
+                return False
+            if bool(getattr(self, "_ensure_sel_start_active", False)):
+                try:
+                    self.log(
+                        "⚠️ [감시] 일일 선정 후 감시 시작 절차가 이미 진행 중입니다."
+                    )
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            pass
+
+        try:
+            from core.selection_freshness import (
+                is_selected_targets_fresh,
+                selection_freshness_status,
+            )
+
+            st = getattr(self, "settings", None) or {}
+            path = "selected_targets.csv"
+            if is_selected_targets_fresh(path, settings=st):
+                try:
+                    from core.selection_freshness import count_selected_targets
+
+                    n_sel = int(count_selected_targets(path))
+                except Exception:
+                    n_sel = -1
+                if n_sel == 0:
                     try:
                         self.log(
-                            "⚠️ [연속감시] 감시 시작에 실패했습니다. "
-                            "일일 감시목록 선정 후 다시 시도하세요."
+                            "⚠️ [감시] 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
                         )
                     except Exception:
                         pass
-            self._sync_continuous_monitor_ui()
-        except Exception as e:
+                    try:
+                        scb = getattr(tc, "status_cb", None)
+                        if callable(scb):
+                            scb(
+                                "SHOW_WARNING",
+                                "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
+                            )
+                    except Exception:
+                        pass
+                    return False
+                return bool(tc.start(skip_selection_fresh_check=True))
+            _ok, detail = selection_freshness_status(path, settings=st)
             try:
-                self.log(f"❌ [연속감시] 토글 오류: {e}")
+                self.log(
+                    f"🔄 [감시] 일일 감시목록 갱신 필요 — {detail}. "
+                    "선정을 수행한 뒤 감시를 시작합니다."
+                )
             except Exception:
                 pass
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [감시] 신선도 검사 실패({e}) — 기존 CSV로 시작 시도")
+            except Exception:
+                pass
+            return bool(tc.start(skip_selection_fresh_check=True))
+
+        mt = getattr(self, "monitor_tab", None)
+        if mt is None or not hasattr(mt, "select_monitoring_targets"):
+            try:
+                self.log("⚠️ [감시] monitor_tab 없음 — 선정 불가")
+            except Exception:
+                pass
+            try:
+                scb = getattr(tc, "status_cb", None)
+                if callable(scb):
+                    scb(
+                        "SHOW_WARNING",
+                        "일일 감시목록 선정이 필요합니다.",
+                    )
+            except Exception:
+                pass
+            return False
+
+        self._ensure_sel_start_active = True
+
+        def _on_complete(ok: bool) -> None:
+            def _job() -> None:
+                try:
+                    self._ensure_sel_start_active = False
+                except Exception:
+                    pass
+                if not ok:
+                    try:
+                        self.log(
+                            "⚠️ [감시] 일일 선정 실패 또는 종목 0건 — 감시 시작을 건너뜁니다."
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        scb = getattr(tc, "status_cb", None)
+                        if callable(scb):
+                            scb(
+                                "SHOW_WARNING",
+                                "감시 선정 결과가 0건(또는 실패)이라 감시를 시작하지 않습니다.",
+                            )
+                    except Exception:
+                        pass
+                    return
+                try:
+                    from core.selection_freshness import count_selected_targets
+
+                    n_sel = int(count_selected_targets("selected_targets.csv"))
+                except Exception:
+                    n_sel = -1
+                if n_sel == 0:
+                    try:
+                        self.log(
+                            "⚠️ [감시] 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        scb = getattr(tc, "status_cb", None)
+                        if callable(scb):
+                            scb(
+                                "SHOW_WARNING",
+                                "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
+                            )
+                    except Exception:
+                        pass
+                    return
+                try:
+                    self.log(
+                        f"✅ [감시] 일일 선정 완료({n_sel}종목) — 감시를 시작합니다."
+                    )
+                except Exception:
+                    pass
+                try:
+                    tc.start(skip_selection_fresh_check=True)
+                except Exception as ex:
+                    try:
+                        self.log(f"❌ [감시] 선정 후 시작 실패: {ex}")
+                    except Exception:
+                        pass
+
+            try:
+                self.root.after(0, _job)
+            except Exception:
+                _job()
+
+        try:
+            import threading
+
+            threading.Thread(
+                target=lambda: mt.select_monitoring_targets(
+                    auto_confirm=True,
+                    on_complete=_on_complete,
+                ),
+                daemon=True,
+                name="EnsureSelThenStart",
+            ).start()
+            return True
+        except Exception as e:
+            try:
+                self._ensure_sel_start_active = False
+            except Exception:
+                pass
+            try:
+                self.log(f"❌ [감시] 선정 스레드 기동 실패: {e}")
+            except Exception:
+                pass
+            return False
 
     def _sync_continuous_monitor_ui(self) -> None:
-        """연속 감시 버튼 문구·스타일 동기화."""
-        try:
-            mt = getattr(self, "monitor_tab", None)
-            svc = getattr(self, "continuous_monitor_service", None)
-            btn = getattr(mt, "btn_continuous_monitor", None) if mt is not None else None
-            if btn is None or svc is None:
-                return
-            if svc.armed:
-                btn.config(text="⏹️ 연속 감시 중단", style="Warning.TButton")
-            else:
-                btn.config(text="🔄 연속 감시 시작", style="Action.TButton")
-        except Exception:
-            pass
+        """레거시 no-op(연속 감시 전용 버튼 제거)."""
+        return
 
     def stop_monitoring(self) -> None:
         """
@@ -2595,11 +2765,14 @@ class KiwoomApp:
                 pass
             try:
                 cms = getattr(self, "continuous_monitor_service", None)
-                if cms is not None and cms.armed:
-                    cms.start_scheduler()
+                if cms is not None:
+                    # 실시간 감시 = 연속(EOD) 전환 연동
+                    if not cms.armed:
+                        cms.arm()
+                    else:
+                        cms.start_scheduler()
             except Exception:
                 pass
-            self._sync_continuous_monitor_ui()
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
             try:
                 from core.monitor_started_display import format_monitor_started_status_text
@@ -2643,7 +2816,11 @@ class KiwoomApp:
                     text="▶️ 실시간 감시 시작", style="Accent.TButton"
                 )
             if eod_cycle_stop and cms is not None and cms.armed:
-                _wait_txt = "상태: 연속 감시 — 장마감 전환 중(선정·재시작)"
+                try:
+                    hm = cms._auto_start_hhmm_str()
+                except Exception:
+                    hm = "08:50"
+                _wait_txt = f"상태: 장마감 선정 중 → 감시 시작 {hm}"
                 if self.lbl_monitor_status:
                     self.lbl_monitor_status.config(
                         text=_wait_txt, foreground=self.colors.get("primary", "#88C0D0")
@@ -2666,7 +2843,6 @@ class KiwoomApp:
                     self.status_label.config(
                         text="상태: 대기 중", foreground=self.colors["primary"]
                     )
-            self._sync_continuous_monitor_ui()
 
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")

@@ -141,6 +141,40 @@ def _patch_k_trader_gui_for_production(path: Path) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def _verify_op_venv(dest: Path) -> None:
+    """
+    운영 폴더 .venv 상태 확인.
+
+    deploy 는 .venv 를 복사/삭제하지 않는다. 다만 run_k_trader.bat 등은
+    매 배포마다 덮어쓰므로, venv 가 없거나 패키지가 빠지면 실행이 실패한다.
+    """
+    venv_py = dest / ".venv" / "Scripts" / "python.exe"
+    if not venv_py.is_file():
+        print(
+            "\n[경고] [운영] .venv 없음 — 최초 1회 install_k_trader.bat 실행 필요"
+        )
+        print(f"     → {dest}\\install_k_trader.bat")
+        return
+    try:
+        import subprocess
+
+        r = subprocess.run(
+            [str(venv_py), "-c", "import pandas"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            print(
+                "\n[경고] [운영] .venv 에 pandas 등 패키지 없음 — install_k_trader.bat 재실행"
+            )
+            print(f"     → {dest}\\install_k_trader.bat")
+            return
+        print("\n[OK] [운영] .venv + pandas 확인됨 (run_k_trader.bat 가 .venv 우선 사용)")
+    except Exception as ex:
+        print(f"\n[경고] [운영] .venv 검사 생략: {ex}")
+
+
 def deploy() -> None:
     if not SOURCE.is_dir():
         raise FileNotFoundError(f"소스 없음: {SOURCE}")
@@ -180,7 +214,9 @@ def deploy() -> None:
     print(f"  Python 모듈: {py_count}개")
     print("  백테스트 탭 제거 패치 적용됨 (k_trader_gui.py)")
     print(f"\n실행: cd {DEST} && run_k_trader.bat")
-    print("  (최초 1회: .venv\\Scripts\\pip install -r requirements.txt)")
+    print(f"  (최초/패키지 오류: {DEST}\\install_k_trader.bat)")
+    print(f"  (다음 배포: {SOURCE}\\deploy_production.bat)")
+    _verify_op_venv(DEST)
 
 
 if __name__ == "__main__":
