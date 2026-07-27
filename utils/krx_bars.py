@@ -29,6 +29,7 @@ __all__ = [
     "is_krx_15m_slot_end",
     "krx_stream_slot_end_datetime",
     "next_krx_15m_slot_end",
+    "seconds_until_next_krx_15m_boundary",
 ]
 
 # DB·백텐·키움 REST resample(r/r)과 동일
@@ -162,6 +163,33 @@ def next_krx_15m_slot_end(
         return next_krx_15m_slot_end(up)
     except Exception:
         return None
+
+
+def seconds_until_next_krx_15m_boundary(
+    now: Optional[Union[datetime, pd.Timestamp]] = None,
+) -> float:
+    """
+    다음 KRX 15분 슬롯 **벽시계 경계**까지 남은 초.
+
+    ``krx_stream_slot_end_datetime`` 이 분 단위로 점프하는 시각(09:15, 09:30, …)
+    까지의 대기시간. 슬롯 롤 워처의 exact wake 에 사용합니다.
+    """
+    try:
+        raw = now if now is not None else datetime.now()
+        t = pd.Timestamp(raw)
+        want = krx_stream_slot_end_datetime(
+            t.to_pydatetime() if hasattr(t, "to_pydatetime") else t
+        )
+        want_ts = pd.Timestamp(want)
+        delta = float((want_ts - t).total_seconds())
+        if delta > 0.001:
+            return delta
+        nxt = next_krx_15m_slot_end(want_ts)
+        if nxt is None:
+            return 60.0
+        return max(0.0, float((pd.Timestamp(nxt) - t).total_seconds()))
+    except Exception:
+        return 1.0
 
 
 def m1_window_start_for_15m_end(

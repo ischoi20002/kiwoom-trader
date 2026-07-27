@@ -577,34 +577,39 @@ class KiwoomApp:
         )
 
         _rt15_store = self.realtime_monitor_bars_store
+        from core.closed_15m_fast_path import Closed15mDbUpsertQueue, Closed15mEvalPool
+
+        self._closed_15m_db_queue = Closed15mDbUpsertQueue(_rt15_store, log=self.log)
+        self._closed_15m_db_queue.start()
+        self._closed_15m_eval_pool = Closed15mEvalPool(self, log=self.log)
 
         def _on_rt15_bar_closed(code, ts, o, h, l, c, v):
+            # DB upsert는 비동기 — 신호 평가 경로를 블로킹하지 않음
             try:
-                _rt15_store.upsert_completed_bar(code, ts, o, h, l, c, v)
+                self._closed_15m_db_queue.enqueue(code, ts, o, h, l, c, v)
             except Exception as ex:
                 try:
-                    self.log(f"⚠️ [RT15mDB] 확정봉 저장 실패: {ex}")
+                    self.log(f"⚠️ [RT15mDB] 확정봉 큐잉 실패: {ex}")
                 except Exception:
                     pass
-            # 로컬 15분 확정 → S1·S2·청산 즉시 평가(공식 REST 교체와 무관, 비동기)
+            # 로컬 15분 확정 → S1·S2·청산 즉시 평가(공식 REST 교체와 무관, 워커풀)
             try:
                 st = self.settings or {}
                 if bool(st.get("realtime_s1_eval_on_local_15m_close", True)):
-                    def _run_closed_15m_eval() -> None:
-                        try:
-                            se = getattr(self, "signal_engine", None)
-                            if se is not None:
-                                se.eval_on_completed_15m(code, ts)
-                        except Exception:
-                            pass
-
-                    threading.Thread(
-                        target=_run_closed_15m_eval,
-                        name=f"closed15m_{code}",
-                        daemon=True,
-                    ).start()
+                    self._closed_15m_eval_pool.submit_eval(code, ts)
             except Exception:
                 pass
+            # 공식 15분 교체·M1 위생은 조용 구간 뒤로(신호·주문 우선)
+            try:
+                from core.closed_15m_fast_path import (
+                    closed_15m_defer_official_sec,
+                    mark_rt15_official_quiet,
+                )
+
+                mark_rt15_official_quiet(self)
+                defer_sec = closed_15m_defer_official_sec(self)
+            except Exception:
+                defer_sec = 4.0
             try:
                 sched = getattr(self, "rt_closed_15m_official_scheduler", None)
                 if sched is not None:
@@ -627,7 +632,11 @@ class KiwoomApp:
                     except (TypeError, ValueError):
                         dly = 2.5
                     sched.schedule(
-                        app=self, code=code, bar_ts=ts, delay_sec=dly
+                        app=self,
+                        code=code,
+                        bar_ts=ts,
+                        delay_sec=dly,
+                        prepend_delay_sec=float(defer_sec),
                     )
             except Exception:
                 pass
@@ -1205,6 +1214,21 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def enqueue_closed_15m_order_action(self, kind: str, payload: Any) -> bool:
+        """
+        로컬 15분 확정 평가용 주문 패스트패스.
+
+        Tk 메인 큐(버스트/폴러)를 우회하고 OrderActionDispatcher 로 직행합니다.
+        """
+        try:
+            return bool(
+                self._enqueue_order_action(
+                    str(kind), payload, source="closed_15m"
+                )
+            )
+        except Exception:
+            return False
+
     def mark_tick_worker_ui_dirty(self) -> None:
         """워커가 감시 트리 갱신이 필요함을 표시합니다."""
         try:
@@ -1227,12 +1251,14 @@ class KiwoomApp:
         except Exception:
             pass
 
-    def _enqueue_order_action(self, kind: str, payload: Any) -> bool:
+    def _enqueue_order_action(
+        self, kind: str, payload: Any, *, source: str = "tick"
+    ) -> bool:
         """OrderActionDispatcher 위임."""
         try:
             disp = getattr(self, "order_action_dispatcher", None)
             if disp is not None:
-                return bool(disp.enqueue(kind, payload))
+                return bool(disp.enqueue(kind, payload, source=source))
         except Exception:
             pass
         return False
@@ -3239,11 +3265,20 @@ class KiwoomApp:
 
     def _handle_remote_update(self):
         self.send_telegram_message("📦 [원격 배포 시작]")
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        update_script = os.path.join(script_dir, "remote_update.ps1")
-        if os.path.exists(update_script):
-            subprocess.Popen(["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", update_script], cwd=script_dir, creationflags=0x10)
+        candidates = (
+            os.path.join(r"c:\vibe", "remote_update.bat"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "remote_update.bat"),
+        )
+        update_script = next((p for p in candidates if os.path.isfile(p)), None)
+        if update_script:
+            subprocess.Popen(
+                ["cmd", "/c", update_script],
+                cwd=os.path.dirname(update_script),
+                creationflags=0x10,
+            )
             self.root.after(1000, self.on_close)
+        else:
+            self.send_telegram_message("❌ remote_update.bat(c:\\vibe) 없음")
 
 if __name__ == "__main__":
     import sys

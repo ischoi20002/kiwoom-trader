@@ -460,6 +460,25 @@ class RtWatchlistM1ApiPoller:
                 return
             if self._is_round_dormant(sk):
                 return
+            # 15분 확정 직후 신호 우선 — 프로브 REST도 잠시 연기
+            try:
+                from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
+
+                rem = float(rt15_official_quiet_remaining_sec(self._app))
+            except Exception:
+                rem = 0.0
+            if rem > 0.05:
+                try:
+                    t = threading.Timer(
+                        rem,
+                        self._job_probe_round,
+                        args=(codes, closed_lab, sk, attempt),
+                    )
+                    t.daemon = True
+                    t.start()
+                except Exception:
+                    pass
+                return
             probe = self._pick_probe_code(codes)
             nk = canonical_stock_code(str(probe).strip())
             if not nk:
@@ -554,6 +573,25 @@ class RtWatchlistM1ApiPoller:
             if not self._is_pollable_m1_label(closed_lab):
                 return
             if self._is_round_dormant(sk):
+                return
+            # 15분 슬롯 확정 직후: 신호·주문 우선 — 공식 M1 REST 잠시 연기
+            try:
+                from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
+
+                rem = float(rt15_official_quiet_remaining_sec(self._app))
+            except Exception:
+                rem = 0.0
+            if rem > 0.05:
+                try:
+                    t = threading.Timer(
+                        rem,
+                        self._job_fetch_one,
+                        args=(code, closed_lab, sk),
+                    )
+                    t.daemon = True
+                    t.start()
+                except Exception:
+                    pass
                 return
             nk = canonical_stock_code(str(code).strip())
             if not nk:

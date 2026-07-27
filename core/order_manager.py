@@ -2,6 +2,7 @@ import requests
 import json
 import logging
 import threading
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
@@ -38,6 +39,77 @@ class OrderManager:
 
         # 직전 주문 API 거부 메시지(매도 실패 시 800033 등 후처리용)
         self.last_order_reject_msg: str = ""
+        # touch 호가(ka10004) 단기 캐시 — 15분 확정 평가 중 prefetch 용
+        self._touch_quote_cache: Dict[str, Tuple[float, Optional[float], Optional[float]]] = {}
+        self._touch_quote_cache_lock = threading.Lock()
+
+    def _touch_quote_cache_ttl_sec(self) -> float:
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            v = float(st.get("realtime_touch_quote_cache_ttl_sec", 2.0))
+            return max(0.2, min(10.0, v))
+        except Exception:
+            return 2.0
+
+    def cache_best_bid_ask(
+        self,
+        stk_cd: str,
+        bid: Optional[float],
+        ask: Optional[float],
+    ) -> None:
+        """호가 캐시를 갱신합니다."""
+        try:
+            code = str(stk_cd or "").strip().zfill(6)
+        except Exception:
+            return
+        if not code or code == "000000":
+            return
+        try:
+            with self._touch_quote_cache_lock:
+                self._touch_quote_cache[code] = (
+                    time.monotonic(),
+                    float(bid) if bid is not None and float(bid) > 0 else None,
+                    float(ask) if ask is not None and float(ask) > 0 else None,
+                )
+        except Exception:
+            pass
+
+    def get_cached_best_bid_ask(
+        self,
+        stk_cd: str,
+        *,
+        max_age_sec: Optional[float] = None,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """유효 TTL 내 캐시된 (bid, ask). 없거나 만료면 (None, None)."""
+        try:
+            code = str(stk_cd or "").strip().zfill(6)
+        except Exception:
+            return None, None
+        if not code:
+            return None, None
+        ttl = (
+            float(max_age_sec)
+            if max_age_sec is not None
+            else self._touch_quote_cache_ttl_sec()
+        )
+        try:
+            with self._touch_quote_cache_lock:
+                hit = self._touch_quote_cache.get(code)
+            if not hit:
+                return None, None
+            ts_m, bid, ask = hit
+            if (time.monotonic() - float(ts_m)) > float(ttl):
+                return None, None
+            return bid, ask
+        except Exception:
+            return None, None
+
+    def prefetch_best_bid_ask_rest(self, stk_cd: str) -> Tuple[Optional[float], Optional[float]]:
+        """ka10004를 조회해 캐시에 넣고 반환(평가와 주문 경로 겹침용)."""
+        bid, ask = self.fetch_best_bid_ask_rest(
+            stk_cd, prefer_cache=False, update_cache=True
+        )
+        return bid, ask
 
     def _get_base_url(self):
         return config.MOCK_URL if getattr(config, 'USE_MOCK', False) else config.URL
@@ -554,9 +626,18 @@ class OrderManager:
                 pass
         return None
 
-    def fetch_best_bid_ask_rest(self, stk_cd: str) -> Tuple[Optional[float], Optional[float]]:
+    def fetch_best_bid_ask_rest(
+        self,
+        stk_cd: str,
+        *,
+        prefer_cache: bool = True,
+        update_cache: bool = True,
+        max_age_sec: Optional[float] = None,
+    ) -> Tuple[Optional[float], Optional[float]]:
         """
         키움 REST ``ka10004``(주식호가)로 **매수1호가·매도1호가** 를 조회합니다.
+
+        prefer_cache=True 이면 TTL 내 캐시를 우선 반환해 touch 주문 지연을 줄입니다.
 
         Returns
         -------
@@ -568,6 +649,18 @@ class OrderManager:
             return None, None
         if not code or code == "000000":
             return None, None
+
+        if prefer_cache:
+            try:
+                c_bid, c_ask = self.get_cached_best_bid_ask(
+                    code, max_age_sec=max_age_sec
+                )
+                if (c_bid is not None and float(c_bid) > 0) or (
+                    c_ask is not None and float(c_ask) > 0
+                ):
+                    return c_bid, c_ask
+            except Exception:
+                pass
 
         def _hp_int_from_obj(obj: Any) -> Tuple[int, int]:
             """단일 dict 에서 (bid1, ask1) 정수. 없으면 0."""
@@ -638,10 +731,14 @@ class OrderManager:
             bid1, ask1 = acc[0], acc[1]
             if bid1 <= 0 and ask1 <= 0:
                 return None, None
-            return (
-                float(bid1) if bid1 > 0 else None,
-                float(ask1) if ask1 > 0 else None,
-            )
+            out_bid = float(bid1) if bid1 > 0 else None
+            out_ask = float(ask1) if ask1 > 0 else None
+            if update_cache:
+                try:
+                    self.cache_best_bid_ask(code, out_bid, out_ask)
+                except Exception:
+                    pass
+            return out_bid, out_ask
         except requests.RequestException as e:
             try:
                 self.logger.debug("fetch_best_bid_ask_rest 요청 실패: %s", e)

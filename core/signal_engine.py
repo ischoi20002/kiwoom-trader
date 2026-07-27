@@ -378,6 +378,80 @@ class SignalEngine:
         except Exception:
             pass
 
+    def _enqueue_closed_15m_order(self, kind: str, payload: Any) -> bool:
+        """
+        로컬 15분 확정 주문: Tk 메인 큐를 우회하는 패스트패스.
+        실패 시 기존 틱 메인 큐로 폴백합니다.
+        """
+        try:
+            fast = getattr(self.app, "enqueue_closed_15m_order_action", None)
+            if callable(fast):
+                if bool(fast(str(kind), payload)):
+                    return True
+        except Exception:
+            pass
+        try:
+            enq = getattr(self.app, "enqueue_tick_main_action", None)
+            if callable(enq):
+                enq(str(kind), payload)
+                self._wake_tick_main_action_poller()
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _prefetch_touch_quote_async(self, code: str) -> None:
+        """touch 주문용 ka10004를 지표 계산과 겹쳐 미리 조회합니다."""
+        try:
+            oes = getattr(self.app, "order_execution_service", None)
+            if oes is None:
+                tc = getattr(self.app, "trading_controller", None)
+                oes = getattr(tc, "order_execution_service", None) if tc else None
+            if oes is not None and hasattr(oes, "_realtime_live_order_spec"):
+                _ot, ex_style = oes._realtime_live_order_spec()
+                if str(ex_style) != "touch":
+                    return
+        except Exception:
+            # 스펙 확인 실패 시에도 prefetch 시도(캐시만 채움)
+            pass
+
+        nk = str(canonical_stock_code(code) or code).zfill(6)
+
+        def _run() -> None:
+            try:
+                om = getattr(self.app, "order_manager", None)
+                if om is not None and hasattr(om, "prefetch_best_bid_ask_rest"):
+                    om.prefetch_best_bid_ask_rest(nk)
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(
+                target=_run, name=f"quote_pf_{nk}", daemon=True
+            ).start()
+        except Exception:
+            pass
+
+    def _closed_df_for_indicator_calc(self, closed_df: Any) -> Any:
+        """
+        확정 15분 지표 계산용 lookback 제한.
+
+        bars_data 는 이미 tail(300) 이지만, 설정으로 상한을 줄여
+        슬롯 경계 CPU 경합을 완화할 수 있습니다(신호 정합에 필요한 최소봉은 유지).
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            max_rows = int(float(st.get("realtime_closed_15m_indicator_max_rows", 300)))
+            max_rows = max(80, min(2000, max_rows))
+        except Exception:
+            max_rows = 300
+        try:
+            if closed_df is not None and len(closed_df) > max_rows:
+                return closed_df.iloc[-max_rows:].copy()
+        except Exception:
+            pass
+        return closed_df
+
     def _realtime_s1_mirror_dynamic_intrabar_enabled(self) -> bool:
         """
         동적 고정밀과 동일한 인트라바 판정 사용 여부.
@@ -634,7 +708,10 @@ class SignalEngine:
                 return
 
             settings = getattr(self.app, "settings", None) or {}
-            df_ind = TradingStrategy.calculate_indicators(closed_df, settings)
+            # 지표 계산과 호가 REST를 겹쳐 touch 주문 RTT를 숨김
+            self._prefetch_touch_quote_async(nk)
+            calc_df = self._closed_df_for_indicator_calc(closed_df)
+            df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
             df_ind = self._apply_ready_column_to_indicators(df_ind)
             detailed = TradingStrategy.get_buy_signals_detailed(df_ind, settings, "UP")
             last_ser = detailed.iloc[-1]
@@ -738,26 +815,20 @@ class SignalEngine:
             except Exception:
                 pass
 
-            # 주문 큐(메인 콜백) — 틱 경로와 동일
+            # 주문 패스트패스(Tk 메인 큐 우회) — 틱 경로와 분리
             try:
                 self.last_buy_sig_time[nk] = datetime.now()
                 if mi_key and mi_key != nk:
                     self.last_buy_sig_time[mi_key] = self.last_buy_sig_time[nk]
-                enq = getattr(self.app, "enqueue_tick_main_action", None)
-                if callable(enq):
-                    enq(
-                        "buy_signal",
-                        (
-                            nk,
-                            float(now_price),
-                            float(rsi_sig),
-                            float(macd_val),
-                            float(osc_val),
-                            float(ma60_ratio),
-                        ),
-                    )
-                    self._wake_tick_main_action_poller()
-                else:
+                payload = (
+                    nk,
+                    float(now_price),
+                    float(rsi_sig),
+                    float(macd_val),
+                    float(osc_val),
+                    float(ma60_ratio),
+                )
+                if not self._enqueue_closed_15m_order("buy_signal", payload):
                     self.app._on_buy_signal_received(
                         nk,
                         now_price,
@@ -841,7 +912,9 @@ class SignalEngine:
                 pass
 
             settings = getattr(self.app, "settings", None) or {}
-            df_ind = TradingStrategy.calculate_indicators(closed_df, settings)
+            self._prefetch_touch_quote_async(nk)
+            calc_df = self._closed_df_for_indicator_calc(closed_df)
+            df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
             last_row = df_ind.iloc[-1].to_dict()
             try:
                 close_px = float(self._to_scalar(last_row.get("Close"), 0.0))
@@ -935,19 +1008,13 @@ class SignalEngine:
                 pass
 
             try:
-                enq = getattr(self.app, "enqueue_tick_main_action", None)
-                if callable(enq):
-                    enq(
-                        "strategy_action",
-                        (
-                            nk,
-                            act,
-                            str(res.get("reason") or ""),
-                            _act_kw,
-                        ),
-                    )
-                    self._wake_tick_main_action_poller()
-                else:
+                payload = (
+                    nk,
+                    act,
+                    str(res.get("reason") or ""),
+                    _act_kw,
+                )
+                if not self._enqueue_closed_15m_order("strategy_action", payload):
                     self.app._on_strategy_action_needed(
                         nk,
                         act,

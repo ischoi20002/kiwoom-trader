@@ -1228,6 +1228,20 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
+            '15분 슬롯 경계 감지(초)',
+            'realtime_15m_slot_watch_sec',
+            '초',
+            '경계에서 멀 때 최대 sleep. 경계 근처는 near_poll(0.1s)로 전환',
+        )
+        add_param_row(
+            strat_f,
+            '15분 확정 후 공식REST 연기',
+            'realtime_closed_15m_defer_official_sec',
+            '초',
+            '로컬 확정 신호·주문 우선. 이 시간 동안 공식 M1 폴링·형성봉 sync·15분 교체 시작을 미룸(기본 4)',
+        )
+        add_param_row(
+            strat_f,
             '15분 마지막 1분 틱 합성',
             None,
             '',

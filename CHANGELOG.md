@@ -13,6 +13,17 @@
 
 ---
 
+## 0.14.0 (2026-07-28)
+
+실시간 15분봉 마감 직후 신호 평가·주문 지연 최소화.
+
+- **슬롯 감지**: 벽시계 경계 exact wake + 경계 근처 고주기 폴링 (`seconds_until_next_krx_15m_boundary`).
+- **병렬 롤·락 분리**: 종목 병렬 슬롯 롤, compose/콜백을 `_bars_data_lock` 밖에서 수행.
+- **평가 워커풀·비동기 DB**: `Closed15mEvalPool` / `Closed15mDbUpsertQueue` (`core/closed_15m_fast_path.py`).
+- **주문 패스트패스**: Tk 메인 큐 우회 → `OrderActionDispatcher`(closed-15m 쿨다운 완화·워커 확대).
+- **touch 호가**: ka10004 캐시 + 지표 계산과 병렬 prefetch.
+- **공식 REST 후순위**: 슬롯 확정 후 `realtime_closed_15m_defer_official_sec`(기본 4초) 동안 M1 폴링·형성봉 sync·15분 교체 연기.
+
 ## 0.13.3 (2026-07-27)
 
 레짐 계산 FDR 전환, 모의 예수금 파싱, 운영 배포 보조.

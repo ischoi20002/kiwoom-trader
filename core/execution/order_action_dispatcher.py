@@ -47,28 +47,41 @@ class OrderActionDispatcher:
         except Exception:
             return str(raw_code)
 
-    def _submit_cooldown_sec(self, kind: str) -> float:
+    def _submit_cooldown_sec(self, kind: str, *, source: str = "tick") -> float:
         try:
             st = getattr(self.app, "settings", None) or {}
+            src = str(source or "tick").strip().lower()
+            if src == "closed_15m":
+                if str(kind) == "buy_signal":
+                    v = float(
+                        st.get("closed_15m_buy_signal_submit_cooldown_sec", 0.05)
+                    )
+                    return max(0.0, min(v, 5.0))
+                v = float(
+                    st.get("closed_15m_strategy_action_submit_cooldown_sec", 0.05)
+                )
+                return max(0.0, min(v, 10.0))
             if str(kind) == "buy_signal":
                 v = float(st.get("buy_signal_submit_cooldown_sec", 0.35))
                 return max(0.05, min(v, 5.0))
             v = float(st.get("strategy_action_submit_cooldown_sec", 0.7))
             return max(0.1, min(v, 10.0))
         except Exception:
+            if str(source or "").strip().lower() == "closed_15m":
+                return 0.05
             return 0.35 if str(kind) == "buy_signal" else 0.7
 
-    def _try_reserve(self, kind: str, code: str) -> bool:
+    def _try_reserve(self, kind: str, code: str, *, source: str = "tick") -> bool:
         """종목별 inflight 1건 + kind·code 쿨다운."""
         nk = self.normalize_code(code)
         now_ts = time.time()
-        cd = self._submit_cooldown_sec(kind)
+        cd = self._submit_cooldown_sec(kind, source=source)
         try:
             with self._guard_lock:
                 if nk in self._inflight_codes:
                     return False
                 last = float(self._last_submit_ts.get((str(kind), nk), 0.0) or 0.0)
-                if (now_ts - last) < cd:
+                if cd > 0.0 and (now_ts - last) < cd:
                     return False
                 self._inflight_codes.add(nk)
                 self._last_submit_ts[(str(kind), nk)] = now_ts
@@ -91,13 +104,13 @@ class OrderActionDispatcher:
             if alive:
                 return
             self._worker_stop.clear()
-            worker_count = 2
+            worker_count = 4
             try:
                 st = getattr(self.app, "settings", None) or {}
-                worker_count = int(float(st.get("order_action_worker_threads", 2)))
+                worker_count = int(float(st.get("order_action_worker_threads", 4)))
             except Exception:
-                worker_count = 2
-            worker_count = max(1, min(worker_count, 4))
+                worker_count = 4
+            worker_count = max(1, min(worker_count, 8))
             for idx in range(worker_count):
                 th = threading.Thread(
                     target=self._worker_loop,
@@ -109,8 +122,10 @@ class OrderActionDispatcher:
         except Exception:
             pass
 
-    def enqueue(self, kind: str, payload: Any) -> bool:
-        """메인 큐에서 꺼낸 주문 액션을 워커 큐로 위임합니다."""
+    def enqueue(
+        self, kind: str, payload: Any, *, source: str = "tick"
+    ) -> bool:
+        """메인 큐/패스트패스에서 꺼낸 주문 액션을 워커 큐로 위임합니다."""
         try:
             if str(kind) == "buy_signal" and isinstance(payload, tuple) and len(payload) >= 1:
                 code = payload[0]
@@ -122,7 +137,7 @@ class OrderActionDispatcher:
                 code = payload[0]
             else:
                 return False
-            if not self._try_reserve(str(kind), str(code)):
+            if not self._try_reserve(str(kind), str(code), source=source):
                 return False
             self._ensure_workers_started()
             try:

@@ -30,6 +30,7 @@ from utils.krx_bars import (
     m1_bar_open_label_for_just_completed_minute,
     m1_window_start_for_15m_end,
     next_krx_15m_slot_end,
+    seconds_until_next_krx_15m_boundary,
 )
 from utils.normalization import canonical_stock_code
 
@@ -170,6 +171,9 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
     ``bars_data`` 마지막 인덱스가 현재 슬롯 종가 시각보다 과거면,
     슬롯이 진행한 만큼 확정 콜백을 호출하고 새 행을 추가합니다.
 
+    compose·콜백은 ``_bars_data_lock`` **밖**에서 수행해 락 경합·DB I/O가
+    다른 종목 롤/평가를 막지 않게 합니다.
+
     Returns:
         ``bars_data`` 가 변경되었으면 True.
     """
@@ -181,95 +185,190 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
     if lk is None or not isinstance(bd, dict):
         return False
     changed = False
+    pending_cbs: List[Tuple[str, Any, float, float, float, float, float]] = []
     try:
-        with lk:
-            _k, df = resolve_bars_data_frame(bd, nk, migrate_alias=True)
-            use_key = _k or nk
-            if df is None or getattr(df, "empty", True):
-                return False
-            want = stream_slot_end_datetime(datetime.now())
-            guard = 0
-            while guard < 64:
-                guard += 1
-                try:
-                    last_ix = pd.Timestamp(df.index[-1])
-                except Exception:
-                    break
-                if last_ix >= want:
-                    break
-                try:
-                    o = float(df.at[last_ix, "Open"])
-                    h = float(df.at[last_ix, "High"])
-                    l_ = float(df.at[last_ix, "Low"])
-                    c = float(df.at[last_ix, "Close"])
-                    v = float(df.at[last_ix, "Volume"])
-                except Exception:
-                    o = h = l_ = c = v = 0.0
-                # 확정 직전: 앞14분 공식1분 + 마지막1분 틱 재합성
-                try:
-                    composed = compose_local_15m_ohlcv(app, use_key, last_ix)
-                    if composed is not None:
-                        o, h, l_, c, v = composed
-                        df.at[last_ix, "Open"] = o
-                        df.at[last_ix, "High"] = h
-                        df.at[last_ix, "Low"] = l_
-                        df.at[last_ix, "Close"] = c
-                        df.at[last_ix, "Volume"] = v
-                        bd[use_key] = df
-                        changed = True
-                except Exception:
-                    pass
-                # 장외·야간 등 비정상 인덱스는 공식 REST 대상이 아니므로 콜백 생략
-                if is_krx_15m_slot_end(last_ix):
+        guard = 0
+        while guard < 64:
+            guard += 1
+            use_key = nk
+            last_ix: Optional[pd.Timestamp] = None
+            want: Optional[pd.Timestamp] = None
+            raw_o = raw_h = raw_l = raw_c = raw_v = 0.0
+            try:
+                with lk:
+                    _k, df = resolve_bars_data_frame(bd, nk, migrate_alias=True)
+                    use_key = _k or nk
+                    if df is None or getattr(df, "empty", True):
+                        break
+                    want = stream_slot_end_datetime(datetime.now())
                     try:
-                        from core.krx_market_halt_slots import (
-                            probe_and_maybe_mark_halt_slot,
-                        )
+                        last_ix = pd.Timestamp(df.index[-1])
+                    except Exception:
+                        break
+                    if last_ix >= want:
+                        break
+                    try:
+                        raw_o = float(df.at[last_ix, "Open"])
+                        raw_h = float(df.at[last_ix, "High"])
+                        raw_l = float(df.at[last_ix, "Low"])
+                        raw_c = float(df.at[last_ix, "Close"])
+                        raw_v = float(df.at[last_ix, "Volume"])
+                    except Exception:
+                        raw_o = raw_h = raw_l = raw_c = raw_v = 0.0
+            except Exception:
+                break
 
-                        probe_and_maybe_mark_halt_slot(app, last_ix)
+            if last_ix is None or want is None:
+                break
+
+            # 락 밖: 앞14분 공식1분 + 마지막1분 틱 재합성
+            o, h, l_, c, v = raw_o, raw_h, raw_l, raw_c, raw_v
+            try:
+                composed = compose_local_15m_ohlcv(app, use_key, last_ix)
+                if composed is not None:
+                    o, h, l_, c, v = composed
+            except Exception:
+                pass
+
+            try:
+                with lk:
+                    _k2, df2 = resolve_bars_data_frame(bd, nk, migrate_alias=True)
+                    use_key = _k2 or use_key
+                    if df2 is None or getattr(df2, "empty", True):
+                        break
+                    try:
+                        cur_last = pd.Timestamp(df2.index[-1])
+                    except Exception:
+                        break
+                    # 다른 스레드가 이미 롤했으면 스킵
+                    if cur_last != last_ix:
+                        continue
+                    try:
+                        df2.at[last_ix, "Open"] = o
+                        df2.at[last_ix, "High"] = h
+                        df2.at[last_ix, "Low"] = l_
+                        df2.at[last_ix, "Close"] = c
+                        df2.at[last_ix, "Volume"] = v
+                        bd[use_key] = df2
+                        changed = True
                     except Exception:
                         pass
-                    _on_bar_closed_safe(app, use_key, last_ix, o, h, l_, c, v)
-                try:
-                    nxt = next_krx_15m_slot_end(last_ix)
-                except Exception:
-                    nxt = None
-                if nxt is None:
-                    break
-                if nxt > want:
-                    nxt = want
-                if not is_krx_15m_slot_end(nxt):
-                    break
-                if pd.Timestamp(nxt) <= last_ix:
-                    break
-                try:
-                    pc = float(df.at[last_ix, "Close"])
-                except Exception:
-                    pc = float(c)
-                slot_hhmm = ts_to_slot_hhmm(nxt)
-                dt_str = nxt.strftime("%Y-%m-%d %H:%M:%S")
-                new_row = {
-                    "datetime": dt_str,
-                    "time": slot_hhmm,
-                    "Open": pc,
-                    "High": pc,
-                    "Low": pc,
-                    "Close": pc,
-                    "Volume": 0.0,
-                    "cum_v_start": 0.0,
-                }
-                try:
-                    nrd = pd.DataFrame([new_row])
-                    nrd["datetime"] = pd.to_datetime(nrd["datetime"])
-                    nrd.set_index("datetime", inplace=True)
-                    df = pd.concat([df, nrd]).tail(300)
-                    bd[use_key] = df
-                    changed = True
-                except Exception:
-                    break
+                    # 장외·야간 등 비정상 인덱스는 공식 REST 대상이 아니므로 콜백 생략
+                    if is_krx_15m_slot_end(last_ix):
+                        try:
+                            from core.krx_market_halt_slots import (
+                                probe_and_maybe_mark_halt_slot,
+                            )
+
+                            probe_and_maybe_mark_halt_slot(app, last_ix)
+                        except Exception:
+                            pass
+                        pending_cbs.append((use_key, last_ix, o, h, l_, c, v))
+                    try:
+                        nxt = next_krx_15m_slot_end(last_ix)
+                    except Exception:
+                        nxt = None
+                    if nxt is None:
+                        break
+                    if nxt > want:
+                        nxt = want
+                    if not is_krx_15m_slot_end(nxt):
+                        break
+                    if pd.Timestamp(nxt) <= last_ix:
+                        break
+                    try:
+                        pc = float(df2.at[last_ix, "Close"])
+                    except Exception:
+                        pc = float(c)
+                    slot_hhmm = ts_to_slot_hhmm(nxt)
+                    dt_str = nxt.strftime("%Y-%m-%d %H:%M:%S")
+                    new_row = {
+                        "datetime": dt_str,
+                        "time": slot_hhmm,
+                        "Open": pc,
+                        "High": pc,
+                        "Low": pc,
+                        "Close": pc,
+                        "Volume": 0.0,
+                        "cum_v_start": 0.0,
+                    }
+                    try:
+                        nrd = pd.DataFrame([new_row])
+                        nrd["datetime"] = pd.to_datetime(nrd["datetime"])
+                        nrd.set_index("datetime", inplace=True)
+                        df2 = pd.concat([df2, nrd]).tail(300)
+                        bd[use_key] = df2
+                        changed = True
+                    except Exception:
+                        break
+            except Exception:
+                break
+
+        # 락 해제 후 콜백(DB upsert·eval 스폰이 락을 잡지 않도록)
+        for cb_args in pending_cbs:
+            try:
+                _on_bar_closed_safe(app, *cb_args)
+            except Exception:
+                pass
         return changed
     except Exception:
+        for cb_args in pending_cbs:
+            try:
+                _on_bar_closed_safe(app, *cb_args)
+            except Exception:
+                pass
         return changed
+
+
+def _slot_roll_parallel_workers(app: Any) -> int:
+    """슬롯 경계 롤 병렬 워커 수."""
+    try:
+        st = getattr(app, "settings", None) or {}
+        v = int(float(st.get("realtime_15m_slot_roll_workers", 8)))
+        return max(1, min(16, v))
+    except Exception:
+        return 8
+
+
+def roll_needed_codes_parallel(app: Any, codes: List[str]) -> None:
+    """롤이 필요한 종목만 병렬로 ``maybe_roll_15m_slot_on_clock`` 수행."""
+    if not codes:
+        return
+    need: List[str] = []
+    for nk in codes:
+        try:
+            if peek_15m_slot_roll_needed(app, nk):
+                need.append(nk)
+        except Exception:
+            continue
+    if not need:
+        return
+    workers = min(_slot_roll_parallel_workers(app), len(need))
+    if workers <= 1 or len(need) == 1:
+        for nk in need:
+            try:
+                maybe_roll_15m_slot_on_clock(app, nk)
+            except Exception:
+                pass
+        return
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="Rt15mRoll"
+        ) as ex:
+            futs = [ex.submit(maybe_roll_15m_slot_on_clock, app, nk) for nk in need]
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception:
+                    pass
+    except Exception:
+        for nk in need:
+            try:
+                maybe_roll_15m_slot_on_clock(app, nk)
+            except Exception:
+                pass
 
 
 def sync_forming_15m_last_row_from_official_m1(app: Any, code: str) -> bool:
@@ -444,7 +543,7 @@ def iter_slot_roll_watch_codes(app: Any) -> List[str]:
 
 _slot_roll_tick_last: Dict[str, float] = {}
 _slot_roll_tick_lock = threading.Lock()
-_SLOT_ROLL_TICK_MIN_INTERVAL_SEC = 0.25
+_SLOT_ROLL_TICK_MIN_INTERVAL_SEC = 0.05
 
 
 def try_roll_15m_slot_on_tick(app: Any, code: str) -> bool:
@@ -651,9 +750,12 @@ def schedule_official_sync_and_signal_eval(
 
 class Rt15mSlotBoundaryWatcher:
     """
-    감시 중 주기적으로 슬롯 전진을 확인합니다.
+    감시 중 15분 슬롯 경계를 벽시계에 맞춰 감지합니다.
 
-    롤은 워커 큐에 맡기지 않고 **즉시** 수행한 뒤, M1 동기화·형성봉 평가만 큐에 넣습니다.
+    - 경계 근처: 짧은 폴링(기본 0.1s)
+    - 경계에서 멀면: 다음 경계 직전까지 sleep
+    - 롤은 워커 큐에 맡기지 않고 **즉시 병렬** 수행한 뒤,
+      공식 M1 동기화·형성봉 평가는 조용 구간 뒤로 미룹니다.
     """
 
     def __init__(self, app: Any, log: Optional[Callable[[str], None]] = None) -> None:
@@ -690,7 +792,8 @@ class Rt15mSlotBoundaryWatcher:
         except Exception:
             pass
 
-    def _watch_interval_sec(self) -> float:
+    def _idle_watch_sec(self) -> float:
+        """경계에서 멀 때의 최대 sleep(초)."""
         try:
             st = getattr(self._app, "settings", None) or {}
             v = float(st.get("realtime_15m_slot_watch_sec", 1.0))
@@ -698,36 +801,114 @@ class Rt15mSlotBoundaryWatcher:
         except Exception:
             return 1.0
 
+    def _near_poll_sec(self) -> float:
+        """경계 근처 폴링 간격(초)."""
+        try:
+            st = getattr(self._app, "settings", None) or {}
+            v = float(st.get("realtime_15m_slot_near_poll_sec", 0.1))
+            return max(0.05, min(0.5, v))
+        except Exception:
+            return 0.1
+
+    def _near_window_sec(self) -> float:
+        """경계 직전 고주기 폴링 창(초)."""
+        try:
+            st = getattr(self._app, "settings", None) or {}
+            v = float(st.get("realtime_15m_slot_near_window_sec", 2.0))
+            return max(0.5, min(10.0, v))
+        except Exception:
+            return 2.0
+
+    def _next_sleep_sec(self) -> float:
+        """
+        다음 wake까지 sleep.
+
+        경계 ``near_window`` 이내면 ``near_poll``, 아니면 경계−창까지
+        (단 idle_watch 상한) 만큼 쉽니다.
+        """
+        try:
+            sec_to = float(seconds_until_next_krx_15m_boundary())
+        except Exception:
+            sec_to = 1.0
+        near_w = self._near_window_sec()
+        near_p = self._near_poll_sec()
+        idle = self._idle_watch_sec()
+        if sec_to <= near_w:
+            # 경계까지 남은 시간보다 길지 않게(과슬립 방지)
+            return max(0.05, min(near_p, max(0.05, sec_to)))
+        sleep_to_near = sec_to - near_w
+        return max(0.05, min(idle, sleep_to_near))
+
+    def _roll_and_schedule_sync(self) -> None:
+        """롤 필요 종목 병렬 확정. 공식 M1 sync는 조용 구간 뒤로 미룹니다."""
+        codes = iter_slot_roll_watch_codes(self._app)
+        if not codes:
+            return
+        need: List[str] = []
+        for nk in codes:
+            try:
+                if peek_15m_slot_roll_needed(self._app, nk):
+                    need.append(nk)
+            except Exception:
+                continue
+        if not need:
+            return
+        roll_needed_codes_parallel(self._app, need)
+
+        def _deferred_official_hygiene() -> None:
+            for nk in need:
+                try:
+                    schedule_official_sync_and_signal_eval(
+                        self._app, nk, skip_roll=True
+                    )
+                except Exception as e:
+                    try:
+                        self._emit(f"⚠️ [RT15mWatch] {nk!r}: {e!r}")
+                    except Exception:
+                        pass
+            try:
+                from core.krx_market_halt_slots import (
+                    maybe_schedule_halt_slot_official_retries,
+                )
+
+                maybe_schedule_halt_slot_official_retries(self._app)
+            except Exception:
+                pass
+
+        # 로컬 확정 평가·주문이 공식 REST/동기화와 CPU·락을 다투지 않도록 잠시 후순위
+        try:
+            from core.closed_15m_fast_path import (
+                mark_rt15_official_quiet,
+                schedule_after_rt15_official_quiet,
+            )
+
+            mark_rt15_official_quiet(self._app)
+            schedule_after_rt15_official_quiet(
+                self._app,
+                _deferred_official_hygiene,
+                name="Rt15mDeferOfficialSync",
+            )
+        except Exception:
+            _deferred_official_hygiene()
+
     def _loop(self) -> None:
-        while not self._stop.wait(self._watch_interval_sec()):
+        while not self._stop.is_set():
             try:
                 tc = getattr(self._app, "trading_controller", None)
                 if tc is None or not getattr(tc, "is_monitoring", False):
+                    if self._stop.wait(self._idle_watch_sec()):
+                        break
                     continue
-                codes = iter_slot_roll_watch_codes(self._app)
-                for nk in codes:
-                    try:
-                        if not peek_15m_slot_roll_needed(self._app, nk):
-                            continue
-                        maybe_roll_15m_slot_on_clock(self._app, nk)
-                        schedule_official_sync_and_signal_eval(
-                            self._app, nk, skip_roll=True
-                        )
-                    except Exception as e:
-                        try:
-                            self._emit(f"⚠️ [RT15mWatch] {nk!r}: {e!r}")
-                        except Exception:
-                            pass
-                try:
-                    from core.krx_market_halt_slots import (
-                        maybe_schedule_halt_slot_official_retries,
-                    )
-
-                    maybe_schedule_halt_slot_official_retries(self._app)
-                except Exception:
-                    pass
+                # 먼저 밀린 롤을 처리(경계 wake 직후·늦은 wake 모두 커버)
+                self._roll_and_schedule_sync()
             except Exception as e:
                 try:
                     self._emit(f"⚠️ [RT15mWatch] 루프 예외: {e!r}")
                 except Exception:
                     pass
+            try:
+                wait_sec = self._next_sleep_sec()
+            except Exception:
+                wait_sec = 1.0
+            if self._stop.wait(wait_sec):
+                break
