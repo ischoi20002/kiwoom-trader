@@ -1,23 +1,44 @@
 @echo off
-:: Remote Update Handover Script
+chcp 65001 >nul
+setlocal EnableDelayedExpansion
 
-title Kiwoom Trader - Remote Updating...
+title K-Trader - Remote Updating...
+
+set "REPO=c:\vibe"
+set "OP=c:\k-trader"
+
 echo --------------------------------------------------
-echo [1/4] Waiting for application to release file locks (5s)...
+echo [1/4] 파일 잠금 해제 대기 (5초)...
 timeout /t 5 /nobreak >nul
 
-echo [2/4] Pulling latest code from Git (Research Folder)...
-cd /d "%~dp0"
+echo [2/4] Git pull (%REPO%)...
+if not exist "%REPO%\.git" (
+  echo [오류] Git 저장소 없음: %REPO%
+  exit /b 1
+)
+cd /d "%REPO%"
 git pull
+if errorlevel 1 (
+  echo [오류] git pull 실패
+  exit /b 1
+)
 
-echo [3/4] Running Deployment Sync...
-call deploy.bat
+echo [3/4] 운영 배포 (deploy_production.py)...
+py -3 -u "%REPO%\tools\deploy_production.py"
+if errorlevel 1 (
+  echo [오류] 배포 실패
+  exit /b 1
+)
 
-echo [4/4] Restarting Application in Operation Folder...
-cd /d "c:\vibe_op"
-start run_app.bat --auto-start
+echo [4/4] 운영 폴더에서 재시작 (%OP%)...
+if not exist "%OP%\run_k_trader.bat" (
+  echo [오류] run_k_trader.bat 없음: %OP%
+  exit /b 1
+)
+cd /d "%OP%"
+start "" run_k_trader.bat --auto-start
 
 echo.
 echo Remote Update Sequence Completed!
 echo --------------------------------------------------
-exit
+exit /b 0

@@ -2763,6 +2763,13 @@ class KiwoomApp:
                 self._start_eod_equity_snapshot_scheduler()
             except Exception:
                 pass
+            # 금일손익: 장전 시작 → 09:00 총자산 기준 / 장중 시작 → N/A
+            try:
+                from utils.session_open_day_pnl import on_monitoring_started
+
+                on_monitoring_started(self)
+            except Exception:
+                pass
             try:
                 cms = getattr(self, "continuous_monitor_service", None)
                 if cms is not None:

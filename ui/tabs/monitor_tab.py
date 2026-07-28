@@ -951,39 +951,46 @@ class MonitorTab:
         )
         self.selection_progress_visible: bool = False
 
-        # [임시] 매수신호 없이 주문·체결 흐름 테스트 — 감시/보유 트리에서 행 선택 후 1주 시장가
+        # 선택 종목 수동 주문 — 감시/보유 트리에서 행 선택 후 수량 지정
         test_wrap = ttk.Frame(self.ctrl_frame)
         test_wrap.pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(
             test_wrap,
-            text="테스트 주문 (임시 · 1주 시장가)",
+            text="선택 종목 주문",
             font=("Malgun Gothic", 8),
             foreground="#81A1C1",
         ).pack(anchor=tk.W)
         test_btns = ttk.Frame(test_wrap)
         test_btns.pack(fill=tk.X)
+        ttk.Label(
+            test_btns,
+            text="수량",
+            font=("Malgun Gothic", 9),
+            foreground="#D8DEE9",
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        self.var_manual_order_qty = tk.StringVar(value="1")
+        self.ent_manual_order_qty = ttk.Entry(
+            test_btns,
+            textvariable=self.var_manual_order_qty,
+            width=6,
+            justify=tk.RIGHT,
+        )
+        self.ent_manual_order_qty.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             test_btns,
-            text="1주 매수",
-            width=10,
-            command=lambda: self._test_market_order_1share("buy"),
+            text="선택종목매수",
+            width=12,
+            command=lambda: self._manual_selected_order("buy"),
         ).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(
             test_btns,
-            text="1주 매도",
-            width=10,
-            command=lambda: self._test_market_order_1share("sell"),
+            text="선택종목매도",
+            width=12,
+            command=lambda: self._manual_selected_order("sell"),
         ).pack(side=tk.LEFT, padx=0)
 
         # 실시간 감시 시작/중단과 동일 폭(폰트 기준 문자 단위). 한글·이모지 여유.
         _monitor_ctrl_btn_w = 20
-        self.btn_compare_bt_sel = ttk.Button(
-            self.ctrl_frame,
-            text="백테스팅 선정목록",
-            width=_monitor_ctrl_btn_w,
-            style="Action.TButton",
-            command=self.start_bt_selection_compare_thread,
-        )
         self.btn_select = ttk.Button(
             self.ctrl_frame,
             text="일일 감시목록 선정",
@@ -1005,10 +1012,9 @@ class MonitorTab:
             font=("Malgun Gothic", 10),
             foreground=self.app.colors["primary"],
         )
-        # 오른쪽 묶음: 읽기 순서(왼→오) = 상태 | 실시간 감시 | 일일 감시목록 선정 | 백테스팅 선정목록
+        # 오른쪽 묶음: 읽기 순서(왼→오) = 상태 | 실시간 감시 | 일일 감시목록 선정
         # side=RIGHT 는 먼저 pack 한 위젯이 부모의 오른쪽에 붙고, 다음은 그 왼쪽에 이어 붙음.
         # 실시간 감시 ON 시 장마감 후 연속전환(중단→선정→재시작)은 ContinuousMonitorService 가 자동 수행.
-        self.btn_compare_bt_sel.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 8))
         self.lbl_monitor_status.pack(side=tk.RIGHT, padx=(4, 0))
@@ -1447,12 +1453,7 @@ class MonitorTab:
         _finalize_ui("종목 선정 완료")
 
     def start_bt_selection_compare_thread(self) -> None:
-        """백테스트·DB 일봉 선정과 일일 감시목록 선정 결과를 비교합니다."""
-        try:
-            if getattr(self, "btn_compare_bt_sel", None) is not None:
-                self.btn_compare_bt_sel.config(state=tk.DISABLED)
-        except Exception:
-            pass
+        """백테스트·DB 일봉 선정과 일일 감시목록 선정 결과를 비교합니다(UI 버튼 없음·내부용)."""
         threading.Thread(
             target=self.compare_backtest_vs_live_selection,
             daemon=True,
@@ -1475,11 +1476,6 @@ class MonitorTab:
                         text=f"상태: {done_message}",
                         foreground=self.app.colors["primary"],
                     )
-                except Exception:
-                    pass
-                try:
-                    if getattr(self, "btn_compare_bt_sel", None) is not None:
-                        self.btn_compare_bt_sel.config(state=tk.NORMAL)
                 except Exception:
                     pass
 
@@ -1671,16 +1667,42 @@ class MonitorTab:
         except Exception:
             return None
 
-    def _test_market_order_1share(self, side: str) -> None:
-        """선택 종목에 대해 1주 시장가 테스트 주문(워커 스레드에서 실행)."""
+    def _parse_manual_order_qty(self) -> Optional[int]:
+        """선택 종목 주문 수량 입력값 파싱. 실패 시 None."""
+        try:
+            raw = ""
+            try:
+                raw = str(self.var_manual_order_qty.get() or "").strip()
+            except Exception:
+                raw = ""
+            if not raw:
+                return None
+            raw = raw.replace(",", "").replace("주", "").strip()
+            qty = int(float(raw))
+            if qty <= 0:
+                return None
+            return int(qty)
+        except Exception:
+            return None
+
+    def _manual_selected_order(self, side: str) -> None:
+        """선택 종목에 대해 지정 수량 수동 주문(워커 스레드에서 실행)."""
         side = (side or "buy").lower().strip()
         if side not in ("buy", "sell"):
+            return
+
+        qty = self._parse_manual_order_qty()
+        if qty is None:
+            messagebox.showwarning(
+                "선택 종목 주문",
+                "수량을 1 이상의 정수로 입력하세요.",
+            )
             return
 
         picked = self._get_selected_monitor_code_name_price()
         if not picked:
             messagebox.showwarning(
-                "테스트 주문",
+                "선택 종목 주문",
                 "감시 목록 또는 보유 종목 트리에서 종목 한 줄을 먼저 선택하세요.",
             )
             return
@@ -1695,7 +1717,7 @@ class MonitorTab:
         mode_kr = "모의투자" if use_mock else "실전"
         if not allow:
             messagebox.showwarning(
-                "테스트 주문",
+                "선택 종목 주문",
                 f"{mode_kr}에서 주문이 차단되어 있습니다.\n"
                 "config.py 의 ALLOW_MOCK_ORDER 또는 ALLOW_REAL_ORDER 를 True 로 설정하세요.",
             )
@@ -1711,12 +1733,12 @@ class MonitorTab:
             ot = "03" if bool(st.get("realtime_use_market_orders", True)) else "00"
             ot_kr = "시장가" if ot == "03" else "지정가(참고가 기준 ±1틱)"
         if not messagebox.askyesno(
-            "테스트 주문 확인",
-            f"{act} 1주 {ot_kr} 주문을 보냅니다.\n\n"
+            "선택 종목 주문 확인",
+            f"{act} {qty}주 {ot_kr} 주문을 보냅니다.\n\n"
             f"{name} ({code})\n"
             f"참고가: {ref_p:,}원\n"
             f"모드: {mode_kr}\n\n"
-            f"사유: TEST_1SHARE_MARKET",
+            f"사유: MANUAL_SELECTED_ORDER",
         ):
             return
 
@@ -1726,7 +1748,7 @@ class MonitorTab:
                 if om is None:
                     self.app.root.after(
                         0,
-                        lambda: self.app.log("❌ [테스트주문] OrderManager 없음"),
+                        lambda: self.app.log("❌ [선택주문] OrderManager 없음"),
                     )
                     return
                 if touch:
@@ -1742,18 +1764,18 @@ class MonitorTab:
                         self.app.root.after(
                             0,
                             lambda: self.app.log(
-                                "❌ [테스트주문] 터치호가 조회 실패(ka10004)"
+                                "❌ [선택주문] 터치호가 조회 실패(ka10004)"
                             ),
                         )
                         return
                     ord_no = om.place_order(
                         code,
-                        1,
+                        int(qty),
                         px_t,
                         order_type="00",
                         side=side,
                         name=name,
-                        reason="TEST_1SHARE_MARKET",
+                        reason="MANUAL_SELECTED_ORDER",
                         skip_price_guard=True,
                         apply_limit_tick_adjust=False,
                         skip_immediate_fill_reconcile=True,
@@ -1761,15 +1783,15 @@ class MonitorTab:
                 else:
                     ord_no = om.place_order(
                         code,
-                        1,
+                        int(qty),
                         ref_p,
                         order_type=ot,
                         side=side,
                         name=name,
-                        reason="TEST_1SHARE_MARKET",
+                        reason="MANUAL_SELECTED_ORDER",
                     )
                 msg = (
-                    f"🧪 [테스트주문] {act} 1주 {ot_kr} 응답: "
+                    f"🧪 [선택주문] {act} {qty}주 {ot_kr} 응답: "
                     f"{ord_no if ord_no else '실패/거부 — 로그 확인'}"
                 )
                 self.app.root.after(0, lambda m=msg: self.app.log(m))
@@ -1777,10 +1799,17 @@ class MonitorTab:
                 err = str(e)
                 self.app.root.after(
                     0,
-                    lambda: self.app.log(f"❌ [테스트주문] 예외: {err}"),
+                    lambda: self.app.log(f"❌ [선택주문] 예외: {err}"),
                 )
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _test_market_order_1share(self, side: str) -> None:
+        """레거시 별칭 — 선택 종목 수동 주문으로 위임."""
+        try:
+            self._manual_selected_order(side)
+        except Exception:
+            pass
 
     async def _ws_client_loop(self):
         """키움 REST API 방식 웹소켓 루프 (자동 재연결 및 안정성 강화)"""

@@ -9,10 +9,7 @@ from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import config
-from utils.eod_equity_snapshots import (
-    compute_day_pnl_vs_eod_store,
-    compute_synthetic_prior_total_assets_at_prev_close,
-)
+from utils.session_open_day_pnl import format_day_pnl_text, try_capture_open_baseline
 from utils.equity_snapshots_store import (
     equity_snapshots_root_candidates,
     read_equity_snapshot_from_root,
@@ -143,8 +140,7 @@ class VirtualTab:
             "d1_cash": tk.StringVar(value="0"),
             "d2_cash": tk.StringVar(value="0"),
             "open_ur": tk.StringVar(value="0 (0.00%)"),
-            "day": tk.StringVar(value="— (전일 EOD 없음)"),
-            "cum": tk.StringVar(value="0 (+0.00%)"),
+            "day": tk.StringVar(value="—"),
             # 실시간 보유 트리 하단: 보유 전체 합계(매수·매도 수수료 미반영)
             "hold_sum_buy_ex": tk.StringVar(value="0"),
             "hold_sum_eval_ex": tk.StringVar(value="0"),
@@ -161,8 +157,7 @@ class VirtualTab:
             ("D+2 예상", "d2_cash", self.app.colors['primary']),
             ("주식 평가금", "stock", None),
             ("미실현 손익", "open_ur", "#88C0D0"),
-            ("금일 손익 (전일 기준)", "day", "#EBCB8B"),
-            ("누적 수익(종료+보유)", "cum", "#A3BE8C")
+            ("금일 손익 (장시작 기준)", "day", "#EBCB8B"),
         ]:
             f = ttk.Frame(summary_f)
             f.pack(side=tk.LEFT, padx=(0, 15))
@@ -1685,63 +1680,51 @@ class VirtualTab:
             pass
         return 0.0
 
-    def _schedule_day_pnl_warmup(self) -> None:
-        """금일손익 분모(직전 장마감 합성 총자산)의 종목별 동기 REST(ka10001)를
-        백그라운드에서 미리 계산해 앱 캐시(_synthetic_prev_assets_cache)를 데운다.
-        실시간 UI 틱 경로는 allow_rest=False 로만 호출하므로 메인 스레드가 멈추지 않는다."""
+    def compute_day_pnl_total_assets(self) -> Optional[float]:
+        """
+        금일손익용 총자산: D+2 + 보유 순매각 합 (증권사 총평가 치환 없음).
+        장시작 기준 캡처·현재값 비교에 동일 정의를 쓴다.
+        """
         try:
-            app = getattr(self, "app", None)
-            if app is None:
-                return
-            lock = getattr(self, "_fallback_quote_cache_lock", None)
-            if lock is not None:
-                with lock:
-                    if getattr(app, "_vt_day_pnl_warmup_inflight", False):
-                        return
-                    app._vt_day_pnl_warmup_inflight = True
-            else:
-                if getattr(app, "_vt_day_pnl_warmup_inflight", False):
-                    return
-                app._vt_day_pnl_warmup_inflight = True
-
-            def _worker() -> None:
-                got = None
-                try:
-                    got = compute_synthetic_prior_total_assets_at_prev_close(
-                        app, allow_rest=True
-                    )
-                except Exception:
-                    got = None
-                finally:
-                    try:
-                        if lock is not None:
-                            with lock:
-                                app._vt_day_pnl_warmup_inflight = False
-                        else:
-                            app._vt_day_pnl_warmup_inflight = False
-                    except Exception:
-                        pass
-                if got is not None:
-                    try:
-                        root = getattr(app, "root", None)
-                        req = getattr(
-                            app, "request_virtual_tab_realtime_render", None
-                        )
-                        if root is not None and callable(req):
-                            root.after(0, req)
-                    except Exception:
-                        pass
-
-            threading.Thread(
-                target=_worker, name="VpDayPnlWarmup", daemon=True
-            ).start()
-        except Exception:
+            holdings = self._sorted_active_holdings()
+            mi = getattr(self.app, "monitor_info", None) or {}
+            total_unrealized_pnl = 0.0
+            total_invested_open = 0.0
+            total_eval_weight = 0.0
             try:
-                app = getattr(self, "app", None)
-                if app is not None:
-                    app._vt_day_pnl_warmup_inflight = False
+                for idx, (nk, pos) in enumerate(holdings):
+                    info = mi.get(nk, {}) or {}
+                    _, _, _, _, ev_part, _ = self._active_row_vals_and_tags(
+                        idx, nk, pos, info, None
+                    )
+                    total_eval_weight += float(ev_part)
             except Exception:
-                pass
+                total_eval_weight = 0.0
+            for idx, (nk, pos) in enumerate(holdings):
+                info = mi.get(nk, {}) or {}
+                _v, _t, _p, _ur_ex, _ev_row, ur_net = self._active_row_vals_and_tags(
+                    idx, nk, pos, info, total_eval_weight
+                )
+                total_unrealized_pnl += float(ur_net)
+                try:
+                    total_invested_open += float(pos.get("invested", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+            portfolio = getattr(self.app, "portfolio", None)
+            if portfolio is None:
+                return None
+            try:
+                stock_liquid = float(total_invested_open) + float(total_unrealized_pnl)
+            except (TypeError, ValueError):
+                stock_liquid = 0.0
+            stock_eval = self._resolve_stock_eval_for_account(portfolio, stock_liquid)
+            return float(
+                self._compute_virtual_tab_total_assets(
+                    portfolio, stock_eval, skip_broker_te_reconcile=True
+                )
+            )
+        except Exception:
+            return None
 
     def _fallback_quote_cached_value(self, nk: str) -> float:
         """REST 폴백 캐시의 유효값(55초 TTL)을 **블로킹 없이** 반환. 없으면 0.0."""
@@ -1952,42 +1935,6 @@ class VirtualTab:
             )
         except Exception:
             return 0.0
-
-    def _history_realized_pnl_amt(self, pos: Dict[str, Any]) -> float:
-        """종료 포지션 실현손익(원). `realized_pnl_amt` 누락·null 시 수익률·투입금으로 근사."""
-        try:
-            raw = pos.get("realized_pnl_amt")
-            if raw is not None and raw != "":
-                return float(raw)
-        except (TypeError, ValueError):
-            pass
-        try:
-            inv = float(pos.get("invested", 0) or 0)
-            fp = float(pos.get("final_pnl_pct", 0) or 0)
-            if inv > 0 and abs(fp) > 1e-12:
-                return inv * fp / 100.0
-        except (TypeError, ValueError):
-            pass
-        return 0.0
-
-    def _sum_visible_history_realized_pnl(self) -> float:
-        """
-        `virtual_history` 전체에 대해 종료 실현손익(`_history_realized_pnl_amt`) 합계.
-        누적 수익의 청산분에 사용합니다(관심목록과 무관).
-        """
-        out = 0.0
-        try:
-            hist = list(getattr(self.app.portfolio, "virtual_history", None) or [])
-        except Exception:
-            hist = []
-        for pos in hist:
-            if not isinstance(pos, dict):
-                continue
-            try:
-                out += float(self._history_realized_pnl_amt(pos))
-            except Exception:
-                pass
-        return float(out)
 
     def _history_total_fees_amt(self, pos: Dict[str, Any]) -> float:
         """
@@ -2827,13 +2774,7 @@ class VirtualTab:
         if self._active_tree_ready():
             self._reorder_active_tree_rows()
 
-        # 2. 종료 포지션 실현손익 합계(상단 누적 수익용). 표시는 주문·체결 트리 필터로 대체.
-        try:
-            total_closed_pnl = float(self._sum_visible_history_realized_pnl())
-        except Exception:
-            total_closed_pnl = 0.0
-
-        # 3. 요약: 예수금·D+n은 포트폴리오(체결/수동 동기화 시 REST).
+        # 2. 요약: 예수금·D+n은 포트폴리오(체결/수동 동기화 시 REST).
         # 「주식 평가금」= 보유 순매각 합 Σ(현재가×수량 후 매도수수료 차감) = invested 합 + 미실현(
         # 매도 차감) 합 — 금액 자체에는 매입수수료가 포함되지 않으며, 매도 수수료만 반영된다.
         portfolio = self.app.portfolio
@@ -2862,37 +2803,20 @@ class VirtualTab:
             open_ur_pct = (open_ur_amt / cxd_den) * 100.0
         else:
             open_ur_pct = 0.0
-        try:
-            ta = float(total_assets)
-        except (TypeError, ValueError):
-            ta = 0.0
 
-        # 금일 손익: 직전 장마감 시세 합성 분모와 동일하게 **D+2+순매각 합**(증권사 총평가 치환 없음)을 분자로 사용.
-        # [버그픽스] 메인 스레드에서 종목별 동기 ka10001 루프를 돌리지 않도록 allow_rest=False(캐시 전용).
-        # 캐시가 비어 None 이면 백그라운드 워밍만 예약하고 placeholder 를 잠시 표시한다.
+        # 금일 손익: 현재 총자산 − 장시작(시초가 반영 전) 총자산.
+        # 장중 감시 시작이면 N/A. 장전 시작 후 09:00 전이면 「장시작 대기」.
         try:
-            d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
-                self.app,
-                calendar_day=datetime.now().date(),
-                current_total_assets=float(total_assets_day_pnl),
-                allow_rest=False,
+            try_capture_open_baseline(self.app)
+        except Exception:
+            pass
+        try:
+            day_pnl_txt = format_day_pnl_text(
+                self.app, float(total_assets_day_pnl)
             )
         except Exception:
-            d_amt, d_pct = None, None
-        if d_amt is not None and d_pct is not None:
-            day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
-        else:
-            day_pnl_txt = "— (계산 중)"
-            self._schedule_day_pnl_warmup()
+            day_pnl_txt = "—"
         open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
-
-        # 누적 수익(종료+보유): 매매종료 손익 합 + 보유 「미실현 손익」(계좌 요약 정의와 동일).
-        # % 분모는 총자산(백테스트 초기자본은 실시간 요약에 사용하지 않음).
-        cum_pnl_amt = float(total_closed_pnl) + float(total_unrealized_account)
-        if ta > 1e-6:
-            cum_pnl_pct = (cum_pnl_amt / ta) * 100.0
-        else:
-            cum_pnl_pct = 0.0
 
         self.vars["total"].set(f"{total_assets:,.0f}")
         self.vars["cash"].set(f"{current_cash:,.0f}")
@@ -2904,7 +2828,6 @@ class VirtualTab:
 
         self.vars["open_ur"].set(open_ur_txt)
         self.vars["day"].set(day_pnl_txt)
-        self.vars["cum"].set(f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
         self._update_holdings_aggregate_fee_excluded()
 
     def _render_real_data(self):
@@ -2964,11 +2887,9 @@ class VirtualTab:
         (REST를 다시 호출하지 않음). 동기화 후 구조 시그니처가 같으면 경량 경로만 타는데,
         그때 이 필드를 갱신하지 않으면 예수·D+n이 0으로 남는 버그가 있었음.
 
-        금일손익(직전 종가 REST 합성)은 틱마다 재계산하지 않고 기본 30초 스로틀합니다.
+        금일손익은 장시작(09:00) 총자산 대비로 계산한다(장중 감시 시작 시 N/A).
         """
         try:
-            import time as _time_mod
-
             def _set_if_diff(key: str, text: str) -> None:
                 try:
                     v = self.vars.get(key)
@@ -3041,76 +2962,18 @@ class VirtualTab:
                 open_ur_pct = (open_ur_amt / cxd_den) * 100.0
             else:
                 open_ur_pct = 0.0
-            try:
-                ta = float(total_assets)
-            except (TypeError, ValueError):
-                ta = 0.0
 
             try:
-                st_th = getattr(self.app, "settings", None) or {}
-                day_throttle = float(st_th.get("virtual_tab_day_pnl_tick_throttle_sec", 30.0))
-            except (TypeError, ValueError):
-                day_throttle = 30.0
-            day_throttle = max(5.0, min(day_throttle, 300.0))
-            now_m = _time_mod.monotonic()
-            day_cache = getattr(self.app, "_vt_day_pnl_tick_cache", None)
-            use_day_cache = False
-            if isinstance(day_cache, dict):
-                try:
-                    if (
-                        _time_mod.monotonic() - float(day_cache.get("ts", 0.0) or 0.0)
-                        < day_throttle
-                    ):
-                        use_day_cache = True
-                        day_pnl_txt = str(day_cache.get("txt", "— (전일 기준 없음)"))
-                        closed_h = float(day_cache.get("closed_h", 0.0) or 0.0)
-                except (TypeError, ValueError):
-                    use_day_cache = False
-            if not use_day_cache:
-                # [버그픽스] 실시간 틱 경로에서는 allow_rest=False 로 캐시만 사용한다.
-                # 캐시가 비어 None 이면 메인 스레드를 막지 않고 백그라운드 워밍만 예약.
-                try:
-                    d_amt, d_pct, _p0, _pk = compute_day_pnl_vs_eod_store(
-                        self.app,
-                        calendar_day=datetime.now().date(),
-                        current_total_assets=float(total_assets_day_pnl),
-                        allow_rest=False,
-                    )
-                except Exception:
-                    d_amt, d_pct = None, None
-                if d_amt is not None and d_pct is not None:
-                    day_pnl_txt = f"{int(d_amt):+,} ({d_pct:+.2f}%)"
-                else:
-                    # 직전 표시값이 있으면 유지(깜빡임 방지), 없으면 placeholder
-                    prev_txt = None
-                    try:
-                        if isinstance(day_cache, dict):
-                            prev_txt = day_cache.get("txt")
-                    except Exception:
-                        prev_txt = None
-                    day_pnl_txt = str(prev_txt) if prev_txt else "— (계산 중)"
-                    self._schedule_day_pnl_warmup()
-                closed_h = self._sum_visible_history_realized_pnl()
-                # 실제 값일 때만 30초 throttle 캐시에 기록한다.
-                # placeholder 를 캐시에 넣으면 워밍 완료 후에도 throttle 동안 고착되므로,
-                # 미확정(d_amt None) 동안은 캐시를 갱신하지 않고 다음 틱이 캐시(allow_rest=False)를
-                # 다시 시도하도록 둔다(워밍 완료 시 즉시 실제 값 반영).
-                if d_amt is not None and d_pct is not None:
-                    try:
-                        self.app._vt_day_pnl_tick_cache = {
-                            "ts": now_m,
-                            "txt": day_pnl_txt,
-                            "closed_h": float(closed_h),
-                        }
-                    except Exception:
-                        pass
+                try_capture_open_baseline(self.app)
+            except Exception:
+                pass
+            try:
+                day_pnl_txt = format_day_pnl_text(
+                    self.app, float(total_assets_day_pnl)
+                )
+            except Exception:
+                day_pnl_txt = "—"
             open_ur_txt = f"{int(open_ur_amt):+,} ({open_ur_pct:+.2f}%)"
-
-            cum_pnl_amt = float(closed_h) + float(total_unrealized_account)
-            if ta > 1e-6:
-                cum_pnl_pct = (cum_pnl_amt / ta) * 100.0
-            else:
-                cum_pnl_pct = 0.0
 
             _set_if_diff("total", f"{total_assets:,.0f}")
             _set_if_diff("stock", f"{stock_eval:,.0f}")
@@ -3128,7 +2991,6 @@ class VirtualTab:
                     pass
             _set_if_diff("open_ur", open_ur_txt)
             _set_if_diff("day", day_pnl_txt)
-            _set_if_diff("cum", f"{int(cum_pnl_amt):+,} ({cum_pnl_pct:+.2f}%)")
             self._update_holdings_aggregate_fee_excluded()
         except Exception:
             pass
@@ -3170,7 +3032,7 @@ class VirtualTab:
         포지션 관리 탭 「총 자산」: **D+2 예수 + 주식 순매각 합**(``_resolve_stock_eval_for_account``: 매도 수수료만 반영).
 
         ``last_tot_evlu_amt``(ka10085 단일 총평가)는 합산과 ±2.5% 이내면 증권사 표시와 동일시합니다.
-        금일 손익(직전 장마감 대비)은 분모·분자 정합을 위해 ``skip_broker_te_reconcile=True`` 로
+        금일 손익(장시작 대비)은 분모·분자 정합을 위해 ``skip_broker_te_reconcile=True`` 로
         **항상 D+2+순매각 합** 만 씁니다.
         """
         try:
