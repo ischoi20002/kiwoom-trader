@@ -13,6 +13,12 @@
 
 ---
 
+## 0.15.9 (2026-07-28)
+
+- **유니버스 갱신 주기**: 백테에서 monthly/weekly/biweekly/daily/bimonthly/quarterly 비교 가능. 스윕 결과 **monthly 유지** (FULL·OOS 모두 최선).
+- **실시간도 monthly 고정**: `kospi_universe.csv`를 당월 첫 영업일 marcap as-of로 갱신(월 중 일별 재갱신 없음). 실시간 전용 갱신주기 설정 없음.
+- 비교 스크립트: `tools/compare_k200_univ_refresh.py`.
+
 ## 0.15.8 (2026-07-28)
 
 - **기본 설정 튜닝 반영 (K200 백테 1~5차)**: 유니버스 `kospi_top_n=200`, Type B 갭다운 `gap_down_limit_b=-2.5`. S2·selection·DD sizing·trail은 현행 유지가 최적으로 확인됨.

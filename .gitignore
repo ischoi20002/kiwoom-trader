@@ -27,6 +27,11 @@ trading_state_mock.db
 backtest_data/
 data/marcap/
 data/universe_marcap_monthly/
+data/universe_marcap_weekly/
+data/universe_marcap_biweekly/
+data/universe_marcap_bimonthly/
+data/universe_marcap_quarterly/
+data/universe_marcap_daily/
 *.csv
 !kospi_200.csv
 !kospi_top_500.csv

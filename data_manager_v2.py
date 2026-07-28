@@ -3406,7 +3406,7 @@ class DataManagerV2:
         try:
             if count <= 200:
                 if idx_choice == "KOSPI200":
-                    # marcap 최신 as-of 확인 후 kospi_universe.csv 로드 (실시간 일일 갱신)
+                    # 당월 첫 영업일 marcap as-of → kospi_universe.csv (실시간 월별 고정)
                     try:
                         if force:
                             from core.marcap_universe import refresh_kospi_universe_csv_from_marcap

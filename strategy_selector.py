@@ -280,8 +280,8 @@ def load_kospi_universe_codes(
     KOSPI 시총 상위 top_n 종목코드.
 
     - ``pit_asof`` 지정 시: marcap 과거 시점 as-of (FDR/CSV 무시)
-    - ``daily_refresh=True``: 실시간용 marcap 최신 as-of 기준 하루 1회 CSV 갱신
-    - 그 외: ``kospi_universe.csv`` (없으면 marcap 최신 → FDR 폴백)
+    - ``daily_refresh=True``: 실시간용 당월 첫 영업일 marcap as-of (월 1회 CSV 갱신)
+    - 그 외: ``kospi_universe.csv`` (없으면 당월 marcap → FDR 폴백)
     """
     if pit_asof is not None:
         try:
@@ -323,7 +323,7 @@ def load_kospi_universe_codes(
                 if logger_callback is not None and asof_str:
                     try:
                         logger_callback(
-                            f"  [Marcap] 실시간 유니버스 as-of {asof_str} → {len(codes)}종목"
+                            f"  [Marcap] 실시간 유니버스(월별) as-of {asof_str} → {len(codes)}종목"
                         )
                     except Exception:
                         pass
@@ -3093,18 +3093,27 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         logger_callback("  [Error] 거래일 데이터를 찾을 수 없습니다.")
         return {}
 
-    # 2. 월별 코스피 200 유니버스 캐싱
+    # 2. 주기별 코스피 유니버스 캐싱 (monthly|weekly|biweekly|daily|bimonthly|quarterly)
     universe_cache = {}
     all_days = pd.date_range(start=start_date, end=end_date, freq='B')
     union_tickers = set()
+    from core.marcap_universe import (
+        get_kospi_top_n_for_refresh,
+        normalize_refresh_mode,
+        universe_period_key,
+    )
 
+    refresh_mode = normalize_refresh_mode(settings.get("kospi_universe_refresh"))
+    # monthly 외에는 기간 내 주기 갱신 — lean 단일 유니버스 생략
+    use_period_univ = refresh_mode != "monthly"
 
-    def get_monthly_universe(dt):
-        """월별 유니버스: KOSPI200=marcap as-of, KODEX200=고정 CSV."""
+    def get_period_universe(dt):
+        """유니버스: KOSPI200=marcap as-of(갱신주기), KODEX200=고정 CSV."""
         idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
-        m_key = dt.strftime("%Y%m")
-        if m_key in universe_cache:
-            return universe_cache[m_key]
+        d_ts = pd.Timestamp(dt).normalize()
+        cache_key = universe_period_key(d_ts, refresh_mode)
+        if cache_key in universe_cache:
+            return universe_cache[cache_key]
         try:
             top_n = 200
             try:
@@ -3112,15 +3121,22 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             except Exception:
                 top_n = 200
             if idx_choice == "KOSPI200":
-                from core.marcap_universe import get_monthly_kospi_top_n
-
-                tickers, asof_str = get_monthly_kospi_top_n(
-                    m_key, top_n, logger_callback=logger_callback
+                tickers, asof_str = get_kospi_top_n_for_refresh(
+                    d_ts,
+                    top_n,
+                    refresh_mode,
+                    logger_callback=(
+                        None if refresh_mode == "daily" else logger_callback
+                    ),
                 )
-                if tickers and logger_callback is not None:
+                if (
+                    tickers
+                    and refresh_mode == "monthly"
+                    and logger_callback is not None
+                ):
                     try:
                         logger_callback(
-                            f"    - [Marcap] {m_key} as-of {asof_str or '?'} "
+                            f"    - [Marcap] {d_ts.strftime('%Y%m')} as-of {asof_str or '?'} "
                             f"KOSPI top{top_n} → {len(tickers)}종목"
                         )
                     except Exception:
@@ -3134,18 +3150,40 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 pass
             tickers = []
         if tickers:
-            universe_cache[m_key] = tickers
+            universe_cache[cache_key] = tickers
         return tickers
 
-    # [v17.9] Lean Mode: 6개월 미만 근거리 백테스트는 유니버스 변경이 적으므로 한 번만 조회 (2초 내 완료)
+    # Lean Mode: 월별 모드 + 6개월 미만만 단일 유니버스. 그 외는 주기 갱신.
     duration_days = (all_days[-1] - all_days[0]).days if not all_days.empty else 0
 
-    if duration_days < 180:
+    if refresh_mode == "daily":
+        logger_callback(
+            f"  [Batch] 일별 marcap as-of 유니버스 순회… ({duration_days}일)"
+        )
+        for d in all_days:
+            tickers = get_period_universe(d)
+            if tickers:
+                union_tickers.update(tickers)
+        logger_callback(f"    - 일별 유니버스 누적 {len(union_tickers)}종목")
+    elif use_period_univ:
+        logger_callback(
+            f"  [Batch] {refresh_mode} marcap as-of 유니버스 순회… ({duration_days}일)"
+        )
+        last_key = ""
+        for d in all_days:
+            curr_key = universe_period_key(d, refresh_mode)
+            if curr_key != last_key or not union_tickers:
+                union_tickers.update(get_period_universe(d))
+                last_key = curr_key
+                logger_callback(
+                    f"    - {curr_key} 유니버스 체크 완료 (누적 {len(union_tickers)}종목)"
+                )
+    elif duration_days < 180:
         logger_callback(
             f"  [Batch] Lean 모드 활성화 ({duration_days}일): "
             f"시작월 marcap as-of 단일 유니버스"
         )
-        union_tickers = set(get_monthly_universe(all_days[0]))
+        union_tickers = set(get_period_universe(all_days[0]))
     else:
         logger_callback(
             "  [Batch] 정밀 모드: 월별 marcap as-of 유니버스 순회…"
@@ -3154,7 +3192,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         for d in all_days:
             curr_m = d.strftime("%Y%m")
             if curr_m != last_m or not union_tickers:
-                union_tickers.update(get_monthly_universe(d))
+                union_tickers.update(get_period_universe(d))
                 last_m = curr_m
                 logger_callback(f"    - {d.strftime('%Y-%m')} 유니버스 체크 완료 (누적 {len(union_tickers)}종목)")
     
@@ -3267,10 +3305,10 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         try:
             _t_rows: List[Dict[str, Any]] = []
             for _d_str in trading_days_list:
-                if duration_days < 180:
-                    _univ = all_codes
+                if use_period_univ or duration_days >= 180:
+                    _univ = get_period_universe(pd.to_datetime(_d_str))
                 else:
-                    _univ = get_monthly_universe(pd.to_datetime(_d_str))
+                    _univ = all_codes
                 _dm = (df_sim["time"] == pd.to_datetime(_d_str)) & (
                     df_sim["code"].isin(_univ)
                 )
@@ -3304,10 +3342,10 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             transition_stats_by_day = {}
 
     for d_str in trading_days_list:
-        if duration_days < 180:
-            universe = all_codes
+        if use_period_univ or duration_days >= 180:
+            universe = get_period_universe(pd.to_datetime(d_str))
         else:
-            universe = get_monthly_universe(pd.to_datetime(d_str))
+            universe = all_codes
 
         day_mask = (df_sim["time"] == pd.to_datetime(d_str)) & (df_sim["code"].isin(universe))
 
@@ -3480,11 +3518,20 @@ def diagnose_dynamic_universe_selection_by_trading_day(
     duration_days = (all_days[-1] - all_days[0]).days if not all_days.empty else 0
     union_cache: dict[str, list[str]] = {}
     union_tickers: set[str] = set()
+    from core.marcap_universe import (
+        get_kospi_top_n_for_refresh,
+        normalize_refresh_mode,
+        universe_period_key,
+    )
 
-    def get_monthly_universe(dt: Any) -> list[str]:
-        m_key = pd.Timestamp(dt).strftime("%Y%m")
-        if m_key in union_cache:
-            return union_cache[m_key]
+    refresh_mode = normalize_refresh_mode(settings.get("kospi_universe_refresh"))
+    use_period_univ = refresh_mode != "monthly"
+
+    def get_period_universe(dt: Any) -> list[str]:
+        d_ts = pd.Timestamp(dt).normalize()
+        cache_key = universe_period_key(d_ts, refresh_mode)
+        if cache_key in union_cache:
+            return union_cache[cache_key]
         try:
             idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
             top_n = 200
@@ -3493,26 +3540,36 @@ def diagnose_dynamic_universe_selection_by_trading_day(
             except Exception:
                 top_n = 200
             if idx_choice == "KOSPI200":
-                from core.marcap_universe import get_monthly_kospi_top_n
-
-                tickers, _ = get_monthly_kospi_top_n(m_key, top_n, logger_callback=None)
+                tickers, _ = get_kospi_top_n_for_refresh(
+                    d_ts, top_n, refresh_mode, logger_callback=None
+                )
             else:
                 tickers = load_kodex200_universe_codes(logger_callback=None)
         except Exception:
             tickers = []
         if tickers:
-            union_cache[m_key] = tickers
+            union_cache[cache_key] = tickers
         return tickers
 
     try:
-        if duration_days < 180:
-            union_tickers = set(get_monthly_universe(all_days[0]))
+        if refresh_mode == "daily":
+            for d in all_days:
+                union_tickers.update(get_period_universe(d))
+        elif use_period_univ:
+            last_key = ""
+            for d in all_days:
+                curr_key = universe_period_key(d, refresh_mode)
+                if curr_key != last_key or not union_tickers:
+                    union_tickers.update(get_period_universe(d))
+                    last_key = curr_key
+        elif duration_days < 180:
+            union_tickers = set(get_period_universe(all_days[0]))
         else:
             last_m = ""
             for d in all_days:
                 curr_m = d.strftime("%Y%m")
                 if curr_m != last_m or not union_tickers:
-                    union_tickers.update(get_monthly_universe(d))
+                    union_tickers.update(get_period_universe(d))
                     last_m = curr_m
     except Exception as e:
         try:
@@ -3629,8 +3686,10 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         )
         for d_str in trading_days_list2:
             try:
-                universe2 = all_codes if duration_days < 180 else get_monthly_universe(
-                    pd.to_datetime(d_str)
+                universe2 = (
+                    get_period_universe(pd.to_datetime(d_str))
+                    if (use_period_univ or duration_days >= 180)
+                    else all_codes
                 )
             except Exception:
                 universe2 = all_codes

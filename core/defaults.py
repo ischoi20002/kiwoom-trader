@@ -151,6 +151,9 @@ DEFAULT_SETTINGS = {
     "realtime_monitor_atr_ir_cache_min_sec": 12.0,
     "universe_index_choice": "KOSPI200",
     "kospi_top_n": "200",
+    # 백테 KOSPI 시총 유니버스 갱신 주기:
+    # daily | weekly | biweekly | monthly | bimonthly | quarterly
+    "kospi_universe_refresh": "monthly",
     "kodex200_universe_priority": "csv_only",
     "kodex200_export_csv_on_etf_success": False,
     "kodex200_constituents_url": "",
