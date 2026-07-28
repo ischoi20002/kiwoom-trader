@@ -440,36 +440,6 @@ class SettingsTab:
         # 레거시 키 호환: 단위는 항상 % 고정 (금액 지정 UI 제거)
         self.conf_vars['s1_sizing_unit'] = tk.StringVar(value='%')
         self.conf_vars['s2_sizing_unit'] = tk.StringVar(value='%')
-        add_header(cap_f, 'DD 연동 리스크 (백테·방어용)')
-        add_param_row(
-            cap_f,
-            '고점 대비 낙폭 시 비중 축소',
-            None,
-            '',
-            'ON이면 자산이 고점 대비 임계% 이상 하락했을 때 신규/추매 금액·(선택)슬롯 축소',
-            toggle_key='use_dd_sizing',
-        )
-        add_param_row(
-            cap_f,
-            'DD 발동 임계',
-            'dd_sizing_trigger_pct',
-            '%',
-            '고점 대비 낙폭이 이 값 이상이면 축소 적용(예: 10)',
-        )
-        add_param_row(
-            cap_f,
-            'DD 시 금액 배율',
-            'dd_sizing_scale',
-            '배',
-            '0.5=절반 비중. 1.0에 가까울수록 축소 약함',
-        )
-        add_param_row(
-            cap_f,
-            'DD 시 슬롯 배율',
-            'dd_slots_scale',
-            '배',
-            '1.0=슬롯 유지. 0.6이면 Track A/B 감시 슬롯 축소',
-        )
         add_header(cap_f, '거래 수수료 요율 (체결금액 대비 %)')
         add_param_row(
             cap_f,
@@ -506,8 +476,9 @@ class SettingsTab:
 
         _univ_root = _sec_parent('univ')
 
-        # ── 유니버스 인덱스 소스 선택 (KODEX200 vs KOSPI200) ──
-        # settings['universe_index_choice'] 값에 따라 종목선정/백테스트 유니버스가 분기됩니다.
+        # ── 유니버스 인덱스 소스 선택 (KODEX200 vs KOSPI 시총 상위 N) ──
+        # settings['universe_index_choice'] 내부값은 KODEX200 / KOSPI200 유지.
+        # UI 표시만 'KOSPI' (저장 시 KOSPI → KOSPI200 매핑).
         univ_source_f = ttk.LabelFrame(
             _univ_root,
             text=' 🔎 유니버스 인덱스 소스 ',
@@ -521,7 +492,12 @@ class SettingsTab:
                     'universe_index_choice',
                     self.default_settings.get('universe_index_choice', 'KODEX200'),
                 )
-                self.conf_vars['universe_index_choice'] = tk.StringVar(value=str(init_val))
+                init_disp = str(init_val).strip().upper()
+                if init_disp == 'KOSPI200':
+                    init_disp = 'KOSPI'
+                elif init_disp not in ('KODEX200', 'KOSPI'):
+                    init_disp = 'KODEX200'
+                self.conf_vars['universe_index_choice'] = tk.StringVar(value=init_disp)
         except Exception:
             # UI 로딩 실패 시에도 나머지 섹션은 유지되도록 방어
             self.conf_vars['universe_index_choice'] = tk.StringVar(value='KODEX200')
@@ -536,7 +512,7 @@ class SettingsTab:
         univ_cmb = ttk.Combobox(
             univ_source_f,
             textvariable=self.conf_vars['universe_index_choice'],
-            values=['KODEX200', 'KOSPI200'],
+            values=['KODEX200', 'KOSPI'],
             state='readonly',
             width=10,
         )
@@ -546,12 +522,12 @@ class SettingsTab:
         # (save_settings()에서 self.conf_vars 순회)
         ttk.Label(
             univ_source_f,
-            text='(고정 200종목 기준)',
+            text='(KODEX=고정 200 / KOSPI=시총 상위 N)',
             font=('Malgun Gothic', 9),
             foreground=primary_col,
         ).grid(row=0, column=2, sticky='w', padx=(10, 5))
 
-        # KOSPI200 선택 시 kospi_universe.csv에서 head(top_n) 슬라이스에 사용합니다.
+        # KOSPI 선택 시 marcap 시총 상위 N 슬라이스에 사용합니다.
         try:
             if 'kospi_top_n' not in self.conf_vars:
                 init_topn = self.app.settings.get(
@@ -562,12 +538,13 @@ class SettingsTab:
         except Exception:
             self.conf_vars['kospi_top_n'] = tk.StringVar(value='200')
 
-        ttk.Label(
+        kospi_n_lbl = ttk.Label(
             univ_source_f,
             text='상위 N(150/200/250/300)',
             font=('Malgun Gothic', 9),
             foreground=primary_col,
-        ).grid(row=1, column=0, sticky='w', padx=(5, 10), pady=(4, 0))
+        )
+        kospi_n_lbl.grid(row=1, column=0, sticky='w', padx=(5, 10), pady=(4, 0))
 
         kospi_n_cmb = ttk.Combobox(
             univ_source_f,
@@ -577,6 +554,26 @@ class SettingsTab:
             width=10,
         )
         kospi_n_cmb.grid(row=1, column=1, sticky='w', padx=(5, 10), pady=(4, 0))
+
+        def _sync_kospi_top_n_enabled(*_args: object) -> None:
+            """KODEX200이면 상위 N 비활성·흐리게, KOSPI면 활성."""
+            try:
+                choice = str(self.conf_vars['universe_index_choice'].get()).strip().upper()
+                is_kospi = choice in ('KOSPI', 'KOSPI200')
+                kospi_n_cmb.configure(state='readonly' if is_kospi else 'disabled')
+                kospi_n_lbl.configure(style='TLabel' if is_kospi else 'Dimmed.TLabel')
+                if is_kospi:
+                    kospi_n_lbl.configure(foreground=primary_col)
+            except (tk.TclError, AttributeError, KeyError):
+                pass
+
+        try:
+            self.conf_vars['universe_index_choice'].trace_add(
+                'write', _sync_kospi_top_n_enabled
+            )
+            _sync_kospi_top_n_enabled()
+        except Exception:
+            pass
 
         # ── 레짐 전환 게이트 (TRANS_S8_NS2: B-share 급락 + 변동성) ──
         transition_f = ttk.LabelFrame(
@@ -1117,48 +1114,6 @@ class SettingsTab:
             '',
             'Fast/Slow/Signal은 macd_fast_daily 등 전역 키와 동일',
             widget_list=self.sel_b_v2_widgets,
-        )
-        slot_f = ttk.LabelFrame(
-            _univ_root,
-            text=' 📊 감시 선정: 최소 점수(N 무관) · 개수 상한 · (옵션)순위 밴드 ',
-            padding='15',
-        )
-        slot_f.pack(fill=tk.X, expand=False, pady=(0, 10))
-        add_param_row(
-            slot_f,
-            'Track A 최소 선정 점수',
-            'sel_track_min_score_a',
-            '점',
-            '0=비활성(상위 N만). 0보다 크면 그날 Score_A≥값만 후보, max_slots_a는 개수 상한만',
-        )
-        add_param_row(
-            slot_f,
-            'Track B 최소 선정 점수',
-            'sel_track_min_score_b',
-            '점',
-            '0=비활성. Score_B≥값만 후보, max_slots_b는 상한',
-        )
-        add_param_row(
-            slot_f,
-            '최소점수 미달 시 상위 N으로 억지 채움',
-            None,
-            '',
-            '기본 OFF: 임계 넘는 종목이 없으면 그날 해당 트랙 감시 없음(권장). ON이면 예전처럼 상위 N 폴백',
-            toggle_key='sel_track_min_score_fallback_topn',
-        )
-        add_param_row(
-            slot_f,
-            '상한 경계 점수 상대 밴드',
-            'max_slots_score_rel_pad',
-            '',
-            '최소점수 비활성(0)일 때만 적용. 0=정확히 N종',
-        )
-        add_param_row(
-            slot_f,
-            '밴드 추가 편입 상한',
-            'max_slots_band_extra_cap',
-            '종',
-            '밴드 사용 시 최대 N+이 값(폭주 방지)',
         )
 
         strat_f = ttk.LabelFrame(_sec_parent('s1'), text=' 🎯 [3] 1단계 진입 (S1) — 감시 후 매수 신호 ', padding='15')
@@ -1886,7 +1841,18 @@ class SettingsTab:
                 self.app.settings[k] = float(v)
         for k, var in self.conf_vars.items():
             if hasattr(var, 'get'):
-                self.app.settings[k] = var.get()
+                val = var.get()
+                # UI 표시 'KOSPI' → 내부 설정키 'KOSPI200' 유지
+                if k == 'universe_index_choice':
+                    try:
+                        raw = str(val).strip().upper()
+                        if raw in ('KOSPI', 'KOSPI200'):
+                            val = 'KOSPI200'
+                        else:
+                            val = 'KODEX200'
+                    except Exception:
+                        val = 'KODEX200'
+                self.app.settings[k] = val
 
         # 포지션 사이징은 %만 지원 (금액 단위 제거)
         self.app.settings['s1_sizing_unit'] = '%'
