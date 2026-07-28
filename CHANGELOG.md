@@ -13,6 +13,12 @@
 
 ---
 
+## 0.15.8 (2026-07-28)
+
+- **기본 설정 튜닝 반영 (K200 백테 1~5차)**: 유니버스 `kospi_top_n=200`, Type B 갭다운 `gap_down_limit_b=-2.5`. S2·selection·DD sizing·trail은 현행 유지가 최적으로 확인됨.
+- 디폴트(`core/defaults.py`)도 동일하게 동기화.
+- 비교 스크립트: `tools/compare_kospi_univ_ladder.py`, `compare_k200_*_tuning.py`.
+
 ## 0.15.7 (2026-07-28)
 
 - **실시간 KOSPI 유니버스 일일 갱신**: 감시목록 선정·`get_kospi_list` 시 marcap 최신 거래일 as-of로 `kospi_universe.csv` 자동 갱신(같은 as-of면 스킵). 올해 parquet 캐시 3일 TTL 재다운로드.
