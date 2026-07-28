@@ -1905,28 +1905,31 @@ class PortfolioManager:
             return 0
 
     def calculate_order_quantity(self, stage=1, is_simulation=False):
-        """[v2.2] 설정창의 비중 설정(원/%)에 따른 실제 투자금액 산출 (실전/시뮬레이션 로직 분리)"""
+        """설정창의 총자산 대비 % 비중에 따른 투자금액 산출 (실전/시뮬레이션 로직 분리)."""
         s = self.settings
-        unit = s.get(f's{stage}_sizing_unit', '원')
-        
-        if unit == '원':
-            invest_amt = int(float(str(s.get(f'stage{stage}_amt', 1000000)).replace(',', '')))
-        else:
+        try:
             pct = float(s.get(f's{stage}_equity_pct', 10.0))
-            # [v18.0] Separation of Logic: Real-time order vs Simulation
-            if is_simulation:
-                # 백테스팅/가상매매는 설정창의 기반 자산을 사용
-                total_cap = float(str(s.get('backtest_initial_capital', 10000000)).replace(',', ''))
-            else:
-                # 실전/모의: 잔고 API(총평가) 기준으로 동기화된 self.total_equity / last_tot_evlu_amt
-                total_cap = self._effective_sizing_capital()
-                if total_cap <= 0:
-                    self.log(
-                        "❌ [Risk] 실제 계좌 자산 정보를 가져오지 못해 주문을 발송할 수 없습니다. "
-                        "(동기화·계좌 조회를 확인하세요)"
-                    )
-                    return 0
-            invest_amt = int(total_cap * pct / 100.0)
+        except (TypeError, ValueError):
+            pct = 10.0
+        # [v18.0] Separation of Logic: Real-time order vs Simulation
+        if is_simulation:
+            # 백테스팅/가상매매는 설정창의 기반 자산을 사용
+            try:
+                total_cap = float(
+                    str(s.get('backtest_initial_capital', 10000000)).replace(',', '')
+                )
+            except (TypeError, ValueError):
+                total_cap = 10_000_000.0
+        else:
+            # 실전/모의: 잔고 API(총평가) 기준으로 동기화된 self.total_equity / last_tot_evlu_amt
+            total_cap = self._effective_sizing_capital()
+            if total_cap <= 0:
+                self.log(
+                    "❌ [Risk] 실제 계좌 자산 정보를 가져오지 못해 주문을 발송할 수 없습니다. "
+                    "(동기화·계좌 조회를 확인하세요)"
+                )
+                return 0
+        invest_amt = int(total_cap * pct / 100.0)
         # 실전/모의 실주문: D+2 예수 한도 내에서만 매수액+매수수수료 지불(증권사 주문가능·신용 한도는 사용하지 않음)
         if not is_simulation:
             try:

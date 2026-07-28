@@ -22,7 +22,6 @@ class SettingsTab:
         self.sel_b_v2_widgets: list[tp.Any] = []
         self.sel_b_legacy_widgets: list[tp.Any] = []
         self.grid_rows = {} 
-        self.sizing_rows = []
         self.opt_sync_tasks = [] 
         self.window_id: tp.Any = None 
         
@@ -419,49 +418,28 @@ class SettingsTab:
                 if widget_list is not None: widget_list.append(hn)
             if widget_list is not None: widget_list.append(lbl)
 
-        def add_sizing_row(parent, label, amt_key, pct_key, unit_key):
-            r = get_next_row(parent)
-            ttk.Label(parent, text=label, font=('Malgun Gothic', 10), foreground=txt_col).grid(row=r, column=1, sticky='w', pady=4)
-            frame = ttk.Frame(parent)
-            frame.grid(row=r, column=2, columnspan=2, sticky='w')
-            
-            ent = ttk.Entry(frame, width=10, justify='center', exportselection=0)
-            ent.pack(side=tk.LEFT, padx=(5, 2))
-            ent.bind("<FocusIn>", lambda e: ent.selection_clear())
-
-            amt_peers = (amt_key,) if amt_key in self.app.opt_params_vars else ()
-            self._bind_opt_interaction(ent, pct_key, grid_row=r, grid_parent=parent, peer_keys=amt_peers)
-            if amt_key in self.app.opt_params_vars:
-                self._bind_opt_interaction(
-                    ent,
-                    amt_key,
-                    grid_row=r,
-                    grid_parent=parent,
-                    pack_in=frame,
-                    peer_keys=(pct_key,),
-                    bind_widget_rclick=False,
-                )
-
-            if unit_key not in self.conf_vars:
-                self.conf_vars[unit_key] = tk.StringVar(value=self.app.settings.get(unit_key, '원'))
-            cb = ttk.Combobox(frame, textvariable=self.conf_vars[unit_key], values=['원', '%'], width=3, state='readonly')
-            cb.pack(side=tk.LEFT)
-            self.sizing_rows.append({'ent': ent, 'unit_var': self.conf_vars[unit_key], 'amt_key': amt_key, 'pct_key': pct_key})
-            def on_unit_change(*args):
-                u = self.conf_vars[unit_key].get()
-                val = self.app.settings.get(amt_key if u == '원' else pct_key, '')
-                ent.delete(0, tk.END)
-                ent.insert(0, str(val))
-            self.conf_vars[unit_key].trace_add('write', on_unit_change)
-            on_unit_change()
-
         # UI 빌드 (그리드 순서대로 배치)
         cap_f = ttk.LabelFrame(_sec_parent('fund'), text=' 💰 [1] 자금 및 계좌 관리 ', padding='15')
         cap_f.pack(fill=tk.X, pady=10)
         add_param_row(cap_f, '백테스팅용 초기자금', 'backtest_initial_capital', '원', '시뮬레이션 시작 및 잔고 부족 시 기준')
-        add_header(cap_f, '포지션 사이징 (배분 방식)')
-        add_sizing_row(cap_f, '1단계(정찰) 비중', 'stage1_amt', 's1_equity_pct', 's1_sizing_unit')
-        add_sizing_row(cap_f, '2단계(본대) 비중', 'stage2_amt', 's2_equity_pct', 's2_sizing_unit')
+        add_header(cap_f, '포지션 사이징 (총자산 대비 %)')
+        add_param_row(
+            cap_f,
+            '1단계(정찰) 비중',
+            's1_equity_pct',
+            '%',
+            '총자산 대비 S1 진입 비중',
+        )
+        add_param_row(
+            cap_f,
+            '2단계(본대) 비중',
+            's2_equity_pct',
+            '%',
+            '총자산 대비 S2 추매 비중',
+        )
+        # 레거시 키 호환: 단위는 항상 % 고정 (금액 지정 UI 제거)
+        self.conf_vars['s1_sizing_unit'] = tk.StringVar(value='%')
+        self.conf_vars['s2_sizing_unit'] = tk.StringVar(value='%')
         add_header(cap_f, 'DD 연동 리스크 (백테·방어용)')
         add_param_row(
             cap_f,
@@ -1846,42 +1824,78 @@ class SettingsTab:
         # v2 위젯만 활성화합니다.
 
     def reset_to_defaults(self):
-        if messagebox.askyesno('초기화 확인', '모든 파라미터를 초기값으로 복원하시겠습니까?'):
-            self.app.settings = self.default_settings.copy()
-            if hasattr(self.app, 'reset_ui_tabs'): self.app.reset_ui_tabs()
+        """공장 초기화: DEFAULT_SETTINGS 를 메모리·settings.json 에 모두 반영한 뒤 UI 를 재구성한다."""
+        if not messagebox.askyesno(
+            '초기화 확인', '모든 파라미터를 초기값으로 복원하시겠습니까?'
+        ):
+            return
+        try:
+            from copy import deepcopy
+            from core.defaults import DEFAULT_SETTINGS
+
+            # 모듈 디폴트를 깊은 복사로 복원 (중첩 dict 공유·오염 방지)
+            restored = deepcopy(DEFAULT_SETTINGS)
+            # 포지션 사이징은 %만 지원
+            restored['s1_sizing_unit'] = '%'
+            restored['s2_sizing_unit'] = '%'
+            self.app.settings = restored
+            if not self.app.config_handler.save_settings(self.app.settings):
+                messagebox.showerror('오류', '초기값 파일 저장에 실패했습니다.')
+                return
+            if hasattr(self.app, 'reset_ui_tabs'):
+                self.app.reset_ui_tabs()
+            try:
+                self.app.log('🔄 공장 초기화 완료 — DEFAULT_SETTINGS 를 settings.json 에 저장했습니다.')
+            except Exception:
+                pass
+            try:
+                self.status_label.config(
+                    text='✅ 공장 초기화 완료 (디폴트 저장됨)',
+                    foreground='#A3BE8C',
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                messagebox.showerror('오류', f'공장 초기화 실패: {e}')
+            except Exception:
+                pass
                                    
+    def collect_from_ui(self) -> None:
+        """설정 탭 위젯 값을 ``app.settings`` 메모리에만 반영한다 (파일 저장 없음)."""
+        for k, ent in self.params_entries.items():
+            if not ent:
+                continue
+            v = ent.get().strip().replace(',', '')
+            if not v:
+                continue
+            if k in [
+                'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b',
+                'max_slots_band_extra_cap',
+                'transition_soft_slots_a', 'transition_soft_slots_b',
+                'chop_valid_a_min', 'chop_valid_b_max', 'chop_valid_a_floor',
+                'atr_sl_reentry_cooldown_days',
+                'atr_sl_streak_lookback_days',
+                'atr_sl_streak_cooldown_days',
+                'atr_period', 'atr_period_a', 'atr_period_b',
+                'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
+                'gc_window', 'rsi_window',
+            ]:
+                self.app.settings[k] = int(float(v))
+            else:
+                self.app.settings[k] = float(v)
+        for k, var in self.conf_vars.items():
+            if hasattr(var, 'get'):
+                self.app.settings[k] = var.get()
+
+        # 포지션 사이징은 %만 지원 (금액 단위 제거)
+        self.app.settings['s1_sizing_unit'] = '%'
+        self.app.settings['s2_sizing_unit'] = '%'
+
     def save_settings(self, sync_to_backtest=True):
         try:
-            for k, ent in self.params_entries.items():
-                if not ent: continue
-                v = ent.get().strip().replace(',', '')
-                if not v: continue
-                if k in [
-                    'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b',
-                    'max_slots_band_extra_cap',
-                    'transition_soft_slots_a', 'transition_soft_slots_b',
-                    'chop_valid_a_min', 'chop_valid_b_max', 'chop_valid_a_floor',
-                    'atr_sl_reentry_cooldown_days',
-                    'atr_sl_streak_lookback_days',
-                    'atr_sl_streak_cooldown_days',
-                    'atr_period', 'atr_period_a', 'atr_period_b',
-                    'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
-                    'gc_window', 'rsi_window',
-                ]:
-                    self.app.settings[k] = int(float(v))
-                else: 
-                    self.app.settings[k] = float(v)
-            for k, var in self.conf_vars.items():
-                if hasattr(var, 'get'): self.app.settings[k] = var.get()
+            self.collect_from_ui()
 
-            for row in self.sizing_rows:
-                ent = row['ent']
-                unit = row['unit_var'].get()
-                v = ent.get().strip().replace(',', '')
-                if not v: continue
-                active_key = row['amt_key'] if unit == '원' else row['pct_key']
-                self.app.settings[active_key] = float(v)
-            
             if self.app.config_handler.save_settings(self.app.settings):
                 if hasattr(self.app, 'stream_processor'):
                     self.app.stream_processor.settings = self.app.settings

@@ -13,6 +13,27 @@
 
 ---
 
+## 0.15.7 (2026-07-28)
+
+- **실시간 KOSPI 유니버스 일일 갱신**: 감시목록 선정·`get_kospi_list` 시 marcap 최신 거래일 as-of로 `kospi_universe.csv` 자동 갱신(같은 as-of면 스킵). 올해 parquet 캐시 3일 TTL 재다운로드.
+- `kospi_universe.csv`에 `asof_date` 컬럼 저장.
+
+## 0.15.6 (2026-07-28)
+
+- **백테 KOSPI 유니버스 PIT(과거 시점 시총)**: FinanceData marcap 연도별 parquet → 월 첫 영업일 as-of 시총 상위 N. FDR `StockListing` 현재 시총 스냅샷 대신 사용.
+- 로컬 캐시: `data/marcap/`, `data/universe_marcap_monthly/`. 실시간 `kospi_universe.csv` 갱신도 marcap 최신 as-of.
+- 백테 경로에서 FDR로 `kospi_universe.csv` 자동 재생성 차단 (`allow_fdr_generate=False`).
+- 의존성: `pyarrow` (marcap parquet 읽기).
+
+## 0.15.5 (2026-07-28)
+
+- **공장 초기화 버그 수정**: 디폴트를 메모리에만 넣고 `reset_ui_tabs`가 기존 `settings.json`을 다시 읽어 덮어쓰던 문제. 이제 `DEFAULT_SETTINGS`를 저장한 뒤 UI를 재구성한다.
+- **설정 자동저장 덮어쓰기 수정**: 백테스트/최적화 시작 시 `_final_save_settings`가 설정 탭 UI를 무시하고 메모리만 저장해, 이전에 저장한 값(예: 전환 게이트 ON)을 OFF로 덮어쓰던 문제. 저장 전 UI→메모리 동기화.
+
+## 0.15.4 (2026-07-28)
+
+- 설정 탭 포지션 사이징: **금액(원) 단위 지정 제거** — 1·2단계 비중은 총자산 대비 **%만** 지원. 실전·백테·리포트 경로도 % 고정.
+
 ## 0.15.3 (2026-07-28)
 
 - **디폴트 설정**을 현재 `settings.json`과 동기화: 유니버스 `KOSPI200`·상위 `150`, `use_transition_gate=True` (`tools/sync_defaults_from_settings.py`).

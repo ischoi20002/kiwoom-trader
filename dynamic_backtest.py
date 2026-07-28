@@ -975,26 +975,27 @@ class DynamicBacktester:
         if price <= 0:
             return False
         h_info = self.holdings.get(code)
-        s1_amt = float(self.settings.get('stage1_amt', 1_000_000))
-        s2_amt = float(self.settings.get('stage2_amt', 2_000_000))
-        
-        # [v33.0] Unified Sizing (Unit-based: % or 원)
-        s1_unit = self.settings.get('s1_sizing_unit', "원")
-        s2_unit = self.settings.get('s2_sizing_unit', "원")
-        
-        if s1_unit == '%' or s2_unit == '%':
-            # Calculate current total equity (Cash + Current Holdings Value)
-            holdings_value = 0
-            for c, h in self.holdings.items():
-                holdings_value += h['qty'] * h.get('last_p', h['avg_p'])
-            total_equity = self.cash + holdings_value
-            
-            if s1_unit == '%':
-                s1_pct = float(self.settings.get('s1_equity_pct', 10.0))
-                s1_amt = total_equity * (s1_pct / 100.0)
-            if s2_unit == '%':
-                s2_pct = float(self.settings.get('s2_equity_pct', 20.0))
-                s2_amt = total_equity * (s2_pct / 100.0)
+        # 포지션 사이징: 현재 총자산(현금+보유평가) 대비 %만 사용
+        holdings_value = 0.0
+        try:
+            for _c, h in self.holdings.items():
+                holdings_value += float(h['qty']) * float(h.get('last_p', h['avg_p']))
+        except Exception:
+            holdings_value = 0.0
+        try:
+            total_equity = float(self.cash) + float(holdings_value)
+        except (TypeError, ValueError):
+            total_equity = float(holdings_value)
+        try:
+            s1_pct = float(self.settings.get('s1_equity_pct', 10.0))
+        except (TypeError, ValueError):
+            s1_pct = 10.0
+        try:
+            s2_pct = float(self.settings.get('s2_equity_pct', 20.0))
+        except (TypeError, ValueError):
+            s2_pct = 20.0
+        s1_amt = total_equity * (s1_pct / 100.0)
+        s2_amt = total_equity * (s2_pct / 100.0)
 
         # DD 연동: 고점 대비 낙폭 시 신규/추매 금액 축소
         try:

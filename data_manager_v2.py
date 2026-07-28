@@ -3406,9 +3406,25 @@ class DataManagerV2:
         try:
             if count <= 200:
                 if idx_choice == "KOSPI200":
-                    # 1) kospi_universe.csv 우선 로드
+                    # marcap 최신 as-of 확인 후 kospi_universe.csv 로드 (실시간 일일 갱신)
                     try:
-                        if os.path.exists(cache_file) and (os.path.getsize(cache_file) > 10) and not force:
+                        if force:
+                            from core.marcap_universe import refresh_kospi_universe_csv_from_marcap
+
+                            refresh_kospi_universe_csv_from_marcap(
+                                kospi_universe_path=cache_file,
+                                target_n=max(400, effective_count),
+                                logger_callback=_ulog if universe_log is not None else None,
+                            )
+                        else:
+                            from core.marcap_universe import ensure_realtime_kospi_universe_csv
+
+                            ensure_realtime_kospi_universe_csv(
+                                kospi_universe_path=cache_file,
+                                target_n=max(400, effective_count),
+                                logger_callback=_ulog if universe_log is not None else None,
+                            )
+                        if os.path.exists(cache_file) and os.path.getsize(cache_file) > 10:
                             df = pd.read_csv(cache_file, dtype=str)
                             if "종목코드" in df.columns and "Code" not in df.columns:
                                 df.rename(columns={"종목코드": "Code", "종목명": "Name"}, inplace=True)
@@ -3421,28 +3437,6 @@ class DataManagerV2:
                             return df_out
                     except Exception:
                         pass
-
-                    # 2) kospi_universe.csv 없으면 strategy_selector 로더를 호출해 생성
-                    try:
-                        from strategy_selector import _maybe_generate_kospi_universe_csv
-                        _maybe_generate_kospi_universe_csv(
-                            logger_callback=_ulog if universe_log is not None else None,
-                            kospi_universe_path=cache_file,
-                            target_n=max(400, effective_count),
-                            force_refresh=force,
-                        )
-                        if os.path.exists(cache_file):
-                            df = pd.read_csv(cache_file, dtype=str)
-                            if "종목코드" in df.columns and "Code" not in df.columns:
-                                df.rename(columns={"종목코드": "Code", "종목명": "Name"}, inplace=True)
-                            if "Code" not in df.columns:
-                                return pd.DataFrame()
-                            if "Name" not in df.columns:
-                                df["Name"] = df["Code"]
-                            df["Code"] = df["Code"].astype(str).str.zfill(6)
-                            return df[["Code", "Name"]].head(effective_count).copy()
-                    except Exception:
-                        return pd.DataFrame()
 
                     return pd.DataFrame()
 

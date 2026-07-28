@@ -25,6 +25,8 @@ trading_state_mock.db
 *.bak
 *.ruined
 backtest_data/
+data/marcap/
+data/universe_marcap_monthly/
 *.csv
 !kospi_200.csv
 !kospi_top_500.csv

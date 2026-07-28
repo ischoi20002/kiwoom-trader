@@ -1005,8 +1005,8 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "백테스팅용 초기자금", "key": "backtest_initial_capital", "unit": "원", "is_amt": True},
                 {"label": "최대 감시 종목 수 (Track A)", "key": "max_slots_a", "unit": "개"},
                 {"label": "최대 감시 종목 수 (Track B)", "key": "max_slots_b", "unit": "개"},
-                {"label": "1단계(정찰) 비중", "keys": ["stage1_amt", "s1_equity_pct"], "unit_key": "s1_sizing_unit"},
-                {"label": "2단계(본대) 비중", "keys": ["stage2_amt", "s2_equity_pct"], "unit_key": "s2_sizing_unit"},
+                {"label": "1단계(정찰) 비중", "key": "s1_equity_pct", "unit": "%"},
+                {"label": "2단계(본대) 비중", "key": "s2_equity_pct", "unit": "%"},
             ]
         },
         {

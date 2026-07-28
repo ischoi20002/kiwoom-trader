@@ -2024,27 +2024,15 @@ class SimpleBacktester:
         # [v4.5 Design Update] 슬롯별 예산 제한 폐지. 각 종목은 전체 가용 자산을 기준으로 시뮬레이션됨.
         slot_budget = total_capital_val
         
-        # [v4.5 Sync] Handle Sizing Units (Won / %)
-        s1_unit = self.settings.get('s1_sizing_unit', '%')
-        if s1_unit == '원':
-            self.s1_amt = float(self.settings.get('stage1_amt', 1000000.0))
-        else:
-            s1_pct = float(self.settings.get('s1_equity_pct', 20.0))
-            self.s1_amt = total_capital_val * (s1_pct / 100.0)
-
-        s2_unit = self.settings.get('s2_sizing_unit', '%')
-        if s2_unit == '원':
-            self.s2_amt = float(self.settings.get('stage2_amt', 2000000.0))
-        else:
-            s2_pct = float(self.settings.get('s2_equity_pct', 30.0))
-            self.s2_amt = total_capital_val * (s2_pct / 100.0)
+        # 포지션 사이징: 총자산 대비 %만 사용
+        s1_pct = float(self.settings.get('s1_equity_pct', 20.0))
+        self.s1_amt = total_capital_val * (s1_pct / 100.0)
+        s2_pct = float(self.settings.get('s2_equity_pct', 30.0))
+        self.s2_amt = total_capital_val * (s2_pct / 100.0)
 
         # [Phase 2] Type B S2 사이징 (별도 비중)
-        if s2_unit == '원':
-            self.s2_b_amt = self.s2_amt
-        else:
-            s2_b_pct = float(self.settings.get('s2_b_equity_pct', s2_pct))
-            self.s2_b_amt = total_capital_val * (s2_b_pct / 100.0)
+        s2_b_pct = float(self.settings.get('s2_b_equity_pct', s2_pct))
+        self.s2_b_amt = total_capital_val * (s2_b_pct / 100.0)
 
         self.buy_f_rate, self.sell_f_rate = fee_decimal_rates_backtest(self.settings)
         
@@ -2622,20 +2610,16 @@ class SimpleBacktester:
                 reason += f"|RSI:{rsi_val:.1f}|MA5:{int(ma5_val):,}|OSC:{osc_val:.2f}"
             except: pass
 
-        amt = self.s1_amt if stage == 1 else self.s2_amt
-        
-        # [v33.0] Unified Sizing (Unit-based: % or 원)
-        unit = self.settings.get('s1_sizing_unit' if stage == 1 else 's2_sizing_unit', "원")
-        if unit == '%':
-            total_equity = params['balance']
-            if params['position'] is not None:
-                total_equity += params['position']['qty'] * price
-            
-            s_pct = float(self.settings.get('s1_equity_pct' if stage == 1 else 's2_equity_pct', 10.0))
-            amt = total_equity * (s_pct / 100.0)
-        else:
-            # 원화 고정 금액 (이미 상단에서 amt에 할당됨. 명시적으로 재할당 가능)
-            amt = float(self.settings.get('stage1_amt' if stage == 1 else 'stage2_amt', 1_000_000))
+        # 포지션 사이징: 현재 총자산(잔고+보유평가) 대비 %
+        total_equity = params['balance']
+        if params['position'] is not None:
+            total_equity += params['position']['qty'] * price
+        s_pct = float(
+            self.settings.get(
+                's1_equity_pct' if stage == 1 else 's2_equity_pct', 10.0
+            )
+        )
+        amt = total_equity * (s_pct / 100.0)
 
         qty = int(amt // price)
         if qty <= 0: return params

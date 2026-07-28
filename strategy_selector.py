@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import pandas as pd
 import FinanceDataReader as fdr
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
@@ -166,14 +166,13 @@ def _maybe_generate_kospi_universe_csv(
     kospi_universe_path: str = "kospi_universe.csv",
     target_n: int = 400,
     force_refresh: bool = False,
+    allow_fdr_generate: bool = True,
 ) -> list[str]:
     """
     `kospi_universe.csv`를 생성/확보합니다.
 
-    생성 규칙(프로젝트 요청사항):
-    - Code 끝이 '0' 인 종목만 사용
-    - Marcap(없으면 MarketCap) 내림차순 정렬
-    - 상위 target_n개를 Code/Name으로 저장
+    ``allow_fdr_generate=False`` 이면 기존 파일만 읽고 FDR로 덮어쓰지 않습니다
+    (백테 재현성·marcap PIT 경로용).
     """
     try:
         need_gen = False
@@ -195,7 +194,7 @@ def _maybe_generate_kospi_universe_csv(
             except Exception:
                 need_gen = True
 
-        if need_gen:
+        if need_gen and allow_fdr_generate:
             try:
                 import FinanceDataReader as fdr
             except Exception:
@@ -273,15 +272,91 @@ def load_kospi_universe_codes(
     kospi_universe_path: str = "kospi_universe.csv",
     top_n: int = 200,
     force_refresh: bool = False,
+    allow_fdr_generate: bool = True,
+    pit_asof: Optional[Union[date, datetime, str, pd.Timestamp]] = None,
+    daily_refresh: bool = False,
 ) -> list[str]:
     """
-    `kospi_universe.csv`에서 상위 top_n개 종목코드를 로드합니다.
+    KOSPI 시총 상위 top_n 종목코드.
+
+    - ``pit_asof`` 지정 시: marcap 과거 시점 as-of (FDR/CSV 무시)
+    - ``daily_refresh=True``: 실시간용 marcap 최신 as-of 기준 하루 1회 CSV 갱신
+    - 그 외: ``kospi_universe.csv`` (없으면 marcap 최신 → FDR 폴백)
     """
+    if pit_asof is not None:
+        try:
+            from core.marcap_universe import load_kospi_top_n_asof
+
+            codes, asof_str, _ = load_kospi_top_n_asof(
+                pit_asof, int(top_n), logger_callback=logger_callback
+            )
+            if codes and logger_callback is not None and asof_str:
+                try:
+                    logger_callback(
+                        f"  [Marcap] as-of {asof_str} KOSPI top{int(top_n)} → {len(codes)}종목"
+                    )
+                except Exception:
+                    pass
+            return codes
+        except Exception as e:
+            try:
+                logging.warning("marcap PIT 유니버스 실패: %s", e, exc_info=True)
+            except Exception:
+                pass
+            if logger_callback is not None:
+                try:
+                    logger_callback(f"  [Warn] marcap PIT 유니버스 실패: {e}")
+                except Exception:
+                    pass
+            return []
+
+    if daily_refresh and pit_asof is None:
+        try:
+            from core.marcap_universe import ensure_realtime_kospi_universe_csv
+
+            codes, asof_str = ensure_realtime_kospi_universe_csv(
+                kospi_universe_path=kospi_universe_path,
+                target_n=max(400, int(top_n)),
+                logger_callback=logger_callback,
+            )
+            if codes:
+                if logger_callback is not None and asof_str:
+                    try:
+                        logger_callback(
+                            f"  [Marcap] 실시간 유니버스 as-of {asof_str} → {len(codes)}종목"
+                        )
+                    except Exception:
+                        pass
+                return codes[: int(top_n)]
+        except Exception as e:
+            try:
+                logging.info("실시간 marcap 일일 갱신 생략: %s", e)
+            except Exception:
+                pass
+
+    if force_refresh or not os.path.isfile(kospi_universe_path) or os.path.getsize(kospi_universe_path) <= 10:
+        try:
+            from core.marcap_universe import refresh_kospi_universe_csv_from_marcap
+
+            refreshed = refresh_kospi_universe_csv_from_marcap(
+                kospi_universe_path=kospi_universe_path,
+                target_n=max(400, int(top_n)),
+                logger_callback=logger_callback,
+            )
+            if refreshed:
+                return refreshed[: int(top_n)]
+        except Exception as e:
+            try:
+                logging.info("marcap 최신 kospi_universe 갱신 생략: %s", e)
+            except Exception:
+                pass
+
     codes = _maybe_generate_kospi_universe_csv(
         logger_callback=logger_callback,
         kospi_universe_path=kospi_universe_path,
         target_n=max(400, int(top_n)),
         force_refresh=force_refresh,
+        allow_fdr_generate=allow_fdr_generate,
     )
     if not codes:
         return []
@@ -2051,7 +2126,12 @@ def select_monitoring_targets(
             top_n = 200
         try:
             tickers = (
-                load_kospi_universe_codes(logger_callback=logger_callback, top_n=top_n)
+                load_kospi_universe_codes(
+                    logger_callback=logger_callback,
+                    top_n=top_n,
+                    pit_asof=target_date,
+                    allow_fdr_generate=False,
+                )
                 if univ_choice == "KOSPI200"
                 else load_kodex200_universe_codes(logger_callback=logger_callback)
             )
@@ -2113,11 +2193,12 @@ def select_monitoring_targets(
             except Exception:
                 top_n = 200
             try:
-                if not os.path.exists(input_file) or os.path.getsize(input_file) <= 10:
-                    _ = load_kospi_universe_codes(
-                        logger_callback=logger_callback,
-                        top_n=top_n,
-                    )
+                _ = load_kospi_universe_codes(
+                    logger_callback=logger_callback,
+                    top_n=top_n,
+                    allow_fdr_generate=False,
+                    daily_refresh=True,
+                )
 
                 if os.path.exists(input_file):
                     df_top = pd.read_csv(input_file, dtype=str)
@@ -2140,6 +2221,8 @@ def select_monitoring_targets(
                     tickers = load_kospi_universe_codes(
                         logger_callback=logger_callback,
                         top_n=top_n,
+                        allow_fdr_generate=False,
+                        daily_refresh=True,
                     )
                     df_fdr_names = fdr.StockListing("KOSPI")
                     name_map = dict(
@@ -3017,7 +3100,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
 
     def get_monthly_universe(dt):
-        """KRX 미사용. ``kodex200.csv`` 등으로 월 키별 캐시(메모리)에 동일 리스트를 넣는다."""
+        """월별 유니버스: KOSPI200=marcap as-of, KODEX200=고정 CSV."""
         idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
         m_key = dt.strftime("%Y%m")
         if m_key in universe_cache:
@@ -3028,14 +3111,25 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 top_n = int(settings.get("kospi_top_n", 200))
             except Exception:
                 top_n = 200
-            tickers = (
-                load_kospi_universe_codes(logger_callback=logger_callback, top_n=top_n)
-                if idx_choice == "KOSPI200"
-                else load_kodex200_universe_codes(logger_callback=logger_callback)
-            )
+            if idx_choice == "KOSPI200":
+                from core.marcap_universe import get_monthly_kospi_top_n
+
+                tickers, asof_str = get_monthly_kospi_top_n(
+                    m_key, top_n, logger_callback=logger_callback
+                )
+                if tickers and logger_callback is not None:
+                    try:
+                        logger_callback(
+                            f"    - [Marcap] {m_key} as-of {asof_str or '?'} "
+                            f"KOSPI top{top_n} → {len(tickers)}종목"
+                        )
+                    except Exception:
+                        pass
+            else:
+                tickers = load_kodex200_universe_codes(logger_callback=logger_callback)
         except Exception as e:
             try:
-                logging.warning("배치 유니버스 CSV 로드 실패: %s", e, exc_info=True)
+                logging.warning("배치 유니버스 로드 실패: %s", e, exc_info=True)
             except Exception:
                 pass
             tickers = []
@@ -3048,12 +3142,13 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
     if duration_days < 180:
         logger_callback(
-            f"  [Batch] Lean 모드 활성화 ({duration_days}일): 단일 유니버스 기준 분석 (KRX 미사용)"
+            f"  [Batch] Lean 모드 활성화 ({duration_days}일): "
+            f"시작월 marcap as-of 단일 유니버스"
         )
         union_tickers = set(get_monthly_universe(all_days[0]))
     else:
         logger_callback(
-            "  [Batch] 정밀 모드: 월별 캐시 키 순회 (소스는 kodex200.csv, KRX 미사용)…"
+            "  [Batch] 정밀 모드: 월별 marcap as-of 유니버스 순회…"
         )
         last_m = ""
         for d in all_days:
@@ -3391,7 +3486,18 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         if m_key in union_cache:
             return union_cache[m_key]
         try:
-            tickers = load_kodex200_universe_codes(logger_callback=None)
+            idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+            top_n = 200
+            try:
+                top_n = int(settings.get("kospi_top_n", 200))
+            except Exception:
+                top_n = 200
+            if idx_choice == "KOSPI200":
+                from core.marcap_universe import get_monthly_kospi_top_n
+
+                tickers, _ = get_monthly_kospi_top_n(m_key, top_n, logger_callback=None)
+            else:
+                tickers = load_kodex200_universe_codes(logger_callback=None)
         except Exception:
             tickers = []
         if tickers:

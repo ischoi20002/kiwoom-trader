@@ -38,9 +38,7 @@ class BacktestTab:
         # SimpleBacktester 기반 최적화와 무관 (DynamicBacktester에서만 유효) → 의도적으로 제외
         # 엑셀(optimization_params_audit) 확정 순서 우선 → 이후 레거시 키(미선택 시에도 툴팁용)
         self.PARAM_INFO = {
-            'stage1_amt': ('S1_AmtWon', '자금관리', '1단계 정찰 금액(원)'),
             's1_equity_pct': ('S1_Equity%', '자금관리', '1단계 비중 (%)'),
-            'stage2_amt': ('S2_AmtWon', '자금관리', '2단계 본대 금액(원)'),
             's2_equity_pct': ('S2_Equity%', '자금관리', '2단계 비중 (%)'),
             'buy_rsi_min': ('BuyRSI_Min', 'S1 공통', 'S1 진입 RSI 하한'),
             'buy_rsi_max_a': ('A_RSI_High', 'S1 Type A', '눌림(A) RSI 상한선'),
@@ -554,8 +552,6 @@ class BacktestTab:
                 return [round(float(val) + (i - count//2) * step, 2) for i in range(count)]
 
         return {
-            'stage1_amt': range_for(float(s.get('stage1_amt', 20_000_000)), 5_000_000),
-            'stage2_amt': range_for(float(s.get('stage2_amt', 30_000_000)), 5_000_000),
             's1_equity_pct': range_for(s.get('s1_equity_pct', 10.0), 5.0),
             's2_equity_pct': range_for(s.get('s2_equity_pct', 20.0), 10.0),
             'buy_rsi_min': range_for(s.get('buy_rsi_min', 40.0), 5.0),

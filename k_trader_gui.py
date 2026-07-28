@@ -715,7 +715,7 @@ class KiwoomApp:
         self.opt_params_vars = {}
         # 최적화 대상(○/●): tools/optimization_params_audit.xlsx 사용자 표시(2026-04) 기준 72키
         opt_keys = [
-            'stage1_amt', 's1_equity_pct', 'stage2_amt', 's2_equity_pct',
+            's1_equity_pct', 's2_equity_pct',
             'buy_rsi_min', 'buy_rsi_max_a', 'gc_window', 'rsi_window', 'ma60_min', 'ma60_max',
             'vol_surge', 'prev_vol_lookback_s1_a',
             'buy_rsi_max_b', 'vol_surge_b', 'prev_vol_lookback_s1_b',
@@ -847,6 +847,21 @@ class KiwoomApp:
                 self.root.after(8000, self.ensure_fresh_selection_then_start)
         
     def _final_save_settings(self):
+        """메모리 설정을 settings.json 에 저장한다.
+
+        백테스트/최적화 시작 등에서 호출될 때, 설정 탭 UI 와 메모리가
+        어긋난 채로 이전 값(예: 게이트 OFF)을 파일에 덮어쓰지 않도록
+        저장 직전에 설정 탭 위젯 → 메모리를 동기화한다.
+        """
+        try:
+            st = getattr(self, "settings_tab", None)
+            if st is not None and hasattr(st, "collect_from_ui"):
+                st.collect_from_ui()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ 설정 탭 → 메모리 동기화 실패(저장은 계속): {e}")
+            except Exception:
+                pass
         if self.config_handler.save_settings(self.settings):
             self.log("💿 설정 파일 저장 및 데이터 동기화 완료")
             return True
