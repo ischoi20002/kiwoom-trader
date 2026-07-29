@@ -590,14 +590,6 @@ class SettingsTab:
             'ON: Valid_B 비중 급락 + 변동성 확인 시 TRANSITION/HARD. 실시간·동적 백테 공통',
             toggle_key='use_transition_gate',
         )
-        add_param_row(
-            transition_f,
-            'Tiered 응답',
-            None,
-            '',
-            'ON: TRANSITION=슬롯만 축소(기본). OFF: TRANSITION에서도 S1 차단 가능',
-            toggle_key='transition_tiered_response',
-        )
         add_header(transition_f, '── 전환(TRANSITION) 감지 ──')
         add_param_row(
             transition_f,
@@ -654,7 +646,7 @@ class SettingsTab:
             'TRANSITION 시 S1 차단',
             None,
             '',
-            'Tiered OFF 또는 강한 차단 시. TRANS_S8_NS2는 OFF 권장',
+            'ON: TRANSITION에서 신규 진입(S1) 중단. OFF면 위 슬롯 축소만 적용',
             toggle_key='transition_block_s1_on_soft',
         )
         add_param_row(

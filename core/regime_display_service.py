@@ -3,8 +3,10 @@
 GUI 상단 B 추세 레짐(전환 게이트) 표시.
 
 갱신 시점:
-  - GUI 기동(재시작) 직후 1회
-  - 거래일 장마감(15:30) + 버퍼(기본 30분) 이후 1회/일
+  - GUI 기동(재시작) 직후 1회 — **직전 완료 거래일** 기준
+  - 거래일 장마감(15:30) + 버퍼(기본 30분) 이후 1회/일 — 당일 완료분 반영
+
+장중에는 미완성 당일 일봉으로 재계산하지 않는다 (백테 ref일 정합).
 """
 from __future__ import annotations
 
@@ -62,7 +64,7 @@ class RegimeDisplayService:
         self._after_id = None
 
     def start(self) -> None:
-        """스케줄러 시작 + 기동 직후 1회 갱신."""
+        """스케줄러 시작 + 기동 직후 1회 갱신(직전 완료 거래일)."""
         self._cancelled = False
         self._schedule_tick()
         try:
@@ -79,6 +81,19 @@ class RegimeDisplayService:
             return max(5, min(v, 120))
         except (TypeError, ValueError):
             return 30
+
+    def _completed_asof_date(self, now: Optional[datetime] = None) -> date:
+        """직전 완료 거래일 (장중이면 전일, EOD+버퍼 후면 당일)."""
+        try:
+            from reporting.krx_trading_calendar import completed_trading_day_asof_local
+
+            return completed_trading_day_asof_local(
+                now or datetime.now(),
+                eod_buffer_minutes=self._eod_buffer_minutes(),
+            )
+        except Exception:
+            t = now or datetime.now()
+            return t.date() - timedelta(days=1)
 
     def _schedule_tick(self) -> None:
         if self._cancelled:
@@ -161,10 +176,19 @@ class RegimeDisplayService:
         except Exception:
             pass
 
+        # 기동/수동: 미지정 시 직전 완료 거래일 고정 (장중 '오늘' 재계산 방지)
+        resolved_asof = as_of
+        if resolved_asof is None:
+            try:
+                resolved_asof = self._completed_asof_date()
+            except Exception:
+                resolved_asof = None
+
         def _worker() -> None:
             payload: dict[str, Any]
             try:
-                payload = self._fetch_regime_payload(as_of=as_of)
+                payload = self._fetch_regime_payload(as_of=resolved_asof)
+                payload["reason"] = reason
             except Exception as ex:
                 payload = {
                     "regime_key": "ERROR",
@@ -202,7 +226,9 @@ class RegimeDisplayService:
                 "reason": "no_dm",
             }
 
-        as_of_dt = datetime.combine(as_of, dtime(0, 0)) if as_of is not None else datetime.now()
+        if as_of is None:
+            as_of = self._completed_asof_date()
+        as_of_dt = datetime.combine(as_of, dtime(0, 0))
         tg = strategy_selector.resolve_transition_gate_for_live(
             st,
             dm,
@@ -221,7 +247,7 @@ class RegimeDisplayService:
         elif reg == "HARD":
             detail = "신규 차단"
 
-        as_of_s = as_of_dt.strftime("%Y-%m-%d")
+        as_of_s = str(tg.get("as_of") or as_of_dt.strftime("%Y-%m-%d"))
         return {
             "regime_key": reg,
             "as_of": as_of_s,

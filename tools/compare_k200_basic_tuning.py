@@ -106,7 +106,6 @@ def _experiments(base: Dict[str, Any]) -> List[Dict[str, Any]]:
             "title": "soft8 유지, soft 구간 S2 허용",
             "overrides": {
                 "use_transition_gate": True,
-                "transition_tiered_response": True,
                 "transition_prior_share_min": 50.0,
                 "transition_share_delta5_max": -20.0,
                 "transition_share_delta3_max": -10.0,

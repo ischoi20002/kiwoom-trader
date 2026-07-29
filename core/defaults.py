@@ -172,7 +172,6 @@ DEFAULT_SETTINGS = {
     "sync_ghost_new_synced_hours": 1.0,
     "exclude_trading_halt_on_selection": True,
     "use_transition_gate": True,
-    "transition_tiered_response": True,
     "transition_prior_share_min": 50.0,
     "transition_share_delta5_max": -20.0,
     "transition_share_delta3_max": -10.0,

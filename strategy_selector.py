@@ -1866,15 +1866,21 @@ def resolve_transition_runtime_blocks(
     regime: str,
     settings: Optional[dict] = None,
 ) -> Tuple[bool, bool]:
-    """레짐별 실시간·백테스트 S1/S2 차단 플래그 (TRANS_S8_NS2 tiered)."""
+    """
+    레짐별 실시간·백테스트 S1/S2 차단 플래그.
+
+    - HARD: S1·S2 모두 차단
+    - TRANSITION: ``transition_block_s1_on_soft`` / ``transition_block_s2_on_soft`` 를 그대로 따름
+      (슬롯 축소는 ``resolve_transition_regime_policy`` 가 별도로 담당)
+    - 그 외: 차단 없음
+    """
     s = settings or {}
     try:
         r = str(regime or "OFF").strip().upper()
         if r == "HARD":
             return True, True
         if r == "TRANSITION":
-            tiered = bool(s.get("transition_tiered_response", True))
-            block_s1 = (not tiered) and bool(s.get("transition_block_s1_on_soft", False))
+            block_s1 = bool(s.get("transition_block_s1_on_soft", False))
             block_s2 = bool(s.get("transition_block_s2_on_soft", True))
             return block_s1, block_s2
         return False, False
@@ -1892,6 +1898,10 @@ def resolve_transition_gate_for_live(
     실시간 선정용 transition 레짐·슬롯·차단 플래그.
 
     FDR 일봉으로 최근 구간을 스코어해 당일 레짐을 판정한다 (``bars_1d`` DB 불필요).
+
+    백테와 같이 **완료된 거래일** 기준만 사용한다.
+    ``as_of`` 가 오늘(또는 미래)이면서 아직 장마감+버퍼 전이면 직전 완료 거래일로 스냅한다.
+    과거 ``target_date`` 명시 시에는 그 날짜를 그대로 쓴다.
     """
     log = logger_callback or (lambda *_a, **_k: None)
     max_a = int(settings.get("max_slots_a", 20))
@@ -1910,6 +1920,24 @@ def resolve_transition_gate_for_live(
         return result
     try:
         as_of_dt = pd.to_datetime(as_of or datetime.now()).normalize()
+        # 미완성 당일 일봉으로 레짐이 바뀌지 않도록 직전 완료 거래일로 고정
+        try:
+            from reporting.krx_trading_calendar import completed_trading_day_asof_local
+
+            try:
+                buf = int(float(settings.get("regime_display_eod_buffer_minutes", 30) or 30))
+            except (TypeError, ValueError):
+                buf = 30
+            now_d = datetime.now().date()
+            completed = completed_trading_day_asof_local(
+                datetime.now(), eod_buffer_minutes=buf
+            )
+            req_d = as_of_dt.date()
+            # 실시간/오늘 이후만 스냅 (과거 선정일은 유지)
+            if req_d >= now_d and req_d != completed:
+                as_of_dt = pd.Timestamp(completed)
+        except Exception:
+            pass
         end_s = as_of_dt.strftime("%Y-%m-%d")
         start_s = (as_of_dt - timedelta(days=30)).strftime("%Y-%m-%d")
         idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
@@ -1934,6 +1962,7 @@ def resolve_transition_gate_for_live(
             last_t = df_all["time"].max()
             df_day = df_all[df_all["time"].dt.normalize() == pd.Timestamp(last_t).normalize()]
             end_s = pd.Timestamp(last_t).strftime("%Y-%m-%d")
+            as_of_dt = pd.Timestamp(last_t).normalize()
         va = int(df_day["Valid_A"].astype(bool).sum()) if "Valid_A" in df_day.columns else 0
         vb = int(df_day["Valid_B"].astype(bool).sum()) if "Valid_B" in df_day.columns else 0
         tot = va + vb
@@ -2002,6 +2031,7 @@ def resolve_transition_gate_for_live(
                 "slots_b": slots_b,
                 "block_s1": block_s1,
                 "block_s2": block_s2,
+                "as_of": end_s,
             }
         )
         return result
@@ -3449,15 +3479,36 @@ def compute_transition_regime_history(
 
     ``prepare_dynamic_universe`` 와 동일 분류 로직(게이트 ON으로 일시 강제).
     GUI 이력 차트용 — 실전 ``use_transition_gate`` 와 무관하게 분류 결과를 반환한다.
+
+    표시 일자는 레짐 계산에 실제로 쓰인 FDR 일봉 일자(∩ KRX 영업일)를 따르며,
+    로컬 ``bars_1d`` 보유 일자에 묶지 않는다. 마지막 일자는 **완료된 거래일**
+    로 캡해 미완성 당일 일봉이 섞이지 않게 한다.
     """
     out: List[Dict[str, Any]] = []
     try:
         n = max(5, min(int(lookback_trading_days or 22), 60))
-        end_s = pd.to_datetime(end_date or datetime.now()).strftime("%Y-%m-%d")
-        start_s = (pd.to_datetime(end_s) - timedelta(days=75)).strftime("%Y-%m-%d")
-
         st = dict(settings or {})
         st["use_transition_gate"] = True
+
+        end_s = pd.to_datetime(end_date or datetime.now()).strftime("%Y-%m-%d")
+        if end_date is None:
+            try:
+                from reporting.krx_trading_calendar import (
+                    completed_trading_day_asof_local,
+                )
+
+                try:
+                    _buf = int(
+                        float(st.get("regime_display_eod_buffer_minutes", 30) or 30)
+                    )
+                except (TypeError, ValueError):
+                    _buf = 30
+                end_s = completed_trading_day_asof_local(
+                    datetime.now(), eod_buffer_minutes=_buf
+                ).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        start_s = (pd.to_datetime(end_s) - timedelta(days=75)).strftime("%Y-%m-%d")
 
         def _silent(*_a: Any, **_k: Any) -> None:
             pass
@@ -3465,14 +3516,20 @@ def compute_transition_regime_history(
         _result = _compute_transition_regime_map_fdr(st, data_manager, start_s, end_s, _silent)
         regime_map: Dict[str, str] = dict(_result or {})
 
+        # KRX 영업일과의 교집합만 사용 (FDR 이상치 일자 방어). 캘린더 실패 시 맵 그대로.
         try:
-            td_list = list(data_manager.get_trading_days(start_s, end_s) or [])
-        except Exception:
-            td_list = sorted(regime_map.keys())
+            from reporting.krx_trading_calendar import trading_days_inclusive
 
-        display_days = [d for d in td_list if d in regime_map][-n:]
-        if not display_days:
-            display_days = sorted(regime_map.keys())[-n:]
+            krx_set = {d.strftime("%Y-%m-%d") for d in trading_days_inclusive(start_s, end_s)}
+        except Exception:
+            krx_set = set()
+
+        cand = sorted(k for k in regime_map.keys() if k <= end_s)
+        if krx_set:
+            filtered = [d for d in cand if d in krx_set]
+            if filtered:
+                cand = filtered
+        display_days = cand[-n:]
 
         labels = {
             "OFF": "유지",

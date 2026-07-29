@@ -6,7 +6,7 @@ KRX(XKRX) 거래일 판정 — pandas_market_calendars 고정 사용.
 from __future__ import annotations
 
 import warnings
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, List, Optional
 
 try:
@@ -134,6 +134,44 @@ def required_eod_bar_date_asof_local(now: Optional[datetime] = None) -> date:
         return prev if prev is not None else d
     except Exception:
         return d
+
+
+def completed_trading_day_asof_local(
+    now: Optional[datetime] = None,
+    *,
+    eod_buffer_minutes: int = 30,
+) -> date:
+    """
+    레짐·전환 게이트용: 마지막으로 **완료된** 거래일.
+
+    - 비거래일: 직전 거래일
+    - 거래일 · 장마감(15:30)+버퍼 이전(장전·장중·직후): 직전 거래일
+    - 거래일 · 15:30+버퍼 이후: 당일
+
+    백테가 전일(ref) 레짐으로 당일을 도는 것과 맞춰, 실시간에서
+    미완성 당일 일봉으로 HARD↔OFF가 바뀌지 않게 한다.
+    """
+    t = now or datetime.now()
+    d = t.date()
+    try:
+        buf = max(0, min(int(eod_buffer_minutes), 180))
+    except (TypeError, ValueError):
+        buf = 30
+    try:
+        if not is_trading_day(d):
+            prev = previous_trading_day(d)
+            return prev if prev is not None else d
+        due = datetime.combine(d, time(15, 30, 0)) + timedelta(minutes=buf)
+        if t >= due:
+            return d
+        prev = previous_trading_day(d)
+        return prev if prev is not None else d
+    except Exception:
+        try:
+            prev = previous_trading_day(d)
+            return prev if prev is not None else d
+        except Exception:
+            return d
 
 
 def required_eod_bar_datetime_asof_local(now: Optional[datetime] = None) -> Optional[datetime]:

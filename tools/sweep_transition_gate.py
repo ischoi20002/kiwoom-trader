@@ -47,7 +47,6 @@ _COMMON: Dict[str, Any] = {
     "use_chop_gate": False,
     "use_stress_gate": False,
     "use_transition_gate": True,
-    "transition_tiered_response": True,
     "transition_soft_slots_a": 6,
     "transition_soft_slots_b": 6,
     "transition_share_delta3_max": -10.0,
