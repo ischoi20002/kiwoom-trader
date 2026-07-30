@@ -345,6 +345,18 @@ def evaluate_close_now_s1_at_m1_idx(
         )
 
         track_ok = TradingStrategy.track_signal_match_allows(settings, sig_type, ct)
+        if track_ok and TradingStrategy.simultaneous_type_a_blocked(
+            settings, last_sig, sig_type
+        ):
+            track_ok = False
+            out["ok"] = True
+            out["signal"] = bool(signal_on)
+            out["ready"] = bool(ready_on)
+            out["sig_type"] = sig_type
+            out["indicator_row"] = last_sig
+            out["can_execute"] = False
+            out["reason"] = "simul_type_a_blocked"
+            return out
 
         out["ok"] = True
         out["signal"] = bool(signal_on)
@@ -510,6 +522,9 @@ def evaluate_bt_hp_s1_new_entry_only(
         ct = str(code_track or "AB").strip().upper()
         if not TradingStrategy.track_signal_match_allows(settings, sig_type, ct):
             out["reason"] = "track_mismatch"
+            return out
+        if TradingStrategy.simultaneous_type_a_blocked(settings, ind, sig_type):
+            out["reason"] = "simul_type_a_blocked"
             return out
 
         use_sb_a, use_sb_b, sb_ba, sb_vp = _read_sb_flags(settings)

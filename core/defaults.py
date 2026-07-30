@@ -228,6 +228,12 @@ DEFAULT_SETTINGS = {
     "same_bar_sig_priority": "prefer_a",
     # 동시신호(A+B) 봉에서 선정 트랙(A/B)에 맞는 신호로 확정 — 트랙 불일치 폐기 방지
     "same_bar_sig_prefer_sel_track": False,
+    # 동시신호에서 트랙 B만 TYPE_B로 확정(비동수에서 prefer_a로 막히던 B 진입 허용)
+    "same_bar_sig_allow_track_b": False,
+    # 동시신호 봉에서 확정 TYPE_A 매수만 차단(TYPE_B·동수 타이브레이크는 현행 유지)
+    "same_bar_block_type_a": False,
+    # 동시신호(A+B) 봉 S1 매수 전면 차단(TYPE_A·B 모두)
+    "same_bar_block_simul": False,
     # 동시신호 봉 보유 A/B 동수 타이브레이크(B 우선) 적용 범위:
     # always / empty_only / when_held / off
     "s1_simul_balance_tie_mode": "always",

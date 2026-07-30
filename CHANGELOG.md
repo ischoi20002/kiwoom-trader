@@ -13,6 +13,12 @@
 
 ---
 
+## 0.15.13 (2026-07-30)
+
+- **동시신호 초안**: `confluence` 제거, `prefer_track`(선정 트랙 일치) 추가. 구 `confluence` 설정은 `prefer_a`로 읽음.
+- **설정 UI**: 실험용 토글 제거(트랙 B만 동시신호 허용 · TYPE_A 차단 · 전면 차단). 기본은 OFF 유지.
+- 동시신호 A만/전면 차단·트랙 B 허용 FULL+OOS 비교 → OOS 이점 없음 또는 MDD 악화 → **현행(prefer_a + 동수 B) 유지**.
+
 ## 0.15.12 (2026-07-30)
 
 - **트랙 불일치 가시화**: S1 매수 스킵 시 `signal_buy_skipped(track_signal_mismatch)` 세션 로그. 감시 표시는 `타점(A) · 트랙B 제외` 형태.

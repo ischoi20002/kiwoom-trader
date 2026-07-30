@@ -726,6 +726,53 @@ class TradingStrategy:
         return sig_type
 
     @staticmethod
+    def _row_is_simultaneous_ab(row: Any) -> bool:
+        """지표 행이 동시신호(A+B) 봉인지."""
+        try:
+            if row is None or not hasattr(row, "get"):
+                return False
+            return bool(row.get("S1_Simultaneous_AB", False))
+        except Exception:
+            return False
+
+    @staticmethod
+    def simultaneous_buy_blocked(
+        settings: Optional[dict], row: Any, sig_type: Any = None
+    ) -> bool:
+        """
+        동시신호(A+B) 봉의 S1 매수 차단 여부.
+
+        - ``same_bar_block_simul``: TYPE_A·B 전부 차단
+        - ``same_bar_block_type_a``: 확정이 TYPE_A 일 때만 차단
+        """
+        try:
+            if not TradingStrategy._row_is_simultaneous_ab(row):
+                return False
+        except Exception:
+            return False
+        try:
+            if bool((settings or {}).get("same_bar_block_simul", False)):
+                return True
+        except Exception:
+            pass
+        try:
+            if not bool((settings or {}).get("same_bar_block_type_a", False)):
+                return False
+        except Exception:
+            return False
+        try:
+            return str(sig_type or "").strip().upper() == "TYPE_A"
+        except Exception:
+            return False
+
+    @staticmethod
+    def simultaneous_type_a_blocked(
+        settings: Optional[dict], row: Any, sig_type: Any
+    ) -> bool:
+        """하위 호환 — ``simultaneous_buy_blocked`` 위임."""
+        return TradingStrategy.simultaneous_buy_blocked(settings, row, sig_type)
+
+    @staticmethod
     def track_signal_match_allows(
         settings: Optional[dict], sig_type: Any, code_track: Any
     ) -> bool:
@@ -760,18 +807,36 @@ class TradingStrategy:
             return False
 
     @staticmethod
+    def _same_bar_allow_track_b_enabled(settings: Optional[dict]) -> bool:
+        """
+        동시신호 봉에서 선정 트랙 B 종목만 TYPE_B 로 확정할지.
+
+        ``prefer_a`` 초안이면 비동수 보유 시 트랙 B 가 TYPE_A 로 확정되어
+        교차검증에 막힌다. 이 플래그는 그 경우만 TYPE_B 로 살려 매수를 허용한다.
+        트랙 A·동수 타이브레이크 동작은 바꾸지 않는다.
+        """
+        try:
+            return bool((settings or {}).get("same_bar_sig_allow_track_b", False))
+        except Exception:
+            return False
+
+    @staticmethod
     def effective_s1_sig_type_for_buy(
         settings: dict, row, holdings: dict, code_track: Any = None
     ) -> str:
         """15분 행·실시간 last_sig 등에서 Sig_Type 확정.
 
-        동시신호(S1_Simultaneous_AB)면 현재 same_bar / 브레드스 런타임 우선순위로
-        TYPE_A·B를 재결정한 뒤, 보유 동수 타이브레이크(B 우선)를 적용한다.
+        동시신호(S1_Simultaneous_AB)면 현재 same_bar 우선순위
+        (prefer_a / prefer_b / prefer_track)로 TYPE_A·B를 재결정한 뒤,
+        보유 동수 타이브레이크(B 우선)를 적용한다.
 
         ``same_bar_sig_prefer_sel_track`` 이 켜져 있고 ``code_track`` 이 A/B 단일이면,
         동시신호 봉에 한해 **그 트랙의 신호로 확정**한다. 동시신호 봉은 A·B가 모두
         성립한 것이므로, 우선순위 규칙 때문에 반대편 타입으로 확정되어
         ``track_signal_match_allows`` 에서 폐기되는 기회 손실을 막는다.
+
+        ``same_bar_sig_allow_track_b`` 는 트랙 B 만 TYPE_B 로 확정한다
+        (트랙 A 의 prefer_a·동수 차단은 유지).
         """
         try:
             if row is None:
@@ -794,30 +859,33 @@ class TradingStrategy:
                 except Exception:
                     pass
                 try:
+                    if TradingStrategy._same_bar_allow_track_b_enabled(s):
+                        ct = str(code_track or "").strip().upper()
+                        if ct == "B":
+                            return "TYPE_B"
+                except Exception:
+                    pass
+                try:
                     from strategy.signals import _normalize_same_bar_priority
 
                     pri = _normalize_same_bar_priority(s)
                 except Exception:
-                    pri = "confluence"
+                    pri = "prefer_a"
                 if pri == "prefer_b":
                     base = "TYPE_B"
-                elif pri == "prefer_a":
-                    base = "TYPE_A"
-                else:
-                    # confluence: Met_A/Tot_A vs Met_B/Tot_B
+                elif pri == "prefer_track":
+                    # 선정 트랙과 일치(A→TYPE_A, B→TYPE_B). AB/미지정이면 A.
                     try:
-                        ma = float(row.get("Met_A", row.get("met_a", 0)) or 0)
-                        ta = float(row.get("Tot_A", row.get("tot_a", 1)) or 1)
-                        mb = float(row.get("Met_B", row.get("met_b", 0)) or 0)
-                        tb = float(row.get("Tot_B", row.get("tot_b", 1)) or 1)
-                        ra = ma / ta if ta > 0 else 0.0
-                        rb = mb / tb if tb > 0 else 0.0
-                        if rb > ra:
-                            base = "TYPE_B"
-                        else:
-                            base = "TYPE_A"
+                        ct = str(code_track or "").strip().upper()
                     except Exception:
-                        pass
+                        ct = ""
+                    if ct == "B":
+                        base = "TYPE_B"
+                    else:
+                        base = "TYPE_A"
+                else:
+                    # prefer_a (및 구 confluence 정규화 결과)
+                    base = "TYPE_A"
             out = TradingStrategy._s1_sig_type_simultaneous_balance_tie_b(
                 settings, base, sim, holdings
             )

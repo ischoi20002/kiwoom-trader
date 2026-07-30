@@ -687,7 +687,7 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "③ Stage 1 진입 (공통/A/B)",
         "[3] 1단계 진입 (S1) — 감시 후 매수 신호",
         "동시신호(A+B) 타입 확정",
-        "① 초안 선택",
+        "① 초안 선택 (prefer_a / prefer_b / prefer_track)",
         "same_bar_sig_priority",
     ),
     SettingUiRow(

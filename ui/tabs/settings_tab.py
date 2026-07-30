@@ -1251,13 +1251,14 @@ class SettingsTab:
         ).grid(row=r_sb, column=1, sticky='w', pady=4)
         try:
             if 'same_bar_sig_priority' not in self.conf_vars:
-                _d = str(self.default_settings.get('same_bar_sig_priority', 'confluence'))
-                self.conf_vars['same_bar_sig_priority'] = tk.StringVar(
-                    value=str(self.app.settings.get('same_bar_sig_priority', _d)).strip().lower()
-                )
-            _sb_vals = ('prefer_a', 'prefer_b', 'confluence')
+                _d = str(self.default_settings.get('same_bar_sig_priority', 'prefer_a'))
+                _cur = str(self.app.settings.get('same_bar_sig_priority', _d)).strip().lower()
+                if _cur == 'confluence':
+                    _cur = 'prefer_a'
+                self.conf_vars['same_bar_sig_priority'] = tk.StringVar(value=_cur)
+            _sb_vals = ('prefer_a', 'prefer_b', 'prefer_track')
             if self.conf_vars['same_bar_sig_priority'].get() not in _sb_vals:
-                self.conf_vars['same_bar_sig_priority'].set('confluence')
+                self.conf_vars['same_bar_sig_priority'].set('prefer_a')
             cb_samebar = ttk.Combobox(
                 strat_f,
                 textvariable=self.conf_vars['same_bar_sig_priority'],
@@ -1268,7 +1269,11 @@ class SettingsTab:
             cb_samebar.grid(row=r_sb, column=2, sticky='w', padx=5)
             ttk.Label(
                 strat_f,
-                text='A·B 동시 봉의 임시 우승자. prefer_a=A · prefer_b=B · confluence=합치도 높은쪽(동점 A)',
+                text=(
+                    'A·B 동시 봉의 임시 우승자. '
+                    'prefer_a=A · prefer_b=B · prefer_track=선정트랙(A→A, B→B). '
+                    '이후 ② 동수면 B 덮기 적용'
+                ),
                 style='Dimmed.TLabel',
             ).grid(row=r_sb, column=5, sticky='w', padx=10)
 

@@ -736,6 +736,10 @@ class DynamicBacktester:
                                     self.settings, sig_type, code_track
                                 ):
                                     can_execute = False
+                                elif TradingStrategy.simultaneous_type_a_blocked(
+                                    self.settings, last_sig, sig_type
+                                ):
+                                    can_execute = False
                                 
                                 # [v31.5] Smart Buy (Supply/Demand Confirmation)
                                 use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
@@ -1471,6 +1475,10 @@ class DynamicBacktester:
                     
                     if not TradingStrategy.track_signal_match_allows(
                         self.settings, sig_type, code_track
+                    ):
+                        continue
+                    if (not is_addon_target) and TradingStrategy.simultaneous_type_a_blocked(
+                        self.settings, indicator_to_use, sig_type
                     ):
                         continue
                     

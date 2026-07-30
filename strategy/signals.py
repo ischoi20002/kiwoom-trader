@@ -6,14 +6,17 @@ def _normalize_same_bar_priority(settings: dict | None) -> str:
     """동일 봉 A+B 동시 신호 시 Sig_Type 우선순위 (settings 키: same_bar_sig_priority)."""
     try:
         if settings is None:
-            return "confluence"
-        raw = settings.get("same_bar_sig_priority", "confluence")
+            return "prefer_a"
+        raw = settings.get("same_bar_sig_priority", "prefer_a")
         p = str(raw).strip().lower()
-        if p in ("prefer_b", "prefer_a", "confluence"):
+        # 구 confluence → prefer_a (합치도 초안 폐기)
+        if p == "confluence":
+            return "prefer_a"
+        if p in ("prefer_b", "prefer_a", "prefer_track"):
             return p
-        return "confluence"
+        return "prefer_a"
     except Exception:
-        return "confluence"
+        return "prefer_a"
 
 
 def _compute_sig_type_column(
@@ -25,35 +28,31 @@ def _compute_sig_type_column(
 ) -> np.ndarray:
     """
     Sig_Type 열 산출. 동일 봉에서 signal_a·signal_b가 모두 True일 때만 priority 규칙 적용.
-    - confluence: Met_Ratio(합치도)가 더 큰 타입(동점이면 TYPE_A — NEUTRAL·Track A 정합성)
     - prefer_a / prefer_b: 동시 만족 봉에서 각각 고정
+    - prefer_track: 종목 트랙은 매수 확정 시점에 반영(여기선 열 산출용으로 prefer_a 와 동일)
     """
     try:
         sa = np.asarray(signal_a, dtype=bool)
         sb = np.asarray(signal_b, dtype=bool)
-        ra = np.asarray(ratio_a, dtype=float)
-        rb = np.asarray(ratio_b, dtype=float)
         only_b = sb & ~sa
         only_a = sa & ~sb
         both = sa & sb
         out = np.where(only_b, "TYPE_B", np.where(only_a, "TYPE_A", "NONE"))
-        pri = (priority or "confluence").strip().lower()
-        if pri not in ("prefer_b", "prefer_a", "confluence"):
-            pri = "confluence"
+        pri = (priority or "prefer_a").strip().lower()
+        if pri == "confluence":
+            pri = "prefer_a"
+        if pri not in ("prefer_b", "prefer_a", "prefer_track"):
+            pri = "prefer_a"
         if pri == "prefer_b":
             return np.where(both, "TYPE_B", out)
-        if pri == "prefer_a":
-            return np.where(both, "TYPE_A", out)
-        # confluence
-        valid = np.isfinite(ra) & np.isfinite(rb)
-        both_valid = both & valid
-        both_invalid = both & ~valid
-        out = np.where(both_invalid, "TYPE_B", out)
-        # both_valid: rb>ra → B, 그 외(ra>rb 또는 동점) → A
-        sub = np.where(both_valid & (rb > ra), "TYPE_B", np.where(both_valid, "TYPE_A", "NONE"))
-        return np.where(both_valid, sub, out)
+        # prefer_a · prefer_track(열 단계): 동시 봉은 TYPE_A
+        return np.where(both, "TYPE_A", out)
     except Exception:
-        return np.where(np.asarray(signal_b, dtype=bool), "TYPE_B", np.where(np.asarray(signal_a, dtype=bool), "TYPE_A", "NONE"))
+        return np.where(
+            np.asarray(signal_b, dtype=bool),
+            "TYPE_B",
+            np.where(np.asarray(signal_a, dtype=bool), "TYPE_A", "NONE"),
+        )
 
 
 def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bool:

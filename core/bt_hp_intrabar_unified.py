@@ -505,6 +505,10 @@ def evaluate_bt_hp_intrabar_unified(
                         sig_type == "TYPE_B" and ct == "A"
                     ):
                         continue
+                    if (not is_addon_target) and TradingStrategy.simultaneous_type_a_blocked(
+                        settings, ind_d, sig_type
+                    ):
+                        continue
 
                     use_sb_for_type = bool(use_sb_a) if (
                         sig_type == "TYPE_A" and not is_addon_target

@@ -160,6 +160,34 @@ class SignalCallbacksService:
                     pass
                 return False
 
+            # 동시신호에서 확정 타입이 TYPE_A 이면 차단(TYPE_B 경로는 현행 유지)
+            if TradingStrategy.simultaneous_type_a_blocked(
+                self.app.settings, row, sig_type
+            ):
+                try:
+                    if isinstance(info, dict):
+                        info["confluence"] = "동시신호 A 차단"
+                        info["status_text"] = "동시신호 A 차단"
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "signal_buy_skipped",
+                            {
+                                "code": code,
+                                "name": name,
+                                "reason": "simul_type_a_blocked",
+                                "sig_type": str(sig_type),
+                                "sel_track": tr,
+                                "price": float(now_price),
+                            },
+                        )
+                except Exception:
+                    pass
+                return False
+
             if bool(self.app.settings.get("transition_runtime_block_s1", False)):
                 try:
                     sl = getattr(self.app, "session_logger", None)

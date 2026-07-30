@@ -360,6 +360,31 @@ class SignalEngine:
                 settings, row, holdings, tr
             )
             if TradingStrategy.track_signal_match_allows(settings, eff, tr):
+                if TradingStrategy.simultaneous_type_a_blocked(settings, row, eff):
+                    try:
+                        if isinstance(info, dict):
+                            info["confluence"] = "동시신호 A 차단"
+                            info["status_text"] = "동시신호 A 차단"
+                    except Exception:
+                        pass
+                    if log_skip:
+                        try:
+                            sl = getattr(self.app, "session_logger", None)
+                            if sl:
+                                sl.log(
+                                    "signal_buy_skipped",
+                                    {
+                                        "code": str(code).zfill(6),
+                                        "name": str((info or {}).get("name", "")),
+                                        "reason": "simul_type_a_blocked",
+                                        "sig_type": str(eff),
+                                        "sel_track": tr,
+                                        "price": float(now_price) if now_price else None,
+                                    },
+                                )
+                        except Exception:
+                            pass
+                    return False
                 return True
             try:
                 from core.signal_callbacks_service import SignalCallbacksService
