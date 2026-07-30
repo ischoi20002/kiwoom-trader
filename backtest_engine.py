@@ -664,11 +664,34 @@ class TradingStrategy:
             return False
 
     @staticmethod
+    def _s1_simul_balance_tie_mode(settings: Optional[dict]) -> str:
+        """
+        동시신호 봉의 보유 A/B 동수 타이브레이크 적용 범위.
+
+        - ``always``    : 보유가 없어도 동수(0=0)면 TYPE_B (구버전 동작)
+        - ``empty_only``: 보유 0:0 일 때만 TYPE_B (1:1·2:2 부터는 우선순위 유지)
+        - ``when_held`` : 보유가 1건 이상일 때만 동수 타이브레이크 적용
+        - ``off``       : 타이브레이크 미적용(우선순위 결과 유지)
+        """
+        try:
+            v = str((settings or {}).get("s1_simul_balance_tie_mode", "always"))
+            v = v.strip().lower()
+            if v in ("always", "empty_only", "when_held", "off"):
+                return v
+        except Exception:
+            pass
+        return "always"
+
+    @staticmethod
     def _s1_sig_type_simultaneous_balance_tie_b(
         settings: dict, sig_type: str, simultaneous_ab: bool, holdings: dict
     ) -> str:
         """
         A·B 동시 신호이고 보유 TYPE_A / TYPE_B 가 동수이면 TYPE_B 우선.
+
+        보유가 0건이면 항상 ``0 == 0`` 이 되어 동시신호가 무조건 TYPE_B 로 확정되는데,
+        이는 A/B 보유 균형을 맞추려는 본래 취지와 무관한 퇴화 동작이다.
+        ``s1_simul_balance_tie_mode`` 로 적용 범위를 제어한다.
         """
         try:
             if not bool(simultaneous_ab):
@@ -677,6 +700,9 @@ class TradingStrategy:
             use_a = bool(s.get("use_type_a", True))
             use_b = bool(s.get("use_type_b", False))
             if not (use_a and use_b):
+                return sig_type
+            mode = TradingStrategy._s1_simul_balance_tie_mode(s)
+            if mode == "off":
                 return sig_type
             n_a = sum(
                 1
@@ -688,6 +714,11 @@ class TradingStrategy:
                 for h in (holdings or {}).values()
                 if "TYPE_B" in str(h.get("sig_type", "") or "").upper()
             )
+            if mode == "when_held" and (n_a + n_b) <= 0:
+                return sig_type
+            # empty_only: 빈 포트(0:0)에서만 B 우선 — 1:1·2:2 는 Type A 허용
+            if mode == "empty_only" and (n_a + n_b) > 0:
+                return sig_type
             if n_a == n_b:
                 return "TYPE_B"
         except Exception:
@@ -719,11 +750,28 @@ class TradingStrategy:
             return True
 
     @staticmethod
-    def effective_s1_sig_type_for_buy(settings: dict, row, holdings: dict) -> str:
+    def _same_bar_prefer_sel_track_enabled(settings: Optional[dict]) -> bool:
+        """동시신호 봉에서 선정 트랙(A/B)에 맞는 신호를 우선 확정할지."""
+        try:
+            return bool(
+                (settings or {}).get("same_bar_sig_prefer_sel_track", False)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def effective_s1_sig_type_for_buy(
+        settings: dict, row, holdings: dict, code_track: Any = None
+    ) -> str:
         """15분 행·실시간 last_sig 등에서 Sig_Type 확정.
 
         동시신호(S1_Simultaneous_AB)면 현재 same_bar / 브레드스 런타임 우선순위로
         TYPE_A·B를 재결정한 뒤, 보유 동수 타이브레이크(B 우선)를 적용한다.
+
+        ``same_bar_sig_prefer_sel_track`` 이 켜져 있고 ``code_track`` 이 A/B 단일이면,
+        동시신호 봉에 한해 **그 트랙의 신호로 확정**한다. 동시신호 봉은 A·B가 모두
+        성립한 것이므로, 우선순위 규칙 때문에 반대편 타입으로 확정되어
+        ``track_signal_match_allows`` 에서 폐기되는 기회 손실을 막는다.
         """
         try:
             if row is None:
@@ -736,6 +784,15 @@ class TradingStrategy:
             use_a = bool(s.get("use_type_a", True))
             use_b = bool(s.get("use_type_b", False))
             if sim and use_a and use_b:
+                try:
+                    if TradingStrategy._same_bar_prefer_sel_track_enabled(s):
+                        ct = str(code_track or "").strip().upper()
+                        if ct == "A":
+                            return "TYPE_A"
+                        if ct == "B":
+                            return "TYPE_B"
+                except Exception:
+                    pass
                 try:
                     from strategy.signals import _normalize_same_bar_priority
 

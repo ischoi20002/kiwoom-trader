@@ -324,6 +324,79 @@ class SignalEngine:
         except Exception:
             return False
 
+    def _apply_s1_track_match_gate(
+        self,
+        code: str,
+        info: Dict[str, Any],
+        last_sig: Any,
+        *,
+        is_buy: bool,
+        now_price: float = 0.0,
+        log_skip: bool = False,
+    ) -> bool:
+        """
+        선정 트랙(sel_track)과 확정 Sig_Type 교차 검증.
+
+        불일치면 ``is_buy`` 를 False 로 내리고 감시 문구를
+        ``타점(A) · 트랙B 제외`` 형태로 갱신한다.
+        ``log_skip=True`` 이면 세션에 ``signal_buy_skipped`` 를 남긴다
+        (15분 확정 경로처럼 콜백에 도달하지 않고 조기 return 할 때).
+        """
+        if not is_buy:
+            return False
+        try:
+            settings = getattr(self.app, "settings", None) or {}
+            tr = str(
+                (info or {}).get("sel_track", (info or {}).get("SelTrack", "AB"))
+                or "AB"
+            ).strip().upper()
+            holdings = {}
+            try:
+                holdings = getattr(self.app.portfolio, "virtual_positions", None) or {}
+            except Exception:
+                holdings = {}
+            row = last_sig if isinstance(last_sig, dict) else {}
+            eff = TradingStrategy.effective_s1_sig_type_for_buy(
+                settings, row, holdings, tr
+            )
+            if TradingStrategy.track_signal_match_allows(settings, eff, tr):
+                return True
+            try:
+                from core.signal_callbacks_service import SignalCallbacksService
+
+                status = SignalCallbacksService.format_track_mismatch_status(tr, eff)
+            except Exception:
+                status = f"타점 · 트랙{tr} 제외"
+            try:
+                if isinstance(info, dict):
+                    info["confluence"] = status
+                    info["status_text"] = status
+            except Exception:
+                pass
+            if log_skip:
+                try:
+                    from core.signal_callbacks_service import SignalCallbacksService
+
+                    raw = ""
+                    try:
+                        raw = str(row.get("Sig_Type", "") or "")
+                    except Exception:
+                        raw = ""
+                    SignalCallbacksService.log_track_signal_mismatch(
+                        self.app,
+                        code=str(code).zfill(6),
+                        name=str((info or {}).get("name", "")),
+                        sel_track=tr,
+                        sig_type=eff,
+                        raw_sig_type=raw,
+                        price=float(now_price) if now_price else None,
+                    )
+                except Exception:
+                    pass
+            return False
+        except Exception:
+            return bool(is_buy)
+
     def _s1_presignal_ready_for_gate(self, last_sig: dict[str, Any]) -> bool:
         """
         고정 프리시그널 게이트에 넣을 Ready 초기값.
@@ -814,6 +887,17 @@ class SignalEngine:
                     )
             except Exception:
                 pass
+
+            # 선정 트랙 ↔ 신호 타입 불일치: 주문·쿨다운 소모 전에 차단
+            if not self._apply_s1_track_match_gate(
+                nk,
+                info,
+                last_sig,
+                is_buy=True,
+                now_price=float(now_price),
+                log_skip=True,
+            ):
+                return
 
             # 주문 패스트패스(Tk 메인 큐 우회) — 틱 경로와 분리
             try:
@@ -2798,6 +2882,21 @@ class SignalEngine:
                         info["confluence"] = "⏳ ATR_SL 재진입 쿨다운"
                 except Exception:
                     pass
+
+                # 선정 트랙 ↔ 신호 타입 불일치: 주문·「타점 포착」표시 전에 차단
+                # (세션 로그는 15분 확정/콜백 경로에서 남김 — 틱마다 중복 기록 방지)
+                if is_buy and last_sig is not None:
+                    try:
+                        is_buy = self._apply_s1_track_match_gate(
+                            code,
+                            info,
+                            last_sig,
+                            is_buy=True,
+                            now_price=float(now_price) if now_price else 0.0,
+                            log_skip=False,
+                        )
+                    except Exception:
+                        pass
 
                 # 쿨타임 및 중복 진입 방지
                 _cool_sec = self._s1_buy_signal_cooldown_sec()

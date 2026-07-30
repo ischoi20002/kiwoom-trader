@@ -261,9 +261,16 @@ class DynamicBacktester:
         except Exception:
             pass
 
-    def _effective_s1_sig_type_for_buy(self, row: Any) -> str:
-        """15분 행·1분 indicator dict 등에서 Sig_Type 확정(동시신호+보유 A/B 동점 시 B 우선)."""
-        return TradingStrategy.effective_s1_sig_type_for_buy(self.settings, row, self.holdings)
+    def _effective_s1_sig_type_for_buy(
+        self, row: Any, code_track: Any = None
+    ) -> str:
+        """15분 행·1분 indicator dict 등에서 Sig_Type 확정(동시신호+보유 A/B 동점 시 B 우선).
+
+        ``code_track`` 은 ``same_bar_sig_prefer_sel_track`` 이 켜졌을 때만 사용된다.
+        """
+        return TradingStrategy.effective_s1_sig_type_for_buy(
+            self.settings, row, self.holdings, code_track
+        )
 
     def _bootstrap_portfolio_data(
         self,
@@ -721,8 +728,10 @@ class DynamicBacktester:
                                 if bool(self.settings.get("transition_runtime_block_s1", False)):
                                     can_execute = False
                                 # [Phase 2] Track-Signal 교차 검증 (enforce_track_signal_match)
-                                sig_type = self._effective_s1_sig_type_for_buy(last_sig)
                                 code_track = track_map.get(code, 'A')
+                                sig_type = self._effective_s1_sig_type_for_buy(
+                                    last_sig, code_track
+                                )
                                 if not TradingStrategy.track_signal_match_allows(
                                     self.settings, sig_type, code_track
                                 ):
@@ -762,7 +771,9 @@ class DynamicBacktester:
                             
                             if can_execute:
                                 if h_info is None and not is_addon_target:
-                                    sig_type = self._effective_s1_sig_type_for_buy(last_sig)
+                                    sig_type = self._effective_s1_sig_type_for_buy(
+                                        last_sig, track_map.get(code, 'A')
+                                    )
                                 else:
                                     sig_type = str(last_sig.get('Sig_Type', 'TYPE_B'))
                                 use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \
@@ -1449,13 +1460,15 @@ class DynamicBacktester:
                         self.settings.get("transition_runtime_block_s1", False)
                     ):
                         continue
+                    # [Phase 2] Track-Signal 교차 검증 (1분봉 경로)
+                    code_track = getattr(self, '_current_track_map', {}).get(code, 'A')
                     if h_info is None:
-                        sig_type = self._effective_s1_sig_type_for_buy(indicator_to_use)
+                        sig_type = self._effective_s1_sig_type_for_buy(
+                            indicator_to_use, code_track
+                        )
                     else:
                         sig_type = str(indicator_to_use.get('Sig_Type', 'TYPE_B'))
                     
-                    # [Phase 2] Track-Signal 교차 검증 (1분봉 경로)
-                    code_track = getattr(self, '_current_track_map', {}).get(code, 'A')
                     if not TradingStrategy.track_signal_match_allows(
                         self.settings, sig_type, code_track
                     ):

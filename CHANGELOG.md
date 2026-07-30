@@ -13,6 +13,13 @@
 
 ---
 
+## 0.15.12 (2026-07-30)
+
+- **트랙 불일치 가시화**: S1 매수 스킵 시 `signal_buy_skipped(track_signal_mismatch)` 세션 로그. 감시 표시는 `타점(A) · 트랙B 제외` 형태.
+- **동시신호 타입 확정**: `same_bar_sig_prefer_sel_track`(트랙으로 바로 확정), `s1_simul_balance_tie_mode`(always/empty_only/when_held/off). 기본은 현행(`prefer` OFF · `always`).
+- FULL+OOS: 트랙 우선·타이브레이크 완화는 OOS 개선 없음 → **기본값 유지**. `empty_only`는 OOS 동일·FULL −3.7%p.
+- **설정 UI**: 동시신호 확정을 ①초안 → ②동수면 B로 덮기 → ③트랙으로 바로 확정 순서로 표기.
+
 ## 0.15.11 (2026-07-29)
 
 - **레짐 표시**: 실시간·이력은 **완료 거래일** 기준(`completed_trading_day_asof_local`). 장중 미완성 당일 일봉으로 HARD↔OFF가 뒤집히지 않음.

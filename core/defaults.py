@@ -226,6 +226,11 @@ DEFAULT_SETTINGS = {
     "use_atr_trailing_stop_a": True,
     "use_type_b": True,
     "same_bar_sig_priority": "prefer_a",
+    # 동시신호(A+B) 봉에서 선정 트랙(A/B)에 맞는 신호로 확정 — 트랙 불일치 폐기 방지
+    "same_bar_sig_prefer_sel_track": False,
+    # 동시신호 봉 보유 A/B 동수 타이브레이크(B 우선) 적용 범위:
+    # always / empty_only / when_held / off
+    "s1_simul_balance_tie_mode": "always",
     "buy_rsi_max_b": 80.0,
     "use_smart_buy_b": False,
     "use_type_b_vol": True,

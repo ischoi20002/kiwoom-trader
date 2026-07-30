@@ -337,13 +337,13 @@ def evaluate_close_now_s1_at_m1_idx(
         except Exception:
             pass
 
+        ct = str(code_track or "AB").strip().upper()
         sig_type = str(
             TradingStrategy.effective_s1_sig_type_for_buy(
-                settings, last_sig, holdings or {}
+                settings, last_sig, holdings or {}, ct
             )
         )
 
-        ct = str(code_track or "AB").strip().upper()
         track_ok = TradingStrategy.track_signal_match_allows(settings, sig_type, ct)
 
         out["ok"] = True
@@ -491,7 +491,10 @@ def evaluate_bt_hp_s1_new_entry_only(
                 sig_on = False
             if sig_on:
                 sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
-                    settings, ind, holdings or {}
+                    settings,
+                    ind,
+                    holdings or {},
+                    str(code_track or "AB").strip().upper(),
                 )
 
         out["ok"] = True

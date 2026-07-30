@@ -482,7 +482,7 @@ def evaluate_bt_hp_intrabar_unified(
                     if is_buy_signal and pos_sim is None:
                         sig_type = str(
                             TradingStrategy.effective_s1_sig_type_for_buy(
-                                settings, ind_d, {}
+                                settings, ind_d, {}, ct
                             )
                         )
                 elif is_addon_target:
@@ -495,7 +495,7 @@ def evaluate_bt_hp_intrabar_unified(
                     ):
                         sig_type = str(
                             TradingStrategy.effective_s1_sig_type_for_buy(
-                                settings, ind_d, {}
+                                settings, ind_d, {}, ct
                             )
                         )
                     elif is_addon_target:

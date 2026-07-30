@@ -17,6 +17,59 @@ class SignalCallbacksService:
         self.app = app
         self.log = log_func or print
 
+    @staticmethod
+    def format_track_mismatch_status(sel_track: Any, sig_type: Any) -> str:
+        """
+        감시 트리용: 신호는 떴으나 선정 트랙과 불일치해 진입하지 않을 때 표시.
+        예) ``타점(A) · 트랙B 제외``
+        """
+        try:
+            st = str(sig_type or "").strip().upper()
+            if st == "TYPE_A" or st.endswith("_A"):
+                sig_lbl = "A"
+            elif st == "TYPE_B" or st.endswith("_B"):
+                sig_lbl = "B"
+            else:
+                sig_lbl = "?"
+            tr = str(sel_track or "AB").strip().upper() or "AB"
+            return f"타점({sig_lbl}) · 트랙{tr} 제외"
+        except Exception:
+            return "타점 · 트랙 불일치"
+
+    @staticmethod
+    def log_track_signal_mismatch(
+        app: Any,
+        *,
+        code: str,
+        name: str = "",
+        sel_track: Any = "AB",
+        sig_type: Any = "",
+        raw_sig_type: Any = None,
+        price: Optional[float] = None,
+    ) -> None:
+        """트랙·신호 불일치로 S1 매수를 건너뛸 때 세션 로그."""
+        try:
+            sl = getattr(app, "session_logger", None)
+            if not sl:
+                return
+            payload: dict = {
+                "code": str(code).zfill(6),
+                "name": str(name or ""),
+                "reason": "track_signal_mismatch",
+                "sel_track": str(sel_track or "").strip().upper(),
+                "sig_type": str(sig_type or ""),
+            }
+            if raw_sig_type is not None:
+                payload["raw_sig_type"] = str(raw_sig_type)
+            if price is not None:
+                try:
+                    payload["price"] = float(price)
+                except (TypeError, ValueError):
+                    pass
+            sl.log("signal_buy_skipped", payload)
+        except Exception:
+            pass
+
     def on_buy_signal_received(
         self,
         code: str,
@@ -68,19 +121,43 @@ class SignalCallbacksService:
                     except Exception:
                         pass
                     return False
-            sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
-                self.app.settings, row, self.app.portfolio.virtual_positions
-            )
-
             # CSV/선정 단계에서 SelTrack(A/B/AB)을 넣은 경우에만 백테 트랙 검증과 동일
             tr = str(
                 info.get("sel_track", info.get("SelTrack", info.get("seltrack", "AB")))
             ).strip().upper()
 
+            sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
+                self.app.settings, row, self.app.portfolio.virtual_positions, tr
+            )
+
             # 선정 트랙과 확정 신호 타입 불일치: 의도적 무시(백테와 동일)
-            if tr == "A" and sig_type == "TYPE_B":
-                return False
-            if tr == "B" and sig_type == "TYPE_A":
+            if not TradingStrategy.track_signal_match_allows(
+                self.app.settings, sig_type, tr
+            ):
+                try:
+                    raw_sig = ""
+                    try:
+                        raw_sig = str(row.get("Sig_Type", "") or "")
+                    except Exception:
+                        raw_sig = ""
+                    self.log_track_signal_mismatch(
+                        self.app,
+                        code=code,
+                        name=name,
+                        sel_track=tr,
+                        sig_type=sig_type,
+                        raw_sig_type=raw_sig,
+                        price=float(now_price),
+                    )
+                except Exception:
+                    pass
+                try:
+                    status = self.format_track_mismatch_status(tr, sig_type)
+                    if isinstance(info, dict):
+                        info["confluence"] = status
+                        info["status_text"] = status
+                except Exception:
+                    pass
                 return False
 
             if bool(self.app.settings.get("transition_runtime_block_s1", False)):

@@ -1240,17 +1240,22 @@ class SettingsTab:
         )
         add_header(strat_f, '── Type B: 돌파형 진입 조건 ──')
         add_param_row(strat_f, 'B 전용 사용', None, '', '순풍(UP) 장세 전용', toggle_key='use_type_b')
+        # 동시신호(A+B) 확정: ①초안 → ②동수 시 B 덮기 → ③트랙 바로확정(ON이면 ①② 무시)
+        add_header(strat_f, '── 동시신호(A+B) 타입 확정 ──')
         r_sb = get_next_row(strat_f)
-        ttk.Label(strat_f, text='동일 봉 A+B 동시 신호 시', font=('Malgun Gothic', 10), foreground=txt_col).grid(
-            row=r_sb, column=1, sticky='w', pady=4
-        )
+        ttk.Label(
+            strat_f,
+            text='① 초안 선택',
+            font=('Malgun Gothic', 10),
+            foreground=txt_col,
+        ).grid(row=r_sb, column=1, sticky='w', pady=4)
         try:
             if 'same_bar_sig_priority' not in self.conf_vars:
                 _d = str(self.default_settings.get('same_bar_sig_priority', 'confluence'))
                 self.conf_vars['same_bar_sig_priority'] = tk.StringVar(
                     value=str(self.app.settings.get('same_bar_sig_priority', _d)).strip().lower()
                 )
-            _sb_vals = ('confluence', 'prefer_a', 'prefer_b')
+            _sb_vals = ('prefer_a', 'prefer_b', 'confluence')
             if self.conf_vars['same_bar_sig_priority'].get() not in _sb_vals:
                 self.conf_vars['same_bar_sig_priority'].set('confluence')
             cb_samebar = ttk.Combobox(
@@ -1263,9 +1268,55 @@ class SettingsTab:
             cb_samebar.grid(row=r_sb, column=2, sticky='w', padx=5)
             ttk.Label(
                 strat_f,
-                text='Sig_Type (합치도·A고정·B고정=구버전)',
+                text='A·B 동시 봉의 임시 우승자. prefer_a=A · prefer_b=B · confluence=합치도 높은쪽(동점 A)',
                 style='Dimmed.TLabel',
             ).grid(row=r_sb, column=5, sticky='w', padx=10)
+
+            r_tie = get_next_row(strat_f)
+            ttk.Label(
+                strat_f,
+                text='② 동수면 B로 덮기',
+                font=('Malgun Gothic', 10),
+                foreground=txt_col,
+            ).grid(row=r_tie, column=1, sticky='w', pady=4)
+            if 's1_simul_balance_tie_mode' not in self.conf_vars:
+                _dt = str(
+                    self.default_settings.get('s1_simul_balance_tie_mode', 'always')
+                )
+                self.conf_vars['s1_simul_balance_tie_mode'] = tk.StringVar(
+                    value=str(
+                        self.app.settings.get('s1_simul_balance_tie_mode', _dt)
+                    ).strip().lower()
+                )
+            _tie_vals = ('always', 'empty_only', 'when_held', 'off')
+            if self.conf_vars['s1_simul_balance_tie_mode'].get() not in _tie_vals:
+                self.conf_vars['s1_simul_balance_tie_mode'].set('always')
+            ttk.Combobox(
+                strat_f,
+                textvariable=self.conf_vars['s1_simul_balance_tie_mode'],
+                values=_tie_vals,
+                width=14,
+                state='readonly',
+            ).grid(row=r_tie, column=2, sticky='w', padx=5)
+            ttk.Label(
+                strat_f,
+                text=(
+                    '보유 A수=B수일 때 초안을 B로 바꿈. '
+                    'always=0:0포함 전부 · empty_only=빈계좌(0:0)만 · '
+                    'when_held=보유있을때만 · off=안 바꿈'
+                ),
+                style='Dimmed.TLabel',
+            ).grid(row=r_tie, column=5, sticky='w', padx=10)
+
+            add_param_row(
+                strat_f,
+                '③ 트랙으로 바로 확정',
+                None,
+                '',
+                'ON이면 ①②를 건너뛰고 선정 트랙(A→TYPE_A, B→TYPE_B)으로 확정. '
+                'OFF(권장)=①→② 순서 유지',
+                toggle_key='same_bar_sig_prefer_sel_track',
+            )
         except Exception as e:
             try:
                 if hasattr(self, 'app') and hasattr(self.app, 'log'):
