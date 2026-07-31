@@ -224,6 +224,15 @@ class RtWatchlistM1ApiPoller:
         """새로 닫힌 1분 라벨이 바뀌었을 때만 라운드 스케줄."""
         while not self._stop.wait(0.25):
             try:
+                try:
+                    st = self._settings()
+                    from core.rt_closed_15m_official_replace import m1_api_poller_enabled
+
+                    if not m1_api_poller_enabled(st):
+                        continue
+                except Exception:
+                    # 설정 조회 실패 시 안전하게 비활성(저정밀 공식15분 우선)
+                    continue
                 if not self._monitoring():
                     continue
                 wall = datetime.now()

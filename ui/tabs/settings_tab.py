@@ -1148,8 +1148,31 @@ class SettingsTab:
             'S1: 로컬 15분 확정 시 평가',
             None,
             '',
-            'ON=저정밀 백테 정합: 완성 15분에서 S1·S2·청산 평가(틱 주기 주문 없음). 공식 REST 교체 대기 없음',
+            'ON=저정밀 완성 15분에서 S1·S2·청산. 「공식교체 후 평가」ON이면 로컬 즉시평가 대신 공식봉 반영 후 평가',
             toggle_key='realtime_s1_eval_on_local_15m_close',
+        )
+        add_param_row(
+            strat_f,
+            'S1: 공식15분 교체 후 평가',
+            None,
+            '',
+            'ON(권장)=ka10080 공식 15분봉 반영 후 S1·S2·청산. 보유·합치도 임박 종목만 조회(전감시 순회 없음)',
+            toggle_key='realtime_closed_15m_eval_after_official',
+        )
+        add_param_row(
+            strat_f,
+            '공식교체 최소 합치도',
+            'realtime_closed_15m_official_min_met_ratio',
+            '',
+            '미보유는 met_ratio≥이 값만 공식봉 조회·평가(기본 0.5). 보유는 항상 포함',
+        )
+        add_param_row(
+            strat_f,
+            'M1 API 폴러',
+            None,
+            '',
+            'OFF(권장·저정밀)=매분 ka10080(1분) 중단. 고정밀/인트라바 미러 시에만 ON',
+            toggle_key='realtime_watchlist_m1_api_poller_enabled',
         )
         add_param_row(
             strat_f,
@@ -1163,7 +1186,7 @@ class SettingsTab:
             '15분 확정 후 공식REST 연기',
             'realtime_closed_15m_defer_official_sec',
             '초',
-            '로컬 확정 신호·주문 우선. 이 시간 동안 공식 M1 폴링·형성봉 sync·15분 교체 시작을 미룸(기본 4)',
+            'M1 폴러 ON일 때만 의미. 저정밀(공식교체 후 평가)에서는 0 권장',
         )
         add_param_row(
             strat_f,
@@ -1280,7 +1303,7 @@ class SettingsTab:
             r_tie = get_next_row(strat_f)
             ttk.Label(
                 strat_f,
-                text='② 동수면 B로 덮기',
+                text='② 동수 처리',
                 font=('Malgun Gothic', 10),
                 foreground=txt_col,
             ).grid(row=r_tie, column=1, sticky='w', pady=4)
@@ -1293,7 +1316,7 @@ class SettingsTab:
                         self.app.settings.get('s1_simul_balance_tie_mode', _dt)
                     ).strip().lower()
                 )
-            _tie_vals = ('always', 'empty_only', 'when_held', 'off')
+            _tie_vals = ('always', 'force_a', 'block', 'empty_only', 'when_held', 'off')
             if self.conf_vars['s1_simul_balance_tie_mode'].get() not in _tie_vals:
                 self.conf_vars['s1_simul_balance_tie_mode'].set('always')
             ttk.Combobox(
@@ -1306,9 +1329,9 @@ class SettingsTab:
             ttk.Label(
                 strat_f,
                 text=(
-                    '보유 A수=B수일 때 초안을 B로 바꿈. '
-                    'always=0:0포함 전부 · empty_only=빈계좌(0:0)만 · '
-                    'when_held=보유있을때만 · off=안 바꿈'
+                    '보유 A수=B수일 때. always=B로 덮기 · force_a=A로 덮기(B차단) · '
+                    'block=매수 전면차단 · empty_only=0:0만 B · '
+                    'when_held=보유있을때만 B · off=안 바꿈'
                 ),
                 style='Dimmed.TLabel',
             ).grid(row=r_tie, column=5, sticky='w', padx=10)

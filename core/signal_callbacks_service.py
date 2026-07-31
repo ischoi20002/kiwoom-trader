@@ -188,6 +188,34 @@ class SignalCallbacksService:
                     pass
                 return False
 
+            # 동시신호 + 보유 동수면 매수 전면 차단
+            if TradingStrategy.simultaneous_equal_holdings_blocked(
+                self.app.settings, row, self.app.portfolio.virtual_positions
+            ):
+                try:
+                    if isinstance(info, dict):
+                        info["confluence"] = "동수 동시신호 차단"
+                        info["status_text"] = "동수 동시신호 차단"
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "signal_buy_skipped",
+                            {
+                                "code": code,
+                                "name": name,
+                                "reason": "simul_equal_holdings_blocked",
+                                "sig_type": str(sig_type),
+                                "sel_track": tr,
+                                "price": float(now_price),
+                            },
+                        )
+                except Exception:
+                    pass
+                return False
+
             if bool(self.app.settings.get("transition_runtime_block_s1", False)):
                 try:
                     sl = getattr(self.app, "session_logger", None)

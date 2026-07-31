@@ -592,24 +592,47 @@ class KiwoomApp:
                     self.log(f"⚠️ [RT15mDB] 확정봉 큐잉 실패: {ex}")
                 except Exception:
                     pass
-            # 로컬 15분 확정 → S1·S2·청산 즉시 평가(공식 REST 교체와 무관, 워커풀)
+
+            st = self.settings or {}
             try:
-                st = self.settings or {}
-                if bool(st.get("realtime_s1_eval_on_local_15m_close", True)):
+                from core.rt_closed_15m_official_replace import (
+                    closed_15m_eval_after_official_enabled,
+                    m1_api_poller_enabled,
+                )
+
+                eval_after_official = closed_15m_eval_after_official_enabled(st)
+                m1_on = m1_api_poller_enabled(st)
+            except Exception:
+                eval_after_official = bool(
+                    st.get("realtime_closed_15m_eval_after_official", True)
+                ) and bool(st.get("realtime_s1_eval_on_local_15m_close", True))
+                m1_on = bool(st.get("realtime_watchlist_m1_api_poller_enabled", False))
+
+            # 레거시: 로컬 확정 즉시 평가(공식 교체 대기 없음)
+            # 신규 기본: 공식 15분 교체 후 평가 → 여기서는 스킵
+            try:
+                if (
+                    bool(st.get("realtime_s1_eval_on_local_15m_close", True))
+                    and not eval_after_official
+                ):
                     self._closed_15m_eval_pool.submit_eval(code, ts)
             except Exception:
                 pass
-            # 공식 15분 교체·M1 위생은 조용 구간 뒤로(신호·주문 우선)
-            try:
-                from core.closed_15m_fast_path import (
-                    closed_15m_defer_official_sec,
-                    mark_rt15_official_quiet,
-                )
 
-                mark_rt15_official_quiet(self)
-                defer_sec = closed_15m_defer_official_sec(self)
-            except Exception:
-                defer_sec = 4.0
+            # 공식 15분 교체 스케줄(우선순위 지연은 스케줄러 내부)
+            # M1 폴러 OFF면 조용 구간(defer) 불필요
+            defer_sec = 0.0
+            if m1_on and not eval_after_official:
+                try:
+                    from core.closed_15m_fast_path import (
+                        closed_15m_defer_official_sec,
+                        mark_rt15_official_quiet,
+                    )
+
+                    mark_rt15_official_quiet(self)
+                    defer_sec = closed_15m_defer_official_sec(self)
+                except Exception:
+                    defer_sec = 4.0
             try:
                 sched = getattr(self, "rt_closed_15m_official_scheduler", None)
                 if sched is not None:
@@ -624,7 +647,7 @@ class KiwoomApp:
                         pass
                     try:
                         dly = float(
-                            (self.settings or {}).get(
+                            st.get(
                                 "realtime_closed_15m_official_replace_delay_sec",
                                 2.5,
                             )
@@ -646,7 +669,24 @@ class KiwoomApp:
             log=self.log
         )
         self.rt_watchlist_m1_api_poller = RtWatchlistM1ApiPoller(self, log=self.log)
-        self.rt_watchlist_m1_api_poller.start()
+        try:
+            _m1_en = bool(
+                (self.settings or {}).get(
+                    "realtime_watchlist_m1_api_poller_enabled", False
+                )
+            )
+        except Exception:
+            _m1_en = False
+        if _m1_en:
+            self.rt_watchlist_m1_api_poller.start()
+        else:
+            try:
+                self.log(
+                    "ℹ️ [M1Poll] 비활성(realtime_watchlist_m1_api_poller_enabled=false) "
+                    "— 공식 15분 교체 우선"
+                )
+            except Exception:
+                pass
         from core.realtime_official_bars_sync import Rt15mSlotBoundaryWatcher
 
         self.rt_15m_slot_boundary_watcher = Rt15mSlotBoundaryWatcher(self, log=self.log)
@@ -3017,10 +3057,13 @@ class KiwoomApp:
         low: float,
         close: float,
         volume: float,
-    ) -> None:
+    ) -> bool:
         """
         확정된 15분 봉 한 줄을 REST(ka10080, tic_scope=설정) OHLCV로 덮어씁니다.
         Tk 메인 스레드에서만 호출합니다.
+
+        Returns:
+            bars_data 반영 성공 시 True(이후 S1·S2·청산 평가 가능).
         """
         from utils.bars_data_keys import resolve_bars_data_frame
         from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
@@ -3028,10 +3071,10 @@ class KiwoomApp:
         try:
             cc = canonical_stock_code(str(code).strip())
             if not cc:
-                return
+                return False
             want = pd.Timestamp(bar_ts).floor("s")
         except Exception:
-            return
+            return False
 
         lk = getattr(self, "_bars_data_lock", None)
         bd = getattr(self, "bars_data", None)
@@ -3042,7 +3085,7 @@ class KiwoomApp:
                 )
             except Exception:
                 pass
-            return
+            return False
 
         recalc_key: Optional[str] = None
         try:
@@ -3050,7 +3093,7 @@ class KiwoomApp:
                 nk, df = resolve_bars_data_frame(bd, cc, migrate_alias=True)
                 use_key = nk or cc
                 if not use_key:
-                    return
+                    return False
                 if df is None or getattr(df, "empty", True):
                     try:
                         self.realtime_monitor_bars_store.upsert_completed_bar(
@@ -3058,7 +3101,7 @@ class KiwoomApp:
                         )
                     except Exception:
                         pass
-                    return
+                    return False
                 hit_idx = None
                 for ix in df.index:
                     try:
@@ -3081,7 +3124,7 @@ class KiwoomApp:
                         )
                     except Exception:
                         pass
-                    return
+                    return False
                 try:
                     df.at[hit_idx, "Open"] = float(open_)
                     df.at[hit_idx, "High"] = float(high)
@@ -3097,7 +3140,7 @@ class KiwoomApp:
                         )
                     except Exception:
                         pass
-                    return
+                    return False
                 try:
                     df["ma5"] = df["Close"].rolling(window=5).mean()
                     df["ma20"] = df["Close"].rolling(window=20).mean()
@@ -3129,11 +3172,14 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
+                return True
+            return False
         except Exception as e:
             try:
                 self.log(f"⚠️ [RT15m-Official] _apply_official_closed_15m_bar 예외: {e!r}")
             except Exception:
                 pass
+            return False
 
     def send_telegram_message(self, message: str, parse_mode: Optional[str] = "HTML") -> None:
         try:

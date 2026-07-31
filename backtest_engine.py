@@ -666,44 +666,28 @@ class TradingStrategy:
     @staticmethod
     def _s1_simul_balance_tie_mode(settings: Optional[dict]) -> str:
         """
-        동시신호 봉의 보유 A/B 동수 타이브레이크 적용 범위.
+        동시신호 봉의 보유 A/B 동수 타이브레이크 적용 방식.
 
-        - ``always``    : 보유가 없어도 동수(0=0)면 TYPE_B (구버전 동작)
-        - ``empty_only``: 보유 0:0 일 때만 TYPE_B (1:1·2:2 부터는 우선순위 유지)
-        - ``when_held`` : 보유가 1건 이상일 때만 동수 타이브레이크 적용
-        - ``off``       : 타이브레이크 미적용(우선순위 결과 유지)
+        - ``always``    : 동수(0:0 포함)면 TYPE_B 로 덮기
+        - ``force_a``   : 동수면 TYPE_A 로 덮기 (B 차단·A 허용)
+        - ``block``     : 동수면 S1 매수 전면 차단
+        - ``empty_only``: 보유 0:0 일 때만 TYPE_B
+        - ``when_held`` : 보유가 1건 이상일 때만 동수→TYPE_B
+        - ``off``       : 타이브레이크 미적용(초안 유지)
         """
         try:
             v = str((settings or {}).get("s1_simul_balance_tie_mode", "always"))
             v = v.strip().lower()
-            if v in ("always", "empty_only", "when_held", "off"):
+            if v in ("always", "force_a", "block", "empty_only", "when_held", "off"):
                 return v
         except Exception:
             pass
         return "always"
 
     @staticmethod
-    def _s1_sig_type_simultaneous_balance_tie_b(
-        settings: dict, sig_type: str, simultaneous_ab: bool, holdings: dict
-    ) -> str:
-        """
-        A·B 동시 신호이고 보유 TYPE_A / TYPE_B 가 동수이면 TYPE_B 우선.
-
-        보유가 0건이면 항상 ``0 == 0`` 이 되어 동시신호가 무조건 TYPE_B 로 확정되는데,
-        이는 A/B 보유 균형을 맞추려는 본래 취지와 무관한 퇴화 동작이다.
-        ``s1_simul_balance_tie_mode`` 로 적용 범위를 제어한다.
-        """
+    def _count_holdings_ab(holdings: Optional[dict]) -> tuple:
+        """보유 포지션의 TYPE_A / TYPE_B 개수."""
         try:
-            if not bool(simultaneous_ab):
-                return sig_type
-            s = settings or {}
-            use_a = bool(s.get("use_type_a", True))
-            use_b = bool(s.get("use_type_b", False))
-            if not (use_a and use_b):
-                return sig_type
-            mode = TradingStrategy._s1_simul_balance_tie_mode(s)
-            if mode == "off":
-                return sig_type
             n_a = sum(
                 1
                 for h in (holdings or {}).values()
@@ -714,16 +698,84 @@ class TradingStrategy:
                 for h in (holdings or {}).values()
                 if "TYPE_B" in str(h.get("sig_type", "") or "").upper()
             )
-            if mode == "when_held" and (n_a + n_b) <= 0:
+            return int(n_a), int(n_b)
+        except Exception:
+            return 0, 0
+
+    @staticmethod
+    def _simul_balance_equal_applies(mode: str, n_a: int, n_b: int) -> bool:
+        """동수 타이브레이크/차단 규칙이 이 보유 상태에서 적용되는지."""
+        try:
+            if n_a != n_b:
+                return False
+            m = str(mode or "always").strip().lower()
+            if m == "off":
+                return False
+            if m == "when_held" and (n_a + n_b) <= 0:
+                return False
+            if m == "empty_only" and (n_a + n_b) > 0:
+                return False
+            # always / force_a / block / (when_held·empty_only 통과분)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _s1_sig_type_simultaneous_balance_tie_b(
+        settings: dict, sig_type: str, simultaneous_ab: bool, holdings: dict
+    ) -> str:
+        """
+        A·B 동시 신호이고 보유 TYPE_A / TYPE_B 가 동수이면 타이브레이크 적용.
+
+        ``always`` → TYPE_B, ``force_a`` → TYPE_A.
+        ``block`` 은 타입을 바꾸지 않고 ``simultaneous_equal_holdings_blocked`` 에서 매수를 막는다.
+        """
+        try:
+            if not bool(simultaneous_ab):
                 return sig_type
-            # empty_only: 빈 포트(0:0)에서만 B 우선 — 1:1·2:2 는 Type A 허용
-            if mode == "empty_only" and (n_a + n_b) > 0:
+            s = settings or {}
+            use_a = bool(s.get("use_type_a", True))
+            use_b = bool(s.get("use_type_b", False))
+            if not (use_a and use_b):
                 return sig_type
-            if n_a == n_b:
-                return "TYPE_B"
+            mode = TradingStrategy._s1_simul_balance_tie_mode(s)
+            if mode in ("off", "block"):
+                return sig_type
+            n_a, n_b = TradingStrategy._count_holdings_ab(holdings)
+            if not TradingStrategy._simul_balance_equal_applies(mode, n_a, n_b):
+                return sig_type
+            if mode == "force_a":
+                return "TYPE_A"
+            # always / empty_only / when_held (적용 통과분)
+            return "TYPE_B"
         except Exception:
             pass
         return sig_type
+
+    @staticmethod
+    def simultaneous_equal_holdings_blocked(
+        settings: Optional[dict],
+        row: Any,
+        holdings: Optional[dict],
+    ) -> bool:
+        """
+        동시신호 + 보유 A/B 동수일 때 S1 매수 전면 차단 여부.
+
+        ``s1_simul_balance_tie_mode=block`` 일 때만 True.
+        """
+        try:
+            if not TradingStrategy._row_is_simultaneous_ab(row):
+                return False
+        except Exception:
+            return False
+        try:
+            mode = TradingStrategy._s1_simul_balance_tie_mode(settings)
+            if mode != "block":
+                return False
+            n_a, n_b = TradingStrategy._count_holdings_ab(holdings)
+            return TradingStrategy._simul_balance_equal_applies(mode, n_a, n_b)
+        except Exception:
+            return False
 
     @staticmethod
     def _row_is_simultaneous_ab(row: Any) -> bool:

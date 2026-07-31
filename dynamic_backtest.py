@@ -318,8 +318,47 @@ class DynamicBacktester:
         except Exception:
             self._bt_ref_day_for_first = None
 
-        # prepare_dynamic_universe 스케줄 생성도 ref_day에 해당하는 키가 포함되도록 시작일을 확장한다.
-        sched_start = self._bt_ref_day_for_first or start_date
+        # prepare_dynamic_universe 시작일:
+        # 1) 첫 시뮬일의 ref_day(직전 영업일) 키가 스케줄에 포함되도록 최소 확장
+        # 2) 단일일 BT처럼 창이 짧으면 일봉 지표 시드·레짐 통계가 흔들려
+        #    유니버스가 RT/장기 BT와 달라질 수 있음 → 선정 워밍업 영업일을 추가로 붙임
+        sched_anchor = self._bt_ref_day_for_first or start_date
+        sched_start = str(sched_anchor)
+        try:
+            warm_n = int(
+                self.settings.get("bt_universe_schedule_warmup_trading_days", 20) or 0
+            )
+        except Exception:
+            warm_n = 20
+        try:
+            warm_n = max(0, min(int(warm_n), 60))
+        except Exception:
+            warm_n = 20
+        if warm_n > 0:
+            try:
+                anchor_dt = pd.to_datetime(sched_anchor)
+                warm_from = (
+                    anchor_dt - timedelta(days=max(45, warm_n * 3))
+                ).strftime("%Y-%m-%d")
+                warm_to = (anchor_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+                warm_days = self.db.get_trading_days(warm_from, warm_to) or []
+                if warm_days:
+                    pick = (
+                        warm_days[-warm_n:]
+                        if len(warm_days) >= warm_n
+                        else list(warm_days)
+                    )
+                    sched_start = pd.to_datetime(pick[0]).strftime("%Y-%m-%d")
+            except Exception:
+                sched_start = str(sched_anchor)
+        try:
+            if str(sched_start) != str(sched_anchor):
+                print(
+                    f"[Dynamic] 유니버스 선정 워밍업: {sched_start} ~ {end_date} "
+                    f"(ref={sched_anchor}, +{warm_n}영업일)"
+                )
+        except Exception:
+            pass
         t_start = time.time()
         _result = strategy_selector.prepare_dynamic_universe(
             self.settings, sched_start, end_date, self.db, callback if callback else print
@@ -738,6 +777,10 @@ class DynamicBacktester:
                                     can_execute = False
                                 elif TradingStrategy.simultaneous_type_a_blocked(
                                     self.settings, last_sig, sig_type
+                                ):
+                                    can_execute = False
+                                elif TradingStrategy.simultaneous_equal_holdings_blocked(
+                                    self.settings, last_sig, self.holdings
                                 ):
                                     can_execute = False
                                 
@@ -1479,6 +1522,10 @@ class DynamicBacktester:
                         continue
                     if (not is_addon_target) and TradingStrategy.simultaneous_type_a_blocked(
                         self.settings, indicator_to_use, sig_type
+                    ):
+                        continue
+                    if (not is_addon_target) and TradingStrategy.simultaneous_equal_holdings_blocked(
+                        self.settings, indicator_to_use, self.holdings
                     ):
                         continue
                     

@@ -38,6 +38,115 @@ def _settings_bool(settings: Any, key: str, default: bool = True) -> bool:
         return default
 
 
+def m1_api_poller_enabled(settings: Any) -> bool:
+    """감시 종목 매분 ka10080(1분) 폴러 사용 여부."""
+    return _settings_bool(settings, "realtime_watchlist_m1_api_poller_enabled", False)
+
+
+def closed_15m_eval_after_official_enabled(settings: Any) -> bool:
+    """
+    저정밀 경로: 공식 15분봉 교체 성공 후에만 S1·S2·청산 평가.
+
+    ``realtime_s1_eval_on_local_15m_close`` 가 꺼져 있으면 False.
+    """
+    try:
+        if not _settings_bool(settings, "realtime_s1_eval_on_local_15m_close", True):
+            return False
+        return _settings_bool(
+            settings, "realtime_closed_15m_eval_after_official", True
+        )
+    except Exception:
+        return True
+
+
+def official_replace_priority_score(app: Any, code: str) -> float:
+    """
+    공식 15분 교체 우선순위(0~1, 높을수록 먼저).
+
+    - 보유(청산·S2 필요): 1.0
+    - 미보유: ``monitor_info.met_ratio`` (신호 완성도에 근접할수록 높음)
+    """
+    try:
+        nk = canonical_stock_code(str(code).strip())
+    except Exception:
+        nk = str(code or "").strip()
+    if not nk:
+        return 0.0
+
+    # 보유 종목 최우선
+    try:
+        pf = getattr(app, "portfolio", None)
+        vp = getattr(pf, "virtual_positions", None) if pf is not None else None
+        if not isinstance(vp, dict):
+            vp = getattr(app, "virtual_positions", None) or {}
+        if isinstance(vp, dict):
+            for k in list(vp.keys()):
+                try:
+                    if canonical_stock_code(str(k).strip()) == nk:
+                        return 1.0
+                except Exception:
+                    if str(k).zfill(6)[-6:] == nk:
+                        return 1.0
+    except Exception:
+        pass
+
+    met = 0.0
+    try:
+        mi = getattr(app, "monitor_info", None)
+        if isinstance(mi, dict):
+            info = None
+            for k in (nk, str(code), code):
+                if k in mi and isinstance(mi.get(k), dict):
+                    info = mi[k]
+                    break
+            if info is not None:
+                met = float(info.get("met_ratio", 0.0) or 0.0)
+    except Exception:
+        met = 0.0
+    if met < 0.0:
+        met = 0.0
+    if met > 1.0:
+        met = 1.0
+    return float(met)
+
+
+def official_replace_eval_eligible(
+    app: Any,
+    code: str,
+    settings: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    공식교체+평가 대상 여부.
+
+    - 보유: 항상 True (청산·S2)
+    - 미보유: ``met_ratio >= realtime_closed_15m_official_min_met_ratio``
+    - 공식교체 후 평가 모드가 아니면 전 종목 True(레거시)
+    """
+    try:
+        st = settings if settings is not None else (
+            getattr(app, "settings", None) or {}
+        )
+    except Exception:
+        st = {}
+    if not closed_15m_eval_after_official_enabled(st):
+        return True
+    try:
+        score = float(official_replace_priority_score(app, code))
+    except Exception:
+        score = 0.0
+    # 보유(1.0)는 항상
+    if score >= 0.999:
+        return True
+    try:
+        min_met = float(
+            st.get("realtime_closed_15m_official_min_met_ratio", 0.5)
+        )
+    except (TypeError, ValueError):
+        min_met = 0.5
+    min_met = max(0.0, min(min_met, 1.0))
+    return score >= min_met
+
+
 def compute_rt15m_official_replace_delay_sec(
     app: Any,
     code: str,
@@ -48,15 +157,74 @@ def compute_rt15m_official_replace_delay_sec(
     """
     15분 확정 ka10080 조회 지연(초).
 
-    M1 폴러가 매 분 ``[0, m1_spread)`` 에 ka10080(1분)을 쓰므로, 15분 REST는
-    ``m1_spread + guard`` 이후부터 ``spread`` 구간에 종목별로 분산합니다.
-    (15분 슬롯 안에만 완료되면 됨 — M1과 경쟁하지 않도록.)
+    - M1 폴러 OFF 또는 공식교체 후 평가 모드: M1 가드 없이
+      ``min_delay + (1 - priority) * priority_spread`` (신호 근접·보유 우선).
+    - M1 폴러 ON(레거시): ``m1_spread + guard`` 이후 hash stagger.
     """
     try:
         settings = getattr(app, "settings", None) or {}
     except Exception:
         settings = {}
 
+    use_priority = (not m1_api_poller_enabled(settings)) or closed_15m_eval_after_official_enabled(
+        settings
+    )
+
+    if use_priority:
+        try:
+            min_d = float(
+                settings.get(
+                    "realtime_closed_15m_official_replace_min_delay_sec", 0.5
+                )
+            )
+        except (TypeError, ValueError):
+            min_d = 0.5
+        min_d = max(0.0, min(min_d, 30.0))
+        if min_d <= 0.0:
+            try:
+                min_d = max(0.3, float(fallback_delay_sec))
+            except (TypeError, ValueError):
+                min_d = 0.5
+
+        try:
+            n_codes = _active_stream_code_count(app)
+        except Exception:
+            n_codes = 1
+        try:
+            per = float(
+                settings.get(
+                    "realtime_closed_15m_priority_spacing_sec", 0.45
+                )
+            )
+        except (TypeError, ValueError):
+            per = 0.45
+        per = max(0.15, min(per, 3.0))
+        # 최하위 우선순위가 전역 페이싱(0.5s×N)을 크게 넘지 않도록 캡
+        try:
+            gmin = float(
+                settings.get("realtime_ka10080_global_min_interval_sec", 0.5)
+            )
+        except (TypeError, ValueError):
+            gmin = 0.5
+        spread = max(float(n_codes) * per, float(n_codes) * max(0.3, gmin))
+        spread = max(2.0, min(spread, 45.0))
+
+        try:
+            score = float(official_replace_priority_score(app, code))
+        except Exception:
+            score = 0.0
+        score = max(0.0, min(1.0, score))
+        # 동일 점수 미세 분산(해시) — 동시 폭주 완화
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            sk = _norm_bar_ts(bar_ts).strftime("%Y-%m-%d %H:%M:%S")
+            h = abs(hash((nk, sk)))
+            jitter = ((h % 1000) / 1000.0) * min(0.35, per)
+        except Exception:
+            jitter = 0.0
+        return float(min_d + (1.0 - score) * spread + jitter)
+
+    # ---- 레거시: M1 폴러와 경쟁 회피 ----
     if not _settings_bool(
         settings, "realtime_closed_15m_official_replace_stagger", True
     ):
@@ -362,6 +530,11 @@ class RtClosed15mOfficialReplaceScheduler:
     """
     슬롯 확정 콜백에서 ``schedule`` 만 호출합니다.
     HTTP는 지연 후 데몬 스레드에서 수행하고, 결과는 ``KiwoomApp._apply_official_closed_15m_bar`` 로 전달합니다.
+
+    공식교체 후 평가 모드:
+    - 1차: 보유·합치도(임박) 종목만 스케줄
+    - 슬롯당 1종(프로브)만 공식봉 등장까지 재시도
+    - 프로브 성공 후 나머지 감시 종목 백필 교체·평가(간격 분산, 1회 조회)
     """
 
     def __init__(self, log: Optional[Callable[[str], None]] = None) -> None:
@@ -371,6 +544,8 @@ class RtClosed15mOfficialReplaceScheduler:
         # 실패(행 미발견 등) 이후 동일 키를 일정 시간 동안 재시도/로그하지 않기 위한 쿨다운
         self._fail_cooldown_until: Dict[str, float] = {}
         self._fail_counts: Dict[str, int] = {}
+        # 슬롯(봉 시각)별 공식봉 준비 게이트 — 프로브 1종만 재시도
+        self._slot_gate: Dict[str, Dict[str, Any]] = {}
 
     def _key(self, code: str, bar_ts: Any) -> str:
         nc = canonical_stock_code(str(code).strip())
@@ -379,6 +554,169 @@ class RtClosed15mOfficialReplaceScheduler:
         except Exception:
             s = str(bar_ts)
         return f"{nc}|{s}"
+
+    def _slot_ts_key(self, bar_ts: Any) -> str:
+        try:
+            return _norm_bar_ts(bar_ts).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(bar_ts)
+
+    def _get_slot_gate(self, slot_key: str) -> Dict[str, Any]:
+        with self._lock:
+            g = self._slot_gate.get(slot_key)
+            if g is None:
+                g = {
+                    "probe_lock": threading.Lock(),
+                    "probe_code": None,
+                    "ready_event": threading.Event(),
+                    "ready": False,
+                    "backfill_started": False,
+                }
+                self._slot_gate[slot_key] = g
+            # 오래된 슬롯 정리(최대 ~8개 유지)
+            if len(self._slot_gate) > 12:
+                try:
+                    keys = sorted(self._slot_gate.keys())
+                    for old in keys[:-8]:
+                        if old != slot_key:
+                            self._slot_gate.pop(old, None)
+                except Exception:
+                    pass
+            return g
+
+    def _list_watch_codes(self, app: Any) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        try:
+            ac = getattr(app, "_active_stream_codes", None) or []
+            for c in ac:
+                try:
+                    nk = canonical_stock_code(str(c).strip())
+                except Exception:
+                    nk = str(c or "").strip().zfill(6)[-6:]
+                if nk and len(nk) == 6 and nk not in seen:
+                    seen.add(nk)
+                    out.append(nk)
+        except Exception:
+            pass
+        return out
+
+    def _allow_fallback_probe(
+        self, app: Any, code: str, settings: Dict[str, Any]
+    ) -> bool:
+        """임박·보유가 없을 때, 감시 중 합치도 최고 종목 1만 프로브 허용."""
+        try:
+            nk = canonical_stock_code(str(code).strip())
+        except Exception:
+            nk = str(code or "").strip()
+        if not nk:
+            return False
+        best_c = ""
+        best_s = -1.0
+        for c in self._list_watch_codes(app):
+            try:
+                sc = float(official_replace_priority_score(app, c))
+            except Exception:
+                sc = 0.0
+            if sc > best_s or (sc == best_s and (not best_c or c < best_c)):
+                best_s = sc
+                best_c = c
+        return bool(best_c) and best_c == nk
+
+    def _enqueue_slot_backfill(
+        self,
+        app: Any,
+        bar_ts: Any,
+        *,
+        probe_code: str,
+        delay_sec: float,
+    ) -> None:
+        """
+        프로브로 공식봉 등장이 확인된 뒤, 나머지 감시 종목도 느리게 교체·평가.
+
+        임박이 아니어도 해당 봉에서 갑자기 Signal 나는 종목을 BT와 맞추기 위함.
+        """
+        try:
+            settings = getattr(app, "settings", None) or {}
+        except Exception:
+            settings = {}
+        if not closed_15m_eval_after_official_enabled(settings):
+            return
+        try:
+            if not _settings_bool(
+                settings, "realtime_closed_15m_backfill_after_ready", True
+            ):
+                return
+        except Exception:
+            pass
+
+        slot_key = self._slot_ts_key(bar_ts)
+        gate = self._get_slot_gate(slot_key)
+        with self._lock:
+            if gate.get("backfill_started"):
+                return
+            gate["backfill_started"] = True
+
+        try:
+            probe_nk = canonical_stock_code(str(probe_code).strip())
+        except Exception:
+            probe_nk = str(probe_code or "").strip()
+
+        codes = self._list_watch_codes(app)
+        pending: List[Tuple[float, str]] = []
+        for nk in codes:
+            if nk == probe_nk:
+                continue
+            k = self._key(nk, bar_ts)
+            with self._lock:
+                if self._scheduled.get(k):
+                    continue
+            try:
+                sc = float(official_replace_priority_score(app, nk))
+            except Exception:
+                sc = 0.0
+            pending.append((sc, nk))
+        if not pending:
+            return
+        # 합치도 높은 쪽을 조금 더 먼저(여유 백필)
+        pending.sort(key=lambda x: (-x[0], x[1]))
+
+        try:
+            spacing = float(
+                settings.get("realtime_closed_15m_backfill_spacing_sec", 0.55)
+            )
+        except (TypeError, ValueError):
+            spacing = 0.55
+        spacing = max(0.35, min(spacing, 3.0))
+        try:
+            base = float(
+                settings.get("realtime_closed_15m_backfill_base_delay_sec", 0.3)
+            )
+        except (TypeError, ValueError):
+            base = 0.3
+        base = max(0.0, min(base, 5.0))
+
+        for i, (_sc, nk) in enumerate(pending):
+            try:
+                self.schedule(
+                    app=app,
+                    code=nk,
+                    bar_ts=bar_ts,
+                    delay_sec=max(0.3, float(delay_sec)),
+                    prepend_delay_sec=0.0,
+                    backfill_after_ready=True,
+                    backfill_extra_delay_sec=base + float(i) * spacing,
+                )
+            except Exception:
+                continue
+        if self._log:
+            try:
+                self._log(
+                    f"ℹ️ [RT15m-Official] {slot_key} 공식봉 확인 — "
+                    f"나머지 {len(pending)}종 백필 교체·평가 예약"
+                )
+            except Exception:
+                pass
 
     def schedule(
         self,
@@ -390,6 +728,8 @@ class RtClosed15mOfficialReplaceScheduler:
         force_halt_retry: bool = False,
         halt_retry_fail_cooldown_sec: float = 60.0,
         prepend_delay_sec: float = 0.0,
+        backfill_after_ready: bool = False,
+        backfill_extra_delay_sec: float = 0.0,
     ) -> None:
         """이미 동일 종목·동일 봉 시각이 예약돼 있으면 무시합니다."""
         try:
@@ -397,6 +737,23 @@ class RtClosed15mOfficialReplaceScheduler:
                 return
         except Exception:
             return
+
+        try:
+            settings = getattr(app, "settings", None) or {}
+        except Exception:
+            settings = {}
+
+        # 저정밀 공식교체 후 평가: 1차=임박·보유만. 백필은 프로브 성공 후 전 감시.
+        # 임박·보유가 전무하면 합치도 최고 1종을 프로브로 허용(성공 시 백필).
+        if not force_halt_retry and not backfill_after_ready:
+            try:
+                if closed_15m_eval_after_official_enabled(settings):
+                    if not official_replace_eval_eligible(app, code, settings):
+                        if not self._allow_fallback_probe(app, code, settings):
+                            return
+            except Exception:
+                pass
+
         k = self._key(code, bar_ts)
         with self._lock:
             if self._scheduled.get(k):
@@ -423,6 +780,11 @@ class RtClosed15mOfficialReplaceScheduler:
                 pass
 
         def _delay() -> float:
+            if backfill_after_ready:
+                try:
+                    return max(0.0, float(backfill_extra_delay_sec))
+                except (TypeError, ValueError):
+                    return 0.3
             try:
                 return compute_rt15m_official_replace_delay_sec(
                     app, code, bar_ts, fallback_delay_sec=delay_sec
@@ -530,20 +892,146 @@ class RtClosed15mOfficialReplaceScheduler:
                 except (TypeError, ValueError):
                     dmin, dmax = 0.08, 0.22
 
-                tup = fetch_official_15m_row_for_timestamp(
-                    dm,
-                    code,
-                    token,
-                    bar_ts,
-                    tic_scope=tic,
-                    max_pages=mp,
-                    page_delay_min=dmin,
-                    page_delay_max=dmax,
-                    max_retries=mr,
-                    inter_retry_sec=ir,
-                    log=self._log,
-                    app=app,
+                try:
+                    max_wait = float(
+                        settings.get(
+                            "realtime_closed_15m_official_replace_max_wait_sec",
+                            30.0,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    max_wait = 30.0
+                max_wait = max(3.0, min(max_wait, 120.0))
+                try:
+                    poll_sec = float(
+                        settings.get(
+                            "realtime_closed_15m_official_replace_poll_sec",
+                            1.0,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    poll_sec = 1.0
+                poll_sec = max(0.4, min(poll_sec, 5.0))
+
+                use_slot_probe = (
+                    (not force_halt_retry)
+                    and closed_15m_eval_after_official_enabled(settings)
                 )
+                slot_key = self._slot_ts_key(bar_ts)
+                is_probe = True
+                gate: Optional[Dict[str, Any]] = None
+
+                # 백필: 이미 공식봉 확인됨 → 프로브/대기 없이 1회 조회
+                if backfill_after_ready and use_slot_probe:
+                    is_probe = False
+                    gate = self._get_slot_gate(slot_key)
+                elif use_slot_probe:
+                    gate = self._get_slot_gate(slot_key)
+                    plock = gate["probe_lock"]
+                    claimed = False
+                    try:
+                        claimed = bool(plock.acquire(blocking=False))
+                    except Exception:
+                        claimed = False
+                    if claimed:
+                        try:
+                            if gate.get("probe_code") is None:
+                                gate["probe_code"] = canonical_stock_code(
+                                    str(code).strip()
+                                )
+                                is_probe = True
+                            else:
+                                is_probe = False
+                        finally:
+                            try:
+                                plock.release()
+                            except Exception:
+                                pass
+                    else:
+                        is_probe = False
+
+                    if not is_probe:
+                        try:
+                            ev = gate.get("ready_event")
+                            if ev is not None:
+                                ev.wait(timeout=max_wait + 2.0)
+                        except Exception:
+                            pass
+
+                per_try_retries = 1 if (is_probe and max_wait >= 5.0) else max(1, min(mr, 3))
+                deadline = time.monotonic() + max_wait
+                tup = None
+
+                if use_slot_probe and not is_probe:
+                    if gate is not None and not bool(gate.get("ready")):
+                        with self._lock:
+                            self._scheduled.pop(k, None)
+                        return
+                    tup = fetch_official_15m_row_for_timestamp(
+                        dm,
+                        code,
+                        token,
+                        bar_ts,
+                        tic_scope=tic,
+                        max_pages=mp,
+                        page_delay_min=dmin,
+                        page_delay_max=dmax,
+                        max_retries=1,
+                        inter_retry_sec=ir,
+                        log=self._log,
+                        app=app,
+                    )
+                else:
+                    while True:
+                        tup = fetch_official_15m_row_for_timestamp(
+                            dm,
+                            code,
+                            token,
+                            bar_ts,
+                            tic_scope=tic,
+                            max_pages=mp,
+                            page_delay_min=dmin,
+                            page_delay_max=dmax,
+                            max_retries=per_try_retries,
+                            inter_retry_sec=ir,
+                            log=self._log,
+                            app=app,
+                        )
+                        if tup is not None:
+                            break
+                        if time.monotonic() + poll_sec >= deadline:
+                            break
+                        try:
+                            time.sleep(poll_sec)
+                        except Exception:
+                            break
+                        try:
+                            token = app.auth_manager.get_auth_token()
+                        except Exception:
+                            pass
+                        if not token:
+                            break
+
+                    if use_slot_probe and gate is not None and is_probe:
+                        try:
+                            gate["ready"] = tup is not None
+                            ev = gate.get("ready_event")
+                            if ev is not None:
+                                ev.set()
+                        except Exception:
+                            pass
+                        # 공식봉 확인 후 나머지 감시 종목 백필(늦어도 OK)
+                        if tup is not None:
+                            try:
+                                self._enqueue_slot_backfill(
+                                    app,
+                                    bar_ts,
+                                    probe_code=str(code),
+                                    delay_sec=float(delay_sec),
+                                )
+                            except Exception:
+                                pass
+
                 root = getattr(app, "root", None)
                 if tup is None or root is None:
                     try:
@@ -555,8 +1043,6 @@ class RtClosed15mOfficialReplaceScheduler:
                             return
                     except Exception:
                         pass
-                    # 행 미발견/메인 root 없음 등 실패는 즉시 재스케줄 루프가 생길 수 있으므로
-                    # 동일 키에 대해 쿨다운을 둡니다.
                     with self._lock:
                         if force_halt_retry:
                             try:
@@ -571,9 +1057,18 @@ class RtClosed15mOfficialReplaceScheduler:
                             self._fail_counts[k] = cnt
                             delay = min(
                                 900.0, 60.0 * (2 ** max(0, cnt - 1))
-                            )  # 1분 → 2분 → 4분 … (최대 15분)
+                            )
                             self._fail_cooldown_until[k] = time.monotonic() + delay
                         self._scheduled.pop(k, None)
+                    if self._log and tup is None and is_probe:
+                        try:
+                            cc = canonical_stock_code(str(code).strip())
+                            self._log(
+                                f"ℹ️ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
+                                f"공식봉 대기 초과({max_wait:.0f}s) — 임박/보유 평가 생략"
+                            )
+                        except Exception:
+                            pass
                     return
                 o, h, l_, c, v = tup
 
@@ -592,10 +1087,12 @@ class RtClosed15mOfficialReplaceScheduler:
                         pass
 
                 def _apply_main() -> None:
+                    applied = False
                     try:
-                        app._apply_official_closed_15m_bar(  # type: ignore[attr-defined]
+                        ret = app._apply_official_closed_15m_bar(  # type: ignore[attr-defined]
                             code, bar_ts, o, h, l_, c, v
                         )
+                        applied = True if ret is None else bool(ret)
                     except Exception as ex:
                         if self._log:
                             try:
@@ -605,11 +1102,21 @@ class RtClosed15mOfficialReplaceScheduler:
                                 )
                             except Exception:
                                 pass
+                        applied = False
                     finally:
                         with self._lock:
                             self._scheduled.pop(k, None)
                             self._fail_cooldown_until.pop(k, None)
                             self._fail_counts.pop(k, None)
+                    if applied:
+                        try:
+                            st = getattr(app, "settings", None) or {}
+                            if closed_15m_eval_after_official_enabled(st):
+                                pool = getattr(app, "_closed_15m_eval_pool", None)
+                                if pool is not None:
+                                    pool.submit_eval(code, bar_ts)
+                        except Exception:
+                            pass
 
                 try:
                     root.after(0, _apply_main)

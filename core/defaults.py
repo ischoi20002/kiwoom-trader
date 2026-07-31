@@ -34,6 +34,9 @@ DEFAULT_SETTINGS = {
     "bt_high_precision": False,
     "bt_rt_parity_intrabar": False,
     "bt_rt_parity_fast": False,
+    # 단일일 등 짧은 기간 BT에서도 prepare_dynamic_universe 선정창을
+    # ref_day 이전 N영업일까지 확장해 RT/장기 BT 유니버스와 맞춘다.
+    "bt_universe_schedule_warmup_trading_days": 20,
     "bt_rt_parity_fast_rsi_delta": 0.35,
     "bt_rt_parity_fast_osc_delta": 0.08,
     "bt_rt_parity_fast_osc_abs_max": 0.0,
@@ -43,9 +46,9 @@ DEFAULT_SETTINGS = {
     "realtime_15m_calendar_retention_days": 365,
     "realtime_warmup_persist_to_rt15m_db": True,
     "realtime_bars_max_keep": 300,
-    "realtime_closed_15m_official_replace_delay_sec": 2.5,
+    "realtime_closed_15m_official_replace_delay_sec": 0.5,
     "realtime_closed_15m_official_replace_stagger": True,
-    "realtime_closed_15m_official_replace_min_delay_sec": 0.0,
+    "realtime_closed_15m_official_replace_min_delay_sec": 0.5,
     "realtime_closed_15m_official_replace_spread_per_code_sec": 22.5,
     "realtime_closed_15m_official_replace_spread_min_sec": 90.0,
     "realtime_closed_15m_official_replace_spread_max_sec": 840.0,
@@ -54,6 +57,15 @@ DEFAULT_SETTINGS = {
     "realtime_closed_15m_official_replace_max_retries": 3,
     "realtime_closed_15m_official_replace_max_pages": 8,
     "realtime_closed_15m_official_replace_inter_retry_sec": 0.6,
+    "realtime_closed_15m_official_replace_max_wait_sec": 30.0,
+    "realtime_closed_15m_official_replace_poll_sec": 1.0,
+    "realtime_closed_15m_priority_spacing_sec": 0.45,
+    "realtime_closed_15m_official_min_met_ratio": 0.5,
+    "realtime_closed_15m_backfill_after_ready": True,
+    "realtime_closed_15m_backfill_base_delay_sec": 0.3,
+    "realtime_closed_15m_backfill_spacing_sec": 0.55,
+    "realtime_closed_15m_eval_after_official": True,
+    "realtime_watchlist_m1_api_poller_enabled": False,
     "realtime_ka10080_global_min_interval_sec": 0.5,
     "realtime_ka10080_fail_log_ui_throttle_sec": 90.0,
     "realtime_ka10080_fail_summary_interval_sec": 300.0,
@@ -120,7 +132,7 @@ DEFAULT_SETTINGS = {
     "realtime_15m_slot_roll_workers": 8,
     "realtime_closed_15m_eval_workers": 8,
     "realtime_closed_15m_indicator_max_rows": 300,
-    "realtime_closed_15m_defer_official_sec": 4.0,
+    "realtime_closed_15m_defer_official_sec": 0.0,
     "realtime_touch_quote_cache_ttl_sec": 2.0,
     "ws_reg_max_codes_per_chunk": 80,
     "realtime_tree_first_refresh_delay_ms": 48,
@@ -234,8 +246,8 @@ DEFAULT_SETTINGS = {
     "same_bar_block_type_a": False,
     # 동시신호(A+B) 봉 S1 매수 전면 차단(TYPE_A·B 모두)
     "same_bar_block_simul": False,
-    # 동시신호 봉 보유 A/B 동수 타이브레이크(B 우선) 적용 범위:
-    # always / empty_only / when_held / off
+    # 동시신호 봉 보유 A/B 동수 처리:
+    # always / force_a / block / empty_only / when_held / off
     "s1_simul_balance_tie_mode": "always",
     "buy_rsi_max_b": 80.0,
     "use_smart_buy_b": False,

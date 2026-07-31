@@ -385,6 +385,33 @@ class SignalEngine:
                         except Exception:
                             pass
                     return False
+                if TradingStrategy.simultaneous_equal_holdings_blocked(
+                    settings, row, holdings
+                ):
+                    try:
+                        if isinstance(info, dict):
+                            info["confluence"] = "동수 동시신호 차단"
+                            info["status_text"] = "동수 동시신호 차단"
+                    except Exception:
+                        pass
+                    if log_skip:
+                        try:
+                            sl = getattr(self.app, "session_logger", None)
+                            if sl:
+                                sl.log(
+                                    "signal_buy_skipped",
+                                    {
+                                        "code": str(code).zfill(6),
+                                        "name": str((info or {}).get("name", "")),
+                                        "reason": "simul_equal_holdings_blocked",
+                                        "sig_type": str(eff),
+                                        "sel_track": tr,
+                                        "price": float(now_price) if now_price else None,
+                                    },
+                                )
+                        except Exception:
+                            pass
+                    return False
                 return True
             try:
                 from core.signal_callbacks_service import SignalCallbacksService
@@ -700,10 +727,11 @@ class SignalEngine:
 
     def eval_s1_on_completed_15m(self, code: str, bar_ts: Any) -> None:
         """
-        로컬 15분 슬롯 확정 직후 S1 1회 평가(저정밀 백테 정합).
+        로컬/공식 15분 슬롯 확정 후 S1 1회 평가(저정밀 백테 정합).
 
+        - 기본 운영: 공식 ka10080 15분봉 교체 반영 후 호출됨
+          (``realtime_closed_15m_eval_after_official``).
         - ``bars_data`` 를 ``bar_ts`` 이하로 잘라 완성봉 기준으로 지표·신호 계산
-        - 공식 ka10080 15분 교체를 기다리지 않음
         - 보유·관심전용·정규장 외·쿨다운·ATR_SL 재진입은 기존과 동일하게 차단
         """
         try:
@@ -959,9 +987,10 @@ class SignalEngine:
 
     def eval_held_on_completed_15m(self, code: str, bar_ts: Any) -> None:
         """
-        로컬 15분 슬롯 확정 직후 보유 종목 청산·S2 평가(저정밀 백테 정합).
+        완성 15분 슬롯 확정 후 보유 종목 청산·S2 평가(저정밀 백테 정합).
 
-        틱/15초 주기 평가 대신, 완성 15분 종가·지표 행으로 ``evaluate_position_scoped(full)`` 1회.
+        기본 운영에서는 공식 15분봉 교체 반영 후 ``eval_on_completed_15m`` 경로로 호출됩니다.
+        틱/15초 주기 주문 대신, 완성 15분 종가·지표 행으로 ``evaluate_position_scoped(full)`` 1회.
         """
         try:
             if not self._s1_eval_on_local_15m_close_enabled():

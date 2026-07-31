@@ -1,0 +1,11 @@
+{
+  "label": "0.15.3 KOSPI150 + transition gate ON (순손익 +1640만 백테 당시)",
+  "source": "git:18c6b4f settings.json",
+  "saved_at": "2026-07-28T15:13:56",
+  "notes": "공장 초기화/자동저장 사고로 유실되지 않도록 고정 스냅샷. 복원: 이 파일을 settings.json으로 복사 후 앱 재시작.",
+  "focus": {
+    "universe_index_choice": "KOSPI200",
+    "kospi_top_n": "150",
+    "use_transition_gate": true
+  }
+}

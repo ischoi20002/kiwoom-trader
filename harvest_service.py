@@ -74,7 +74,12 @@ class HarvestService:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{now}] {msg}", flush=True)
 
-    def _fetch_minute_data(self, code, token, next_key=""):
+    def _fetch_minute_data(self, code, token, next_key="", *, tic_scope: str = "1"):
+        """
+        키움 ka10080 분봉 1페이지 조회.
+        tic_scope: \"1\"=1분봉, \"15\"=15분봉(서버 공식봉).
+        """
+        scope = str(tic_scope or "1").strip() or "1"
         url = f"{config.URL}/api/dostk/chart"
         headers = {
             "Content-Type": "application/json;charset=UTF-8",
@@ -85,7 +90,7 @@ class HarvestService:
         }
         body = {
             "stk_cd": code,
-            "tic_scope": "1", # 1분봉
+            "tic_scope": scope,
             "upd_stkpc_tp": "1"
         }
         try:
@@ -96,11 +101,105 @@ class HarvestService:
                 n_key = res.headers.get('next-key', "")
                 return raw_list, n_key
             else:
-                self.log(f"⚠️ API 에러 ({code}): {res.status_code} | Msg: {res.text[:100]}")
+                self.log(
+                    f"⚠️ API 에러 ({code}, tic={scope}): {res.status_code} | Msg: {res.text[:100]}"
+                )
                 return None, ""
         except Exception as e:
-            self.log(f"❌ 요청 중 예외 ({code}): {e}")
+            self.log(f"❌ 요청 중 예외 ({code}, tic={scope}): {e}")
             return None, ""
+
+    def _sync_bars_15m_from_api(
+        self,
+        code: str,
+        token: str,
+        *,
+        start_day: str = "",
+        end_day: str = "",
+        cap_dt: Optional[str] = None,
+        max_pages: int = 400,
+    ) -> int:
+        """
+        ka10080(tic_scope=15) 직접 조회 → ``bars_15m`` 저장(INSERT OR REPLACE).
+
+        ``start_day``(YYYY-MM-DD)가 있으면 그 날짜 이전으로 내려가면 조기 종료.
+        ``end_day``는 상한 필터(해당일 23:59:59 초과 봉 제외). 없으면 cap만 적용.
+        반환: 저장 시도 행 수 합계.
+        """
+        day_lo = str(start_day or "").strip()[:10]
+        day_hi = str(end_day or "").strip()[:10]
+        floor_ts = f"{day_lo} 00:00:00" if day_lo else ""
+        ceil_ts = f"{day_hi} 23:59:59" if day_hi else ""
+        if cap_dt:
+            try:
+                if ceil_ts:
+                    ceil_ts = min(str(ceil_ts), str(cap_dt))
+                else:
+                    ceil_ts = str(cap_dt)
+            except Exception:
+                pass
+
+        # 백필 하한: start_day 없으면 기존 1m earliest(있으면)까지만 내려감
+        if not floor_ts:
+            try:
+                earliest_1m = self.db.get_earliest_sync_time(code)
+                if earliest_1m:
+                    floor_ts = f"{str(earliest_1m)[:10]} 00:00:00"
+            except Exception:
+                pass
+
+        next_key = ""
+        total_saved = 0
+        pages = 0
+        try:
+            max_p = max(1, int(max_pages))
+        except Exception:
+            max_p = 400
+
+        while self.running and pages < max_p:
+            raw_data, next_key = self._fetch_minute_data(
+                code, token, next_key, tic_scope="15"
+            )
+            pages += 1
+            if not raw_data:
+                break
+            bars = self._parse_to_bars(raw_data)
+            if not bars:
+                break
+
+            raw_bottom = bars[-1]["time"]
+            filtered: list = []
+            for b in bars:
+                t = b.get("time") or ""
+                if ceil_ts and t > ceil_ts:
+                    continue
+                if floor_ts and t < floor_ts:
+                    continue
+                filtered.append(b)
+
+            if filtered:
+                try:
+                    df_chunk = pd.DataFrame(filtered)
+                    n = int(self.db.save_bars_15m(code, df_chunk) or 0)
+                    total_saved += n
+                except Exception as e:
+                    self.log(f"   ⚠️ {code}: bars_15m 저장 실패: {e}")
+
+            # 페이지 하단이 목표 하한보다 이전이면 더 이상 불필요
+            try:
+                if floor_ts and raw_bottom and str(raw_bottom) < str(floor_ts):
+                    break
+            except Exception:
+                pass
+
+            if not next_key:
+                break
+            try:
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+        return int(total_saved)
 
     def _parse_to_bars(self, raw_list):
         """API 원본 데이터를 정형화된 리스트로 변환"""
@@ -150,7 +249,8 @@ class HarvestService:
         except Exception:
             cap_dt_once = None
         self.log(
-            f"[SYNC] {code} 시작 — 키움 1분봉(ka10080) 수집 → bars_1m 저장, 이후 15분 리샘플로 bars_15m 갱신 "
+            f"[SYNC] {code} 시작 — 키움 1분봉(ka10080 tic=1)→bars_1m, "
+            f"이후 15분봉(ka10080 tic=15) 직접조회→bars_15m "
             f"(DB 1m 범위: {earliest_sync or '미상'} ~ {initial_last_sync or '없음'})"
         )
         
@@ -237,7 +337,7 @@ class HarvestService:
             time.sleep(0.3)
             
         # total_fetched는 "API가 준 청크 중 필터 통과 건수"라 중복(INSERT OR IGNORE)일 수 있습니다.
-        # 실제로 1m 범위가 확장되었을 때만 15m 리샘플·FDR 일봉 반영을 수행해 시간을 줄입니다.
+        # 실제로 1m 범위가 확장되었을 때만 공식 15분봉 직접조회·FDR 일봉 반영을 수행해 시간을 줄입니다.
         try:
             new_last_sync = self.db.get_last_sync_time(code)
             new_earliest_sync = self.db.get_earliest_sync_time(code)
@@ -256,7 +356,7 @@ class HarvestService:
                 _nk = str(code).strip()
             self._codes_1m_updated.add(_nk)
 
-            # 변경된 구간만 재계산(대개는 '최신 1~2일'만 달라짐)
+            # 변경된 구간만 공식 15분봉으로 덮어씀(대개는 '최신 1~2일')
             start_src = (
                 new_earliest_sync
                 if new_earliest_sync and new_earliest_sync != earliest_sync
@@ -270,18 +370,37 @@ class HarvestService:
                 start_day = ""
                 end_day = ""
 
-            if start_day and end_day:
-                self.log(
-                    f"   - {code}: 1분봉 적재 완료 → bars_15m 리샘플(1m→15m) [{start_day}~{end_day}] 갱신 중..."
-                )
-                self.db.refresh_resampled_data_range(code, start_day, end_day)
-            else:
-                self.log(
-                    f"   - {code}: 1분봉 적재 완료 → bars_15m 리샘플(1m→15m) 전체 재빌드(범위 판정 실패)"
-                )
-                self.db.refresh_resampled_data(code)
+            n15 = 0
+            try:
+                if start_day and end_day:
+                    self.log(
+                        f"   - {code}: 1분봉 적재 완료 → bars_15m 직접조회(ka10080 tic=15) "
+                        f"[{start_day}~{end_day}] 갱신 중..."
+                    )
+                    n15 = self._sync_bars_15m_from_api(
+                        code,
+                        token,
+                        start_day=start_day,
+                        end_day=end_day,
+                        cap_dt=cap_dt_once,
+                    )
+                else:
+                    self.log(
+                        f"   - {code}: 1분봉 적재 완료 → bars_15m 직접조회(ka10080 tic=15) "
+                        f"전체 구간(1m earliest~) 갱신 중..."
+                    )
+                    n15 = self._sync_bars_15m_from_api(
+                        code,
+                        token,
+                        start_day="",
+                        end_day=str(end_src)[:10] if end_src else "",
+                        cap_dt=cap_dt_once,
+                    )
+            except Exception as e:
+                self.log(f"   ⚠️ {code}: bars_15m 직접조회 실패: {e}")
             self.log(
-                f"[OK] {code} 처리 완료: 신규 1분봉 {total_fetched}개(bars_1m) + 15분봉 테이블 갱신(bars_15m)"
+                f"[OK] {code} 처리 완료: 신규 1분봉 {total_fetched}개(bars_1m) + "
+                f"공식 15분봉 {n15}개 반영(bars_15m)"
             )
             # FDR → bars_1d: 동적 백테·감시 선정과 동일 일봉 소스
             try:
@@ -535,7 +654,7 @@ class HarvestService:
             if _cap0:
                 self._cap_dt_once = _cap0
                 self.log(
-                    f"⏸ [장중] 1분봉은 '{_cap0}' 이하만 DB 저장합니다(당일 장중 봉 제외). "
+                    f"⏸ [장중] 1분·15분봉은 '{_cap0}' 이하만 DB 저장합니다(당일 장중 봉 제외). "
                     f"장 마감 후 실행 시 당일 분봉까지 반영됩니다."
                 )
             req_close = required_eod_bar_datetime_asof_local()

@@ -764,8 +764,83 @@ class DataManagerV2:
             """, (code, last_dt, first_dt))
             conn.commit()
 
+    def save_bars_15m(self, code: str, df: Any) -> int:
+        """
+        ka10080(tic_scope=15) 등 공식 15분봉을 ``bars_15m``에 저장합니다.
+
+        PRIMARY KEY(code, datetime) 기준 ``INSERT OR REPLACE`` —
+        과거 1m→15m 리샘플 값이 있으면 동일 시각은 공식봉으로 덮어씁니다.
+        반환: 시도한 행 수(0이면 저장 없음).
+        """
+        try:
+            import pandas as pd
+        except Exception:
+            return 0
+        try:
+            if df is None or getattr(df, "empty", True):
+                return 0
+            ncode = normalize_code(code)
+            data = df.copy()
+            if "time" in data.columns:
+                data.rename(columns={"time": "datetime"}, inplace=True)
+            elif "Date" in data.columns:
+                data.rename(columns={"Date": "datetime"}, inplace=True)
+            data.columns = [str(c).lower() for c in data.columns]
+            need = ("datetime", "open", "high", "low", "close", "volume")
+            for c in need:
+                if c not in data.columns:
+                    return 0
+            data["code"] = ncode
+            data = data[["code", "datetime", "open", "high", "low", "close", "volume"]]
+            # 문자열 시각 정규화
+            data["datetime"] = data["datetime"].astype(str).str.strip()
+            for c in ("open", "high", "low", "close", "volume"):
+                data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0).astype(int)
+            data = data[data["datetime"].str.len() >= 19]
+            if data.empty:
+                return 0
+            rows = data.values.tolist()
+            with self._lock, self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.executemany(
+                    """
+                    INSERT OR REPLACE INTO bars_15m
+                        (code, datetime, open, high, low, close, volume)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                conn.commit()
+            return int(len(rows))
+        except Exception as e:
+            try:
+                print(f"[DataManagerV2] save_bars_15m {code}: {e}")
+            except Exception:
+                pass
+            return 0
+
+    def get_bars_15m_bounds(self, code: str) -> tuple[Optional[str], Optional[str]]:
+        """``bars_15m`` MIN/MAX datetime. 없으면 (None, None)."""
+        try:
+            ncode = normalize_code(code)
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT MIN(datetime), MAX(datetime) FROM bars_15m WHERE code = ?",
+                    (ncode,),
+                ).fetchone()
+            if not row or row[0] is None:
+                return None, None
+            return str(row[0]), str(row[1])
+        except Exception:
+            return None, None
+
     def refresh_resampled_data(self, code):
-        """bars_1m 전체를 기준으로 해당 종목의 bars_15m을 재생성합니다."""
+        """
+        [레거시] bars_1m → bars_15m 로컬 리샘플 재생성.
+
+        하베스팅은 ka10080(tic_scope=15) 직접 조회로 전환됨.
+        도구/마이그레이션용으로만 유지합니다.
+        """
         err = refresh_resampled_data_at_path(self.db_path, code)
         if err:
             try:
@@ -780,7 +855,9 @@ class DataManagerV2:
         end_day: str,
     ) -> None:
         """
-        bars_1m 기준으로 해당 종목의 bars_15m을 날짜 범위(start_day~end_day)에 대해서만 재생성합니다.
+        [레거시] bars_1m 기준 날짜 범위만 15m 리샘플.
+
+        하베스팅은 공식 15분봉 직접 조회를 사용합니다.
         """
         err = refresh_resampled_data_at_path_range(
             self.db_path, code, start_day=start_day, end_day=end_day
