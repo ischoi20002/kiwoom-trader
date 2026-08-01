@@ -2965,7 +2965,7 @@ class KiwoomApp:
         self.root.destroy()
 
     def _on_regime_history_clicked(self) -> None:
-        """헤더 「30일」 — 최근 영업일 레짐 이력 창."""
+        """헤더 「30일」 — 적용일(다음 장) 기준 레짐 이력 창."""
         try:
             svc = getattr(self, "regime_display_service", None)
             if svc is not None:

@@ -1614,7 +1614,12 @@ def _build_index_vol_by_day(
     fetch_start: str,
     end_date: str,
 ) -> Dict[str, Dict[str, float]]:
-    """KODEX200(069500) 일봉 기준 연환산 변동성(rvol_5/20) 일별 맵 — FDR 우선."""
+    """
+    KODEX200(069500) 일봉 기준 일별 맵 — FDR 우선.
+
+    - ``rvol_5`` / ``rvol_20``: 연환산 변동성(%)
+    - ``ret_pct``: 일수익률(%) — HARD 상승일 억제 등에 사용
+    """
     out: Dict[str, Dict[str, float]] = {}
     try:
         df = _fdr_index_daily_close_df(data_manager, "069500", fetch_start, end_date)
@@ -1624,6 +1629,7 @@ def _build_index_vol_by_day(
         tmp["d"] = pd.to_datetime(tmp["time"], errors="coerce").dt.normalize()
         close = pd.to_numeric(tmp["close"], errors="coerce")
         ret = close.pct_change()
+        tmp["ret_pct"] = ret * 100.0
         tmp["rvol_20"] = ret.rolling(20).std() * np.sqrt(252.0) * 100.0
         tmp["rvol_5"] = ret.rolling(5).std() * np.sqrt(252.0) * 100.0
         for _, row in tmp.iterrows():
@@ -1632,7 +1638,7 @@ def _build_index_vol_by_day(
                 continue
             d_str = pd.Timestamp(d_raw).strftime("%Y-%m-%d")
             entry: Dict[str, float] = {}
-            for key in ("rvol_20", "rvol_5"):
+            for key in ("rvol_20", "rvol_5", "ret_pct"):
                 val = row.get(key)
                 if val is not None and np.isfinite(float(val)):
                     entry[key] = float(val)
@@ -1753,6 +1759,7 @@ def _compute_transition_regime_map_fdr(
                     settings,
                     index_rvol_20=_iv.get("rvol_20"),
                     xs_ret_std=_xs,
+                    index_day_ret=_iv.get("ret_pct"),
                 )
             except Exception:
                 regime_map[d_str] = "OFF"
@@ -1773,17 +1780,40 @@ def classify_transition_regime(
     settings: Optional[dict] = None,
     index_rvol_20: Optional[float] = None,
     xs_ret_std: Optional[float] = None,
+    index_day_ret: Optional[float] = None,
 ) -> str:
     """
     B-share 급락(레짐 전환) + 변동성 확인.
 
     반환: ``OFF`` / ``TRANSITION`` / ``HARD``
       - TRANSITION/HARD: 신규 S1 차단 + S2 중단 (런타임)
+      - ``hard_suppress_on_index_up``: 지수 일수익률(%)이 임계 이상이면
+        chop→HARD를 건너뜀 (폭등일 A과밀 오발동 완화)
+      - ``hard_suppress_to_off_only``: 억제 시 TRANSITION 폴백 없이 즉시 ``OFF``
     """
     s = settings or {}
     try:
-        if is_chop_regime_day(valid_a, valid_b, settings):
-            return "HARD"
+        chop = is_chop_regime_day(valid_a, valid_b, settings)
+        if chop:
+            suppress = bool(s.get("hard_suppress_on_index_up", False))
+            try:
+                thr = float(s.get("hard_suppress_index_up_pct", 2.0) or 2.0)
+            except (TypeError, ValueError):
+                thr = 2.0
+            day_ret: Optional[float] = None
+            try:
+                if index_day_ret is not None and np.isfinite(float(index_day_ret)):
+                    day_ret = float(index_day_ret)
+            except Exception:
+                day_ret = None
+            suppressed = bool(
+                suppress and day_ret is not None and day_ret >= thr
+            )
+            if not suppressed:
+                return "HARD"
+            # 강한 상승일로 HARD 억제 — OFF만 허용하면 TRANSITION 폴백 금지
+            if bool(s.get("hard_suppress_to_off_only", False)):
+                return "OFF"
 
         va = max(0, int(valid_a))
         vb = max(0, int(valid_b))
@@ -2008,6 +2038,7 @@ def resolve_transition_gate_for_live(
             settings,
             index_rvol_20=iv.get("rvol_20"),
             xs_ret_std=xs if np.isfinite(xs) else None,
+            index_day_ret=iv.get("ret_pct"),
         )
         if regime == "TRANSITION" and bool(settings.get("transition_ignore_soft", False)):
             regime = "OFF"
@@ -2019,9 +2050,16 @@ def resolve_transition_gate_for_live(
                 "TRANSITION", max_a, max_b, settings
             )
         block_s1, block_s2 = resolve_transition_runtime_blocks(regime, settings)
+        _ret_s = iv.get("ret_pct")
+        _ret_txt = (
+            f"{float(_ret_s):+.2f}%"
+            if _ret_s is not None and np.isfinite(float(_ret_s))
+            else "n/a"
+        )
         log(
             f"[Transition] {end_s} 레짐={regime} Valid_A={va} Valid_B={vb} "
             f"share={share:.1f}% d5={d5 if d5 is not None else 'n/a'} "
+            f"idx_ret={_ret_txt} "
             f"→ 슬롯 A={slots_a}/B={slots_b} S1차단={block_s1} S2차단={block_s2}"
         )
         result.update(
@@ -3402,6 +3440,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                     settings,
                     index_rvol_20=_iv.get("rvol_20"),
                     xs_ret_std=_xs,
+                    index_day_ret=_iv.get("ret_pct"),
                 )
                 transition_regime_by_day[d_str] = _tl
                 _ignore_soft = bool(settings.get("transition_ignore_soft", False))
@@ -3480,9 +3519,9 @@ def compute_transition_regime_history(
     ``prepare_dynamic_universe`` 와 동일 분류 로직(게이트 ON으로 일시 강제).
     GUI 이력 차트용 — 실전 ``use_transition_gate`` 와 무관하게 분류 결과를 반환한다.
 
-    표시 일자는 레짐 계산에 실제로 쓰인 FDR 일봉 일자(∩ KRX 영업일)를 따르며,
-    로컬 ``bars_1d`` 보유 일자에 묶지 않는다. 마지막 일자는 **완료된 거래일**
-    로 캡해 미완성 당일 일봉이 섞이지 않게 한다.
+    레짐은 **완료 거래일(data_as_of)** 일봉으로 판정하고, 반환 ``date``/``apply_on`` 은
+    그 레짐이 적용되는 **다음 영업일**이다 (헤더 레짐 표시와 동일).
+    마지막 데이터일은 **완료된 거래일**로 캡해 미완성 당일 일봉이 섞이지 않게 한다.
     """
     out: List[Dict[str, Any]] = []
     try:
@@ -3536,13 +3575,29 @@ def compute_transition_regime_history(
             "TRANSITION": "약화",
             "HARD": "붕괴",
         }
+        try:
+            from reporting.krx_trading_calendar import next_trading_day as _next_td
+        except Exception:
+            _next_td = None  # type: ignore
+
         for d in display_days:
             reg = str(regime_map.get(d, "OFF")).strip().upper()
             if reg not in ("OFF", "TRANSITION", "HARD"):
                 reg = "OFF"
+            # UI 표시는 적용일(다음 영업일). 데이터 판정일은 data_as_of 에 보관.
+            apply_on = d
+            try:
+                if _next_td is not None:
+                    nxt = _next_td(d)
+                    if nxt is not None:
+                        apply_on = nxt.strftime("%Y-%m-%d")
+            except Exception:
+                apply_on = d
             out.append(
                 {
-                    "date": d,
+                    "date": apply_on,
+                    "data_as_of": d,
+                    "apply_on": apply_on,
                     "regime": reg,
                     "label": labels.get(reg, reg),
                 }

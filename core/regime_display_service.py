@@ -3,8 +3,11 @@
 GUI 상단 B 추세 레짐(전환 게이트) 표시.
 
 갱신 시점:
-  - GUI 기동(재시작) 직후 1회 — **직전 완료 거래일** 기준
+  - GUI 기동(재시작) 직후 1회 — **직전 완료 거래일** 데이터로 판정
   - 거래일 장마감(15:30) + 버퍼(기본 30분) 이후 1회/일 — 당일 완료분 반영
+
+표시 일자:
+  - 판정은 완료 거래일(데이터) 기준이지만, UI에는 **적용되는 다음 영업일**을 표기한다.
 
 장중에는 미완성 당일 일봉으로 재계산하지 않는다 (백테 ref일 정합).
 """
@@ -48,7 +51,10 @@ class RegimeDisplayService:
         self._refresh_in_progress: bool = False
         self._last_eod_refresh_day: Optional[str] = None
         self._cached_regime: str = "UNKNOWN"
+        # 데이터 판정 기준일(완료 거래일)
         self._cached_as_of: str = ""
+        # UI 표시용 — 레짐이 적용되는 다음 영업일
+        self._cached_apply_on: str = ""
         self._cached_detail: str = ""
         self._history_in_progress: bool = False
 
@@ -94,6 +100,27 @@ class RegimeDisplayService:
         except Exception:
             t = now or datetime.now()
             return t.date() - timedelta(days=1)
+
+    @staticmethod
+    def _apply_on_from_data_asof(data_as_of: str) -> str:
+        """
+        데이터 판정일(완료 거래일) → 레짐이 적용되는 다음 영업일 문자열.
+
+        실패 시 입력값을 그대로 반환한다.
+        """
+        s = str(data_as_of or "").strip()[:10]
+        if len(s) < 10:
+            return s
+        try:
+            from reporting.krx_trading_calendar import next_trading_day
+
+            d0 = date.fromisoformat(s)
+            nxt = next_trading_day(d0)
+            if nxt is not None:
+                return nxt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+        return s
 
     def _schedule_tick(self) -> None:
         if self._cancelled:
@@ -172,7 +199,7 @@ class RegimeDisplayService:
             return
         self._refresh_in_progress = True
         try:
-            self._apply_label("LOADING", "", "")
+            self._apply_label("LOADING", "", "", "")
         except Exception:
             pass
 
@@ -193,6 +220,7 @@ class RegimeDisplayService:
                 payload = {
                     "regime_key": "ERROR",
                     "as_of": "",
+                    "apply_on": "",
                     "detail": str(ex)[:80],
                     "reason": reason,
                 }
@@ -213,6 +241,7 @@ class RegimeDisplayService:
             return {
                 "regime_key": "GATE_OFF",
                 "as_of": "",
+                "apply_on": "",
                 "detail": "",
                 "reason": "gate_off",
             }
@@ -222,6 +251,7 @@ class RegimeDisplayService:
             return {
                 "regime_key": "ERROR",
                 "as_of": "",
+                "apply_on": "",
                 "detail": "data_manager 없음",
                 "reason": "no_dm",
             }
@@ -248,9 +278,11 @@ class RegimeDisplayService:
             detail = "신규 차단"
 
         as_of_s = str(tg.get("as_of") or as_of_dt.strftime("%Y-%m-%d"))
+        apply_on = self._apply_on_from_data_asof(as_of_s)
         return {
             "regime_key": reg,
             "as_of": as_of_s,
+            "apply_on": apply_on,
             "detail": detail,
             "reason": "ok",
         }
@@ -260,9 +292,13 @@ class RegimeDisplayService:
         try:
             key = str(payload.get("regime_key", "UNKNOWN"))
             as_of = str(payload.get("as_of", "") or "")
+            apply_on = str(payload.get("apply_on", "") or "")
+            if not apply_on and as_of:
+                apply_on = self._apply_on_from_data_asof(as_of)
             detail = str(payload.get("detail", "") or "")
             self._cached_regime = key
             self._cached_as_of = as_of
+            self._cached_apply_on = apply_on
             self._cached_detail = detail
 
             reason = str(payload.get("reason", "") or "")
@@ -277,13 +313,14 @@ class RegimeDisplayService:
                 except Exception:
                     pass
 
-            self._apply_label(key, as_of, detail)
+            self._apply_label(key, as_of, apply_on, detail)
 
             if reason == "startup":
                 try:
+                    show_d = apply_on or as_of
                     self.log(
                         f"📊 [레짐표시] B 추세 레짐={self._REGIME_LABELS.get(key, key)}"
-                        + (f" (기준 {as_of})" if as_of else "")
+                        + (f" (적용 {show_d})" if show_d else "")
                     )
                 except Exception:
                     pass
@@ -376,7 +413,13 @@ class RegimeDisplayService:
             target=_worker, daemon=True, name="RegimeHistory"
         ).start()
 
-    def _apply_label(self, regime_key: str, as_of: str, detail: str) -> None:
+    def _apply_label(
+        self,
+        regime_key: str,
+        data_as_of: str,
+        apply_on: str,
+        detail: str,
+    ) -> None:
         lbl = getattr(self.app, "lbl_regime_status", None)
         if lbl is None:
             return
@@ -385,9 +428,11 @@ class RegimeDisplayService:
             parts = [f"B 추세 레짐: {label_txt}"]
             if detail:
                 parts[0] += f" · {detail}"
-            if as_of and regime_key not in ("LOADING", "GATE_OFF"):
-                short_d = as_of[5:] if len(as_of) >= 10 else as_of
-                parts[0] += f"  (기준 {short_d})"
+            # 표시는 적용일(다음 장). 데이터 기준일은 캐시에만 보관.
+            show = str(apply_on or "").strip() or str(data_as_of or "").strip()
+            if show and regime_key not in ("LOADING", "GATE_OFF"):
+                short_d = show[5:] if len(show) >= 10 else show
+                parts[0] += f"  (적용 {short_d})"
             text = parts[0]
             color = self._REGIME_COLORS.get(regime_key, "#ECEFF4")
             bg = (getattr(self.app, "colors", None) or {}).get("bg", "#2E3440")

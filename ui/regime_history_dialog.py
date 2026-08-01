@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""B 추세 레짐 — 최근 영업일 타임라인 다이얼로그."""
+"""B 추세 레짐 — 적용일(다음 장) 기준 타임라인 다이얼로그."""
 from __future__ import annotations
 
 import tkinter as tk
@@ -46,7 +46,7 @@ def open_regime_history_dialog(
     primary = colors.get("primary", "#88C0D0")
 
     top = tk.Toplevel(parent)
-    top.title("B 추세 레짐 — 최근 영업일")
+    top.title("B 추세 레짐 — 적용일(다음 장) 기준")
     top.transient(parent)
     top.geometry("860x480")
     top.minsize(720, 400)
@@ -65,7 +65,7 @@ def open_regime_history_dialog(
     )
     ttk.Label(
         outer,
-        text=f"최근 {len(rows)}영업일 · {gate_note}",
+        text=f"최근 {len(rows)}영업일 · 적용일 표시 · {gate_note}",
         font=("Malgun Gothic", 10, "bold"),
         foreground=primary,
     ).pack(anchor="w", pady=(0, 8))
@@ -112,9 +112,13 @@ def open_regime_history_dialog(
         x = x0 + i * (bar_w + gap)
         y1 = pad_top
         y2 = pad_top + bar_h_max
-        d = str(row.get("date", ""))
+        d = str(row.get("date", "") or row.get("apply_on", ""))
+        data_asof = str(row.get("data_as_of", "") or "")
         tag = f"bar_{i}"
-        tip = f"{d}  {_REGIME_LABELS.get(reg, reg)}"
+        tip = f"적용 {d}"
+        if data_asof and data_asof != d:
+            tip += f" (데이터 {data_asof})"
+        tip += f"  {_REGIME_LABELS.get(reg, reg)}"
 
         canvas.create_rectangle(x, y1, x + bar_w, y2, fill=col, outline=col, tags=(tag,))
         if d:
@@ -137,7 +141,7 @@ def open_regime_history_dialog(
 
         def _reset_title(_e: Any) -> None:
             try:
-                top.title("B 추세 레짐 — 최근 영업일")
+                top.title("B 추세 레짐 — 적용일(다음 장) 기준")
             except Exception:
                 pass
 
@@ -150,7 +154,7 @@ def open_regime_history_dialog(
 
     cols = ("date", "regime", "label")
     tree = ttk.Treeview(table_f, columns=cols, show="headings", height=min(12, max(6, n)))
-    tree.heading("date", text="일자")
+    tree.heading("date", text="적용일")
     tree.heading("regime", text="코드")
     tree.heading("label", text="상태")
     tree.column("date", width=110, anchor="center")
@@ -167,7 +171,7 @@ def open_regime_history_dialog(
             "",
             tk.END,
             values=(
-                row.get("date", ""),
+                row.get("date", "") or row.get("apply_on", ""),
                 row.get("regime", ""),
                 row.get("label", ""),
             ),

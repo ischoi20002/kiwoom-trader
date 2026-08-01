@@ -694,6 +694,29 @@ class SettingsTab:
             '개',
             'B-share 상한 조건용 Valid_A 최소',
         )
+        add_param_row(
+            transition_f,
+            '강한 상승일 HARD 억제',
+            None,
+            '',
+            'ON: KODEX200 일수익률≥임계면 chop→HARD 건너뜀 (폭등일 A과밀 오발동 완화)',
+            toggle_key='hard_suppress_on_index_up',
+        )
+        add_param_row(
+            transition_f,
+            'HARD 억제 상승 임계 (%)',
+            'hard_suppress_index_up_pct',
+            '%',
+            '지수(KODEX200) 일수익률이 이 값 이상이면 HARD 억제',
+        )
+        add_param_row(
+            transition_f,
+            '억제 시 OFF만',
+            None,
+            '',
+            'ON: 상승일 HARD 억제 후 TRANSITION 폴백 없이 OFF (슬롯 축소 없음)',
+            toggle_key='hard_suppress_to_off_only',
+        )
 
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')
         sel_f.pack(fill=tk.X, expand=False, pady=(0, 12))

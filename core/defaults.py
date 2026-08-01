@@ -194,6 +194,11 @@ DEFAULT_SETTINGS = {
     "transition_block_s1_on_soft": False,
     "transition_block_s2_on_soft": False,
     "transition_ignore_soft": False,
+    # HARD(chop) 상승일 억제: 지수 일수익률≥임계면 chop→HARD 건너뜀 (검증 후 미채택·기본 OFF)
+    "hard_suppress_on_index_up": False,
+    "hard_suppress_index_up_pct": 2.0,
+    # 상승일 HARD 억제 시 TRANSITION 폴백 금지 → 즉시 OFF (검증 후 미채택·기본 OFF)
+    "hard_suppress_to_off_only": False,
     "chop_valid_a_min": 15,
     "chop_valid_b_max": 3,
     "chop_valid_b_share_max_pct": 15.0,
