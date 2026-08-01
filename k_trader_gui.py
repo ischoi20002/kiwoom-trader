@@ -2614,14 +2614,33 @@ class KiwoomApp:
             pass
         return self.ensure_fresh_selection_then_start()
 
-    def ensure_fresh_selection_then_start(self) -> bool:
+    def ensure_fresh_selection_then_start(
+        self,
+        force_selection: bool = False,
+        on_done: Optional[Any] = None,
+    ) -> bool:
         """
         ``selected_targets.csv`` 가 신선하면 즉시 감시 시작,
         만료·없으면 일일 선정 후 시작합니다.
+
+        ``force_selection=True``: 신선도와 무관하게 일일 선정을 다시 수행한 뒤 시작
+        (장마감 선정 실패 후 장전 재시도 등).
+        ``on_done``: 최종 성공/실패(bool) 콜백 — 비동기 선정 완료 후에도 호출.
         """
+        done_cb = on_done if callable(on_done) else None
+
+        def _notify(ok: bool) -> None:
+            if done_cb is None:
+                return
+            try:
+                done_cb(bool(ok))
+            except Exception:
+                pass
+
         tc = self.trading_controller
         try:
             if bool(getattr(tc, "is_monitoring", False)):
+                _notify(True)
                 return False
             if bool(getattr(tc, "_run_start_sequence_active", False)):
                 try:
@@ -2630,6 +2649,7 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
+                _notify(False)
                 return False
             if bool(getattr(self, "_ensure_sel_start_active", False)):
                 try:
@@ -2638,10 +2658,12 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
+                _notify(False)
                 return False
         except Exception:
             pass
 
+        need_select = bool(force_selection)
         try:
             from core.selection_freshness import (
                 is_selected_targets_fresh,
@@ -2650,7 +2672,7 @@ class KiwoomApp:
 
             st = getattr(self, "settings", None) or {}
             path = "selected_targets.csv"
-            if is_selected_targets_fresh(path, settings=st):
+            if not need_select and is_selected_targets_fresh(path, settings=st):
                 try:
                     from core.selection_freshness import count_selected_targets
 
@@ -2673,22 +2695,44 @@ class KiwoomApp:
                             )
                     except Exception:
                         pass
+                    _notify(False)
                     return False
-                return bool(tc.start(skip_selection_fresh_check=True))
-            _ok, detail = selection_freshness_status(path, settings=st)
-            try:
-                self.log(
-                    f"🔄 [감시] 일일 감시목록 갱신 필요 — {detail}. "
-                    "선정을 수행한 뒤 감시를 시작합니다."
-                )
-            except Exception:
-                pass
+                started = bool(tc.start(skip_selection_fresh_check=True))
+                _notify(started)
+                return started
+            if need_select:
+                try:
+                    self.log(
+                        "🔄 [감시] 강제 재선정(장마감 실패 복구 또는 요청) — "
+                        "선정을 수행한 뒤 감시를 시작합니다."
+                    )
+                except Exception:
+                    pass
+            else:
+                _ok, detail = selection_freshness_status(path, settings=st)
+                try:
+                    self.log(
+                        f"🔄 [감시] 일일 감시목록 갱신 필요 — {detail}. "
+                        "선정을 수행한 뒤 감시를 시작합니다."
+                    )
+                except Exception:
+                    pass
         except Exception as e:
-            try:
-                self.log(f"⚠️ [감시] 신선도 검사 실패({e}) — 기존 CSV로 시작 시도")
-            except Exception:
-                pass
-            return bool(tc.start(skip_selection_fresh_check=True))
+            if force_selection:
+                try:
+                    self.log(
+                        f"⚠️ [감시] 신선도 검사 실패({e}) — 강제 재선정을 계속합니다."
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.log(f"⚠️ [감시] 신선도 검사 실패({e}) — 기존 CSV로 시작 시도")
+                except Exception:
+                    pass
+                started = bool(tc.start(skip_selection_fresh_check=True))
+                _notify(started)
+                return started
 
         mt = getattr(self, "monitor_tab", None)
         if mt is None or not hasattr(mt, "select_monitoring_targets"):
@@ -2705,6 +2749,7 @@ class KiwoomApp:
                     )
             except Exception:
                 pass
+            _notify(False)
             return False
 
         self._ensure_sel_start_active = True
@@ -2731,6 +2776,7 @@ class KiwoomApp:
                             )
                     except Exception:
                         pass
+                    _notify(False)
                     return
                 try:
                     from core.selection_freshness import count_selected_targets
@@ -2754,6 +2800,7 @@ class KiwoomApp:
                             )
                     except Exception:
                         pass
+                    _notify(False)
                     return
                 try:
                     self.log(
@@ -2761,13 +2808,16 @@ class KiwoomApp:
                     )
                 except Exception:
                     pass
+                started = False
                 try:
-                    tc.start(skip_selection_fresh_check=True)
+                    started = bool(tc.start(skip_selection_fresh_check=True))
                 except Exception as ex:
                     try:
                         self.log(f"❌ [감시] 선정 후 시작 실패: {ex}")
                     except Exception:
                         pass
+                    started = False
+                _notify(started)
 
             try:
                 self.root.after(0, _job)
@@ -2785,6 +2835,7 @@ class KiwoomApp:
                 daemon=True,
                 name="EnsureSelThenStart",
             ).start()
+            # 비동기 진행 중 — 최종 결과는 on_done 으로 통지
             return True
         except Exception as e:
             try:
@@ -2795,6 +2846,7 @@ class KiwoomApp:
                 self.log(f"❌ [감시] 선정 스레드 기동 실패: {e}")
             except Exception:
                 pass
+            _notify(False)
             return False
 
     def _sync_continuous_monitor_ui(self) -> None:

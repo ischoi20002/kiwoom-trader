@@ -4,6 +4,8 @@
 
 - **16:00**(15:30+버퍼, 기본 30분): 감시 중단 → 일일 선정 (재시작 없음)
 - **08:50**(설정): 다음날/당일 장전 실시간 감시 시작
+  - 직전 장마감 선정이 **실패**했으면 장전에 **강제 재선정** 후 시작
+  - CSV 신선도 만료 시에도 기존처럼 선정 후 시작
 
 「실시간 감시 시작」과 함께 ``arm()`` 됩니다.
 """
@@ -28,6 +30,10 @@ class ContinuousMonitorService:
         self._last_morning_start_day: Optional[str] = None
         # EOD 사이클용 stop() 인지 — STOPPED 콜백에서 연속 모드 해제 방지
         self._eod_stop_for_cycle: bool = False
+        # 장마감 선정 실패 → 다음 장전(08:50)에 강제 재선정
+        self._pending_morning_reselect: bool = False
+        # 장전 시작(선정 포함) 진행 중 — 30초 tick 중복 기동 방지
+        self._morning_start_in_progress: bool = False
 
     def arm(self) -> None:
         """연속 스케줄 활성화. 이미 armed 면 스케줄러만 유지."""
@@ -214,6 +220,8 @@ class ContinuousMonitorService:
 
             # 1) 장전 자동 시작 (미감시)
             if not monitoring:
+                if self._morning_start_in_progress:
+                    return
                 if self._should_morning_start(now):
                     self._begin_morning_start(now.date())
                 return
@@ -235,30 +243,59 @@ class ContinuousMonitorService:
                 pass
 
     def _begin_morning_start(self, day_d: date) -> None:
-        """08:50 등 장전 감시 시작."""
+        """08:50 등 장전 감시 시작(필요 시 재선정)."""
         day_key = self._trading_day_key(day_d)
+        force_sel = bool(self._pending_morning_reselect)
         try:
             hm = self._auto_start_hhmm_str()
-            self.log(f"🔄 [연속감시] {day_key} {hm} 실시간 감시 자동 시작")
+            if force_sel:
+                self.log(
+                    f"🔄 [연속감시] {day_key} {hm} 장전 감시 시작 "
+                    f"— 직전 장마감 선정 실패분, 재선정 후 시작"
+                )
+            else:
+                self.log(f"🔄 [연속감시] {day_key} {hm} 실시간 감시 자동 시작")
         except Exception:
             pass
-        started_ok = False
+
+        self._morning_start_in_progress = True
+
+        def _on_done(ok: bool) -> None:
+            try:
+                self._morning_start_in_progress = False
+                if ok:
+                    self._last_morning_start_day = day_key
+                    self._pending_morning_reselect = False
+                    return
+                # 실패 시 당일 플래그를 남기지 않아 EOD 전까지 재시도
+                if force_sel:
+                    self._pending_morning_reselect = True
+                try:
+                    self.log(
+                        "⚠️ [연속감시] 장전 시작 미완료 — "
+                        "선정/시작 성공 시까지 주기적으로 재시도합니다."
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                self._morning_start_in_progress = False
+
         try:
             ens = getattr(self.app, "ensure_fresh_selection_then_start", None)
             if callable(ens):
-                started_ok = bool(ens())
-            else:
-                tc = getattr(self.app, "trading_controller", None)
-                if tc is not None:
-                    started_ok = bool(tc.start())
+                ens(force_selection=force_sel, on_done=_on_done)
+                return
+            tc = getattr(self.app, "trading_controller", None)
+            started_ok = False
+            if tc is not None:
+                started_ok = bool(tc.start())
+            _on_done(started_ok)
         except Exception as e:
             try:
                 self.log(f"⚠️ [연속감시] 장전 시작 실패: {e}")
             except Exception:
                 pass
-            started_ok = False
-        if started_ok:
-            self._last_morning_start_day = day_key
+            _on_done(False)
 
     def _begin_eod_cycle(self, day_key: str) -> None:
         self._cycle_in_progress = True
@@ -354,10 +391,21 @@ class ContinuousMonitorService:
         self._cycle_in_progress = False
         self._eod_stop_for_cycle = False
         try:
+            if ok:
+                self._pending_morning_reselect = False
+            else:
+                # 다음 거래일 장전(08:50)에 강제 재선정
+                self._pending_morning_reselect = True
+        except Exception:
+            self._pending_morning_reselect = not bool(ok)
+        try:
             msg = (
                 f"✅ [연속감시] 장마감 선정 완료 — {detail}"
                 if ok
-                else f"⚠️ [연속감시] 장마감 선정 실패 — {detail}"
+                else (
+                    f"⚠️ [연속감시] 장마감 선정 실패 — {detail} "
+                    f"(다음 장전 {self._auto_start_hhmm_str()}에 재선정 예정)"
+                )
             )
             self.log(msg)
             sl = getattr(self.app, "session_logger", None)
