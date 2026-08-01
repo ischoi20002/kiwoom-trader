@@ -13,6 +13,12 @@
 
 ---
 
+## 0.15.17 (2026-08-02)
+
+- **틱→15분 전체 누적(검증용)**: `RtTick15mAccumulator` — 0B 틱으로 슬롯 전체 OHLCV 누적 후 **전용 DB**(`realtime_15m_tick_*.db`)에만 저장. 신호·주문·`bars_data` 미사용.
+- **매매 경로 격리**: 디스패치는 `offer_tick`(큐 put만), 누적·seal·SQLite는 전용 스레드. 공식 15분 슬롯 watcher와 분리.
+- 설정: `realtime_tick_15m_accumulate_save_only`(기본 ON). 설정 탭 토글 추가.
+
 ## 0.15.16 (2026-08-01)
 
 - **레짐 표시 일자**: 헤더·「30일」이력 모두 **적용일(다음 영업일)** 기준. 판정은 완료 거래일(`data_as_of`) 유지.

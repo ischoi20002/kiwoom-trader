@@ -131,6 +131,7 @@
     "realtime_s1_full_calc_fallback_sec": 120.0,
     "realtime_s1_eval_on_local_15m_close": true,
     "realtime_15m_last_minute_from_ticks": true,
+    "realtime_tick_15m_accumulate_save_only": true,
     "realtime_s1_mirror_dynamic_intrabar": false,
     "realtime_intrabar_close_now_signals": false,
     "realtime_use_fixed_s1_presignal_gate": true,

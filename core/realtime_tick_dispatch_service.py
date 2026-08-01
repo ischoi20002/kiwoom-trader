@@ -231,6 +231,22 @@ class RealtimeTickDispatchService:
           UI 반영은 메인 큐 폴러로 위임합니다.
         - root가 없으면 즉시 SignalEngine 호출(호환/테스트용)
         """
+        # 틱→15분 검증용 누적: 큐 put 만(전용 스레드가 OHLC/DB 처리). 신호 경로와 겹치지 않음.
+        try:
+            acc = getattr(self.app, "rt_tick_15m_accumulator", None)
+            if acc is not None:
+                skip = bool(kwargs.get("_orderbook_only", False)) or bool(
+                    kwargs.get("_official_sync_eval", False)
+                )
+                acc.offer_tick(
+                    code,
+                    float(now_price) if now_price is not None else 0.0,
+                    float(volume) if volume is not None else 0.0,
+                    skip=skip,
+                )
+        except Exception:
+            pass
+
         try:
             root = self._get_root()
             if root is None:

@@ -575,6 +575,38 @@ class KiwoomApp:
             max_completed_per_code=24,
             logger_callback=self.log,
         )
+        from core.rt_tick_15m_accumulator import RtTick15mAccumulator
+        from utils.server_mode_paths import realtime_tick_15m_db_path
+
+        # 틱→15분 검증용: 전용 DB + 전용 스레드(공식봉·신호·주문과 파일/락/워커 분리)
+        try:
+            _tick_ret = int(
+                float(self.settings.get("realtime_15m_calendar_retention_days", 365))
+            )
+        except (TypeError, ValueError):
+            _tick_ret = 365
+        _tick_ret = max(1, min(_tick_ret, 3650))
+        self.realtime_tick_15m_bars_store = RealtimeMonitorBarsStore(
+            db_path=realtime_tick_15m_db_path(),
+            logger_callback=self.log,
+            retention_calendar_days=_tick_ret,
+        )
+        self.rt_tick_15m_accumulator = RtTick15mAccumulator(
+            store=self.realtime_tick_15m_bars_store,
+            settings=self.settings,
+            logger_callback=self.log,
+            get_settings=lambda: getattr(self, "settings", None) or {},
+        )
+        try:
+            if bool(
+                (self.settings or {}).get("realtime_tick_15m_accumulate_save_only", True)
+            ):
+                self.log(
+                    "ℹ️ [Tick15m] 틱→15분 전체 누적 ON "
+                    f"(전용DB={realtime_tick_15m_db_path()}, 신호·주문 미사용)"
+                )
+        except Exception:
+            pass
 
         _rt15_store = self.realtime_monitor_bars_store
         from core.closed_15m_fast_path import Closed15mDbUpsertQueue, Closed15mEvalPool
@@ -1270,6 +1302,21 @@ class KiwoomApp:
             )
         except Exception:
             try:
+                # 디스패치 실패 폴백: 검증용 누적은 비차단 offer 만
+                try:
+                    acc = getattr(self, "rt_tick_15m_accumulator", None)
+                    if acc is not None:
+                        skip = bool(kwargs.get("_orderbook_only", False)) or bool(
+                            kwargs.get("_official_sync_eval", False)
+                        )
+                        acc.offer_tick(
+                            code,
+                            float(now_price) if now_price is not None else 0.0,
+                            float(volume) if volume is not None else 0.0,
+                            skip=skip,
+                        )
+                except Exception:
+                    pass
                 self.signal_engine.on_tick_received(
                     code, now_price, volume, trde_val, **dict(kwargs)
                 )
@@ -2949,6 +2996,12 @@ class KiwoomApp:
         try:
             if hasattr(self, "tick_dispatch_service"):
                 self.tick_dispatch_service.shutdown()
+        except Exception:
+            pass
+        try:
+            acc = getattr(self, "rt_tick_15m_accumulator", None)
+            if acc is not None and hasattr(acc, "shutdown"):
+                acc.shutdown()
         except Exception:
             pass
         try:

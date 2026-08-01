@@ -147,6 +147,8 @@ DEFAULT_SETTINGS = {
     "realtime_s1_full_calc_fallback_sec": 120.0,
     "realtime_s1_eval_on_local_15m_close": True,
     "realtime_15m_last_minute_from_ticks": True,
+    # 틱→15분 전체 누적. 저장만(bars_15m_rt_tick). 신호·매매에는 사용하지 않음.
+    "realtime_tick_15m_accumulate_save_only": True,
     "realtime_s1_mirror_dynamic_intrabar": False,
     "realtime_intrabar_close_now_signals": False,
     "realtime_use_fixed_s1_presignal_gate": True,

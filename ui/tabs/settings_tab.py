@@ -1221,6 +1221,15 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
+            '틱15분 전체누적(저장만)',
+            None,
+            '',
+            'ON=0B 틱으로 15분봉 누적 후 전용 DB(realtime_15m_tick_*.db)에만 저장. '
+            '전용 스레드·전용 DB로 공식봉/신호/주문과 분리(검증용)',
+            toggle_key='realtime_tick_15m_accumulate_save_only',
+        )
+        add_param_row(
+            strat_f,
             'S1: 인트라바(고정밀) 미러',
             None,
             '',
