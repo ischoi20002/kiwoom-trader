@@ -123,10 +123,22 @@ def _load_marcap_year_df(
         return _year_df_cache[y]
 
     try:
-        df = pd.read_parquet(path)
+        df = None
+        last_err: Optional[BaseException] = None
+        for engine in ("pyarrow", "fastparquet"):
+            try:
+                df = pd.read_parquet(path, engine=engine)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        if df is None:
+            raise last_err if last_err is not None else RuntimeError("parquet 엔진 없음")
     except Exception as e:
         try:
-            logging.warning("marcap parquet 읽기 실패 %s: %s", path, e, exc_info=True)
+            # DLL 정책 차단 등은 traceback 전체 출력 대신 한 줄로
+            logging.warning("marcap parquet 읽기 실패 %s: %s", path, e)
         except Exception:
             pass
         _year_df_cache[y] = pd.DataFrame()

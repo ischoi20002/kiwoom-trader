@@ -138,6 +138,142 @@ class TradingController:
         else:
             return self.stop()
 
+    def held_position_codes(self) -> List[str]:
+        """가상 보유 종목 코드(6자리) 목록. 접미사 키는 베이스만."""
+        out: List[str] = []
+        try:
+            vpd = getattr(self.app.portfolio, "virtual_positions", None) or {}
+        except Exception:
+            vpd = {}
+        for c_raw in list(vpd.keys()):
+            try:
+                nk = canonical_stock_code(str(c_raw).split("_")[0])
+            except Exception:
+                continue
+            if nk and nk not in out:
+                out.append(nk)
+        return out
+
+    def _refresh_transition_runtime_flags(self) -> None:
+        """
+        감시 시작 시 레짐 런타임 플래그를 갱신합니다.
+        HARD(붕괴)는 S1·S2만 차단하고, 청산(EXIT)은 막지 않습니다.
+        """
+        st = getattr(self.app, "settings", None)
+        if not isinstance(st, dict):
+            return
+        try:
+            if not bool(st.get("use_transition_gate", False)):
+                st.pop("transition_runtime_regime", None)
+                st.pop("transition_runtime_block_s1", None)
+                st.pop("transition_runtime_block_s2", None)
+                return
+        except Exception:
+            return
+        try:
+            import strategy_selector
+
+            tg = strategy_selector.resolve_transition_gate_for_live(
+                st,
+                getattr(self.app, "data_manager", None),
+                None,
+                self.log,
+            )
+            reg = str(tg.get("regime", "OFF"))
+            st["transition_runtime_regime"] = reg
+            st["transition_runtime_block_s1"] = bool(tg.get("block_s1", False))
+            st["transition_runtime_block_s2"] = bool(tg.get("block_s2", False))
+            try:
+                if reg == "HARD":
+                    self.log(
+                        "ℹ️ [Transition] HARD(붕괴) — 신규 S1·추매 S2 차단, "
+                        "보유 청산(EXIT)은 계속 평가"
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Transition] 시작 시 레짐 갱신 실패: {e}")
+            except Exception:
+                pass
+
+    def _spawn_start_sequence(self) -> bool:
+        """워밍업·웹소켓 시작 스레드를 띄웁니다."""
+        self._run_start_sequence_active = True
+        try:
+            terminal_trace(
+                "감시 start() → 백그라운드 스레드 spawn (_run_start_sequence_guarded)",
+                app=self.app,
+                component="StartSeq",
+            )
+        except Exception:
+            pass
+        try:
+            threading.Thread(
+                target=self._run_start_sequence_guarded, daemon=True
+            ).start()
+            return True
+        except Exception as e:
+            self._run_start_sequence_active = False
+            self.log(f"❌ [Error] 감시 엔진 시작 실패: {e}")
+            return False
+
+    def _start_held_positions_only(self, held_codes: List[str]) -> bool:
+        """선정 종목 0건이지만 보유가 있을 때 — 청산·S2 감시만 시작합니다."""
+        codes = [c for c in held_codes if c]
+        if not codes:
+            return False
+        try:
+            self._refresh_transition_runtime_flags()
+        except Exception:
+            pass
+        rows: List[Dict[str, Any]] = []
+        try:
+            vpd = getattr(self.app.portfolio, "virtual_positions", None) or {}
+        except Exception:
+            vpd = {}
+        for c in codes:
+            nm = c
+            try:
+                for k, pos in vpd.items():
+                    try:
+                        nk = canonical_stock_code(str(k).split("_")[0])
+                    except Exception:
+                        nk = ""
+                    if nk == c and isinstance(pos, dict):
+                        nm = str(pos.get("name") or c)
+                        break
+            except Exception:
+                nm = c
+            rows.append(
+                {
+                    "Code": c,
+                    "Name": nm,
+                    "SelTrack": "AB",
+                    "Score": 0.0,
+                    "MA20": 0.0,
+                    "MA60": 0.0,
+                    "PrevVol": 0.0,
+                    "Open": 0.0,
+                    "Price": 0.0,
+                }
+            )
+        try:
+            df_held = pd.DataFrame(rows)
+            self.monitor_codes = list(codes)
+            self._initialize_monitor_info(df_held)
+            self._ensure_virtual_positions_monitor_info()
+            self.log(
+                f"ℹ️ [Check] 선정 0건·보유 {len(codes)}종 — "
+                f"보유 청산·S2 감시로 시작합니다."
+            )
+            if self.status_cb:
+                self.status_cb("TARGETS_LOADED", df_held)
+            return self._spawn_start_sequence()
+        except Exception as e:
+            self.log(f"❌ [Error] 보유-only 감시 시작 실패: {e}")
+            return False
+
     def start(self, *, skip_selection_fresh_check: bool = False):
         """실시간 감시 엔진을 시작합니다.
 
@@ -159,6 +295,8 @@ class TradingController:
                     "감시 시작이 이미 진행 중입니다. 잠시 후 다시 시도하세요.",
                 )
             return False
+
+        held_codes = self.held_position_codes()
 
         # 1. 선정 종목 유효성·신선도 확인
         target_cache = "selected_targets.csv"
@@ -196,6 +334,8 @@ class TradingController:
                     pass
 
         if not os.path.exists(target_cache):
+            if held_codes:
+                return self._start_held_positions_only(held_codes)
             self.log("⚠️ [Check] 먼저 종목 선정을 수행해주세요.")
             if self.status_cb: self.status_cb("SHOW_WARNING", "먼저 종목 선정을 수행해주세요.")
             return False
@@ -203,6 +343,8 @@ class TradingController:
         try:
             df_targets = pd.read_csv(target_cache, dtype={'Code': str})
             if df_targets is None or getattr(df_targets, "empty", True):
+                if held_codes:
+                    return self._start_held_positions_only(held_codes)
                 self.log(
                     "⚠️ [Check] 감시 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
                 )
@@ -223,6 +365,8 @@ class TradingController:
             except Exception:
                 codes = []
             if len(codes) <= 0:
+                if held_codes:
+                    return self._start_held_positions_only(held_codes)
                 self.log(
                     "⚠️ [Check] 감시 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
                 )
@@ -232,25 +376,21 @@ class TradingController:
                         "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
                     )
                 return False
+            try:
+                self._refresh_transition_runtime_flags()
+            except Exception:
+                pass
             self.monitor_codes = df_targets['Code'].tolist()
             self._initialize_monitor_info(df_targets)
+            try:
+                self._ensure_virtual_positions_monitor_info()
+            except Exception:
+                pass
             
             if self.status_cb: self.status_cb("TARGETS_LOADED", df_targets)
             
             # 2. 시작 시퀀스 (별도 스레드에서 수행 - UI 프리징 방지)
-            self._run_start_sequence_active = True
-            try:
-                terminal_trace(
-                    "감시 start() → 백그라운드 스레드 spawn (_run_start_sequence_guarded)",
-                    app=self.app,
-                    component="StartSeq",
-                )
-            except Exception:
-                pass
-            threading.Thread(
-                target=self._run_start_sequence_guarded, daemon=True
-            ).start()
-            return True
+            return self._spawn_start_sequence()
         except Exception as e:
             self.log(f"❌ [Error] 감시 엔진 시작 실패: {e}")
             return False

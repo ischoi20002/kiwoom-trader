@@ -6,6 +6,7 @@ pandas-market-calendars>=4.3.0
 requests>=2.28.0
 pykrx>=1.2.4
 pyarrow>=14.0.0
+fastparquet>=2024.2.0
 matplotlib>=3.6.0
 optuna>=4.0.0
 deprecated>=1.2.0

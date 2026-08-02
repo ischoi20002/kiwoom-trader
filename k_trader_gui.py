@@ -2680,6 +2680,22 @@ class KiwoomApp:
                 except Exception:
                     n_sel = -1
                 if n_sel == 0:
+                    held_n = 0
+                    try:
+                        held_n = len(tc.held_position_codes())
+                    except Exception:
+                        held_n = 0
+                    if held_n > 0:
+                        try:
+                            self.log(
+                                f"ℹ️ [감시] 선정 0건·보유 {held_n}종 — "
+                                f"보유 청산 감시로 시작합니다."
+                            )
+                        except Exception:
+                            pass
+                        started = bool(tc.start(skip_selection_fresh_check=True))
+                        _notify(started)
+                        return started
                     try:
                         self.log(
                             "⚠️ [감시] 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
@@ -2736,6 +2752,22 @@ class KiwoomApp:
 
         mt = getattr(self, "monitor_tab", None)
         if mt is None or not hasattr(mt, "select_monitoring_targets"):
+            held_n = 0
+            try:
+                held_n = len(tc.held_position_codes())
+            except Exception:
+                held_n = 0
+            if held_n > 0:
+                try:
+                    self.log(
+                        f"ℹ️ [감시] 선정 UI 없음·보유 {held_n}종 — "
+                        f"보유 청산 감시로 시작합니다."
+                    )
+                except Exception:
+                    pass
+                started = bool(tc.start(skip_selection_fresh_check=True))
+                _notify(started)
+                return started
             try:
                 self.log("⚠️ [감시] monitor_tab 없음 — 선정 불가")
             except Exception:
@@ -2761,6 +2793,31 @@ class KiwoomApp:
                 except Exception:
                     pass
                 if not ok:
+                    held_n = 0
+                    try:
+                        held_n = len(tc.held_position_codes())
+                    except Exception:
+                        held_n = 0
+                    if held_n > 0:
+                        try:
+                            self.log(
+                                f"ℹ️ [감시] 선정 실패/0건·보유 {held_n}종 — "
+                                f"보유 청산 감시로 시작합니다."
+                            )
+                        except Exception:
+                            pass
+                        started = False
+                        try:
+                            started = bool(
+                                tc.start(skip_selection_fresh_check=True)
+                            )
+                        except Exception as ex:
+                            try:
+                                self.log(f"❌ [감시] 보유-only 시작 실패: {ex}")
+                            except Exception:
+                                pass
+                        _notify(started)
+                        return
                     try:
                         self.log(
                             "⚠️ [감시] 일일 선정 실패 또는 종목 0건 — 감시 시작을 건너뜁니다."
@@ -2785,6 +2842,31 @@ class KiwoomApp:
                 except Exception:
                     n_sel = -1
                 if n_sel == 0:
+                    held_n = 0
+                    try:
+                        held_n = len(tc.held_position_codes())
+                    except Exception:
+                        held_n = 0
+                    if held_n > 0:
+                        try:
+                            self.log(
+                                f"ℹ️ [감시] 선정 0건·보유 {held_n}종 — "
+                                f"보유 청산 감시로 시작합니다."
+                            )
+                        except Exception:
+                            pass
+                        started = False
+                        try:
+                            started = bool(
+                                tc.start(skip_selection_fresh_check=True)
+                            )
+                        except Exception as ex:
+                            try:
+                                self.log(f"❌ [감시] 보유-only 시작 실패: {ex}")
+                            except Exception:
+                                pass
+                        _notify(started)
+                        return
                     try:
                         self.log(
                             "⚠️ [감시] 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
