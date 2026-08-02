@@ -2652,9 +2652,32 @@ class KiwoomApp:
                 _notify(False)
                 return False
             if bool(getattr(self, "_ensure_sel_start_active", False)):
+                # 선정 대기 중 재클릭: 플래그 해제 후 보유만 즉시(옛 CSV 사용 금지)
+                try:
+                    self._ensure_sel_start_active = False
+                except Exception:
+                    pass
+                held_codes = []
+                try:
+                    held_codes = list(tc.held_position_codes())
+                except Exception:
+                    held_codes = []
+                if held_codes:
+                    try:
+                        self.log(
+                            f"ℹ️ [감시] 선정 대기 취소 — "
+                            f"보유 {len(held_codes)}종만 즉시 감시 "
+                            f"(선정 완료 전 옛 CSV는 사용하지 않음)"
+                        )
+                    except Exception:
+                        pass
+                    started = bool(tc._start_held_positions_only(held_codes))
+                    _notify(started)
+                    return started
                 try:
                     self.log(
-                        "⚠️ [감시] 일일 선정 후 감시 시작 절차가 이미 진행 중입니다."
+                        "⚠️ [감시] 일일 선정이 진행 중이었습니다. "
+                        "보유가 없으면 선정 완료 후 다시 눌러 주세요."
                     )
                 except Exception:
                     pass
@@ -2680,20 +2703,20 @@ class KiwoomApp:
                 except Exception:
                     n_sel = -1
                 if n_sel == 0:
-                    held_n = 0
+                    held_codes = []
                     try:
-                        held_n = len(tc.held_position_codes())
+                        held_codes = list(tc.held_position_codes())
                     except Exception:
-                        held_n = 0
-                    if held_n > 0:
+                        held_codes = []
+                    if held_codes:
                         try:
                             self.log(
-                                f"ℹ️ [감시] 선정 0건·보유 {held_n}종 — "
-                                f"보유 청산 감시로 시작합니다."
+                                f"ℹ️ [감시] 선정 CSV 0건·보유 {len(held_codes)}종 — "
+                                f"보유만 감시합니다."
                             )
                         except Exception:
                             pass
-                        started = bool(tc.start(skip_selection_fresh_check=True))
+                        started = bool(tc._start_held_positions_only(held_codes))
                         _notify(started)
                         return started
                     try:
@@ -2793,23 +2816,23 @@ class KiwoomApp:
                 except Exception:
                     pass
                 if not ok:
-                    held_n = 0
+                    held_codes: list = []
                     try:
-                        held_n = len(tc.held_position_codes())
+                        held_codes = list(tc.held_position_codes())
                     except Exception:
-                        held_n = 0
-                    if held_n > 0:
+                        held_codes = []
+                    if held_codes:
                         try:
                             self.log(
-                                f"ℹ️ [감시] 선정 실패/0건·보유 {held_n}종 — "
-                                f"보유 청산 감시로 시작합니다."
+                                f"ℹ️ [감시] 오늘 선정 0건·보유 {len(held_codes)}종 — "
+                                f"이전 일자 CSV는 쓰지 않고 보유만 감시합니다."
                             )
                         except Exception:
                             pass
                         started = False
                         try:
                             started = bool(
-                                tc.start(skip_selection_fresh_check=True)
+                                tc._start_held_positions_only(held_codes)
                             )
                         except Exception as ex:
                             try:
@@ -2820,7 +2843,8 @@ class KiwoomApp:
                         return
                     try:
                         self.log(
-                            "⚠️ [감시] 일일 선정 실패 또는 종목 0건 — 감시 시작을 건너뜁니다."
+                            "⚠️ [감시] 오늘 선정 0건·보유 없음 — "
+                            "이전 일자 감시목록으로 시작하지 않습니다."
                         )
                     except Exception:
                         pass
@@ -2829,7 +2853,7 @@ class KiwoomApp:
                         if callable(scb):
                             scb(
                                 "SHOW_WARNING",
-                                "감시 선정 결과가 0건(또는 실패)이라 감시를 시작하지 않습니다.",
+                                "오늘 선정 종목이 0건입니다. 보유가 있으면 보유만 감시합니다.",
                             )
                     except Exception:
                         pass
@@ -2842,23 +2866,23 @@ class KiwoomApp:
                 except Exception:
                     n_sel = -1
                 if n_sel == 0:
-                    held_n = 0
+                    held_codes = []
                     try:
-                        held_n = len(tc.held_position_codes())
+                        held_codes = list(tc.held_position_codes())
                     except Exception:
-                        held_n = 0
-                    if held_n > 0:
+                        held_codes = []
+                    if held_codes:
                         try:
                             self.log(
-                                f"ℹ️ [감시] 선정 0건·보유 {held_n}종 — "
-                                f"보유 청산 감시로 시작합니다."
+                                f"ℹ️ [감시] 선정 CSV 0건·보유 {len(held_codes)}종 — "
+                                f"보유만 감시합니다."
                             )
                         except Exception:
                             pass
                         started = False
                         try:
                             started = bool(
-                                tc.start(skip_selection_fresh_check=True)
+                                tc._start_held_positions_only(held_codes)
                             )
                         except Exception as ex:
                             try:

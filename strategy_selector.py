@@ -2708,6 +2708,29 @@ def select_monitoring_targets(
         # 캐시 저장: 실시간 + API/DB혼합 경로만 (db_only 는 CLI 등에서 별도 경로로 저장)
         if not target_date and not db_only_no_fdr:
             df_result.to_csv("selected_targets.csv", index=False, encoding="utf-8-sig")
+    else:
+        # 실시간 선정 0건(HARD 등): 이전 일자 CSV가 남아 재사용되는 것을 막음
+        if not target_date and not db_only_no_fdr:
+            try:
+                pd.DataFrame(
+                    columns=[
+                        "Code",
+                        "Name",
+                        "Price",
+                        "Open",
+                        "Diff",
+                        "Ratio",
+                        "SelTrack",
+                    ]
+                ).to_csv("selected_targets.csv", index=False, encoding="utf-8-sig")
+                logger_callback(
+                    "💾 [선정] 0건 — selected_targets.csv 를 비웠습니다(이전 일자 목록 폐기)."
+                )
+            except Exception as _e:
+                try:
+                    logger_callback(f"⚠️ [선정] 빈 CSV 저장 실패: {_e}")
+                except Exception:
+                    pass
 
     logger_callback(
         f"[Done] 최종 {len(df_result)}개 종목 선정 완료. "

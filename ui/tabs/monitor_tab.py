@@ -1388,7 +1388,42 @@ class MonitorTab:
         def finish_on_main() -> None:
             try:
                 if df_snap is None or df_snap.empty:
-                    self.app.log("⚠️ [선정] 조건에 부합하는 종목이 없습니다.")
+                    self.app.log(
+                        "⚠️ [선정] 조건에 부합하는 종목이 없습니다. "
+                        "(이전 일자 selected_targets.csv 는 비웁니다)"
+                    )
+                    # 옛 일자 감시목록이 남아 있으면 다음 시작 시 그대로 올라가는 문제 방지
+                    try:
+                        _csv_path = os.path.join(os.getcwd(), "selected_targets.csv")
+                        pd.DataFrame(
+                            columns=[
+                                "Code",
+                                "Name",
+                                "Price",
+                                "Open",
+                                "Diff",
+                                "Ratio",
+                                "SelTrack",
+                            ]
+                        ).to_csv(_csv_path, index=False, encoding="utf-8-sig")
+                        self.app.log(f"💾 [선정] 0건 반영 — CSV 초기화: {_csv_path}")
+                    except Exception as _csv_e:
+                        try:
+                            self.app.log(
+                                f"⚠️ [선정] 빈 CSV 저장 실패: {_csv_e}"
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        tc = getattr(self.app, "trading_controller", None)
+                        if tc is not None:
+                            tc.monitor_codes = []
+                            tc.monitor_info = {}
+                        self.app.monitor_codes = []
+                        self.app.monitor_info = {}
+                        self.update_watchlist({})
+                    except Exception:
+                        pass
                     _notify_complete(False)
                     return
                 self._log_selection_results(self.app, df_snap)
