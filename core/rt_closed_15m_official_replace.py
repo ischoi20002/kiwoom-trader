@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-15분 슬롯이 바뀔 때 확정된 직전 봉을, 짧은 지연 후 키움 ka10080(15분)으로 조회해
+15분 슬롯이 바뀔 때 확정된 직전 봉을 키움 ka10080(15분)으로 조회해
 메모리 ``bars_data`` 및 RT15m DB에 덮어씁니다(틱 누락 시 OHLCV 정합성).
 
 - 완성 봉 한 줄만 갱신(형성 중 현재 봉은 틱 경로 유지).
 - 종목·슬롯당 스케줄 1회(중복 타이머 방지).
 - 조회는 데몬 스레드, ``bars_data`` 반영은 Tk ``after(0)`` 로 메인 스레드.
+
+M1 평가 경로(정렬용 교체): 슬롯 완성 후 고정 지연(~120초) + 짧은 재시도만.
+조기 폴링으로 M1 프로브·평가 REST 와 경쟁하지 않습니다.
 """
 
 from __future__ import annotations
@@ -41,6 +44,17 @@ def _settings_bool(settings: Any, key: str, default: bool = True) -> bool:
 def m1_api_poller_enabled(settings: Any) -> bool:
     """감시 종목 매분 ka10080(1분) 폴러 사용 여부."""
     return _settings_bool(settings, "realtime_watchlist_m1_api_poller_enabled", True)
+
+
+def official_replace_alignment_mode(settings: Any) -> bool:
+    """
+    M1로 평가하고 공식 15분은 정합 교체만 하는 모드.
+
+    이 모드에서는 슬롯 직후 폴링 대신 고정 지연 후 단발 조회합니다.
+    """
+    return m1_api_poller_enabled(settings) and (
+        not closed_15m_eval_after_official_enabled(settings)
+    )
 
 
 def closed_15m_eval_after_official_enabled(settings: Any) -> bool:
@@ -166,6 +180,10 @@ def compute_rt15m_official_replace_delay_sec(
     use_priority = (not m1_api_poller_enabled(settings)) or closed_15m_eval_after_official_enabled(
         settings
     )
+
+    # 정렬용(M1 평가): 지연은 워커의 슬롯+고정대기에서 처리
+    if official_replace_alignment_mode(settings):
+        return 0.0
 
     if use_priority:
         try:
@@ -362,6 +380,134 @@ def _monotonic_deadline_for_slot(bar_ts: Any, max_wait_sec: float) -> float:
         return time.monotonic() + remain
     except Exception:
         return time.monotonic() + max(5.0, float(max_wait_sec))
+
+
+def _alignment_fixed_delay_sec(settings: Any) -> float:
+    """정렬용 공식15 교체: 슬롯 완성 후 대기 초(기본 120)."""
+    try:
+        v = float(
+            settings.get("realtime_closed_15m_official_replace_fixed_delay_sec", 120.0)
+        )
+    except (TypeError, ValueError):
+        v = 120.0
+    return max(60.0, min(v, 300.0))
+
+
+def _alignment_retry_params(settings: Any) -> Tuple[int, float]:
+    """고정 지연 후 조회 횟수·재시도 간격."""
+    try:
+        n = int(
+            float(
+                settings.get(
+                    "realtime_closed_15m_official_replace_retry_attempts", 2
+                )
+            )
+        )
+    except (TypeError, ValueError):
+        n = 2
+    n = max(1, min(n, 4))
+    try:
+        gap = float(
+            settings.get(
+                "realtime_closed_15m_official_replace_retry_gap_sec", 15.0
+            )
+        )
+    except (TypeError, ValueError):
+        gap = 15.0
+    gap = max(3.0, min(gap, 60.0))
+    return n, gap
+
+
+def _alignment_code_stagger_sec(app: Any, code: str, bar_ts: Any, settings: Any) -> float:
+    """종목별 미세 분산(동시 REST 폭주 완화, 상한 기본 45초)."""
+    try:
+        cap = float(
+            settings.get(
+                "realtime_closed_15m_official_replace_stagger_cap_sec", 45.0
+            )
+        )
+    except (TypeError, ValueError):
+        cap = 45.0
+    cap = max(0.0, min(cap, 120.0))
+    if cap <= 0.0:
+        return 0.0
+    try:
+        n_codes = max(1, int(_active_stream_code_count(app)))
+    except Exception:
+        n_codes = 1
+    # 종목 수에 비례하되 cap 이하
+    spread = min(cap, max(5.0, float(n_codes) * 2.0))
+    try:
+        nk = canonical_stock_code(str(code).strip())
+        sk = _norm_bar_ts(bar_ts).strftime("%Y-%m-%d %H:%M:%S")
+        h = abs(hash((nk, sk, "align15")))
+        frac = (h % 1_000_003) / 1_000_003.0
+    except Exception:
+        frac = 0.0
+    return float(spread * frac)
+
+
+def _wait_official_quiet_chunks(app: Any, *, chunk_sec: float = 1.5) -> None:
+    """공식 조용 구간이 끝날 때까지 짧게 나눠 대기(필수 작업 양보)."""
+    try:
+        from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
+    except Exception:
+        return
+    for _ in range(120):
+        try:
+            rem = float(rt15_official_quiet_remaining_sec(app))
+        except Exception:
+            rem = 0.0
+        if rem <= 0.05:
+            return
+        try:
+            time.sleep(min(float(chunk_sec), rem))
+        except Exception:
+            return
+
+
+def wait_for_alignment_replace_window(
+    app: Any,
+    code: str,
+    bar_ts: Any,
+    settings: Any,
+) -> None:
+    """
+    슬롯 완성 + 고정지연(+종목 stagger)까지 대기.
+
+    대기 중 공식 조용 구간이 켜지면 그 시간을 존중해 필수 M1/평가 REST 에 양보합니다.
+    """
+    from datetime import datetime, timedelta
+
+    from utils.krx_bars import krx_15m_slot_complete_ts
+
+    fixed = _alignment_fixed_delay_sec(settings)
+    stag = _alignment_code_stagger_sec(app, code, bar_ts, settings)
+    try:
+        slot = krx_15m_slot_complete_ts(bar_ts).to_pydatetime()
+        target = slot + timedelta(seconds=float(fixed) + float(stag))
+    except Exception:
+        # 폴백: 지금부터 fixed 초
+        try:
+            time.sleep(float(fixed))
+        except Exception:
+            pass
+        _wait_official_quiet_chunks(app)
+        return
+
+    while True:
+        _wait_official_quiet_chunks(app)
+        try:
+            left = (target - datetime.now()).total_seconds()
+        except Exception:
+            left = 0.0
+        if left <= 0.05:
+            break
+        try:
+            time.sleep(min(2.0, left))
+        except Exception:
+            break
+    _wait_official_quiet_chunks(app)
 
 
 def _find_row_for_bar_end(
@@ -922,6 +1068,42 @@ class RtClosed15mOfficialReplaceScheduler:
                 except (TypeError, ValueError):
                     dmin, dmax = 0.08, 0.22
 
+                # M1 평가 + 정합 교체: 슬롯+~2분 후 단발(짧은 재시도), 조기 폴링 금지
+                alignment = (
+                    (not force_halt_retry)
+                    and (not backfill_after_ready)
+                    and official_replace_alignment_mode(settings)
+                )
+                if alignment:
+                    try:
+                        wait_for_alignment_replace_window(
+                            app, code, bar_ts, settings
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        mon2 = bool(getattr(app, "is_monitoring", False)) or bool(
+                            getattr(
+                                getattr(app, "trading_controller", None),
+                                "is_monitoring",
+                                False,
+                            )
+                        )
+                        if not mon2:
+                            with self._lock:
+                                self._scheduled.pop(k, None)
+                            return
+                    except Exception:
+                        pass
+                    try:
+                        token = app.auth_manager.get_auth_token()
+                    except Exception:
+                        token = None
+                    if not token:
+                        with self._lock:
+                            self._scheduled.pop(k, None)
+                        return
+
                 try:
                     max_wait = float(
                         settings.get(
@@ -946,6 +1128,7 @@ class RtClosed15mOfficialReplaceScheduler:
 
                 use_slot_probe = (
                     (not force_halt_retry)
+                    and (not alignment)
                     and closed_15m_eval_after_official_enabled(settings)
                 )
                 slot_key = self._slot_ts_key(bar_ts)
@@ -996,7 +1179,7 @@ class RtClosed15mOfficialReplaceScheduler:
                         except Exception:
                             pass
 
-                per_try_retries = 1 if (max_wait >= 5.0) else max(1, min(mr, 3))
+                per_try_retries = 1 if (max_wait >= 5.0 or alignment) else max(1, min(mr, 3))
                 deadline = _monotonic_deadline_for_slot(bar_ts, max_wait)
                 tup = None
 
@@ -1017,36 +1200,73 @@ class RtClosed15mOfficialReplaceScheduler:
                             pass
                         return
 
-                # 프로브·백필 공통: 슬롯 기준 deadline까지 폴링
-                while True:
-                    tup = fetch_official_15m_row_for_timestamp(
-                        dm,
-                        code,
-                        token,
-                        bar_ts,
-                        tic_scope=tic,
-                        max_pages=mp,
-                        page_delay_min=dmin,
-                        page_delay_max=dmax,
-                        max_retries=per_try_retries,
-                        inter_retry_sec=ir,
-                        log=self._log,
-                        app=app,
-                    )
-                    if tup is not None:
-                        break
-                    if time.monotonic() + poll_sec >= deadline:
-                        break
-                    try:
-                        time.sleep(poll_sec)
-                    except Exception:
-                        break
-                    try:
-                        token = app.auth_manager.get_auth_token()
-                    except Exception:
-                        pass
-                    if not token:
-                        break
+                if alignment:
+                    # 고정 지연 후 소수 회 조회만 (M1/평가 REST 와 경쟁 최소화)
+                    attempts, gap_sec = _alignment_retry_params(settings)
+                    for ai in range(int(attempts)):
+                        try:
+                            _wait_official_quiet_chunks(app)
+                        except Exception:
+                            pass
+                        tup = fetch_official_15m_row_for_timestamp(
+                            dm,
+                            code,
+                            token,
+                            bar_ts,
+                            tic_scope=tic,
+                            max_pages=mp,
+                            page_delay_min=dmin,
+                            page_delay_max=dmax,
+                            max_retries=per_try_retries,
+                            inter_retry_sec=ir,
+                            log=self._log,
+                            app=app,
+                        )
+                        if tup is not None:
+                            break
+                        if ai + 1 >= int(attempts):
+                            break
+                        try:
+                            time.sleep(float(gap_sec))
+                        except Exception:
+                            break
+                        try:
+                            token = app.auth_manager.get_auth_token()
+                        except Exception:
+                            pass
+                        if not token:
+                            break
+                else:
+                    # 프로브·백필 공통: 슬롯 기준 deadline까지 폴링
+                    while True:
+                        tup = fetch_official_15m_row_for_timestamp(
+                            dm,
+                            code,
+                            token,
+                            bar_ts,
+                            tic_scope=tic,
+                            max_pages=mp,
+                            page_delay_min=dmin,
+                            page_delay_max=dmax,
+                            max_retries=per_try_retries,
+                            inter_retry_sec=ir,
+                            log=self._log,
+                            app=app,
+                        )
+                        if tup is not None:
+                            break
+                        if time.monotonic() + poll_sec >= deadline:
+                            break
+                        try:
+                            time.sleep(poll_sec)
+                        except Exception:
+                            break
+                        try:
+                            token = app.auth_manager.get_auth_token()
+                        except Exception:
+                            pass
+                        if not token:
+                            break
 
                 if use_slot_probe and gate is not None and is_probe:
                     try:
@@ -1100,12 +1320,18 @@ class RtClosed15mOfficialReplaceScheduler:
                         try:
                             cc = canonical_stock_code(str(code).strip())
                             el = _elapsed_sec_since_slot(bar_ts)
-                            role = "프로브" if is_probe else "백필"
-                            self._log(
-                                f"ℹ️ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
-                                f"공식봉 대기 초과({role}, 한도 {max_wait:.0f}s, "
-                                f"슬롯 후 {el:.0f}s) — 평가 생략"
-                            )
+                            if alignment:
+                                self._log(
+                                    f"ℹ️ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
+                                    f"정렬교체 실패(슬롯 후 {el:.0f}s) — 평가 영향 없음"
+                                )
+                            else:
+                                role = "프로브" if is_probe else "백필"
+                                self._log(
+                                    f"ℹ️ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
+                                    f"공식봉 대기 초과({role}, 한도 {max_wait:.0f}s, "
+                                    f"슬롯 후 {el:.0f}s) — 평가 생략"
+                                )
                         except Exception:
                             pass
                     return
@@ -1115,11 +1341,17 @@ class RtClosed15mOfficialReplaceScheduler:
                     if self._log:
                         cc = canonical_stock_code(str(code).strip())
                         el = _elapsed_sec_since_slot(bar_ts)
-                        role = "프로브" if is_probe else "백필"
-                        self._log(
-                            f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
-                            f"공식봉 확인({role}, 슬롯 후 +{el:.1f}s) — 교체·평가"
-                        )
+                        if alignment:
+                            self._log(
+                                f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
+                                f"정렬교체(슬롯 후 +{el:.1f}s)"
+                            )
+                        else:
+                            role = "프로브" if is_probe else "백필"
+                            self._log(
+                                f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
+                                f"공식봉 확인({role}, 슬롯 후 +{el:.1f}s) — 교체·평가"
+                            )
                 except Exception:
                     pass
 

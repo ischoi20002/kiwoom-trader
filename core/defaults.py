@@ -34,8 +34,6 @@ DEFAULT_SETTINGS = {
     "bt_high_precision": False,
     "bt_rt_parity_intrabar": False,
     "bt_rt_parity_fast": False,
-    # 단일일 등 짧은 기간 BT에서도 prepare_dynamic_universe 선정창을
-    # ref_day 이전 N영업일까지 확장해 RT/장기 BT 유니버스와 맞춘다.
     "bt_universe_schedule_warmup_trading_days": 20,
     "bt_rt_parity_fast_rsi_delta": 0.35,
     "bt_rt_parity_fast_osc_delta": 0.08,
@@ -57,17 +55,19 @@ DEFAULT_SETTINGS = {
     "realtime_closed_15m_official_replace_max_retries": 3,
     "realtime_closed_15m_official_replace_max_pages": 8,
     "realtime_closed_15m_official_replace_inter_retry_sec": 0.6,
-    # 공식 15분 API 실측 ~50초 지연 → 슬롯 후 대기 기본 75초(상한 180)
     "realtime_closed_15m_official_replace_max_wait_sec": 75.0,
     "realtime_closed_15m_official_replace_poll_sec": 1.5,
+    "realtime_closed_15m_official_replace_fixed_delay_sec": 120.0,
+    "realtime_closed_15m_official_replace_retry_attempts": 2,
+    "realtime_closed_15m_official_replace_retry_gap_sec": 15.0,
+    "realtime_closed_15m_official_replace_stagger_cap_sec": 45.0,
     "realtime_closed_15m_priority_spacing_sec": 0.45,
     "realtime_closed_15m_official_min_met_ratio": 0.5,
     "realtime_closed_15m_backfill_after_ready": True,
     "realtime_closed_15m_backfill_base_delay_sec": 0.3,
     "realtime_closed_15m_backfill_spacing_sec": 0.55,
-    # 공식 1분 합성 평가가 기본 — 공식 15분 대기 평가는 OFF
     "realtime_closed_15m_eval_after_official": False,
-    "realtime_closed_15m_official_replace_with_m1": False,
+    "realtime_closed_15m_official_replace_with_m1": True,
     "realtime_watchlist_m1_api_poller_enabled": True,
     "realtime_watchlist_m1_api_spread_per_code_sec": 2.5,
     "realtime_watchlist_m1_api_spread_min_sec": 12.0,
@@ -80,14 +80,12 @@ DEFAULT_SETTINGS = {
     "realtime_m1_poller_apply_chart_catchup": True,
     "realtime_m1_poller_eval_on_fetch_fail": True,
     "realtime_m1_poller_eval_on_cache_hit": True,
-    # 프로브: 시장 API 지연만 짧게 대기(한 종목 무거래에 전체 묶지 않음)
     "realtime_tick_m1_accumulate_save_only": True,
     "realtime_tick_m1_seal_defer_sec": 4.0,
     "realtime_tick_m1_calendar_retention_days": 60,
     "realtime_m1_probe_not_ready_poll_sec": 0.5,
     "realtime_m1_probe_not_ready_max_wait_sec": 2.5,
     "realtime_m1_probe_candidate_codes": 3,
-    # 종목별 조회: 해당 종목만 대기 후 평봉
     "realtime_m1_fetch_not_ready_max_wait_sec": 12.0,
     "realtime_15m_last_minute_from_ticks": False,
     "realtime_eval_position_on_m1_revision_only": True,
@@ -159,7 +157,6 @@ DEFAULT_SETTINGS = {
     "realtime_s1_full_calc_min_interval_sec": 1.0,
     "realtime_s1_full_calc_fallback_sec": 120.0,
     "realtime_s1_eval_on_local_15m_close": True,
-    # 완성봉 S1·S2·EXIT 판정 후 주문 직전: 라이브가 추격/이탈·MA20 쪽 확인
     "realtime_s1_live_confirm_gate_enabled": True,
     "realtime_s1_live_max_chase_pct": 0.8,
     "realtime_s1_live_max_fade_pct": 1.0,
@@ -177,8 +174,6 @@ DEFAULT_SETTINGS = {
     "realtime_monitor_atr_ir_cache_min_sec": 12.0,
     "universe_index_choice": "KOSPI200",
     "kospi_top_n": "200",
-    # 백테 KOSPI 시총 유니버스 갱신 주기:
-    # daily | weekly | biweekly | monthly | bimonthly | quarterly
     "kospi_universe_refresh": "monthly",
     "kodex200_universe_priority": "csv_only",
     "kodex200_export_csv_on_etf_success": False,
@@ -193,7 +188,6 @@ DEFAULT_SETTINGS = {
     "touch_pending_confirm_max": 20,
     "reconcile_remove_grace_seconds": 180,
     "reconcile_remove_confirm_syncs": 2,
-    # 매도 exit_pending+스냅샷 reconcile 보류 상한(초). 초과 시 잔고 미보유면 제거 진행
     "reconcile_exit_pending_max_seconds": 120,
     "sync_ghost_suppress_hours": 12.0,
     "sync_ghost_suppress_minutes": 15.0,
@@ -210,10 +204,8 @@ DEFAULT_SETTINGS = {
     "transition_block_s1_on_soft": False,
     "transition_block_s2_on_soft": False,
     "transition_ignore_soft": False,
-    # HARD(chop) 상승일 억제: 지수 일수익률≥임계면 chop→HARD 건너뜀 (검증 후 미채택·기본 OFF)
     "hard_suppress_on_index_up": False,
     "hard_suppress_index_up_pct": 2.0,
-    # 상승일 HARD 억제 시 TRANSITION 폴백 금지 → 즉시 OFF (검증 후 미채택·기본 OFF)
     "hard_suppress_to_off_only": False,
     "chop_valid_a_min": 15,
     "chop_valid_b_max": 3,
@@ -259,16 +251,10 @@ DEFAULT_SETTINGS = {
     "use_atr_trailing_stop_a": True,
     "use_type_b": True,
     "same_bar_sig_priority": "prefer_a",
-    # 동시신호(A+B) 봉에서 선정 트랙(A/B)에 맞는 신호로 확정 — 트랙 불일치 폐기 방지
     "same_bar_sig_prefer_sel_track": False,
-    # 동시신호에서 트랙 B만 TYPE_B로 확정(비동수에서 prefer_a로 막히던 B 진입 허용)
     "same_bar_sig_allow_track_b": False,
-    # 동시신호 봉에서 확정 TYPE_A 매수만 차단(TYPE_B·동수 타이브레이크는 현행 유지)
     "same_bar_block_type_a": False,
-    # 동시신호(A+B) 봉 S1 매수 전면 차단(TYPE_A·B 모두)
     "same_bar_block_simul": False,
-    # 동시신호 봉 보유 A/B 동수 처리:
-    # always / force_a / block / empty_only / when_held / off
     "s1_simul_balance_tie_mode": "always",
     "buy_rsi_max_b": 80.0,
     "use_smart_buy_b": False,

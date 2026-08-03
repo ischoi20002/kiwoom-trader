@@ -1184,18 +1184,11 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
-            'S1: 공식15분 교체 후 평가',
-            None,
-            '',
-            'ON=ka10080 공식 15분봉 반영 후 평가(느림 ~50초). OFF(권장)=공식 1분 합성으로 평가',
-            toggle_key='realtime_closed_15m_eval_after_official',
-        )
-        add_param_row(
-            strat_f,
             'M1 ON시에도 공식15 교체',
             None,
             '',
-            'OFF(기본)=M1 경로에서 공식 15분 REST 스킵. ON=정합용 교체 유지(평가는 eval_after_official에 따름)',
+            'OFF(기본)=M1 경로에서 공식 15분 REST 스킵. '
+            'ON=슬롯 완성 후 ~2분 지연·단발 조회로 정합 교체(M1 평가/프로브와 경쟁하지 않음)',
             toggle_key='realtime_closed_15m_official_replace_with_m1',
         )
         add_param_row(
@@ -1228,34 +1221,6 @@ class SettingsTab:
             '',
             'ON=봉종가와 라이브가가 MA20 같은 쪽에 있을 때만 주문(위↔아래 교차 시 스킵)',
             toggle_key='realtime_s1_live_ma20_side_confirm',
-        )
-        add_param_row(
-            strat_f,
-            '공식15분 대기(초)',
-            'realtime_closed_15m_official_replace_max_wait_sec',
-            '초',
-            '슬롯 마감 후 공식봉 폴링 한도(기본 75, 실측~50초+여유). 초과 시 해당 슬롯 평가 생략',
-        )
-        add_param_row(
-            strat_f,
-            '공식15분 폴링간격',
-            'realtime_closed_15m_official_replace_poll_sec',
-            '초',
-            '공식봉 미발견 시 재조회 간격(기본 1.5)',
-        )
-        add_param_row(
-            strat_f,
-            '공식교체 최소 합치도',
-            'realtime_closed_15m_official_min_met_ratio',
-            '',
-            '미보유는 met_ratio≥이 값만 완성봉 조회·평가(기본 0.5). 보유는 항상 포함. M1·공식15 공통',
-        )
-        add_param_row(
-            strat_f,
-            '15분 슬롯 경계 감지(초)',
-            'realtime_15m_slot_watch_sec',
-            '초',
-            '경계에서 멀 때 최대 sleep. 경계 근처는 near_poll(0.1s)로 전환',
         )
 
         # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지
