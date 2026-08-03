@@ -1184,33 +1184,43 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
-            'S1: 라이브가 주문 게이트',
+            '라이브가 주문 게이트(S1·S2·EXIT)',
             None,
             '',
-            'ON=완성봉으로 S1 신호 판정 후, 주문 직전 라이브가로 추격/이탈·MA20 정합 확인. 실패 시 주문·쿨다운 스킵',
+            'ON=완성봉으로 S1·S2·청산 판정 후, 주문 직전 라이브가로 추격/이탈·MA20 정합 확인. '
+            '실패 시 주문 스킵(S1은 쿨다운 미소모)',
             toggle_key='realtime_s1_live_confirm_gate_enabled',
         )
         add_param_row(
             strat_f,
-            'S1 라이브 추격 상한',
+            '라이브 추격 상한',
             'realtime_s1_live_max_chase_pct',
             '%',
-            '봉종가 대비 라이브가 상승 허용 한도(기본 0.8). 초과 시 추격 주문 스킵',
+            '봉종가 대비 확인가(라이브/BT 1분종가) 상승 허용 한도(기본 0.8). 초과 시 주문 스킵',
         )
         add_param_row(
             strat_f,
-            'S1 라이브 이탈 하한',
+            '라이브 이탈 하한',
             'realtime_s1_live_max_fade_pct',
             '%',
-            '봉종가 대비 라이브가 하락 허용 한도(기본 1.0). 초과 시 이탈로 주문 스킵',
+            '봉종가 대비 확인가 하락 허용 한도(기본 1.0). 초과 시 주문 스킵',
         )
         add_param_row(
             strat_f,
-            'S1 라이브 MA20 정합',
+            '라이브 MA20 정합',
             None,
             '',
-            'ON=봉종가와 라이브가가 MA20 같은 쪽에 있을 때만 주문(위↔아래 교차 시 스킵)',
+            'ON=봉종가와 확인가가 MA20 같은 쪽에 있을 때만 주문(위↔아래 교차 시 스킵)',
             toggle_key='realtime_s1_live_ma20_side_confirm',
+        )
+        add_param_row(
+            strat_f,
+            'BT: 다음1분 종가 게이트(S1·S2·EXIT)',
+            None,
+            '',
+            'ON=백테 저정밀에서 완성 15분 판정 후 다음 1분 종가로 추격/이탈·MA20 게이트. '
+            '통과 시 그 종가로 체결(임계값은 위 라이브 게이트와 동일). RT와 동일 규칙',
+            toggle_key='bt_s1_m1_confirm_gate_enabled',
         )
         add_param_row(
             strat_f,

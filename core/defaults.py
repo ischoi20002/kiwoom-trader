@@ -129,11 +129,13 @@ DEFAULT_SETTINGS = {
     "realtime_s1_full_calc_min_interval_sec": 1.0,
     "realtime_s1_full_calc_fallback_sec": 120.0,
     "realtime_s1_eval_on_local_15m_close": True,
-    # 완성봉 S1 신호 후 주문 직전: 라이브가 추격/이탈·MA20 쪽 확인
+    # 완성봉 S1·S2·EXIT 판정 후 주문 직전: 라이브가 추격/이탈·MA20 쪽 확인
     "realtime_s1_live_confirm_gate_enabled": True,
     "realtime_s1_live_max_chase_pct": 0.8,
     "realtime_s1_live_max_fade_pct": 1.0,
     "realtime_s1_live_ma20_side_confirm": True,
+    # 백테 저정밀: 완성 15분 후 다음 1분 종가로 RT와 동일 chase/fade/MA20 게이트 (S1·S2·EXIT)
+    "bt_s1_m1_confirm_gate_enabled": True,
     "realtime_use_fixed_s1_presignal_gate": True,
     "realtime_eval_position_min_interval_sec": 15.0,
     "realtime_exit_indicator_min_interval_sec": 15.0,

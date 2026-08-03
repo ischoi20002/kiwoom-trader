@@ -10,7 +10,7 @@ pandas 기본 ``resample('15min')`` 은 label=left, closed=left 로
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
-from typing import Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -20,6 +20,8 @@ from utils.normalization import normalize_code
 __all__ = [
     "m1_window_start_for_15m_end",
     "m1_index_bounds_for_15m_end",
+    "next_m1_ts_after_15m_end",
+    "next_m1_close_after_15m_end",
     "m1_bar_open_label_for_just_completed_minute",
     "m1_bar_end_ts_for_closed_open",
     "chart_covers_m1_closed_minute",
@@ -227,6 +229,69 @@ def m1_index_bounds_for_15m_end(
         return s, e
     except Exception:
         return 0, 0
+
+
+def next_m1_ts_after_15m_end(
+    end_ts_15m: Union[pd.Timestamp, datetime, str],
+) -> Optional[pd.Timestamp]:
+    """
+    15분 슬롯 종가 라벨 ``T`` 다음 1분봉의 DB close-label 시각 ``T+1분``.
+
+    정규장 연속 1분이 없으면 ``None`` (예: 15:30 슬롯 이후).
+    """
+    try:
+        t = pd.Timestamp(end_ts_15m)
+        nxt = t + pd.Timedelta(minutes=1)
+        # 정규장 연속분: 09:01~15:20 close-label (마지막 연속분은 15:20)
+        if nxt.hour > 15 or (nxt.hour == 15 and nxt.minute > 20):
+            return None
+        if nxt.hour < 9 or (nxt.hour == 9 and nxt.minute < 1):
+            return None
+        return nxt
+    except Exception:
+        return None
+
+
+def next_m1_close_after_15m_end(
+    m1_df: Any,
+    end_ts_15m: Union[pd.Timestamp, datetime, str],
+) -> Optional[float]:
+    """
+    DB ``bars_1m``(close-label)에서 15분 슬롯 ``T`` 다음 1분 ``T+1`` 의 Close.
+
+    정확한 시각 행만 사용하며, 이후 봉으로 대체하지 않습니다.
+    """
+    try:
+        want = next_m1_ts_after_15m_end(end_ts_15m)
+        if want is None:
+            return None
+        if m1_df is None or getattr(m1_df, "empty", True):
+            return None
+        want_ns = pd.Timestamp(want).floor("min")
+        try:
+            # 인덱스가 이미 Timestamp 인 경우 직접 조회
+            if want_ns in m1_df.index:
+                val = m1_df.loc[want_ns, "Close"]
+            else:
+                # 문자열/다른 dtype 인덱스 폴백
+                idx = pd.to_datetime(m1_df.index).floor("min")
+                mask = idx == want_ns
+                if not bool(np.any(mask)):
+                    return None
+                val = m1_df.loc[mask, "Close"].iloc[0]
+        except Exception:
+            return None
+        try:
+            # Series(중복 인덱스)면 첫 값
+            if hasattr(val, "iloc"):
+                px = float(val.iloc[0])
+            else:
+                px = float(val)
+        except (TypeError, ValueError):
+            return None
+        return px if px > 0 else None
+    except Exception:
+        return None
 
 
 def m1_bar_open_label_for_just_completed_minute(

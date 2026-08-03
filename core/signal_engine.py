@@ -325,12 +325,12 @@ class SignalEngine:
         slot_key: str = "",
     ) -> Tuple[bool, float, str]:
         """
-        완성봉 S1 신호 후 주문 직전 라이브가 확인.
+        완성봉 S1·S2·EXIT 판정 후 주문 직전 라이브가 확인.
 
         Returns
         -------
         (ok, live_price, reason)
-            ok=False 이면 주문 스킵(쿨다운 미소모). live_price는 통과 시 주문가.
+            ok=False 이면 주문 스킵(S1은 쿨다운 미소모). live_price는 통과 시 주문가.
         """
         st: Dict[str, Any] = {}
         try:
@@ -376,55 +376,24 @@ class SignalEngine:
             return False, 0.0, "no_live_price"
 
         try:
-            chase = float(st.get("realtime_s1_live_max_chase_pct", 0.8) or 0.8)
-        except Exception:
-            chase = 0.8
-        try:
-            fade = float(st.get("realtime_s1_live_max_fade_pct", 1.0) or 1.0)
-        except Exception:
-            fade = 1.0
-        chase = max(0.0, min(chase, 10.0))
-        fade = max(0.0, min(fade, 10.0))
-
-        if live > bc * (1.0 + chase / 100.0):
-            return (
-                False,
-                live,
-                f"chase>{chase:.1f}% live={live:.0f} close={bc:.0f}",
-            )
-        if live < bc * (1.0 - fade / 100.0):
-            return (
-                False,
-                live,
-                f"fade>{fade:.1f}% live={live:.0f} close={bc:.0f}",
-            )
-
-        try:
-            ma_side = bool(st.get("realtime_s1_live_ma20_side_confirm", True))
-        except Exception:
-            ma_side = True
-        if ma_side and isinstance(last_row, dict):
-            try:
+            ma20 = 0.0
+            if isinstance(last_row, dict):
                 ma20 = float(self._to_scalar(last_row.get("MA20", 0), 0.0))
-            except Exception:
-                ma20 = 0.0
-            if ma20 > 0:
-                bar_above = bc >= ma20
-                live_above = live >= ma20
-                if bar_above and not live_above:
-                    return (
-                        False,
-                        live,
-                        f"ma20_break live={live:.0f} ma20={ma20:.0f}",
-                    )
-                if (not bar_above) and live_above:
-                    return (
-                        False,
-                        live,
-                        f"ma20_cross_up live={live:.0f} ma20={ma20:.0f}",
-                    )
+        except Exception:
+            ma20 = 0.0
 
-        return True, live, ""
+        try:
+            from strategy.s1_confirm_gate import s1_price_confirm_gate
+
+            ok, reason = s1_price_confirm_gate(bc, live, ma20, st)
+        except Exception as e:
+            try:
+                print(f"[SignalEngine] s1_price_confirm_gate 실패: {e}")
+            except Exception:
+                pass
+            return False, live, "gate_error"
+
+        return bool(ok), float(live), str(reason or "")
 
     def _apply_s1_track_match_gate(
         self,
@@ -1214,8 +1183,55 @@ class SignalEngine:
             if act == "HOLD":
                 return
 
+            order_px = float(close_px)
+            # EXIT/STAGE2: S1과 동일 — 주문 직전 라이브가 게이트, 통과 시 라이브가 주문
+            if act in ("EXIT", "STAGE2"):
+                try:
+                    gate_ok, live_px, gate_reason = self._s1_live_confirm_gate(
+                        nk,
+                        info if isinstance(info, dict) else {},
+                        float(close_px),
+                        last_row if isinstance(last_row, dict) else {},
+                        slot_key=slot_key,
+                    )
+                except Exception as e:
+                    gate_ok, live_px, gate_reason = False, 0.0, f"gate_error:{e}"
+                if not gate_ok:
+                    try:
+                        msg = f"라이브가 게이트({act}): {gate_reason}"
+                        if isinstance(info, dict):
+                            info["confluence"] = msg
+                            info["status_text"] = msg
+                    except Exception:
+                        pass
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "held_live_gate_skip",
+                                {
+                                    "code": nk,
+                                    "slot": slot_key,
+                                    "action": act,
+                                    "bar_close": float(close_px),
+                                    "live": float(live_px or 0.0),
+                                    "reason": str(gate_reason),
+                                },
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        self.app.log(
+                            f"ℹ️ [{act}] {nk} 라이브가 게이트 스킵 — {gate_reason}"
+                        )
+                    except Exception:
+                        pass
+                    return
+                if live_px > 0:
+                    order_px = float(live_px)
+
             _act_kw: Dict[str, Any] = {
-                "now_price": float(close_px),
+                "now_price": float(order_px),
                 "profit_ratio": float(res.get("profit_ratio", 0) or 0),
             }
             try:
@@ -1228,7 +1244,8 @@ class SignalEngine:
                             "slot": slot_key,
                             "action": act,
                             "reason": str(res.get("reason") or ""),
-                            "price": float(close_px),
+                            "price": float(order_px),
+                            "bar_close": float(close_px),
                         },
                     )
             except Exception:
