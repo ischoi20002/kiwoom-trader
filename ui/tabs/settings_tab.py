@@ -1206,7 +1206,8 @@ class SettingsTab:
             'ON=완성봉으로 S1·S2·청산 판정 후, 주문 직전 라이브가로 추격/이탈·MA20 정합 확인. '
             '실패 시 주문 스킵(S1은 쿨다운 미소모)',
             toggle_key='realtime_s1_live_confirm_gate_enabled',
-        )        add_param_row(
+        )
+        add_param_row(
             strat_f,
             '라이브 추격 상한',
             'realtime_s1_live_max_chase_pct',
