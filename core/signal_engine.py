@@ -660,13 +660,25 @@ class SignalEngine:
 
     def _held_eval_on_m1_revision_only(self) -> bool:
         """
-        [옵션 A: 저정밀 전용] M1 리비전 기반 보유 평가 스케줄은 제거되어 항상 비활성입니다.
+        True면 보유 청산·S2 평가를 M1 리비전(완료 1분 반영) 시점에 맞춥니다.
 
-        인트라바 미러 제거에 따라 보유 청산·S2 평가는 항상 레거시 시간 주기
-        (``realtime_eval_position_min_interval_sec``)만 사용합니다.
-        호출부 호환을 위해 메서드는 유지하고 항상 ``False`` 를 반환합니다.
+        M1 폴러·스토어가 있을 때 ``realtime_eval_position_on_m1_revision_only`` 를 따릅니다.
         """
-        return False
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            if not bool(st.get("realtime_eval_position_on_m1_revision_only", True)):
+                return False
+            try:
+                from core.rt_closed_15m_official_replace import m1_api_poller_enabled
+
+                if not m1_api_poller_enabled(st):
+                    return False
+            except Exception:
+                if not bool(st.get("realtime_watchlist_m1_api_poller_enabled", True)):
+                    return False
+            return getattr(self.app, "rt_tick_m1_store", None) is not None
+        except Exception:
+            return False
 
     def _intrabar_mirror_get_full15m_and_m1(
         self, nk: str, full_15m_src: Any
@@ -2279,12 +2291,20 @@ class SignalEngine:
             return ("err", -1)
 
     def _s1_m1_revision_snapshot(self, bars_key: str) -> int:
-        """
-        [옵션 A: 저정밀 전용] M1 리비전 스냅샷은 제거되어 항상 0을 반환합니다.
-
-        ``rt_tick_m1_store`` 접근 없이 호출부 호환을 위해 메서드만 유지합니다.
-        """
-        return 0
+        """``RtTickM1Store`` 공식 1분 반영 리비전(없으면 0)."""
+        try:
+            nk = canonical_stock_code(str(bars_key).strip()) if bars_key else ""
+            if len(nk) != 6:
+                return 0
+            m1s = getattr(self.app, "rt_tick_m1_store", None)
+            if m1s is None:
+                return 0
+            rev_fn = getattr(m1s, "revision_for_code", None)
+            if rev_fn is None or not callable(rev_fn):
+                return 0
+            return int(rev_fn(nk))
+        except Exception:
+            return 0
 
     def _log_s1_watch_diag(
         self,
@@ -3235,13 +3255,48 @@ class SignalEngine:
 
                 stg_h = self._held_position_stage(code)
 
-                # [옵션 A: 저정밀 전용] M1 리비전/저장소 의존 스케줄 제거 — 항상 시간 주기 폴백만 사용
-                # (``_held_eval_on_m1_revision_only`` 는 항상 False 를 반환하므로 레거시 경로만 남음)
-                exit_due = time_fallback_due
-                s2_m1_due = exit_due if int(stg_h) == 1 else False
-                held_eval_due = exit_due or s2_m1_due
-                need_skip_exit = False
-                run_s2_legacy = bool(s2_m1_due)
+                on_m1_schedule = bool(self._held_eval_on_m1_revision_only())
+                m1_rev_h = 0
+                try:
+                    m1_rev_h = int(
+                        self._s1_m1_revision_snapshot(str(bars_key_m) if bars_key_m else code)
+                    )
+                except Exception:
+                    m1_rev_h = 0
+                prev_m1r = self._held_s2_last_m1_rev.get(code)
+                try:
+                    has_m1_store = getattr(self.app, "rt_tick_m1_store", None) is not None
+                except Exception:
+                    has_m1_store = False
+                m1_rev_changed = False
+                if has_m1_store:
+                    try:
+                        m1_rev_changed = (
+                            prev_m1r is None or int(prev_m1r) != int(m1_rev_h)
+                        )
+                    except (TypeError, ValueError):
+                        m1_rev_changed = False
+
+                if on_m1_schedule:
+                    # 청산·S2: M1 완성 시 평가 + M1 부재 시 시간 폴백
+                    if has_m1_store:
+                        held_eval_due = bool(m1_rev_changed or time_fallback_due)
+                    else:
+                        held_eval_due = time_fallback_due
+                    need_skip_exit = False
+                    exit_due = held_eval_due
+                    run_s2_legacy = int(stg_h) == 1 and held_eval_due
+                else:
+                    exit_due = time_fallback_due
+                    s2_m1_due = False
+                    if int(stg_h) == 1:
+                        if has_m1_store:
+                            s2_m1_due = m1_rev_changed
+                        else:
+                            s2_m1_due = exit_due
+                    held_eval_due = exit_due or s2_m1_due
+                    need_skip_exit = bool(s2_m1_due and not exit_due)
+                    run_s2_legacy = bool(s2_m1_due)
 
                 if held_eval_due:
                     res: Dict[str, Any] = {"action": "HOLD"}
@@ -3387,6 +3442,12 @@ class SignalEngine:
                                 res.get("reason"),
                                 **_act_kw,
                             )
+
+                    if held_eval_due and has_m1_store:
+                        try:
+                            self._held_s2_last_m1_rev[code] = int(m1_rev_h)
+                        except Exception:
+                            pass
 
             # 관심목록 전용: 평단(기준가) 등록 시에만 S2-B 매도 신호 텔레그램 (미등록 시 매수만)
             if (

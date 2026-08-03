@@ -39,8 +39,8 @@ def _settings_bool(settings: Any, key: str, default: bool = True) -> bool:
 
 
 def m1_api_poller_enabled(settings: Any) -> bool:
-    """[옵션 A] M1 폴러 제거 — 항상 False(하위 호환)."""
-    return False
+    """감시 종목 매분 ka10080(1분) 폴러 사용 여부."""
+    return _settings_bool(settings, "realtime_watchlist_m1_api_poller_enabled", True)
 
 
 def closed_15m_eval_after_official_enabled(settings: Any) -> bool:
@@ -53,10 +53,10 @@ def closed_15m_eval_after_official_enabled(settings: Any) -> bool:
         if not _settings_bool(settings, "realtime_s1_eval_on_local_15m_close", True):
             return False
         return _settings_bool(
-            settings, "realtime_closed_15m_eval_after_official", True
+            settings, "realtime_closed_15m_eval_after_official", False
         )
     except Exception:
-        return True
+        return False
 
 
 def official_replace_priority_score(app: Any, code: str) -> float:
@@ -116,11 +116,10 @@ def official_replace_eval_eligible(
     settings: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
-    공식교체+평가 대상 여부.
+    완성봉 평가·우선 조회 대상 여부.
 
     - 보유: 항상 True (청산·S2)
     - 미보유: ``met_ratio >= realtime_closed_15m_official_min_met_ratio``
-    - 공식교체 후 평가 모드가 아니면 전 종목 True(레거시)
     """
     try:
         st = settings if settings is not None else (
@@ -128,8 +127,6 @@ def official_replace_eval_eligible(
         )
     except Exception:
         st = {}
-    if not closed_15m_eval_after_official_enabled(st):
-        return True
     try:
         score = float(official_replace_priority_score(app, code))
     except Exception:
@@ -166,7 +163,9 @@ def compute_rt15m_official_replace_delay_sec(
     except Exception:
         settings = {}
 
-    use_priority = True  # 옵션 A: M1 폴러 없음 → 항상 우선순위 지연
+    use_priority = (not m1_api_poller_enabled(settings)) or closed_15m_eval_after_official_enabled(
+        settings
+    )
 
     if use_priority:
         try:

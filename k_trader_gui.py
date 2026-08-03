@@ -67,6 +67,7 @@ from core.signal_callbacks_service import SignalCallbacksService
 from core.ui_trading_status_service import UiTradingStatusService
 from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
 from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
+from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 
 from utils.monitor_vp_stub import is_vp_price_stub_active, stamp_vp_price_stub
 from utils.normalization import canonical_stock_code
@@ -574,7 +575,32 @@ class KiwoomApp:
             logger_callback=self.log,
             retention_calendar_days=_rt15_ret,
         )
+        from core.rt_tick_m1_store import RtTickM1Store
         from core.stream_processor import StreamProcessor
+
+        self.rt_tick_m1_store = RtTickM1Store(
+            max_completed_per_code=24,
+            logger_callback=self.log,
+        )
+        from core.rt_tick_m1_accumulator import RtTickM1Accumulator
+
+        self.rt_tick_m1_accumulator = RtTickM1Accumulator(
+            settings=self.settings,
+            logger_callback=self.log,
+            get_settings=lambda: getattr(self, "settings", None) or {},
+        )
+        try:
+            if bool(
+                (self.settings or {}).get("realtime_tick_m1_accumulate_save_only", True)
+            ):
+                from utils.server_mode_paths import realtime_tick_1m_db_path
+
+                self.log(
+                    "ℹ️ [Tick1m] 틱→1분 검증 누적 ON "
+                    f"(전용DB={realtime_tick_1m_db_path()}, 신호·주문 미사용)"
+                )
+        except Exception:
+            pass
 
         _rt15_store = self.realtime_monitor_bars_store
         from core.closed_15m_fast_path import Closed15mDbUpsertQueue, Closed15mEvalPool
@@ -597,26 +623,48 @@ class KiwoomApp:
             try:
                 from core.rt_closed_15m_official_replace import (
                     closed_15m_eval_after_official_enabled,
+                    m1_api_poller_enabled,
                 )
 
                 eval_after_official = closed_15m_eval_after_official_enabled(st)
+                m1_on = m1_api_poller_enabled(st)
             except Exception:
                 eval_after_official = bool(
-                    st.get("realtime_closed_15m_eval_after_official", True)
+                    st.get("realtime_closed_15m_eval_after_official", False)
                 ) and bool(st.get("realtime_s1_eval_on_local_15m_close", True))
+                m1_on = bool(st.get("realtime_watchlist_m1_api_poller_enabled", True))
 
-            # 레거시: 로컬 확정 즉시 평가(공식 교체 대기 없음)
-            # 기본: 공식 15분 교체 후 평가 → 여기서는 스킵
+            # M1 경로: 마지막 1분 프로브 후 평가 — 로컬 롤 직후 즉시 평가 금지
+            # 레거시(M1 OFF + eval_after_official OFF): 로컬 확정 즉시 평가
             try:
                 if (
                     bool(st.get("realtime_s1_eval_on_local_15m_close", True))
                     and not eval_after_official
+                    and not m1_on
                 ):
                     self._closed_15m_eval_pool.submit_eval(code, ts)
             except Exception:
                 pass
 
-            # 공식 15분 교체 스케줄
+            # 공식 15분 교체: M1 경로 ON이면 기본 스킵(평가 게이트·REST 부하 완화)
+            skip_15m_replace = bool(m1_on) and not bool(
+                st.get("realtime_closed_15m_official_replace_with_m1", False)
+            )
+            if skip_15m_replace:
+                return
+
+            defer_sec = 0.0
+            if m1_on and not eval_after_official:
+                try:
+                    from core.closed_15m_fast_path import (
+                        closed_15m_defer_official_sec,
+                        mark_rt15_official_quiet,
+                    )
+
+                    mark_rt15_official_quiet(self)
+                    defer_sec = closed_15m_defer_official_sec(self)
+                except Exception:
+                    defer_sec = 4.0
             try:
                 sched = getattr(self, "rt_closed_15m_official_scheduler", None)
                 if sched is not None:
@@ -643,7 +691,7 @@ class KiwoomApp:
                         code=code,
                         bar_ts=ts,
                         delay_sec=dly,
-                        prepend_delay_sec=0.0,
+                        prepend_delay_sec=float(defer_sec),
                     )
             except Exception:
                 pass
@@ -652,6 +700,35 @@ class KiwoomApp:
         self.rt_closed_15m_official_scheduler = RtClosed15mOfficialReplaceScheduler(
             log=self.log
         )
+        self.rt_watchlist_m1_api_poller = RtWatchlistM1ApiPoller(self, log=self.log)
+        try:
+            from core.rt_closed_15m_official_replace import m1_api_poller_enabled as _m1_en_fn
+
+            _m1_en = bool(_m1_en_fn(self.settings or {}))
+        except Exception:
+            try:
+                _m1_en = bool(
+                    (self.settings or {}).get(
+                        "realtime_watchlist_m1_api_poller_enabled", True
+                    )
+                )
+            except Exception:
+                _m1_en = True
+        if _m1_en:
+            self.rt_watchlist_m1_api_poller.start()
+            try:
+                self.log(
+                    "ℹ️ [M1Poll] 활성 — 마지막 1분 완성 시 보유·고합치도 우선 평가"
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                self.log(
+                    "ℹ️ [M1Poll] 비활성(realtime_watchlist_m1_api_poller_enabled=false)"
+                )
+            except Exception:
+                pass
         from core.realtime_official_bars_sync import Rt15mSlotBoundaryWatcher
 
         self.rt_15m_slot_boundary_watcher = Rt15mSlotBoundaryWatcher(self, log=self.log)
@@ -3154,6 +3231,18 @@ class KiwoomApp:
             pass
         try:
             self._shutdown_order_action_workers()
+        except Exception:
+            pass
+        try:
+            poller = getattr(self, "rt_watchlist_m1_api_poller", None)
+            if poller is not None:
+                poller.stop()
+        except Exception:
+            pass
+        try:
+            acc = getattr(self, "rt_tick_m1_accumulator", None)
+            if acc is not None and hasattr(acc, "shutdown"):
+                acc.shutdown()
         except Exception:
             pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()

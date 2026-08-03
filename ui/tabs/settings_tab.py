@@ -1171,16 +1171,32 @@ class SettingsTab:
             'S1: 로컬 15분 확정 시 평가',
             None,
             '',
-            'ON=저정밀 완성 15분에서 S1·S2·청산. 「공식교체 후 평가」ON이면 로컬 즉시평가 대신 공식봉 반영 후 평가',
+            'ON=완성 15분에서 S1·S2·청산. M1 폴러 ON이면 마지막 1분 완성(프로브) 후 평가',
             toggle_key='realtime_s1_eval_on_local_15m_close',
+        )
+        add_param_row(
+            strat_f,
+            'M1 API 폴러(공식 1분)',
+            None,
+            '',
+            'ON(권장)=ka10080 1분봉으로 15분 합성·평가. 슬롯 마지막 1분 완성 시 보유·고합치도 우선',
+            toggle_key='realtime_watchlist_m1_api_poller_enabled',
         )
         add_param_row(
             strat_f,
             'S1: 공식15분 교체 후 평가',
             None,
             '',
-            'ON(권장)=ka10080 공식 15분봉 반영 후 S1·S2·청산. 보유·합치도 임박 종목만 조회(전감시 순회 없음). 공식 API는 슬롯 후 ~50초 지연 가능',
+            'ON=ka10080 공식 15분봉 반영 후 평가(느림 ~50초). OFF(권장)=공식 1분 합성으로 평가',
             toggle_key='realtime_closed_15m_eval_after_official',
+        )
+        add_param_row(
+            strat_f,
+            'M1 ON시에도 공식15 교체',
+            None,
+            '',
+            'OFF(기본)=M1 경로에서 공식 15분 REST 스킵. ON=정합용 교체 유지(평가는 eval_after_official에 따름)',
+            toggle_key='realtime_closed_15m_official_replace_with_m1',
         )
         add_param_row(
             strat_f,
@@ -1190,8 +1206,7 @@ class SettingsTab:
             'ON=완성봉으로 S1·S2·청산 판정 후, 주문 직전 라이브가로 추격/이탈·MA20 정합 확인. '
             '실패 시 주문 스킵(S1은 쿨다운 미소모)',
             toggle_key='realtime_s1_live_confirm_gate_enabled',
-        )
-        add_param_row(
+        )        add_param_row(
             strat_f,
             '라이브 추격 상한',
             'realtime_s1_live_max_chase_pct',
@@ -1232,7 +1247,7 @@ class SettingsTab:
             '공식교체 최소 합치도',
             'realtime_closed_15m_official_min_met_ratio',
             '',
-            '미보유는 met_ratio≥이 값만 공식봉 조회·평가(기본 0.5). 보유는 항상 포함',
+            '미보유는 met_ratio≥이 값만 완성봉 조회·평가(기본 0.5). 보유는 항상 포함. M1·공식15 공통',
         )
         add_param_row(
             strat_f,

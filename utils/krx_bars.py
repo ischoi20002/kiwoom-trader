@@ -36,6 +36,8 @@ __all__ = [
     "m1_bar_open_label_for_just_completed_minute",
     "m1_bar_end_ts_for_closed_open",
     "chart_covers_m1_closed_minute",
+    "is_last_m1_open_of_15m_slot",
+    "krx_15m_label_for_m1_open",
     "is_krx_m1_closed_open_label",
     "is_krx_last_15m_slot",
     "is_krx_pre_auction_15m_slot",
@@ -464,6 +466,57 @@ def m1_bar_open_label_for_just_completed_minute(
     return floored - pd.Timedelta(minutes=1)
 
 
+def is_last_m1_open_of_15m_slot(
+    open_ts: Union[pd.Timestamp, datetime, str],
+) -> bool:
+    """
+    닫힌 1분봉 open 라벨이 소속 15분 슬롯의 **마지막 연속매매 분**(또는 15:30 단일가)인지.
+
+    - 일반: ``minute % 15 == 14`` (예: 09:14, 09:29)
+    - ``15:15`` 슬롯: ``15:19``
+    - ``15:30`` 슬롯: ``15:30``
+    """
+    try:
+        t = pd.Timestamp(open_ts).floor("min")
+        if t.weekday() >= 5:
+            return False
+        hm = t.hour * 60 + t.minute
+        if hm == 15 * 60 + 19:
+            return True
+        if hm == 15 * 60 + 30:
+            return True
+        if hm < 9 * 60 or hm > 15 * 60 + 14:
+            return False
+        return (t.minute % 15) == 14
+    except Exception:
+        return False
+
+
+def krx_15m_label_for_m1_open(
+    open_ts: Union[pd.Timestamp, datetime, str],
+) -> Optional[pd.Timestamp]:
+    """
+    1분봉 open 라벨이 속한 **좌측 라벨** 15분 슬롯 시각.
+
+    - ``15:19`` → ``15:15``
+    - ``15:30`` → ``15:30``
+    - 그 외: ``floor('15min')`` (예: 09:14 → 09:00)
+    """
+    try:
+        t = pd.Timestamp(open_ts).floor("min")
+        hm = t.hour * 60 + t.minute
+        if hm == 15 * 60 + 19:
+            return t.normalize() + pd.Timedelta(hours=15, minutes=15)
+        if hm == 15 * 60 + 30:
+            return t.normalize() + pd.Timedelta(hours=15, minutes=30)
+        lab = t.floor("15min")
+        if not is_krx_15m_slot_end(lab):
+            return None
+        return lab
+    except Exception:
+        return None
+
+
 def m1_bar_end_ts_for_closed_open(
     closed_open: Union[pd.Timestamp, datetime, str],
 ) -> pd.Timestamp:
@@ -496,15 +549,15 @@ def is_krx_m1_closed_open_label(
 ) -> bool:
     """
     ``m1_bar_open_label_for_just_completed_minute`` 로 구한 **닫힌 1분봉 시작 라벨**이
-    KRX 연속매매 1분 격자(평일 09:00~15:19)에 속하는지.
-
-    (레거시·보조) 실시간 M1 폴러는 ``chart_covers_m1_closed_minute`` 를 우선 사용한다.
+    KRX 연속매매 1분 격자(평일 09:00~15:19) 또는 15:30 단일가에 속하는지.
     """
     try:
         t = pd.Timestamp(closed_open).floor("min")
         if t.weekday() >= 5:
             return False
         hm = t.hour * 60 + t.minute
+        if hm == 15 * 60 + 30:
+            return True
         return (9 * 60) <= hm <= (15 * 60 + 19)
     except Exception:
         return False
