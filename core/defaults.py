@@ -134,8 +134,6 @@ DEFAULT_SETTINGS = {
     "realtime_s1_live_max_chase_pct": 0.8,
     "realtime_s1_live_max_fade_pct": 1.0,
     "realtime_s1_live_ma20_side_confirm": True,
-    # 백테 저정밀: 완성 15분 후 다음 1분 종가로 RT와 동일 chase/fade/MA20 게이트 (S1·S2·EXIT)
-    "bt_s1_m1_confirm_gate_enabled": True,
     "realtime_use_fixed_s1_presignal_gate": True,
     "realtime_eval_position_min_interval_sec": 15.0,
     "realtime_exit_indicator_min_interval_sec": 15.0,

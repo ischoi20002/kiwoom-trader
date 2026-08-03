@@ -803,9 +803,9 @@ class WarmupService:
         self,
     ) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
         """
-        현재 시각 기준 진행 중 15m 슬롯의 (시작 시각, 종가 시각) 반환.
+        현재 시각 기준 진행 중 15m 슬롯의 (라벨=시작, 창끝 미포함) 반환.
         장 시간이 아니거나 주말이면 None.
-        종가 시각은 right-label 규칙(slot_start + 15분).
+        인덱스는 키움 공식과 동일한 좌측 라벨(slot_start).
         """
         try:
             now = datetime.now()
@@ -815,12 +815,14 @@ class WarmupService:
             close_t = datetime.strptime("15:30", "%H:%M").time()
             if now.time() < open_t or now.time() > close_t:
                 return None
-            n = pd.Timestamp(now)
-            minute_floor = (n.minute // 15) * 15
-            slot_start = n.replace(
-                minute=minute_floor, second=0, microsecond=0
+            from utils.krx_bars import (
+                krx_15m_slot_complete_ts,
+                krx_stream_slot_end_datetime,
             )
-            slot_end = slot_start + pd.Timedelta(minutes=15)
+
+            n = pd.Timestamp(now)
+            slot_start = krx_stream_slot_end_datetime(n.to_pydatetime())
+            slot_end = krx_15m_slot_complete_ts(slot_start)
             return slot_start, slot_end
         except Exception:
             return None
@@ -835,12 +837,9 @@ class WarmupService:
         """
         재시작 시 진행 중 15m 슬롯의 V/OHLC 가 부분 손실됐을 가능성을 보정합니다.
 
-        ka10080(tic_scope='1') 로 1분봉 1페이지를 받아 진행 중 슬롯 (slot_start, slot_end]
+        ka10080(tic_scope='1') 로 1분봉 1페이지를 받아 진행 중 슬롯 ``[label, complete)``
         구간에 속하는 1분봉을 합산해 base 의 해당 슬롯 봉을 정확한 OHLCV 로 덮어씁니다.
-        - 1분봉 cntr_tm 은 _봉 종가 시각_(09:01 = 09:00:01~09:01:00).
-        - 진행 중 슬롯은 아직 마감되지 않았으므로 _마감된 1분봉만_ 합산되며, 마지막 1분은
-          이후 0B 차분 누적으로 stream_processor 가 채웁니다.
-        - 결과 봉의 인덱스는 slot_end(right-label) — 기존 15m base 와 동일 규약.
+        - 결과 봉의 인덱스는 좌측 라벨(키움 공식 15분과 동일).
         """
         try:
             if not self._inprogress_slot_recover_with_1m_enabled():
@@ -868,7 +867,7 @@ class WarmupService:
             df_1m = self._minute_api_raw_to_1m_ohlcv(raw_list)
             if df_1m is None or df_1m.empty:
                 return base
-            mask = (df_1m.index > slot_start) & (df_1m.index <= slot_end)
+            mask = (df_1m.index >= slot_start) & (df_1m.index < slot_end)
             in_slot = df_1m[mask]
             if in_slot.empty:
                 return base
@@ -888,7 +887,7 @@ class WarmupService:
                 )
             else:
                 out = base.copy()
-            new_idx = pd.Timestamp(slot_end)
+            new_idx = pd.Timestamp(slot_start)
             out.loc[new_idx, "Open"] = o_val
             out.loc[new_idx, "High"] = h_val
             out.loc[new_idx, "Low"] = l_val

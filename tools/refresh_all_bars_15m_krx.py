@@ -64,12 +64,14 @@ def main() -> int:
                 print(f"  [{i}/{n}] {code} 오류: {err[:200]}", flush=True)
             except (OSError, TypeError) as e2:
                 pass
-        if i == 1 or i % 25 == 0 or i == n:
+        if i == 1 or i % 10 == 0 or i == n:
             elapsed = time.time() - t_all
+            rate = elapsed / max(i, 1)
+            eta = rate * (n - i)
             try:
                 print(
                     f"  … 진행 {i}/{n}  누적 {elapsed:.0f}s  "
-                    f"최근 {code} {time.time()-t0:.2f}s",
+                    f"ETA ~{eta/60:.1f}분  최근 {code} {time.time()-t0:.2f}s",
                     flush=True,
                 )
             except (OSError, TypeError) as e2:

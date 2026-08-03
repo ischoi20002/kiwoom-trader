@@ -2,13 +2,17 @@
 """
 KRX 장중 15분봉·1분 창의 시간 정의.
 
-1분봉 → 15분봉 합성은 **봉 개수가 아니라 타임스탬프 구간**으로 한다.
+키움 ka10080(tic_scope=15) 과 동일하게 **좌측(시작) 라벨**을 쓴다.
 
-- 일반 슬롯(종가 라벨 ``T``): ``T-15분 ≤ ts < T``
-  (예: 09:15 → 09:00~09:14, 09:30 → 09:15~09:29 — 09:15는 두 번째 봉)
-- 마지막 슬롯(15:30): ``15:15 ≤ ts < 15:20`` 또는 ``ts == 15:30``(단일가)
+1분봉 → 15분봉 합성은 봉 개수가 아니라 타임스탬프 구간으로 한다.
 
-구간에 실제 존재하는 1분봉만 집계한다(결측·서킷 등으로 개수가 줄어도 됨).
+- 일반 슬롯(라벨 ``T``): ``T ≤ ts < T+15분``
+  (예: 09:00 → 09:00~09:14, 09:15 → 09:15~09:29)
+- ``15:15``: ``15:15 ≤ ts < 15:20`` (연속매매 잔여분만)
+- ``15:30``: ``ts == 15:30`` (단일가)
+
+라벨 목록: 09:00, 09:15, …, 15:00, 15:15, 15:30.
+구간에 실제 존재하는 1분봉만 집계한다.
 """
 from __future__ import annotations
 
@@ -28,13 +32,13 @@ __all__ = [
     "m1_index_ranges_for_15m_end",
     "m1_mask_for_15m_end",
     "slice_m1_for_15m_end",
-    "next_m1_ts_after_15m_end",
-    "next_m1_close_after_15m_end",
+    "krx_15m_slot_complete_ts",
     "m1_bar_open_label_for_just_completed_minute",
     "m1_bar_end_ts_for_closed_open",
     "chart_covers_m1_closed_minute",
     "is_krx_m1_closed_open_label",
     "is_krx_last_15m_slot",
+    "is_krx_pre_auction_15m_slot",
     "iter_krx_15m_slot_ends_for_day",
     "resample_1m_ohlcv_to_15m_krx",
     "KRX_15M_RESAMPLE_KWARGS",
@@ -44,17 +48,17 @@ __all__ = [
     "seconds_until_next_krx_15m_boundary",
 ]
 
-# 레거시 호환 이름. 신규 합성은 타임스탬프 마스크를 쓰며 pandas resample 에 의존하지 않음.
-# closed=left, label=right 는 일반 슬롯 [T-15, T) 와 동일한 의미.
-KRX_15M_RESAMPLE_KWARGS: dict = {"label": "right", "closed": "left"}
+# 레거시 이름. 공식은 좌측 라벨(시작 시각). pandas label=left, closed=left 에 가깝다.
+KRX_15M_RESAMPLE_KWARGS: dict = {"label": "left", "closed": "left"}
 
-# KRX 정규장 15분봉(right-label) 첫·마지막 슬롯 종가 시각
-_KRX_FIRST_15M_END = time(9, 15)
+# KRX/키움 공식 15분 라벨 첫·마지막
+_KRX_FIRST_15M_END = time(9, 0)
 _KRX_LAST_15M_END = time(15, 30)
 
 
 def _krx_day_first_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
-    return day0.normalize() + pd.Timedelta(hours=9, minutes=15)
+    """당일 첫 15분 라벨(09:00)."""
+    return day0.normalize() + pd.Timedelta(hours=9, minutes=0)
 
 
 def _krx_day_last_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
@@ -62,7 +66,7 @@ def _krx_day_last_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
 
 
 def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
-    """``t`` 날짜 **다음날**부터 찾은 첫 평일 09:15."""
+    """``t`` 날짜 **다음날**부터 찾은 첫 평일 09:00."""
     try:
         d = pd.Timestamp(t).normalize() + pd.Timedelta(days=1)
         for _ in range(8):
@@ -76,7 +80,7 @@ def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
 
 def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """
-    KRX 정규장 15분봉 종가 라벨(09:15~15:30, 15분 간격, 평일) 여부.
+    KRX/키움 공식 15분봉 **라벨**(09:00~15:30, 15분 간격, 평일) 여부.
 
     공휴일은 미반영(평일만). 장외·야간 슬롯은 False.
     """
@@ -87,7 +91,7 @@ def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
         if t.second != 0 or t.microsecond != 0:
             return False
         hm = t.hour * 60 + t.minute
-        if hm < 9 * 60 + 15 or hm > 15 * 60 + 30:
+        if hm < 9 * 60 or hm > 15 * 60 + 30:
             return False
         return (t.minute % 15) == 0
     except Exception:
@@ -95,7 +99,7 @@ def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
 
 
 def is_krx_last_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
-    """종가 라벨이 당일 마지막 15분봉(15:30)인지."""
+    """라벨이 당일 마지막 15분봉(15:30, 단일가)인지."""
     try:
         t = pd.Timestamp(ts)
         return int(t.hour) == 15 and int(t.minute) == 30
@@ -103,8 +107,17 @@ def is_krx_last_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
         return False
 
 
+def is_krx_pre_auction_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """라벨이 연속매매 마지막 잔여 구간(15:15)인지."""
+    try:
+        t = pd.Timestamp(ts)
+        return int(t.hour) == 15 and int(t.minute) == 15
+    except Exception:
+        return False
+
+
 def iter_krx_15m_slot_ends_for_day(day: Union[pd.Timestamp, datetime, str]) -> List[pd.Timestamp]:
-    """해당 캘린더일의 KRX 15분 종가 라벨 목록(09:15 … 15:30)."""
+    """해당 캘린더일의 KRX/키움 15분 라벨 목록(09:00 … 15:30)."""
     try:
         day0 = pd.Timestamp(day).normalize()
         out: List[pd.Timestamp] = []
@@ -118,39 +131,55 @@ def iter_krx_15m_slot_ends_for_day(day: Union[pd.Timestamp, datetime, str]) -> L
         return []
 
 
+def krx_15m_slot_complete_ts(
+    label_ts: Union[pd.Timestamp, datetime, str],
+) -> pd.Timestamp:
+    """
+    좌측 라벨 ``T`` 봉이 **완성되는 벽시계 시각**.
+
+    - 일반: ``T+15분``
+    - 15:15: ``15:20`` (연속 잔여 종료)
+    - 15:30: ``15:30``
+    """
+    t = pd.Timestamp(label_ts)
+    if is_krx_last_15m_slot(t):
+        return t.floor("min")
+    if is_krx_pre_auction_15m_slot(t):
+        return t.normalize() + pd.Timedelta(hours=15, minutes=20)
+    return t.floor("min") + pd.Timedelta(minutes=15)
+
+
 def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp:
     """
-    벽시계 기준 **현재 형성 중** 15분봉의 종가 라벨(KRX 장중만).
+    벽시계 기준 **현재 형성 중** 15분봉의 **좌측 라벨**(KRX 장중만).
 
-    - 09:15 이전: 당일 09:15
-    - 09:15~15:30: 해당 구간의 right-label 종가 시각
-    - 15:30 이후·주말: 당일(또는 직전 평일) 15:30 — 장외에는 새 슬롯을 만들지 않음
+    - 09:00 이전: 당일 09:00
+    - 09:00~15:14: 해당 15분 구간의 시작 라벨
+    - 15:15~15:29: 15:15
+    - 15:30 이후·주말: 당일(또는 직전 평일) 15:30
     """
     try:
         raw = now if now is not None else datetime.now()
         t = pd.Timestamp(raw)
         day0 = t.normalize()
         if t.weekday() >= 5:
-            # 주말: 직전 금요일 15:30 고정(새 슬롯 전진 없음)
             d = day0
             while d.weekday() >= 5:
                 d = d - pd.Timedelta(days=1)
             return _krx_day_last_slot_end(d)
 
         hm = t.hour * 60 + t.minute
-        if hm < 9 * 60 + 15:
+        if hm < 9 * 60:
             return _krx_day_first_slot_end(day0)
         if hm >= 15 * 60 + 30:
             return _krx_day_last_slot_end(day0)
+        if hm >= 15 * 60 + 15:
+            return day0 + pd.Timedelta(hours=15, minutes=15)
 
-        # 장중: 09:15 기준 15분 단위로 올림한 종가 라벨
-        base_min = 9 * 60 + 15
+        base_min = 9 * 60
         offset = hm - base_min
-        slot_idx = offset // 15
-        end_min = base_min + (slot_idx + 1) * 15
-        if end_min > 15 * 60 + 30:
-            end_min = 15 * 60 + 30
-        return day0 + pd.Timedelta(minutes=end_min)
+        slot_min = base_min + (offset // 15) * 15
+        return day0 + pd.Timedelta(minutes=int(slot_min))
     except Exception:
         try:
             return pd.Timestamp(now or datetime.now()).floor("15min")
@@ -162,9 +191,9 @@ def next_krx_15m_slot_end(
     ts: Union[pd.Timestamp, datetime, str],
 ) -> Optional[pd.Timestamp]:
     """
-    ``ts`` **이후** 첫 KRX 15분봉 종가 시각.
+    ``ts`` **이후** 첫 KRX 15분봉 라벨.
 
-    장마감(15:30) 다음은 **다음 평일 09:15** 로 점프합니다(야간 00:00·03:00 등 생성 안 함).
+    장마감(15:30) 다음은 **다음 평일 09:00** 으로 점프합니다.
     """
     try:
         t = pd.Timestamp(ts).floor("s")
@@ -180,7 +209,7 @@ def next_krx_15m_slot_end(
         if hm >= 15 * 60 + 30:
             return _next_weekday_first_slot_after(t)
 
-        if hm < 9 * 60 + 15:
+        if hm < 9 * 60:
             if t < first_end:
                 return first_end
             return next_krx_15m_slot_end(first_end)
@@ -193,8 +222,8 @@ def next_krx_15m_slot_end(
                 return last_end
             return _next_weekday_first_slot_after(t)
 
-        # 슬롯 경계 사이 → 올림한 종가 라벨
         up = krx_stream_slot_end_datetime(t.to_pydatetime())
+        # 형성 중 라벨이 t 이하면 그 다음 라벨
         if up > t:
             return up
         return next_krx_15m_slot_end(up)
@@ -206,25 +235,26 @@ def seconds_until_next_krx_15m_boundary(
     now: Optional[Union[datetime, pd.Timestamp]] = None,
 ) -> float:
     """
-    다음 KRX 15분 슬롯 **벽시계 경계**까지 남은 초.
+    다음 15분봉 **완성 경계**(또는 다음 라벨 시작)까지 남은 초.
 
-    ``krx_stream_slot_end_datetime`` 이 분 단위로 점프하는 시각(09:15, 09:30, …)
-    까지의 대기시간. 슬롯 롤 워처의 exact wake 에 사용합니다.
+    슬롯 롤 워처의 exact wake 에 사용합니다.
     """
     try:
         raw = now if now is not None else datetime.now()
         t = pd.Timestamp(raw)
-        want = krx_stream_slot_end_datetime(
+        label = krx_stream_slot_end_datetime(
             t.to_pydatetime() if hasattr(t, "to_pydatetime") else t
         )
-        want_ts = pd.Timestamp(want)
-        delta = float((want_ts - t).total_seconds())
+        complete = krx_15m_slot_complete_ts(label)
+        delta = float((pd.Timestamp(complete) - t).total_seconds())
         if delta > 0.001:
             return delta
-        nxt = next_krx_15m_slot_end(want_ts)
+        nxt = next_krx_15m_slot_end(label)
         if nxt is None:
             return 60.0
-        return max(0.0, float((pd.Timestamp(nxt) - t).total_seconds()))
+        # 다음 라벨의 완성 시각(또는 라벨 시각이 곧 경계인 15:30)
+        nxt_complete = krx_15m_slot_complete_ts(nxt)
+        return max(0.0, float((pd.Timestamp(nxt_complete) - t).total_seconds()))
     except Exception:
         return 1.0
 
@@ -233,11 +263,11 @@ def m1_window_start_for_15m_end(
     end_ts: Union[pd.Timestamp, datetime, str],
 ) -> pd.Timestamp:
     """
-    15분봉 종가 라벨 ``T`` 에 대응하는 1분봉 창 **시작(포함)**.
+    15분봉 라벨 ``T`` 에 대응하는 1분봉 창 **시작(포함)**.
 
-    항상 ``T - 15분`` (타임스탬프 기준, 개수 고정 아님).
+    좌측 라벨: 항상 ``T``.
     """
-    return pd.Timestamp(end_ts) - pd.Timedelta(minutes=15)
+    return pd.Timestamp(end_ts).floor("min")
 
 
 def m1_continuous_end_exclusive_for_15m_end(
@@ -246,13 +276,16 @@ def m1_continuous_end_exclusive_for_15m_end(
     """
     연속매매 1분봉 창의 **끝(미포함)**.
 
-    - 일반: ``T``
-    - 15:30: ``15:20`` (15:15~15:19만 연속 구간; 단일가는 별도)
+    - 일반: ``T+15``
+    - 15:15: ``15:20``
+    - 15:30: ``T`` (연속 구간 없음 — 단일가만)
     """
-    t = pd.Timestamp(end_ts)
+    t = pd.Timestamp(end_ts).floor("min")
     if is_krx_last_15m_slot(t):
+        return t
+    if is_krx_pre_auction_15m_slot(t):
         return t.normalize() + pd.Timedelta(hours=15, minutes=20)
-    return t
+    return t + pd.Timedelta(minutes=15)
 
 
 def m1_closing_auction_ts_for_15m_end(
@@ -272,7 +305,7 @@ def m1_mask_for_15m_end(
     until: Optional[Union[pd.Timestamp, datetime, str]] = None,
 ) -> np.ndarray:
     """
-    ``end_ts_15m`` 슬롯에 속하는 1분봉 여부 마스크(타임스탬프 규칙).
+    라벨 ``end_ts_15m`` 슬롯에 속하는 1분봉 여부 마스크(공식 좌측 라벨 규칙).
 
     ``until`` 이 있으면 그 시각(포함)까지만 — 형성 중 슬롯용.
     """
@@ -296,8 +329,6 @@ def m1_mask_for_15m_end(
             return np.zeros(len(m1_index), dtype=bool)
         except Exception:
             return np.asarray([], dtype=bool)
-
-
 def m1_index_ranges_for_15m_end(
     m1_index: pd.DatetimeIndex,
     end_ts_15m: Union[pd.Timestamp, datetime, str],
@@ -307,16 +338,53 @@ def m1_index_ranges_for_15m_end(
 
     일반·갭 없는 15:30 은 보통 1개 구간. 15:20~15:29 잔여 봉이 있으면
     연속 구간과 단일가 구간이 분리된다.
+
+    정렬된 인덱스에서는 ``searchsorted`` 로 O(log n) 구간을 잡고,
+    비정렬/이상치는 마스크 폴백.
     """
     try:
-        mask = m1_mask_for_15m_end(m1_index, end_ts_15m)
+        t_end = pd.Timestamp(end_ts_15m)
+        t0 = m1_window_start_for_15m_end(t_end)
+        cont_ex = m1_continuous_end_exclusive_for_15m_end(t_end)
+        auction = m1_closing_auction_ts_for_15m_end(t_end)
+
+        idx = pd.DatetimeIndex(pd.to_datetime(m1_index, errors="coerce"))
+        if len(idx) == 0:
+            return []
+
+        # 단조 증가면 searchsorted 고속 경로
+        try:
+            vals = idx.asi8
+            mono = bool(np.all(vals[1:] >= vals[:-1]))
+        except Exception:
+            mono = False
+
+        ranges: List[Tuple[int, int]] = []
+        if mono:
+            i0 = int(np.searchsorted(vals, np.int64(pd.Timestamp(t0).value), side="left"))
+            i1 = int(
+                np.searchsorted(vals, np.int64(pd.Timestamp(cont_ex).value), side="left")
+            )
+            if i1 > i0:
+                ranges.append((i0, i1))
+            if auction is not None:
+                a0 = pd.Timestamp(auction).floor("min")
+                a_ns = np.int64(a0.value)
+                j = int(np.searchsorted(vals, a_ns, side="left"))
+                if j < len(vals) and int(vals[j]) == int(a_ns):
+                    # 연속 구간에 이미 포함되면 추가하지 않음
+                    if not (i0 <= j < i1):
+                        ranges.append((j, j + 1))
+            return ranges
+
+        # 폴백: 마스크 → 연속 구간 압축
+        mask = m1_mask_for_15m_end(idx, end_ts_15m)
         if mask.size == 0 or not bool(np.any(mask)):
             return []
-        idx = np.flatnonzero(mask)
-        ranges: List[Tuple[int, int]] = []
-        start = int(idx[0])
+        flat = np.flatnonzero(mask)
+        start = int(flat[0])
         prev = start
-        for j in idx[1:]:
+        for j in flat[1:]:
             j = int(j)
             if j == prev + 1:
                 prev = j
@@ -378,69 +446,6 @@ def slice_m1_for_15m_end(
         if mask.size != len(m1_df) or not bool(np.any(mask)):
             return m1_df.iloc[0:0].copy() if hasattr(m1_df, "iloc") else None
         return m1_df.loc[mask].copy()
-    except Exception:
-        return None
-
-
-def next_m1_ts_after_15m_end(
-    end_ts_15m: Union[pd.Timestamp, datetime, str],
-) -> Optional[pd.Timestamp]:
-    """
-    15분 슬롯 종가 라벨 ``T`` 다음 1분봉의 DB close-label 시각 ``T+1분``.
-
-    정규장 연속 1분이 없으면 ``None`` (예: 15:30 슬롯 이후).
-    """
-    try:
-        t = pd.Timestamp(end_ts_15m)
-        nxt = t + pd.Timedelta(minutes=1)
-        # 정규장 연속분: 09:01~15:20 close-label (마지막 연속분은 15:20)
-        if nxt.hour > 15 or (nxt.hour == 15 and nxt.minute > 20):
-            return None
-        if nxt.hour < 9 or (nxt.hour == 9 and nxt.minute < 1):
-            return None
-        return nxt
-    except Exception:
-        return None
-
-
-def next_m1_close_after_15m_end(
-    m1_df: Any,
-    end_ts_15m: Union[pd.Timestamp, datetime, str],
-) -> Optional[float]:
-    """
-    DB ``bars_1m``(close-label)에서 15분 슬롯 ``T`` 다음 1분 ``T+1`` 의 Close.
-
-    정확한 시각 행만 사용하며, 이후 봉으로 대체하지 않습니다.
-    """
-    try:
-        want = next_m1_ts_after_15m_end(end_ts_15m)
-        if want is None:
-            return None
-        if m1_df is None or getattr(m1_df, "empty", True):
-            return None
-        want_ns = pd.Timestamp(want).floor("min")
-        try:
-            # 인덱스가 이미 Timestamp 인 경우 직접 조회
-            if want_ns in m1_df.index:
-                val = m1_df.loc[want_ns, "Close"]
-            else:
-                # 문자열/다른 dtype 인덱스 폴백
-                idx = pd.to_datetime(m1_df.index).floor("min")
-                mask = idx == want_ns
-                if not bool(np.any(mask)):
-                    return None
-                val = m1_df.loc[mask, "Close"].iloc[0]
-        except Exception:
-            return None
-        try:
-            # Series(중복 인덱스)면 첫 값
-            if hasattr(val, "iloc"):
-                px = float(val.iloc[0])
-            else:
-                px = float(val)
-        except (TypeError, ValueError):
-            return None
-        return px if px > 0 else None
     except Exception:
         return None
 
@@ -521,12 +526,76 @@ def _agg_ohlcv_from_m1(seg: pd.DataFrame) -> Optional[dict]:
         return None
 
 
+def _agg_ohlcv_from_ranges(
+    o: np.ndarray,
+    h: np.ndarray,
+    l: np.ndarray,
+    c: np.ndarray,
+    v: np.ndarray,
+    ranges: List[Tuple[int, int]],
+) -> Optional[dict]:
+    """numpy OHLCV + half-open 구간 목록 → 단일 봉. 실패 시 None."""
+    try:
+        if not ranges:
+            return None
+        first_i = int(ranges[0][0])
+        last_e = int(ranges[-1][1])
+        if first_i < 0 or last_e <= first_i:
+            return None
+        hi: Optional[float] = None
+        lo: Optional[float] = None
+        vol = 0.0
+        for a, b in ranges:
+            a_i, b_i = int(a), int(b)
+            if b_i <= a_i:
+                continue
+            seg_h = float(np.max(h[a_i:b_i]))
+            seg_l = float(np.min(l[a_i:b_i]))
+            hi = seg_h if hi is None else max(hi, seg_h)
+            lo = seg_l if lo is None else min(lo, seg_l)
+            vol += float(np.sum(v[a_i:b_i]))
+        if hi is None or lo is None:
+            return None
+        return {
+            "open": float(o[first_i]),
+            "high": float(hi),
+            "low": float(lo),
+            "close": float(c[last_e - 1]),
+            "volume": float(vol),
+        }
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _slot_ranges_on_sorted_ns(
+    vals: np.ndarray,
+    end_ts_15m: Union[pd.Timestamp, datetime, str],
+) -> List[Tuple[int, int]]:
+    """정렬된 index.asi8 배열에서 슬롯 half-open 구간(searchsorted)."""
+    t_end = pd.Timestamp(end_ts_15m)
+    t0 = m1_window_start_for_15m_end(t_end)
+    cont_ex = m1_continuous_end_exclusive_for_15m_end(t_end)
+    auction = m1_closing_auction_ts_for_15m_end(t_end)
+    i0 = int(np.searchsorted(vals, np.int64(pd.Timestamp(t0).value), side="left"))
+    i1 = int(np.searchsorted(vals, np.int64(pd.Timestamp(cont_ex).value), side="left"))
+    ranges: List[Tuple[int, int]] = []
+    if i1 > i0:
+        ranges.append((i0, i1))
+    if auction is not None:
+        a_ns = np.int64(pd.Timestamp(auction).floor("min").value)
+        j = int(np.searchsorted(vals, a_ns, side="left"))
+        if j < len(vals) and int(vals[j]) == int(a_ns):
+            if not (i0 <= j < i1):
+                ranges.append((j, j + 1))
+    return ranges
+
+
 def resample_1m_ohlcv_to_15m_krx(
     df_1m: pd.DataFrame, code: str
 ) -> pd.DataFrame:
     """
     1m OHLCV(열: open, high, low, close, volume, index=datetime)을
-    KRX 타임스탬프 규칙의 15m DataFrame(열 datetime+OHLCV+code)로 집계한다.
+    KRX 타임스탬프 규칙으로 15m DataFrame(열 datetime+OHLCV+code)로 집계한다.
     """
     ncode = normalize_code(code)
     _empty = pd.DataFrame(
@@ -537,30 +606,37 @@ def resample_1m_ohlcv_to_15m_krx(
 
     try:
         s = df_1m.copy()
-        s = s.sort_index()
         s.index = pd.to_datetime(s.index, errors="coerce")
         s = s[s.index.notna()]
-        for c in ("open", "high", "low", "close", "volume"):
-            if c not in s.columns:
+        for col in ("open", "high", "low", "close", "volume"):
+            if col not in s.columns:
                 return _empty
-            s[c] = pd.to_numeric(s[c], errors="coerce")
+            s[col] = pd.to_numeric(s[col], errors="coerce")
         s = s.dropna(subset=["open", "high", "low", "close", "volume"])
         if s.empty:
             return _empty
+        if not s.index.is_monotonic_increasing:
+            s = s.sort_index()
     except (TypeError, ValueError, KeyError) as e:
         print(f"[krx_bars] 1m 전처리 실패: {e!r}", flush=True)
         return _empty
 
     rows: List[dict] = []
     try:
+        o = s["open"].to_numpy(dtype=np.float64, copy=False)
+        h = s["high"].to_numpy(dtype=np.float64, copy=False)
+        l = s["low"].to_numpy(dtype=np.float64, copy=False)
+        c = s["close"].to_numpy(dtype=np.float64, copy=False)
+        v = s["volume"].to_numpy(dtype=np.float64, copy=False)
+        vals = s.index.asi8
         days = sorted({pd.Timestamp(ts).normalize() for ts in s.index})
         for day0 in days:
             for slot_end in iter_krx_15m_slot_ends_for_day(day0):
                 try:
-                    mask = m1_mask_for_15m_end(s.index, slot_end)
-                    if not bool(np.any(mask)):
+                    ranges = _slot_ranges_on_sorted_ns(vals, slot_end)
+                    if not ranges:
                         continue
-                    agg = _agg_ohlcv_from_m1(s.loc[mask])
+                    agg = _agg_ohlcv_from_ranges(o, h, l, c, v, ranges)
                     if agg is None:
                         continue
                     agg["datetime"] = slot_end

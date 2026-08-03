@@ -1986,33 +1986,6 @@ class SimpleBacktester:
             
             params = self._init_simulation(df, code, market_df, vix_df, high_precision)
 
-            # BT S1: 다음 1분 종가 게이트용 1분봉 (저정밀에서도 preload 사용)
-            try:
-                self._bt_s1_m1_gate = bool(
-                    self.settings.get("bt_s1_m1_confirm_gate_enabled", True)
-                )
-            except Exception:
-                self._bt_s1_m1_gate = True
-            self._m1_df_s1_gate = m1_df_preloaded
-            # preload 없으면 필요 시 지연 로드 (단일 종목 run 등)
-            if (
-                self._bt_s1_m1_gate
-                and not high_precision
-                and self._m1_df_s1_gate is None
-                and len(df) > 0
-            ):
-                try:
-                    from strategy.data_loader import BacktestDataLoader
-
-                    loader = BacktestDataLoader()
-                    t0 = pd.Timestamp(df.index[0]).strftime("%Y-%m-%d")
-                    t1 = pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d")
-                    self._m1_df_s1_gate = loader.get_data(
-                        code, t0, t1, interval="1m"
-                    )
-                except Exception:
-                    self._m1_df_s1_gate = None
-            
             # 2. Main Simulation Loop (v23.0 Optimized)
             # [Perf] 미리 벡터화된 신호 및 가격 정보를 로컬 변수로 캐싱하여 루프 부하 최적화
             # [v31.4] Real-time only columns preparation
@@ -2693,52 +2666,14 @@ class SimpleBacktester:
             # Exit Check
             exit_res = self._check_exits_optimized(curr_date, curr_close, curr_high, curr_low, pos, indicators=indicators, i=i)
             if exit_res:
-                sell_px = float(exit_res["price"])
-                sell_ok = True
-                if (not high_precision) and bool(getattr(self, "_bt_s1_m1_gate", False)):
-                    try:
-                        from strategy.s1_confirm_gate import bt_m1_confirm_fill
-
-                        try:
-                            ma20_v = float(indicators["MA20"][i])
-                        except Exception:
-                            ma20_v = 0.0
-                        ok_g, fill_g, reason_g = bt_m1_confirm_fill(
-                            getattr(self, "_m1_df_s1_gate", None),
-                            curr_date,
-                            float(curr_close),
-                            ma20_v,
-                            self.settings,
-                        )
-                        if not ok_g:
-                            sell_ok = False
-                            try:
-                                self.collect_trade(
-                                    curr_date,
-                                    "REJECTED_EXIT",
-                                    float(curr_close),
-                                    0,
-                                    0,
-                                    0.0,
-                                    reason_str=f"EXIT_M1Gate|{reason_g}",
-                                    fee=0,
-                                    sig_type=pos.get("sig_type"),
-                                )
-                            except Exception:
-                                pass
-                        else:
-                            sell_px = float(fill_g)
-                    except Exception:
-                        sell_ok = False
-                if sell_ok:
-                    params = self._execute_sell(
-                        curr_date,
-                        sell_px,
-                        exit_res["reason"],
-                        params,
-                        indicators=indicators,
-                        i=i,
-                    )
+                params = self._execute_sell(
+                    curr_date,
+                    float(exit_res["price"]),
+                    exit_res["reason"],
+                    params,
+                    indicators=indicators,
+                    i=i,
+                )
             
             # Stage 2 Buy Check
             elif pos['stage'] == 1:
@@ -2755,56 +2690,16 @@ class SimpleBacktester:
                         s2_reason = f"ADDON(S2)|R:{indicators['RSI'][i]:.1f}|M:{indicators['MACD'][i]:.1f}|O:{indicators['OSC'][i]:.2f}|V:{indicators['Volume'][i]}"
                         if _use_s2_sb:
                             s2_reason = "SmartBuy|" + s2_reason
-                        s2_px = float(curr_close)
-                        if (not high_precision) and bool(
-                            getattr(self, "_bt_s1_m1_gate", False)
-                        ):
-                            try:
-                                from strategy.s1_confirm_gate import bt_m1_confirm_fill
-
-                                try:
-                                    ma20_v = float(indicators["MA20"][i])
-                                except Exception:
-                                    ma20_v = 0.0
-                                ok_g, fill_g, reason_g = bt_m1_confirm_fill(
-                                    getattr(self, "_m1_df_s1_gate", None),
-                                    curr_date,
-                                    float(curr_close),
-                                    ma20_v,
-                                    self.settings,
-                                )
-                                if not ok_g:
-                                    can_buy_s2 = False
-                                    try:
-                                        self.collect_trade(
-                                            curr_date,
-                                            "REJECTED_S2",
-                                            float(curr_close),
-                                            0,
-                                            0,
-                                            0.0,
-                                            reason_str=f"S2_M1Gate|{reason_g}",
-                                            fee=0,
-                                            sig_type=pos.get("sig_type"),
-                                        )
-                                    except Exception:
-                                        pass
-                                else:
-                                    s2_px = float(fill_g)
-                                    s2_reason = f"{s2_reason}|M1Conf"
-                            except Exception:
-                                can_buy_s2 = False
-                        if can_buy_s2:
-                            params = self._execute_buy(
-                                curr_date,
-                                s2_px,
-                                "BUY_2ND",
-                                params,
-                                stage=2,
-                                reason=s2_reason,
-                                indicators=indicators,
-                                i=i,
-                            )
+                        params = self._execute_buy(
+                            curr_date,
+                            float(curr_close),
+                            "BUY_2ND",
+                            params,
+                            stage=2,
+                            reason=s2_reason,
+                            indicators=indicators,
+                            i=i,
+                        )
         
         # 3. Entry Check
         elif signal_shifted[i]:
@@ -2821,60 +2716,19 @@ class SimpleBacktester:
                 
                 if is_ok:
                     reason = "SmartBuy|SIG" if use_sb_for_type else "SIG"
-                    buy_px = float(curr_close)
-                    # 저정밀: 완성 15분 신호 후 다음 1분 종가 게이트 (RT 라이브가 정합)
-                    if (not high_precision) and bool(
-                        getattr(self, "_bt_s1_m1_gate", False)
-                    ):
-                        try:
-                            from strategy.s1_confirm_gate import bt_m1_confirm_fill
-
-                            try:
-                                ma20_v = float(indicators["MA20"][i])
-                            except Exception:
-                                ma20_v = 0.0
-                            ok_g, fill_g, reason_g = bt_m1_confirm_fill(
-                                getattr(self, "_m1_df_s1_gate", None),
-                                curr_date,
-                                float(curr_close),
-                                ma20_v,
-                                self.settings,
-                            )
-                            if not ok_g:
-                                is_ok = False
-                                try:
-                                    self.collect_trade(
-                                        curr_date,
-                                        "REJECTED_SIG",
-                                        float(curr_close),
-                                        0,
-                                        0,
-                                        0.0,
-                                        reason_str=f"S1_M1Gate|{reason_g}",
-                                        fee=0,
-                                        sig_type=sig_type,
-                                    )
-                                except Exception:
-                                    pass
-                            else:
-                                buy_px = float(fill_g)
-                                reason = f"{reason}|M1Conf"
-                        except Exception:
-                            is_ok = False
-                    if is_ok:
-                        params = self._execute_buy(
-                            curr_date,
-                            buy_px,
-                            "BUY_1ST",
-                            params,
-                            stage=1,
-                            entry_idx=i,
-                            max_p=max(float(curr_high), float(buy_px)),
-                            reason=reason,
-                            indicators=indicators,
-                            i=i,
-                            sig_type=sig_type,
-                        )
+                    params = self._execute_buy(
+                        curr_date,
+                        float(curr_close),
+                        "BUY_1ST",
+                        params,
+                        stage=1,
+                        entry_idx=i,
+                        max_p=float(curr_high),
+                        reason=reason,
+                        indicators=indicators,
+                        i=i,
+                        sig_type=sig_type,
+                    )
         
         if log_to_csv and not self.settings.get('skip_indicators', False):
             if indicators['Signal'][i] or (indicators['RSI'][i] > 30 and indicators['RSI'][i] < 80):
@@ -3172,15 +3026,7 @@ class PortfolioBacktester:
         def _load_data(code):
             d15 = self.loader.get_data(code, w_start_dt, end_date, interval, force_refresh=force_refresh)
             dm1 = None
-            need_m1 = bool(high_precision)
-            if not need_m1:
-                try:
-                    need_m1 = bool(
-                        self.tester.settings.get("bt_s1_m1_confirm_gate_enabled", True)
-                    )
-                except Exception:
-                    need_m1 = True
-            if need_m1:
+            if high_precision:
                 dm1 = self.loader.get_data(code, w_start_dt, end_date, interval='1m')
             return code, d15, dm1
 

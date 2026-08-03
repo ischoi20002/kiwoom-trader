@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-완성 15분 신호/판정 후 주문 직전 가격 확인 게이트.
+완성 15분 신호/판정 후 주문 직전 가격 확인 게이트 (실시간).
 
-S1·S2·EXIT 공통. RT는 라이브가, BT(저정밀)는 다음 1분봉 종가를 확인가로 씁니다.
+S1·S2·EXIT 공통. RT는 라이브가를 확인가로 씁니다.
 임계값은 ``realtime_s1_live_*`` 설정을 사용합니다.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
-
-from utils.krx_bars import next_m1_close_after_15m_end
 
 
 def s1_price_confirm_gate(
@@ -19,7 +17,7 @@ def s1_price_confirm_gate(
     settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """
-    완성봉 Close 대비 확인가(라이브 또는 다음 1분 종가) 게이트.
+    완성봉 Close 대비 확인가(라이브가) 게이트.
 
     Returns
     -------
@@ -76,42 +74,3 @@ def s1_price_confirm_gate(
                 return False, f"ma20_cross_up conf={px:.0f} ma20={m20:.0f}"
 
     return True, ""
-
-
-def bt_m1_confirm_fill(
-    m1_df: Any,
-    slot_end: Any,
-    bar_close: float,
-    ma20: float = 0.0,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Tuple[bool, float, str]:
-    """
-    BT 저정밀: 다음 1분 종가 조회 + 게이트.
-
-    Returns
-    -------
-    (ok, fill_px, reason)
-        ok=True 이면 fill_px 로 체결. 실패 시 fill_px=0.
-    """
-    st = settings if isinstance(settings, dict) else {}
-    try:
-        if not bool(st.get("bt_s1_m1_confirm_gate_enabled", True)):
-            try:
-                bc = float(bar_close or 0.0)
-            except (TypeError, ValueError):
-                bc = 0.0
-            return (bc > 0, bc, "")
-    except Exception:
-        pass
-
-    try:
-        conf = next_m1_close_after_15m_end(m1_df, slot_end)
-    except Exception:
-        conf = None
-    if conf is None or float(conf) <= 0:
-        return False, 0.0, "no_confirm_1m"
-
-    ok, reason = s1_price_confirm_gate(bar_close, float(conf), ma20, st)
-    if not ok:
-        return False, float(conf), reason
-    return True, float(conf), ""

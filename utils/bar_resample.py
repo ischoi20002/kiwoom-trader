@@ -138,8 +138,34 @@ def refresh_resampled_data_at_path(db_path: str, code: str) -> Optional[str]:
             df_15m = resample_1m_ohlcv_to_15m_krx(df_1m, code)
             if df_15m is None or len(df_15m) == 0:
                 return None
+            try:
+                for col in ("open", "high", "low", "close", "volume"):
+                    df_15m[col] = (
+                        pd.to_numeric(df_15m[col], errors="coerce")
+                        .round(0)
+                        .astype("int64")
+                    )
+            except (TypeError, ValueError) as e:
+                return f"15m int cast failed: {e}"
             conn.execute("DELETE FROM bars_15m WHERE code = ?", (code,))
-            df_15m.to_sql("bars_15m", conn, if_exists="append", index=False)
+            rows = [
+                (
+                    str(r.code),
+                    str(r.datetime),
+                    int(r.open),
+                    int(r.high),
+                    int(r.low),
+                    int(r.close),
+                    int(r.volume),
+                )
+                for r in df_15m.itertuples(index=False)
+            ]
+            conn.executemany(
+                "INSERT OR REPLACE INTO bars_15m"
+                " (code, datetime, open, high, low, close, volume)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
             conn.commit()
         return None
     except Exception as e:

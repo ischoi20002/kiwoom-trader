@@ -25,7 +25,6 @@ from backtest_engine import (
 )
 from utils.fee_rates import fee_decimal_rates_backtest
 from utils.krx_bars import slice_m1_for_15m_end
-from strategy.s1_confirm_gate import bt_m1_confirm_fill
 from core.bt_hp_signal_bridge import compute_intrabar_indicator_step
 from core.bt_hp_intrabar_unified import (
     evaluate_bt_hp_intrabar_unified,
@@ -709,7 +708,7 @@ class DynamicBacktester:
                     )
                     
                     if res['action'] == 'EXIT':
-                        # TP인 경우 가격 보정 (고가 돌파 기준) — 게이트 통과 시 1분 종가로 대체
+                        # TP인 경우 가격 보정 (고가 돌파 기준)
                         e_price = curr_row['Close']
                         if res['reason'] == 'TAKE_PROFIT':
                             tpp = res.get('tp_pct_applied')
@@ -724,79 +723,14 @@ class DynamicBacktester:
                                 tp_pct = float(self.settings.get(tp_key, 5.0))
                                 e_price = h_info['avg_p'] * (1 + tp_pct/100.0)
 
-                        sell_ok = True
-                        if bool(
-                            self.settings.get("bt_s1_m1_confirm_gate_enabled", True)
-                        ):
-                            try:
-                                from strategy.s1_confirm_gate import bt_m1_confirm_fill
-
-                                day_str = (
-                                    curr_time.strftime("%Y-%m-%d")
-                                    if hasattr(curr_time, "strftime")
-                                    else str(curr_time)[:10]
-                                )
-                                m1_full = None
-                                try:
-                                    cache_key = (code, day_str)
-                                    if cache_key not in self.cached_1m_data:
-                                        _ = self._get_m1_chunk_on_demand(
-                                            code, day_str, curr_time
-                                        )
-                                    m1_full = self.cached_1m_data.get(cache_key)
-                                except Exception:
-                                    m1_full = None
-                                try:
-                                    ma20_v = float(curr_row.get("MA20", 0) or 0)
-                                except (TypeError, ValueError):
-                                    ma20_v = 0.0
-                                ok_g, fill_g, reason_g = bt_m1_confirm_fill(
-                                    m1_full,
-                                    curr_time,
-                                    float(curr_row["Close"]),
-                                    ma20_v,
-                                    self.settings,
-                                )
-                                if not ok_g:
-                                    sell_ok = False
-                                    reason_rej = f"EXIT_M1Gate|{reason_g}"
-                                    self._log_trade_to_csv(
-                                        curr_time,
-                                        code,
-                                        "REJECTED_EXIT",
-                                        float(curr_row["Close"]),
-                                        0,
-                                        reason_rej,
-                                        sig_type=h_info.get("sig_type"),
-                                    )
-                                    self.trades_history.append(
-                                        {
-                                            "Date": curr_time,
-                                            "Code": code,
-                                            "Name": self.stock_name_map.get(code, code),
-                                            "Action": "REJECTED_EXIT",
-                                            "Price": float(curr_row["Close"]),
-                                            "Qty": 0,
-                                            "Amount": 0,
-                                            "Reason": reason_rej,
-                                            "Cash": self.cash,
-                                            "Sig_Type": h_info.get("sig_type"),
-                                        }
-                                    )
-                                else:
-                                    e_price = float(fill_g)
-                            except Exception:
-                                sell_ok = False
-
-                        if sell_ok:
-                            self._execute_sell(
-                                code,
-                                e_price,
-                                curr_time,
-                                res["reason"],
-                                indicator_row=curr_row,
-                            )
-                            today_sells.add(code)
+                        self._execute_sell(
+                            code,
+                            e_price,
+                            curr_time,
+                            res["reason"],
+                            indicator_row=curr_row,
+                        )
+                        today_sells.add(code)
 
                 # 2-4-2. 매수 감시
                 buy_candidates = [c for c in monitoring_list if (c not in self.holdings or self.holdings.get(c, {}).get('entry_n', 0) < 2) and (c not in today_sells)]
@@ -903,87 +837,6 @@ class DynamicBacktester:
                                 if use_sb_for_type:
                                     reason = "SmartBuy|" + reason
 
-                                fill_px = None
-                                # S1·S2: 다음 1분 종가 게이트 (저정밀 RT 정합)
-                                if can_execute and bool(
-                                    self.settings.get(
-                                        "bt_s1_m1_confirm_gate_enabled", True
-                                    )
-                                ):
-                                    try:
-                                        from strategy.s1_confirm_gate import (
-                                            bt_m1_confirm_fill,
-                                        )
-
-                                        day_str = (
-                                            curr_time.strftime("%Y-%m-%d")
-                                            if hasattr(curr_time, "strftime")
-                                            else str(curr_time)[:10]
-                                        )
-                                        m1_full = None
-                                        try:
-                                            cache_key = (code, day_str)
-                                            if cache_key not in self.cached_1m_data:
-                                                _ = self._get_m1_chunk_on_demand(
-                                                    code, day_str, curr_time
-                                                )
-                                            m1_full = self.cached_1m_data.get(cache_key)
-                                        except Exception:
-                                            m1_full = None
-                                        try:
-                                            ma20_v = float(
-                                                last_sig.get("MA20", 0) or 0
-                                            )
-                                        except (TypeError, ValueError):
-                                            ma20_v = 0.0
-                                        bar_c = float(last_sig.get("Close", 0) or 0)
-                                        tag = "S2" if is_addon_target else "S1"
-                                        ok_g, fill_g, reason_g = bt_m1_confirm_fill(
-                                            m1_full,
-                                            curr_time,
-                                            bar_c,
-                                            ma20_v,
-                                            self.settings,
-                                        )
-                                        if not ok_g:
-                                            can_execute = False
-                                            reason_rej = f"{tag}_M1Gate|{reason_g}"
-                                            rej_act = (
-                                                "REJECTED_S2"
-                                                if is_addon_target
-                                                else "REJECTED_SIG"
-                                            )
-                                            self._log_trade_to_csv(
-                                                curr_time,
-                                                code,
-                                                rej_act,
-                                                bar_c,
-                                                0,
-                                                reason_rej,
-                                                sig_type=sig_type,
-                                            )
-                                            self.trades_history.append(
-                                                {
-                                                    "Date": curr_time,
-                                                    "Code": code,
-                                                    "Name": self.stock_name_map.get(
-                                                        code, code
-                                                    ),
-                                                    "Action": rej_act,
-                                                    "Price": bar_c,
-                                                    "Qty": 0,
-                                                    "Amount": 0,
-                                                    "Reason": reason_rej,
-                                                    "Cash": self.cash,
-                                                    "Sig_Type": sig_type,
-                                                }
-                                            )
-                                        else:
-                                            fill_px = float(fill_g)
-                                            reason = f"{reason}|M1Conf"
-                                    except Exception:
-                                        can_execute = False
-
                                 if can_execute:
                                     self._handle_buy_execution(
                                         code,
@@ -991,7 +844,6 @@ class DynamicBacktester:
                                         curr_time,
                                         d_df.loc[curr_time],
                                         indicator_row=d_df.loc[curr_time],
-                                        fill_price=fill_px,
                                     )
 
             # 2-5. 일일 정산 (당일 분봉이 없어도 보유는 평단으로 평가 — 공백일 누락으로 자산 괴리 방지)

@@ -333,11 +333,13 @@ def _norm_bar_ts(ts: Any) -> pd.Timestamp:
 
 
 def _elapsed_sec_since_slot(bar_ts: Any) -> float:
-    """벽시계 기준 슬롯(봉 종가) 시각 이후 경과 초."""
+    """벽시계 기준 슬롯 **완성** 시각 이후 경과 초(좌측 라벨 → complete_ts)."""
     try:
         from datetime import datetime
 
-        slot = _norm_bar_ts(bar_ts).to_pydatetime()
+        from utils.krx_bars import krx_15m_slot_complete_ts
+
+        slot = krx_15m_slot_complete_ts(bar_ts).to_pydatetime()
         return max(0.0, (datetime.now() - slot).total_seconds())
     except Exception:
         return 0.0
@@ -345,15 +347,17 @@ def _elapsed_sec_since_slot(bar_ts: Any) -> float:
 
 def _monotonic_deadline_for_slot(bar_ts: Any, max_wait_sec: float) -> float:
     """
-    슬롯 마감 시각 + max_wait 까지의 남은 시간으로 monotonic deadline 산출.
+    슬롯 **완성** 시각 + max_wait 까지의 남은 시간으로 monotonic deadline 산출.
 
-    늦게 시작된 백필도 프로브와 같은 「슬롯 후 N초」 창을 공유합니다.
+    늦게 시작된 백필도 프로브와 같은 「슬롯 완성 후 N초」 창을 공유합니다.
     이미 창을 지났으면 최소 5초만 더 시도합니다.
     """
     try:
         from datetime import datetime, timedelta
 
-        slot = _norm_bar_ts(bar_ts).to_pydatetime()
+        from utils.krx_bars import krx_15m_slot_complete_ts
+
+        slot = krx_15m_slot_complete_ts(bar_ts).to_pydatetime()
         remain = (slot + timedelta(seconds=float(max_wait_sec)) - datetime.now()).total_seconds()
         remain = max(5.0, float(remain))
         return time.monotonic() + remain
