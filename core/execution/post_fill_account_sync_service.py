@@ -125,6 +125,15 @@ class PostFillAccountSyncService:
                         self._run_sync(refresh_cash=False, refresh_gui=False)
                     except Exception:
                         pass
+                    # 첫 sync는 GUI 전체 갱신 없음 — 보유 유령 UI만 light purge
+                    try:
+                        fn = getattr(
+                            self.app, "request_virtual_tab_sync_light_refresh", None
+                        )
+                        if callable(fn):
+                            fn()
+                    except Exception:
+                        pass
                     if not enable_follow:
                         return
                     try:

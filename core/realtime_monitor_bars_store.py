@@ -6,7 +6,6 @@
 - 워밍업 시 로컬 우선 조회, 검증 통과 후 병합 OHLCV 일괄 저장(bulk_upsert_ohlcv_index_frame)
 - 장중에는 슬롯이 바뀔 때 확정 15분봉 1행씩 INSERT OR REPLACE
 - ``bars_15m_rt``: 공식/워밍업·신호용 15분봉
-- ``bars_15m_rt_tick``: 틱 전체 누적 검증용(신호 미사용)
 - ``realtime_15m_calendar_retention_days``(기본 365)일보다 오래된 봉은 종목별 DELETE
   (워밍업이 과거를 채우는 목적이 아니라 **디스크 롤링**용)
 """
@@ -71,10 +70,6 @@ class RealtimeMonitorBarsStore:
                 "DELETE FROM bars_15m_rt WHERE code = ? AND datetime < ?",
                 (code, cs),
             )
-            conn.execute(
-                "DELETE FROM bars_15m_rt_tick WHERE code = ? AND datetime < ?",
-                (code, cs),
-            )
         except sqlite3.Error as e:
             try:
                 self._log(f"⚠️ [RT15mDB] 롤링 삭제 실패 ({code}): {e}")
@@ -99,21 +94,6 @@ class RealtimeMonitorBarsStore:
                         )
                         """
                     )
-                    # 틱 전체 누적 15분봉(검증용·신호 미사용). 공식/워밍업 bars_15m_rt 와 분리.
-                    conn.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS bars_15m_rt_tick (
-                            code TEXT NOT NULL,
-                            datetime TEXT NOT NULL,
-                            open INTEGER NOT NULL,
-                            high INTEGER NOT NULL,
-                            low INTEGER NOT NULL,
-                            close INTEGER NOT NULL,
-                            volume INTEGER NOT NULL,
-                            PRIMARY KEY (code, datetime)
-                        )
-                        """
-                    )
                     conn.execute(
                         """
                         CREATE TABLE IF NOT EXISTS symbol_meta_rt (
@@ -125,10 +105,6 @@ class RealtimeMonitorBarsStore:
                     conn.execute(
                         "CREATE INDEX IF NOT EXISTS idx_bars_15m_rt_code_dt "
                         "ON bars_15m_rt (code, datetime)"
-                    )
-                    conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_bars_15m_rt_tick_code_dt "
-                        "ON bars_15m_rt_tick (code, datetime)"
                     )
                     self._migrate_symbol_meta_rt_columns(conn)
                     conn.commit()
@@ -192,33 +168,6 @@ class RealtimeMonitorBarsStore:
             log_tag="RT15mDB",
         )
 
-    def upsert_tick_completed_bar(
-        self,
-        code: str,
-        bar_ts: Any,
-        open_: float,
-        high: float,
-        low: float,
-        close: float,
-        volume: float,
-    ) -> None:
-        """
-        틱 전체 누적으로 확정한 15분봉을 ``bars_15m_rt_tick`` 에만 저장합니다.
-        신호·워밍업용 ``bars_15m_rt`` 와 섞지 않습니다.
-        """
-        self._upsert_ohlcv_row(
-            "bars_15m_rt_tick",
-            code,
-            bar_ts,
-            open_,
-            high,
-            low,
-            close,
-            volume,
-            log_tag="Tick15mDB",
-            touch_meta=False,
-        )
-
     def _upsert_ohlcv_row(
         self,
         table: str,
@@ -234,7 +183,7 @@ class RealtimeMonitorBarsStore:
         touch_meta: bool = True,
     ) -> None:
         """공통 INSERT OR REPLACE (허용 테이블만)."""
-        if table not in ("bars_15m_rt", "bars_15m_rt_tick"):
+        if table != "bars_15m_rt":
             return
         nc = _norm_code(code)
         if not nc:
@@ -404,56 +353,6 @@ class RealtimeMonitorBarsStore:
         except Exception as e:
             try:
                 self._log(f"⚠️ [RT15mDB] 조회 실패 ({nc}): {e}")
-            except Exception:
-                pass
-            return pd.DataFrame()
-
-    def fetch_tick_15m_bars_as_dataframe(
-        self,
-        code: str,
-        limit: int,
-        *,
-        retention_days: Optional[int] = None,
-    ) -> pd.DataFrame:
-        """
-        틱 누적 검증용: ``bars_15m_rt_tick`` 조회.
-        형태는 ``fetch_15m_bars_as_dataframe`` 과 동일합니다.
-        """
-        nc = _norm_code(code)
-        if not nc or limit <= 0:
-            return pd.DataFrame()
-        lim = max(1, int(limit))
-        try:
-            rd = self._retention_days if retention_days is None else int(retention_days)
-            rd = max(1, min(rd, 3650))
-            cutoff = self._retention_cutoff_str(rd)
-        except Exception:
-            cutoff = self._retention_cutoff_str()
-        try:
-            with self._lock:
-                with sqlite3.connect(self._db_path) as conn:
-                    df = pd.read_sql_query(
-                        """
-                        SELECT datetime AS time, open AS Open, high AS High,
-                               low AS Low, close AS Close, volume AS Volume
-                        FROM bars_15m_rt_tick
-                        WHERE code = ? AND datetime >= ?
-                        ORDER BY datetime DESC
-                        LIMIT ?
-                        """,
-                        conn,
-                        params=(nc, cutoff, lim),
-                    )
-            if not df.empty:
-                df = df.iloc[::-1].reset_index(drop=True)
-            if df.empty:
-                return pd.DataFrame()
-            df["time"] = pd.to_datetime(df["time"], errors="coerce")
-            df = df.dropna(subset=["time"])
-            return df
-        except Exception as e:
-            try:
-                self._log(f"⚠️ [Tick15mDB] 조회 실패 ({nc}): {e}")
             except Exception:
                 pass
             return pd.DataFrame()

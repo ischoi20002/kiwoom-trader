@@ -737,7 +737,7 @@ def fetch_m1_via_ka10080_1m(
 ) -> pd.DataFrame:
     """
     키움 ka10080(tic_scope=1) 연속조회로 [t0, t_hi] 1분 OHLCV(선택 보강용).
-    운영 기본 1분 소스는 `RtTickM1Store` 틱 집계이며, 본 함수는 설정으로 켠 경우에만 호출됩니다.
+    저정밀 운영에서는 사용하지 않으며, 연구/브리지 설정으로 켠 경우에만 호출됩니다.
     """
     out_empty = pd.DataFrame()
     try:

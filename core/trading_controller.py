@@ -405,12 +405,6 @@ class TradingController:
                 bw.stop()
         except Exception:
             pass
-        try:
-            poller = getattr(self.app, "rt_watchlist_m1_api_poller", None)
-            if poller is not None:
-                poller.reset_round_state()
-        except Exception:
-            pass
         # 워밍업·감시 외 구간에서 틱 워커가 bars_data 를 건드리지 않도록 먼저 정지합니다.
         try:
             tds = getattr(self.app, "tick_dispatch_service", None)

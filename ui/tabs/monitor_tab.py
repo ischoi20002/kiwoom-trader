@@ -2570,12 +2570,11 @@ class MonitorTab:
                 volume = int(get_val(13))
                 try:
                     st = getattr(self.app, "settings", None) or {}
-                    m1s = getattr(self.app, "rt_tick_m1_store", None)
                     ok_px, rej_reason = should_accept_ws_tick_price(
                         code,
                         int(now_price),
                         info,
-                        m1_store=m1s,
+                        m1_store=None,
                         settings=st,
                     )
                     if not ok_px:
@@ -3201,6 +3200,43 @@ class MonitorTab:
             return False
         except Exception:
             return False
+
+    def clear_holdings_ui_debounce(self, code: str) -> None:
+        """
+        전량 매도 직후 호출: '비보유 2틱' 디바운스를 건너뛰고
+        보유 트리에서 즉시 이탈할 수 있게 합니다.
+        """
+        try:
+            nk = str(code or "").split("_")[0].zfill(6)
+            if not nk or nk.lower() == "nan":
+                return
+            self._vp_ui_inactive_streak[nk] = 3
+            try:
+                self._vp_ever_in_holdings.pop(nk, None)
+            except Exception:
+                pass
+            try:
+                iid = nk
+                if self.tree_active_monitor and self.tree_active_monitor.exists(iid):
+                    # VP가 비었으면 purge가 행을 옮김 — 여기서는 디바운스만 해제
+                    pass
+            except Exception:
+                pass
+            try:
+                vp = {}
+                pm = getattr(self.app, "portfolio", None)
+                if pm is not None:
+                    vp = getattr(pm, "virtual_positions", None) or {}
+                self._purge_stale_active_monitor_rows(
+                    vp, getattr(self.app, "monitor_info", None) or {}
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                print(f"[UI Error] clear_holdings_ui_debounce: {e}")
+            except Exception:
+                pass
 
     def _purge_stale_active_monitor_rows(
         self,

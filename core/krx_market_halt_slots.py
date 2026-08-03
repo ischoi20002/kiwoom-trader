@@ -399,102 +399,9 @@ def purge_stale_market_halt_slots(app: Any) -> int:
 
 
 def probe_m1_quiet_market_halt(app: Any, bar_ts: Any) -> bool:
-    """
-    감시 종목 M1 합산 거래량이 극히 적으면 시장중단 후보로 판단.
+    """[옵션 A] M1 정적 프로브 제거 — 항상 False. official_miss 클러스터만 사용."""
+    return False
 
-    M1 수집이 늦거나 일부 분봉만 들어온 상태에서는 정상 장도 거래량 합계가 작게
-    보일 수 있으므로, 충분한 1분봉 커버리지가 있는 종목만 판정에 사용합니다.
-    """
-    if not market_halt_detection_enabled(app):
-        return False
-    if not _halt_probe_bar_on_current_session_day(bar_ts):
-        return False
-    try:
-        st = getattr(app, "settings", None) or {}
-    except Exception:
-        st = {}
-    try:
-        ratio_need = _settings_float(st, "realtime_market_halt_m1_quiet_ratio", 0.70)
-        max_vol = _settings_float(st, "realtime_market_halt_m1_max_volume", 50.0)
-        min_codes = max(3, int(_settings_float(st, "realtime_market_halt_m1_min_codes", 6)))
-        min_bars_per_code = max(
-            1,
-            int(_settings_float(st, "realtime_market_halt_m1_min_bars_per_code", 8)),
-        )
-        scale_volume_by_bars = _settings_bool(
-            st,
-            "realtime_market_halt_m1_scale_volume_by_bars",
-            True,
-        )
-    except (TypeError, ValueError):
-        ratio_need, max_vol, min_codes = 0.70, 50.0, 6
-        min_bars_per_code, scale_volume_by_bars = 8, True
-
-    m1s = getattr(app, "rt_tick_m1_store", None)
-    if m1s is None:
-        return False
-
-    codes = list(getattr(app, "_active_stream_codes", None) or [])
-    if not codes:
-        return False
-
-    try:
-        slot_end = norm_halt_slot_ts(bar_ts)
-        t0 = m1_window_start_for_15m_end(slot_end)
-    except Exception:
-        return False
-
-    quiet = 0
-    checked = 0
-    with_m1_rows = 0
-    eligible = 0
-    for c in codes:
-        try:
-            nk = canonical_stock_code(str(c).strip())
-            if not nk:
-                continue
-            try:
-                m1df = m1s.dataframe_for_window(nk, t0, slot_end, include_open_bucket=False)
-            except TypeError:
-                m1df = m1s.dataframe_for_window(nk, t0, slot_end)
-            checked += 1
-            if m1df is None or getattr(m1df, "empty", True):
-                continue
-            with_m1_rows += 1
-            try:
-                row_count = int(len(m1df.index))
-            except Exception:
-                row_count = 0
-            if row_count < min_bars_per_code:
-                continue
-            eligible += 1
-            try:
-                vol_sum = float(m1df["Volume"].sum())
-            except Exception:
-                vol_sum = 0.0
-            threshold = max_vol
-            if scale_volume_by_bars:
-                try:
-                    threshold = max_vol * (float(row_count) / 15.0)
-                except Exception:
-                    threshold = max_vol
-            if vol_sum <= threshold:
-                quiet += 1
-        except Exception:
-            continue
-
-    if checked < min_codes:
-        return False
-    # M1 구간에 행 자체가 없으면 '거래 정적'이 아니라 아직 미수집(장 시작·롤업 직후)
-    if with_m1_rows < min_codes:
-        return False
-    # 15분 창 일부만 수집된 종목으로는 시장중단을 확정하지 않는다.
-    if eligible < min_codes:
-        return False
-    try:
-        return (float(quiet) / float(eligible)) >= ratio_need
-    except Exception:
-        return False
 
 
 def record_rt15m_official_miss_and_maybe_halt(
@@ -552,19 +459,12 @@ def record_rt15m_official_miss_and_maybe_halt(
 
 
 def probe_and_maybe_mark_halt_slot(app: Any, bar_ts: Any) -> bool:
-    """M1 거래 정적 프로브 후 필요 시 시장중단 슬롯 등록."""
+    """시장중단 슬롯 등록(옵션 A: M1 프로브 없음 → 항상 미등록, official_miss 경로 유지)."""
     if not _halt_probe_bar_on_current_session_day(bar_ts):
         return False
     if is_market_halt_15m_slot(app, bar_ts):
         return True
-    if not probe_m1_quiet_market_halt(app, bar_ts):
-        return False
-    return mark_market_halt_15m_slot(
-        app,
-        bar_ts,
-        reason="M1 거래 정적(자동 추정, 오탐 가능)",
-        source="m1_quiet_probe",
-    )
+    return False
 
 
 def should_skip_rt15m_official_replace(app: Any, bar_ts: Any) -> bool:

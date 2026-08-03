@@ -563,22 +563,6 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "realtime_s1_eval_on_local_15m_close",
     ),
     SettingUiRow(
-        3037,
-        "③ Stage 1 진입 (공통/A/B)",
-        "[3] 1단계 진입 (S1) — 감시 후 매수 신호",
-        "단계 공통 필수 필터 (A/B 모두 적용)",
-        "15분 마지막 1분 틱 합성 — 토글",
-        "realtime_15m_last_minute_from_ticks",
-    ),
-    SettingUiRow(
-        3038,
-        "③ Stage 1 진입 (공통/A/B)",
-        "[3] 1단계 진입 (S1) — 감시 후 매수 신호",
-        "단계 공통 필수 필터 (A/B 모두 적용)",
-        "S1: 인트라바(고정밀) 미러 — 토글",
-        "realtime_s1_mirror_dynamic_intrabar",
-    ),
-    SettingUiRow(
         3040,
         "③ Stage 1 진입 (공통/A/B)",
         "[3] 1단계 진입 (S1) — 감시 후 매수 신호",

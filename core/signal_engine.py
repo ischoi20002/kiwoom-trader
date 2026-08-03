@@ -11,17 +11,8 @@ from core.bt_hp_intrabar_unified import (
     evaluate_bt_hp_intrabar_unified,
     resolve_position_entry_ts,
 )
-from core.bt_hp_signal_bridge import (
-    evaluate_close_now_s1_at_m1_idx,
-    intrabar_close_now_signals_enabled,
-)
-from core.bt_hp_signal_bridge import _apply_synthetic_metrics_m1
+from core.bt_hp_signal_bridge import evaluate_close_now_s1_at_m1_idx
 from core.defaults import effective_min_15m_bars_for_monitoring
-from core.realtime_official_bars_sync import stream_slot_end_datetime
-from utils.krx_bars import (
-    m1_bar_open_label_for_just_completed_minute,
-    m1_window_start_for_15m_end,
-)
 from core.monitor_code_sets import watchlist_only_codes_set
 from core.monitor_signal_status_display import monitor_signal_status_display_text
 from ui.tabs.monitor_tab import format_entry_signal_type_label
@@ -121,7 +112,7 @@ class SignalEngine:
         self._s1_full_calc_last_ts: dict[str, float] = {}
         # 보유: M1 스토어 없을 때 시간 폴백 앵커(레거시·on_m1_revision_only=False)
         self._eval_exit_last_ts: dict[str, float] = {}
-        # 보유 S2: 공식 M1 반영 리비전과 동기(``RtTickM1Store.revision_for_code``)
+        # 보유 S2: 완성 15분 평가 경로와 동기(저정밀)
         self._held_s2_last_m1_rev: dict[str, int] = {}
         self._exit_indicator_last_ts: dict[str, float] = {}
 
@@ -323,6 +314,117 @@ class SignalEngine:
             )
         except Exception:
             return False
+
+    def _s1_live_confirm_gate(
+        self,
+        code: str,
+        info: Optional[Dict[str, Any]],
+        bar_close: float,
+        last_row: Optional[Dict[str, Any]],
+        *,
+        slot_key: str = "",
+    ) -> Tuple[bool, float, str]:
+        """
+        완성봉 S1 신호 후 주문 직전 라이브가 확인.
+
+        Returns
+        -------
+        (ok, live_price, reason)
+            ok=False 이면 주문 스킵(쿨다운 미소모). live_price는 통과 시 주문가.
+        """
+        st: Dict[str, Any] = {}
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            if not isinstance(st, dict):
+                st = {}
+            if not bool(st.get("realtime_s1_live_confirm_gate_enabled", True)):
+                # 게이트 OFF: 봉종가 또는 info 가격 사용
+                try:
+                    px = float(
+                        self._to_scalar(
+                            (info or {}).get("price")
+                            or (info or {}).get("last_price")
+                            or bar_close,
+                            0.0,
+                        )
+                    )
+                except Exception:
+                    px = float(bar_close or 0.0)
+                if px <= 0:
+                    px = float(bar_close or 0.0)
+                return (px > 0, px, "")
+        except Exception:
+            st = {}
+
+        try:
+            bc = float(bar_close or 0.0)
+        except Exception:
+            bc = 0.0
+        if bc <= 0:
+            return False, 0.0, "no_bar_close"
+
+        try:
+            live = float(
+                self._to_scalar(
+                    (info or {}).get("price") or (info or {}).get("last_price"),
+                    0.0,
+                )
+            )
+        except Exception:
+            live = 0.0
+        if live <= 0:
+            return False, 0.0, "no_live_price"
+
+        try:
+            chase = float(st.get("realtime_s1_live_max_chase_pct", 0.8) or 0.8)
+        except Exception:
+            chase = 0.8
+        try:
+            fade = float(st.get("realtime_s1_live_max_fade_pct", 1.0) or 1.0)
+        except Exception:
+            fade = 1.0
+        chase = max(0.0, min(chase, 10.0))
+        fade = max(0.0, min(fade, 10.0))
+
+        if live > bc * (1.0 + chase / 100.0):
+            return (
+                False,
+                live,
+                f"chase>{chase:.1f}% live={live:.0f} close={bc:.0f}",
+            )
+        if live < bc * (1.0 - fade / 100.0):
+            return (
+                False,
+                live,
+                f"fade>{fade:.1f}% live={live:.0f} close={bc:.0f}",
+            )
+
+        try:
+            ma_side = bool(st.get("realtime_s1_live_ma20_side_confirm", True))
+        except Exception:
+            ma_side = True
+        if ma_side and isinstance(last_row, dict):
+            try:
+                ma20 = float(self._to_scalar(last_row.get("MA20", 0), 0.0))
+            except Exception:
+                ma20 = 0.0
+            if ma20 > 0:
+                bar_above = bc >= ma20
+                live_above = live >= ma20
+                if bar_above and not live_above:
+                    return (
+                        False,
+                        live,
+                        f"ma20_break live={live:.0f} ma20={ma20:.0f}",
+                    )
+                if (not bar_above) and live_above:
+                    return (
+                        False,
+                        live,
+                        f"ma20_cross_up live={live:.0f} ma20={ma20:.0f}",
+                    )
+
+        return True, live, ""
 
     def _apply_s1_track_match_gate(
         self,
@@ -579,97 +681,35 @@ class SignalEngine:
 
     def _realtime_s1_mirror_dynamic_intrabar_enabled(self) -> bool:
         """
-        동적 고정밀과 동일한 인트라바 판정 사용 여부.
+        [옵션 A: 저정밀 전용] 인트라바(M1 미러) 동적 고정밀 판정은 제거되어 항상 비활성입니다.
 
-        - 미보유: S1 신규(기존)
-        - 보유: 청산(EXIT)·추매(S2) — ``evaluate_bt_hp_intrabar_unified`` 분기
-
-        로컬 15분 완성 S1 모드가 켜져 있으면 인트라바 S1/청산 미러는 끕니다
-        (청산은 ``StrategyEngine`` 주기 평가 경로 사용).
+        과거에는 동적 고정밀과 동일하게 M1 봉 단위로 S1/청산/S2를 판정했으나,
+        저정밀(공식 15분 확정 평가) 전용 구성으로 정리되며 이 경로는 완전히 꺼졌습니다.
+        호출부 호환을 위해 메서드는 유지하고 항상 ``False`` 를 반환합니다.
         """
-        try:
-            if self._s1_eval_on_local_15m_close_enabled():
-                return False
-            st = getattr(self.app, "settings", None) or {}
-            return bool(st.get("realtime_s1_mirror_dynamic_intrabar", False))
-        except Exception:
-            return False
+        return False
 
     def _held_eval_on_m1_revision_only(self) -> bool:
         """
-        True면 보유 청산·S2 평가를 M1 리비전(완료 1분 반영) 시점에만 수행합니다.
+        [옵션 A: 저정밀 전용] M1 리비전 기반 보유 평가 스케줄은 제거되어 항상 비활성입니다.
 
-        인트라바 미러가 꺼져 있으면 레거시 시간 주기(``realtime_eval_position_min_interval_sec``)를 유지합니다.
+        인트라바 미러 제거에 따라 보유 청산·S2 평가는 항상 레거시 시간 주기
+        (``realtime_eval_position_min_interval_sec``)만 사용합니다.
+        호출부 호환을 위해 메서드는 유지하고 항상 ``False`` 를 반환합니다.
         """
-        try:
-            if not self._realtime_s1_mirror_dynamic_intrabar_enabled():
-                return False
-            st = getattr(self.app, "settings", None) or {}
-            return bool(st.get("realtime_eval_position_on_m1_revision_only", True))
-        except Exception:
-            return True
+        return False
 
     def _intrabar_mirror_get_full15m_and_m1(
         self, nk: str, full_15m_src: Any
     ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
         """
-        현재 15분 슬롯에 맞춘 15m 사본과 공식 1분 구간 ``[t0, t_hi]`` M1 DataFrame.
+        [옵션 A: 저정밀 전용] 인트라바(M1) 미러 경로는 제거된 죽은 경로입니다.
 
-        ``None`` 이면 M1 저장소/봉 부재 등으로 인트라바 미러를 적용하지 않습니다.
+        과거에는 현재 15분 슬롯에 맞춘 15m 사본과 공식 1분 구간 M1 DataFrame을
+        반환했으나, M1 의존성이 완전히 제거되어 항상 ``None`` 을 반환합니다.
+        호출부 호환을 위해 메서드 시그니처만 유지합니다.
         """
-        try:
-            if len(str(nk).strip()) != 6:
-                return None
-            m1s = getattr(self.app, "rt_tick_m1_store", None)
-            if m1s is None:
-                return None
-            if full_15m_src is None or getattr(full_15m_src, "empty", True):
-                return None
-            full_15m = full_15m_src.copy()
-            try:
-                slot_end = pd.Timestamp(full_15m.index[-1])
-            except Exception:
-                slot_end = stream_slot_end_datetime(datetime.now())
-            t0 = m1_window_start_for_15m_end(slot_end)
-            try:
-                wall = datetime.now()
-                closed_open = m1_bar_open_label_for_just_completed_minute(wall)
-                t_hi = min(slot_end, closed_open + pd.Timedelta(minutes=1))
-            except Exception:
-                try:
-                    t_hi = min(
-                        slot_end,
-                        pd.Timestamp(datetime.now()).floor("min"),
-                    )
-                except Exception:
-                    t_hi = slot_end
-            if t_hi < t0:
-                return None
-            try:
-                from core.realtime_m1_fallback import load_intrabar_m1_window
-
-                m1df = load_intrabar_m1_window(
-                    self.app, nk, t0, t_hi, include_open_bucket=False
-                )
-            except Exception:
-                try:
-                    m1df = m1s.dataframe_for_window(
-                        nk, t0, t_hi, include_open_bucket=False
-                    )
-                except TypeError:
-                    m1df = m1s.dataframe_for_window(nk, t0, t_hi)
-            if m1df is None or getattr(m1df, "empty", True):
-                return None
-            m1df = m1df.copy()
-            try:
-                _apply_synthetic_metrics_m1(
-                    m1df, getattr(self.app, "settings", None) or {}
-                )
-            except Exception:
-                pass
-            return full_15m, m1df
-        except Exception:
-            return None
+        return None
 
     @staticmethod
     def _indicator_row_to_plain_dict(row: Any) -> Dict[str, Any]:
@@ -686,13 +726,8 @@ class SignalEngine:
         return {}
 
     def _intrabar_close_now_enabled(self) -> bool:
-        try:
-            if self._s1_eval_on_local_15m_close_enabled():
-                return False
-            st = getattr(self.app, "settings", None) or {}
-            return intrabar_close_now_signals_enabled(st)
-        except Exception:
-            return False
+        """[옵션 A: 저정밀 전용] 인트라바 즉시가 판정은 제거되어 항상 비활성입니다."""
+        return False
 
     def _mark_s1_closed_slot_done(
         self, code: str, slot_key: str, *, prefix: str = "s1"
@@ -951,6 +986,60 @@ class SignalEngine:
                 log_skip=True,
             ):
                 return
+
+            # 완성봉 신호 유지 + 주문 직전 라이브가 게이트 (추격/이탈·MA20)
+            try:
+                bar_close = float(closed_df["Close"].iloc[-1])
+            except Exception:
+                bar_close = float(now_price or 0.0)
+            gate_ok, live_px, gate_reason = self._s1_live_confirm_gate(
+                nk,
+                info,
+                bar_close,
+                last_row if isinstance(last_row, dict) else {},
+                slot_key=slot_key,
+            )
+            if not gate_ok:
+                try:
+                    msg = f"라이브가 게이트: {gate_reason}"
+                    info["confluence"] = msg
+                    info["status_text"] = msg
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "s1_live_gate_skip",
+                            {
+                                "code": nk,
+                                "name": str(info.get("name", "")),
+                                "slot": slot_key,
+                                "bar_close": float(bar_close),
+                                "live": float(live_px or 0.0),
+                                "reason": str(gate_reason),
+                            },
+                        )
+                except Exception:
+                    pass
+                try:
+                    self.app.log(
+                        f"ℹ️ [S1] {nk} 라이브가 게이트 스킵 — {gate_reason}"
+                    )
+                except Exception:
+                    pass
+                return
+            if live_px > 0:
+                now_price = float(live_px)
+                try:
+                    ma60 = float(
+                        self._to_scalar(last_row.get("MA60", 0), 0.0)
+                    )
+                    ma60_ratio = (
+                        (now_price / ma60 - 1.0) * 100.0 if ma60 > 0 else 0.0
+                    )
+                except Exception:
+                    pass
 
             # 주문 패스트패스(Tk 메인 큐 우회) — 틱 경로와 분리
             try:
@@ -2173,20 +2262,12 @@ class SignalEngine:
             return ("err", -1)
 
     def _s1_m1_revision_snapshot(self, bars_key: str) -> int:
-        """``RtTickM1Store`` 공식 1분 반영 리비전(없으면 0)."""
-        try:
-            nk = canonical_stock_code(str(bars_key).strip()) if bars_key else ""
-            if len(nk) != 6:
-                return 0
-            m1s = getattr(self.app, "rt_tick_m1_store", None)
-            if m1s is None:
-                return 0
-            rev_fn = getattr(m1s, "revision_for_code", None)
-            if rev_fn is None or not callable(rev_fn):
-                return 0
-            return int(rev_fn(nk))
-        except Exception:
-            return 0
+        """
+        [옵션 A: 저정밀 전용] M1 리비전 스냅샷은 제거되어 항상 0을 반환합니다.
+
+        ``rt_tick_m1_store`` 접근 없이 호출부 호환을 위해 메서드만 유지합니다.
+        """
+        return 0
 
     def _log_s1_watch_diag(
         self,
@@ -2435,28 +2516,7 @@ class SignalEngine:
             except Exception:
                 pass
 
-            # 15분 슬롯 마지막 1분: 틱으로 OHLCV 버킷 갱신(공식 1분과 분리)
-            try:
-                if (
-                    not is_orderbook_only
-                    and not bool(kwargs.get("_official_sync_eval", False))
-                    and bool(
-                        (getattr(self.app, "settings", None) or {}).get(
-                            "realtime_15m_last_minute_from_ticks", True
-                        )
-                    )
-                ):
-                    m1s = getattr(self.app, "rt_tick_m1_store", None)
-                    if m1s is not None:
-                        m1s.feed_tick(
-                            code,
-                            float(now_price),
-                            float(volume) if volume is not None else 0.0,
-                        )
-            except Exception:
-                pass
-
-            # 1. 15분 OHLCV 본체는 ``realtime_official_bars_sync``(공식 1분 + 마지막1분 틱 합성).
+            # 1. 15분 OHLCV 본체는 ``realtime_official_bars_sync``(공식 1분 집계).
             # 2. 실시간 지표 추출 (RSI, MACD 등)
             rsi_val = self._calculate_realtime_rsi(code)
             
@@ -3156,54 +3216,15 @@ class SignalEngine:
                 if _src_m is None:
                     _src_m = _bd_m
 
-                try:
-                    m1_rev_h = (
-                        self._s1_m1_revision_snapshot(str(bars_key_m))
-                        if bars_key_m
-                        else 0
-                    )
-                except Exception:
-                    m1_rev_h = 0
-
                 stg_h = self._held_position_stage(code)
-                prev_m1r = self._held_s2_last_m1_rev.get(code)
-                try:
-                    has_m1_store = getattr(self.app, "rt_tick_m1_store", None) is not None
-                except Exception:
-                    has_m1_store = False
 
-                m1_rev_changed = False
-                if has_m1_store:
-                    try:
-                        m1_rev_changed = (
-                            prev_m1r is None or int(prev_m1r) != int(m1_rev_h)
-                        )
-                    except (TypeError, ValueError):
-                        m1_rev_changed = False
-
-                on_m1_schedule = self._held_eval_on_m1_revision_only()
-                exit_due = False
-                s2_m1_due = False
-                if on_m1_schedule:
-                    # 청산·S2: M1 완성 시 즉시 + M1 정체 시 15초마다 틱 재검사
-                    # (화면 ATR SL은 틱가 기준인데 미러만 보면 forming 분봉 저가로 HOLD 될 수 있음)
-                    if has_m1_store:
-                        held_eval_due = bool(m1_rev_changed or time_fallback_due)
-                    else:
-                        held_eval_due = time_fallback_due
-                    need_skip_exit = False
-                    run_s2_legacy = int(stg_h) == 1 and held_eval_due
-                else:
-                    # 레거시: 15초 청산 + Stage1 M1 S2 (미러 OFF 또는 설정 OFF)
-                    exit_due = time_fallback_due
-                    if int(stg_h) == 1:
-                        if has_m1_store:
-                            s2_m1_due = m1_rev_changed
-                        else:
-                            s2_m1_due = exit_due
-                    held_eval_due = exit_due or s2_m1_due
-                    need_skip_exit = bool(s2_m1_due and not exit_due)
-                    run_s2_legacy = bool(s2_m1_due)
+                # [옵션 A: 저정밀 전용] M1 리비전/저장소 의존 스케줄 제거 — 항상 시간 주기 폴백만 사용
+                # (``_held_eval_on_m1_revision_only`` 는 항상 False 를 반환하므로 레거시 경로만 남음)
+                exit_due = time_fallback_due
+                s2_m1_due = exit_due if int(stg_h) == 1 else False
+                held_eval_due = exit_due or s2_m1_due
+                need_skip_exit = False
+                run_s2_legacy = bool(s2_m1_due)
 
                 if held_eval_due:
                     res: Dict[str, Any] = {"action": "HOLD"}
@@ -3217,7 +3238,7 @@ class SignalEngine:
                     except Exception:
                         mirrored = None
 
-                    run_exit_legacy = held_eval_due if on_m1_schedule else bool(exit_due)
+                    run_exit_legacy = bool(exit_due)
 
                     if mirrored is not None:
                         res = (
@@ -3244,7 +3265,7 @@ class SignalEngine:
                                     res = leg
                             except Exception:
                                 pass
-                        if run_exit_legacy and (not on_m1_schedule or not has_m1_store):
+                        if run_exit_legacy:
                             self._eval_exit_last_ts[code] = now_ts
                     else:
                         if run_exit_legacy:
@@ -3277,8 +3298,7 @@ class SignalEngine:
                                     )
                                 except Exception:
                                     res = {"action": "HOLD"}
-                            if not on_m1_schedule or not has_m1_store:
-                                self._eval_exit_last_ts[code] = now_ts
+                            self._eval_exit_last_ts[code] = now_ts
 
                         if (res.get("action") == "HOLD") and run_s2_legacy:
                             try:
@@ -3300,19 +3320,6 @@ class SignalEngine:
                                     res = res2
                             except Exception:
                                 pass
-
-                    if held_eval_due and has_m1_store:
-                        try:
-                            self._held_s2_last_m1_rev[code] = int(m1_rev_h)
-                        except Exception:
-                            pass
-                    if (
-                        held_eval_due
-                        and on_m1_schedule
-                        and has_m1_store
-                        and time_fallback_due
-                    ):
-                        self._eval_exit_last_ts[code] = now_ts
 
                     try:
                         _raw_np = res.get("now_price")

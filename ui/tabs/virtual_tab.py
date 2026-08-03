@@ -2671,12 +2671,24 @@ class VirtualTab:
         포지션 구조(종목·수량·평단)는 그대로일 때만 사용.
         히스토리·주문 트리 전체 delete/재삽입 없이 보유 행·상단 요약만 갱신합니다.
         (실시간 감시 탭의 틱 단위 item 갱신과 같은 패턴으로 깜빡임을 줄입니다.)
+
+        VP에 없는 트리 행(매도 후 유령)도 여기서 제거합니다.
         """
         try:
             if not self._active_tree_ready():
                 return
             merged = self._vp_items_by_normalized()
             tr = self.tree_active
+            orphans_removed = False
+            if tr is not None:
+                for nk in list(tr.get_children()):
+                    if nk in merged:
+                        continue
+                    try:
+                        self._remove_active_tree_row(nk)
+                        orphans_removed = True
+                    except Exception:
+                        pass
             for nk in merged:
                 if tr is not None and not tr.exists(nk):
                     self._render_virtual_positions()
@@ -2684,8 +2696,17 @@ class VirtualTab:
                         self.app._last_vp_render_sig = self.app._vp_structure_signature()
                     except Exception:
                         pass
+                    try:
+                        self._purge_monitor_holdings_orphans()
+                    except Exception:
+                        pass
                     return
             self._render_real_data()
+            if orphans_removed:
+                try:
+                    self._purge_monitor_holdings_orphans()
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 print(f"[UI Error] refresh_portfolio_light: {e}")
@@ -2696,6 +2717,24 @@ class VirtualTab:
                 self.app._last_vp_render_sig = self.app._vp_structure_signature()
             except Exception:
                 pass
+
+    def _purge_monitor_holdings_orphans(self) -> None:
+        """가상탭 보유 정리 후 모니터 보유 트리 유령 행도 제거합니다."""
+        try:
+            mt = getattr(self.app, "monitor_tab", None)
+            if mt is None or not hasattr(mt, "_purge_stale_active_monitor_rows"):
+                return
+            vp = {}
+            try:
+                pm = getattr(self.app, "portfolio", None)
+                if pm is not None:
+                    vp = getattr(pm, "virtual_positions", None) or {}
+            except Exception:
+                vp = {}
+            mi = getattr(self.app, "monitor_info", None) or {}
+            mt._purge_stale_active_monitor_rows(vp, mi)
+        except Exception:
+            pass
 
     def _render_virtual_positions(self, *, render_orders: bool = True) -> None:
         """데이터(app.virtual_positions / history / today_orders) 동기화"""

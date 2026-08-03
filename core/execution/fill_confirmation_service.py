@@ -385,6 +385,8 @@ class FillConfirmationService:
                     except Exception:
                         pass
                     self._mark_complete_if_fully_applied(oid)
+                    # 데이터는 이미 비었을 수 있음 — UI 유령 행만 정리
+                    self._schedule_ui_purge_after_sell(nc)
                     return False
                 applied = pm.record_orphan_sell_close(
                     nc,
@@ -435,7 +437,30 @@ class FillConfirmationService:
             )
         except Exception:
             pass
+        if side_l == "sell":
+            self._schedule_ui_purge_after_sell(nc)
         return False
+
+    def _schedule_ui_purge_after_sell(self, code: str = "") -> None:
+        """매도 체결 미반영·중복 경로에서도 보유 UI 유령을 정리합니다."""
+        try:
+            nc = str(code or "").split("_")[0].zfill(6)
+            if nc and nc.lower() != "nan":
+                mt = getattr(self.app, "monitor_tab", None)
+                if mt is not None and hasattr(mt, "clear_holdings_ui_debounce"):
+                    root = getattr(self.app, "root", None)
+                    if root is not None:
+                        root.after(0, lambda c=nc: mt.clear_holdings_ui_debounce(c))
+                    else:
+                        mt.clear_holdings_ui_debounce(nc)
+        except Exception:
+            pass
+        try:
+            fn = getattr(self.app, "request_virtual_tab_sync_light_refresh", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
 
     def ingest_che(
         self,
@@ -474,6 +499,11 @@ class FillConfirmationService:
             except Exception:
                 pass
             self._schedule_account_sync_after_fill_if_ready()
+            try:
+                if str(side or "").lower() == "sell":
+                    self._schedule_ui_purge_after_sell(str(code))
+            except Exception:
+                pass
             return False
 
         try:
@@ -530,6 +560,11 @@ class FillConfirmationService:
         if not oid:
             return False
         if self.is_fully_applied(oid):
+            try:
+                if str(side or "").lower() == "sell":
+                    self._schedule_ui_purge_after_sell(str(code))
+            except Exception:
+                pass
             return False
 
         exchange_cum = self._resolve_exchange_cumulative_qty(oid, row)
@@ -924,8 +959,22 @@ class FillConfirmationService:
             return
         nc = str(code).split("_")[0].zfill(6)
         try:
-            with self.app.portfolio.lock:
-                p = self.app.portfolio.virtual_positions.get(nc)
+            pm = self.app.portfolio
+            with pm.lock:
+                try:
+                    pm._merge_vp_alias_to_canonical(nc)
+                except Exception:
+                    pass
+                key = None
+                try:
+                    key = pm._find_vp_key_for_code(nc)
+                except Exception:
+                    key = None
+                p = None
+                if key is not None:
+                    p = pm.virtual_positions.get(key)
+                if not isinstance(p, dict):
+                    p = pm.virtual_positions.get(nc)
                 if isinstance(p, dict):
                     p["exit_pending"] = False
                     p.pop("pending_exit_ord_no", None)

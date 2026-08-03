@@ -1179,8 +1179,52 @@ class SettingsTab:
             'S1: 공식15분 교체 후 평가',
             None,
             '',
-            'ON(권장)=ka10080 공식 15분봉 반영 후 S1·S2·청산. 보유·합치도 임박 종목만 조회(전감시 순회 없음)',
+            'ON(권장)=ka10080 공식 15분봉 반영 후 S1·S2·청산. 보유·합치도 임박 종목만 조회(전감시 순회 없음). 공식 API는 슬롯 후 ~50초 지연 가능',
             toggle_key='realtime_closed_15m_eval_after_official',
+        )
+        add_param_row(
+            strat_f,
+            'S1: 라이브가 주문 게이트',
+            None,
+            '',
+            'ON=완성봉으로 S1 신호 판정 후, 주문 직전 라이브가로 추격/이탈·MA20 정합 확인. 실패 시 주문·쿨다운 스킵',
+            toggle_key='realtime_s1_live_confirm_gate_enabled',
+        )
+        add_param_row(
+            strat_f,
+            'S1 라이브 추격 상한',
+            'realtime_s1_live_max_chase_pct',
+            '%',
+            '봉종가 대비 라이브가 상승 허용 한도(기본 0.8). 초과 시 추격 주문 스킵',
+        )
+        add_param_row(
+            strat_f,
+            'S1 라이브 이탈 하한',
+            'realtime_s1_live_max_fade_pct',
+            '%',
+            '봉종가 대비 라이브가 하락 허용 한도(기본 1.0). 초과 시 이탈로 주문 스킵',
+        )
+        add_param_row(
+            strat_f,
+            'S1 라이브 MA20 정합',
+            None,
+            '',
+            'ON=봉종가와 라이브가가 MA20 같은 쪽에 있을 때만 주문(위↔아래 교차 시 스킵)',
+            toggle_key='realtime_s1_live_ma20_side_confirm',
+        )
+        add_param_row(
+            strat_f,
+            '공식15분 대기(초)',
+            'realtime_closed_15m_official_replace_max_wait_sec',
+            '초',
+            '슬롯 마감 후 공식봉 폴링 한도(기본 75, 실측~50초+여유). 초과 시 해당 슬롯 평가 생략',
+        )
+        add_param_row(
+            strat_f,
+            '공식15분 폴링간격',
+            'realtime_closed_15m_official_replace_poll_sec',
+            '초',
+            '공식봉 미발견 시 재조회 간격(기본 1.5)',
         )
         add_param_row(
             strat_f,
@@ -1191,50 +1235,10 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
-            'M1 API 폴러',
-            None,
-            '',
-            'OFF(권장·저정밀)=매분 ka10080(1분) 중단. 고정밀/인트라바 미러 시에만 ON',
-            toggle_key='realtime_watchlist_m1_api_poller_enabled',
-        )
-        add_param_row(
-            strat_f,
             '15분 슬롯 경계 감지(초)',
             'realtime_15m_slot_watch_sec',
             '초',
             '경계에서 멀 때 최대 sleep. 경계 근처는 near_poll(0.1s)로 전환',
-        )
-        add_param_row(
-            strat_f,
-            '15분 확정 후 공식REST 연기',
-            'realtime_closed_15m_defer_official_sec',
-            '초',
-            'M1 폴러 ON일 때만 의미. 저정밀(공식교체 후 평가)에서는 0 권장',
-        )
-        add_param_row(
-            strat_f,
-            '15분 마지막 1분 틱 합성',
-            None,
-            '',
-            'ON=슬롯 마지막 1분만 틱 OHLCV, 앞 14분은 공식 1분. 슬롯 확정 직후 지연·누락 완화',
-            toggle_key='realtime_15m_last_minute_from_ticks',
-        )
-        add_param_row(
-            strat_f,
-            '틱15분 전체누적(저장만)',
-            None,
-            '',
-            'ON=0B 틱으로 15분봉 누적 후 전용 DB(realtime_15m_tick_*.db)에만 저장. '
-            '전용 스레드·전용 DB로 공식봉/신호/주문과 분리(검증용)',
-            toggle_key='realtime_tick_15m_accumulate_save_only',
-        )
-        add_param_row(
-            strat_f,
-            'S1: 인트라바(고정밀) 미러',
-            None,
-            '',
-            '연구용. 로컬 15분 확정 모드 ON이면 자동 비활성. ON 시 1분 close-now 경로',
-            toggle_key='realtime_s1_mirror_dynamic_intrabar',
         )
 
         # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지

@@ -90,19 +90,6 @@ def realtime_monitor_15m_db_path() -> str:
     return os.path.join(base, name)
 
 
-def realtime_tick_15m_db_path() -> str:
-    """
-    틱→15분 전체 누적 **검증용** SQLite (공식/워밍업 DB와 파일 분리).
-
-    신호·주문 경로의 ``realtime_15m_*.db`` 와 락·I/O가 겹치지 않도록 합니다.
-    """
-    base = project_root()
-    name = (
-        "realtime_15m_tick_mock.db" if is_mock_mode() else "realtime_15m_tick_live.db"
-    )
-    return os.path.join(base, name)
-
-
 def migrate_legacy_virtual_db_files() -> None:
     """
     구 단일 virtual_db.json → virtual_db_mock.json 으로 1회 이관.

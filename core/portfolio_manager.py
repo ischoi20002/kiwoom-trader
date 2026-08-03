@@ -1531,10 +1531,10 @@ class PortfolioManager:
                     # 이후 체결 확인 경로(_take_pending_exit_for_order → 실 SELL 기록)와 겹쳐
                     # 동일 라운드 종료내역이 이중 기록되고 손익이 왜곡된다.
                     # 따라서 진행 중 매도는 reconcile 제거를 보류하고 체결 경로가 처리하도록 둔다.
+                    # (단, 대기 상한 초과 시 체결 누락 유령 방지를 위해 보류 해제)
                     if (
                         not force_reconcile_zero
-                        and bool(pos.get("exit_pending"))
-                        and self._has_pending_exit_snapshot_for_code(code)
+                        and self._should_defer_reconcile_for_exit_pending(code, pos)
                     ):
                         if not silent:
                             try:
@@ -2125,6 +2125,71 @@ class PortfolioManager:
             pass
         return None
 
+    def _pending_exit_newest_age_seconds_for_code(self, code: str) -> Optional[float]:
+        """해당 종목 pending exit 스냅샷 중 가장 최근 registered_at 기준 경과 초."""
+        try:
+            nc = self._normalize_stock_code(code)
+            if not nc:
+                return None
+            now = datetime.now()
+            ages: List[float] = []
+            with self.lock:
+                for rec in self._pending_exit_snapshots.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    if self._normalize_stock_code(rec.get("code")) != nc:
+                        continue
+                    raw = rec.get("registered_at")
+                    if not raw:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(str(raw))
+                    except Exception:
+                        continue
+                    ages.append(max(0.0, (now - ts).total_seconds()))
+            if not ages:
+                return None
+            # 가장 최근 스냅샷 경과(초) — 전부 한도 초과일 때만 보류 해제
+            return float(min(ages))
+        except Exception:
+            return None
+
+    def _should_defer_reconcile_for_exit_pending(
+        self, code: str, pos: Dict[str, Any]
+    ) -> bool:
+        """
+        True: 매도 진행 중이라 reconcile 제거를 보류.
+        최신 스냅샷 등록 후 N초(기본 120) 초과면 False — 체결 확인 누락 유령 방지.
+        """
+        try:
+            if not bool(pos.get("exit_pending")):
+                return False
+            if not self._has_pending_exit_snapshot_for_code(code):
+                return False
+            max_s = 120
+            try:
+                st = getattr(self.app, "settings", None) or {}
+                max_s = int(float(st.get("reconcile_exit_pending_max_seconds", 120)))
+                max_s = max(30, min(max_s, 900))
+            except Exception:
+                max_s = 120
+            age = self._pending_exit_newest_age_seconds_for_code(code)
+            if age is not None and age >= float(max_s):
+                try:
+                    self.log(
+                        f"[Sync] {pos.get('name', code)}({code}) "
+                        f"매도 대기 {int(age)}초 초과(한도 {max_s}s) — "
+                        f"reconcile 제거 진행"
+                    )
+                except Exception:
+                    pass
+                return False
+            return True
+        except Exception:
+            return bool(pos.get("exit_pending")) and self._has_pending_exit_snapshot_for_code(
+                code
+            )
+
     def _has_pending_exit_snapshot_for_code(self, code: str) -> bool:
         """해당 종목코드로 진행 중(접수 후 미체결) 매도 스냅샷이 있는지 확인합니다."""
         try:
@@ -2212,8 +2277,51 @@ class PortfolioManager:
         except Exception:
             pass
         self.log(f"[Portfolio] {pos['name']}({code}) 최종 청산 완료 ({pnl_pct:+.2f}%)")
+        if remove_from_vp:
+            try:
+                self._notify_holdings_ui_cleared(code)
+            except Exception:
+                pass
         # 텔레그램은 FillReconciliationService에서 '포지션관리탭 주문·체결 내역 row' 기준으로
         # 매수/매도 1회 전송 정책에 맞춰 발송됩니다.
+
+    def _notify_holdings_ui_cleared(self, code: str) -> None:
+        """전량 매도 후 모니터 보유 디바운스·유령 행을 즉시 정리합니다."""
+        try:
+            nc = self._normalize_stock_code(code)
+        except Exception:
+            try:
+                nc = str(code).split("_")[0].zfill(6)
+            except Exception:
+                nc = ""
+        if not nc:
+            return
+
+        def _job() -> None:
+            try:
+                mt = getattr(self.app, "monitor_tab", None)
+                if mt is not None and hasattr(mt, "clear_holdings_ui_debounce"):
+                    mt.clear_holdings_ui_debounce(nc)
+            except Exception:
+                pass
+            try:
+                fn = getattr(self.app, "request_virtual_tab_sync_light_refresh", None)
+                if callable(fn):
+                    fn()
+            except Exception:
+                pass
+
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None:
+                root.after(0, _job)
+            else:
+                _job()
+        except Exception:
+            try:
+                _job()
+            except Exception:
+                pass
 
     def on_fill(
         self,

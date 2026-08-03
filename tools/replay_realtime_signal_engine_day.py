@@ -185,28 +185,8 @@ def load_1m_bars_day(code: str, day: str) -> pd.DataFrame:
 
 
 def seed_m1_store(store: Any, code: str, df1: pd.DataFrame) -> int:
-    """완료 1분을 순서대로 ``RtTickM1Store`` 에 반영."""
-    from core.rt_tick_m1_store import RtTickM1Store
-
-    assert isinstance(store, RtTickM1Store)
-    nk = str(code).zfill(6)
-    n = 0
-    for _, row in df1.iterrows():
-        try:
-            ol = pd.Timestamp(row["dt"]).floor("min")
-            store.apply_official_closed_minute(
-                nk,
-                ol,
-                float(row["o"]),
-                float(row["h"]),
-                float(row["l"]),
-                float(row["c"]),
-                float(row["v"] or 0),
-            )
-            n += 1
-        except Exception:
-            continue
-    return n
+    """[옵션 A] RtTickM1Store 제거 — 호환용 스텁(항상 0)."""
+    return 0
 
 
 def subsample_ticks(
@@ -595,9 +575,7 @@ def main() -> None:
 
     bars_data: Dict[str, pd.DataFrame] = {}
     m1_counts: Dict[str, int] = {}
-    from core.rt_tick_m1_store import RtTickM1Store
-
-    m1_store = RtTickM1Store(max_completed_per_code=48, logger_callback=None)
+    m1_store = None
     for c in codes_ordered:
         df15 = load_15m_bars(c, day_end)
         if df15.empty:
