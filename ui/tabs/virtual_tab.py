@@ -2675,6 +2675,16 @@ class VirtualTab:
         VP에 없는 트리 행(매도 후 유령)도 여기서 제거합니다.
         """
         try:
+            # Tk 위젯은 메인 스레드·mainloop 에서만
+            run_ui = getattr(self.app, "run_on_ui_thread", None)
+            is_main = getattr(self.app, "_is_ui_main_thread", None)
+            if callable(is_main) and not is_main():
+                if callable(run_ui):
+                    run_ui(self.refresh_portfolio_light, 0)
+                return
+        except Exception:
+            pass
+        try:
             if not self._active_tree_ready():
                 return
             merged = self._vp_items_by_normalized()
@@ -2710,6 +2720,13 @@ class VirtualTab:
         except Exception as e:
             try:
                 print(f"[UI Error] refresh_portfolio_light: {e}")
+            except Exception:
+                pass
+            # 메인루프 종료/비메인 호출이면 전체 리빌드 재시도하지 않음
+            try:
+                msg = str(e).lower()
+                if "main thread" in msg or "main loop" in msg:
+                    return
             except Exception:
                 pass
             try:

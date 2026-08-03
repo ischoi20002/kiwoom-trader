@@ -24,7 +24,7 @@ from backtest_engine import (
     settings_for_backtest,
 )
 from utils.fee_rates import fee_decimal_rates_backtest
-from utils.krx_bars import m1_window_start_for_15m_end
+from utils.krx_bars import slice_m1_for_15m_end
 from strategy.s1_confirm_gate import bt_m1_confirm_fill
 from core.bt_hp_signal_bridge import compute_intrabar_indicator_step
 from core.bt_hp_intrabar_unified import (
@@ -1392,14 +1392,13 @@ class DynamicBacktester:
         m1_full = self.cached_1m_data[cache_key]
         if m1_full is not None:
             try:
-                # [v38] 15m 행 시각=구간 끝: 09:15봉만 1m [09:00,09:15] (T-15), 나머지 (T-14) — utils.krx_bars
+                # 15m 종가 라벨 기준 타임스탬프 창 (개수 고정 아님) — utils.krx_bars
                 _ct = (
                     pd.Timestamp(curr_time)
                     if not isinstance(curr_time, pd.Timestamp)
                     else curr_time
                 )
-                t0 = m1_window_start_for_15m_end(_ct)
-                return m1_full.loc[t0:curr_time]
+                return slice_m1_for_15m_end(m1_full, _ct)
             except (TypeError, KeyError) as e:
                 print(f"[_get_m1_chunk] 1m 슬라이스 실패: {e!r}", flush=True)
                 return None

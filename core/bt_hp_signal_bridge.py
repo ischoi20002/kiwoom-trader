@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from backtest_engine import TradingStrategy
-from utils.krx_bars import m1_window_start_for_15m_end
+from utils.krx_bars import m1_window_start_for_15m_end, slice_m1_for_15m_end
 
 # dynamic_backtest._process_intra_bar_dynamic 과 동일 키 목록
 _STATIC_SYNC_KEYS: Tuple[str, ...] = (
@@ -879,10 +879,11 @@ def resolve_m1_chunk_for_bt_hp_bridge(
         merged = pd.concat(parts, axis=0).sort_index()
         merged = merged[~merged.index.duplicated(keep="first")]
         try:
-            merged = merged.loc[t0:t_hi]
+            until = t_hi if t_hi < t_end else None
+            merged = slice_m1_for_15m_end(merged, t_end, until=until)
         except (TypeError, KeyError, ValueError):
             return None
-        if merged.empty:
+        if merged is None or merged.empty:
             return None
         return merged
     except (TypeError, ValueError, KeyError, AttributeError, OSError):
@@ -902,7 +903,11 @@ def fetch_m1_chunk_for_bt_hp_bridge(
         t_end = pd.Timestamp(curr_15m_end_ts)
         t0 = m1_window_start_for_15m_end(t_end)
         t_hi = min(t_end, pd.Timestamp(now_cap).floor("min"))
-        return fetch_m1_from_trading_db(conn, code, t0, t_hi, settings=settings)
+        df = fetch_m1_from_trading_db(conn, code, t0, t_hi, settings=settings)
+        if df is None or df.empty:
+            return df
+        until = t_hi if t_hi < t_end else None
+        return slice_m1_for_15m_end(df, t_end, until=until)
     except (TypeError, ValueError, AttributeError):
         return None
 

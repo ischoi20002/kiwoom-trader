@@ -2125,16 +2125,12 @@ class SimpleBacktester:
                 # Find the starting index of 1M data for each 15M timestamp
                 times_15m = df.index
                 m1_times = m1_df_preloaded.index
-                # [v38] 15m 끝 시각과 동일 규칙: 09:15(첫 봉) T-15, 그 외 T-14 (utils.krx_bars.m1_window_start* 와 동일)
-                _h = times_15m.hour.values
-                _m = times_15m.minute.values
-                _dmin = np.where((_h == 9) & (_m == 15), 15, 14).astype("int32")
-                _starts = times_15m - pd.to_timedelta(_dmin, unit="m")
-                m1a = np.asarray(m1_times.values, dtype="datetime64[ns]")
-                start_idxs = np.searchsorted(m1a, _starts.to_numpy(), side="left")
-                end_idxs = np.searchsorted(m1a, times_15m.to_numpy(), side="right")
-                # Store as (start, end) tuples or arrays
-                m1_boundaries = list(zip(start_idxs, end_idxs))
+                # 타임스탬프 창: 일반 [T-15,T), 15:30은 15:15~15:19+15:30 (utils.krx_bars)
+                from utils.krx_bars import m1_index_bounds_for_15m_end
+
+                m1_boundaries = [
+                    m1_index_bounds_for_15m_end(m1_times, ts) for ts in times_15m
+                ]
                 # [v4.5.10] Extract VP/BA for 1M Smart Exit simulation
                 m1_np_high = m1_df_preloaded['High'].values
                 m1_np_close = m1_df_preloaded['Close'].values

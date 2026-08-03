@@ -19,7 +19,7 @@ def main() -> None:
     lab = m1_bar_open_label_for_just_completed_minute("2026-05-12 13:02:30")
     assert str(lab) == "2026-05-12 13:01:00", lab
     t0 = m1_window_start_for_15m_end("2026-05-12 13:15:00")
-    assert str(t0) == "2026-05-12 13:01:00", t0
+    assert str(t0) == "2026-05-12 13:00:00", t0
     print("OK: m1_bar_open_label_for_just_completed_minute / m1_window_start_for_15m_end")
 
 

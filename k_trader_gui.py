@@ -457,9 +457,16 @@ class KiwoomApp:
     def __init__(self, root, auto_start=False):
         self.root = root
         self._main_thread_id = threading.get_ident()
+        # 비메인 스레드 → 메인 Tk 루프 작업 큐 (root.after 를 워커에서 직접 호출하지 않음)
+        self._ui_call_queue: queue.Queue = queue.Queue()
+        self._ui_call_drain_after_id: Optional[Any] = None
         self.auto_start = auto_start
         self.root.title(f"K-Trader v{APP_VERSION} [Remote Monitoring]")
         self.root.geometry("1400x900")
+        try:
+            self.root.after(50, self._drain_ui_call_queue)
+        except Exception:
+            pass
         
         self.gui_utils = GuiUtils(root=self.root)
         self.auth_manager = AuthManager(logger_callback=self.log)
@@ -1018,11 +1025,7 @@ class KiwoomApp:
                 pass
 
         try:
-            r = getattr(self, "root", None)
-            if r is not None and r.winfo_exists():
-                r.after(0, _apply)
-            else:
-                _apply()
+            self.run_on_ui_thread(_apply, 0)
         except Exception:
             pass
 
@@ -1076,15 +1079,94 @@ class KiwoomApp:
                 pass
 
         try:
-            r = getattr(self, "root", None)
-            if r is not None and r.winfo_exists():
-                r.after(0, _apply)
-            else:
-                _apply()
+            self.run_on_ui_thread(_apply, 0)
         except Exception:
             pass
 
     def log(self, message): self.gui_utils.log(message)
+
+    def _is_ui_main_thread(self) -> bool:
+        """현재 스레드가 Tk 메인 스레드인지."""
+        try:
+            return threading.get_ident() == int(getattr(self, "_main_thread_id", 0) or 0)
+        except Exception:
+            return False
+
+    def run_on_ui_thread(self, callback: Any, delay_ms: int = 0) -> None:
+        """
+        Tk 위젯 갱신·``root.after`` 예약을 **메인 스레드에서만** 수행합니다.
+
+        인증/계좌 동기화 등 백그라운드에서 ``root.after`` / ``winfo_exists`` 를 직접 호출하면
+        Windows 에서 ``main thread is not in main loop`` 로 프로세스가 죽을 수 있습니다.
+        """
+        if not callable(callback):
+            return
+        try:
+            delay = max(0, int(delay_ms))
+        except Exception:
+            delay = 0
+
+        if self._is_ui_main_thread():
+            try:
+                r = getattr(self, "root", None)
+                if r is None:
+                    callback()
+                    return
+                if delay <= 0:
+                    r.after(0, callback)
+                else:
+                    r.after(delay, callback)
+            except Exception:
+                try:
+                    callback()
+                except Exception:
+                    pass
+            return
+
+        try:
+            self._ui_call_queue.put((delay, callback))
+        except Exception:
+            return
+        # 메인 폴러가 이미 돌고 있으면 enqueue 만으로 충분.
+        # 폴러가 끊겼을 때만 메인에서 재기동되도록 플래그만 남긴다.
+
+    def _drain_ui_call_queue(self) -> None:
+        """메인 스레드: 백그라운드가 넣은 UI 작업을 꺼내 after 로 실행/예약."""
+        self._ui_call_drain_after_id = None
+        try:
+            while True:
+                try:
+                    delay, callback = self._ui_call_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    d = max(0, int(delay or 0))
+                except Exception:
+                    d = 0
+                try:
+                    r = getattr(self, "root", None)
+                    if r is None:
+                        continue
+                    if d <= 0:
+                        try:
+                            callback()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            r.after(d, callback)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            r = getattr(self, "root", None)
+            if r is not None:
+                self._ui_call_drain_after_id = r.after(50, self._drain_ui_call_queue)
+        except Exception:
+            pass
 
     def _set_ui_busy(self, busy: bool, hint: str = "") -> None:
         """
@@ -2183,25 +2265,34 @@ class KiwoomApp:
         try:
             if not hasattr(self, "virtual_tab"):
                 return
-            r = getattr(self, "root", None)
-            if r is None:
-                return
             self._vt_light_refresh_dirty = True
-            try:
-                if self._vt_light_refresh_after_id is not None:
-                    r.after_cancel(self._vt_light_refresh_after_id)
-            except Exception:
-                pass
-            try:
-                delay = 450
-                st = getattr(self, "settings", None) or {}
-                delay = int(float(st.get("virtual_tab_light_refresh_debounce_ms", 450)))
-                delay = max(150, min(delay, 3000))
-            except Exception:
-                delay = 450
-            self._vt_light_refresh_after_id = r.after(
-                delay, self._flush_virtual_tab_sync_light_refresh
-            )
+
+            def _schedule() -> None:
+                try:
+                    r = getattr(self, "root", None)
+                    if r is None:
+                        return
+                    try:
+                        if self._vt_light_refresh_after_id is not None:
+                            r.after_cancel(self._vt_light_refresh_after_id)
+                    except Exception:
+                        pass
+                    try:
+                        delay = 450
+                        st = getattr(self, "settings", None) or {}
+                        delay = int(
+                            float(st.get("virtual_tab_light_refresh_debounce_ms", 450))
+                        )
+                        delay = max(150, min(delay, 3000))
+                    except Exception:
+                        delay = 450
+                    self._vt_light_refresh_after_id = r.after(
+                        delay, self._flush_virtual_tab_sync_light_refresh
+                    )
+                except Exception:
+                    pass
+
+            self.run_on_ui_thread(_schedule, 0)
         except Exception:
             pass
 
@@ -2342,9 +2433,7 @@ class KiwoomApp:
     def _schedule_vp_stub_price_refresh_after_auth(self) -> None:
         """인증 직후 토큰·REST 준비 타이밍을 두고 보유 전용 스텁 last_price 를 재시드합니다."""
         try:
-            r = getattr(self, "root", None)
-            if r is not None:
-                r.after(400, self._refresh_vp_price_stubs_after_auth_safe)
+            self.run_on_ui_thread(self._refresh_vp_price_stubs_after_auth_safe, 400)
         except Exception:
             pass
 
@@ -2459,13 +2548,9 @@ class KiwoomApp:
                 pass
 
         try:
-            r = getattr(self, "root", None)
-            if r is not None:
-                r.after(0, _apply_on_main)
-            else:
-                _apply_on_main()
+            self.run_on_ui_thread(_apply_on_main, 0)
         except Exception:
-            _apply_on_main()
+            pass
 
     def _ensure_vp_monitor_stub(self, code: str) -> None:
         """보유만 있고 감시에 없던 종목에 monitor_info 스텁을 넣고 스트림 재등록을 요청합니다."""
@@ -3471,6 +3556,13 @@ class KiwoomApp:
         """
         if not hasattr(self, "virtual_tab"):
             return
+        # 백그라운드에서 직접 들어오면 메인으로 위임 (Tk 크래시 방지)
+        try:
+            if not self._is_ui_main_thread():
+                self.run_on_ui_thread(self._render_virtual_positions, 0)
+                return
+        except Exception:
+            pass
         try:
             sig = self._vp_structure_signature()
             prev = getattr(self, "_last_vp_render_sig", None)

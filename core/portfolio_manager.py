@@ -149,23 +149,41 @@ class PortfolioManager:
             self._gui_cb_dirty = True
         except Exception:
             pass
-        try:
-            root = getattr(self.app, "root", None)
-            if root is None:
-                self.gui_callback()
-                return
-            delay = int(self._portfolio_gui_callback_debounce_ms())
+
+        def _arm_on_main() -> None:
             try:
-                if self._gui_cb_after_id is not None:
-                    root.after_cancel(self._gui_cb_after_id)
-            except Exception:
-                pass
-            self._gui_cb_after_id = root.after(delay, self._flush_gui_callback_on_main)
-        except Exception:
-            try:
-                self.gui_callback()
+                root = getattr(self.app, "root", None)
+                if root is None:
+                    return
+                delay = int(self._portfolio_gui_callback_debounce_ms())
+                try:
+                    if self._gui_cb_after_id is not None:
+                        root.after_cancel(self._gui_cb_after_id)
+                except Exception:
+                    pass
+                self._gui_cb_after_id = root.after(
+                    delay, self._flush_gui_callback_on_main
+                )
             except Exception as e:
-                self.log(f"⚠️ [Portfolio] GUI 콜백 실패: {e}")
+                try:
+                    self.log(f"⚠️ [Portfolio] GUI 콜백 예약 실패: {e}")
+                except Exception:
+                    pass
+
+        try:
+            run_ui = getattr(self.app, "run_on_ui_thread", None)
+            if callable(run_ui):
+                run_ui(_arm_on_main, 0)
+                return
+        except Exception:
+            pass
+        # 폴백: 메인 스레드일 때만 직접 예약 (워커에서 root.after 금지)
+        try:
+            main_tid = int(getattr(self.app, "_main_thread_id", 0) or 0)
+            if main_tid and threading.get_ident() == main_tid:
+                _arm_on_main()
+        except Exception:
+            pass
 
     def _flush_gui_callback_on_main(self) -> None:
         try:

@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""1분/15분봉 정합: bars_15m vs KRX 1m→15m(utils.krx_bars) vs 1m 인트라바 창(09:15=T-15, 그 외 T-14)."""
+"""1분/15분봉 정합: bars_15m vs KRX 1m→15m(utils.krx_bars, 타임스탬프 창)."""
 from __future__ import annotations
 
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
 from typing import Any, Optional, Tuple
 
 import pandas as pd
@@ -15,7 +14,11 @@ ABS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ABS not in sys.path:
     sys.path.insert(0, ABS)
 from data_manager_v2 import DataManagerV2  # noqa: E402
-from utils.krx_bars import m1_window_start_for_15m_end, resample_1m_ohlcv_to_15m_krx
+from utils.krx_bars import (  # noqa: E402
+    m1_mask_for_15m_end,
+    m1_window_start_for_15m_end,
+    resample_1m_ohlcv_to_15m_krx,
+)
 from utils.normalization import normalize_code  # noqa: E402
 
 
@@ -35,9 +38,9 @@ def verify_one_code_one_day(
 ]:
     """
     Returns: (n_same, n_higher, n_lower, higher_examples, n_db_vs_resample_mismatch, slot_945)
-    - higher: T-14~T 1분 min > 15분 Low (1분이 더 높음 = 창이 저점 분을 누락)
-    - lower: T-14~T 1분 min < 15분 Low
-    - slot_945: 09:45 행이 있을 때 9:30~9:45, 9:31~9:45, 15m 비교 dict
+    - higher: 슬롯 1분 min > 15분 Low (1분이 더 높음 = 창이 저점 분을 누락)
+    - lower: 슬롯 1분 min < 15분 Low
+    - slot_945: 09:45 행이 있을 때 비교 dict
     """
     code = normalize_code(code)
     t_start = f"{day} 00:00:00"
@@ -63,7 +66,7 @@ def verify_one_code_one_day(
         df1[c] = pd.to_numeric(df1[c], errors="coerce")
     df1 = df1.set_index("datetime").sort_index()
 
-    # bar_resample: KRX 1m→15m (r/r + 09:00~09:15 병합)
+    # bar_resample: KRX 1m→15m (타임스탬프 창)
     df15_k = resample_1m_ohlcv_to_15m_krx(df1, code)
     if df15_k.empty:
         krx_by_ts: dict[pd.Timestamp, int] = {}
@@ -86,8 +89,8 @@ def verify_one_code_one_day(
     higher_list: list[Tuple[pd.Timestamp, int, int]] = []
     for t in df15_idx.index:
         t = pd.Timestamp(t)
-        t0 = m1_window_start_for_15m_end(t)
-        m1w = df1[(df1.index >= t0) & (df1.index <= t)]
+        mask = m1_mask_for_15m_end(df1.index, t)
+        m1w = df1.loc[mask]
         if m1w.empty:
             continue
         cmin = int(m1w["low"].min())
@@ -103,8 +106,8 @@ def verify_one_code_one_day(
     slot_945: Optional[dict[str, Any]] = None
     k = _ts(day, "09:45:00")
     if k in df15_idx.index:
-        t0k = m1_window_start_for_15m_end(k)
-        t_chunk2 = df1[(df1.index >= t0k) & (df1.index <= k)]
+        mask_k = m1_mask_for_15m_end(df1.index, k)
+        t_chunk2 = df1.loc[mask_k]
         _lk = krx_by_ts.get(k) or krx_by_ts.get(k.replace(microsecond=0, nanosecond=0))
         slot_945 = {
             "day": day,
@@ -112,7 +115,7 @@ def verify_one_code_one_day(
             "15m_krx_from_1m": _lk,
             "1m_m1_start_to_0945": int(t_chunk2["low"].min()) if not t_chunk2.empty else None,
             "n_1m_chunk": len(t_chunk2),
-            "m1_t0": str(t0k),
+            "m1_t0": str(m1_window_start_for_15m_end(k)),
         }
 
     if verbose and mismatch_db_vs_rs:
@@ -149,8 +152,8 @@ def main() -> int:
     print(f"종목: {code}  기준일(말일 1m): {day}  (last_1m={d})")
     a, b, c, hlist, mcnt, s945 = verify_one_code_one_day(db_path, code, day, verbose=True)
     print("---")
-    print(f"15m 행별 KRX 1m창(09:15=T-15, 이후 T-14) Low min vs 15m DB Low: 같음={a}, 1m>15m={b}, 1m<15m={c}")
-    print(f"bars_15m Low vs KRX 1m→15m(resample+09:0병합) Low 불일치: {mcnt}건 (0이면 DB=엔진일치; 갱신 후 0 권장)")
+    print(f"15m 행별 KRX 1m창(타임스탬프) Low min vs 15m DB Low: 같음={a}, 1m>15m={b}, 1m<15m={c}")
+    print(f"bars_15m Low vs KRX 1m→15m(타임스탬프 집계) Low 불일치: {mcnt}건 (0이면 DB=엔진일치; 갱신 후 0 권장)")
 
     if s945 is not None:
         print("--- 09:45 봉(해당일) ---")

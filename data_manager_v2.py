@@ -3086,28 +3086,42 @@ class DataManagerV2:
 
         if df1 is not None and not df1.empty:
             try:
+                from utils.krx_bars import resample_1m_ohlcv_to_15m_krx
+
                 w = df1.copy()
                 w["time"] = pd.to_datetime(w["time"], errors="coerce")
                 w = w.dropna(subset=["time"])
                 if w.empty:
                     raise ValueError("time 파싱 후 비어 있음")
                 w = w.set_index("time").sort_index()
-                agg = {
-                    "Open": "first",
-                    "High": "max",
-                    "Low": "min",
-                    "Close": "last",
-                    "Volume": "sum",
+                # Open/High/... → open/high/...
+                rename_l = {
+                    c: c.lower()
+                    for c in ("Open", "High", "Low", "Close", "Volume")
+                    if c in w.columns
                 }
-                miss = [k for k in agg if k not in w.columns]
+                if rename_l:
+                    w = w.rename(columns=rename_l)
+                miss = [k for k in ("open", "high", "low", "close", "volume") if k not in w.columns]
                 if miss:
                     raise ValueError(f"필수 열 없음: {miss}")
-                rs = (
-                    w.resample("15min", closed="right", label="right")
-                    .agg(agg)
-                    .dropna(how="any")
+                df15_k = resample_1m_ohlcv_to_15m_krx(
+                    w[["open", "high", "low", "close", "volume"]], n_code
                 )
-                rs = rs.reset_index()
+                if df15_k is None or df15_k.empty:
+                    raise ValueError("리샘플 결과 없음")
+                rs = df15_k.rename(
+                    columns={
+                        "datetime": "time",
+                        "open": "Open",
+                        "high": "High",
+                        "low": "Low",
+                        "close": "Close",
+                        "volume": "Volume",
+                    }
+                )
+                rs["time"] = pd.to_datetime(rs["time"], errors="coerce")
+                rs = rs.dropna(subset=["time"])
                 if rs.empty:
                     raise ValueError("리샘플 결과 없음")
                 self._last_report_15m_source = "db1m"
@@ -3115,7 +3129,7 @@ class DataManagerV2:
                     f"[리포트15m] {n_code} {day} trading_data.db bars_1m→15m "
                     f"{len(rs)}건"
                 )
-                return rs
+                return rs[["time", "Open", "High", "Low", "Close", "Volume"]]
             except Exception as e:
                 _log(f"[리포트15m] {n_code} {day} bars_1m→15m 리샘플 실패: {e}")
 

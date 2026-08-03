@@ -156,17 +156,22 @@ class RestAuthRetryService:
                     )
             except Exception:
                 pass
-            try:
-                self.app.root.after(
-                    0,
-                    lambda c=err_fg: (
+
+            def _fail_status() -> None:
+                try:
+                    if self.app.status_label:
                         self.app.status_label.config(
-                            text="상태: 인증 실패 — 연결 확인", foreground=c
+                            text="상태: 인증 실패 — 연결 확인", foreground=err_fg
                         )
-                        if self.app.status_label
-                        else None
-                    ),
-                )
+                except Exception:
+                    pass
+
+            try:
+                run_ui = getattr(self.app, "run_on_ui_thread", None)
+                if callable(run_ui):
+                    run_ui(_fail_status, 0)
+                else:
+                    self.app.root.after(0, _fail_status)
             except Exception:
                 pass
             try:
@@ -176,17 +181,21 @@ class RestAuthRetryService:
             return
 
         # 로그인 완료 상태 라벨
-        try:
-            self.app.root.after(
-                0,
-                lambda c=ok_fg: (
+        def _ok_status() -> None:
+            try:
+                if self.app.status_label:
                     self.app.status_label.config(
-                        text="상태: 로그인 완료", foreground=c
+                        text="상태: 로그인 완료", foreground=ok_fg
                     )
-                    if self.app.status_label
-                    else None
-                ),
-            )
+            except Exception:
+                pass
+
+        try:
+            run_ui = getattr(self.app, "run_on_ui_thread", None)
+            if callable(run_ui):
+                run_ui(_ok_status, 0)
+            else:
+                self.app.root.after(0, _ok_status)
         except Exception:
             pass
 
@@ -213,13 +222,20 @@ class RestAuthRetryService:
             except Exception:
                 pass
 
-            try:
-                self.app.root.after(
-                    2000,
-                    lambda: self.app._run_portfolio_sync_in_daemon_thread(
+            def _schedule_first_sync() -> None:
+                try:
+                    self.app._run_portfolio_sync_in_daemon_thread(
                         silent=True, force=True
-                    ),
-                )
+                    )
+                except Exception:
+                    pass
+
+            try:
+                run_ui = getattr(self.app, "run_on_ui_thread", None)
+                if callable(run_ui):
+                    run_ui(_schedule_first_sync, 2000)
+                else:
+                    self.app.root.after(2000, _schedule_first_sync)
             except Exception:
                 pass
 

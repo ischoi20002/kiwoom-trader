@@ -655,7 +655,7 @@ class WarmupService:
         """
         키움 ka10080 응답 리스트 → 15분 OHLCV DataFrame.
         - tic_scope \"15\"(기본): 서버가 이미 15분봉을 주므로 리샘플 없이 OHLCV만 정렬·중복 제거.
-        - 그 외(예: \"1\"): 1분봉을 closed='right', label='right' 로 15분봉에 합침(레거시·비권장).
+        - 그 외(예: \"1\"): 1분봉을 타임스탬프 창 규칙으로 15분봉에 합침(레거시·비권장).
         """
         if not raw_api:
             return pd.DataFrame()
@@ -698,14 +698,39 @@ class WarmupService:
                     inplace=True,
                 )
                 return out[["Open", "High", "Low", "Close", "Volume"]].copy()
-            out = (
-                df.resample("15min", closed="right", label="right")
-                .agg({f_op: "first", f_hg: "max", f_lw: "min", f_cl: "last", f_vl: "sum"})
-                .dropna(how="any")
-            )
-            out.rename(
-                columns={f_op: "Open", f_hg: "High", f_lw: "Low", f_cl: "Close", f_vl: "Volume"},
+            from utils.krx_bars import resample_1m_ohlcv_to_15m_krx
+
+            m1 = df[[f_op, f_hg, f_lw, f_cl, f_vl]].copy()
+            m1.rename(
+                columns={
+                    f_op: "open",
+                    f_hg: "high",
+                    f_lw: "low",
+                    f_cl: "close",
+                    f_vl: "volume",
+                },
                 inplace=True,
+            )
+            code_hint = "000000"
+            try:
+                # 워밍업 호출 컨텍스트에 종목코드가 없으면 placeholder
+                code_hint = str(getattr(self, "_warmup_last_code", "000000") or "000000")
+            except Exception:
+                pass
+            df15 = resample_1m_ohlcv_to_15m_krx(m1, code_hint)
+            if df15 is None or df15.empty:
+                return pd.DataFrame()
+            out = df15.copy()
+            out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
+            out = out.dropna(subset=["datetime"]).set_index("datetime").sort_index()
+            out = out.rename(
+                columns={
+                    "open": "Open",
+                    "high": "High",
+                    "low": "Low",
+                    "close": "Close",
+                    "volume": "Volume",
+                }
             )
             return out[["Open", "High", "Low", "Close", "Volume"]].copy()
         except Exception as e:
@@ -1033,23 +1058,38 @@ class WarmupService:
             return pd.DataFrame()
 
         try:
+            from utils.krx_bars import resample_1m_ohlcv_to_15m_krx
+
             d1 = m1.copy()
             d1["time"] = pd.to_datetime(d1["time"], errors="coerce")
             d1 = d1.dropna(subset=["time"])
             d1 = d1.set_index("time").sort_index()
-            out = (
-                d1.resample("15min", label="right", closed="right")
-                .agg(
-                    {
-                        "Open": "first",
-                        "High": "max",
-                        "Low": "min",
-                        "Close": "last",
-                        "Volume": "sum",
-                    }
-                )
-                .dropna(how="any")
+            rename_l = {
+                c: c.lower()
+                for c in ("Open", "High", "Low", "Close", "Volume")
+                if c in d1.columns
+            }
+            if rename_l:
+                d1 = d1.rename(columns=rename_l)
+            need = ("open", "high", "low", "close", "volume")
+            if any(c not in d1.columns for c in need):
+                return pd.DataFrame()
+            df15 = resample_1m_ohlcv_to_15m_krx(d1[list(need)], code)
+            if df15 is None or df15.empty:
+                return pd.DataFrame()
+            out = df15.copy()
+            out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
+            out = out.dropna(subset=["datetime"]).set_index("datetime").sort_index()
+            out = out.rename(
+                columns={
+                    "open": "Open",
+                    "high": "High",
+                    "low": "Low",
+                    "close": "Close",
+                    "volume": "Volume",
+                }
             )
+            out = out[["Open", "High", "Low", "Close", "Volume"]]
             if out.empty:
                 return pd.DataFrame()
             try:
