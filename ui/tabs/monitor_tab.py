@@ -2643,7 +2643,27 @@ class MonitorTab:
                 info['volume'] = volume
                 info['trde_val'] = trde_val
                 info['vol_power'] = vol_power
-                self.app._on_realtime_data_received(code, now_price, volume, trde_val, vol_power=vol_power)
+                # 틱→1분 누적: 수신 벽시계가 아니라 0B fid20 체결시각 전달
+                trade_time = None
+                try:
+                    from core.rt_tick_m1_accumulator import parse_0b_trade_datetime
+
+                    trade_time = parse_0b_trade_datetime(vals)
+                except Exception:
+                    trade_time = None
+                if trade_time is not None:
+                    self.app._on_realtime_data_received(
+                        code,
+                        now_price,
+                        volume,
+                        trde_val,
+                        vol_power=vol_power,
+                        trade_time=trade_time,
+                    )
+                else:
+                    self.app._on_realtime_data_received(
+                        code, now_price, volume, trde_val, vol_power=vol_power
+                    )
             elif p_type == "0d":
                 total_ask = int(get_val(121))
                 total_bid = int(get_val(125))

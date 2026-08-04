@@ -8,6 +8,7 @@
 - 한 종목 무거래에 전체를 묶지 않음 — 준비되면(또는 짧게 기다린 뒤) 전 종목 각자 조회.
 - 종목별 ``minute_not_ready`` 는 해당 종목만 재폴링(기본 12초) 후 DB·무거래 평봉.
 - **15분 슬롯 마지막 1분**이면 보유·고 met_ratio 종목을 우선 조회하고, 합성 15분으로 완성봉 평가.
+- 말분 평가는 기본 **다음분 `:00` 틱 즉시**(무거래는 1.5s 타임아웃). 앞 구간 공식 1분 + 틱 말분 합성. ``15:30``은 공식 경로.
 - 성공 시 ``RtTickM1Store.apply_official_closed_minute`` 로 공식 1분을 반영합니다.
 """
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -25,6 +26,7 @@ from core.bt_hp_signal_bridge import ka10080_raw_rows_to_1m_df
 from core.ka10080_spread import effective_m1_poll_spread_sec
 from utils.krx_bars import (
     chart_covers_m1_closed_minute,
+    is_krx_last_15m_slot,
     is_krx_m1_closed_open_label,
     is_last_m1_open_of_15m_slot,
     krx_15m_label_for_m1_open,
@@ -55,6 +57,10 @@ class RtWatchlistM1ApiPoller:
         self._round_lock = threading.Lock()
         self._dormant_rounds: Set[str] = set()
         self._active_rounds: Set[str] = set()
+        # 틱 말분 경로로 이미 평가한 (code, slot_key) — 공식 말분 fetch 중복 평가 방지
+        self._tick_tail_eval_done: Set[Tuple[str, str]] = set()
+        self._tick_tail_eval_lock = threading.Lock()
+        self._tick_tail_scheduled_rounds: Set[str] = set()
 
     def _emit(self, msg: str) -> None:
         if self._log is None:
@@ -79,6 +85,224 @@ class RtWatchlistM1ApiPoller:
             return str(v).strip().lower() in ("1", "true", "yes", "on")
         except Exception:
             return default
+
+    def _last_minute_from_ticks_enabled(self) -> bool:
+        return self._settings_bool(
+            self._settings(), "realtime_15m_last_minute_from_ticks", True
+        )
+
+    def _tick_tail_wait_sec(self) -> float:
+        """무거래 등 :00 틱이 없을 때 말분 종료 후 타임아웃(초). 기본 1.5."""
+        try:
+            v = float(self._settings().get("realtime_15m_tick_tail_wait_sec", 1.5))
+            return max(0.5, min(5.0, v))
+        except (TypeError, ValueError):
+            return 1.5
+
+    def _eval_on_official_last_m1_enabled(self) -> bool:
+        """공식 말분 1분 REST 도착 시 평가할지(기본 OFF — 틱 말분 경로 사용)."""
+        return self._settings_bool(
+            self._settings(), "realtime_15m_eval_on_official_last_m1", False
+        )
+
+    @staticmethod
+    def _slot_eval_key(nk: str, slot: pd.Timestamp) -> Tuple[str, str]:
+        return (
+            str(nk).zfill(6),
+            pd.Timestamp(slot).floor("min").strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    def _mark_tick_tail_eval_done(self, nk: str, slot: pd.Timestamp) -> None:
+        try:
+            key = self._slot_eval_key(nk, slot)
+            with self._tick_tail_eval_lock:
+                self._tick_tail_eval_done.add(key)
+                # 슬롯이 쌓이면 오래된 항목 정리
+                if len(self._tick_tail_eval_done) > 4000:
+                    keep = sorted(self._tick_tail_eval_done, key=lambda x: x[1])[-2000:]
+                    self._tick_tail_eval_done = set(keep)
+        except Exception:
+            pass
+
+    def _is_tick_tail_eval_done(self, nk: str, slot: pd.Timestamp) -> bool:
+        try:
+            key = self._slot_eval_key(nk, slot)
+            with self._tick_tail_eval_lock:
+                return key in self._tick_tail_eval_done
+        except Exception:
+            return False
+
+    def _schedule_tick_tail_evals(
+        self, codes: List[str], closed_lab: pd.Timestamp
+    ) -> None:
+        """
+        무거래 폴백: 말분 종료 + wait_sec 타임아웃 후 틱 seal → 합성 → 평가.
+
+        활발한 종목은 ``on_tick_tail_next_minute``(:00 틱)이 먼저 평가한다.
+        """
+        try:
+            if is_krx_last_15m_slot(closed_lab):
+                return
+            if not is_last_m1_open_of_15m_slot(closed_lab):
+                return
+            if not self._last_minute_from_ticks_enabled():
+                return
+        except Exception:
+            return
+
+        sk = pd.Timestamp(closed_lab).floor("min").strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._tick_tail_eval_lock:
+                if sk in self._tick_tail_scheduled_rounds:
+                    return
+                self._tick_tail_scheduled_rounds.add(sk)
+                if len(self._tick_tail_scheduled_rounds) > 64:
+                    self._tick_tail_scheduled_rounds = set(
+                        sorted(self._tick_tail_scheduled_rounds)[-32:]
+                    )
+        except Exception:
+            pass
+
+        wait = self._tick_tail_wait_sec()
+        try:
+            end_wall = (
+                pd.Timestamp(closed_lab).floor("min") + pd.Timedelta(minutes=1)
+            ).to_pydatetime()
+            due = end_wall + timedelta(seconds=wait)
+            delay = max(0.05, (due - datetime.now()).total_seconds())
+        except Exception:
+            delay = wait
+
+        try:
+            self._emit(
+                f"ℹ️ [M1Poll] 틱말분 타임아웃 예약 "
+                f"lab={closed_lab.strftime('%H:%M')} wait={wait:.1f}s "
+                f"delay={delay:.2f}s n={len(codes)} (:00틱 우선)"
+            )
+        except Exception:
+            pass
+
+        for nk in codes:
+            try:
+                t = threading.Timer(
+                    delay,
+                    self._job_tick_tail_eval,
+                    args=(nk, closed_lab, "timeout"),
+                )
+                t.daemon = True
+                t.start()
+            except Exception:
+                continue
+
+    def on_tick_tail_next_minute(self, code: Any, closed_lab: Any) -> None:
+        """
+        다음 분(:00) 체결로 말분이 seal된 직후 — 즉시 완성15 평가.
+
+        WS 틱 스레드에서 호출될 수 있으므로 짧은 타이머(0)로 분리해도 되고,
+        중복은 ``_tick_tail_eval_done`` 으로 막는다.
+        """
+        try:
+            if not self._last_minute_from_ticks_enabled():
+                return
+            nk = canonical_stock_code(str(code).strip())
+            lab = pd.Timestamp(closed_lab).floor("min")
+            if not nk or not is_last_m1_open_of_15m_slot(lab):
+                return
+            if is_krx_last_15m_slot(lab):
+                return
+            slot = krx_15m_label_for_m1_open(lab)
+            if slot is None or self._is_tick_tail_eval_done(nk, slot):
+                return
+            # 즉시 평가(다음 분 틱 = 말분 종료 신호). 늦은 :59는 seal amend만.
+            t = threading.Timer(
+                0.0,
+                self._job_tick_tail_eval,
+                args=(nk, lab, "next_min_tick"),
+            )
+            t.daemon = True
+            t.start()
+        except Exception:
+            pass
+
+    def _job_tick_tail_eval(
+        self,
+        nk: str,
+        closed_lab: pd.Timestamp,
+        reason: str = "timeout",
+    ) -> None:
+        """틱 말분 seal·합성 15분 평가 (``:00`` 틱 또는 타임아웃)."""
+        if self._stop.is_set() or not self._monitoring():
+            return
+        try:
+            slot = krx_15m_label_for_m1_open(closed_lab)
+            if slot is None:
+                return
+            if self._is_tick_tail_eval_done(nk, slot):
+                return
+
+            st = self._settings()
+            if not self._settings_bool(st, "realtime_s1_eval_on_local_15m_close", True):
+                return
+            from core.rt_closed_15m_official_replace import (
+                closed_15m_eval_after_official_enabled,
+                official_replace_eval_eligible,
+            )
+
+            if closed_15m_eval_after_official_enabled(st):
+                return
+            if not official_replace_eval_eligible(self._app, nk, st):
+                return
+
+            m1s = getattr(self._app, "rt_tick_m1_store", None)
+            if m1s is not None:
+                try:
+                    m1s.seal_tick_tail_minute(nk, closed_lab)
+                except Exception:
+                    pass
+
+            from core.realtime_official_bars_sync import (
+                apply_composed_closed_15m_from_m1,
+                maybe_roll_15m_slot_on_clock,
+            )
+
+            maybe_roll_15m_slot_on_clock(self._app, nk)
+            composed = apply_composed_closed_15m_from_m1(self._app, nk, slot)
+            if composed is None:
+                try:
+                    self._emit(
+                        f"⚠️ [M1Poll] 틱말분 합성 실패/스킵 {nk} "
+                        f"slot={slot.strftime('%H:%M')} reason={reason}"
+                    )
+                except Exception:
+                    pass
+                return
+            o, h, l_, c, v = composed
+
+            self._mark_tick_tail_eval_done(nk, slot)
+
+            try:
+                q = getattr(self._app, "_closed_15m_db_queue", None)
+                if q is not None:
+                    q.enqueue(nk, slot, o, h, l_, c, v)
+            except Exception:
+                pass
+
+            try:
+                pool = getattr(self._app, "_closed_15m_eval_pool", None)
+                if pool is not None:
+                    pool.submit_eval(nk, slot)
+                    self._emit(
+                        f"ℹ️ [M1Poll] 틱말분 완성15 평가 {nk} "
+                        f"slot={slot.strftime('%H:%M')} reason={reason} "
+                        f"@ {datetime.now().strftime('%H:%M:%S.%f')[:-3]}"
+                    )
+            except Exception as ex:
+                self._emit(f"⚠️ [M1Poll] {nk} 틱말분 submit_eval 실패: {ex!r}")
+        except Exception as e:
+            try:
+                self._emit(f"⚠️ [M1Poll] 틱말분 평가 예외 ({nk}): {e!r}")
+            except Exception:
+                pass
 
     def _schedule_signal_eval(
         self, nk: str, *, close_px: float = 0.0, volume: float = 0.0
@@ -363,6 +587,15 @@ class RtWatchlistM1ApiPoller:
                     self._active_rounds = {
                         x for x in self._active_rounds if x == sk
                     }
+                # 슬롯 말분: 공식 REST 전에 틱 말분+wait 평가 예약(15:30 제외)
+                try:
+                    if (
+                        is_last_m1_open_of_15m_slot(closed_lab)
+                        and not is_krx_last_15m_slot(closed_lab)
+                    ):
+                        self._schedule_tick_tail_evals(codes, closed_lab)
+                except Exception:
+                    pass
                 if self._is_round_dormant(sk):
                     continue
                 with self._round_lock:
@@ -850,6 +1083,18 @@ class RtWatchlistM1ApiPoller:
         self._schedule_signal_eval(nk, close_px=c, volume=v)
         try:
             if is_last_m1_open_of_15m_slot(closed_lab):
+                # 틱 말분 ON + 일반 슬롯: 공식 말분 REST로 평가하지 않음
+                # 공식 말분 평가 토글 OFF(기본)면 15:30 외에도 스킵
+                use_tick = self._last_minute_from_ticks_enabled()
+                is_auc = False
+                try:
+                    is_auc = bool(is_krx_last_15m_slot(closed_lab))
+                except Exception:
+                    is_auc = False
+                if use_tick and not is_auc:
+                    return
+                if (not is_auc) and (not self._eval_on_official_last_m1_enabled()):
+                    return
                 self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
         except Exception:
             pass
@@ -861,6 +1106,7 @@ class RtWatchlistM1ApiPoller:
         슬롯 마지막 1분 반영 후 합성 15분으로 완성봉 평가.
 
         보유·합치도 임박 종목만 평가(공식15 교체 우선순위와 동일 필터).
+        틱 말분 경로로 이미 평가한 (code, slot) 은 스킵.
         """
         st = self._settings()
         try:
@@ -885,6 +1131,8 @@ class RtWatchlistM1ApiPoller:
         slot = krx_15m_label_for_m1_open(closed_lab)
         if slot is None:
             return
+        if self._is_tick_tail_eval_done(nk, slot):
+            return
 
         try:
             from core.realtime_official_bars_sync import (
@@ -904,10 +1152,10 @@ class RtWatchlistM1ApiPoller:
                 pass
             return
 
+        self._mark_tick_tail_eval_done(nk, slot)
+
         # DB upsert (비동기)
         try:
-            cb = getattr(self._app, "_rt15_bar_closed_cb", None)
-            # 콜백은 평가·공식교체도 포함하므로 DB 큐만 직접 enqueue
             q = getattr(self._app, "_closed_15m_db_queue", None)
             if q is not None:
                 q.enqueue(nk, slot, o, h, l_, c, v)
@@ -929,6 +1177,7 @@ class RtWatchlistM1ApiPoller:
                 self._emit(f"⚠️ [M1Poll] {nk} submit_eval 실패: {ex!r}")
             except Exception:
                 pass
+            return
 
     def _job_fetch_one(
         self,

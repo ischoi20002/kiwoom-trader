@@ -41,12 +41,12 @@ def stream_slot_end_datetime(now: datetime) -> pd.Timestamp:
 
 
 def _last_minute_from_ticks_enabled(app: Any) -> bool:
-    """마지막 1분을 틱 버킷으로 보정할지(기본 OFF — 공식 1분 권위)."""
+    """마지막 1분을 틱 버킷으로 보정할지(기본 ON — 공식14+틱1 합성)."""
     try:
         st = getattr(app, "settings", None) or {}
-        return bool(st.get("realtime_15m_last_minute_from_ticks", False))
+        return bool(st.get("realtime_15m_last_minute_from_ticks", True))
     except Exception:
-        return False
+        return True
 
 
 def compose_local_15m_ohlcv(

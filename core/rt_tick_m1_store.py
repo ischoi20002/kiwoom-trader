@@ -4,6 +4,8 @@
 
 - ``RtWatchlistM1ApiPoller`` 가 매 분 받은 완료 1분을 ``apply_official_closed_minute`` 로 반영합니다.
 - ``dataframe_for_window`` 는 신호용 15분 형성 행 집계에 사용합니다(진행 중 분은 기본 제외).
+- 슬롯 말분(``:14`` / ``15:19``)은 ``feed_tick``(0B fid20 체결시각)으로 틱 1분을 쌓아
+  공식14+틱1 합성에 사용합니다. ``15:30`` 단일가는 틱 누적 대상이 아닙니다.
 """
 
 from __future__ import annotations
@@ -47,8 +49,9 @@ class RtTickM1Store:
         self._revision: Dict[str, int] = {}
         # 틱으로만 쌓는 진행 중 1분(공식 completed 와 분리) — 15분 슬롯 마지막 1분 보정용
         self._tick_open: Dict[str, Dict[str, Any]] = {}
-        # 방금 막힌 틱 1분(슬롯 꼬리분) 스냅샷 — 벽시계 롤 직후 조회용
-        self._tick_sealed: Dict[str, Tuple[pd.Timestamp, float, float, float, float, float]] = {}
+        # 방금 막힌 틱 1분(슬롯 꼬리분) 스냅샷 — 합성·늦은 체결 amend 용
+        # code -> (open_lab, O, H, L, C, V, last_trade_dt|None, cum_v_start, cum_v_max)
+        self._tick_sealed: Dict[str, Tuple[Any, ...]] = {}
 
     def _emit_log(self, msg: str) -> None:
         if self._log is None:
@@ -60,16 +63,148 @@ class RtTickM1Store:
 
     @staticmethod
     def _is_slot_tail_minute(open_label: pd.Timestamp) -> bool:
-        """15분 슬롯의 마지막 1분(일반 :14, 15:19, 15:30)인지."""
-        try:
-            from utils.krx_bars import is_last_m1_open_of_15m_slot
+        """
+        15분 슬롯의 마지막 1분(일반 :14, 15:19)인지.
 
+        ``15:30`` 단일가는 틱 합성 대상이 아니므로 False.
+        """
+        try:
+            from utils.krx_bars import is_krx_last_15m_slot, is_last_m1_open_of_15m_slot
+
+            if is_krx_last_15m_slot(open_label):
+                return False
             return bool(is_last_m1_open_of_15m_slot(open_label))
         except Exception:
             try:
-                return int(pd.Timestamp(open_label).minute) % 15 == 14
+                t = pd.Timestamp(open_label)
+                if int(t.hour) == 15 and int(t.minute) == 30:
+                    return False
+                return int(t.minute) % 15 == 14
             except Exception:
                 return False
+
+    @staticmethod
+    def _new_tick_forming(
+        bucket: pd.Timestamp,
+        px: float,
+        cum_v: float,
+        trade_dt: datetime,
+    ) -> Dict[str, Any]:
+        return {
+            "bucket": bucket,
+            "O": px,
+            "H": px,
+            "L": px,
+            "C": px,
+            "V": 0.0,
+            "cum_v_start": cum_v,
+            "cum_v_max": cum_v,
+            "last_trade_dt": trade_dt,
+        }
+
+    @staticmethod
+    def _update_tick_ohlcv(
+        st: Dict[str, Any],
+        px: float,
+        cum_v: float,
+        trade_dt: datetime,
+    ) -> None:
+        """동일 분 틱 반영. 종가는 체결시각이 더 늦은 쪽 우선."""
+        try:
+            prev_td = st.get("last_trade_dt")
+            newer = True
+            if isinstance(prev_td, datetime):
+                newer = trade_dt >= prev_td
+            if newer:
+                st["C"] = px
+                st["last_trade_dt"] = trade_dt
+        except Exception:
+            st["C"] = px
+            st["last_trade_dt"] = trade_dt
+        try:
+            st["H"] = max(float(st.get("H", px) or px), px)
+            st["L"] = min(float(st.get("L", px) or px), px)
+            if float(st.get("L", 0) or 0) <= 0:
+                st["L"] = px
+        except Exception:
+            st["H"] = px
+            st["L"] = px
+        try:
+            start_v = float(st.get("cum_v_start", 0) or 0)
+            if start_v <= 0 and cum_v > 0:
+                cur_v = float(st.get("V", 0) or 0)
+                st["cum_v_start"] = max(0.0, cum_v - cur_v)
+                start_v = float(st.get("cum_v_start", 0) or 0)
+            prev_max = float(st.get("cum_v_max", 0) or 0)
+            if cum_v > prev_max:
+                st["cum_v_max"] = cum_v
+            if start_v > 0:
+                st["V"] = max(
+                    float(st.get("V", 0) or 0),
+                    max(0.0, float(st.get("cum_v_max", cum_v) or cum_v) - start_v),
+                )
+        except Exception:
+            pass
+
+    def _seal_tick_state_unlocked(self, nk: str, st: Dict[str, Any]) -> bool:
+        """진행 중 틱 봉을 sealed 스냅샷으로 확정. 성공 시 True."""
+        try:
+            bkt = pd.Timestamp(st.get("bucket")).floor("min")
+            c = float(st.get("C", 0) or 0)
+            if c <= 0 or not self._is_slot_tail_minute(bkt):
+                return False
+            o = float(st.get("O", 0) or 0)
+            h = float(st.get("H", 0) or 0)
+            l_ = float(st.get("L", 0) or 0)
+            if l_ <= 0:
+                l_ = c
+            v = max(0.0, float(st.get("V", 0) or 0))
+            self._tick_sealed[nk] = (
+                bkt,
+                o,
+                h,
+                l_,
+                c,
+                v,
+                st.get("last_trade_dt"),
+                float(st.get("cum_v_start", 0) or 0),
+                float(st.get("cum_v_max", 0) or 0),
+            )
+            return True
+        except Exception:
+            return False
+
+    def _amend_sealed_unlocked(
+        self,
+        nk: str,
+        open_lab: pd.Timestamp,
+        px: float,
+        cum_v: float,
+        trade_dt: datetime,
+    ) -> bool:
+        """이미 seal된 말분에 늦은 체결을 반영."""
+        try:
+            sealed = self._tick_sealed.get(nk)
+            if sealed is None:
+                return False
+            sb = pd.Timestamp(sealed[0]).floor("min")
+            if sb != pd.Timestamp(open_lab).floor("min"):
+                return False
+            st = {
+                "bucket": sb,
+                "O": float(sealed[1]),
+                "H": float(sealed[2]),
+                "L": float(sealed[3]),
+                "C": float(sealed[4]),
+                "V": float(sealed[5]),
+                "last_trade_dt": sealed[6] if len(sealed) > 6 else None,
+                "cum_v_start": float(sealed[7]) if len(sealed) > 7 else 0.0,
+                "cum_v_max": float(sealed[8]) if len(sealed) > 8 else float(sealed[5]),
+            }
+            self._update_tick_ohlcv(st, px, cum_v, trade_dt)
+            return self._seal_tick_state_unlocked(nk, st)
+        except Exception:
+            return False
 
     def feed_tick(
         self,
@@ -78,94 +213,112 @@ class RtTickM1Store:
         cum_volume: float,
         *,
         now: Optional[datetime] = None,
-    ) -> None:
+    ) -> Optional[pd.Timestamp]:
         """
-        틱으로 **진행 중 1분** OHLCV를 갱신합니다(공식 ``completed`` 와 분리).
+        틱으로 **슬롯 말분** OHLCV를 갱신합니다(공식 ``completed`` 와 분리).
 
-        15분 슬롯의 마지막 1분(및 그 직후 seal)에 쓰며, 공식 1분 경로를 덮어쓰지 않습니다.
-        ``cum_volume`` 은 당일 누적 거래량(키움 0B 등)을 가정합니다.
+        ``now`` 에는 **체결시각**(0B fid 20)을 넘기는 것을 권장.
+        분 라벨은 체결시각 ``floor(min)`` 이며, seal 이후 늦은 체결은 sealed를 amend합니다.
+
+        Returns:
+            다음 분 체결로 **말분이 새로 seal** 된 경우 그 open 라벨.
+            (``:00`` 틱 즉시 평가 트리거용). 그 외는 None.
+        """
+        sealed_on_next_min: Optional[pd.Timestamp] = None
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return None
+            px = float(price)
+            if px <= 0:
+                return None
+            cum_v = max(0.0, float(cum_volume))
+            trade_dt = now if isinstance(now, datetime) else datetime.now()
+            cur = _floor_minute(trade_dt)
+        except (TypeError, ValueError):
+            return None
+
+        with self._lock:
+            try:
+                # 이미 seal된 말분에 대한 늦은 체결
+                if self._amend_sealed_unlocked(nk, cur, px, cum_v, trade_dt):
+                    return None
+
+                st = self._tick_open.get(nk)
+                if st is None:
+                    if not self._is_slot_tail_minute(cur):
+                        return None
+                    self._tick_open[nk] = self._new_tick_forming(
+                        cur, px, cum_v, trade_dt
+                    )
+                    return None
+
+                bkt = pd.Timestamp(st.get("bucket")).floor("min")
+                if bkt == cur:
+                    self._update_tick_ohlcv(st, px, cum_v, trade_dt)
+                    return None
+
+                if cur < bkt:
+                    # forming이 다음 분인데 직전 말분 체결이 늦게 온 경우
+                    if self._is_slot_tail_minute(bkt):
+                        self._seal_tick_state_unlocked(nk, st)
+                        self._tick_open.pop(nk, None)
+                    self._amend_sealed_unlocked(nk, cur, px, cum_v, trade_dt)
+                    return None
+
+                # cur > bkt: 다음 분 체결 → 직전 말분이면 seal (즉시 평가 트리거)
+                try:
+                    if self._is_slot_tail_minute(bkt) and float(st.get("C", 0) or 0) > 0:
+                        if self._seal_tick_state_unlocked(nk, st):
+                            sealed_on_next_min = bkt
+                except Exception:
+                    pass
+                if not self._is_slot_tail_minute(cur):
+                    self._tick_open.pop(nk, None)
+                    return sealed_on_next_min
+                self._tick_open[nk] = self._new_tick_forming(cur, px, cum_v, trade_dt)
+                return sealed_on_next_min
+            except Exception as e:
+                self._emit_log(f"⚠️ [RtTickM1] feed_tick 예외 ({code}): {e!r}")
+                return None
+        return sealed_on_next_min
+
+    def seal_tick_tail_minute(self, code: str, open_label: Any) -> bool:
+        """
+        지정 말분 open_label 의 진행 중 틱 봉을 강제 seal.
+
+        이미 sealed 이고 동일 분이면 True. 데이터 없으면 False.
         """
         try:
             nk = canonical_stock_code(str(code).strip())
             if not nk:
-                return
-            px = float(price)
-            if px <= 0:
-                return
-            cum_v = max(0.0, float(cum_volume))
-            wall = now if now is not None else datetime.now()
-            cur = _floor_minute(wall)
+                return False
+            want = pd.Timestamp(open_label).floor("min")
+            if not self._is_slot_tail_minute(want):
+                return False
         except (TypeError, ValueError):
-            return
+            return False
 
         with self._lock:
             try:
+                sealed = self._tick_sealed.get(nk)
+                if sealed is not None:
+                    sb = pd.Timestamp(sealed[0]).floor("min")
+                    if sb == want and float(sealed[4]) > 0:
+                        return True
                 st = self._tick_open.get(nk)
                 if st is None:
-                    # 슬롯 꼬리분이 아니면 시작하지 않음(불필요 부하 방지)
-                    if not self._is_slot_tail_minute(cur):
-                        return
-                    self._tick_open[nk] = {
-                        "bucket": cur,
-                        "O": px,
-                        "H": px,
-                        "L": px,
-                        "C": px,
-                        "V": 0.0,
-                        "cum_v_start": cum_v,
-                    }
-                    return
-
+                    return False
                 bkt = pd.Timestamp(st.get("bucket")).floor("min")
-                if bkt != cur:
-                    # 분이 바뀌면 직전 버킷이 슬롯 꼬리분이면 seal
-                    try:
-                        if self._is_slot_tail_minute(bkt) and float(st.get("C", 0) or 0) > 0:
-                            self._tick_sealed[nk] = (
-                                bkt,
-                                float(st["O"]),
-                                float(st["H"]),
-                                float(st["L"]),
-                                float(st["C"]),
-                                max(0.0, float(st.get("V", 0) or 0)),
-                            )
-                    except Exception:
-                        pass
-                    if not self._is_slot_tail_minute(cur):
-                        self._tick_open.pop(nk, None)
-                        return
-                    self._tick_open[nk] = {
-                        "bucket": cur,
-                        "O": px,
-                        "H": px,
-                        "L": px,
-                        "C": px,
-                        "V": 0.0,
-                        "cum_v_start": cum_v,
-                    }
-                    return
-
-                # 동일 분: OHLC + 누계 차분 거래량
-                st["C"] = px
-                try:
-                    st["H"] = max(float(st.get("H", px) or px), px)
-                    st["L"] = min(float(st.get("L", px) or px), px)
-                    if float(st.get("L", 0) or 0) <= 0:
-                        st["L"] = px
-                except Exception:
-                    st["H"] = px
-                    st["L"] = px
-                try:
-                    start_v = float(st.get("cum_v_start", 0) or 0)
-                    if start_v <= 0 and cum_v > 0:
-                        cur_v = float(st.get("V", 0) or 0)
-                        st["cum_v_start"] = max(0.0, cum_v - cur_v)
-                    else:
-                        st["V"] = max(0.0, cum_v - start_v)
-                except Exception:
-                    pass
+                if bkt != want:
+                    return False
+                ok = self._seal_tick_state_unlocked(nk, st)
+                if ok:
+                    self._tick_open.pop(nk, None)
+                return ok
             except Exception as e:
-                self._emit_log(f"⚠️ [RtTickM1] feed_tick 예외 ({code}): {e!r}")
+                self._emit_log(f"⚠️ [RtTickM1] seal_tick_tail 예외 ({code}): {e!r}")
+                return False
 
     def tick_minute_ohlcv(
         self, code: str, open_label: Any
@@ -428,5 +581,7 @@ class RtTickM1Store:
             nk = canonical_stock_code(str(code).strip())
             with self._lock:
                 self._st.pop(nk, None)
+                self._tick_open.pop(nk, None)
+                self._tick_sealed.pop(nk, None)
         except (TypeError, ValueError):
             pass

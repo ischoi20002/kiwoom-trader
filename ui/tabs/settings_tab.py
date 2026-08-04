@@ -1171,16 +1171,32 @@ class SettingsTab:
             'S1: 로컬 15분 확정 시 평가',
             None,
             '',
-            'ON=완성 15분에서 S1·S2·청산. M1 폴러 ON이면 마지막 1분 완성(프로브) 후 평가',
+            'ON=완성 15분에서 S1·S2·청산',
             toggle_key='realtime_s1_eval_on_local_15m_close',
         )
         add_param_row(
             strat_f,
-            'M1 API 폴러(공식 1분)',
+            '틱 말분 합성 평가',
             None,
             '',
-            'ON(권장)=ka10080 1분봉으로 15분 합성·평가. 슬롯 마지막 1분 완성 시 보유·고합치도 우선',
-            toggle_key='realtime_watchlist_m1_api_poller_enabled',
+            'ON(권장)=슬롯 마지막 1분은 틱(체결시각). 다음분 :00 틱 시 즉시 평가, '
+            '무거래는 타임아웃(초). 앞 구간은 공식 1분 합성',
+            toggle_key='realtime_15m_last_minute_from_ticks',
+        )
+        add_param_row(
+            strat_f,
+            '틱말분 타임아웃',
+            'realtime_15m_tick_tail_wait_sec',
+            '초',
+            '다음분 :00 틱이 없을 때(무거래) 말분 종료 후 대기. 기본 1.5',
+        )
+        add_param_row(
+            strat_f,
+            '공식 말분 1분 평가',
+            None,
+            '',
+            'OFF(권장)=말분 평가는 틱 경로. ON=공식 ka10080 말분 1분 도착 시 평가(레거시)',
+            toggle_key='realtime_15m_eval_on_official_last_m1',
         )
         add_param_row(
             strat_f,

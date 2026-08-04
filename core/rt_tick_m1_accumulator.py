@@ -9,6 +9,12 @@
   (``realtime_1m_tick_*.db``) → 락·I/O 경합 없음.
 - ``bars_data`` / SignalEngine / M1 폴러 / 주문 경로에 개입하지 않음.
 
+분 라벨:
+- **0B fid 20(체결시간 HHMMSS)** 기준으로 1분 open 라벨을 잡는다.
+  수신 벽시계만 쓰면 분 경계 지연 체결이 다음 분 시가로 밀려 종가가 어긋난다.
+- fid 20 이 없으면 ``now``/벽시계로 폴백.
+- 이미 seal 된 직전 분에 늦은 체결이 오면 recent 버퍼에서 OHLC를 보정 후 재 upsert.
+
 빈 시점 배치:
 - 분 경계 직후 ``realtime_tick_m1_seal_defer_sec``(기본 4초) 동안은
   확정봉 DB flush 를 미룸 (프로브·공식 1분 조회·신호평가와 겹치지 않게).
@@ -26,6 +32,44 @@ import pandas as pd
 
 from utils.normalization import canonical_stock_code
 from utils.server_mode_paths import realtime_tick_1m_db_path
+from utils.krx_bars import is_krx_m1_closed_open_label
+
+
+def parse_0b_trade_datetime(
+    values: Any,
+    *,
+    ref: Optional[datetime] = None,
+) -> Optional[datetime]:
+    """
+    키움 실시간 0B ``fid 20``(체결시간) → datetime.
+
+    - 값 예: ``\"101809\"`` / ``101809`` → 당일 10:18:09
+    - 날짜는 ``ref``(기본 지금)의 연·월·일 사용 (정규장 중 자정 넘김 없음)
+    """
+    try:
+        vals = values if isinstance(values, dict) else {}
+        raw = vals.get("20")
+        if raw is None or raw == "":
+            raw = vals.get(20)
+        if raw is None or raw == "":
+            return None
+        s = str(raw).strip().replace(":", "")
+        # 부호·소수점 잔여 제거
+        s = s.replace("+", "").replace("-", "").split(".")[0]
+        if not s.isdigit():
+            return None
+        if len(s) > 6:
+            s = s[-6:]
+        s = s.zfill(6)
+        hh = int(s[0:2])
+        mm = int(s[2:4])
+        ss = int(s[4:6])
+        if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+            return None
+        base = ref if isinstance(ref, datetime) else datetime.now()
+        return base.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+    except Exception:
+        return None
 
 
 def tick_m1_accumulate_save_only_enabled(settings: Optional[Dict[str, Any]]) -> bool:
@@ -220,6 +264,8 @@ class RtTickM1Accumulator:
         self._log = logger_callback
         self._forming_lock = threading.RLock()
         self._forming: Dict[str, Dict[str, Any]] = {}
+        # seal 직후 늦은 체결(직전 분) 보정용 — 종목별 최근 open_lab → 봉 상태
+        self._recent_sealed: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # 분 경계 직후 DB flush 대기열 (프로브 구간 회피)
         self._pending_db: List[Tuple[str, pd.Timestamp, float, float, float, float, float]] = []
         self._pending_lock = threading.Lock()
@@ -312,7 +358,12 @@ class RtTickM1Accumulator:
         skip: bool = False,
         now: Optional[datetime] = None,
     ) -> None:
-        """비차단 인제스트. 매매 틱 경로에서 안전하게 호출."""
+        """
+        비차단 인제스트. 매매 틱 경로에서 안전하게 호출.
+
+        ``now`` 에는 **체결시각**(0B fid 20)을 넘기는 것을 권장.
+        없으면 수신 벽시계로 폴백한다.
+        """
         if skip:
             return
         try:
@@ -325,8 +376,8 @@ class RtTickM1Accumulator:
             if px <= 0:
                 return
             cum_v = max(0.0, float(cum_volume) if cum_volume is not None else 0.0)
-            wall = now if now is not None else datetime.now()
-            self._ingest_q.put((code, px, cum_v, wall))
+            trade_dt = now if isinstance(now, datetime) else datetime.now()
+            self._ingest_q.put((code, px, cum_v, trade_dt))
         except Exception:
             pass
 
@@ -440,28 +491,152 @@ class RtTickM1Accumulator:
 
     def _apply_tick_safe(self, item: Tuple[Any, ...]) -> None:
         try:
-            code, px, cum_v, wall = item[0], item[1], item[2], item[3]
+            code, px, cum_v, trade_dt = item[0], item[1], item[2], item[3]
         except (TypeError, ValueError, IndexError):
             return
         self._apply_tick(
             code,
             float(px),
             float(cum_v),
-            wall if isinstance(wall, datetime) else datetime.now(),
+            trade_dt if isinstance(trade_dt, datetime) else datetime.now(),
         )
+
+    @staticmethod
+    def _update_forming_ohlcv(
+        st: Dict[str, Any],
+        px: float,
+        cum_v: float,
+        trade_dt: datetime,
+    ) -> None:
+        """동일 분 봉에 틱 반영. 종가는 체결시각이 더 늦은 쪽을 우선."""
+        try:
+            prev_td = st.get("last_trade_dt")
+            newer = True
+            if isinstance(prev_td, datetime):
+                newer = trade_dt >= prev_td
+            if newer:
+                st["C"] = px
+                st["last_trade_dt"] = trade_dt
+        except Exception:
+            st["C"] = px
+            st["last_trade_dt"] = trade_dt
+        try:
+            st["H"] = max(float(st.get("H", px) or px), px)
+            st["L"] = min(float(st.get("L", px) or px), px)
+            if float(st.get("L", 0) or 0) <= 0:
+                st["L"] = px
+        except Exception:
+            st["H"] = px
+            st["L"] = px
+        try:
+            start_v = float(st.get("cum_v_start", 0) or 0)
+            if start_v <= 0 and cum_v > 0:
+                cur_v = float(st.get("V", 0) or 0)
+                st["cum_v_start"] = max(0.0, cum_v - cur_v)
+                start_v = float(st.get("cum_v_start", 0) or 0)
+            prev_max = float(st.get("cum_v_max", 0) or 0)
+            if cum_v > prev_max:
+                st["cum_v_max"] = cum_v
+            if start_v > 0:
+                st["V"] = max(
+                    float(st.get("V", 0) or 0),
+                    max(0.0, float(st.get("cum_v_max", cum_v) or cum_v) - start_v),
+                )
+        except Exception:
+            pass
+
+    def _remember_sealed(self, nk: str, st: Dict[str, Any]) -> None:
+        """seal 직후 늦은 체결 보정을 위해 최근 봉 스냅샷 보관."""
+        try:
+            open_lab = pd.Timestamp(st["open_lab"]).floor("min")
+            key = open_lab.strftime("%Y-%m-%d %H:%M:%S")
+            bucket = self._recent_sealed.setdefault(nk, {})
+            bucket[key] = {
+                "open_lab": open_lab,
+                "O": float(st.get("O", 0) or 0),
+                "H": float(st.get("H", 0) or 0),
+                "L": float(st.get("L", 0) or 0),
+                "C": float(st.get("C", 0) or 0),
+                "V": float(st.get("V", 0) or 0),
+                "cum_v_start": float(st.get("cum_v_start", 0) or 0),
+                "cum_v_max": float(
+                    st.get("cum_v_max", st.get("cum_v_start", 0)) or 0
+                ),
+                "last_trade_dt": st.get("last_trade_dt"),
+            }
+            if len(bucket) > 3:
+                for old_k in sorted(bucket.keys())[:-3]:
+                    bucket.pop(old_k, None)
+        except Exception:
+            pass
+
+    def _amend_recent_sealed(
+        self,
+        nk: str,
+        open_lab: pd.Timestamp,
+        px: float,
+        cum_v: float,
+        trade_dt: datetime,
+    ) -> bool:
+        """이미 seal된 직전 분 봉에 늦은 체결을 반영하고 DB 재 upsert."""
+        try:
+            key = pd.Timestamp(open_lab).floor("min").strftime("%Y-%m-%d %H:%M:%S")
+            bucket = self._recent_sealed.get(nk) or {}
+            st = bucket.get(key)
+            if st is None:
+                return False
+            self._update_forming_ohlcv(st, px, cum_v, trade_dt)
+            o = float(st.get("O", 0) or 0)
+            h = float(st.get("H", 0) or 0)
+            l_ = float(st.get("L", 0) or 0)
+            c = float(st.get("C", 0) or 0)
+            v = float(st.get("V", 0) or 0)
+            if c <= 0:
+                return False
+            if l_ <= 0:
+                l_ = c
+            self._enqueue_sealed_bar(
+                nk, pd.Timestamp(open_lab).floor("min"), o, h, l_, c, max(0.0, v)
+            )
+            return True
+        except Exception as e:
+            self._emit(f"⚠️ [Tick1m] amend 예외 ({nk}): {e!r}")
+            return False
+
+    def _new_forming(
+        self,
+        open_lab: pd.Timestamp,
+        px: float,
+        cum_v: float,
+        trade_dt: datetime,
+    ) -> Dict[str, Any]:
+        return {
+            "open_lab": open_lab,
+            "O": px,
+            "H": px,
+            "L": px,
+            "C": px,
+            "V": 0.0,
+            "cum_v_start": cum_v,
+            "cum_v_max": cum_v,
+            "last_trade_dt": trade_dt,
+        }
 
     def _apply_tick(
         self,
         code: Any,
         px: float,
         cum_v: float,
-        wall: datetime,
+        trade_dt: datetime,
     ) -> None:
         try:
             nk = canonical_stock_code(str(code).strip())
             if not nk or px <= 0:
                 return
-            open_lab = pd.Timestamp(wall).floor("min")
+            # 분 라벨 = 체결시각 floor (수신 벽시계 아님)
+            open_lab = pd.Timestamp(trade_dt).floor("min")
+            if not is_krx_m1_closed_open_label(open_lab):
+                return
         except (TypeError, ValueError):
             return
 
@@ -469,49 +644,27 @@ class RtTickM1Accumulator:
             try:
                 st = self._forming.get(nk)
                 if st is None:
-                    self._forming[nk] = {
-                        "open_lab": open_lab,
-                        "O": px,
-                        "H": px,
-                        "L": px,
-                        "C": px,
-                        "V": 0.0,
-                        "cum_v_start": cum_v,
-                    }
+                    if self._amend_recent_sealed(nk, open_lab, px, cum_v, trade_dt):
+                        return
+                    self._forming[nk] = self._new_forming(
+                        open_lab, px, cum_v, trade_dt
+                    )
                     return
 
                 prev = pd.Timestamp(st["open_lab"]).floor("min")
                 if prev == open_lab:
-                    st["C"] = px
-                    try:
-                        st["H"] = max(float(st.get("H", px) or px), px)
-                        st["L"] = min(float(st.get("L", px) or px), px)
-                        if float(st.get("L", 0) or 0) <= 0:
-                            st["L"] = px
-                    except Exception:
-                        st["H"] = px
-                        st["L"] = px
-                    try:
-                        start_v = float(st.get("cum_v_start", 0) or 0)
-                        if start_v <= 0 and cum_v > 0:
-                            cur_v = float(st.get("V", 0) or 0)
-                            st["cum_v_start"] = max(0.0, cum_v - cur_v)
-                        else:
-                            st["V"] = max(0.0, cum_v - start_v)
-                    except Exception:
-                        pass
+                    self._update_forming_ohlcv(st, px, cum_v, trade_dt)
                     return
 
-                self._seal_forming_unlocked(nk, st, seal_cum_v=cum_v)
-                self._forming[nk] = {
-                    "open_lab": open_lab,
-                    "O": px,
-                    "H": px,
-                    "L": px,
-                    "C": px,
-                    "V": 0.0,
-                    "cum_v_start": cum_v,
-                }
+                if open_lab < prev:
+                    # 분 경계 지연: 다음 분 forming 중 도착한 직전 분 체결
+                    self._amend_recent_sealed(nk, open_lab, px, cum_v, trade_dt)
+                    return
+
+                # open_lab > prev: 새 분 → 직전 분 seal
+                # 새 분 첫 틱의 cum_v 를 넣으면 직전 봉 거래량이 과대됨 → 기존 V/cum_v_max 사용
+                self._seal_forming_unlocked(nk, st, seal_cum_v=None)
+                self._forming[nk] = self._new_forming(open_lab, px, cum_v, trade_dt)
             except Exception as e:
                 self._emit(f"⚠️ [Tick1m] apply_tick 예외 ({code}): {e!r}")
 
@@ -550,6 +703,8 @@ class RtTickM1Accumulator:
     ) -> None:
         try:
             open_lab = pd.Timestamp(st["open_lab"]).floor("min")
+            if not is_krx_m1_closed_open_label(open_lab):
+                return
             o = float(st.get("O", 0) or 0)
             h = float(st.get("H", 0) or 0)
             l_ = float(st.get("L", 0) or 0)
@@ -566,6 +721,19 @@ class RtTickM1Accumulator:
                         v = max(0.0, float(seal_cum_v) - start_v)
                 except Exception:
                     pass
+            # 늦은 체결 보정을 위해 seal 스냅샷 보관 후 upsert
+            try:
+                st["V"] = max(0.0, v)
+                if seal_cum_v is not None:
+                    try:
+                        st["cum_v_max"] = max(
+                            float(st.get("cum_v_max", 0) or 0), float(seal_cum_v)
+                        )
+                    except Exception:
+                        pass
+                self._remember_sealed(nk, st)
+            except Exception:
+                pass
             self._enqueue_sealed_bar(nk, open_lab, o, h, l_, c, max(0.0, v))
         except Exception as e:
             self._emit(f"⚠️ [Tick1m] seal 예외 ({nk}): {e!r}")

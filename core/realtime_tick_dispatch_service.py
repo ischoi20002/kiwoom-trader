@@ -11,6 +11,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.terminal_trace import terminal_trace
@@ -232,18 +233,47 @@ class RealtimeTickDispatchService:
         - root가 없으면 즉시 SignalEngine 호출(호환/테스트용)
         """
         # 검증용 틱→1분: 비차단 put 만 (신호·주문과 격리)
+        # 신호용 슬롯 말분 틱 누적: RtTickM1Store.feed_tick (공식14+틱1 합성)
         try:
+            skip = bool(kwargs.get("_orderbook_only", False)) or bool(
+                kwargs.get("_official_sync_eval", False)
+            )
+            trade_time = kwargs.get("trade_time")
+            px = float(now_price) if now_price is not None else 0.0
+            vol = float(volume) if volume is not None else 0.0
             acc = getattr(self.app, "rt_tick_m1_accumulator", None)
             if acc is not None:
-                skip = bool(kwargs.get("_orderbook_only", False)) or bool(
-                    kwargs.get("_official_sync_eval", False)
-                )
                 acc.offer_tick(
                     code,
-                    float(now_price) if now_price is not None else 0.0,
-                    float(volume) if volume is not None else 0.0,
+                    px,
+                    vol,
                     skip=skip,
+                    now=trade_time,
                 )
+            if not skip:
+                m1s = getattr(self.app, "rt_tick_m1_store", None)
+                if m1s is not None:
+                    try:
+                        sealed_lab = m1s.feed_tick(
+                            code,
+                            px,
+                            vol,
+                            now=trade_time if isinstance(trade_time, datetime) else None,
+                        )
+                    except Exception:
+                        sealed_lab = None
+                    # 다음 분(:00) 체결로 말분이 seal → 즉시 완성15 평가
+                    if sealed_lab is not None:
+                        try:
+                            poller = getattr(
+                                self.app, "rt_watchlist_m1_api_poller", None
+                            )
+                            if poller is not None and hasattr(
+                                poller, "on_tick_tail_next_minute"
+                            ):
+                                poller.on_tick_tail_next_minute(code, sealed_lab)
+                        except Exception:
+                            pass
         except Exception:
             pass
         try:
