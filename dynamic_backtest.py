@@ -24,7 +24,12 @@ from backtest_engine import (
     settings_for_backtest,
 )
 from utils.fee_rates import fee_decimal_rates_backtest
-from utils.krx_bars import slice_m1_for_15m_end
+from utils.krx_bars import (
+    is_krx_auction_market_fill_slot,
+    is_krx_no_signal_eval_15m_slot,
+    krx_same_day_1530_label,
+    slice_m1_for_15m_end,
+)
 from core.bt_hp_signal_bridge import compute_intrabar_indicator_step
 from core.bt_hp_intrabar_unified import (
     evaluate_bt_hp_intrabar_unified,
@@ -37,7 +42,7 @@ from strategy.synthetic_realtime_fill import (
     synthesize_bid_ask_ratio_vectorized,
     synthesize_vol_power_vectorized,
 )
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 def _dual_track_new_candidates(
@@ -102,6 +107,13 @@ class DynamicBacktester:
     """[v16.0] 동적 포트폴리오 백테스터: 매일 종목을 새로 선정하고 1,000만원 예산을 공유하여 운용"""
     def __init__(self, settings, total_budget=None):
         self.settings = settings_for_backtest(settings)
+        self.bt_1530_signal_next_open_fill = bool(
+            self.settings.get("next_open_1530_enabled", False)
+        )
+        # 실시간 경로와 분리하기 위해 15:30 신호 허용은 동적 백테 내부 설정에만 주입한다.
+        self.settings["_bt_allow_1530_signal_eval"] = bool(
+            self.bt_1530_signal_next_open_fill
+        )
         self.db = DataManagerV2("trading_data.db")
         # [v16.7] 설정에서 예산 가져오기 (기본값 1000만)
         budget = total_budget if total_budget is not None else float(
@@ -694,9 +706,14 @@ class DynamicBacktester:
 
                 # 2-4-1. 매도 감시 (보유 중인 종목)
                 try:
-                    from utils.krx_bars import is_krx_no_signal_eval_15m_slot
-
                     _skip_eod_slot = bool(is_krx_no_signal_eval_15m_slot(curr_time))
+                    if (
+                        _skip_eod_slot
+                        and bool(self.bt_1530_signal_next_open_fill)
+                        and int(pd.Timestamp(curr_time).hour) == 15
+                        and int(pd.Timestamp(curr_time).minute) == 30
+                    ):
+                        _skip_eod_slot = False
                 except Exception:
                     _skip_eod_slot = False
                 for code, h_info in list(self.holdings.items()):
@@ -715,7 +732,7 @@ class DynamicBacktester:
                     )
                     
                     if res['action'] == 'EXIT':
-                        # TP인 경우 가격 보정 (고가 돌파 기준)
+                        # TP인 경우 가격 보정 (고가 돌파 기준) — 15:15 auction이면 아래에서 15:30 종가로 덮음
                         e_price = curr_row['Close']
                         if res['reason'] == 'TAKE_PROFIT':
                             tpp = res.get('tp_pct_applied')
@@ -730,11 +747,17 @@ class DynamicBacktester:
                                 tp_pct = float(self.settings.get(tp_key, 5.0))
                                 e_price = h_info['avg_p'] * (1 + tp_pct/100.0)
 
+                        fill = self._resolve_auction_market_fill(
+                            code, curr_time, d_df, e_price, res["reason"]
+                        )
+                        if fill is None:
+                            continue
+                        e_price, fill_ts, sell_reason = fill
                         self._execute_sell(
                             code,
                             e_price,
-                            curr_time,
-                            res["reason"],
+                            fill_ts,
+                            sell_reason,
                             indicator_row=curr_row,
                         )
                         today_sells.add(code)
@@ -742,7 +765,7 @@ class DynamicBacktester:
                 # 2-4-2. 매수 감시
                 buy_candidates = [c for c in monitoring_list if (c not in self.holdings or self.holdings.get(c, {}).get('entry_n', 0) < 2) and (c not in today_sells)]
                 if buy_candidates and not self.high_precision:
-                    # 15:15/15:30 슬롯 — S1·S2·청산 신호평가 스킵
+                    # 기본은 15:30 슬롯 스킵. 옵션 ON이면 익일 09:00 시가 체결 판정으로 이월한다.
                     if _skip_eod_slot:
                         buy_candidates = []
                     for code in sorted(buy_candidates, key=lambda c: code_to_rank.get(c, 999)):
@@ -848,12 +871,26 @@ class DynamicBacktester:
                                     reason = "SmartBuy|" + reason
 
                                 if can_execute:
+                                    buy_reason = reason
+                                    fill_px: Optional[float] = None
+                                    fill_ts = curr_time
+                                    fill = self._resolve_auction_market_fill(
+                                        code,
+                                        curr_time,
+                                        d_df,
+                                        float(d_df.loc[curr_time]["Close"]),
+                                        buy_reason,
+                                    )
+                                    if fill is None:
+                                        continue
+                                    fill_px, fill_ts, buy_reason = fill
                                     self._handle_buy_execution(
                                         code,
-                                        {"reason": reason, "Sig_Type": sig_type},
-                                        curr_time,
+                                        {"reason": buy_reason, "Sig_Type": sig_type},
+                                        fill_ts,
                                         d_df.loc[curr_time],
                                         indicator_row=d_df.loc[curr_time],
+                                        fill_price=fill_px,
                                     )
 
             # 2-5. 일일 정산 (당일 분봉이 없어도 보유는 평단으로 평가 — 공백일 누락으로 자산 괴리 방지)
@@ -927,6 +964,316 @@ class DynamicBacktester:
         except Exception:
             pass
         return self._finalize_backtest(interval)
+
+    def _lookup_same_day_1530_close(
+        self,
+        code: str,
+        curr_time: Any,
+        day_df: Any = None,
+    ) -> Optional[Tuple[pd.Timestamp, float]]:
+        """당일 bars_15m 15:30 Close. 없으면 None."""
+        try:
+            lab = krx_same_day_1530_label(curr_time)
+            if lab is None:
+                return None
+        except Exception:
+            return None
+
+        def _from_df(df: Any) -> Optional[Tuple[pd.Timestamp, float]]:
+            if df is None or getattr(df, "empty", True):
+                return None
+            try:
+                if lab in df.index:
+                    c = float(df.loc[lab, "Close"])
+                    if c > 0:
+                        return pd.Timestamp(lab), c
+            except Exception:
+                pass
+            try:
+                lab_f = pd.Timestamp(lab).floor("min")
+                for idx in df.index:
+                    try:
+                        t = pd.Timestamp(idx).floor("min")
+                        if (
+                            t.normalize() == lab_f.normalize()
+                            and int(t.hour) == 15
+                            and int(t.minute) == 30
+                        ):
+                            c = float(df.loc[idx, "Close"])
+                            if c > 0:
+                                return t, c
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return None
+
+        got = _from_df(day_df)
+        if got is not None:
+            return got
+        try:
+            cache = getattr(self, "cached_15m_data", None) or {}
+            for key in (code, str(code).zfill(6), str(code).strip()):
+                try:
+                    got = _from_df(cache.get(key))
+                    if got is not None:
+                        return got
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _tag_auction_reason(self, reason: Any) -> str:
+        """동시호가 시장가 체결 reason 접두사."""
+        try:
+            r = str(reason or "")
+        except Exception:
+            r = ""
+        if r.startswith("AUCTION_MKT|"):
+            return r
+        return f"AUCTION_MKT|src=15:15|{r}"
+
+    def _tag_next_open_reason(self, reason: Any) -> str:
+        """15:30 신호를 익일 09:00 시가 체결로 이월할 때의 reason 접두사."""
+        try:
+            r = str(reason or "")
+        except Exception:
+            r = ""
+        if r.startswith("NEXT_OPEN_0900|src=15:30|"):
+            return r
+        return f"NEXT_OPEN_0900|src=15:30|{r}"
+
+    def _lookup_next_day_0900_open(
+        self,
+        code: str,
+        curr_time: Any,
+        day_df: Any = None,
+    ) -> Optional[Tuple[pd.Timestamp, float]]:
+        """현재 슬롯 이후 최초 거래일의 09:00 시가를 찾는다."""
+        try:
+            curr_ts = pd.Timestamp(curr_time)
+        except Exception:
+            return None
+
+        def _from_df(df: Any) -> Optional[Tuple[pd.Timestamp, float]]:
+            if df is None or getattr(df, "empty", True):
+                return None
+            try:
+                idx = pd.DatetimeIndex(pd.to_datetime(df.index))
+                fut = idx[idx > curr_ts]
+            except Exception:
+                return None
+            for t in fut:
+                try:
+                    if int(t.hour) == 9 and int(t.minute) == 0:
+                        row = df.loc[t]
+                        px = float(row["Open"])
+                        if px > 0:
+                            return pd.Timestamp(t), px
+                except Exception:
+                    continue
+            return None
+
+        got = _from_df(day_df)
+        if got is not None:
+            return got
+        try:
+            cache = getattr(self, "cached_15m_data", None) or {}
+            for key in (code, str(code).zfill(6), str(code).strip()):
+                got = _from_df(cache.get(key))
+                if got is not None:
+                    return got
+        except Exception:
+            pass
+        return None
+
+    def _resolve_auction_market_fill(
+        self,
+        code: str,
+        curr_time: Any,
+        day_df: Any,
+        price: float,
+        reason: Any,
+    ) -> Optional[Tuple[float, Any, str]]:
+        """
+        일반 슬롯: (price, curr_time, reason) 그대로.
+        15:15: 당일 15:30 Close·시각·AUCTION_MKT reason. Close 없으면 None(주문 스킵).
+        """
+        try:
+            px = float(price)
+        except (TypeError, ValueError):
+            px = 0.0
+        try:
+            rsn = str(reason or "")
+        except Exception:
+            rsn = ""
+        try:
+            t = pd.Timestamp(curr_time)
+            if (
+                bool(self.bt_1530_signal_next_open_fill)
+                and int(t.hour) == 15
+                and int(t.minute) == 30
+            ):
+                got = self._lookup_next_day_0900_open(code, curr_time, day_df)
+                if got is None:
+                    return None
+                fill_ts, open_px = got
+                return float(open_px), fill_ts, self._tag_next_open_reason(rsn)
+        except Exception:
+            pass
+        try:
+            if not is_krx_auction_market_fill_slot(curr_time):
+                return px, curr_time, rsn
+        except Exception:
+            return px, curr_time, rsn
+        got = self._lookup_same_day_1530_close(code, curr_time, day_df)
+        if got is None:
+            return None
+        lab, close = got
+        return float(close), lab, self._tag_auction_reason(rsn)
+
+    def _process_1515_auction_completed_bar(
+        self,
+        code: str,
+        day_df_15m: Any,
+        today_sells: Any,
+        curr_15m_time: Any,
+    ) -> None:
+        """
+        고정밀 경로의 15:15: 1분 인트라바 체결 없이 완성 15:15 평가 → 15:30 종가 1회.
+        """
+        try:
+            if code in today_sells:
+                return
+            if day_df_15m is None or curr_15m_time not in day_df_15m.index:
+                return
+            curr_row = day_df_15m.loc[curr_15m_time]
+            h_info = self.holdings.get(code)
+
+            if h_info is not None:
+                try:
+                    hi = float(curr_row.get("High", curr_row.get("high", 0)) or 0)
+                    if hi > float(h_info.get("max_p", 0) or 0):
+                        h_info["max_p"] = hi
+                except Exception:
+                    pass
+                res = TradingStrategy.evaluate_position(
+                    code,
+                    float(curr_row["Close"]),
+                    h_info,
+                    self.settings,
+                    indicator_row=curr_row,
+                    current_time=curr_15m_time,
+                    is_realtime=False,
+                )
+                if isinstance(res, dict) and res.get("action") == "EXIT":
+                    e_price = float(curr_row["Close"])
+                    if res.get("reason") == "TAKE_PROFIT":
+                        tpp = res.get("tp_pct_applied")
+                        if tpp is not None:
+                            e_price = float(h_info["avg_p"]) * (
+                                1 + float(tpp) / 100.0
+                            )
+                    fill = self._resolve_auction_market_fill(
+                        code,
+                        curr_15m_time,
+                        day_df_15m,
+                        e_price,
+                        res.get("reason"),
+                    )
+                    if fill is None:
+                        return
+                    e_price, fill_ts, sell_reason = fill
+                    self._execute_sell(
+                        code,
+                        e_price,
+                        fill_ts,
+                        sell_reason,
+                        indicator_row=curr_row,
+                    )
+                    try:
+                        today_sells.add(code)
+                    except Exception:
+                        pass
+                    return
+
+                # S2 추매
+                try:
+                    entry_n = int(h_info.get("entry_n", 1) or 1)
+                except Exception:
+                    entry_n = 1
+                if entry_n < 2:
+                    try:
+                        ok_s2 = bool(
+                            self._check_s2_approval(
+                                code, h_info, curr_row, market_trend="UP"
+                            )
+                        )
+                    except Exception:
+                        ok_s2 = False
+                    if ok_s2:
+                        fill = self._resolve_auction_market_fill(
+                            code,
+                            curr_15m_time,
+                            day_df_15m,
+                            float(curr_row["Close"]),
+                            "ADDON(S2)|AUCTION",
+                        )
+                        if fill is None:
+                            return
+                        fill_px, fill_ts, buy_reason = fill
+                        self._handle_buy_execution(
+                            code,
+                            {
+                                "reason": buy_reason,
+                                "Sig_Type": h_info.get("sig_type", "TYPE_A"),
+                            },
+                            fill_ts,
+                            curr_row,
+                            indicator_row=curr_row,
+                            fill_price=fill_px,
+                        )
+                return
+
+            # S1 신규
+            try:
+                is_sig = bool(curr_row.get("Signal", False)) and bool(
+                    curr_row.get("Ready", False)
+                )
+            except Exception:
+                is_sig = False
+            if not is_sig:
+                return
+            sig_type = str(curr_row.get("Sig_Type", "TYPE_A"))
+            fill = self._resolve_auction_market_fill(
+                code,
+                curr_15m_time,
+                day_df_15m,
+                float(curr_row["Close"]),
+                "SIG",
+            )
+            if fill is None:
+                return
+            fill_px, fill_ts, buy_reason = fill
+            self._handle_buy_execution(
+                code,
+                {"reason": buy_reason, "Sig_Type": sig_type},
+                fill_ts,
+                curr_row,
+                indicator_row=curr_row,
+                fill_price=fill_px,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            try:
+                print(
+                    f"[Dynamic] 15:15 auction 처리 실패 ({code} @ {curr_15m_time}): {e!r}",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
     def _handle_buy_execution(
         self,
@@ -1317,6 +1664,18 @@ class DynamicBacktester:
                 return
             if day_df_15m is None or curr_15m_time not in day_df_15m.index:
                 return
+
+            # 15:30 — 신호평가·체결 스킵 / 15:15 — 인트라바 없이 15:30 종가 1회
+            try:
+                if is_krx_no_signal_eval_15m_slot(curr_15m_time):
+                    return
+                if is_krx_auction_market_fill_slot(curr_15m_time):
+                    self._process_1515_auction_completed_bar(
+                        code, day_df_15m, today_sells, curr_15m_time
+                    )
+                    return
+            except Exception:
+                pass
 
             curr_15m = day_df_15m.loc[curr_15m_time]
             full = self.cached_15m_data.get(code)

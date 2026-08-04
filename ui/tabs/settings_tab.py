@@ -467,6 +467,22 @@ class SettingsTab:
         add_param_row(cap_f, '백테 — 매도', 'sell_fee_bt', '%', '')
         add_param_row(
             cap_f,
+            'A/B 수 균형(신규 S1)',
+            None,
+            '',
+            '보유 종목 수 비율이 목표를 넘는 타입의 신규 S1만 차단(동률이면 허용). '
+            '매수금액 불변. A·B 둘 다 켤 때만 적용(BT·RT 공통)',
+            toggle_key='use_type_balance_gate',
+        )
+        add_param_row(
+            cap_f,
+            '  └ Type A 목표 비중',
+            'type_balance_a_pct',
+            '%',
+            'Type B 목표 = (100 − A)%. 예: 65이면 A 65%·B 35%에 가깝게 유지',
+        )
+        add_param_row(
+            cap_f,
             '선정 시 거래정지 종목 제외',
             None,
             '',
@@ -1173,6 +1189,14 @@ class SettingsTab:
             '',
             'ON=완성 15분에서 S1·S2·청산',
             toggle_key='realtime_s1_eval_on_local_15m_close',
+        )
+        add_param_row(
+            strat_f,
+            '15:30 신호 익일 시초 이월',
+            None,
+            '',
+            'ON=15:30 완성봉 S1·S2·EXIT 신호를 즉시 주문하지 않고, 익일 09:00 동시호가 지정가로 이월(BT·RT 공통)',
+            toggle_key='next_open_1530_enabled',
         )
         add_param_row(
             strat_f,

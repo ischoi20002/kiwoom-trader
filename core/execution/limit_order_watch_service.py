@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import threading
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -31,6 +31,8 @@ class LimitOrderMeta:
     # "confirm": kt00007 체결 확인만 / "amend": 호가 정정만 (확인 후 touch_quote_order_poll_sec 대기)
     touch_poll_phase: str = "confirm"
     touch_pending_logged: bool = False
+    # 15:15 동시호가 시장가 — 취소/정정 없이 kt00007 폴링만
+    auction_watch: bool = False
 
 
 class LimitOrderWatchService:
@@ -115,6 +117,109 @@ class LimitOrderWatchService:
         except (TypeError, ValueError):
             n = 3
         return max(1, min(n, 10))
+
+    def _get_auction_poll_ms(self) -> int:
+        """동시호가 시장가 kt00007 확인 간격(기본 30초)."""
+        try:
+            sec = float(
+                (getattr(self.app, "settings", None) or {}).get(
+                    "auction_market_order_poll_sec", 30.0
+                )
+            )
+        except (TypeError, ValueError):
+            sec = 30.0
+        sec = max(5.0, min(sec, 120.0))
+        return int(sec * 1000)
+
+    def _auction_watch_deadline_passed(self) -> bool:
+        """로컬 시각 기준 15:40 이후면 폴링 종료."""
+        try:
+            now = datetime.now()
+            return (now.hour > 15) or (now.hour == 15 and now.minute >= 40)
+        except Exception:
+            return False
+
+    def _schedule_auction_poll(self, order_no: str) -> None:
+        """동시호가 폴링 재예약."""
+        oid = str(order_no or "").strip()
+        if not oid:
+            return
+        root = self._get_root()
+        if root is None:
+            return
+        ms = self._get_auction_poll_ms()
+
+        def _acb() -> None:
+            def _worker() -> None:
+                try:
+                    self._on_auction_poll(oid)
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ [동시호가] 폴링 오류: {e}")
+                    except Exception:
+                        pass
+
+            try:
+                threading.Thread(target=_worker, daemon=True).start()
+            except Exception:
+                try:
+                    self._on_auction_poll(oid)
+                except Exception:
+                    pass
+
+        try:
+            with self._lock:
+                meta = self.limit_order_meta.get(oid)
+                if meta is None or not bool(getattr(meta, "auction_watch", False)):
+                    return
+                aid = root.after(ms, _acb)
+                meta.after_id = aid
+        except Exception:
+            pass
+
+    def _on_auction_poll(self, order_no: str) -> None:
+        """동시호가 시장가: 취소/정정 없이 kt00007 체결 확인만(15:40까지)."""
+        oid = str(order_no or "").strip()
+        if not oid:
+            return
+        meta: Optional[LimitOrderMeta] = None
+        try:
+            with self._lock:
+                meta = self.limit_order_meta.get(oid)
+        except Exception:
+            meta = None
+        if meta is None or not bool(getattr(meta, "auction_watch", False)):
+            return
+
+        # 체결 확인 (side 미설정 시 kind로 추론)
+        side = str(meta.touch_side or "").strip().lower()
+        if side not in ("buy", "sell"):
+            side = "sell" if str(meta.kind or "") == "exit_sell" else "buy"
+            try:
+                meta.touch_side = side
+            except Exception:
+                pass
+
+        try:
+            if self._touch_try_confirm_fill(meta, oid):
+                return
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [동시호가] 체결 확인 실패: {e}")
+            except Exception:
+                pass
+
+        if self._auction_watch_deadline_passed():
+            try:
+                self.log(
+                    f"ℹ️ [동시호가] 폴링 종료(15:40+) ord={oid} {meta.code} — "
+                    f"미확정 시 WS/잔고 동기화로 정리"
+                )
+            except Exception:
+                pass
+            return
+
+        self._schedule_auction_poll(oid)
 
     def _find_touch_entry(self, chain_key: str) -> Tuple[str, Optional[LimitOrderMeta]]:
         """``touch_chain_key`` 로 (현재 주문번호, 메타) 조회."""
@@ -775,6 +880,7 @@ class LimitOrderWatchService:
         touch_name: str = "",
         touch_reason: str = "",
         fill_price_hint: float = 0.0,
+        auction_watch: bool = False,
     ) -> None:
         """
         주문 접수 후 감시 등록.
@@ -784,6 +890,7 @@ class LimitOrderWatchService:
         - 터치호가: ``touch_quote_order_poll_sec`` 후 kt00007 체결 확인,
           미체결이면 즉시 정정(최대
           ``touch_quote_order_max_amends``), 정정 직후 다시 첫 확인 간격으로 루프.
+        - auction_watch: 동시호가 시장가 — 취소/정정 없이 15:40까지 kt00007 폴링.
         """
         oid = str(order_no or "").strip()
         nc = str(code).zfill(6)
@@ -795,7 +902,44 @@ class LimitOrderWatchService:
 
         root = self._get_root()
         after_id: Any = None
-        if cancel_on_timeout:
+        use_auction = bool(auction_watch)
+        if use_auction:
+            if root is None:
+                # 메타만 등록(체결 시 clear)
+                after_id = None
+            else:
+                ms = self._get_auction_poll_ms()
+
+                def _acb() -> None:
+                    def _worker() -> None:
+                        try:
+                            self._on_auction_poll(oid)
+                        except Exception as e:
+                            try:
+                                self.log(f"⚠️ [동시호가] 폴링 오류: {e}")
+                            except Exception:
+                                pass
+
+                    try:
+                        threading.Thread(target=_worker, daemon=True).start()
+                    except Exception:
+                        try:
+                            self._on_auction_poll(oid)
+                        except Exception as e:
+                            try:
+                                self.log(f"⚠️ [동시호가] 폴링 오류: {e}")
+                            except Exception:
+                                pass
+
+                try:
+                    self.log(
+                        f"⏱️ [동시호가] 시장가 감시 등록 ({kind}) {nc} ord={oid} "
+                        f"(취소·정정 없음 · {ms // 1000}초 간격 · 15:40까지)"
+                    )
+                except Exception:
+                    pass
+                after_id = root.after(ms, _acb)
+        elif cancel_on_timeout:
             if root is None:
                 return
             if touch_mode:
@@ -868,15 +1012,20 @@ class LimitOrderWatchService:
             kind=kind,
             after_id=after_id,
             qty=int(qty),
-            cancel_on_timeout=bool(cancel_on_timeout),
-            touch_mode=bool(touch_mode),
-            touch_chain_key=oid if touch_mode else "",
-            touch_side=str(touch_side or "").strip().lower() if touch_mode else "",
-            touch_name=str(touch_name or "") if touch_mode else "",
-            touch_reason=str(touch_reason or "") if touch_mode else "",
+            cancel_on_timeout=bool(cancel_on_timeout) and (not use_auction),
+            touch_mode=bool(touch_mode) and (not use_auction),
+            touch_chain_key=oid if touch_mode and not use_auction else "",
+            touch_side=str(touch_side or "").strip().lower()
+            if (touch_mode or use_auction)
+            else "",
+            touch_name=str(touch_name or "") if (touch_mode or use_auction) else "",
+            touch_reason=str(touch_reason or "") if (touch_mode or use_auction) else "",
             touch_amend_attempts_done=0,
-            fill_price_hint=float(fill_price_hint or 0) if touch_mode else 0.0,
-            touch_poll_phase="confirm" if touch_mode else "confirm",
+            fill_price_hint=float(fill_price_hint or 0)
+            if (touch_mode or use_auction)
+            else 0.0,
+            touch_poll_phase="confirm",
+            auction_watch=use_auction,
         )
 
         with self._lock:

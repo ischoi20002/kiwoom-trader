@@ -28,6 +28,79 @@ class OrderExecutionService:
         self._exit_retry_not_before: Dict[str, float] = {}
         self._exit_retry_skip_log_at: Dict[str, float] = {}
         self._exit_stale_pending_probe_at: Dict[str, float] = {}
+        # 15:15 완성봉 → 동시호가 시장가 주문 플래그(종목코드)
+        self._auction_mkt_codes: Set[str] = set()
+        # 15:30 완성봉 → 익일 09:00 지정가 주문 플래그(종목코드 -> 메타)
+        self._next_open_limit_orders: Dict[str, Dict[str, Any]] = {}
+
+    def mark_auction_market_order(self, code: Any) -> None:
+        """15:15 평가 경로: 다음 주문을 동시호가 시장가(03)로 낸다."""
+        try:
+            nc = str(canonical_stock_code(code) or code).zfill(6)
+            if len(nc) == 6:
+                self._auction_mkt_codes.add(nc)
+        except Exception:
+            pass
+
+    def _consume_auction_market(self, code: Any) -> bool:
+        """플래그를 소모하며 auction 여부 반환."""
+        try:
+            nc = str(canonical_stock_code(code) or code).zfill(6)
+            if nc in self._auction_mkt_codes:
+                self._auction_mkt_codes.discard(nc)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def mark_next_open_limit_order(
+        self,
+        code: Any,
+        limit_price: float,
+        *,
+        reason_prefix: str = "NEXT_OPEN_0900|src=15:30",
+    ) -> None:
+        """익일 시초 동시호가 지정가 주문 메타를 저장한다."""
+        try:
+            nc = str(canonical_stock_code(code) or code).zfill(6)
+            lp = float(limit_price)
+            if len(nc) == 6 and lp > 0:
+                self._next_open_limit_orders[nc] = {
+                    "limit_price": lp,
+                    "reason_prefix": str(reason_prefix or "NEXT_OPEN_0900|src=15:30"),
+                }
+        except Exception:
+            pass
+
+    def _consume_next_open_limit_order(self, code: Any) -> Optional[Dict[str, Any]]:
+        """저장된 익일 시초 지정가 주문 메타를 1회 소모한다."""
+        try:
+            nc = str(canonical_stock_code(code) or code).zfill(6)
+            meta = self._next_open_limit_orders.pop(nc, None)
+            return dict(meta) if isinstance(meta, dict) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _tag_auction_reason(reason: Any) -> str:
+        try:
+            r = str(reason or "")
+        except Exception:
+            r = ""
+        if r.startswith("AUCTION_MKT|"):
+            return r
+        return f"AUCTION_MKT|src=15:15|{r}"
+
+    @staticmethod
+    def _tag_next_open_reason(reason: Any, prefix: str = "NEXT_OPEN_0900|src=15:30") -> str:
+        try:
+            r = str(reason or "")
+        except Exception:
+            r = ""
+        pfx = str(prefix or "NEXT_OPEN_0900|src=15:30")
+        if r.startswith(pfx):
+            return r
+        return f"{pfx}|{r}"
 
     @property
     def s1_buy_order_pending_codes(self) -> Set[str]:
@@ -64,13 +137,17 @@ class OrderExecutionService:
                 "snap_bid_ask": "— / — (—)",
             }
 
-    def _realtime_live_order_spec(self) -> Tuple[str, str]:
+    def _realtime_live_order_spec(
+        self, *, auction_market: bool = False
+    ) -> Tuple[str, str]:
         """
         실시간 REST 주문 (주문유형, 실행 스타일).
 
-        터치호가(매수=매도1·매도=매수1 + 정정 루프)만 사용합니다.
-        체결 확인은 ``LimitOrderWatchService`` 단일 경로(kt00007)에서 처리합니다.
+        기본: 터치호가(매수=매도1·매도=매수1 + 정정 루프).
+        15:15 동시호가 경로: 시장가(03) — 터치 정정·미체결 취소 없음.
         """
+        if auction_market:
+            return ("03", "market")
         return ("00", "touch")
 
     def _realtime_order_type(self) -> str:
@@ -467,11 +544,23 @@ class OrderExecutionService:
         if order_ref <= 0:
             order_ref = sig_hint
 
-        ot, ex_style = self._realtime_live_order_spec()
+        next_open = self._consume_next_open_limit_order(code)
+        auction = self._consume_auction_market(code)
+        if next_open is not None:
+            ot, ex_style = ("00", "limit")
+            reason = self._tag_next_open_reason(
+                reason, str(next_open.get("reason_prefix", "NEXT_OPEN_0900|src=15:30"))
+            )
+        else:
+            ot, ex_style = self._realtime_live_order_spec(auction_market=auction)
+            if auction:
+                reason = self._tag_auction_reason(reason)
         adj_price = 0
         fresh_ask: float = 0.0
         try:
-            if ex_style == "touch":
+            if ex_style == "limit" and next_open is not None:
+                adj_price = int(round(float(next_open.get("limit_price", 0) or 0)))
+            elif ex_style == "touch":
                 _nc = str(code).zfill(6)
                 _bid, _ask = self.app.order_manager.fetch_best_bid_ask_rest(_nc)
                 if _ask is None or float(_ask) <= 0:
@@ -494,6 +583,11 @@ class OrderExecutionService:
                     return False
                 fresh_ask = float(_ask)
                 adj_price = int(round(fresh_ask))
+            elif ex_style == "market":
+                try:
+                    adj_price = int(round(float(order_ref)))
+                except Exception:
+                    adj_price = int(round(float(sig_hint))) if sig_hint > 0 else 0
             else:
                 adj_price = int(
                     self.app.order_manager.get_adjusted_price(
@@ -519,6 +613,7 @@ class OrderExecutionService:
                         "signal_hint_price": float(sig_hint),
                         "reason": reason,
                         "order_exec_style": ex_style,
+                        "auction_market": bool(auction),
                     },
                 )
         except Exception:
@@ -526,7 +621,10 @@ class OrderExecutionService:
 
         # [Stale-Signal Guard] 신호 평가가(sig_hint)가 신선한 시장 호가(fresh_ask)와 크게 벌어지면
         # 지연된 M1/틱으로 눌림목 등 신호가 오탐됐을 수 있으므로 진입을 생략한다(BT 대비 RT 과진입 방지).
-        if self._s1_stale_signal_gap_block(code, name, sig_hint, fresh_ask, reason):
+        # 동시호가 시장가 경로는 호가 의미가 약해 스킵.
+        if (not auction) and next_open is None and self._s1_stale_signal_gap_block(
+            code, name, sig_hint, fresh_ask, reason
+        ):
             return False
 
         if code in self.app.portfolio.virtual_positions:
@@ -626,7 +724,7 @@ class OrderExecutionService:
                     ord_no = self.app.order_manager.place_order(
                         code,
                         qty,
-                        order_ref,
+                        float(adj_price) if ex_style == "limit" else order_ref,
                         order_type="00",
                         side="buy",
                         name=name,
@@ -658,7 +756,9 @@ class OrderExecutionService:
                 pass
         else:
             fill_px = (
-                float(adj_price) if ex_style == "touch" else float(order_ref)
+                float(adj_price)
+                if ex_style in ("touch", "limit")
+                else float(order_ref)
             )
             snapshot = self.app.portfolio.capture_snapshot(
                 code, fill_px, reason=reason
@@ -687,12 +787,13 @@ class OrderExecutionService:
                     str(code).zfill(6),
                     "s1_buy",
                     qty=int(qty),
-                    cancel_on_timeout=(ot == "00"),
-                    touch_mode=(ex_style == "touch"),
+                    cancel_on_timeout=(ot == "00") and (not auction),
+                    touch_mode=(ex_style == "touch") and (not auction),
                     touch_side="buy",
                     touch_name=name,
                     touch_reason=reason,
                     fill_price=float(adj_price),
+                    auction_watch=bool(auction),
                 )
             except Exception as e:
                 self.log(f"⚠️ [Buy Signal] 미체결 감시 등록 실패: {e}")
@@ -761,11 +862,26 @@ class OrderExecutionService:
         
         use_mock = getattr(config, 'USE_MOCK', False)
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
-        ot, ex_style = self._realtime_live_order_spec()
+        next_open = self._consume_next_open_limit_order(code)
+        auction = self._consume_auction_market(code)
+        if next_open is not None:
+            ot, ex_style = ("00", "limit")
+            reason = self._tag_next_open_reason(
+                reason, str(next_open.get("reason_prefix", "NEXT_OPEN_0900|src=15:30"))
+            )
+        else:
+            ot, ex_style = self._realtime_live_order_spec(auction_market=auction)
+            if auction:
+                reason = self._tag_auction_reason(reason)
 
         if action == "EXIT":
             # 매도: 터치(매수1호가), 지정가(참고가−1틱), 시장가(03)
-            if ex_style == "touch":
+            if ex_style == "limit" and next_open is not None:
+                try:
+                    exit_ord_price = int(round(float(next_open.get("limit_price", 0) or 0)))
+                except Exception:
+                    exit_ord_price = 0
+            elif ex_style == "touch":
                 try:
                     _nk = str(code).zfill(6)
                     bid_t, ask_t = self.app.order_manager.fetch_best_bid_ask_rest(_nk)
@@ -783,6 +899,11 @@ class OrderExecutionService:
                 try:
                     exit_ord_price = int(round(float(bid_t)))
                 except (TypeError, ValueError):
+                    exit_ord_price = 0
+            elif ex_style == "market":
+                try:
+                    exit_ord_price = int(round(float(order_ref_px)))
+                except Exception:
                     exit_ord_price = 0
             else:
                 try:
@@ -892,7 +1013,7 @@ class OrderExecutionService:
                         ord_no = self.app.order_manager.place_order(
                             code,
                             sell_qty,
-                            order_ref_px,
+                            float(exit_ord_price) if ex_style == "limit" else order_ref_px,
                             order_type="00",
                             side="sell",
                             name=pos["name"],
@@ -949,12 +1070,13 @@ class OrderExecutionService:
                             str(code).zfill(6),
                             "exit_sell",
                             qty=int(sell_qty),
-                            cancel_on_timeout=(ot == "00"),
-                            touch_mode=(ex_style == "touch"),
+                            cancel_on_timeout=(ot == "00") and (not auction),
+                            touch_mode=(ex_style == "touch") and (not auction),
                             touch_side="sell",
                             touch_name=str(pos.get("name", "") or ""),
                             touch_reason=f"EXIT_{reason}",
                             fill_price=float(exit_ord_price),
+                            auction_watch=bool(auction),
                         )
                     except Exception as e:
                         self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
@@ -1096,7 +1218,7 @@ class OrderExecutionService:
             else:
                 fill_px = (
                     float(exit_ord_price)
-                    if ex_style == "touch"
+                    if ex_style in ("touch", "limit")
                     else float(order_ref_px)
                 )
                 snapshot = self.app.portfolio.capture_snapshot(
@@ -1152,7 +1274,12 @@ class OrderExecutionService:
             add_amt = self.app.portfolio.calculate_order_quantity(stage=2, is_simulation=not allow_order)
             if add_amt <= 0: return
 
-            if ex_style == "touch":
+            if ex_style == "limit" and next_open is not None:
+                try:
+                    adj_price = int(round(float(next_open.get("limit_price", 0) or 0)))
+                except Exception:
+                    adj_price = 0
+            elif ex_style == "touch":
                 try:
                     _nk2 = str(code).zfill(6)
                     bid_s2, ask_s2 = self.app.order_manager.fetch_best_bid_ask_rest(_nk2)
@@ -1214,7 +1341,7 @@ class OrderExecutionService:
                             ord_no = self.app.order_manager.place_order(
                                 code,
                                 add_qty,
-                                order_ref_px,
+                                float(adj_price) if ex_style == "limit" else order_ref_px,
                                 order_type="00",
                                 side="buy",
                                 name=pos['name'],
@@ -1261,12 +1388,15 @@ class OrderExecutionService:
                                 str(code).zfill(6),
                                 "s2_buy",
                                 qty=int(add_qty),
-                                cancel_on_timeout=(ot == "00"),
-                                touch_mode=(ex_style == "touch"),
+                                cancel_on_timeout=(ot == "00") and (not auction),
+                                touch_mode=(ex_style == "touch") and (not auction),
                                 touch_side="buy",
                                 touch_name=str(pos.get("name", "") or ""),
-                                touch_reason="Stage 2 Scaling",
+                                touch_reason=self._tag_auction_reason("Stage 2 Scaling")
+                                if auction
+                                else "Stage 2 Scaling",
                                 fill_price=float(adj_price),
+                                auction_watch=bool(auction),
                             )
                         except Exception as e:
                             self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
@@ -1356,8 +1486,11 @@ class OrderExecutionService:
         touch_name: str = "",
         touch_reason: str = "",
         fill_price: float = 0.0,
+        auction_watch: bool = False,
     ) -> None:
-        """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만. 터치: 체결 확인+정정 루프."""
+        """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만. 터치: 체결 확인+정정 루프.
+        auction_watch: 동시호가 시장가 — 취소/정정 없이 kt00007 폴링(15:30+까지).
+        """
         try:
             self.limit_order_watch_service.register(
                 order_no=order_no,
@@ -1370,6 +1503,7 @@ class OrderExecutionService:
                 touch_name=touch_name,
                 touch_reason=touch_reason,
                 fill_price_hint=float(fill_price or 0),
+                auction_watch=bool(auction_watch),
             )
         except Exception as e:
             try:

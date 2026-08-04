@@ -565,6 +565,66 @@ class SignalEngine:
         except Exception:
             return True
 
+    def _next_open_1530_enabled(self) -> bool:
+        """15:30 신호를 익일 09:00 시초 동시호가 지정가로 이월할지."""
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return bool(st.get("next_open_1530_enabled", False))
+        except Exception:
+            return False
+
+    def _queue_next_open_buy_signal(
+        self,
+        *,
+        code: str,
+        name: str,
+        sig_type: str,
+        limit_price: float,
+        bar_ts: Any,
+    ) -> bool:
+        """15:30 S1 신호를 익일 시초 동시호가 대기 액션으로 저장."""
+        try:
+            svc = getattr(self.app, "next_open_pending_action_service", None)
+            if svc is None:
+                return False
+            svc.queue_buy_signal(
+                code=str(code).zfill(6),
+                name=str(name or ""),
+                sig_type=str(sig_type or "TYPE_A"),
+                limit_price=float(limit_price),
+                source_slot=bar_ts,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _queue_next_open_strategy_action(
+        self,
+        *,
+        code: str,
+        action: str,
+        reason: str,
+        limit_price: float,
+        profit_ratio: float,
+        bar_ts: Any,
+    ) -> bool:
+        """15:30 S2/청산 신호를 익일 시초 동시호가 대기 액션으로 저장."""
+        try:
+            svc = getattr(self.app, "next_open_pending_action_service", None)
+            if svc is None:
+                return False
+            svc.queue_strategy_action(
+                code=str(code).zfill(6),
+                action=str(action or ""),
+                reason=str(reason or ""),
+                limit_price=float(limit_price),
+                profit_ratio=float(profit_ratio),
+                source_slot=bar_ts,
+            )
+            return True
+        except Exception:
+            return False
+
     def _wake_tick_main_action_poller(self) -> None:
         """백그라운드 스레드에서 큐 적재 후 메인 폴러를 깨웁니다."""
         try:
@@ -756,7 +816,11 @@ class SignalEngine:
             try:
                 from utils.krx_bars import is_krx_no_signal_eval_15m_slot
 
-                if is_krx_no_signal_eval_15m_slot(bar_ts):
+                if is_krx_no_signal_eval_15m_slot(bar_ts) and not (
+                    self._next_open_1530_enabled()
+                    and pd.Timestamp(bar_ts).hour == 15
+                    and pd.Timestamp(bar_ts).minute == 30
+                ):
                     return
             except Exception:
                 pass
@@ -975,59 +1039,99 @@ class SignalEngine:
             ):
                 return
 
+            # 15:30: 익일 09:00 시초 동시호가 지정가로 이월
+            try:
+                if (
+                    self._next_open_1530_enabled()
+                    and pd.Timestamp(bar_ts).hour == 15
+                    and pd.Timestamp(bar_ts).minute == 30
+                ):
+                    ok_next = self._queue_next_open_buy_signal(
+                        code=nk,
+                        name=str(info.get("name", "")),
+                        sig_type=str(sig_type),
+                        limit_price=float(now_price),
+                        bar_ts=bar_ts,
+                    )
+                    if ok_next:
+                        return
+            except Exception:
+                pass
+
+            # 15:15 동시호가: 라이브 터치 게이트 스킵 + 시장가 플래그
+            _auction_1515 = False
+            try:
+                from utils.krx_bars import is_krx_auction_market_fill_slot
+
+                _auction_1515 = bool(is_krx_auction_market_fill_slot(bar_ts))
+            except Exception:
+                _auction_1515 = False
+            if _auction_1515:
+                try:
+                    oes = getattr(self.app, "order_execution_service", None)
+                    if oes is None:
+                        tc = getattr(self.app, "trading_controller", None)
+                        oes = getattr(tc, "order_execution_service", None) if tc else None
+                    if oes is not None and hasattr(oes, "mark_auction_market_order"):
+                        oes.mark_auction_market_order(nk)
+                except Exception:
+                    pass
+
             # 완성봉 신호 유지 + 주문 직전 라이브가 게이트 (추격/이탈·MA20)
+            # 동시호가 구간은 매도1호가 의미가 약해 게이트 생략
             try:
                 bar_close = float(closed_df["Close"].iloc[-1])
             except Exception:
                 bar_close = float(now_price or 0.0)
-            gate_ok, live_px, gate_reason = self._s1_live_confirm_gate(
-                nk,
-                info,
-                bar_close,
-                last_row if isinstance(last_row, dict) else {},
-                slot_key=slot_key,
-            )
-            if not gate_ok:
-                try:
-                    msg = f"라이브가 게이트: {gate_reason}"
-                    info["confluence"] = msg
-                    info["status_text"] = msg
-                except Exception:
-                    pass
-                try:
-                    sl = getattr(self.app, "session_logger", None)
-                    if sl:
-                        sl.log(
-                            "s1_live_gate_skip",
-                            {
-                                "code": nk,
-                                "name": str(info.get("name", "")),
-                                "slot": slot_key,
-                                "bar_close": float(bar_close),
-                                "live": float(live_px or 0.0),
-                                "reason": str(gate_reason),
-                            },
+            if not _auction_1515:
+                gate_ok, live_px, gate_reason = self._s1_live_confirm_gate(
+                    nk,
+                    info,
+                    bar_close,
+                    last_row if isinstance(last_row, dict) else {},
+                    slot_key=slot_key,
+                )
+                if not gate_ok:
+                    try:
+                        msg = f"라이브가 게이트: {gate_reason}"
+                        info["confluence"] = msg
+                        info["status_text"] = msg
+                    except Exception:
+                        pass
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "s1_live_gate_skip",
+                                {
+                                    "code": nk,
+                                    "name": str(info.get("name", "")),
+                                    "slot": slot_key,
+                                    "bar_close": float(bar_close),
+                                    "live": float(live_px or 0.0),
+                                    "reason": str(gate_reason),
+                                },
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        self.app.log(
+                            f"ℹ️ [S1] {nk} 라이브가 게이트 스킵 — {gate_reason}"
                         )
-                except Exception:
-                    pass
-                try:
-                    self.app.log(
-                        f"ℹ️ [S1] {nk} 라이브가 게이트 스킵 — {gate_reason}"
-                    )
-                except Exception:
-                    pass
-                return
-            if live_px > 0:
-                now_price = float(live_px)
-                try:
-                    ma60 = float(
-                        self._to_scalar(last_row.get("MA60", 0), 0.0)
-                    )
-                    ma60_ratio = (
-                        (now_price / ma60 - 1.0) * 100.0 if ma60 > 0 else 0.0
-                    )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+                    return
+                if live_px > 0:
+                    now_price = float(live_px)
+                    try:
+                        ma60 = float(
+                            self._to_scalar(last_row.get("MA60", 0), 0.0)
+                        )
+                        ma60_ratio = (
+                            (now_price / ma60 - 1.0) * 100.0 if ma60 > 0 else 0.0
+                        )
+                    except Exception:
+                        pass
 
             # 주문 패스트패스(Tk 메인 큐 우회) — 틱 경로와 분리
             try:
@@ -1075,7 +1179,11 @@ class SignalEngine:
             try:
                 from utils.krx_bars import is_krx_no_signal_eval_15m_slot
 
-                if is_krx_no_signal_eval_15m_slot(bar_ts):
+                if is_krx_no_signal_eval_15m_slot(bar_ts) and not (
+                    self._next_open_1530_enabled()
+                    and pd.Timestamp(bar_ts).hour == 15
+                    and pd.Timestamp(bar_ts).minute == 30
+                ):
                     return
             except Exception:
                 pass
@@ -1210,8 +1318,45 @@ class SignalEngine:
                 return
 
             order_px = float(close_px)
+            try:
+                if (
+                    self._next_open_1530_enabled()
+                    and pd.Timestamp(bar_ts).hour == 15
+                    and pd.Timestamp(bar_ts).minute == 30
+                ):
+                    ok_next = self._queue_next_open_strategy_action(
+                        code=nk,
+                        action=act,
+                        reason=str(res.get("reason") or ""),
+                        limit_price=float(order_px),
+                        profit_ratio=float(res.get("profit_ratio", 0) or 0),
+                        bar_ts=bar_ts,
+                    )
+                    if ok_next:
+                        return
+            except Exception:
+                pass
+            # 15:15 동시호가: 라이브 게이트 스킵 + 시장가 플래그
+            _auction_1515 = False
+            try:
+                from utils.krx_bars import is_krx_auction_market_fill_slot
+
+                _auction_1515 = bool(is_krx_auction_market_fill_slot(bar_ts))
+            except Exception:
+                _auction_1515 = False
+            if _auction_1515:
+                try:
+                    oes = getattr(self.app, "order_execution_service", None)
+                    if oes is None:
+                        tc = getattr(self.app, "trading_controller", None)
+                        oes = getattr(tc, "order_execution_service", None) if tc else None
+                    if oes is not None and hasattr(oes, "mark_auction_market_order"):
+                        oes.mark_auction_market_order(nk)
+                except Exception:
+                    pass
+
             # EXIT/STAGE2: S1과 동일 — 주문 직전 라이브가 게이트, 통과 시 라이브가 주문
-            if act in ("EXIT", "STAGE2"):
+            if act in ("EXIT", "STAGE2") and (not _auction_1515):
                 try:
                     gate_ok, live_px, gate_reason = self._s1_live_confirm_gate(
                         nk,
@@ -1307,7 +1452,11 @@ class SignalEngine:
         try:
             from utils.krx_bars import is_krx_no_signal_eval_15m_slot
 
-            if is_krx_no_signal_eval_15m_slot(bar_ts):
+            if is_krx_no_signal_eval_15m_slot(bar_ts) and not (
+                self._next_open_1530_enabled()
+                and pd.Timestamp(bar_ts).hour == 15
+                and pd.Timestamp(bar_ts).minute == 30
+            ):
                 return
         except Exception:
             pass

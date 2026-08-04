@@ -316,15 +316,40 @@ def evaluate_bt_hp_intrabar_unified(
             return out
 
         curr_15m = full_15m.iloc[-1]
-        # 15:15/15:30 완성 슬롯 — S1·S2·청산 전부 생략(max_p만 갱신)
+        # 15:30 — 평가/체결 생략. 15:15 — 인트라바 체결 금지(호출측 auction fill).
         try:
-            from utils.krx_bars import is_krx_no_signal_eval_15m_slot
-
-            _skip_eod_sig = bool(
-                is_krx_no_signal_eval_15m_slot(getattr(curr_15m, "name", None) or full_15m.index[-1])
+            from utils.krx_bars import (
+                is_krx_auction_market_fill_slot,
+                is_krx_no_signal_eval_15m_slot,
             )
+
+            _slot_ts = getattr(curr_15m, "name", None) or full_15m.index[-1]
+            _skip_eod_sig = bool(is_krx_no_signal_eval_15m_slot(_slot_ts))
+            _auction_1515 = bool(is_krx_auction_market_fill_slot(_slot_ts))
         except Exception:
             _skip_eod_sig = False
+            _auction_1515 = False
+        if _skip_eod_sig or _auction_1515:
+            out["ok"] = True
+            out["reason"] = (
+                "eod_slot_skip" if _skip_eod_sig else "auction_1515_defer_to_caller"
+            )
+            if isinstance(pos_h, dict) and pos_h is not None:
+                try:
+                    pos_sim_mp = copy.deepcopy(pos_h)
+                    for m1_idx in range(len(m1_chunk)):
+                        m1_r = m1_chunk.iloc[m1_idx]
+                        hi = _m1_hi_for_maxp(m1_r)
+                        mp = float(pos_sim_mp.get("max_p", 0) or 0)
+                        if hi > mp:
+                            pos_sim_mp["max_p"] = hi
+                    out["pos_max_p"] = float(pos_sim_mp.get("max_p", 0) or 0)
+                except Exception:
+                    pass
+            return out
+
+        # 루프 내 EOD 스킵 플래그(상위 early-return 이후엔 항상 False)
+        _skip_eod_sig = False
         pos_sim: Optional[Dict[str, Any]] = (
             copy.deepcopy(pos_h) if isinstance(pos_h, dict) else None
         )

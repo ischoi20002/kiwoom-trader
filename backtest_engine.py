@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import FinanceDataReader as fdr
 import os
@@ -2458,12 +2458,15 @@ class SimpleBacktester:
         - 미보유 S1: 15분 벡터 신호를 그대로 덮어쓰지 않고, 1~k분 누적 가상 15분봉으로
           ``calculate_indicators`` + ``get_buy_signals_detailed`` 를 다시 돌려 인과적으로 진입 시점만 잡음.
         """
-        # 15:15/15:30 슬롯: S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
+        # 15:30 슬롯: S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
+        # 15:15은 인트라바 체결 없이 호출측에서 15:30 종가 auction fill.
         try:
-            _skip_eod_sig = (int(hour) == 15 and int(minute) in (15, 30))
+            _skip_eod_sig = int(hour) == 15 and int(minute) == 30
+            _auction_1515 = int(hour) == 15 and int(minute) == 15
         except Exception:
             _skip_eod_sig = False
-        if _skip_eod_sig:
+            _auction_1515 = False
+        if _skip_eod_sig or _auction_1515:
             signal_shifted = False
             try:
                 pos = params.get("position")
@@ -2641,13 +2644,17 @@ class SimpleBacktester:
         curr_high = high_vals[i]
         curr_low = low_vals[i]
 
-        # 15:15/15:30 — S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
+        # 15:30 — S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
         try:
             _skip_eod_sig = (
-                int(time_hours[i]) == 15 and int(time_minutes[i]) in (15, 30)
+                int(time_hours[i]) == 15 and int(time_minutes[i]) == 30
+            )
+            _auction_1515 = (
+                int(time_hours[i]) == 15 and int(time_minutes[i]) == 15
             )
         except Exception:
             _skip_eod_sig = False
+            _auction_1515 = False
         if _skip_eod_sig:
             try:
                 pos = params.get("position")
@@ -2683,6 +2690,18 @@ class SimpleBacktester:
             except Exception:
                 pass
             return params
+
+        # 15:15 — 인트라바 없이 완성봉 평가 → 당일 15:30 종가 체결
+        if _auction_1515:
+            return self._sim_loop_step_auction_1515(
+                i,
+                close_vals,
+                high_vals,
+                time_indices,
+                indicators,
+                signal_shifted,
+                params,
+            )
         
         # 1. High Precision Entry/Exit/Addon Monitoring
         if high_precision and m1_info is not None:
@@ -2856,6 +2875,205 @@ class SimpleBacktester:
     
         return params
 
+
+    def _lookup_same_day_1530_close(
+        self, curr_date: Any
+    ) -> Optional[Tuple[Any, float]]:
+        """당일 15:30 Close. 없으면 None."""
+        try:
+            from utils.krx_bars import krx_same_day_1530_label
+
+            lab = krx_same_day_1530_label(curr_date)
+            if lab is None:
+                return None
+        except Exception:
+            return None
+        df = getattr(self, "df", None)
+        if df is None or getattr(df, "empty", True):
+            return None
+        try:
+            if lab in df.index:
+                c = float(df.loc[lab, "Close"])
+                if c > 0:
+                    return lab, c
+        except Exception:
+            pass
+        try:
+            lab_n = pd.Timestamp(lab).normalize()
+            for idx in df.index:
+                try:
+                    t = pd.Timestamp(idx)
+                    if (
+                        t.normalize() == lab_n
+                        and int(t.hour) == 15
+                        and int(t.minute) == 30
+                    ):
+                        c = float(df.loc[idx, "Close"])
+                        if c > 0:
+                            return t, c
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _tag_auction_reason(self, reason: Any) -> str:
+        try:
+            r = str(reason or "")
+        except Exception:
+            r = ""
+        if r.startswith("AUCTION_MKT|"):
+            return r
+        return f"AUCTION_MKT|src=15:15|{r}"
+
+    def _resolve_auction_market_fill(
+        self, curr_date: Any, price: float, reason: Any
+    ) -> Optional[Tuple[float, Any, str]]:
+        """15:15 → 15:30 Close·시각. Close 없으면 None."""
+        try:
+            from utils.krx_bars import is_krx_auction_market_fill_slot
+
+            if not is_krx_auction_market_fill_slot(curr_date):
+                return float(price), curr_date, str(reason or "")
+        except Exception:
+            return float(price), curr_date, str(reason or "")
+        got = self._lookup_same_day_1530_close(curr_date)
+        if got is None:
+            return None
+        lab, close = got
+        return float(close), lab, self._tag_auction_reason(reason)
+
+    def _sim_loop_step_auction_1515(
+        self,
+        i: int,
+        close_vals: Any,
+        high_vals: Any,
+        time_indices: Any,
+        indicators: Any,
+        signal_shifted: Any,
+        params: dict,
+    ) -> dict:
+        """완성 15:15 평가 후 당일 15:30 종가로 1회 체결(인트라바 없음)."""
+        try:
+            curr_close = float(close_vals[i])
+            curr_date = time_indices[i]
+            curr_high = float(high_vals[i])
+        except Exception:
+            return params
+
+        if params.get("position") is not None:
+            pos = params["position"]
+            try:
+                if curr_high > float(pos.get("max_price", 0) or 0):
+                    pos["max_price"] = curr_high
+            except Exception:
+                pass
+
+            exit_res = self._check_exits_optimized(
+                curr_date,
+                curr_close,
+                curr_high,
+                curr_close,
+                pos,
+                indicators=indicators,
+                i=i,
+            )
+            if exit_res:
+                fill = self._resolve_auction_market_fill(
+                    curr_date, float(exit_res["price"]), exit_res["reason"]
+                )
+                if fill is None:
+                    return params
+                px, fill_ts, rsn = fill
+                return self._execute_sell(
+                    fill_ts, px, rsn, params, indicators=indicators, i=i
+                )
+
+            if int(pos.get("stage", 1) or 1) == 1:
+                if self._check_s2_approval_v2(
+                    pos, indicators, i, curr_dt=time_indices[i]
+                ):
+                    can_buy_s2 = True
+                    _use_s2_sb = (
+                        self.use_sb_s2_b
+                        if pos.get("sig_type") == "TYPE_B"
+                        else self.use_sb_s2_a
+                    )
+                    if _use_s2_sb:
+                        try:
+                            ab_ratio = indicators["ask_bid_ratio"][i]
+                            v_power = indicators["vol_power"][i]
+                            if ab_ratio < self.sb_ba or v_power < self.sb_vp:
+                                can_buy_s2 = False
+                        except Exception:
+                            can_buy_s2 = False
+                    if can_buy_s2:
+                        s2_reason = (
+                            f"ADDON(S2)|R:{indicators['RSI'][i]:.1f}|"
+                            f"M:{indicators['MACD'][i]:.1f}|"
+                            f"O:{indicators['OSC'][i]:.2f}|"
+                            f"V:{indicators['Volume'][i]}"
+                        )
+                        if _use_s2_sb:
+                            s2_reason = "SmartBuy|" + s2_reason
+                        fill = self._resolve_auction_market_fill(
+                            curr_date, float(curr_close), s2_reason
+                        )
+                        if fill is None:
+                            return params
+                        px, fill_ts, rsn = fill
+                        return self._execute_buy(
+                            fill_ts,
+                            px,
+                            "BUY_2ND",
+                            params,
+                            stage=2,
+                            reason=rsn,
+                            indicators=indicators,
+                            i=i,
+                        )
+            return params
+
+        try:
+            has_sig = bool(signal_shifted[i])
+        except Exception:
+            has_sig = False
+        if has_sig:
+            sig_type = indicators["Sig_Type"][i]
+            is_ok = True
+            use_sb_for_type = (
+                self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
+            )
+            if use_sb_for_type:
+                try:
+                    ab_ratio = indicators["ask_bid_ratio"][i]
+                    v_power = indicators["vol_power"][i]
+                    if ab_ratio < self.sb_ba or v_power < self.sb_vp:
+                        is_ok = False
+                except Exception:
+                    is_ok = False
+            if is_ok:
+                reason = "SmartBuy|SIG" if use_sb_for_type else "SIG"
+                fill = self._resolve_auction_market_fill(
+                    curr_date, float(curr_close), reason
+                )
+                if fill is None:
+                    return params
+                px, fill_ts, rsn = fill
+                return self._execute_buy(
+                    fill_ts,
+                    px,
+                    "BUY_1ST",
+                    params,
+                    stage=1,
+                    entry_idx=i,
+                    max_p=float(curr_high),
+                    reason=rsn,
+                    indicators=indicators,
+                    i=i,
+                    sig_type=sig_type,
+                )
+        return params
 
     def _execute_buy(self, date, price, action, params, stage=1, entry_idx=None, max_p=None, reason="", indicators=None, i=None, sig_type='TYPE_A'):
         """매수 실행 및 params 업데이트"""

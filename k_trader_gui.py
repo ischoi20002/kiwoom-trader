@@ -68,6 +68,7 @@ from core.ui_trading_status_service import UiTradingStatusService
 from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
 from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
 from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
+from core.next_open_pending_action_service import NextOpenPendingActionService
 
 from utils.monitor_vp_stub import is_vp_price_stub_active, stamp_vp_price_stub
 from utils.normalization import canonical_stock_code
@@ -850,6 +851,9 @@ class KiwoomApp:
         self.order_execution_service = OrderExecutionService(
             self, log_func=self.log
         )
+        self.next_open_pending_action_service = NextOpenPendingActionService(
+            self, log_func=self.log
+        )
         self.trading_controller = TradingController(
             self,
             status_callback=None,  # 서비스에서 바인딩
@@ -914,6 +918,10 @@ class KiwoomApp:
         # EOD 스냅샷 자동 저장 시작(15:30 + buffer 분)
         try:
             self._start_eod_equity_snapshot_scheduler()
+        except Exception:
+            pass
+        try:
+            self.next_open_pending_action_service.start_scheduler()
         except Exception:
             pass
         try:
@@ -3257,6 +3265,13 @@ class KiwoomApp:
             poller = getattr(self, "rt_watchlist_m1_api_poller", None)
             if poller is not None:
                 poller.stop()
+        except Exception:
+            pass
+        try:
+            svc = getattr(self, "next_open_pending_action_service", None)
+            if svc is not None:
+                svc.stop_scheduler()
+                svc.save()
         except Exception:
             pass
         try:

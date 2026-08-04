@@ -1,0 +1,285 @@
+# -*- coding: utf-8 -*-
+"""
+15:30 완성봉 신호를 익일 09:00 시초 동시호가 지정가 주문으로 이월하는 서비스.
+
+- 저장: JSON 파일 영속화
+- 복구: 앱 시작 시 자동 로드
+- 제출: 다음 거래일 08:59:50 이후 1회 제출
+- 만료: 09:05 이후까지 미제출/잔존 시 만료 처리
+"""
+from __future__ import annotations
+
+import json
+from datetime import date, datetime, time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from reporting.krx_trading_calendar import next_trading_day
+
+
+class NextOpenPendingActionService:
+    """15:30 신호의 익일 시초 동시호가 이월 액션 저장·복구·제출 서비스."""
+
+    def __init__(self, app: Any, *, log_func: Optional[Any] = None) -> None:
+        self.app = app
+        self.log = log_func or print
+        self._actions: List[Dict[str, Any]] = []
+        self._after_id: Any = None
+        self._path = Path(__file__).resolve().parents[1] / "next_open_pending_actions.json"
+        self.load()
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now()
+
+    @staticmethod
+    def _today() -> date:
+        return datetime.now().date()
+
+    @staticmethod
+    def _next_target_day_from(slot_ts: Any) -> Optional[str]:
+        try:
+            d0 = datetime.strptime(str(slot_ts)[:10], "%Y-%m-%d").date()
+            nxt = next_trading_day(d0)
+            if nxt is None:
+                return None
+            return nxt.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    def _read_json(self) -> List[Dict[str, Any]]:
+        try:
+            if not self._path.exists():
+                return []
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                return [dict(x) for x in raw if isinstance(x, dict)]
+        except Exception:
+            pass
+        return []
+
+    def save(self) -> None:
+        try:
+            self._path.write_text(
+                json.dumps(self._actions, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [NextOpen] 대기 액션 저장 실패: {e}")
+            except Exception:
+                pass
+
+    def load(self) -> None:
+        self._actions = self._read_json()
+        try:
+            if self._actions:
+                self.log(f"ℹ️ [NextOpen] 대기 액션 {len(self._actions)}건 복구")
+        except Exception:
+            pass
+
+    def start_scheduler(self) -> None:
+        root = getattr(self.app, "root", None)
+        if root is None:
+            return
+
+        def _tick() -> None:
+            try:
+                self.process_due_actions()
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ [NextOpen] 스케줄러 오류: {e}")
+                except Exception:
+                    pass
+            try:
+                self._after_id = root.after(1000, _tick)
+            except Exception:
+                self._after_id = None
+
+        try:
+            if self._after_id is not None:
+                root.after_cancel(self._after_id)
+        except Exception:
+            pass
+        try:
+            self._after_id = root.after(1000, _tick)
+        except Exception:
+            self._after_id = None
+
+    def stop_scheduler(self) -> None:
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None and self._after_id is not None:
+                root.after_cancel(self._after_id)
+        except Exception:
+            pass
+        self._after_id = None
+
+    def _upsert_action(self, row: Dict[str, Any]) -> None:
+        key = (
+            str(row.get("code", "")).zfill(6),
+            str(row.get("kind", "")),
+            str(row.get("target_date", "")),
+        )
+        kept: List[Dict[str, Any]] = []
+        for old in self._actions:
+            okey = (
+                str(old.get("code", "")).zfill(6),
+                str(old.get("kind", "")),
+                str(old.get("target_date", "")),
+            )
+            if okey != key:
+                kept.append(old)
+        kept.append(row)
+        self._actions = kept
+        self.save()
+
+    def queue_buy_signal(
+        self,
+        *,
+        code: str,
+        name: str,
+        sig_type: str,
+        limit_price: float,
+        source_slot: Any,
+    ) -> None:
+        target_date = self._next_target_day_from(source_slot)
+        if not target_date:
+            return
+        row = {
+            "kind": "buy_signal",
+            "code": str(code).zfill(6),
+            "name": str(name or ""),
+            "sig_type": str(sig_type or "TYPE_A"),
+            "limit_price": float(limit_price),
+            "reason": "NEXT_OPEN_0900|src=15:30",
+            "source_slot": str(source_slot),
+            "target_date": target_date,
+            "submitted_at": "",
+            "created_at": self._now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._upsert_action(row)
+
+    def queue_strategy_action(
+        self,
+        *,
+        code: str,
+        action: str,
+        reason: str,
+        limit_price: float,
+        profit_ratio: float,
+        source_slot: Any,
+    ) -> None:
+        target_date = self._next_target_day_from(source_slot)
+        if not target_date:
+            return
+        row = {
+            "kind": "strategy_action",
+            "code": str(code).zfill(6),
+            "action": str(action or ""),
+            "reason": str(reason or ""),
+            "limit_price": float(limit_price),
+            "profit_ratio": float(profit_ratio),
+            "source_slot": str(source_slot),
+            "target_date": target_date,
+            "submitted_at": "",
+            "created_at": self._now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._upsert_action(row)
+
+    @staticmethod
+    def _is_submit_window(now: datetime) -> bool:
+        return now.time() >= time(8, 59, 50) and now.time() <= time(9, 0, 30)
+
+    @staticmethod
+    def _is_expire_window(now: datetime) -> bool:
+        return now.time() > time(9, 5, 0)
+
+    def process_due_actions(self) -> None:
+        if not bool(getattr(self.app, "settings", {}).get("next_open_1530_enabled", False)):
+            return
+        now = self._now()
+        today_s = now.strftime("%Y-%m-%d")
+        changed = False
+        kept: List[Dict[str, Any]] = []
+
+        for row in list(self._actions):
+            try:
+                target_date = str(row.get("target_date", ""))
+                submitted = str(row.get("submitted_at", "")).strip()
+                if target_date > today_s:
+                    kept.append(row)
+                    continue
+                if target_date < today_s:
+                    changed = True
+                    continue
+                if submitted:
+                    kept.append(row)
+                    continue
+                if self._is_submit_window(now):
+                    ok = self._submit_one(row)
+                    if ok:
+                        row["submitted_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                        changed = True
+                    else:
+                        kept.append(row)
+                    continue
+                if self._is_expire_window(now):
+                    changed = True
+                    continue
+                kept.append(row)
+            except Exception:
+                kept.append(row)
+
+        self._actions = kept
+        if changed:
+            self.save()
+
+    def _submit_one(self, row: Dict[str, Any]) -> bool:
+        code = str(row.get("code", "")).zfill(6)
+        try:
+            limit_price = float(row.get("limit_price", 0) or 0)
+        except Exception:
+            limit_price = 0.0
+        if not code or limit_price <= 0:
+            return True
+
+        try:
+            oes = getattr(self.app, "order_execution_service", None)
+            if oes is None or not hasattr(oes, "mark_next_open_limit_order"):
+                return False
+            oes.mark_next_open_limit_order(
+                code,
+                limit_price,
+                reason_prefix="NEXT_OPEN_0900|src=15:30",
+            )
+        except Exception:
+            return False
+
+        kind = str(row.get("kind", ""))
+        if kind == "buy_signal":
+            try:
+                return bool(
+                    self.app.trading_controller.execute_buy_signal(
+                        code,
+                        str(row.get("name", "") or code),
+                        float(limit_price),
+                        reason=str(row.get("sig_type", "TYPE_A")),
+                    )
+                )
+            except Exception:
+                return False
+
+        if kind == "strategy_action":
+            try:
+                self.app.order_execution_service.handle_strategy_action(
+                    code,
+                    str(row.get("action", "")),
+                    str(row.get("reason", "")),
+                    now_price=float(limit_price),
+                    profit_ratio=float(row.get("profit_ratio", 0.0) or 0.0),
+                )
+                return True
+            except Exception:
+                return False
+        return True

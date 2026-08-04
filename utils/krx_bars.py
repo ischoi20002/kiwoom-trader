@@ -14,9 +14,9 @@ KRX 장중 15분봉·1분 창의 시간 정의.
 라벨 목록: 09:00, 09:15, …, 15:00, 15:15, 15:30.
 구간에 실제 존재하는 1분봉만 집계한다.
 
-신호 평가: ``15:15``/``15:30`` 은 동시호가·단일가 구간과 겹쳐
-실체결이 어려우므로 ``is_krx_no_signal_eval_15m_slot`` 으로 스킵한다
-(봉 자체는 DB·차트에 유지).
+신호 평가: ``15:30`` 단일가 슬롯만 ``is_krx_no_signal_eval_15m_slot`` 으로 스킵.
+``15:15`` 은 평가하되 체결은 동시호가 시장가 → 당일 ``15:30`` 종가
+(``is_krx_auction_market_fill_slot``). 봉 자체는 DB·차트에 유지.
 """
 from __future__ import annotations
 
@@ -46,6 +46,9 @@ __all__ = [
     "is_krx_last_15m_slot",
     "is_krx_pre_auction_15m_slot",
     "is_krx_no_signal_eval_15m_slot",
+    "is_krx_auction_market_fill_slot",
+    "is_krx_next_open_defer_15m_slot",
+    "krx_same_day_1530_label",
     "iter_krx_15m_slot_ends_for_day",
     "resample_1m_ohlcv_to_15m_krx",
     "KRX_15M_RESAMPLE_KWARGS",
@@ -127,13 +130,43 @@ def is_krx_no_signal_eval_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bo
     """
     완성 15분 신호 평가(S1/S2/청산 콜백)를 하지 않는 슬롯인지.
 
-    ``15:15``(완성≈15:20 동시호가) · ``15:30``(종가 단일가) —
-    연속매매 터치지정가 체결이 사실상 불가해 평가·주문을 생략한다.
+    ``15:30``(종가 단일가)만 스킵. ``15:15`` 은 평가 후 동시호가 시장가→15:30 종가 체결.
     """
     try:
-        return bool(is_krx_pre_auction_15m_slot(ts) or is_krx_last_15m_slot(ts))
+        return bool(is_krx_last_15m_slot(ts))
     except Exception:
         return False
+
+
+def is_krx_auction_market_fill_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """
+    완성 15:15 슬롯 주문을 동시호가 시장가로 내어 당일 15:30 종가로 체결할지.
+    """
+    try:
+        return bool(is_krx_pre_auction_15m_slot(ts))
+    except Exception:
+        return False
+
+
+def is_krx_next_open_defer_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """
+    15:30 완성봉 신호를 익일 09:00 시가 체결 판정으로 이월할 슬롯인지.
+    """
+    try:
+        return bool(is_krx_last_15m_slot(ts))
+    except Exception:
+        return False
+
+
+def krx_same_day_1530_label(
+    ts: Union[pd.Timestamp, datetime, str],
+) -> Optional[pd.Timestamp]:
+    """``ts`` 와 같은 캘린더일의 15:30 좌측 라벨."""
+    try:
+        t = pd.Timestamp(ts)
+        return t.normalize() + pd.Timedelta(hours=15, minutes=30)
+    except Exception:
+        return None
 
 
 def iter_krx_15m_slot_ends_for_day(day: Union[pd.Timestamp, datetime, str]) -> List[pd.Timestamp]:

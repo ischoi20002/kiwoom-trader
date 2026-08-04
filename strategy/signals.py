@@ -191,15 +191,22 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         & np.asarray(signal, dtype=bool)
     )
 
-    # 15:15/15:30 — 동시호가·단일가 슬롯은 S1 신호 평가 대상에서 제외(RT 완성봉 스킵과 정합)
+    # 15:30 — 기본은 종가 단일가 슬롯 S1 신호 제외.
+    # 단, DynamicBacktester 내부 실험/옵션에서 `_bt_allow_1530_signal_eval` 이 켜진 경우에는
+    # 15:30 신호를 남겨 두고, 체결 시점만 익일 09:00 시가로 이월한다.
     try:
         _idx = pd.DatetimeIndex(pd.to_datetime(df.index))
         _hm = _idx.hour.to_numpy(dtype=np.int32) * 60 + _idx.minute.to_numpy(
             dtype=np.int32
         )
-        _eod = (_hm == (15 * 60 + 15)) | (_hm == (15 * 60 + 30))
-        signal = np.asarray(signal, dtype=bool) & ~_eod
-        s1_simul_ab = np.asarray(s1_simul_ab, dtype=bool) & ~_eod
+        _allow_1530 = bool(settings.get("_bt_allow_1530_signal_eval", False))
+        _eod = _hm == (15 * 60 + 30)
+        if not _allow_1530:
+            signal = np.asarray(signal, dtype=bool) & ~_eod
+            s1_simul_ab = np.asarray(s1_simul_ab, dtype=bool) & ~_eod
+        else:
+            signal = np.asarray(signal, dtype=bool)
+            s1_simul_ab = np.asarray(s1_simul_ab, dtype=bool)
     except Exception:
         pass
     
