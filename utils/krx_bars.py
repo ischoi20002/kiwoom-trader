@@ -13,6 +13,10 @@ KRX 장중 15분봉·1분 창의 시간 정의.
 
 라벨 목록: 09:00, 09:15, …, 15:00, 15:15, 15:30.
 구간에 실제 존재하는 1분봉만 집계한다.
+
+신호 평가: ``15:15``/``15:30`` 은 동시호가·단일가 구간과 겹쳐
+실체결이 어려우므로 ``is_krx_no_signal_eval_15m_slot`` 으로 스킵한다
+(봉 자체는 DB·차트에 유지).
 """
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ __all__ = [
     "is_krx_m1_closed_open_label",
     "is_krx_last_15m_slot",
     "is_krx_pre_auction_15m_slot",
+    "is_krx_no_signal_eval_15m_slot",
     "iter_krx_15m_slot_ends_for_day",
     "resample_1m_ohlcv_to_15m_krx",
     "KRX_15M_RESAMPLE_KWARGS",
@@ -114,6 +119,19 @@ def is_krx_pre_auction_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     try:
         t = pd.Timestamp(ts)
         return int(t.hour) == 15 and int(t.minute) == 15
+    except Exception:
+        return False
+
+
+def is_krx_no_signal_eval_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """
+    완성 15분 신호 평가(S1/S2/청산 콜백)를 하지 않는 슬롯인지.
+
+    ``15:15``(완성≈15:20 동시호가) · ``15:30``(종가 단일가) —
+    연속매매 터치지정가 체결이 사실상 불가해 평가·주문을 생략한다.
+    """
+    try:
+        return bool(is_krx_pre_auction_15m_slot(ts) or is_krx_last_15m_slot(ts))
     except Exception:
         return False
 

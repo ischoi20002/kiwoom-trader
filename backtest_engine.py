@@ -2458,6 +2458,14 @@ class SimpleBacktester:
         - 미보유 S1: 15분 벡터 신호를 그대로 덮어쓰지 않고, 1~k분 누적 가상 15분봉으로
           ``calculate_indicators`` + ``get_buy_signals_detailed`` 를 다시 돌려 인과적으로 진입 시점만 잡음.
         """
+        # 15:15/15:30 슬롯: S1·S2 스킵(청산 TP/SL 등은 유지). Signal 마스킹과 이중 안전장치.
+        try:
+            _skip_eod_sig = (int(hour) == 15 and int(minute) in (15, 30))
+        except Exception:
+            _skip_eod_sig = False
+        if _skip_eod_sig:
+            signal_shifted = False
+
         # [보수적 1분 체결] 매도/EXIT 판가: 저가(m1_l), 매수 체결: 고가(m1_h) — 시뮬·지표 경로는 종가(m1_p) 유지
         # [Perf] Pre-calculated tail data for incremental indicator updates
         # Using index i-1 as the base for the current 15m bar simulation
@@ -2532,7 +2540,7 @@ class SimpleBacktester:
                     params = self._execute_sell(m1_t, e_price, f"1M_{res['reason']}+{idx}m", params, indicators=indicators, i=i)
                     return params # 매도 발생 시 블록 종료
                 
-                elif pos['stage'] == 1:
+                elif pos['stage'] == 1 and not _skip_eod_sig:
                     # [v36.9] 시뮬레이션 지표 기반 S2 Approval 체크
                     if TradingStrategy._check_s2_approval(pos, None, self.settings, indicator_row=indicator_to_use, market_trend=params.get('market_trend', 'UP')):
                         can_buy_s2 = True
@@ -2620,6 +2628,14 @@ class SimpleBacktester:
         curr_date = time_indices[i]
         curr_high = high_vals[i]
         curr_low = low_vals[i]
+
+        # 15:15/15:30 — S1·S2 신규/추매 스킵(완성봉 신호평가 제외와 정합). 청산은 유지.
+        try:
+            _skip_eod_sig = (
+                int(time_hours[i]) == 15 and int(time_minutes[i]) in (15, 30)
+            )
+        except Exception:
+            _skip_eod_sig = False
         
         # 1. High Precision Entry/Exit/Addon Monitoring
         if high_precision and m1_info is not None:
@@ -2646,13 +2662,13 @@ class SimpleBacktester:
                 )
 
                 # Check if we should process high-precision (Position exists OR Signal exists)
-                if params['position'] is not None or signal_shifted[i]:
+                if params['position'] is not None or (signal_shifted[i] and not _skip_eod_sig):
                     old_pos = params['position']
                     params = self._process_intra_bar_full_v3(
                         i, code, m1_highs, m1_closes, m1_lows, m1_time_total[s_idx:e_idx],
                         params, time_hours[i], time_minutes[i],
                         m1_ba=m1_ba, m1_vp=m1_vp, m1_vols=m1_vols, indicators=indicators,
-                        signal_shifted=signal_shifted[i]
+                        signal_shifted=bool(signal_shifted[i]) and not _skip_eod_sig
                     )
                     # If position status changed or a trade happened, we might skip standard logic
                     # For simplicity, if we processed intra-bar, we skip standard logic for this 15m block
@@ -2676,7 +2692,7 @@ class SimpleBacktester:
                 )
             
             # Stage 2 Buy Check
-            elif pos['stage'] == 1:
+            elif pos['stage'] == 1 and not _skip_eod_sig:
                 if self._check_s2_approval_v2(pos, indicators, i, curr_dt=time_indices[i]):
                     can_buy_s2 = True
                     _use_s2_sb = self.use_sb_s2_b if pos.get("sig_type") == "TYPE_B" else self.use_sb_s2_a
@@ -2702,7 +2718,7 @@ class SimpleBacktester:
                         )
         
         # 3. Entry Check
-        elif signal_shifted[i]:
+        elif signal_shifted[i] and not _skip_eod_sig:
             sig_type = indicators['Sig_Type'][i]
             is_ok = True
             if is_ok:

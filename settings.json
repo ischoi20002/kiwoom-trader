@@ -67,7 +67,7 @@
     "realtime_m1_poller_apply_chart_catchup": true,
     "realtime_m1_poller_eval_on_fetch_fail": true,
     "realtime_m1_poller_eval_on_cache_hit": true,
-    "realtime_tick_m1_accumulate_save_only": true,
+    "realtime_tick_m1_accumulate_save_only": false,
     "realtime_tick_m1_seal_defer_sec": 4.0,
     "realtime_tick_m1_calendar_retention_days": 60,
     "realtime_15m_last_minute_from_ticks": true,
@@ -449,7 +449,7 @@
     "post_fill_sync_skip_while_pending": true,
     "sync_run_kt00007_on_silent_sync": false,
     "bt_start_date": "2026-01-01",
-    "bt_end_date": "2026-08-03",
+    "bt_end_date": "2026-08-04",
     "mock_account_id": "81220142",
     "debug_terminal_trace": false,
     "realtime_warmup_pre_validate_pause_max_sec": 0.0

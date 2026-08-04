@@ -190,6 +190,18 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         & np.asarray(signal_b, dtype=bool)
         & np.asarray(signal, dtype=bool)
     )
+
+    # 15:15/15:30 — 동시호가·단일가 슬롯은 S1 신호 평가 대상에서 제외(RT 완성봉 스킵과 정합)
+    try:
+        _idx = pd.DatetimeIndex(pd.to_datetime(df.index))
+        _hm = _idx.hour.to_numpy(dtype=np.int32) * 60 + _idx.minute.to_numpy(
+            dtype=np.int32
+        )
+        _eod = (_hm == (15 * 60 + 15)) | (_hm == (15 * 60 + 30))
+        signal = np.asarray(signal, dtype=bool) & ~_eod
+        s1_simul_ab = np.asarray(s1_simul_ab, dtype=bool) & ~_eod
+    except Exception:
+        pass
     
     # 8. 수급 합치도 (Confluence Score) 계산 - [v3.5]
     def calc_met_count(sig_type):

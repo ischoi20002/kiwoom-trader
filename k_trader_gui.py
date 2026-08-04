@@ -584,23 +584,43 @@ class KiwoomApp:
         )
         from core.rt_tick_m1_accumulator import RtTickM1Accumulator
 
-        self.rt_tick_m1_accumulator = RtTickM1Accumulator(
-            settings=self.settings,
-            logger_callback=self.log,
-            get_settings=lambda: getattr(self, "settings", None) or {},
-        )
+        # 검증용 틱→1분 DB 저장(기본 OFF). 신호용 말분 틱은 rt_tick_m1_store.feed_tick.
+        self.rt_tick_m1_accumulator = None
         try:
-            if bool(
-                (self.settings or {}).get("realtime_tick_m1_accumulate_save_only", True)
-            ):
+            _tick_save = bool(
+                (self.settings or {}).get(
+                    "realtime_tick_m1_accumulate_save_only", False
+                )
+            )
+        except Exception:
+            _tick_save = False
+        if _tick_save:
+            try:
+                self.rt_tick_m1_accumulator = RtTickM1Accumulator(
+                    settings=self.settings,
+                    logger_callback=self.log,
+                    get_settings=lambda: getattr(self, "settings", None) or {},
+                )
                 from utils.server_mode_paths import realtime_tick_1m_db_path
 
                 self.log(
                     "ℹ️ [Tick1m] 틱→1분 검증 누적 ON "
                     f"(전용DB={realtime_tick_1m_db_path()}, 신호·주문 미사용)"
                 )
-        except Exception:
-            pass
+            except Exception as e:
+                self.rt_tick_m1_accumulator = None
+                try:
+                    self.log(f"⚠️ [Tick1m] 검증 누적 기동 실패: {e!r}")
+                except Exception:
+                    pass
+        else:
+            try:
+                self.log(
+                    "ℹ️ [Tick1m] 틱→1분 검증 DB 저장 OFF "
+                    "(신호용 말분 틱 누적은 RtTickM1Store 유지)"
+                )
+            except Exception:
+                pass
 
         _rt15_store = self.realtime_monitor_bars_store
         from core.closed_15m_fast_path import Closed15mDbUpsertQueue, Closed15mEvalPool

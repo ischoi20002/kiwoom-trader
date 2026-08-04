@@ -316,6 +316,15 @@ def evaluate_bt_hp_intrabar_unified(
             return out
 
         curr_15m = full_15m.iloc[-1]
+        # 15:15/15:30 완성 슬롯 — S1·S2 생략(청산 경로만 유지)
+        try:
+            from utils.krx_bars import is_krx_no_signal_eval_15m_slot
+
+            _skip_eod_sig = bool(
+                is_krx_no_signal_eval_15m_slot(getattr(curr_15m, "name", None) or full_15m.index[-1])
+            )
+        except Exception:
+            _skip_eod_sig = False
         pos_sim: Optional[Dict[str, Any]] = (
             copy.deepcopy(pos_h) if isinstance(pos_h, dict) else None
         )
@@ -431,7 +440,7 @@ def evaluate_bt_hp_intrabar_unified(
                         return out
 
             # --- 2) 매수(S1 신규 / S2 추매) ---
-            if ind_d is not None:
+            if ind_d is not None and not _skip_eod_sig:
                 is_addon_target = pos_sim is not None and int(
                     pos_sim.get("entry_n", pos_sim.get("stage", 1)) or 1
                 ) < 2

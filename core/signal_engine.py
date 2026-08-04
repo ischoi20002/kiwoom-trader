@@ -753,6 +753,13 @@ class SignalEngine:
         try:
             if not self._s1_eval_on_local_15m_close_enabled():
                 return
+            try:
+                from utils.krx_bars import is_krx_no_signal_eval_15m_slot
+
+                if is_krx_no_signal_eval_15m_slot(bar_ts):
+                    return
+            except Exception:
+                pass
             nk = str(canonical_stock_code(code) or code).zfill(6)
             if len(nk) != 6:
                 return
@@ -1065,6 +1072,13 @@ class SignalEngine:
         try:
             if not self._s1_eval_on_local_15m_close_enabled():
                 return
+            try:
+                from utils.krx_bars import is_krx_no_signal_eval_15m_slot
+
+                if is_krx_no_signal_eval_15m_slot(bar_ts):
+                    return
+            except Exception:
+                pass
             nk = str(canonical_stock_code(code) or code).zfill(6)
             if len(nk) != 6:
                 return
@@ -1290,6 +1304,13 @@ class SignalEngine:
 
     def eval_on_completed_15m(self, code: str, bar_ts: Any) -> None:
         """로컬 15분 확정: S1(미보유) + 청산/S2(보유) 일괄."""
+        try:
+            from utils.krx_bars import is_krx_no_signal_eval_15m_slot
+
+            if is_krx_no_signal_eval_15m_slot(bar_ts):
+                return
+        except Exception:
+            pass
         try:
             self.eval_s1_on_completed_15m(code, bar_ts)
         except Exception:

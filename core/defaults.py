@@ -80,7 +80,7 @@ DEFAULT_SETTINGS = {
     "realtime_m1_poller_apply_chart_catchup": True,
     "realtime_m1_poller_eval_on_fetch_fail": True,
     "realtime_m1_poller_eval_on_cache_hit": True,
-    "realtime_tick_m1_accumulate_save_only": True,
+    "realtime_tick_m1_accumulate_save_only": False,
     "realtime_tick_m1_seal_defer_sec": 4.0,
     "realtime_tick_m1_calendar_retention_days": 60,
     "realtime_15m_last_minute_from_ticks": True,

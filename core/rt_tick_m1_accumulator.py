@@ -75,9 +75,9 @@ def parse_0b_trade_datetime(
 def tick_m1_accumulate_save_only_enabled(settings: Optional[Dict[str, Any]]) -> bool:
     try:
         st = settings or {}
-        return bool(st.get("realtime_tick_m1_accumulate_save_only", True))
+        return bool(st.get("realtime_tick_m1_accumulate_save_only", False))
     except Exception:
-        return True
+        return False
 
 
 class _Tick1mDbStore:

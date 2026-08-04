@@ -125,16 +125,39 @@ def _load_marcap_year_df(
     try:
         df = None
         last_err: Optional[BaseException] = None
+        engine_errors: list[str] = []
+        # pyarrow 우선. fastparquet 는 일부 PC에서 WDAC/정책으로 DLL 차단됨.
         for engine in ("pyarrow", "fastparquet"):
+            try:
+                if engine == "pyarrow":
+                    import pyarrow  # noqa: F401
+                else:
+                    import fastparquet  # noqa: F401
+            except Exception as e:
+                last_err = e
+                try:
+                    engine_errors.append(f"{engine} import: {e}")
+                except Exception:
+                    pass
+                continue
             try:
                 df = pd.read_parquet(path, engine=engine)
                 last_err = None
                 break
             except Exception as e:
                 last_err = e
+                try:
+                    engine_errors.append(f"{engine} read: {e}")
+                except Exception:
+                    pass
                 continue
         if df is None:
-            raise last_err if last_err is not None else RuntimeError("parquet 엔진 없음")
+            detail = " | ".join(engine_errors) if engine_errors else str(last_err)
+            raise RuntimeError(
+                f"parquet 실패 ({detail}). "
+                f"64bit .venv 로 실행하세요: c:\\k-trader\\run_k_trader.bat "
+                f"(필요 시 install_k_trader.bat)"
+            ) from last_err
     except Exception as e:
         try:
             # DLL 정책 차단 등은 traceback 전체 출력 대신 한 줄로

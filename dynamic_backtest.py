@@ -735,6 +735,14 @@ class DynamicBacktester:
                 # 2-4-2. 매수 감시
                 buy_candidates = [c for c in monitoring_list if (c not in self.holdings or self.holdings.get(c, {}).get('entry_n', 0) < 2) and (c not in today_sells)]
                 if buy_candidates and not self.high_precision:
+                    # 15:15/15:30 슬롯 — S1·S2 신호평가 스킵
+                    try:
+                        from utils.krx_bars import is_krx_no_signal_eval_15m_slot
+
+                        if is_krx_no_signal_eval_15m_slot(curr_time):
+                            buy_candidates = []
+                    except Exception:
+                        pass
                     for code in sorted(buy_candidates, key=lambda c: code_to_rank.get(c, 999)):
                         if code in today_sells or code in m1_processed: continue
                         d_df = day_data.get(code)
