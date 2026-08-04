@@ -316,7 +316,7 @@ def evaluate_bt_hp_intrabar_unified(
             return out
 
         curr_15m = full_15m.iloc[-1]
-        # 15:15/15:30 완성 슬롯 — S1·S2 생략(청산 경로만 유지)
+        # 15:15/15:30 완성 슬롯 — S1·S2·청산 전부 생략(max_p만 갱신)
         try:
             from utils.krx_bars import is_krx_no_signal_eval_15m_slot
 
@@ -385,7 +385,7 @@ def evaluate_bt_hp_intrabar_unified(
                     except (TypeError, ValueError, KeyError):
                         pass
 
-                if not skip_holder_exit and not before_entry:
+                if not skip_holder_exit and not before_entry and not _skip_eod_sig:
                     px_sell = m1_sell_price_conservative(m1_r)
                     px_sell = floor_sell_px_to_same_15m_bar(px_sell, curr_15m)
                     try:

@@ -693,9 +693,16 @@ class DynamicBacktester:
                             m1_processed.add(code)
 
                 # 2-4-1. 매도 감시 (보유 중인 종목)
+                try:
+                    from utils.krx_bars import is_krx_no_signal_eval_15m_slot
+
+                    _skip_eod_slot = bool(is_krx_no_signal_eval_15m_slot(curr_time))
+                except Exception:
+                    _skip_eod_slot = False
                 for code, h_info in list(self.holdings.items()):
                     # [v36.1] 고정밀 모드인 경우 15분 단위 매도 패스 (하위 1분 루프에서 처리됨)
                     if self.high_precision: continue
+                    if _skip_eod_slot: continue
                     if code in today_sells or code in m1_processed: continue
                     d_df = day_data.get(code)
                     if d_df is None or curr_time not in d_df.index: continue
@@ -735,14 +742,9 @@ class DynamicBacktester:
                 # 2-4-2. 매수 감시
                 buy_candidates = [c for c in monitoring_list if (c not in self.holdings or self.holdings.get(c, {}).get('entry_n', 0) < 2) and (c not in today_sells)]
                 if buy_candidates and not self.high_precision:
-                    # 15:15/15:30 슬롯 — S1·S2 신호평가 스킵
-                    try:
-                        from utils.krx_bars import is_krx_no_signal_eval_15m_slot
-
-                        if is_krx_no_signal_eval_15m_slot(curr_time):
-                            buy_candidates = []
-                    except Exception:
-                        pass
+                    # 15:15/15:30 슬롯 — S1·S2·청산 신호평가 스킵
+                    if _skip_eod_slot:
+                        buy_candidates = []
                     for code in sorted(buy_candidates, key=lambda c: code_to_rank.get(c, 999)):
                         if code in today_sells or code in m1_processed: continue
                         d_df = day_data.get(code)
