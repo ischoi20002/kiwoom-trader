@@ -3529,6 +3529,118 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     return schedule, schedule_a, schedule_b, transition_regime_by_day
 
 
+def collect_dynamic_schedule_codes(
+    settings: dict,
+    start_date: str,
+    end_date: str,
+    data_manager: Any,
+    *,
+    logger_callback: Optional[Callable[..., Any]] = None,
+) -> List[str]:
+    """
+    동적백테와 동일한 ``prepare_dynamic_universe`` 스케줄에서
+    기간 내 Track A/B 선정 종목의 **합집합**을 반환한다.
+
+    전략최적화(SimpleBacktester)가 대표 10종 대신
+    실제 감시·선정 풀과 맞추기 위한 용도.
+    """
+    log = logger_callback or (lambda *a, **k: None)
+    try:
+        start_s = pd.to_datetime(start_date).strftime("%Y-%m-%d")
+        end_s = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+    except Exception:
+        start_s, end_s = str(start_date)[:10], str(end_date)[:10]
+
+    # DynamicBacktester.run 과 동일: 첫날 ref_day + 선정 워밍업 영업일
+    sched_anchor = start_s
+    try:
+        sd = pd.to_datetime(start_s)
+        prev_range_start = (sd - timedelta(days=30)).strftime("%Y-%m-%d")
+        prev_range_end = (sd - timedelta(days=1)).strftime("%Y-%m-%d")
+        prev_days = data_manager.get_trading_days(prev_range_start, prev_range_end) or []
+        if prev_days:
+            sched_anchor = pd.to_datetime(prev_days[-1]).strftime("%Y-%m-%d")
+    except Exception:
+        sched_anchor = start_s
+
+    sched_start = str(sched_anchor)
+    try:
+        warm_n = int(settings.get("bt_universe_schedule_warmup_trading_days", 20) or 0)
+        warm_n = max(0, min(warm_n, 60))
+    except Exception:
+        warm_n = 20
+    if warm_n > 0:
+        try:
+            anchor_dt = pd.to_datetime(sched_anchor)
+            warm_from = (anchor_dt - timedelta(days=max(45, warm_n * 3))).strftime(
+                "%Y-%m-%d"
+            )
+            warm_to = (anchor_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+            warm_days = data_manager.get_trading_days(warm_from, warm_to) or []
+            if warm_days:
+                pick = (
+                    warm_days[-warm_n:]
+                    if len(warm_days) >= warm_n
+                    else list(warm_days)
+                )
+                sched_start = pd.to_datetime(pick[0]).strftime("%Y-%m-%d")
+        except Exception:
+            sched_start = str(sched_anchor)
+
+    try:
+        log(
+            f"[Opt] 선정 스케줄 종목 풀 수집: {sched_start} ~ {end_s} "
+            f"(BT기간 {start_s}~{end_s})"
+        )
+    except Exception:
+        pass
+
+    try:
+        result = prepare_dynamic_universe(
+            settings, sched_start, end_s, data_manager, log
+        )
+    except Exception as e:
+        try:
+            log(f"[Opt] 선정 스케줄 수집 실패: {e}")
+        except Exception:
+            pass
+        return []
+
+    schedule: Dict[str, Any] = {}
+    schedule_a: Dict[str, Any] = {}
+    schedule_b: Dict[str, Any] = {}
+    try:
+        if isinstance(result, tuple) and len(result) >= 3:
+            schedule = dict(result[0] or {})
+            schedule_a = dict(result[1] or {})
+            schedule_b = dict(result[2] or {})
+        elif isinstance(result, dict):
+            schedule = dict(result)
+            schedule_a = schedule
+    except Exception:
+        return []
+
+    codes: set[str] = set()
+    for src in (schedule, schedule_a, schedule_b):
+        try:
+            for day_codes in (src or {}).values():
+                if not day_codes:
+                    continue
+                for c in day_codes:
+                    nc = str(c).strip().zfill(6)
+                    if len(nc) == 6 and nc.isdigit():
+                        codes.add(nc)
+        except Exception:
+            continue
+
+    out = sorted(codes)
+    try:
+        log(f"[Opt] 선정 스케줄 합집합: {len(out)}종목")
+    except Exception:
+        pass
+    return out
+
+
 def compute_transition_regime_history(
     settings: dict,
     data_manager: Any,

@@ -34,8 +34,7 @@ class BacktestTab:
         self.opt_params_vars = self.app.opt_params_vars
         
         # [v26.0] 최적화 파라미터 상세 정보 사전 (표시명, 카테고리, 설명)
-        # [주의] 종목선정 파라미터(min_trde_val, vol_ratio, vol_lookback, ma_convergence, sel_rsi_max/min 등)는
-        # SimpleBacktester 기반 최적화와 무관 (DynamicBacktester에서만 유효) → 의도적으로 제외
+        # [주의] 종목선정·전환게이트·RT·Smart Buy/Exit 수치는 SimpleBacktester 최적화와 무관 → 제외
         # 엑셀(optimization_params_audit) 확정 순서 우선 → 이후 레거시 키(미선택 시에도 툴팁용)
         self.PARAM_INFO = {
             's1_equity_pct': ('S1_Equity%', '자금관리', '1단계 비중 (%)'),
@@ -44,6 +43,7 @@ class BacktestTab:
             'buy_rsi_max_a': ('A_RSI_High', 'S1 Type A', '눌림(A) RSI 상한선'),
             'gc_window': ('A_GC_Window', 'S1 Type A', '골든크로스 기간(분)'),
             'rsi_window': ('RSI_Window', 'S1 Type A', 'RSI 상향돌파 윈도(분)'),
+            'ma_convergence': ('MA_Conv%', 'S1 Type A', 'GC용 MA5/20 수렴 상한(%)'),
             'ma60_min': ('MA60_Min%', 'S1 Type A', 'MA60 이격 하한(%)'),
             'ma60_max': ('MA60_Max%', 'S1 Type A', 'MA60 이격 상한(%)'),
             'vol_surge': ('A_Vol_Surge', 'S1 Type A', '거래량 급증 배수'),
@@ -60,17 +60,13 @@ class BacktestTab:
             's2_profit_limit': ('S2_Min_Profit', 'S2 Type A', '최소 수익률(%)'),
             's2_delay_hours': ('S2_Delay_Hrs', 'S2 Type A', '진입 후 대기(시간)'),
             's2_b_ma20_gap': ('S2B_MA20', 'S2 Type B', '20일선 지지 갭(B)%'),
+            's2_b_ma5_gap': ('S2B_MA5', 'S2 Type B', '5일선 갭(B)%'),
             's2_b_rsi_gap': ('S2B_RSI', 'S2 Type B', 'RSI 시그널 갭(B)%'),
             's2_b_macd_gap': ('S2B_MACD', 'S2 Type B', 'MACD GC(B)'),
             's2_b_vol_ratio': ('S2B_Vol', 'S2 Type B', '거래량 급증(B) 배수'),
             'prev_vol_lookback_s2_b': ('PrevVol_S2B', 'S2 Type B', '전일동시간 평균 일수 S2·B'),
             's2_b_profit_limit': ('S2B_Profit', 'S2 Type B', '최소 수익률(B)%'),
             's2_b_delay_hours': ('S2B_Delay', 'S2 Type B', '대기(B) 시간'),
-            'smart_buy_vp': ('SB_Min_VP', '전술적 수급', 'Smart Buy 최소 체결강도 (%)'),
-            'smart_buy_ba_ratio': ('SB_BA_Ratio', '전술적 수급', 'Smart Buy 매도벽 비율 (배)'),
-            'smart_exit_vp': ('SX_Min_VP', '전술적 수급', 'Smart Exit 체결강도 하한 (%)'),
-            'smart_exit_ba_ratio': ('SX_BA_Ratio', '전술적 수급', 'Smart Exit 매도벽 비율 (배, 매도/매수)'),
-            'smart_exit_price_threshold': ('SX_Price_Thr', '전술적 수급', 'Smart Exit 가격 하락 임계 (%)'),
             'gap_down_limit_a': ('Gap_A', 'Type A 청산', '갭하락 즉시 손절 (A) (%)'),
             'gap_grace_mins_a': ('Grace_A', 'Type A 청산', '개장 매도 유예 (A) (분)'),
             'atr_period_a': ('ATR_P_A', 'Type A 청산', 'ATR 분석 주기 (A) (봉)'),
@@ -97,13 +93,72 @@ class BacktestTab:
             's2_b_flash_exit_pct': ('S2B_Flash_Exit', 'Type B 청산', 'S2(B) Flash Exit (%)'),
             'atr_multiplier_sl_s2_b': ('S2B_ATR_Stop', 'Type B 청산', 'S2(B) ATR 손절 배수'),
             'atr_multiplier_trail_s2_b': ('S2B_ATR_Trail', 'Type B 청산', 'S2(B) ATR 추격 익절 배수'),
-            # 레거시(엑셀 미선택 시에도 툴팁·재활성 대비)
-            'use_s2_master_a': ('S2_Master_A', '2차 추매(S2)', 'Type A 추매(S2) 전체 ON/OFF'),
-            'use_s2_master_b': ('S2_Master_B', '2차 추매(S2)', 'Type B 추매(S2) 전체 ON/OFF'),
+            'atr_sl_entry_grace_hours': ('ATR_SL_Grace_H', 'ATR_SL 유예', '진입 후 ATR_SL 배수 확대 시간'),
+            'atr_sl_entry_grace_mult': ('ATR_SL_Grace_M', 'ATR_SL 유예', '유예 구간 ATR_SL 배수'),
+            'atr_sl_entry_grace_same_day': ('ATR_SL_Grace_Day', 'ATR_SL 유예', '당일 유예 ON/OFF'),
+            # ON/OFF (SimpleBacktester에서 의미 있는 체크박스)
+            'use_rsi_min': ('Use_RSI_Min', 'S1 공통', 'S1 RSI 하한 ON/OFF'),
+            'use_macd_signal': ('Use_MACD', 'S1 공통', '15분 MACD(OSC>0) 필터 ON/OFF'),
+            'use_rsi_sig_filter': ('Use_RSI_Sig', 'S1 공통', 'RSI 시그널 필터 ON/OFF'),
+            'use_type_a': ('Use_Type_A', 'S1 Type A', 'Type A 진입 ON/OFF'),
+            'use_gc': ('Use_GC', 'S1 Type A', '골든크로스 조건 ON/OFF'),
+            'use_rsi_signal': ('Use_RSI_Pulse', 'S1 Type A', 'RSI 상향돌파 ON/OFF'),
+            'use_ma60_safe': ('Use_MA60', 'S1 Type A', 'MA60 이격 안전대 ON/OFF'),
+            'use_vol_surge': ('Use_VolA', 'S1 Type A', '거래량 급증 ON/OFF'),
+            'use_type_b': ('Use_Type_B', 'S1 Type B', 'Type B 진입 ON/OFF'),
+            'use_type_b_vol': ('Use_VolB', 'S1 Type B', '돌파 거래량 ON/OFF'),
+            'use_trend_aligned_b': ('Use_TrendB', 'S1 Type B', '추세 정렬 ON/OFF'),
+            'use_macd_gc_b': ('Use_MacdGcB', 'S1 Type B', 'MACD GC ON/OFF'),
+            'use_s2_master_a': ('S2_Master_A', 'S2 Type A', 'Type A 추매(S2) 전체 ON/OFF'),
+            'use_s2_ma20': ('Use_S2_MA20', 'S2 Type A', 'S2 MA20 조건 ON/OFF'),
+            'use_s2_ma5': ('Use_S2_MA5', 'S2 Type A', 'S2 MA5 조건 ON/OFF'),
+            'use_s2_rsi_sig': ('Use_S2_RSI', 'S2 Type A', 'S2 RSI 시그널 ON/OFF'),
+            'use_s2_macd_gc': ('Use_S2_MACD', 'S2 Type A', 'S2 MACD GC ON/OFF'),
+            'use_s2_vol_surge': ('Use_S2_Vol', 'S2 Type A', 'S2 거래량 ON/OFF'),
+            'use_s2_profit': ('Use_S2_Profit', 'S2 Type A', 'S2 최소수익 ON/OFF'),
+            'use_s2_delay': ('Use_S2_Delay', 'S2 Type A', 'S2 대기시간 ON/OFF'),
+            'use_s2_master_b': ('S2_Master_B', 'S2 Type B', 'Type B 추매(S2) 전체 ON/OFF'),
+            'use_s2_b_ma20': ('Use_S2B_MA20', 'S2 Type B', 'S2B MA20 ON/OFF'),
+            'use_s2_b_ma5': ('Use_S2B_MA5', 'S2 Type B', 'S2B MA5 ON/OFF'),
+            'use_s2_b_rsi_sig': ('Use_S2B_RSI', 'S2 Type B', 'S2B RSI ON/OFF'),
+            'use_s2_b_macd_gc': ('Use_S2B_MACD', 'S2 Type B', 'S2B MACD ON/OFF'),
+            'use_s2_b_vol_surge': ('Use_S2B_Vol', 'S2 Type B', 'S2B 거래량 ON/OFF'),
+            'use_s2_b_profit': ('Use_S2B_Profit', 'S2 Type B', 'S2B 최소수익 ON/OFF'),
+            'use_s2_b_delay': ('Use_S2B_Delay', 'S2 Type B', 'S2B 대기시간 ON/OFF'),
+            'use_gap_down_exit_a': ('Use_GapA', 'Type A 청산', '갭다운 청산(A) ON/OFF'),
+            'use_gap_grace_a': ('Use_GraceA', 'Type A 청산', '갭 유예(A) ON/OFF'),
+            'use_atr_exit_a': ('Use_AtrExitA', 'Type A 청산', 'ATR 청산 마스터(A) ON/OFF'),
+            'use_s1_a_tp': ('Use_A_TP', 'Type A 청산', 'S1A 익절 ON/OFF'),
+            'use_s1_a_stop_loss': ('Use_A_SL', 'Type A 청산', 'S1A 손절 ON/OFF'),
+            'use_s1_a_flash_exit': ('Use_A_Flash', 'Type A 청산', 'S1A Flash ON/OFF'),
+            'use_atr_stop_loss_a': ('Use_A_AtrSL', 'Type A 청산', 'ATR 손절(A) ON/OFF'),
+            'use_atr_trailing_stop_a': ('Use_A_Trail', 'Type A 청산', 'ATR 트레일(A) ON/OFF'),
+            'use_atr_trail_only_after_tp_s1_a': ('Use_A_TrailAfterTP', 'Type A 청산', '익절후 트레일(S1A) ON/OFF'),
+            'use_s2_tp': ('Use_S2_TP', 'Type A 청산', 'S2A 익절 ON/OFF'),
+            'use_s2_stop_loss': ('Use_S2_SL', 'Type A 청산', 'S2A 손절 ON/OFF'),
+            'use_s2_flash_exit': ('Use_S2_Flash', 'Type A 청산', 'S2A Flash ON/OFF'),
+            'use_atr_stop_loss_s2': ('Use_S2_AtrSL', 'Type A 청산', 'ATR 손절(S2A) ON/OFF'),
+            'use_atr_trailing_stop_s2': ('Use_S2_Trail', 'Type A 청산', 'ATR 트레일(S2A) ON/OFF'),
+            'use_atr_trail_only_after_tp_s2_a': ('Use_S2_TrailAfterTP', 'Type A 청산', '익절후 트레일(S2A) ON/OFF'),
+            'use_gap_down_exit_b': ('Use_GapB', 'Type B 청산', '갭다운 청산(B) ON/OFF'),
+            'use_gap_grace_b': ('Use_GraceB', 'Type B 청산', '갭 유예(B) ON/OFF'),
+            'use_atr_exit_b': ('Use_AtrExitB', 'Type B 청산', 'ATR 청산 마스터(B) ON/OFF'),
+            'use_s1_b_tp': ('Use_B_TP', 'Type B 청산', 'S1B 익절 ON/OFF'),
+            'use_s1_b_stop_loss': ('Use_B_SL', 'Type B 청산', 'S1B 손절 ON/OFF'),
+            'use_s1_b_flash_exit': ('Use_B_Flash', 'Type B 청산', 'S1B Flash ON/OFF'),
+            'use_atr_stop_loss_b': ('Use_B_AtrSL', 'Type B 청산', 'ATR 손절(B) ON/OFF'),
+            'use_atr_trailing_stop_b': ('Use_B_Trail', 'Type B 청산', 'ATR 트레일(B) ON/OFF'),
+            'use_atr_trail_only_after_tp_s1_b': ('Use_B_TrailAfterTP', 'Type B 청산', '익절후 트레일(S1B) ON/OFF'),
+            'use_s2_b_tp': ('Use_S2B_TP', 'Type B 청산', 'S2B 익절 ON/OFF'),
+            'use_s2_b_stop_loss': ('Use_S2B_SL', 'Type B 청산', 'S2B 손절 ON/OFF'),
+            'use_s2_b_flash_exit': ('Use_S2B_Flash', 'Type B 청산', 'S2B Flash ON/OFF'),
+            'use_atr_stop_loss_s2_b': ('Use_S2B_AtrSL', 'Type B 청산', 'ATR 손절(S2B) ON/OFF'),
+            'use_atr_trailing_stop_s2_b': ('Use_S2B_Trail', 'Type B 청산', 'ATR 트레일(S2B) ON/OFF'),
+            'use_atr_trail_only_after_tp_s2_b': ('Use_S2B_TrailAfterTP', 'Type B 청산', '익절후 트레일(S2B) ON/OFF'),
+            # 레거시(엑셀 미선택 시에도 툴팁·재활성 대비) — ma_convergence는 S1 Type A 신호용으로 상단 등록
             'min_trde_val': ('MinTrde', '유니버스(A)', '최소 거래대금(억)'),
             'vol_ratio': ('VolRatio', '유니버스(A)', '거래량 분출 배수'),
             'vol_lookback': ('VolLookback', '유니버스(A)', '분출 확인 기간(일)'),
-            'ma_convergence': ('MA_Conv', '유니버스(A)', '이평 수렴도(%)'),
             'sel_rsi_min': ('SelRSI_Min', '유니버스(A)', '선정 RSI 하한'),
             'sel_rsi_max': ('SelRSI_Max', '유니버스(A)', '선정 RSI 상한'),
             'sel_b_rsi_min': ('SelB_RSI_Min', '유니버스(B)', '선정 RSI 하한(B)'),
@@ -281,17 +336,25 @@ class BacktestTab:
         ttk.Checkbutton(opt_cfg_row, text="고정밀(1m)", variable=self.opt_high_precision_var,
                         style="TCheckbutton").pack(side=tk.LEFT)
 
-        # [v25.0] 최적화 대상 종목 안내 (2025 대표주 10선)
-        target_info = "🔍 대상: 삼성전자, SK하이닉스 등 10개 대표주"
-        lbl_targets = ttk.Label(opt_lf, text=target_info, font=("Segoe UI", 8), foreground="#EBCB8B", cursor="hand2")
-        lbl_targets.pack(pady=(5, 0))
-        
-        # ToolTip helper
+        # 최적화 대상: 동적백테 선정 스케줄(A/B) 합집합 (대표 10종 고정 폐기)
+        self.lbl_opt_targets = ttk.Label(
+            opt_lf,
+            text="🔍 대상: 동적백테 선정 스케줄 종목 풀 (실행 시 수집)",
+            font=("Segoe UI", 8),
+            foreground="#EBCB8B",
+            cursor="hand2",
+        )
+        self.lbl_opt_targets.pack(pady=(5, 0))
         from ui.gui_utils import ToolTip
-        full_stock_list = "최적화 대상 (2025 대표 10선):\n" + \
-                         "삼성전자, SK하이닉스, 현대차, 신한지주, LG화학, " + \
-                         "한화에어로스페이스, NAVER, 한국전력, 삼성물산, 삼성전기"
-        ToolTip(lbl_targets, lambda e: full_stock_list)
+
+        ToolTip(
+            self.lbl_opt_targets,
+            lambda e: (
+                "성과 검증(DynamicBacktester)과 같은 prepare_dynamic_universe 스케줄에서\n"
+                "기간 내 Track A/B 선정 종목의 합집합으로 Simple 최적화를 돌립니다.\n"
+                "일별 슬롯·레짐 게이트까지 매 trial 재현하지는 않습니다(속도 타협)."
+            ),
+        )
 
 
         # 3. 성과 검증 (Portfolio Backtest)
@@ -439,11 +502,16 @@ class BacktestTab:
                     
                     if col_name in self.PARAM_INFO:
                         alias, category, desc = self.PARAM_INFO[col_name]
-                        # [v16.90] 최적화 탐색 범위 정보 추가
-                        space = self._get_dynamic_search_space(self.app.settings)
-                        range_info = f"\n🔍 최적화 범위: {space[col_name]}" if col_name in space else ""
+                        space = self._resolve_search_space_for_active(self.app.settings)
+                        # 비선택 키도 범위 미리보기용으로 폴백 포함
+                        if col_name not in space:
+                            space = {col_name: self._fallback_search_values(col_name, self.app.settings)}
+                        range_info = f"\n🔍 최적화 범위: {space.get(col_name, '')}"
                         return f"📂 {category}\n✨ {desc}{range_info}\n(Key: {col_name})"
-                    return None
+                    labels = getattr(self.app, "opt_param_labels", None) or {}
+                    lab = labels.get(col_name) or col_name
+                    vals = self._fallback_search_values(col_name, self.app.settings)
+                    return f"✨ {lab}\n🔍 최적화 범위: {vals}\n(Key: {col_name})"
                 except: return None
             return None
         ToolTip(self.tree_backtest, get_header_tip)
@@ -565,12 +633,6 @@ class BacktestTab:
             'prev_vol_lookback_s1_b': range_for(int(float(s.get('prev_vol_lookback_s1_b', s.get('prev_vol_lookback_b', 10)))), 2),
             'prev_vol_lookback_s2_a': range_for(int(float(s.get('prev_vol_lookback_s2_a', s.get('prev_vol_lookback', 10)))), 2),
             'prev_vol_lookback_s2_b': range_for(int(float(s.get('prev_vol_lookback_s2_b', s.get('prev_vol_lookback_b', 10)))), 2),
-            'type_a_phase1_up_vol_surge_add': range_for(s.get('type_a_phase1_up_vol_surge_add', 0.2), 0.1),
-            'type_a_phase1_neutral_vol_surge_add': range_for(s.get('type_a_phase1_neutral_vol_surge_add', 0.45), 0.15),
-            'type_a_phase1_up_ma60_shrink_pct': range_for(s.get('type_a_phase1_up_ma60_shrink_pct', 1.0), 0.5),
-            'type_a_phase1_neutral_ma60_shrink_pct': range_for(s.get('type_a_phase1_neutral_ma60_shrink_pct', 2.0), 0.5),
-            'type_b_phase1_up_vol_surge_add': range_for(s.get('type_b_phase1_up_vol_surge_add', 0.2), 0.1),
-            'type_b_phase1_neutral_vol_surge_add': range_for(s.get('type_b_phase1_neutral_vol_surge_add', 0.45), 0.15),
             's2_ma20_gap': range_for(s.get('s2_ma20_gap', 0.0), 0.5),
             's2_ma5_gap': range_for(s.get('s2_ma5_gap', -0.5), 0.25),
             's2_rsi_gap': range_for(s.get('s2_rsi_gap', 0.0), 0.5),
@@ -588,11 +650,74 @@ class BacktestTab:
             's1_b_stop_loss': range_for(s.get('s1_b_stop_loss', 2.0), 1.0),
             's2_take_profit': range_for(s.get('s2_take_profit', 5.0), 2.0),
             's2_stop_loss': range_for(s.get('s2_stop_loss', 2.0), 0.5),
+            's2_b_take_profit': range_for(s.get('s2_b_take_profit', 5.0), 2.0),
+            's2_b_stop_loss': range_for(s.get('s2_b_stop_loss', 2.0), 0.5),
             's2_vol_ratio': range_for(s.get('s2_vol_ratio', 1.0), 0.2),
             's2_profit_limit': range_for(s.get('s2_profit_limit', 1.5), 0.5),
             's2_delay_hours': range_for(s.get('s2_delay_hours', 2.0), 1.0),
+            'ma_convergence': range_for(float(s.get('ma_convergence', 1.2)), 0.5),
+            'atr_sl_entry_grace_hours': range_for(float(s.get('atr_sl_entry_grace_hours', 0.0)), 6.0),
+            'atr_sl_entry_grace_mult': range_for(float(s.get('atr_sl_entry_grace_mult', 0.0)), 0.5),
+            'atr_sl_entry_grace_same_day': [True, False],
+            # ON/OFF categorical
+            'use_rsi_min': [True, False],
+            'use_macd_signal': [True, False],
+            'use_rsi_sig_filter': [True, False],
+            'use_type_a': [True, False],
+            'use_gc': [True, False],
+            'use_rsi_signal': [True, False],
+            'use_ma60_safe': [True, False],
+            'use_vol_surge': [True, False],
+            'use_type_b': [True, False],
+            'use_type_b_vol': [True, False],
+            'use_trend_aligned_b': [True, False],
+            'use_macd_gc_b': [True, False],
             'use_s2_master_a': [True, False],
+            'use_s2_ma20': [True, False],
+            'use_s2_ma5': [True, False],
+            'use_s2_rsi_sig': [True, False],
+            'use_s2_macd_gc': [True, False],
+            'use_s2_vol_surge': [True, False],
+            'use_s2_profit': [True, False],
+            'use_s2_delay': [True, False],
             'use_s2_master_b': [True, False],
+            'use_s2_b_ma20': [True, False],
+            'use_s2_b_ma5': [True, False],
+            'use_s2_b_rsi_sig': [True, False],
+            'use_s2_b_macd_gc': [True, False],
+            'use_s2_b_vol_surge': [True, False],
+            'use_s2_b_profit': [True, False],
+            'use_s2_b_delay': [True, False],
+            'use_gap_down_exit_a': [True, False],
+            'use_gap_grace_a': [True, False],
+            'use_atr_exit_a': [True, False],
+            'use_s1_a_tp': [True, False],
+            'use_s1_a_stop_loss': [True, False],
+            'use_s1_a_flash_exit': [True, False],
+            'use_atr_stop_loss_a': [True, False],
+            'use_atr_trailing_stop_a': [True, False],
+            'use_atr_trail_only_after_tp_s1_a': [True, False],
+            'use_s2_tp': [True, False],
+            'use_s2_stop_loss': [True, False],
+            'use_s2_flash_exit': [True, False],
+            'use_atr_stop_loss_s2': [True, False],
+            'use_atr_trailing_stop_s2': [True, False],
+            'use_atr_trail_only_after_tp_s2_a': [True, False],
+            'use_gap_down_exit_b': [True, False],
+            'use_gap_grace_b': [True, False],
+            'use_atr_exit_b': [True, False],
+            'use_s1_b_tp': [True, False],
+            'use_s1_b_stop_loss': [True, False],
+            'use_s1_b_flash_exit': [True, False],
+            'use_atr_stop_loss_b': [True, False],
+            'use_atr_trailing_stop_b': [True, False],
+            'use_atr_trail_only_after_tp_s1_b': [True, False],
+            'use_s2_b_tp': [True, False],
+            'use_s2_b_stop_loss': [True, False],
+            'use_s2_b_flash_exit': [True, False],
+            'use_atr_stop_loss_s2_b': [True, False],
+            'use_atr_trailing_stop_s2_b': [True, False],
+            'use_atr_trail_only_after_tp_s2_b': [True, False],
             'gc_window': range_for(s.get('gc_window', 90), 10),
             'rsi_window': range_for(s.get('rsi_window', 45), 15),
             'atr_period_a': range_for(s.get('atr_period_a', s.get('atr_period', 14)), 4),
@@ -605,11 +730,6 @@ class BacktestTab:
             'atr_multiplier_trail_s2': range_for(s.get('atr_multiplier_trail_s2', 3.0), 0.5),
             'atr_multiplier_sl_s2_b': range_for(s.get('atr_multiplier_sl_s2_b', 2.5), 0.5),
             'atr_multiplier_trail_s2_b': range_for(s.get('atr_multiplier_trail_s2_b', 3.0), 0.5),
-            'smart_buy_vp': range_for(s.get('smart_buy_vp', 120.0), 10.0),
-            'smart_buy_ba_ratio': range_for(s.get('smart_buy_ba_ratio', 1.5), 0.3),
-            'smart_exit_vp': range_for(s.get('smart_exit_vp', 100.0), 10.0),
-            'smart_exit_ba_ratio': range_for(s.get('smart_exit_ba_ratio', 1.5), 0.3),
-            'smart_exit_price_threshold': range_for(s.get('smart_exit_price_threshold', 1.0), 0.5),
             'gap_down_limit_a': range_for(s.get('gap_down_limit_a', s.get('gap_down_limit', -3.0)), 1.0),
             'gap_down_limit_b': range_for(s.get('gap_down_limit_b', s.get('gap_down_limit', -3.0)), 1.0),
             'gap_grace_mins_a': range_for(s.get('gap_grace_mins_a', s.get('gap_grace_mins', 15)), 5),
@@ -617,17 +737,92 @@ class BacktestTab:
             's1_a_flash_exit_pct': range_for(s.get('s1_a_flash_exit_pct', -5.0), 1.0),
             's1_b_flash_exit_pct': range_for(s.get('s1_b_flash_exit_pct', -5.0), 1.0),
             's2_flash_exit_pct': range_for(s.get('s2_flash_exit_pct', -5.0), 1.0),
+            's2_b_flash_exit_pct': range_for(s.get('s2_b_flash_exit_pct', -5.0), 1.0),
+            # 레거시 유니버스 키(opt_keys 미포함 — 툴팁·구버전 호환용 범위만 유지)
             'min_trde_val': range_for(s.get('min_trde_val', 10), 5),
             'vol_ratio': range_for(s.get('vol_ratio', 1.0), 0.5),
             'vol_lookback': range_for(s.get('vol_lookback', 20), 5),
-            'ma_convergence': range_for(s.get('ma_convergence', 5.0), 1.0),
             'sel_rsi_min': range_for(s.get('sel_rsi_min', 35.0), 5.0),
             'sel_rsi_max': range_for(s.get('sel_rsi_max', 70.0), 5.0),
-            # Track B 종목선정 탐색 범위
             'sel_b_rsi_min': range_for(s.get('sel_b_rsi_min', 45.0), 5.0),
             'sel_b_rsi_max': range_for(s.get('sel_b_rsi_max', 75.0), 5.0),
             'sel_b_min_trde_val': range_for(s.get('sel_b_min_trde_val', 60.0), 10),
         }
+
+    def _fallback_search_values(self, key: str, settings: dict) -> list:
+        """명시 탐색공간이 없는 설정 키용 — 현재값 주변 또는 True/False."""
+        def range_for(val, step, count=3):
+            if isinstance(val, int):
+                return [int(val + (i - count // 2) * step) for i in range(count)]
+            return [round(float(val) + (i - count // 2) * step, 4) for i in range(count)]
+
+        try:
+            raw = settings.get(key, self.base_backtest_settings.get(key))
+            name = str(key).lower()
+            # bool / ON-OFF 계열
+            if isinstance(raw, bool) or name.startswith("use_") or name.endswith("_enabled") or "_require_" in name:
+                return [True, False]
+            if raw is None:
+                return [True, False]
+
+            # 정수/실수
+            try:
+                if isinstance(raw, int) and not isinstance(raw, bool):
+                    iv = int(raw)
+                    step = max(1, abs(iv) // 10) if abs(iv) >= 10 else 1
+                    return range_for(iv, step)
+                fv = float(raw)
+                if abs(fv) >= 100000:  # 초기자금 등
+                    step = max(500000.0, abs(fv) * 0.1)
+                    return range_for(fv, step)
+                if abs(fv) >= 100:
+                    return range_for(fv, max(1.0, abs(fv) * 0.1))
+                if abs(fv) >= 10:
+                    return range_for(fv, max(0.5, abs(fv) * 0.1))
+                if abs(fv) >= 1:
+                    return range_for(fv, 0.25)
+                # 수수료·소수 비율
+                step = 0.05 if abs(fv) < 1 else 0.1
+                return range_for(fv, step)
+            except (TypeError, ValueError):
+                return [True, False]
+        except Exception:
+            return [True, False]
+
+    def _resolve_search_space_for_active(self, settings: dict) -> dict:
+        """● 지정된 모든 키에 대해 탐색공간 구성(명시 범위 + 폴백)."""
+        full = self._get_dynamic_search_space(settings)
+        out: dict = {}
+        try:
+            items = list(self.opt_params_vars.items())
+        except Exception:
+            items = []
+        for k, var in items:
+            try:
+                if not var.get():
+                    continue
+            except Exception:
+                continue
+            if k in full:
+                out[k] = full[k]
+            else:
+                out[k] = self._fallback_search_values(k, settings)
+        return out
+
+    def _param_header_alias(self, key: str) -> str:
+        """결과 트리 헤더용 짧은 이름."""
+        try:
+            if key in self.PARAM_INFO:
+                return str(self.PARAM_INFO[key][0])
+        except Exception:
+            pass
+        try:
+            labels = getattr(self.app, "opt_param_labels", None) or {}
+            if key in labels and labels[key]:
+                return str(labels[key])[:18]
+        except Exception:
+            pass
+        return str(key)[:18]
 
     def _refresh_columns_from_settings(self, re_render=True):
         """[v26.1] 설정 탭의 파라미터 선택 상태를 즉시 트리뷰 컬럼에 반영 (선택된 항목만!)"""
@@ -641,11 +836,22 @@ class BacktestTab:
             # 2. 기본 결과 컬럼
             base_cols = ["rank", "avg_ret", "avg_mdd", "win_rate", "trades"]
             
-            # 3. 현재 선택된 최적화 대상 파라미터 감지 (순서 보장)
+            # 3. 선택된 최적화 대상 (PARAM_INFO 순서 우선, 이후 자동등록 키)
             active_params = []
+            seen = set()
             for k in self.PARAM_INFO.keys():
                 if k in self.opt_params_vars and self.opt_params_vars[k].get():
                     active_params.append(k)
+                    seen.add(k)
+            for k, var in self.opt_params_vars.items():
+                try:
+                    if k in seen:
+                        continue
+                    if var.get():
+                        active_params.append(k)
+                        seen.add(k)
+                except Exception:
+                    continue
             
             # 4. 트리뷰 컬럼 명단 갱신 (선택되지 않은 파라미터는 리스트에서 제외됨)
             new_cols = base_cols + active_params
@@ -661,8 +867,7 @@ class BacktestTab:
                     header_text = {"rank": "순위", "avg_ret": "수익률(%)", "avg_mdd": "MDD", "win_rate": "승률(%)", "trades": "매매수"}[col]
                     width = 75
                 else:
-                    alias, category, desc = self.PARAM_INFO[col]
-                    header_text = alias
+                    header_text = self._param_header_alias(col)
                     width = 110
                 
                 self.tree_backtest.heading(col, text=header_text)
@@ -705,8 +910,7 @@ class BacktestTab:
             self.app._final_save_settings()
             
             s = self.app.settings
-            full_search_space = self._get_dynamic_search_space(s)
-            search_space = {k: v for k, v in full_search_space.items() if self.opt_params_vars.get(k, tk.BooleanVar(value=False)).get()}
+            search_space = self._resolve_search_space_for_active(s)
             
             if not search_space:
                 messagebox.showwarning("주의", "최소 하나 이상의 파라미터를 선택해야 합니다.")
@@ -776,33 +980,123 @@ class BacktestTab:
     def _run_optimize_thread(self, start, end, space, high_precision=False, n_trials=50):
         try:
             import parameter_optimizer as opt_mod
-            # [v31.0] Derive optimization targets from selected universe index
-            from backtest_engine import TradingStrategy
-            idx_choice = self.app.settings.get("universe_index_choice", "KODEX200")
-            name_map = TradingStrategy.get_stock_name_map(idx_choice)
-            opt_codes = list(name_map.keys())[:10] if name_map else ['005930', '000660', '005380', '055550', '051910', '012450', '035420', '015760', '028260', '009150']
-            
+            import strategy_selector
+
+            fallback = [
+                "005930",
+                "000660",
+                "005380",
+                "055550",
+                "051910",
+                "012450",
+                "035420",
+                "015760",
+                "028260",
+                "009150",
+            ]
+
+            def _opt_log(msg: object, *_a: object, **_k: object) -> None:
+                try:
+                    text = str(msg)
+                except Exception:
+                    return
+                try:
+                    self.gui_queue.put(
+                        lambda t=text: self.lbl_bt_status.config(text=t)
+                    )
+                except Exception:
+                    pass
+                try:
+                    print(text, flush=True)
+                except Exception:
+                    pass
+
+            dm = getattr(self.app, "data_manager", None)
+            opt_codes: list[str] = []
+            try:
+                if dm is not None:
+                    opt_codes = strategy_selector.collect_dynamic_schedule_codes(
+                        self.app.settings,
+                        start,
+                        end,
+                        dm,
+                        logger_callback=_opt_log,
+                    )
+            except Exception as e:
+                _opt_log(f"[Opt] 선정 스케줄 수집 예외 → 대표주 폴백: {e}")
+                opt_codes = []
+
+            if not opt_codes:
+                from backtest_engine import TradingStrategy
+
+                idx_choice = self.app.settings.get("universe_index_choice", "KODEX200")
+                name_map = TradingStrategy.get_stock_name_map(idx_choice)
+                opt_codes = (
+                    list(name_map.keys())[:10] if name_map else list(fallback)
+                )
+                _opt_log(
+                    f"[Opt] 선정 스케줄 비어 있음 → 폴백 {len(opt_codes)}종목"
+                )
+            else:
+                _opt_log(
+                    f"[Opt] 선정 스케줄 종목 풀 {len(opt_codes)}종목으로 최적화"
+                )
+
+            try:
+                preview = ", ".join(opt_codes[:12])
+                if len(opt_codes) > 12:
+                    preview += f" …(+{len(opt_codes) - 12})"
+                self.gui_queue.put(
+                    lambda n=len(opt_codes), p=preview: self.lbl_opt_targets.config(
+                        text=f"🔍 대상: 선정 스케줄 {n}종목 ({p})"
+                    )
+                )
+            except Exception:
+                pass
+
             optimizer = opt_mod.ParameterOptimizer(opt_codes, space, self.app.settings)
-            
+
             def update_progress(msg, value):
                 self.gui_queue.put(lambda: self.lbl_bt_status.config(text=msg))
-                if hasattr(self.app, 'progress_var'):
+                if hasattr(self.app, "progress_var"):
                     self.gui_queue.put(lambda: self.app.progress_var.set(value))
 
-            self.gui_queue.put(lambda: self.lbl_bt_status.config(text="최적화 시작...", foreground="orange"))
-            df_results = optimizer.find_best_params(start, end, interval='15m', callback=update_progress, high_precision=high_precision, method='bayesian', n_trials=n_trials)
-            
+            self.gui_queue.put(
+                lambda: self.lbl_bt_status.config(
+                    text="최적화 시작...", foreground="orange"
+                )
+            )
+            df_results = optimizer.find_best_params(
+                start,
+                end,
+                interval="15m",
+                callback=update_progress,
+                high_precision=high_precision,
+                method="bayesian",
+                n_trials=n_trials,
+            )
+
             if df_results is not None and not df_results.empty:
                 self.gui_queue.put(lambda: self._render_optimization_results(df_results))
             else:
-                self.gui_queue.put(lambda: messagebox.showwarning("결과 없음", "매매 신호가 발생하지 않았습니다."))
+                self.gui_queue.put(
+                    lambda: messagebox.showwarning(
+                        "결과 없음", "매매 신호가 발생하지 않았습니다."
+                    )
+                )
         except Exception as _err:
             # [v4.10.5] Absolute isolation of error message
             _msg = str(_err)
-            self.gui_queue.put(lambda error_msg=_msg: messagebox.showerror("최적화 오류", error_msg))
+            self.gui_queue.put(
+                lambda error_msg=_msg: messagebox.showerror("최적화 오류", error_msg)
+            )
         finally:
             self.gui_queue.put(lambda: self.btn_start_optimize.config(state=tk.NORMAL))
-            self.gui_queue.put(lambda: self.lbl_bt_status.config(text="최적화 완료!", foreground="#A3BE8C"))
+            self.gui_queue.put(
+                lambda: self.lbl_bt_status.config(
+                    text="최적화 완료!", foreground="#A3BE8C"
+                )
+            )
 
     def _open_signal_report(self):
         path = os.path.abspath("signal_report.html")

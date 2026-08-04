@@ -816,17 +816,18 @@ class KiwoomApp:
         # [v16.50] 최적화 상태 데이터 중앙 집중화 (Singleton State Management)
         # 탭 전환 시 데이터 유실 방지를 위해 메인 앱 인스턴스에서 직접 관리
         self.opt_params_vars = {}
-        # 최적화 대상(○/●): tools/optimization_params_audit.xlsx 사용자 표시(2026-04) 기준 72키
+        self.opt_param_labels: dict[str, str] = {}
+        # 시드: Simple 경로 핵심 키 (설정 탭 빌드 시 add_param_row가 나머지 UI 키를 자동 등록)
         opt_keys = [
             's1_equity_pct', 's2_equity_pct',
-            'buy_rsi_min', 'buy_rsi_max_a', 'gc_window', 'rsi_window', 'ma60_min', 'ma60_max',
+            'buy_rsi_min', 'buy_rsi_max_a', 'gc_window', 'rsi_window', 'ma_convergence',
+            'ma60_min', 'ma60_max',
             'vol_surge', 'prev_vol_lookback_s1_a',
             'buy_rsi_max_b', 'vol_surge_b', 'prev_vol_lookback_s1_b',
             's2_ma20_gap', 's2_ma5_gap', 's2_rsi_gap', 's2_macd_gap', 's2_vol_ratio',
             'prev_vol_lookback_s2_a', 's2_profit_limit', 's2_delay_hours',
-            's2_b_ma20_gap', 's2_b_rsi_gap', 's2_b_macd_gap', 's2_b_vol_ratio',
+            's2_b_ma20_gap', 's2_b_ma5_gap', 's2_b_rsi_gap', 's2_b_macd_gap', 's2_b_vol_ratio',
             'prev_vol_lookback_s2_b', 's2_b_profit_limit', 's2_b_delay_hours',
-            'smart_buy_vp', 'smart_buy_ba_ratio', 'smart_exit_vp', 'smart_exit_ba_ratio', 'smart_exit_price_threshold',
             'gap_down_limit_a', 'gap_grace_mins_a', 'atr_period_a',
             's1_a_take_profit', 's1_a_stop_loss', 's1_a_flash_exit_pct',
             'atr_multiplier_sl_a', 'atr_multiplier_trail_a',
@@ -837,6 +838,26 @@ class KiwoomApp:
             'atr_multiplier_sl_b', 'atr_multiplier_trail_b',
             's2_b_take_profit', 's2_b_stop_loss', 's2_b_flash_exit_pct',
             'atr_multiplier_sl_s2_b', 'atr_multiplier_trail_s2_b',
+            'atr_sl_entry_grace_hours', 'atr_sl_entry_grace_mult',
+            # --- ON/OFF (SimpleBacktester 경로에서 실제 반영되는 것만) ---
+            'use_rsi_min', 'use_macd_signal', 'use_rsi_sig_filter',
+            'use_type_a', 'use_gc', 'use_rsi_signal', 'use_ma60_safe', 'use_vol_surge',
+            'use_type_b', 'use_type_b_vol', 'use_trend_aligned_b', 'use_macd_gc_b',
+            'use_s2_master_a', 'use_s2_ma20', 'use_s2_ma5', 'use_s2_rsi_sig',
+            'use_s2_macd_gc', 'use_s2_vol_surge', 'use_s2_profit', 'use_s2_delay',
+            'use_s2_master_b', 'use_s2_b_ma20', 'use_s2_b_ma5', 'use_s2_b_rsi_sig',
+            'use_s2_b_macd_gc', 'use_s2_b_vol_surge', 'use_s2_b_profit', 'use_s2_b_delay',
+            'use_gap_down_exit_a', 'use_gap_grace_a', 'use_atr_exit_a',
+            'use_s1_a_tp', 'use_s1_a_stop_loss', 'use_s1_a_flash_exit',
+            'use_atr_stop_loss_a', 'use_atr_trailing_stop_a', 'use_atr_trail_only_after_tp_s1_a',
+            'use_s2_tp', 'use_s2_stop_loss', 'use_s2_flash_exit',
+            'use_atr_stop_loss_s2', 'use_atr_trailing_stop_s2', 'use_atr_trail_only_after_tp_s2_a',
+            'use_gap_down_exit_b', 'use_gap_grace_b', 'use_atr_exit_b',
+            'use_s1_b_tp', 'use_s1_b_stop_loss', 'use_s1_b_flash_exit',
+            'use_atr_stop_loss_b', 'use_atr_trailing_stop_b', 'use_atr_trail_only_after_tp_s1_b',
+            'use_s2_b_tp', 'use_s2_b_stop_loss', 'use_s2_b_flash_exit',
+            'use_atr_stop_loss_s2_b', 'use_atr_trailing_stop_s2_b', 'use_atr_trail_only_after_tp_s2_b',
+            'atr_sl_entry_grace_same_day',
         ]
         for key in opt_keys:
             # 설정 파일에 저장된 값이 있으면 그것을 사용, 없으면 False 초기화

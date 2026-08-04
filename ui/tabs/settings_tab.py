@@ -37,6 +37,26 @@ class SettingsTab:
         frame.columnconfigure(4, weight=0, minsize=80)   # 최적화 토글 (중간에 배치하여 잘림 방지)
         frame.columnconfigure(5, weight=1, minsize=200)  # 설명 (가로 확장)
 
+    def _ensure_opt_var(self, key: str, label: str = "") -> bool:
+        """설정 행 키를 최적화 ○/● 대상에 자동 등록. 성공 시 True."""
+        try:
+            if not key:
+                return False
+            if not hasattr(self.app, "opt_params_vars") or self.app.opt_params_vars is None:
+                self.app.opt_params_vars = {}
+            if key not in self.app.opt_params_vars:
+                saved_val = bool(self.app.settings.get(f"opt_{key}", False))
+                self.app.opt_params_vars[key] = tk.BooleanVar(value=saved_val)
+            if not hasattr(self.app, "opt_param_labels") or self.app.opt_param_labels is None:
+                self.app.opt_param_labels = {}
+            lab = str(label or "").strip()
+            if lab:
+                # 들여쓰기 장식 제거한 표시명 저장
+                self.app.opt_param_labels[key] = lab.lstrip(" ㄴ└─-").strip() or lab
+            return True
+        except Exception:
+            return False
+
     def _bind_opt_interaction(
         self,
         widget,
@@ -47,9 +67,10 @@ class SettingsTab:
         pack_in: tp.Any | None = None,
         peer_keys: tuple[str, ...] = (),
         bind_widget_rclick: bool = True,
+        label: str = "",
     ) -> None:
-        """[v16.50] 최적화 ○/● 아이콘. peer_keys: 동일 입력행 묶음 스타일. bind_widget_rclick=False 이면 입력창 우클릭 미연동(사이징 행 이중 키 시 덮어쓰기 방지)."""
-        if not hasattr(self.app, 'opt_params_vars') or key not in self.app.opt_params_vars:
+        """[v16.50] 최적화 ○/● 아이콘. 설정 UI에 노출된 모든 키를 대상으로 자동 등록."""
+        if not self._ensure_opt_var(key, label=label):
             return
 
         bt = getattr(self.app, 'backtest_tab', None)
@@ -86,10 +107,14 @@ class SettingsTab:
         def sync_style() -> None:
             try:
                 is_active = bool(self.app.opt_params_vars[key].get())
-                if _any_peer_active():
-                    widget.configure(style="Opt.TEntry")
-                else:
-                    widget.configure(style="TEntry")
+                try:
+                    if _any_peer_active():
+                        widget.configure(style="Opt.TEntry")
+                    else:
+                        widget.configure(style="TEntry")
+                except (tk.TclError, AttributeError, TypeError):
+                    # Checkbutton 등 Entry 스타일이 없는 위젯은 아이콘만 갱신
+                    pass
                 opt_icon.config(text="●" if is_active else "○", fg=fg_active if is_active else fg_normal)
             except (tk.TclError, AttributeError):
                 pass
@@ -389,10 +414,30 @@ class SettingsTab:
                 if toggle_key not in self.conf_vars:
                     def_val = self.default_settings.get(toggle_key, True)
                     self.conf_vars[toggle_key] = tk.BooleanVar(value=self.app.settings.get(toggle_key, def_val))
-                cb = tk.Checkbutton(parent, variable=self.conf_vars[toggle_key], bg=bg_col, fg=txt_col, activebackground=bg_col, selectcolor='#5E81AC') 
-                cb.grid(row=r, column=0, sticky='w', padx=(5, 0))
+                # 체크박스 + (최적화 대상이면) ○/● 를 같은 칸에 배치
+                cell0 = ttk.Frame(parent)
+                cell0.grid(row=r, column=0, sticky='w', padx=(5, 0))
+                cb = tk.Checkbutton(
+                    cell0,
+                    variable=self.conf_vars[toggle_key],
+                    bg=bg_col,
+                    fg=txt_col,
+                    activebackground=bg_col,
+                    selectcolor='#5E81AC',
+                )
+                cb.pack(side=tk.LEFT)
                 if widget_list is not None and group_toggle_widgets:
                     widget_list.append(cb)
+                try:
+                    self._bind_opt_interaction(
+                        cb,
+                        toggle_key,
+                        pack_in=cell0,
+                        bind_widget_rclick=True,
+                        label=label,
+                    )
+                except Exception:
+                    pass
             
             lbl = ttk.Label(parent, text=label, font=('Malgun Gothic', 10), foreground=txt_col)
             lbl.grid(row=r, column=1, sticky='w', pady=4)
@@ -405,7 +450,9 @@ class SettingsTab:
                 ent.bind("<FocusIn>", lambda e: ent.selection_clear())
                 self.params_entries[key] = ent
                 if widget_list is not None: widget_list.append(ent)
-                self._bind_opt_interaction(ent, key, grid_row=r, grid_parent=parent)
+                self._bind_opt_interaction(
+                    ent, key, grid_row=r, grid_parent=parent, label=label
+                )
 
             if unit:
                 un = ttk.Label(parent, text=unit, font=('Malgun Gothic', 9), foreground=primary_col)
@@ -1278,6 +1325,14 @@ class SettingsTab:
         add_param_row(strat_f, '이평 골든크로스', 'gc_window', '분', 'N분 내 GC 발생 여부', toggle_key='use_gc', widget_list=self.type_a_widgets)
         add_param_row(
             strat_f,
+            '  ㄴ 이평 수렴 상한',
+            'ma_convergence',
+            '%',
+            'GC 판정: (MA5/MA20-1)×100 ≤ 이 값 (기본 1.2)',
+            widget_list=self.type_a_widgets,
+        )
+        add_param_row(
+            strat_f,
             'RSI 상향돌파',
             'rsi_window',
             '분',
@@ -1809,6 +1864,30 @@ class SettingsTab:
             padding='15',
         )
         exit_cd_f.pack(fill=tk.X, pady=10)
+        add_header(exit_cd_f, '── 진입 직후 ATR_SL 유예 (Simple/동적 공통) ──')
+        add_param_row(
+            exit_cd_f,
+            '유예 시간',
+            'atr_sl_entry_grace_hours',
+            '시간',
+            '0=비활성. 진입 후 N시간 동안 SL 배수 확대(당일유예 OFF일 때)',
+        )
+        add_param_row(
+            exit_cd_f,
+            '유예 SL 배수',
+            'atr_sl_entry_grace_mult',
+            '배',
+            '0=비활성. 유예 중 ATR_SL 배수(기본 SL 배수보다 커야 의미 있음)',
+        )
+        add_param_row(
+            exit_cd_f,
+            '당일 유예',
+            None,
+            '',
+            'ON이면 진입 당일 종일 grace_mult 적용(시간 유예보다 우선)',
+            toggle_key='atr_sl_entry_grace_same_day',
+        )
+        add_header(exit_cd_f, '── ATR_SL 후 재진입 쿨다운 (동적·실시간) ──')
         add_param_row(
             exit_cd_f,
             'ATR_SL 후 재진입 금지',

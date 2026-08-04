@@ -8,7 +8,8 @@ alwaysApply: false
 
 ## 실행 흐름
 
-1. **데이터 로드** (`BacktestDataLoader`) — 10개 대표주 15분봉
+1. **데이터 로드** (`BacktestDataLoader`) — 동적백테 `prepare_dynamic_universe` 선정 스케줄(A/B) **합집합** 15분봉
+   (실패 시에만 대표주 10종 폴백)
 2. **시장지수 로드** — 로컬 DB 우선 → FDR 폴백 (`KS11`, `VIX`)
 3. **지표 사전 계산** — `is_indicator_constant` 여부에 따라 분기
 4. **최적화 실행** — Bayesian(`optuna.TPESampler`) / Grid / Random
@@ -40,6 +41,12 @@ _INDICATOR_PARAMS = frozenset({
 - **Trials**: 스핀박스로 조절 (기본값 50, 범위 10~300)
 - **고정밀(1m)**: 체크박스 — 최적화 중 1분봉 사용 여부 (기본 OFF)
 - 최적화는 기본적으로 15분봉만 사용 (15배 빠름)
+- **ON/OFF 파라미터**: SimpleBacktester에서 의미 있는 `use_*` 체크박스는
+  `[True, False]` categorical로 탐색 가능 (Smart Buy/Exit·전환게이트 등 BT 무력화 항목 제외)
+- **수치 파라미터**: S1/S2/청산·ATR 유예·`ma_convergence` 등 Simple 경로 반영 수치만 ○/● 대상
+  (선정·수수료·RT·Smart 임계는 제외)
+- **설정 UI 자동 등록**: `add_param_row`로 만든 모든 수치/체크박스에 ○/●를 붙임.
+  명시 탐색공간이 없으면 현재값 주변(또는 True/False) 폴백 범위를 사용.
 
 ## 주의사항
 - Bayesian 최적화는 `n_jobs=num_workers`로 멀티스레드 실행
