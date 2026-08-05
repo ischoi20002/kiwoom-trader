@@ -119,7 +119,7 @@ class LimitOrderWatchService:
         return max(1, min(n, 10))
 
     def _get_auction_poll_ms(self) -> int:
-        """동시호가 시장가 kt00007 확인 간격(기본 30초)."""
+        """동시호가 시장가 kt00007 확인 간격(기본 30초). 15:30 이후부터 적용."""
         try:
             sec = float(
                 (getattr(self.app, "settings", None) or {}).get(
@@ -131,6 +131,37 @@ class LimitOrderWatchService:
         sec = max(5.0, min(sec, 120.0))
         return int(sec * 1000)
 
+    def _auction_fill_confirm_start_dt(self, now: Optional[datetime] = None) -> datetime:
+        """
+        종가 동시호가 체결 확인 시작 시각(당일 15:30:00).
+
+        15:15 라벨 봉 완성(~15:20) 후 시장가 접수는 가능하지만,
+        15:20~15:30 사이에는 체결이 나지 않으므로 조회는 15:30부터.
+        """
+        t = now if isinstance(now, datetime) else datetime.now()
+        return t.replace(hour=15, minute=30, second=0, microsecond=0)
+
+    def _ms_until_auction_fill_confirm_start(
+        self, now: Optional[datetime] = None
+    ) -> int:
+        """15:30:00 까지 남은 ms. 이미 지났으면 0."""
+        try:
+            t = now if isinstance(now, datetime) else datetime.now()
+            start = self._auction_fill_confirm_start_dt(t)
+            if t >= start:
+                return 0
+            return max(0, int((start - t).total_seconds() * 1000))
+        except Exception:
+            return 0
+
+    def _auction_fill_confirm_window_open(self, now: Optional[datetime] = None) -> bool:
+        """체결 확인 가능 구간: 15:30:00 이상."""
+        try:
+            t = now if isinstance(now, datetime) else datetime.now()
+            return t >= self._auction_fill_confirm_start_dt(t)
+        except Exception:
+            return True
+
     def _auction_watch_deadline_passed(self) -> bool:
         """로컬 시각 기준 15:40 이후면 폴링 종료."""
         try:
@@ -139,15 +170,27 @@ class LimitOrderWatchService:
         except Exception:
             return False
 
-    def _schedule_auction_poll(self, order_no: str) -> None:
-        """동시호가 폴링 재예약."""
+    def _schedule_auction_poll(
+        self, order_no: str, *, delay_ms: Optional[int] = None
+    ) -> None:
+        """동시호가 폴링 재예약(15:30 전이면 15:30까지 대기)."""
         oid = str(order_no or "").strip()
         if not oid:
             return
         root = self._get_root()
         if root is None:
             return
-        ms = self._get_auction_poll_ms()
+        try:
+            if delay_ms is None:
+                wait_start = self._ms_until_auction_fill_confirm_start()
+                if wait_start > 0:
+                    ms = int(wait_start)
+                else:
+                    ms = self._get_auction_poll_ms()
+            else:
+                ms = max(0, int(delay_ms))
+        except Exception:
+            ms = self._get_auction_poll_ms()
 
         def _acb() -> None:
             def _worker() -> None:
@@ -178,7 +221,7 @@ class LimitOrderWatchService:
             pass
 
     def _on_auction_poll(self, order_no: str) -> None:
-        """동시호가 시장가: 취소/정정 없이 kt00007 체결 확인만(15:40까지)."""
+        """동시호가 시장가: 15:30~15:40 kt00007 체결 확인만(취소·정정 없음)."""
         oid = str(order_no or "").strip()
         if not oid:
             return
@@ -189,6 +232,12 @@ class LimitOrderWatchService:
         except Exception:
             meta = None
         if meta is None or not bool(getattr(meta, "auction_watch", False)):
+            return
+
+        # 15:20~15:30 사이 조기 타이머가 있어도 조회하지 않음
+        if not self._auction_fill_confirm_window_open():
+            wait_ms = self._ms_until_auction_fill_confirm_start()
+            self._schedule_auction_poll(oid, delay_ms=wait_ms)
             return
 
         # 체결 확인 (side 미설정 시 kind로 추론)
@@ -890,7 +939,7 @@ class LimitOrderWatchService:
         - 터치호가: ``touch_quote_order_poll_sec`` 후 kt00007 체결 확인,
           미체결이면 즉시 정정(최대
           ``touch_quote_order_max_amends``), 정정 직후 다시 첫 확인 간격으로 루프.
-        - auction_watch: 동시호가 시장가 — 취소/정정 없이 15:40까지 kt00007 폴링.
+        - auction_watch: 동시호가 시장가 — 15:30~15:40 kt00007 폴링(그 전·취소·정정 없음).
         """
         oid = str(order_no or "").strip()
         nc = str(code).zfill(6)
@@ -908,7 +957,10 @@ class LimitOrderWatchService:
                 # 메타만 등록(체결 시 clear)
                 after_id = None
             else:
-                ms = self._get_auction_poll_ms()
+                wait_start = self._ms_until_auction_fill_confirm_start()
+                poll_ms = self._get_auction_poll_ms()
+                # 15:30 전이면 첫 조회를 15:30:00에, 이후면 곧 간격 폴링
+                ms = wait_start if wait_start > 0 else poll_ms
 
                 def _acb() -> None:
                     def _worker() -> None:
@@ -932,10 +984,19 @@ class LimitOrderWatchService:
                                 pass
 
                 try:
-                    self.log(
-                        f"⏱️ [동시호가] 시장가 감시 등록 ({kind}) {nc} ord={oid} "
-                        f"(취소·정정 없음 · {ms // 1000}초 간격 · 15:40까지)"
-                    )
+                    if wait_start > 0:
+                        self.log(
+                            f"⏱️ [동시호가] 시장가 감시 등록 ({kind}) {nc} ord={oid} "
+                            f"(취소·정정 없음 · 체결확인 15:30~15:40 · "
+                            f"{poll_ms // 1000}초 간격 · "
+                            f"첫조회까지 약 {wait_start // 1000}초)"
+                        )
+                    else:
+                        self.log(
+                            f"⏱️ [동시호가] 시장가 감시 등록 ({kind}) {nc} ord={oid} "
+                            f"(취소·정정 없음 · 체결확인 15:30~15:40 · "
+                            f"{poll_ms // 1000}초 간격)"
+                        )
                 except Exception:
                     pass
                 after_id = root.after(ms, _acb)

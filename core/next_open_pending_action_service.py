@@ -142,10 +142,17 @@ class NextOpenPendingActionService:
         sig_type: str,
         limit_price: float,
         source_slot: Any,
-    ) -> None:
+    ) -> bool:
         target_date = self._next_target_day_from(source_slot)
         if not target_date:
-            return
+            try:
+                self.log(
+                    f"⚠️ [NextOpen] 15:30 매수 예약 실패 {name}({str(code).zfill(6)}) "
+                    f"— 익일 거래일 산출 불가 (slot={source_slot})"
+                )
+            except Exception:
+                pass
+            return False
         row = {
             "kind": "buy_signal",
             "code": str(code).zfill(6),
@@ -159,6 +166,16 @@ class NextOpenPendingActionService:
             "created_at": self._now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         self._upsert_action(row)
+        try:
+            self.log(
+                f"📌 [NextOpen] 15:30→익일09:00 매수 예약 "
+                f"{row['name']}({row['code']}) {row['sig_type']} "
+                f"지정가 {int(round(float(limit_price))):,}원 "
+                f"· 제출일 {target_date} · slot={source_slot}"
+            )
+        except Exception:
+            pass
+        return True
 
     def queue_strategy_action(
         self,
@@ -169,10 +186,17 @@ class NextOpenPendingActionService:
         limit_price: float,
         profit_ratio: float,
         source_slot: Any,
-    ) -> None:
+    ) -> bool:
         target_date = self._next_target_day_from(source_slot)
         if not target_date:
-            return
+            try:
+                self.log(
+                    f"⚠️ [NextOpen] 15:30 {action} 예약 실패 ({str(code).zfill(6)}) "
+                    f"— 익일 거래일 산출 불가 (slot={source_slot})"
+                )
+            except Exception:
+                pass
+            return False
         row = {
             "kind": "strategy_action",
             "code": str(code).zfill(6),
@@ -186,6 +210,19 @@ class NextOpenPendingActionService:
             "created_at": self._now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         self._upsert_action(row)
+        try:
+            act = str(action or "").upper()
+            act_lbl = "청산" if act == "EXIT" else ("추매(S2)" if act == "STAGE2" else act)
+            self.log(
+                f"📌 [NextOpen] 15:30→익일09:00 {act_lbl} 예약 "
+                f"({row['code']}) {reason or '-'} "
+                f"지정가 {int(round(float(limit_price))):,}원 "
+                f"· 수익률 {float(profit_ratio):+.2f}% "
+                f"· 제출일 {target_date} · slot={source_slot}"
+            )
+        except Exception:
+            pass
+        return True
 
     @staticmethod
     def _is_submit_window(now: datetime) -> bool:
@@ -211,20 +248,60 @@ class NextOpenPendingActionService:
                     kept.append(row)
                     continue
                 if target_date < today_s:
+                    try:
+                        self.log(
+                            f"ℹ️ [NextOpen] 기간 만료 폐기 "
+                            f"{row.get('kind')} {str(row.get('code','')).zfill(6)} "
+                            f"target={target_date}"
+                        )
+                    except Exception:
+                        pass
                     changed = True
                     continue
                 if submitted:
                     kept.append(row)
                     continue
                 if self._is_submit_window(now):
+                    try:
+                        self.log(
+                            f"🚀 [NextOpen] 09:00 직전 동시호가 제출 시도 "
+                            f"{row.get('kind')} {str(row.get('code','')).zfill(6)} "
+                            f"지정가 {int(round(float(row.get('limit_price', 0) or 0))):,}원"
+                        )
+                    except Exception:
+                        pass
                     ok = self._submit_one(row)
                     if ok:
                         row["submitted_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                        try:
+                            self.log(
+                                f"✅ [NextOpen] 09:00 동시호가 제출 완료 "
+                                f"{row.get('kind')} {str(row.get('code','')).zfill(6)} "
+                                f"@ {row['submitted_at']}"
+                            )
+                        except Exception:
+                            pass
                         changed = True
                     else:
+                        try:
+                            self.log(
+                                f"⚠️ [NextOpen] 09:00 동시호가 제출 실패 "
+                                f"{row.get('kind')} {str(row.get('code','')).zfill(6)} "
+                                f"— 창 내 재시도"
+                            )
+                        except Exception:
+                            pass
                         kept.append(row)
                     continue
                 if self._is_expire_window(now):
+                    try:
+                        self.log(
+                            f"ℹ️ [NextOpen] 09:05 이후 미제출 만료 "
+                            f"{row.get('kind')} {str(row.get('code','')).zfill(6)} "
+                            f"target={target_date}"
+                        )
+                    except Exception:
+                        pass
                     changed = True
                     continue
                 kept.append(row)

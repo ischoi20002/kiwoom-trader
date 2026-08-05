@@ -588,16 +588,30 @@ class SignalEngine:
         try:
             svc = getattr(self.app, "next_open_pending_action_service", None)
             if svc is None:
+                try:
+                    self.app.log(
+                        f"⚠️ [NextOpen] 15:30 매수 예약 실패 ({str(code).zfill(6)}) "
+                        f"— NextOpen 서비스 없음"
+                    )
+                except Exception:
+                    pass
                 return False
-            svc.queue_buy_signal(
-                code=str(code).zfill(6),
-                name=str(name or ""),
-                sig_type=str(sig_type or "TYPE_A"),
-                limit_price=float(limit_price),
-                source_slot=bar_ts,
+            return bool(
+                svc.queue_buy_signal(
+                    code=str(code).zfill(6),
+                    name=str(name or ""),
+                    sig_type=str(sig_type or "TYPE_A"),
+                    limit_price=float(limit_price),
+                    source_slot=bar_ts,
+                )
             )
-            return True
-        except Exception:
+        except Exception as e:
+            try:
+                self.app.log(
+                    f"⚠️ [NextOpen] 15:30 매수 예약 예외 ({str(code).zfill(6)}): {e}"
+                )
+            except Exception:
+                pass
             return False
 
     def _queue_next_open_strategy_action(
@@ -614,17 +628,31 @@ class SignalEngine:
         try:
             svc = getattr(self.app, "next_open_pending_action_service", None)
             if svc is None:
+                try:
+                    self.app.log(
+                        f"⚠️ [NextOpen] 15:30 {action} 예약 실패 ({str(code).zfill(6)}) "
+                        f"— NextOpen 서비스 없음"
+                    )
+                except Exception:
+                    pass
                 return False
-            svc.queue_strategy_action(
-                code=str(code).zfill(6),
-                action=str(action or ""),
-                reason=str(reason or ""),
-                limit_price=float(limit_price),
-                profit_ratio=float(profit_ratio),
-                source_slot=bar_ts,
+            return bool(
+                svc.queue_strategy_action(
+                    code=str(code).zfill(6),
+                    action=str(action or ""),
+                    reason=str(reason or ""),
+                    limit_price=float(limit_price),
+                    profit_ratio=float(profit_ratio),
+                    source_slot=bar_ts,
+                )
             )
-            return True
-        except Exception:
+        except Exception as e:
+            try:
+                self.app.log(
+                    f"⚠️ [NextOpen] 15:30 {action} 예약 예외 ({str(code).zfill(6)}): {e}"
+                )
+            except Exception:
+                pass
             return False
 
     def _wake_tick_main_action_poller(self) -> None:

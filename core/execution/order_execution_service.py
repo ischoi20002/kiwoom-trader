@@ -39,6 +39,13 @@ class OrderExecutionService:
             nc = str(canonical_stock_code(code) or code).zfill(6)
             if len(nc) == 6:
                 self._auction_mkt_codes.add(nc)
+                try:
+                    self.log(
+                        f"📌 [Auction15:15] 동시호가 시장가 플래그 설정 ({nc}) "
+                        f"— 이어지는 주문은 시장가(03)·미체결 취소 없음"
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -69,6 +76,13 @@ class OrderExecutionService:
                     "limit_price": lp,
                     "reason_prefix": str(reason_prefix or "NEXT_OPEN_0900|src=15:30"),
                 }
+                try:
+                    self.log(
+                        f"📌 [NextOpen] 09:00 지정가 메타 장착 ({nc}) "
+                        f"{int(round(lp)):,}원 ({reason_prefix})"
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -688,10 +702,28 @@ class OrderExecutionService:
                 _ot_label = "지정가"
         except Exception:
             _ot_label = "주문"
-        self.log(
-            f"🚀 [Buy Signal] {name}({code}) {reason} · "
-            f"{_ot_label} {adj_price:,}원 × {qty}주"
-        )
+        try:
+            if next_open is not None:
+                self.log(
+                    f"🚀 [NextOpen/09:00] 시초 동시호가 지정가 매수 발송 "
+                    f"{name}({code}) {_ot_label} {adj_price:,}원 × {qty}주 · {reason}"
+                )
+            elif auction:
+                self.log(
+                    f"🚀 [Auction15:15] 동시호가 시장가 매수 발송 "
+                    f"{name}({code}) {_ot_label} 참고가 {int(round(float(order_ref))):,}원 "
+                    f"× {qty}주 · {reason}"
+                )
+            else:
+                self.log(
+                    f"🚀 [Buy Signal] {name}({code}) {reason} · "
+                    f"{_ot_label} {adj_price:,}원 × {qty}주"
+                )
+        except Exception:
+            self.log(
+                f"🚀 [Buy Signal] {name}({code}) {reason} · "
+                f"{_ot_label} {adj_price:,}원 × {qty}주"
+            )
 
         # 3. 실전/모의 주문 발송 또는 가상 체결 처리
         ord_no = None
@@ -1081,7 +1113,16 @@ class OrderExecutionService:
                     except Exception as e:
                         self.log(f"⚠️ [Exit] 미체결 감시 등록 실패: {e}")
                     self.log(
-                        f"🚨 [Exit Signal/{reason}] {pos['name']}({code}) 매도 접수 "
+                        (
+                            f"🚨 [NextOpen/09:00] 시초 동시호가 지정가 매도 접수 "
+                            if next_open is not None
+                            else (
+                                f"🚨 [Auction15:15] 동시호가 시장가 매도 접수 "
+                                if auction
+                                else f"🚨 [Exit Signal/{reason}] "
+                            )
+                        )
+                        + f"{pos['name']}({code}) "
                         f"({self._exit_order_label(ot, ex_style, exit_ord_price)}, {profit_ratio:+.2f}%) "
                         f"참고가 {ref_px:,}원"
                         + (
@@ -1089,6 +1130,7 @@ class OrderExecutionService:
                             if ot == "00"
                             else ""
                         )
+                        + (f" · {reason}" if next_open is not None or auction else "")
                     )
                     import threading
                     _exit_tl = self._exit_order_label(ot, ex_style, exit_ord_price)
@@ -1401,7 +1443,16 @@ class OrderExecutionService:
                         except Exception as e:
                             self.log(f"⚠️ [S2] 미체결 감시 등록 실패: {e}")
                         self.log(
-                            f"🔥 [Scale-in] {pos['name']}({code}) 2차 추매 접수 "
+                            (
+                                f"🔥 [NextOpen/09:00] 시초 동시호가 지정가 추매 접수 "
+                                if next_open is not None
+                                else (
+                                    f"🔥 [Auction15:15] 동시호가 시장가 추매 접수 "
+                                    if auction
+                                    else f"🔥 [Scale-in] "
+                                )
+                            )
+                            + f"{pos['name']}({code}) 2차 추매 "
                             f"({self._s2_order_label(ot, ex_style)}, 참고가 {int(order_ref_px):,}원"
                             f"{'' if ex_style == 'market' else f', 호가 {adj_price:,}원'}, {add_qty}주)"
                         )
@@ -1489,7 +1540,7 @@ class OrderExecutionService:
         auction_watch: bool = False,
     ) -> None:
         """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만. 터치: 체결 확인+정정 루프.
-        auction_watch: 동시호가 시장가 — 취소/정정 없이 kt00007 폴링(15:30+까지).
+        auction_watch: 동시호가 시장가 — 15:30~15:40 kt00007 폴링(취소·정정 없음).
         """
         try:
             self.limit_order_watch_service.register(
