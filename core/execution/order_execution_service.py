@@ -30,6 +30,8 @@ class OrderExecutionService:
         self._exit_stale_pending_probe_at: Dict[str, float] = {}
         # 15:15 완성봉 → 동시호가 시장가 주문 플래그(종목코드)
         self._auction_mkt_codes: Set[str] = set()
+        # 실전: 15:15·15:30 슬롯 → NXT 1호가 터치+SOR (src=15:15|15:30)
+        self._nxt_touch_src: Dict[str, str] = {}
         # 15:30 완성봉 → 익일 09:00 지정가 주문 플래그(종목코드 -> 메타)
         self._next_open_limit_orders: Dict[str, Dict[str, Any]] = {}
 
@@ -59,6 +61,62 @@ class OrderExecutionService:
         except Exception:
             pass
         return False
+
+    def mark_nxt_touch_order(self, code: Any, *, src: str = "15:15") -> None:
+        """
+        실전 서버: KRX 마감 후 NXT 1호가 터치 주문 플래그.
+
+        주문은 ``dmst_stex_tp=SOR`` 로 내고, ka10004 ``{code}_NX`` 호가로 가격을 잡습니다.
+        """
+        try:
+            nc = str(canonical_stock_code(code) or code).zfill(6)
+            tag = str(src or "15:15").strip() or "15:15"
+            if len(nc) == 6:
+                self._nxt_touch_src[nc] = tag
+                try:
+                    self.log(
+                        f"📌 [NXT/SOR] 터치호가 플래그 ({nc} src={tag}) "
+                        f"— NXT 매수1/매도1 + SOR 라우팅"
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _consume_nxt_touch(self, code: Any) -> Optional[str]:
+        """NXT 터치 플래그 소모 — src(15:15|15:30) 또는 None."""
+        try:
+            nc = str(canonical_stock_code(code) or code).zfill(6)
+            return self._nxt_touch_src.pop(nc, None)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _tag_nxt_touch_reason(reason: Any, src: str) -> str:
+        try:
+            r = str(reason or "")
+        except Exception:
+            r = ""
+        head = f"NXT_TOUCH|src={src}|venue=NX|sor=1"
+        if r.startswith("NXT_TOUCH|"):
+            return r
+        return f"{head}|{r}"
+
+    def _fetch_touch_bid_ask(
+        self, code: Any, *, nxt: bool
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """터치 주문용 (bid1, ask1). ``nxt=True`` 이면 ka10004 ``_NX``."""
+        try:
+            nc = str(canonical_stock_code(code) or code).zfill(6)
+            om = getattr(self.app, "order_manager", None)
+            if om is None:
+                return None, None
+            venue = "NXT" if nxt else "KRX"
+            return om.fetch_best_bid_ask_rest(
+                nc, prefer_cache=False, update_cache=True, venue=venue
+            )
+        except Exception:
+            return None, None
 
     def mark_next_open_limit_order(
         self,
@@ -560,6 +618,7 @@ class OrderExecutionService:
 
         next_open = self._consume_next_open_limit_order(code)
         auction = self._consume_auction_market(code)
+        nxt_src = self._consume_nxt_touch(code)
         if next_open is not None:
             ot, ex_style = ("00", "limit")
             reason = self._tag_next_open_reason(
@@ -569,6 +628,8 @@ class OrderExecutionService:
             ot, ex_style = self._realtime_live_order_spec(auction_market=auction)
             if auction:
                 reason = self._tag_auction_reason(reason)
+            elif nxt_src:
+                reason = self._tag_nxt_touch_reason(reason, nxt_src)
         adj_price = 0
         fresh_ask: float = 0.0
         try:
@@ -576,10 +637,12 @@ class OrderExecutionService:
                 adj_price = int(round(float(next_open.get("limit_price", 0) or 0)))
             elif ex_style == "touch":
                 _nc = str(code).zfill(6)
-                _bid, _ask = self.app.order_manager.fetch_best_bid_ask_rest(_nc)
+                _bid, _ask = self._fetch_touch_bid_ask(_nc, nxt=bool(nxt_src))
                 if _ask is None or float(_ask) <= 0:
+                    venue_label = "NXT" if nxt_src else "KRX"
                     self.log(
-                        f"⚠️ [Skip] {name}({code}) S1 매수 생략: ka10004 매도1호가 조회 실패"
+                        f"⚠️ [Skip] {name}({code}) S1 매수 생략: "
+                        f"ka10004({venue_label}) 매도1호가 조회 실패"
                     )
                     try:
                         sl = getattr(self.app, "session_logger", None)
@@ -633,11 +696,12 @@ class OrderExecutionService:
         except Exception:
             pass
 
-        # [Stale-Signal Guard] 신호 평가가(sig_hint)가 신선한 시장 호가(fresh_ask)와 크게 벌어지면
-        # 지연된 M1/틱으로 눌림목 등 신호가 오탐됐을 수 있으므로 진입을 생략한다(BT 대비 RT 과진입 방지).
-        # 동시호가 시장가 경로는 호가 의미가 약해 스킵.
-        if (not auction) and next_open is None and self._s1_stale_signal_gap_block(
-            code, name, sig_hint, fresh_ask, reason
+        # 동시호가 시장가·NXT 터치(마감 직후) 경로는 호가 의미/지연 특성상 스킵.
+        if (
+            (not auction)
+            and (nxt_src is None)
+            and next_open is None
+            and self._s1_stale_signal_gap_block(code, name, sig_hint, fresh_ask, reason)
         ):
             return False
 
@@ -713,6 +777,11 @@ class OrderExecutionService:
                     f"🚀 [Auction15:15] 동시호가 시장가 매수 발송 "
                     f"{name}({code}) {_ot_label} 참고가 {int(round(float(order_ref))):,}원 "
                     f"× {qty}주 · {reason}"
+                )
+            elif nxt_src:
+                self.log(
+                    f"🚀 [NXT/SOR] 터치호가 매수 발송 ({nxt_src}) "
+                    f"{name}({code}) {_ot_label} {adj_price:,}원 × {qty}주 · {reason}"
                 )
             else:
                 self.log(
@@ -896,6 +965,7 @@ class OrderExecutionService:
         allow_order = getattr(config, 'ALLOW_MOCK_ORDER', False) if use_mock else getattr(config, 'ALLOW_REAL_ORDER', False)
         next_open = self._consume_next_open_limit_order(code)
         auction = self._consume_auction_market(code)
+        nxt_src = self._consume_nxt_touch(code)
         if next_open is not None:
             ot, ex_style = ("00", "limit")
             reason = self._tag_next_open_reason(
@@ -905,6 +975,8 @@ class OrderExecutionService:
             ot, ex_style = self._realtime_live_order_spec(auction_market=auction)
             if auction:
                 reason = self._tag_auction_reason(reason)
+            elif nxt_src:
+                reason = self._tag_nxt_touch_reason(reason, nxt_src)
 
         if action == "EXIT":
             # 매도: 터치(매수1호가), 지정가(참고가−1틱), 시장가(03)
@@ -916,14 +988,17 @@ class OrderExecutionService:
             elif ex_style == "touch":
                 try:
                     _nk = str(code).zfill(6)
-                    bid_t, ask_t = self.app.order_manager.fetch_best_bid_ask_rest(_nk)
+                    bid_t, ask_t = self._fetch_touch_bid_ask(
+                        _nk, nxt=bool(nxt_src)
+                    )
                 except Exception:
                     bid_t, ask_t = None, None
                 if bid_t is None or float(bid_t) <= 0:
                     try:
+                        venue_label = "NXT" if nxt_src else "KRX"
                         self.log(
                             f"⚠️ [Exit Signal/{reason}] {pos.get('name', code)}({code}) "
-                            f"매도 생략: ka10004 매수1호가 조회 실패"
+                            f"매도 생략: ka10004({venue_label}) 매수1호가 조회 실패"
                         )
                     except Exception:
                         pass
@@ -1324,14 +1399,17 @@ class OrderExecutionService:
             elif ex_style == "touch":
                 try:
                     _nk2 = str(code).zfill(6)
-                    bid_s2, ask_s2 = self.app.order_manager.fetch_best_bid_ask_rest(_nk2)
+                    bid_s2, ask_s2 = self._fetch_touch_bid_ask(
+                        _nk2, nxt=bool(nxt_src)
+                    )
                 except Exception:
                     bid_s2, ask_s2 = None, None
                 if ask_s2 is None or float(ask_s2) <= 0:
                     try:
+                        venue_label = "NXT" if nxt_src else "KRX"
                         self.log(
                             f"⚠️ [Scale-in] {pos.get('name', code)}({code}) "
-                            f"2차 생략: ka10004 매도1호가 조회 실패"
+                            f"2차 생략: ka10004({venue_label}) 매도1호가 조회 실패"
                         )
                     except Exception:
                         pass

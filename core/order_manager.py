@@ -51,22 +51,47 @@ class OrderManager:
         except Exception:
             return 2.0
 
+    @staticmethod
+    def quote_venue_stk_cd(stk_cd: str, *, venue: str = "KRX") -> str:
+        """
+        ka10004 종목코드 — KRX 6자리, NXT ``{code}_NX``.
+
+        ``005930_NX`` 등 접미가 이미 있으면 그대로 사용합니다.
+        """
+        try:
+            raw = str(stk_cd or "").strip().upper()
+        except Exception:
+            return ""
+        if not raw:
+            return ""
+        if "_NX" in raw or "_AL" in raw:
+            return raw
+        base = raw.split("_")[0].zfill(6)
+        if not base or base == "000000":
+            return ""
+        v = str(venue or "KRX").strip().upper()
+        if v == "NXT":
+            return f"{base}_NX"
+        return base
+
     def cache_best_bid_ask(
         self,
         stk_cd: str,
         bid: Optional[float],
         ask: Optional[float],
+        *,
+        venue: str = "KRX",
     ) -> None:
         """호가 캐시를 갱신합니다."""
         try:
-            code = str(stk_cd or "").strip().zfill(6)
+            cache_key = self.quote_venue_stk_cd(stk_cd, venue=venue)
         except Exception:
             return
-        if not code or code == "000000":
+        if not cache_key:
             return
         try:
             with self._touch_quote_cache_lock:
-                self._touch_quote_cache[code] = (
+                self._touch_quote_cache[cache_key] = (
                     time.monotonic(),
                     float(bid) if bid is not None and float(bid) > 0 else None,
                     float(ask) if ask is not None and float(ask) > 0 else None,
@@ -79,13 +104,14 @@ class OrderManager:
         stk_cd: str,
         *,
         max_age_sec: Optional[float] = None,
+        venue: str = "KRX",
     ) -> Tuple[Optional[float], Optional[float]]:
         """유효 TTL 내 캐시된 (bid, ask). 없거나 만료면 (None, None)."""
         try:
-            code = str(stk_cd or "").strip().zfill(6)
+            cache_key = self.quote_venue_stk_cd(stk_cd, venue=venue)
         except Exception:
             return None, None
-        if not code:
+        if not cache_key:
             return None, None
         ttl = (
             float(max_age_sec)
@@ -94,7 +120,7 @@ class OrderManager:
         )
         try:
             with self._touch_quote_cache_lock:
-                hit = self._touch_quote_cache.get(code)
+                hit = self._touch_quote_cache.get(cache_key)
             if not hit:
                 return None, None
             ts_m, bid, ask = hit
@@ -104,10 +130,12 @@ class OrderManager:
         except Exception:
             return None, None
 
-    def prefetch_best_bid_ask_rest(self, stk_cd: str) -> Tuple[Optional[float], Optional[float]]:
+    def prefetch_best_bid_ask_rest(
+        self, stk_cd: str, *, venue: str = "KRX"
+    ) -> Tuple[Optional[float], Optional[float]]:
         """ka10004를 조회해 캐시에 넣고 반환(평가와 주문 경로 겹침용)."""
         bid, ask = self.fetch_best_bid_ask_rest(
-            stk_cd, prefer_cache=False, update_cache=True
+            stk_cd, prefer_cache=False, update_cache=True, venue=venue
         )
         return bid, ask
 
@@ -633,27 +661,30 @@ class OrderManager:
         prefer_cache: bool = True,
         update_cache: bool = True,
         max_age_sec: Optional[float] = None,
+        venue: str = "KRX",
     ) -> Tuple[Optional[float], Optional[float]]:
         """
         키움 REST ``ka10004``(주식호가)로 **매수1호가·매도1호가** 를 조회합니다.
 
         prefer_cache=True 이면 TTL 내 캐시를 우선 반환해 touch 주문 지연을 줄입니다.
+        ``venue="NXT"`` 이면 ``{code}_NX`` 로 NXT 호가를 조회합니다(실전 전용).
 
         Returns
         -------
         (매수1호가, 매도1호가) 또는 실패 시 (None, None).
         """
         try:
-            code = str(stk_cd or "").strip().zfill(6)
+            api_stk = self.quote_venue_stk_cd(stk_cd, venue=venue)
+            code = str(stk_cd or "").strip().split("_")[0].zfill(6)
         except Exception:
             return None, None
-        if not code or code == "000000":
+        if not code or code == "000000" or not api_stk:
             return None, None
 
         if prefer_cache:
             try:
                 c_bid, c_ask = self.get_cached_best_bid_ask(
-                    code, max_age_sec=max_age_sec
+                    code, max_age_sec=max_age_sec, venue=venue
                 )
                 if (c_bid is not None and float(c_bid) > 0) or (
                     c_ask is not None and float(c_ask) > 0
@@ -716,7 +747,7 @@ class OrderManager:
                 "api-id": "ka10004",
             }
             res = requests.post(
-                url, headers=headers, json={"stk_cd": code}, timeout=8
+                url, headers=headers, json={"stk_cd": api_stk}, timeout=8
             )
             if res.status_code != 200:
                 return None, None
@@ -735,7 +766,9 @@ class OrderManager:
             out_ask = float(ask1) if ask1 > 0 else None
             if update_cache:
                 try:
-                    self.cache_best_bid_ask(code, out_bid, out_ask)
+                    self.cache_best_bid_ask(
+                        code, out_bid, out_ask, venue=venue
+                    )
                 except Exception:
                     pass
             return out_bid, out_ask

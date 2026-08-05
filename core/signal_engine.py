@@ -575,19 +575,59 @@ class SignalEngine:
         except Exception:
             return False
 
+    def _use_nxt_sor_touch_orders(self) -> bool:
+        """
+        실전 서버: KRX 마감 직후(15:15·15:30 슬롯) NXT 1호가 터치 + SOR.
+
+        모의 서버는 False — 기존 동시호가 시장가·익일 예약 유지.
+        """
+        try:
+            import config
+
+            return not bool(getattr(config, "USE_MOCK", False))
+        except Exception:
+            return False
+
+    def _eval_1530_slot_enabled(self) -> bool:
+        """15:30 슬롯 완성15 평가 허용(모의 next_open 또는 실전 NXT 즉시)."""
+        try:
+            if self._use_nxt_sor_touch_orders():
+                return True
+            return bool(self._next_open_1530_enabled())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_1530_bar_slot(bar_ts: Any) -> bool:
+        try:
+            t = pd.Timestamp(bar_ts)
+            return int(t.hour) == 15 and int(t.minute) == 30
+        except Exception:
+            return False
+
+    def _order_execution_service(self) -> Any:
+        try:
+            oes = getattr(self.app, "order_execution_service", None)
+            if oes is not None:
+                return oes
+            tc = getattr(self.app, "trading_controller", None)
+            return getattr(tc, "order_execution_service", None) if tc else None
+        except Exception:
+            return None
+
     def _allow_closed_15m_eval_wall_now(self, bar_ts: Any) -> bool:
         """
         완성15 평가를 허용하는 벽시계 구간인지.
 
         정규장(09:00~15:30)은 그대로 허용.
-        ``15:30`` 슬롯 + next_open 은 단일가 틱확인·예약이 15:30 직후에도
-        이뤄지므로 당일 15:40까지 허용한다.
+        ``15:30`` 슬롯 + (next_open 또는 실전 NXT 즉시) 은 단일가 틱확인·주문이
+        15:30 직후에도 이뤄지므로 당일 15:40까지 허용한다.
         """
         try:
             now = datetime.now()
             if is_krx_regular_session(now):
                 return True
-            if not self._next_open_1530_enabled():
+            if not self._eval_1530_slot_enabled():
                 return False
             slot = pd.Timestamp(bar_ts)
             if int(slot.hour) != 15 or int(slot.minute) != 30:
@@ -871,9 +911,8 @@ class SignalEngine:
                 from utils.krx_bars import is_krx_no_signal_eval_15m_slot
 
                 if is_krx_no_signal_eval_15m_slot(bar_ts) and not (
-                    self._next_open_1530_enabled()
-                    and pd.Timestamp(bar_ts).hour == 15
-                    and pd.Timestamp(bar_ts).minute == 30
+                    self._eval_1530_slot_enabled()
+                    and self._is_1530_bar_slot(bar_ts)
                 ):
                     return
             except Exception:
@@ -1094,26 +1133,29 @@ class SignalEngine:
             ):
                 return
 
-            # 15:30: 익일 09:00 시초 동시호가 지정가로 이월
+            # 15:30: 모의→익일09:00 예약 / 실전→NXT 터치+SOR 즉시
+            _is_1530 = self._is_1530_bar_slot(bar_ts)
+            _use_nxt = self._use_nxt_sor_touch_orders()
             try:
-                if (
-                    self._next_open_1530_enabled()
-                    and pd.Timestamp(bar_ts).hour == 15
-                    and pd.Timestamp(bar_ts).minute == 30
-                ):
-                    ok_next = self._queue_next_open_buy_signal(
-                        code=nk,
-                        name=str(info.get("name", "")),
-                        sig_type=str(sig_type),
-                        limit_price=float(now_price),
-                        bar_ts=bar_ts,
-                    )
-                    if ok_next:
-                        return
+                if _is_1530:
+                    if _use_nxt:
+                        oes = self._order_execution_service()
+                        if oes is not None and hasattr(oes, "mark_nxt_touch_order"):
+                            oes.mark_nxt_touch_order(nk, src="15:30")
+                    elif self._next_open_1530_enabled():
+                        ok_next = self._queue_next_open_buy_signal(
+                            code=nk,
+                            name=str(info.get("name", "")),
+                            sig_type=str(sig_type),
+                            limit_price=float(now_price),
+                            bar_ts=bar_ts,
+                        )
+                        if ok_next:
+                            return
             except Exception:
                 pass
 
-            # 15:15 동시호가: 라이브 터치 게이트 스킵 + 시장가 플래그
+            # 15:15: 모의→동시호가 시장가 / 실전→NXT 터치+SOR
             _auction_1515 = False
             try:
                 from utils.krx_bars import is_krx_auction_market_fill_slot
@@ -1123,22 +1165,23 @@ class SignalEngine:
                 _auction_1515 = False
             if _auction_1515:
                 try:
-                    oes = getattr(self.app, "order_execution_service", None)
-                    if oes is None:
-                        tc = getattr(self.app, "trading_controller", None)
-                        oes = getattr(tc, "order_execution_service", None) if tc else None
-                    if oes is not None and hasattr(oes, "mark_auction_market_order"):
-                        oes.mark_auction_market_order(nk)
+                    oes = self._order_execution_service()
+                    if oes is not None:
+                        if _use_nxt and hasattr(oes, "mark_nxt_touch_order"):
+                            oes.mark_nxt_touch_order(nk, src="15:15")
+                        elif hasattr(oes, "mark_auction_market_order"):
+                            oes.mark_auction_market_order(nk)
                 except Exception:
                     pass
 
             # 완성봉 신호 유지 + 주문 직전 라이브가 게이트 (추격/이탈·MA20)
-            # 동시호가 구간은 매도1호가 의미가 약해 게이트 생략
+            # 15:15·15:30(NXT) 은 NXT/동시호가 호가 경로라 게이트 생략
             try:
                 bar_close = float(closed_df["Close"].iloc[-1])
             except Exception:
                 bar_close = float(now_price or 0.0)
-            if not _auction_1515:
+            _skip_live_gate = bool(_auction_1515 or (_is_1530 and _use_nxt))
+            if not _skip_live_gate:
                 gate_ok, live_px, gate_reason = self._s1_live_confirm_gate(
                     nk,
                     info,
@@ -1235,9 +1278,8 @@ class SignalEngine:
                 from utils.krx_bars import is_krx_no_signal_eval_15m_slot
 
                 if is_krx_no_signal_eval_15m_slot(bar_ts) and not (
-                    self._next_open_1530_enabled()
-                    and pd.Timestamp(bar_ts).hour == 15
-                    and pd.Timestamp(bar_ts).minute == 30
+                    self._eval_1530_slot_enabled()
+                    and self._is_1530_bar_slot(bar_ts)
                 ):
                     return
             except Exception:
@@ -1373,25 +1415,28 @@ class SignalEngine:
                 return
 
             order_px = float(close_px)
+            _is_1530 = self._is_1530_bar_slot(bar_ts)
+            _use_nxt = self._use_nxt_sor_touch_orders()
             try:
-                if (
-                    self._next_open_1530_enabled()
-                    and pd.Timestamp(bar_ts).hour == 15
-                    and pd.Timestamp(bar_ts).minute == 30
-                ):
-                    ok_next = self._queue_next_open_strategy_action(
-                        code=nk,
-                        action=act,
-                        reason=str(res.get("reason") or ""),
-                        limit_price=float(order_px),
-                        profit_ratio=float(res.get("profit_ratio", 0) or 0),
-                        bar_ts=bar_ts,
-                    )
-                    if ok_next:
-                        return
+                if _is_1530:
+                    if _use_nxt:
+                        oes = self._order_execution_service()
+                        if oes is not None and hasattr(oes, "mark_nxt_touch_order"):
+                            oes.mark_nxt_touch_order(nk, src="15:30")
+                    elif self._next_open_1530_enabled():
+                        ok_next = self._queue_next_open_strategy_action(
+                            code=nk,
+                            action=act,
+                            reason=str(res.get("reason") or ""),
+                            limit_price=float(order_px),
+                            profit_ratio=float(res.get("profit_ratio", 0) or 0),
+                            bar_ts=bar_ts,
+                        )
+                        if ok_next:
+                            return
             except Exception:
                 pass
-            # 15:15 동시호가: 라이브 게이트 스킵 + 시장가 플래그
+            # 15:15: 모의→동시호가 시장가 / 실전→NXT 터치+SOR
             _auction_1515 = False
             try:
                 from utils.krx_bars import is_krx_auction_market_fill_slot
@@ -1401,17 +1446,18 @@ class SignalEngine:
                 _auction_1515 = False
             if _auction_1515:
                 try:
-                    oes = getattr(self.app, "order_execution_service", None)
-                    if oes is None:
-                        tc = getattr(self.app, "trading_controller", None)
-                        oes = getattr(tc, "order_execution_service", None) if tc else None
-                    if oes is not None and hasattr(oes, "mark_auction_market_order"):
-                        oes.mark_auction_market_order(nk)
+                    oes = self._order_execution_service()
+                    if oes is not None:
+                        if _use_nxt and hasattr(oes, "mark_nxt_touch_order"):
+                            oes.mark_nxt_touch_order(nk, src="15:15")
+                        elif hasattr(oes, "mark_auction_market_order"):
+                            oes.mark_auction_market_order(nk)
                 except Exception:
                     pass
 
             # EXIT/STAGE2: S1과 동일 — 주문 직전 라이브가 게이트, 통과 시 라이브가 주문
-            if act in ("EXIT", "STAGE2") and (not _auction_1515):
+            _skip_live_gate = bool(_auction_1515 or (_is_1530 and _use_nxt))
+            if act in ("EXIT", "STAGE2") and (not _skip_live_gate):
                 try:
                     gate_ok, live_px, gate_reason = self._s1_live_confirm_gate(
                         nk,
@@ -1508,9 +1554,8 @@ class SignalEngine:
             from utils.krx_bars import is_krx_no_signal_eval_15m_slot
 
             if is_krx_no_signal_eval_15m_slot(bar_ts) and not (
-                self._next_open_1530_enabled()
-                and pd.Timestamp(bar_ts).hour == 15
-                and pd.Timestamp(bar_ts).minute == 30
+                self._eval_1530_slot_enabled()
+                and self._is_1530_bar_slot(bar_ts)
             ):
                 return
         except Exception:
