@@ -26,10 +26,13 @@ from backtest_engine import (
 from utils.fee_rates import fee_decimal_rates_backtest
 from utils.krx_bars import (
     is_krx_auction_market_fill_slot,
+    is_krx_first_15m_slot,
+    is_krx_last_15m_slot,
     is_krx_no_signal_eval_15m_slot,
     krx_same_day_1530_label,
     slice_m1_for_15m_end,
 )
+from utils.krx_session_hours import get_session_hours
 from core.bt_hp_signal_bridge import compute_intrabar_indicator_step
 from core.bt_hp_intrabar_unified import (
     evaluate_bt_hp_intrabar_unified,
@@ -109,6 +112,10 @@ class DynamicBacktester:
         self.settings = settings_for_backtest(settings)
         self.bt_1530_signal_next_open_fill = bool(
             self.settings.get("next_open_1530_enabled", False)
+        )
+        # BT 전용: 09:00 슬롯에서 첫 1분봉으로 조기 평가 후, 같은 슬롯 완성 15분 평가 이어감
+        self.bt_open_auction_pass_enabled = bool(
+            self.settings.get("bt_open_auction_pass_enabled", False)
         )
         # 실시간 경로와 분리하기 위해 15:30 신호 허용은 동적 백테 내부 설정에만 주입한다.
         self.settings["_bt_allow_1530_signal_eval"] = bool(
@@ -675,6 +682,30 @@ class DynamicBacktester:
                     code_to_rank[c] = offset_b + i
             
             for curr_time in timeline:
+                # BT 전용 조기 패스: 당일 개장 슬롯에서 첫 1분봉으로 EXIT/S1 → 이후 완성15분(Pass2)
+                try:
+                    _is_open_slot = bool(is_krx_first_15m_slot(curr_time))
+                except Exception:
+                    _is_open_slot = False
+                if (
+                    self.bt_open_auction_pass_enabled
+                    and (not self.high_precision)
+                    and _is_open_slot
+                ):
+                    for code in monitoring_list:
+                        try:
+                            self._process_0900_open_auction_pass(
+                                code, curr_time, today_sells, track_map
+                            )
+                        except Exception as e:
+                            try:
+                                print(
+                                    f"[Dynamic] 개장 시초 패스 실패 ({code} @ {curr_time}): {e!r}",
+                                    flush=True,
+                                )
+                            except Exception:
+                                pass
+
                 # [v23.0] 고정밀 모드 처리 (지연 로딩 및 타켓팅 최적화)
                 m1_processed = set()
                 if self.high_precision:
@@ -710,8 +741,7 @@ class DynamicBacktester:
                     if (
                         _skip_eod_slot
                         and bool(self.bt_1530_signal_next_open_fill)
-                        and int(pd.Timestamp(curr_time).hour) == 15
-                        and int(pd.Timestamp(curr_time).minute) == 30
+                        and bool(is_krx_last_15m_slot(curr_time))
                     ):
                         _skip_eod_slot = False
                 except Exception:
@@ -971,11 +1001,12 @@ class DynamicBacktester:
         curr_time: Any,
         day_df: Any = None,
     ) -> Optional[Tuple[pd.Timestamp, float]]:
-        """당일 bars_15m 15:30 Close. 없으면 None."""
+        """당일 bars_15m 종가 단일가(SessionHours.close) Close. 없으면 None."""
         try:
             lab = krx_same_day_1530_label(curr_time)
             if lab is None:
                 return None
+            close_hm = get_session_hours(pd.Timestamp(curr_time).date()).close_minutes
         except Exception:
             return None
 
@@ -996,8 +1027,7 @@ class DynamicBacktester:
                         t = pd.Timestamp(idx).floor("min")
                         if (
                             t.normalize() == lab_f.normalize()
-                            and int(t.hour) == 15
-                            and int(t.minute) == 30
+                            and int(t.hour) * 60 + int(t.minute) == close_hm
                         ):
                             c = float(df.loc[idx, "Close"])
                             if c > 0:
@@ -1050,7 +1080,7 @@ class DynamicBacktester:
         curr_time: Any,
         day_df: Any = None,
     ) -> Optional[Tuple[pd.Timestamp, float]]:
-        """현재 슬롯 이후 최초 거래일의 09:00 시가를 찾는다."""
+        """현재 슬롯 이후 최초 거래일의 개장(SessionHours.open) 시가를 찾는다."""
         try:
             curr_ts = pd.Timestamp(curr_time)
         except Exception:
@@ -1066,7 +1096,7 @@ class DynamicBacktester:
                 return None
             for t in fut:
                 try:
-                    if int(t.hour) == 9 and int(t.minute) == 0:
+                    if bool(is_krx_first_15m_slot(t)):
                         row = df.loc[t]
                         px = float(row["Open"])
                         if px > 0:
@@ -1098,7 +1128,8 @@ class DynamicBacktester:
     ) -> Optional[Tuple[float, Any, str]]:
         """
         일반 슬롯: (price, curr_time, reason) 그대로.
-        15:15: 당일 15:30 Close·시각·AUCTION_MKT reason. Close 없으면 None(주문 스킵).
+        동시호가 직전: 당일 종가 Close·시각·AUCTION_MKT reason. Close 없으면 None(주문 스킵).
+        종가 단일가+next_open: 익일 개장 시가.
         """
         try:
             px = float(price)
@@ -1109,11 +1140,8 @@ class DynamicBacktester:
         except Exception:
             rsn = ""
         try:
-            t = pd.Timestamp(curr_time)
-            if (
-                bool(self.bt_1530_signal_next_open_fill)
-                and int(t.hour) == 15
-                and int(t.minute) == 30
+            if bool(self.bt_1530_signal_next_open_fill) and bool(
+                is_krx_last_15m_slot(curr_time)
             ):
                 got = self._lookup_next_day_0900_open(code, curr_time, day_df)
                 if got is None:
@@ -1132,6 +1160,399 @@ class DynamicBacktester:
             return None
         lab, close = got
         return float(close), lab, self._tag_auction_reason(rsn)
+
+    def _tag_open_auction_reason(self, reason: Any) -> str:
+        """09:00 조기 패스(첫 1분봉) 체결 reason에 OPEN_AUCTION 접두를 붙인다."""
+        try:
+            r = str(reason or "")
+        except Exception:
+            r = ""
+        if r.startswith("OPEN_AUCTION|"):
+            return r
+        return f"OPEN_AUCTION|src=first_m1|{r}"
+
+    def _lookup_day_first_m1_ohlcv(
+        self,
+        code: str,
+        day: Any,
+    ) -> Optional[Tuple[pd.Timestamp, Dict[str, float]]]:
+        """
+        당일 첫 1분봉 OHLCV.
+
+        DB 라벨은 보통 개장+1분(분 종료 시각). 시초 단일가+첫 1분 연속매매 거래량이 포함된다.
+        """
+        try:
+            day0 = pd.Timestamp(day).normalize()
+            date_str = day0.strftime("%Y-%m-%d")
+            hours = get_session_hours(day0.date())
+            open_td = pd.Timedelta(minutes=int(hours.open_minutes))
+            open_end_td = pd.Timedelta(minutes=int(hours.open_minutes) + 5)
+            open_hour_end_td = pd.Timedelta(minutes=int(hours.open_minutes) + 60)
+        except Exception:
+            return None
+
+        def _from_df(df: Any) -> Optional[Tuple[pd.Timestamp, Dict[str, float]]]:
+            if df is None or getattr(df, "empty", True):
+                return None
+            try:
+                idx = pd.DatetimeIndex(pd.to_datetime(df.index))
+                day_m1 = df.loc[(idx >= day0 + open_td) & (idx < day0 + open_hour_end_td)]
+            except Exception:
+                return None
+            if day_m1 is None or day_m1.empty:
+                return None
+            try:
+                row = day_m1.iloc[0]
+                ts = pd.Timestamp(day_m1.index[0])
+                o = float(row.get("Open", row.get("open", 0)) or 0)
+                h = float(row.get("High", row.get("high", 0)) or 0)
+                l = float(row.get("Low", row.get("low", 0)) or 0)
+                c = float(row.get("Close", row.get("close", 0)) or 0)
+                v = float(row.get("Volume", row.get("volume", 0)) or 0)
+            except Exception:
+                return None
+            if o <= 0 or c <= 0:
+                return None
+            if h <= 0:
+                h = max(o, c)
+            if l <= 0:
+                l = min(o, c)
+            return ts, {
+                "Open": o,
+                "High": h,
+                "Low": l,
+                "Close": c,
+                "Volume": max(0.0, v),
+            }
+
+        # 1) 당일 1분 캐시/온디맨드
+        try:
+            chunk = self._get_m1_chunk_on_demand(
+                code, date_str, day0 + open_td
+            )
+            got = _from_df(chunk)
+            if got is not None:
+                return got
+        except Exception:
+            pass
+
+        # 2) DB 직접 조회(첫 봉만)
+        try:
+            q = """
+                SELECT datetime AS time, open, high, low, close, volume
+                FROM bars_1m
+                WHERE code = ? AND datetime >= ? AND datetime < ?
+                ORDER BY datetime
+                LIMIT 1
+            """
+            open_s = (day0 + open_td).strftime("%Y-%m-%d %H:%M:%S")
+            open_e = (day0 + open_end_td).strftime("%Y-%m-%d %H:%M:%S")
+            with self.db._get_connection() as conn:
+                df = pd.read_sql_query(
+                    q,
+                    conn,
+                    params=[
+                        str(code).zfill(6),
+                        open_s,
+                        open_e,
+                    ],
+                )
+            if df is None or df.empty:
+                return None
+            df["time"] = pd.to_datetime(df["time"])
+            df = df.set_index("time")
+            df.columns = [c.capitalize() for c in df.columns]
+            return _from_df(df)
+        except Exception:
+            return None
+
+    def _lookup_prev_trading_day_first_m1_vol(
+        self,
+        code: str,
+        day: Any,
+    ) -> Optional[float]:
+        """직전 거래일(최대 14일 역탐색)의 첫 1분봉 거래량 — SQL만 사용."""
+        try:
+            day0 = pd.Timestamp(day).normalize()
+            code6 = str(code).zfill(6)
+        except Exception:
+            return None
+        for i in range(1, 15):
+            try:
+                prev = day0 - pd.Timedelta(days=int(i))
+            except Exception:
+                continue
+            try:
+                if int(prev.weekday()) >= 5:
+                    continue
+            except Exception:
+                continue
+            date_str = prev.strftime("%Y-%m-%d")
+            try:
+                hours = get_session_hours(prev.date())
+                open_s = f"{date_str} {hours.open.strftime('%H:%M:%S')}"
+                open_e_dt = hours.open_datetime() + timedelta(minutes=5)
+                open_e = open_e_dt.strftime("%Y-%m-%d %H:%M:%S")
+                q = """
+                    SELECT volume
+                    FROM bars_1m
+                    WHERE code = ? AND datetime >= ? AND datetime < ?
+                    ORDER BY datetime
+                    LIMIT 1
+                """
+                with self.db._get_connection() as conn:
+                    df = pd.read_sql_query(
+                        q,
+                        conn,
+                        params=[
+                            code6,
+                            open_s,
+                            open_e,
+                        ],
+                    )
+                if df is None or df.empty:
+                    continue
+                vol = float(df.iloc[0]["volume"] or 0)
+                if vol > 0:
+                    return vol
+            except Exception:
+                continue
+        return None
+
+    def _build_0900_open_auction_signal_row(
+        self,
+        code: str,
+        curr_time: Any,
+    ) -> Optional[pd.Series]:
+        """
+        전일까지 완성 15분봉 + 당일 **첫 1분봉** 으로 합성한 마지막 행.
+
+        - OHLC·Volume: 당일 첫 1분봉 그대로
+        - ``Prev_Day_Vol*``: 전일(직전 거래일) 첫 1분 거래량으로 덮어씀
+          → ``vol_surge`` 가 「전일 첫1분 대비」로 동작
+        캐시된 09:00 15분 Close/Signal/Volume 은 쓰지 않음.
+        ``Ready`` 는 히스토리 봉 수 기준으로 별도 부여한다.
+        """
+        try:
+            cache = getattr(self, "cached_15m_data", None) or {}
+            full = None
+            for key in (code, str(code).zfill(6), str(code).strip()):
+                full = cache.get(key)
+                if full is not None and not getattr(full, "empty", True):
+                    break
+            if full is None or getattr(full, "empty", True):
+                return None
+            t = pd.Timestamp(curr_time)
+            if t not in full.index:
+                return None
+            first = self._lookup_day_first_m1_ohlcv(code, t)
+            if first is None:
+                return None
+            m1_ts, m1 = first
+            hist = full.loc[full.index < t]
+            if hist is None or hist.empty:
+                return None
+            try:
+                lb = int(
+                    float(
+                        self.settings.get("high_precision_causal_lookback_bars", 400)
+                    )
+                )
+            except (TypeError, ValueError):
+                lb = 400
+            lb = max(60, lb)
+            if len(hist) > lb:
+                hist = hist.iloc[-lb:]
+            ohlcv_cols = ["Open", "High", "Low", "Close", "Volume"]
+            for c in ohlcv_cols:
+                if c not in hist.columns:
+                    return None
+            hist_ohlcv = hist[ohlcv_cols].copy()
+            # 가상 15분 라벨은 슬롯 09:00 유지, OHLCV=첫1분 그대로
+            virtual = hist_ohlcv.iloc[[-1]].copy()
+            virtual.index = pd.DatetimeIndex([t])
+            virtual.loc[t, "Open"] = float(m1["Open"])
+            virtual.loc[t, "High"] = float(m1["High"])
+            virtual.loc[t, "Low"] = float(m1["Low"])
+            virtual.loc[t, "Close"] = float(m1["Close"])
+            raw_vol = float(m1["Volume"])
+            virtual.loc[t, "Volume"] = raw_vol
+            combined = pd.concat([hist_ohlcv, virtual], axis=0)
+            combined = TradingStrategy.calculate_indicators(combined, self.settings)
+            # 거래량 기준: 전일 첫 1분 대비 (15분 Prev_Day_Vol 덮어쓰기)
+            prev_m1_vol = self._lookup_prev_trading_day_first_m1_vol(code, t)
+            if prev_m1_vol is not None and prev_m1_vol > 0:
+                for col in (
+                    "Prev_Day_Vol",
+                    "Prev_Day_Vol_B",
+                    "Prev_Day_Vol_S1_A",
+                    "Prev_Day_Vol_S1_B",
+                    "Prev_Day_Vol_S2_A",
+                    "Prev_Day_Vol_S2_B",
+                ):
+                    try:
+                        if col in combined.columns:
+                            combined.loc[t, col] = float(prev_m1_vol)
+                    except Exception:
+                        pass
+            else:
+                # 전일 첫1분 없으면 거래량 조건 판정 불가 → 신호 스킵
+                return None
+            sigd = TradingStrategy.get_buy_signals_detailed(
+                combined, self.settings, "UP"
+            )
+            if sigd is None or sigd.empty:
+                return None
+            last = combined.iloc[-1].copy()
+            for k, v in sigd.iloc[-1].items():
+                last[k] = v
+            try:
+                ready_min = max(
+                    1,
+                    int(
+                        float(
+                            self.settings.get("hp_causal_ready_min_bar_index", 19)
+                        )
+                    ),
+                )
+            except (TypeError, ValueError):
+                ready_min = 19
+            last["Ready"] = bool(len(hist_ohlcv) >= ready_min)
+            try:
+                last["_open_pass_fill_ts"] = m1_ts
+                last["_open_pass_raw_m1_vol"] = raw_vol
+                last["_open_pass_prev_m1_vol"] = float(prev_m1_vol)
+            except Exception:
+                pass
+            return last
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            try:
+                print(
+                    f"[Dynamic] 09:00 첫1분 신호 재계산 실패 ({code} @ {curr_time}): {e!r}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            return None
+
+    def _process_0900_open_auction_pass(
+        self,
+        code: str,
+        curr_time: Any,
+        today_sells: Any,
+        track_map: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        09:00 슬롯 조기 평가(BT 전용) — 당일 첫 1분봉 완성 기준.
+
+        - 보유: evaluate_position(첫1분 Close) → EXIT면 해당가 체결
+        - 미보유: 합성봉 Signal∧Ready → S1 (Smart Buy 생략)
+        - S2는 생략(완성 15분 Pass2에 맡김)
+        Pass2(같은 09:00 완성 Close 평가)는 호출측에서 이어서 수행한다.
+        """
+        try:
+            if code in today_sells:
+                return
+            sig_row = self._build_0900_open_auction_signal_row(code, curr_time)
+            if sig_row is None:
+                return
+            fill_px = float(sig_row.get("Close", 0) or 0)
+            if fill_px <= 0:
+                return
+            try:
+                fill_ts = pd.Timestamp(sig_row.get("_open_pass_fill_ts", curr_time))
+            except Exception:
+                fill_ts = curr_time
+            h_info = self.holdings.get(code)
+
+            # 보유 청산 — 첫 1분 Close 기준
+            if h_info is not None:
+                try:
+                    hi = float(sig_row.get("High", fill_px) or fill_px)
+                    if hi > float(h_info.get("max_p", 0) or 0):
+                        h_info["max_p"] = hi
+                except Exception:
+                    pass
+                res = TradingStrategy.evaluate_position(
+                    code,
+                    fill_px,
+                    h_info,
+                    self.settings,
+                    indicator_row=sig_row,
+                    current_time=fill_ts,
+                    is_realtime=False,
+                )
+                if isinstance(res, dict) and res.get("action") == "EXIT":
+                    e_price = fill_px
+                    if res.get("reason") == "TAKE_PROFIT":
+                        tpp = res.get("tp_pct_applied")
+                        if tpp is not None:
+                            e_price = float(h_info["avg_p"]) * (
+                                1 + float(tpp) / 100.0
+                            )
+                    sell_reason = self._tag_open_auction_reason(res.get("reason"))
+                    self._execute_sell(
+                        code,
+                        e_price,
+                        fill_ts,
+                        sell_reason,
+                        indicator_row=sig_row,
+                    )
+                    try:
+                        today_sells.add(code)
+                    except Exception:
+                        pass
+                return
+
+            # S1 신규 (첫 1분 패스)
+            if bool(self.settings.get("transition_runtime_block_s1", False)):
+                return
+            try:
+                is_sig = bool(sig_row.get("Signal", False)) and bool(
+                    sig_row.get("Ready", False)
+                )
+            except Exception:
+                is_sig = False
+            if not is_sig:
+                return
+            tm = track_map if track_map is not None else getattr(
+                self, "_current_track_map", {}
+            )
+            code_track = str((tm or {}).get(code, "A"))
+            sig_type = self._effective_s1_sig_type_for_buy(sig_row, code_track)
+            if not TradingStrategy.track_signal_match_allows(
+                self.settings, sig_type, code_track
+            ):
+                return
+            if TradingStrategy.simultaneous_type_a_blocked(
+                self.settings, sig_row, sig_type
+            ):
+                return
+            if TradingStrategy.simultaneous_equal_holdings_blocked(
+                self.settings, sig_row, self.holdings
+            ):
+                return
+            buy_reason = self._tag_open_auction_reason("SIG")
+            self._handle_buy_execution(
+                code,
+                {"reason": buy_reason, "Sig_Type": sig_type},
+                fill_ts,
+                sig_row,
+                indicator_row=sig_row,
+                fill_price=fill_px,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            try:
+                print(
+                    f"[Dynamic] 09:00 첫1분 패스 처리 실패 ({code} @ {curr_time}): {e!r}",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
     def _process_1515_auction_completed_bar(
         self,
@@ -1564,7 +1985,17 @@ class DynamicBacktester:
                 ORDER BY b.datetime
             """
             with self.db._get_connection() as conn:
-                df = pd.read_sql_query(query, conn, params=[code, date_str + " 09:00:00", date_str + " 15:45:00"])
+                try:
+                    hours = get_session_hours(date_str)
+                    m1_lo = f"{date_str} {hours.open.strftime('%H:%M:%S')}"
+                    m1_hi_dt = hours.close_datetime() + timedelta(minutes=15)
+                    m1_hi = m1_hi_dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    m1_lo = date_str + " 09:00:00"
+                    m1_hi = date_str + " 15:45:00"
+                df = pd.read_sql_query(
+                    query, conn, params=[code, m1_lo, m1_hi]
+                )
             if df.empty:
                 self.cached_1m_data[cache_key] = None
             else:

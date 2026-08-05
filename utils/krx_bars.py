@@ -42,6 +42,7 @@ __all__ = [
     "krx_15m_label_for_m1_open",
     "is_krx_m1_closed_open_label",
     "is_krx_last_15m_slot",
+    "is_krx_first_15m_slot",
     "is_krx_pre_auction_15m_slot",
     "is_krx_no_signal_eval_15m_slot",
     "is_krx_auction_market_fill_slot",
@@ -131,6 +132,16 @@ def is_krx_last_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
         t = pd.Timestamp(ts)
         h = _hours_for_ts(t)
         return h.is_last_slot_time(int(t.hour) * 60 + int(t.minute))
+    except Exception:
+        return False
+
+
+def is_krx_first_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """라벨이 당일 첫 15분봉(개장)인지."""
+    try:
+        t = pd.Timestamp(ts)
+        h = _hours_for_ts(t)
+        return int(t.hour) * 60 + int(t.minute) == h.open_minutes
     except Exception:
         return False
 

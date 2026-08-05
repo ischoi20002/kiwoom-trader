@@ -1911,8 +1911,12 @@ class TradingStrategy:
             if _rx["use_gap_grace"]:
                 if current_time:
                     try:
+                        from utils.krx_session_hours import get_session_hours
+
                         dt = pd.to_datetime(current_time)
-                        if dt.hour == 9 and dt.minute < int(_rx["gap_grace_mins"]):
+                        open_m = get_session_hours(dt.date()).open_minutes
+                        hm = int(dt.hour) * 60 + int(dt.minute)
+                        if open_m <= hm < open_m + int(_rx["gap_grace_mins"]):
                             if exit_reason != "TAKE_PROFIT":
                                 return {'action': 'HOLD', 'reason': f'GRACE({exit_reason})'}
                     except Exception:
@@ -2444,8 +2448,7 @@ class SimpleBacktester:
         m1_lows,
         m1_times,
         params,
-        hour,
-        minute,
+        slot_ts,
         m1_ba=None,
         m1_vp=None,
         m1_vols=None,
@@ -2458,11 +2461,15 @@ class SimpleBacktester:
         - 미보유 S1: 15분 벡터 신호를 그대로 덮어쓰지 않고, 1~k분 누적 가상 15분봉으로
           ``calculate_indicators`` + ``get_buy_signals_detailed`` 를 다시 돌려 인과적으로 진입 시점만 잡음.
         """
-        # 15:30 슬롯: S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
-        # 15:15은 인트라바 체결 없이 호출측에서 15:30 종가 auction fill.
+        # 종가 단일가 슬롯: S1·S2·청산 전부 스킵. 동시호가 직전은 호출측 auction fill.
         try:
-            _skip_eod_sig = int(hour) == 15 and int(minute) == 30
-            _auction_1515 = int(hour) == 15 and int(minute) == 15
+            from utils.krx_bars import (
+                is_krx_auction_market_fill_slot,
+                is_krx_last_15m_slot,
+            )
+
+            _skip_eod_sig = bool(is_krx_last_15m_slot(slot_ts))
+            _auction_1515 = bool(is_krx_auction_market_fill_slot(slot_ts))
         except Exception:
             _skip_eod_sig = False
             _auction_1515 = False
@@ -2644,14 +2651,15 @@ class SimpleBacktester:
         curr_high = high_vals[i]
         curr_low = low_vals[i]
 
-        # 15:30 — S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
+        # 종가 단일가 — S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
         try:
-            _skip_eod_sig = (
-                int(time_hours[i]) == 15 and int(time_minutes[i]) == 30
+            from utils.krx_bars import (
+                is_krx_auction_market_fill_slot,
+                is_krx_last_15m_slot,
             )
-            _auction_1515 = (
-                int(time_hours[i]) == 15 and int(time_minutes[i]) == 15
-            )
+
+            _skip_eod_sig = bool(is_krx_last_15m_slot(curr_date))
+            _auction_1515 = bool(is_krx_auction_market_fill_slot(curr_date))
         except Exception:
             _skip_eod_sig = False
             _auction_1515 = False
@@ -2732,7 +2740,7 @@ class SimpleBacktester:
                     old_pos = params['position']
                     params = self._process_intra_bar_full_v3(
                         i, code, m1_highs, m1_closes, m1_lows, m1_time_total[s_idx:e_idx],
-                        params, time_hours[i], time_minutes[i],
+                        params, curr_date,
                         m1_ba=m1_ba, m1_vp=m1_vp, m1_vols=m1_vols, indicators=indicators,
                         signal_shifted=signal_shifted[i]
                     )
@@ -2879,13 +2887,15 @@ class SimpleBacktester:
     def _lookup_same_day_1530_close(
         self, curr_date: Any
     ) -> Optional[Tuple[Any, float]]:
-        """당일 15:30 Close. 없으면 None."""
+        """당일 종가 단일가(SessionHours.close) Close. 없으면 None."""
         try:
             from utils.krx_bars import krx_same_day_1530_label
+            from utils.krx_session_hours import get_session_hours
 
             lab = krx_same_day_1530_label(curr_date)
             if lab is None:
                 return None
+            close_hm = get_session_hours(pd.Timestamp(curr_date).date()).close_minutes
         except Exception:
             return None
         df = getattr(self, "df", None)
@@ -2905,8 +2915,7 @@ class SimpleBacktester:
                     t = pd.Timestamp(idx)
                     if (
                         t.normalize() == lab_n
-                        and int(t.hour) == 15
-                        and int(t.minute) == 30
+                        and int(t.hour) * 60 + int(t.minute) == close_hm
                     ):
                         c = float(df.loc[idx, "Close"])
                         if c > 0:
@@ -3408,8 +3417,20 @@ class PortfolioBacktester:
             
         daily_equity_list = [{'date': start_date + " 08:59:00", 'equity': 100.0, 'cash': 100.0}]
         if not all_equity.empty and 'Total' in all_equity.columns:
+            from utils.krx_session_hours import get_session_hours
+
             for d, val in all_equity['Total'].items():
-                daily_equity_list.append({'date': d.strftime('%Y-%m-%d') + " 15:30:00", 'equity': val, 'cash': val}) 
+                try:
+                    close_s = get_session_hours(pd.Timestamp(d).date()).close.strftime(
+                        "%H:%M:%S"
+                    )
+                    day_s = pd.Timestamp(d).strftime("%Y-%m-%d")
+                    eq_ts = f"{day_s} {close_s}"
+                except Exception:
+                    eq_ts = pd.Timestamp(d).strftime("%Y-%m-%d") + " 15:30:00"
+                daily_equity_list.append(
+                    {'date': eq_ts, 'equity': val, 'cash': val}
+                )
         
         generate_trade_report(trades_df, interval, trd_path, len(summaries), 
                               df_sum['win_rate'].mean(), df_sum['final_ret'].mean(), self.settings,

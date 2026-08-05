@@ -13,6 +13,11 @@
 
 ---
 
+## 0.17.1 (2026-08-06)
+
+- **백테스트 SessionHours 반영**: `dynamic_backtest` / `backtest_engine`의 개장·종가·동시호가·익일 시가·1분봉 조회·갭유예가 일자별 `open`/`close`를 사용(신년·수능 등).
+- **개장 슬롯 판별**: `is_krx_first_15m_slot` 추가. BT 시초 조기패스(`bt_open_auction_pass_enabled`)도 고정 09:00이 아닌 당일 개장 슬롯 기준.
+
 ## 0.17.0 (2026-08-06)
 
 - **KRX 특수 개장시간 전체 대응**: 일자별 `SessionHours`(개장·동시호가·종가)를 단일 소스로 도입. 신년 첫 거래일·수능일 자동 규칙 + `krx_special_sessions.json` 오버라이드.

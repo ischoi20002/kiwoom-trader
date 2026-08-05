@@ -13,6 +13,7 @@ from utils import krx_session_hours as sh
 from utils.krx_bars import (
     is_krx_15m_slot_end,
     is_krx_auction_market_fill_slot,
+    is_krx_first_15m_slot,
     is_krx_last_15m_slot,
     is_krx_next_open_defer_15m_slot,
     is_krx_pre_auction_15m_slot,
@@ -163,6 +164,8 @@ def test_csat_15m_labels() -> None:
         assert labels[-1] == pd.Timestamp("2026-11-12 16:30:00")
         assert pd.Timestamp("2026-11-12 16:15:00") in labels
         assert is_krx_15m_slot_end(pd.Timestamp("2026-11-12 10:00:00"))
+        assert is_krx_first_15m_slot(pd.Timestamp("2026-11-12 10:00:00"))
+        assert not is_krx_first_15m_slot(pd.Timestamp("2026-11-12 09:00:00"))
         assert not is_krx_15m_slot_end(pd.Timestamp("2026-11-12 09:00:00"))
         assert is_krx_pre_auction_15m_slot(pd.Timestamp("2026-11-12 16:15:00"))
         assert is_krx_last_15m_slot(pd.Timestamp("2026-11-12 16:30:00"))
