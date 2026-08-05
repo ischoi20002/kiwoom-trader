@@ -1250,8 +1250,8 @@ class SettingsTab:
             '틱 말분 합성 평가',
             None,
             '',
-            'ON(권장)=슬롯 마지막 1분은 틱(체결시각). 다음분 :00 틱 시 즉시 평가, '
-            '무거래는 타임아웃(초). 앞 구간은 공식 1분 합성',
+            'ON(권장)=슬롯 head는 공식 1분 일괄 조회, 말분만 틱 seal 후 평가. '
+            '다음분 :00 틱 즉시, 무거래는 타임아웃(초)',
             toggle_key='realtime_15m_last_minute_from_ticks',
         )
         add_param_row(
@@ -1266,7 +1266,8 @@ class SettingsTab:
             '공식 말분 1분 평가',
             None,
             '',
-            'OFF(권장)=말분 평가는 틱 경로. ON=공식 ka10080 말분 1분 도착 시 평가(레거시)',
+            'OFF(권장)=말분은 틱. ON=틱 OFF일 때 말분 마감 후 ka10080 1회 더 조회해 평가'
+            '(슬롯당 head+말분 최대 2회)',
             toggle_key='realtime_15m_eval_on_official_last_m1',
         )
         add_param_row(

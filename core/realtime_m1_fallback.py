@@ -63,13 +63,15 @@ def apply_chart_catchup_to_m1_store(
     code: str,
     df_1m: pd.DataFrame,
     upto_closed_open: pd.Timestamp,
+    *,
+    from_open: Optional[pd.Timestamp] = None,
 ) -> int:
     """
     ka10080 차트에서 ``upto_closed_open`` 까지의 **완료 1분**을 RtTickM1Store 에 누락 없이 반영.
 
     ka10080 인덱스는 ``cntr_tm`` = **봉 종가 시각**(분 끝)이므로 오픈 라벨 = 종가 시각 − 1분.
-    RtTickM1Store 는 최근 N분만 보관하므로, 차트 1페이지 전체(약 900분)를 매번 재반영하지 않고
-    보관 가능한 최근 구간만 비교·반영한다.
+    ``from_open`` 이 있으면 그 시각(포함)부터만 반영(슬롯 head 일괄용).
+    없으면 RtTickM1Store 보관 길이(최근 N분)로 하한을 잡는다.
     반환: 새로 반영한 분 수.
     """
     try:
@@ -80,17 +82,20 @@ def apply_chart_catchup_to_m1_store(
         if m1s is None:
             return 0
         upto = pd.Timestamp(upto_closed_open).floor("min")
-        try:
-            max_completed = int(getattr(m1s, "_max_c", 24) or 24)
-        except (TypeError, ValueError):
-            max_completed = 24
-        max_completed = max(8, min(max_completed, 64))
-        from_open = upto - pd.Timedelta(minutes=max_completed - 1)
+        if from_open is not None:
+            from_open_ts = pd.Timestamp(from_open).floor("min")
+        else:
+            try:
+                max_completed = int(getattr(m1s, "_max_c", 24) or 24)
+            except (TypeError, ValueError):
+                max_completed = 24
+            max_completed = max(8, min(max_completed, 64))
+            from_open_ts = upto - pd.Timedelta(minutes=max_completed - 1)
 
         existing = pd.DataFrame()
         try:
             existing = m1s.dataframe_for_window(
-                nk, from_open, upto, include_open_bucket=False
+                nk, from_open_ts, upto, include_open_bucket=False
             )
             if existing is None:
                 existing = pd.DataFrame()
@@ -132,7 +137,7 @@ def apply_chart_catchup_to_m1_store(
             try:
                 end_lab = pd.Timestamp(end_ts).floor("min")
                 open_lab = end_lab - pd.Timedelta(minutes=1)
-                if open_lab < from_open or open_lab > upto:
+                if open_lab < from_open_ts or open_lab > upto:
                     continue
                 o = float(row["Open"])
                 h = float(row["High"])

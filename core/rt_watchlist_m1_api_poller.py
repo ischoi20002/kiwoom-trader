@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-감시 종목(_active_stream_codes)에 대해 매 분 ka10080(1분)으로 **방금 닫힌 1분봉** 한 줄을 조회합니다.
+감시 종목(_active_stream_codes)에 대해 ka10080(1분)을 **슬롯 단위로 일괄 조회**합니다.
 
-- **정규장 연속매매 1분 격자(평일 09:00~15:19) + 15:30 단일가**만 폴링한다.
-- 분 경계 직후 종목별 지연을 분산(초당 과다 호출 완화).
-- 매 분 **상위 후보 여러 종목 프로브**(기본 3개)로 시장 1분 API 준비만 짧게 확인(기본 최대 2.5초).
-- 한 종목 무거래에 전체를 묶지 않음 — 준비되면(또는 짧게 기다린 뒤) 전 종목 각자 조회.
-- 종목별 ``minute_not_ready`` 는 해당 종목만 재폴링(기본 12초) 후 DB·무거래 평봉.
-- **15분 슬롯 마지막 1분**이면 보유·고 met_ratio 종목을 우선 조회하고, 합성 15분으로 완성봉 평가.
-- 말분 평가는 기본 **다음분 `:00` 틱 즉시**(무거래는 1.5s 타임아웃). 앞 구간 공식 1분 + 틱 말분 합성. ``15:30``은 공식 경로.
-- 성공 시 ``RtTickM1Store.apply_official_closed_minute`` 로 공식 1분을 반영합니다.
+- **매분 전종목 폴링 없음.** 15분 슬롯 앞구간(보통 14봉, ``15:15``는 4봉)이 닫힌 뒤
+  종목별 분산으로 1페이지를 받아 head만 ``RtTickM1Store``에 반영.
+- **말분**: 기본은 틱 누적 seal 후 합성 15분 평가. 공식 말분 모드면 말분 마감 후
+  1회 더 조회해 평가. ``15:30``은 공식 단일가 경로.
+- 평가 후 공식 15분 교체는 기존 ``rt_closed_15m_official_replace`` 정렬 경로.
+- 매 head/말분 라운드 시작 시 상위 후보 프로브로 API 준비만 짧게 확인.
 """
 
 from __future__ import annotations
@@ -29,14 +27,18 @@ from utils.krx_bars import (
     is_krx_last_15m_slot,
     is_krx_m1_closed_open_label,
     is_last_m1_open_of_15m_slot,
+    is_slot_head_complete_m1_open,
     krx_15m_label_for_m1_open,
     m1_bar_open_label_for_just_completed_minute,
+    slot_head_m1_range,
 )
 from utils.normalization import canonical_stock_code
 
 CacheKey = Tuple[str, str]
 CacheVal = Tuple[float, float, float, float, float]
 FetchResult = Tuple[Optional[pd.Series], Optional[pd.DataFrame], str]
+# head = 슬롯 앞구간 일괄, last = 말분(공식) 1회
+RoundKind = str
 
 
 class RtWatchlistM1ApiPoller:
@@ -474,63 +476,68 @@ class RtWatchlistM1ApiPoller:
         return float(min_d + (1.0 - score) * spread + jitter)
 
     def _schedule_round_jobs(
-        self, codes: List[str], closed_lab: pd.Timestamp, sk: str
+        self,
+        codes: List[str],
+        closed_lab: pd.Timestamp,
+        sk: str,
+        *,
+        kind: RoundKind = "last",
     ) -> None:
-        """프로브 통과 후 종목별 분산 폴링 타이머 등록."""
+        """프로브 통과 후 종목별 분산 조회 타이머 등록 (head 일괄 또는 말분 공식)."""
         try:
-            last_m1 = bool(is_last_m1_open_of_15m_slot(closed_lab))
             ordered = list(codes)
-            if last_m1:
+            try:
+                from core.rt_closed_15m_official_replace import (
+                    official_replace_priority_score,
+                )
+
+                ordered = sorted(
+                    codes,
+                    key=lambda c: (
+                        -float(official_replace_priority_score(self._app, c)),
+                        str(c),
+                    ),
+                )
+            except Exception:
+                ordered = list(codes)
+
+            if kind == "head":
+                # 말분 시작~완성 전에 head가 끝나도록 spread 상한
+                n_codes = len(ordered)
                 try:
-                    from core.rt_closed_15m_official_replace import (
-                        official_replace_priority_score,
-                    )
-
-                    ordered = sorted(
-                        codes,
-                        key=lambda c: (
-                            -float(official_replace_priority_score(self._app, c)),
-                            str(c),
-                        ),
-                    )
+                    spread = effective_m1_poll_spread_sec(self._settings(), n_codes)
                 except Exception:
-                    ordered = list(codes)
-
-            if last_m1:
+                    try:
+                        spread = float(
+                            self._settings().get(
+                                "realtime_watchlist_m1_api_spread_sec", 40.0
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        spread = 40.0
+                spread = max(8.0, min(float(spread), 45.0))
                 for cc in ordered:
                     try:
-                        delay = self._priority_delay_sec(cc)
+                        h = abs(hash((cc, sk, "head")))
+                        frac = (h % 1_000_003) / 1_000_003.0
+                        delay = spread * frac
                     except Exception:
-                        delay = 0.5
+                        delay = 0.0
                     t = threading.Timer(
                         delay,
-                        self._job_fetch_one,
+                        self._job_fetch_slot_head,
                         args=(cc, closed_lab, sk),
                     )
                     t.daemon = True
                     t.start()
                 return
 
-            n_codes = len(ordered)
-            try:
-                spread = effective_m1_poll_spread_sec(self._settings(), n_codes)
-            except Exception:
-                try:
-                    spread = float(
-                        self._settings().get(
-                            "realtime_watchlist_m1_api_spread_sec", 40.0
-                        )
-                    )
-                except (TypeError, ValueError):
-                    spread = 40.0
-                spread = max(12.0, min(spread, 55.0))
+            # kind == "last": 말분·15:30 공식 1분
             for cc in ordered:
                 try:
-                    h = abs(hash((cc, sk)))
-                    frac = (h % 1_000_003) / 1_000_003.0
-                    delay = spread * frac
+                    delay = self._priority_delay_sec(cc)
                 except Exception:
-                    delay = 0.0
+                    delay = 0.5
                 t = threading.Timer(
                     delay,
                     self._job_fetch_one,
@@ -555,7 +562,7 @@ class RtWatchlistM1ApiPoller:
             return False
 
     def _wake_loop(self) -> None:
-        """새로 닫힌 1분 라벨이 바뀌었을 때만 라운드 스케줄."""
+        """새로 닫힌 1분 라벨이 바뀌었을 때만 head 일괄·말분(틱/공식) 스케줄."""
         while not self._stop.wait(0.25):
             try:
                 try:
@@ -587,26 +594,57 @@ class RtWatchlistM1ApiPoller:
                     self._active_rounds = {
                         x for x in self._active_rounds if x == sk
                     }
-                # 슬롯 말분: 공식 REST 전에 틱 말분+wait 평가 예약(15:30 제외)
+
+                is_last = False
+                is_auc = False
+                is_head_done = False
                 try:
-                    if (
-                        is_last_m1_open_of_15m_slot(closed_lab)
-                        and not is_krx_last_15m_slot(closed_lab)
-                    ):
+                    is_last = bool(is_last_m1_open_of_15m_slot(closed_lab))
+                except Exception:
+                    is_last = False
+                try:
+                    is_auc = bool(is_krx_last_15m_slot(closed_lab))
+                except Exception:
+                    is_auc = False
+                try:
+                    is_head_done = bool(is_slot_head_complete_m1_open(closed_lab))
+                except Exception:
+                    is_head_done = False
+
+                use_tick = bool(self._last_minute_from_ticks_enabled())
+                use_official_last = bool(self._eval_on_official_last_m1_enabled())
+
+                # 말분 틱 평가 예약(15:30 제외)
+                try:
+                    if is_last and (not is_auc) and use_tick:
                         self._schedule_tick_tail_evals(codes, closed_lab)
                 except Exception:
                     pass
+
+                need_head = bool(is_head_done)
+                need_last_official = bool(
+                    is_last
+                    and (is_auc or ((not use_tick) and use_official_last))
+                )
+                if not need_head and not need_last_official:
+                    continue
                 if self._is_round_dormant(sk):
                     continue
+
+                kind: RoundKind = "head" if need_head else "last"
+                # head와 last가 같은 분에 겹치지 않음(13 vs 14). 동시 True면 head 우선.
+                if need_head and need_last_official:
+                    kind = "head"
+
                 with self._round_lock:
                     already_active = sk in self._active_rounds
                 if already_active:
-                    self._schedule_round_jobs(codes, closed_lab, sk)
+                    self._schedule_round_jobs(codes, closed_lab, sk, kind=kind)
                     continue
                 t = threading.Timer(
                     0.0,
                     self._job_probe_round,
-                    args=(codes, closed_lab, sk, 0),
+                    args=(codes, closed_lab, sk, 0, None, kind),
                 )
                 t.daemon = True
                 t.start()
@@ -827,12 +865,18 @@ class RtWatchlistM1ApiPoller:
         return ranked[:n]
 
     def _open_round_jobs(
-        self, codes: List[str], closed_lab: pd.Timestamp, sk: str, reason: str
+        self,
+        codes: List[str],
+        closed_lab: pd.Timestamp,
+        sk: str,
+        reason: str,
+        *,
+        kind: RoundKind = "last",
     ) -> None:
         """전 종목 조회 라운드 개시(프로브 통과·타임아웃·차트준비 공통)."""
         try:
             self._mark_round_active(sk)
-            self._schedule_round_jobs(codes, closed_lab, sk)
+            self._schedule_round_jobs(codes, closed_lab, sk, kind=kind)
         except Exception:
             pass
 
@@ -924,14 +968,11 @@ class RtWatchlistM1ApiPoller:
         sk: str,
         attempt: int,
         t0_mono: Optional[float] = None,
+        kind: RoundKind = "last",
     ) -> None:
         """
         상위 후보 종목으로 '시장 1분 API가 열렸는지'만 짧게 확인한 뒤
-        **즉시 전 종목 조회 라운드**를 연다.
-
-        - 한 종목 무거래로 12초 전체 대기는 하지 않음(프로브 대기 기본 2.5초).
-        - 후보 중 하나라도 ok / row_not_found(차트 시각 도달)면 즉시 오픈.
-        - 타임아웃 후에도 라운드는 열어 종목별 조회·평봉이 각자 진행.
+        head 일괄 또는 말분 공식 조회 라운드를 연다.
         """
         try:
             if not self._monitoring():
@@ -957,7 +998,7 @@ class RtWatchlistM1ApiPoller:
                     t = threading.Timer(
                         rem,
                         self._job_probe_round,
-                        args=(codes, closed_lab, sk, attempt, t0_mono),
+                        args=(codes, closed_lab, sk, attempt, t0_mono, kind),
                     )
                     t.daemon = True
                     t.start()
@@ -980,13 +1021,17 @@ class RtWatchlistM1ApiPoller:
                 )
                 if status == "ok":
                     self._open_round_jobs(
-                        codes, closed_lab, sk, f"probe_ok:{nk}"
+                        codes, closed_lab, sk, f"probe_ok:{nk}", kind=kind
                     )
                     return
                 if status == "row_not_found":
                     # 차트 시각은 목표 분을 지남 — 시장 API는 준비됨(이 종목만 무거래 가능)
                     self._open_round_jobs(
-                        codes, closed_lab, sk, f"probe_chart_ready:{nk}"
+                        codes,
+                        closed_lab,
+                        sk,
+                        f"probe_chart_ready:{nk}",
+                        kind=kind,
                     )
                     return
                 if status == "fetch_error":
@@ -1004,7 +1049,7 @@ class RtWatchlistM1ApiPoller:
                     t = threading.Timer(
                         poll,
                         self._job_probe_round,
-                        args=(codes, closed_lab, sk, attempt + 1, t0_mono),
+                        args=(codes, closed_lab, sk, attempt + 1, t0_mono, kind),
                     )
                     t.daemon = True
                     t.start()
@@ -1016,14 +1061,16 @@ class RtWatchlistM1ApiPoller:
                 t = threading.Timer(
                     1.0,
                     self._job_probe_round,
-                    args=(codes, closed_lab, sk, attempt + 1, t0_mono),
+                    args=(codes, closed_lab, sk, attempt + 1, t0_mono, kind),
                 )
                 t.daemon = True
                 t.start()
                 return
 
             # 시장 지연 짧게 기다렸거나 후보가 모두 애매 — 전 종목 각자 처리
-            self._open_round_jobs(codes, closed_lab, sk, "probe_open_anyway")
+            self._open_round_jobs(
+                codes, closed_lab, sk, "probe_open_anyway", kind=kind
+            )
         except Exception:
             pass
 
@@ -1179,6 +1226,140 @@ class RtWatchlistM1ApiPoller:
                 pass
             return
 
+    def _job_fetch_slot_head(
+        self,
+        code: str,
+        head_last_open: pd.Timestamp,
+        sk: str,
+        t0_mono: Optional[float] = None,
+    ) -> None:
+        """
+        슬롯 앞구간(공식 head) 일괄 조회 — ka10080 1페이지에서 head만 store 반영.
+
+        ``head_last_open``: head의 마지막 1분 open (예: 09:13, 15:18).
+        말분 평가·합성은 틱/공식 말분 경로가 담당한다.
+        """
+        try:
+            if not self._monitoring():
+                return
+            if not self._is_pollable_m1_label(head_last_open):
+                return
+            if self._is_round_dormant(sk):
+                return
+            if t0_mono is None:
+                t0_mono = time.monotonic()
+            try:
+                from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
+
+                rem = float(rt15_official_quiet_remaining_sec(self._app))
+            except Exception:
+                rem = 0.0
+            if rem > 0.05:
+                try:
+                    t = threading.Timer(
+                        rem,
+                        self._job_fetch_slot_head,
+                        args=(code, head_last_open, sk, t0_mono),
+                    )
+                    t.daemon = True
+                    t.start()
+                except Exception:
+                    pass
+                return
+
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return
+            slot = krx_15m_label_for_m1_open(head_last_open)
+            if slot is None:
+                return
+            head_rng = slot_head_m1_range(slot)
+            if head_rng is None:
+                return
+            head_start, _head_end_excl = head_rng
+        except Exception:
+            return
+
+        row, chart_df, last_err = self._fetch_closed_minute_row(
+            nk, head_last_open, sk, max_retries=2
+        )
+        status = self._classify_fetch_result(
+            row, chart_df, head_last_open, last_err
+        )
+
+        if status == "minute_not_ready":
+            elapsed = time.monotonic() - float(t0_mono)
+            max_w = self._fetch_not_ready_max_wait_sec()
+            if elapsed < max_w:
+                poll = self._not_ready_poll_sec()
+                try:
+                    t = threading.Timer(
+                        poll,
+                        self._job_fetch_slot_head,
+                        args=(code, head_last_open, sk, t0_mono),
+                    )
+                    t.daemon = True
+                    t.start()
+                except Exception:
+                    pass
+            return
+
+        if chart_df is None or getattr(chart_df, "empty", True):
+            # head 전 구간 평봉 채움은 과도 — 마지막 분만 평봉 시도
+            if status in ("row_not_found", "fetch_error"):
+                try:
+                    self._apply_flat_no_trade_minute(nk, head_last_open, sk)
+                except Exception:
+                    pass
+            return
+
+        try:
+            from core.realtime_m1_fallback import apply_chart_catchup_to_m1_store
+
+            applied = apply_chart_catchup_to_m1_store(
+                self._app,
+                nk,
+                chart_df,
+                head_last_open,
+                from_open=head_start,
+            )
+        except Exception as ex:
+            try:
+                self._emit(f"⚠️ [M1Poll] {nk} head catchup 실패: {ex!r}")
+            except Exception:
+                pass
+            return
+
+        # head 마지막 분이 차트에 없으면 평봉 보강
+        if row is None and status == "row_not_found":
+            try:
+                self._apply_flat_no_trade_minute(nk, head_last_open, sk)
+            except Exception:
+                pass
+
+        close_px = 0.0
+        vol = 0.0
+        try:
+            if row is not None:
+                close_px = float(row["Close"])
+                vol = float(row["Volume"])
+        except Exception:
+            close_px = 0.0
+            vol = 0.0
+        if close_px > 0:
+            try:
+                self._schedule_signal_eval(nk, close_px=close_px, volume=vol)
+            except Exception:
+                pass
+        try:
+            if applied > 0:
+                self._emit(
+                    f"ℹ️ [M1Poll] {nk} slot={slot.strftime('%H:%M')} "
+                    f"head 반영 {int(applied)}분"
+                )
+        except Exception:
+            pass
+
     def _job_fetch_one(
         self,
         code: str,
@@ -1186,7 +1367,7 @@ class RtWatchlistM1ApiPoller:
         sk: str,
         t0_mono: Optional[float] = None,
     ) -> None:
-        """Timer 스레드: 한 종목·한 닫힌 분."""
+        """Timer 스레드: 말분(또는 15:30) 공식 1분 1회 조회."""
         try:
             if not self._monitoring():
                 return

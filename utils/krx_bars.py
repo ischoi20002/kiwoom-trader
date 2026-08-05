@@ -543,6 +543,61 @@ def is_last_m1_open_of_15m_slot(
         return False
 
 
+def is_slot_head_complete_m1_open(
+    open_ts: Union[pd.Timestamp, datetime, str],
+) -> bool:
+    """
+    닫힌 1분봉이 슬롯 **앞구간(공식 head)의 마지막 분**인지.
+
+    이 시점에 head 전 구간이 닫혀 일괄 ka10080 조회를 시작한다.
+    - 일반: ``minute % 15 == 13`` (예: 09:13 @ wall 09:14 → head 09:00~09:13 완료)
+    - ``15:15`` 슬롯: ``15:18`` (head 15:15~15:18)
+    - ``15:30``: False (단일가만, head 일괄 없음)
+    """
+    try:
+        t = pd.Timestamp(open_ts).floor("min")
+        if t.weekday() >= 5:
+            return False
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm == 15 * 60 + 18:
+            return True
+        if hm == 15 * 60 + 30:
+            return False
+        if hm < 9 * 60 or hm > 15 * 60 + 14:
+            return False
+        return (int(t.minute) % 15) == 13
+    except Exception:
+        return False
+
+
+def slot_head_m1_range(
+    slot_label: Union[pd.Timestamp, datetime, str],
+) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+    """
+    15분 슬롯의 공식 head 구간 ``[start, end_excl)`` (1분 open 라벨 기준).
+
+    - 일반 ``T``: ``[T, T+14분)`` → open ``T`` … ``T+13``
+    - ``15:15``: ``[15:15, 15:19)`` → open ``15:15`` … ``15:18``
+    - ``15:30``: None (head 없음)
+    """
+    try:
+        slot = pd.Timestamp(slot_label).floor("min")
+        if is_krx_last_15m_slot(slot):
+            return None
+        hm = int(slot.hour) * 60 + int(slot.minute)
+        if hm == 15 * 60 + 15:
+            start = slot
+            end_excl = slot.normalize() + pd.Timedelta(hours=15, minutes=19)
+            return start, end_excl
+        if not is_krx_15m_slot_end(slot):
+            return None
+        start = slot
+        end_excl = slot + pd.Timedelta(minutes=14)
+        return start, end_excl
+    except Exception:
+        return None
+
+
 def krx_15m_label_for_m1_open(
     open_ts: Union[pd.Timestamp, datetime, str],
 ) -> Optional[pd.Timestamp]:
