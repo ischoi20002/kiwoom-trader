@@ -386,8 +386,17 @@ class TradingController:
                 self._ensure_virtual_positions_monitor_info()
             except Exception:
                 pass
-            
-            if self.status_cb: self.status_cb("TARGETS_LOADED", df_targets)
+
+            # 트리 재구성 전에 상태 문구를 먼저 올려 버튼 클릭 직후 응답감을 유지
+            if self.status_cb:
+                try:
+                    self.status_cb(
+                        "STATUS_TEXT",
+                        f"상태: 감시 목록 준비 중 ({len(self.monitor_codes)}종목)…",
+                    )
+                except Exception:
+                    pass
+                self.status_cb("TARGETS_LOADED", df_targets)
             
             # 2. 시작 시퀀스 (별도 스레드에서 수행 - UI 프리징 방지)
             return self._spawn_start_sequence()

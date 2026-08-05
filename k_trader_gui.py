@@ -2117,6 +2117,15 @@ class KiwoomApp:
                 inject_iv = 2.5
             inject_iv = max(0.8, min(inject_iv, 30.0))
             now_gate = time.time()
+            # STARTED 직후 수 초는 강제 inject 생략(틱·REG와 겹쳐 UI 멈춤 완화)
+            try:
+                grace_until = float(
+                    getattr(self, "_monitor_start_ui_grace_until", 0.0) or 0.0
+                )
+                if grace_until > 0.0 and now_gate < grace_until:
+                    return
+            except Exception:
+                pass
             if now_gate - float(getattr(self, "_inject_min_last_ts", 0.0) or 0.0) < inject_iv:
                 return
             self._inject_min_last_ts = now_gate

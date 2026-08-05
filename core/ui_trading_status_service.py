@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import Any, Optional
 
+import time
 import tkinter as tk
 from tkinter import messagebox
 
@@ -24,6 +25,17 @@ class UiTradingStatusService:
                 fn(*args, **kwargs)
         except Exception:
             pass
+
+    def _defer_to_main(self, fn: Any, *, delay_ms: int = 1) -> None:
+        """버튼 핸들러·동기 status_cb 안에서 무거운 Tk 작업을 한 틱 뒤로 미룹니다."""
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None and callable(fn):
+                root.after(max(0, int(delay_ms)), fn)
+                return
+        except Exception:
+            pass
+        self._safe_call(fn)
 
     def on_trading_status_changed(self, status: str, data: Any) -> None:
         """
@@ -54,16 +66,23 @@ class UiTradingStatusService:
                     )
                 except Exception:
                     pass
+                # 시작 버튼 클릭 경로에서 동기 트리 전량 재구성이 UI를 잠깐 멈추게 함 → 다음 틱으로 이관
+                mi_snap = getattr(self.app, "monitor_info", None) or {}
                 if hasattr(self.app, "monitor_tab"):
-                    self._safe_call(
-                        self.app.monitor_tab.update_watchlist,
-                        self.app.monitor_info,
+                    self._defer_to_main(
+                        lambda: self._safe_call(
+                            self.app.monitor_tab.update_watchlist, mi_snap
+                        ),
+                        delay_ms=1,
                     )
             elif status == "WARMUP_BEGIN":
                 codes = data if isinstance(data, list) else []
                 if hasattr(self.app, "monitor_tab"):
-                    self._safe_call(
-                        self.app.monitor_tab.reset_warmup_row_states, codes
+                    self._defer_to_main(
+                        lambda c=list(codes): self._safe_call(
+                            self.app.monitor_tab.reset_warmup_row_states, c
+                        ),
+                        delay_ms=1,
                     )
             elif status == "WARMUP_FAILED":
                 results = (data or {}).get("results", {})
@@ -100,9 +119,12 @@ class UiTradingStatusService:
                 except Exception:
                     pass
                 if hasattr(self.app, "monitor_tab"):
-                    self._safe_call(
-                        self.app.monitor_tab.update_watchlist,
-                        self.app.monitor_info,
+                    mi_snap = getattr(self.app, "monitor_info", None) or {}
+                    self._defer_to_main(
+                        lambda: self._safe_call(
+                            self.app.monitor_tab.update_watchlist, mi_snap
+                        ),
+                        delay_ms=1,
                     )
             elif status == "STARTED":
                 self.app.is_monitoring = True
@@ -110,6 +132,11 @@ class UiTradingStatusService:
                     self.app.monitor_info = dict(
                         self.app.trading_controller.monitor_info or {}
                     )
+                except Exception:
+                    pass
+                # STARTED 직후 틱·REG·트리 inject 가 한꺼번에 몰리면 메인 루프가 수 초 점유됨
+                try:
+                    setattr(self.app, "_monitor_start_ui_grace_until", time.time() + 2.5)
                 except Exception:
                     pass
                 try:
@@ -149,8 +176,13 @@ class UiTradingStatusService:
                         )
                     except Exception:
                         pass
-                self._safe_call(
-                    lambda: self.app.ensure_monitor_tree_refresh_scheduled(immediate=True)
+                # immediate=True 전량 렌더는 시작 직후 멈춤을 키우므로 약간 지연
+                self._defer_to_main(
+                    lambda: self._safe_call(
+                        self.app.ensure_monitor_tree_refresh_scheduled,
+                        immediate=False,
+                    ),
+                    delay_ms=80,
                 )
             elif status == "STOPPED":
                 self.app.is_monitoring = False

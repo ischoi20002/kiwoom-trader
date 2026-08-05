@@ -70,8 +70,9 @@ class SignalEngine:
         # 종목별 "풀 계산" 및 "포지션 평가" 호출을 강하게 스로틀한다.
         try:
             st = getattr(self.app, "settings", None) or {}
+            # 표시용 합치도/신호상태 — 주문 평가는 완성15 경로. 기본 간격을 넉넉히.
             self._realtime_s1_full_calc_min_interval_sec: float = float(
-                st.get("realtime_s1_full_calc_min_interval_sec", 1.0)
+                st.get("realtime_s1_full_calc_min_interval_sec", 5.0)
             )
             self._realtime_eval_position_min_interval_sec: float = float(
                 st.get("realtime_eval_position_min_interval_sec", 15.0)
@@ -80,12 +81,13 @@ class SignalEngine:
                 st.get("realtime_exit_indicator_min_interval_sec", 15.0)
             )
         except Exception:
-            self._realtime_s1_full_calc_min_interval_sec = 1.0
+            self._realtime_s1_full_calc_min_interval_sec = 5.0
             self._realtime_eval_position_min_interval_sec = 15.0
             self._realtime_exit_indicator_min_interval_sec = 15.0
 
+        # 표시용: 최대 60초까지 허용(너무 잦은 풀계산 방지)
         self._realtime_s1_full_calc_min_interval_sec = max(
-            0.05, min(self._realtime_s1_full_calc_min_interval_sec, 10.0)
+            0.05, min(self._realtime_s1_full_calc_min_interval_sec, 60.0)
         )
         # 청산·S2: 너무 짧으면 매수 직후 틱 노이즈에 과민 반응 — 상한은 5분까지 허용
         self._realtime_eval_position_min_interval_sec = max(
@@ -2271,11 +2273,11 @@ class SignalEngine:
         try:
             v = float(
                 (getattr(self.app, "settings", None) or {}).get(
-                    "realtime_monitor_ui_enqueue_min_sec", 0.20
+                    "realtime_monitor_ui_enqueue_min_sec", 0.5
                 )
             )
         except (TypeError, ValueError):
-            v = 0.20
+            v = 0.5
         return max(0.05, min(v, 2.0))
 
     def _should_enqueue_monitor_tree_ui(
@@ -2872,7 +2874,8 @@ class SignalEngine:
                     except Exception:
                         pass
                 else:
-                    # 15m 꼬리 변경 또는(인트라바 미러 ON 시) 공식 M1 반영 시에만 풀계산.
+                    # 표시용 풀계산: 15m 지문/M1 변경 시에도 min_interval 미만이면 캐시 유지.
+                    # (주문 평가는 완성15 `submit_eval` 경로 — 틱 합치도와 분리)
                     # ``realtime_s1_full_calc_fallback_sec``: 지문이 안 바뀌어도 주기적 재계산(예외·누락 안전망).
                     try:
                         mirror_on = self._realtime_s1_mirror_dynamic_intrabar_enabled()
@@ -2887,10 +2890,16 @@ class SignalEngine:
                         )
                     except Exception:
                         m1_changed = bool(mirror_on)
-                    stale_fb = (now_ts - last_calc_ts) >= float(
+                    elapsed = float(now_ts) - float(last_calc_ts)
+                    stale_fb = elapsed >= float(
                         self._realtime_s1_full_calc_fallback_sec
                     )
-                    need_full_calc = fp_changed or m1_changed or stale_fb
+                    min_iv = float(self._realtime_s1_full_calc_min_interval_sec)
+                    too_soon = elapsed < min_iv
+                    # fallback(장기 미갱신)은 min_interval보다 길므로 too_soon과 겹치지 않음
+                    need_full_calc = (not too_soon) and (
+                        fp_changed or m1_changed or stale_fb
+                    )
 
                 last_sig: dict = {}
                 last_row = cached_last_row
