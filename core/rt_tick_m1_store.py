@@ -4,8 +4,8 @@
 
 - ``RtWatchlistM1ApiPoller`` 가 매 분 받은 완료 1분을 ``apply_official_closed_minute`` 로 반영합니다.
 - ``dataframe_for_window`` 는 신호용 15분 형성 행 집계에 사용합니다(진행 중 분은 기본 제외).
-- 슬롯 말분(``:14`` / ``15:19``)은 ``feed_tick``(0B fid20 체결시각)으로 틱 1분을 쌓아
-  공식14+틱1 합성에 사용합니다. ``15:30`` 단일가는 틱 누적 대상이 아닙니다.
+- 슬롯 말분(``:14`` / ``15:19``) 및 ``15:30`` 단일가는 ``feed_tick``(0B fid20 체결시각)으로
+  틱 1분을 쌓아 합성·즉시 평가에 사용합니다.
 """
 
 from __future__ import annotations
@@ -64,21 +64,21 @@ class RtTickM1Store:
     @staticmethod
     def _is_slot_tail_minute(open_label: pd.Timestamp) -> bool:
         """
-        15분 슬롯의 마지막 1분(일반 :14, 15:19)인지.
+        15분 슬롯의 마지막 1분(일반 :14, 15:19) 또는 **15:30 단일가**인지.
 
-        ``15:30`` 단일가는 틱 합성 대상이 아니므로 False.
+        단일가도 틱 누적·seal·즉시 평가 대상입니다.
         """
         try:
-            from utils.krx_bars import is_krx_last_15m_slot, is_last_m1_open_of_15m_slot
+            from utils.krx_bars import is_last_m1_open_of_15m_slot
 
-            if is_krx_last_15m_slot(open_label):
-                return False
             return bool(is_last_m1_open_of_15m_slot(open_label))
         except Exception:
             try:
                 t = pd.Timestamp(open_label)
                 if int(t.hour) == 15 and int(t.minute) == 30:
-                    return False
+                    return True
+                if int(t.hour) == 15 and int(t.minute) == 19:
+                    return True
                 return int(t.minute) % 15 == 14
             except Exception:
                 return False

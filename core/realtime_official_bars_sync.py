@@ -69,11 +69,27 @@ def compose_local_15m_ohlcv(
         if m1s is None:
             return None
 
-        # 15:30 단일가
+        # 15:30 단일가 — 틱 말분과 동일하게 틱 봉 우선, 없으면 공식 completed
         if is_krx_last_15m_slot(slot):
             auc = m1_closing_auction_ts_for_15m_end(slot)
             if auc is None:
                 return None
+            use_tick = _last_minute_from_ticks_enabled(app)
+            if use_tick:
+                try:
+                    tick_bar = m1s.tick_minute_ohlcv(nk, auc)
+                except Exception:
+                    tick_bar = None
+                if tick_bar is not None:
+                    to, th, tl, tc, tv = tick_bar
+                    if float(tc) > 0:
+                        return (
+                            float(to),
+                            float(th),
+                            float(tl),
+                            float(tc),
+                            max(0.0, float(tv)),
+                        )
             try:
                 tail = m1s.dataframe_for_window(
                     nk, auc, auc, include_open_bucket=False

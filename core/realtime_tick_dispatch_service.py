@@ -14,6 +14,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
+
 from core.terminal_trace import terminal_trace
 
 
@@ -273,6 +275,25 @@ class RealtimeTickDispatchService:
                                 poller.on_tick_tail_next_minute(code, sealed_lab)
                         except Exception:
                             pass
+                    # 15:30 단일가 체결 틱 → 프로브·즉시 평가(틱말분과 동일 계열)
+                    try:
+                        from utils.krx_bars import is_krx_last_15m_slot
+
+                        trade_lab = None
+                        if isinstance(trade_time, datetime):
+                            trade_lab = pd.Timestamp(trade_time).floor("min")
+                        elif trade_time is not None:
+                            trade_lab = pd.Timestamp(trade_time).floor("min")
+                        if trade_lab is not None and is_krx_last_15m_slot(trade_lab):
+                            poller = getattr(
+                                self.app, "rt_watchlist_m1_api_poller", None
+                            )
+                            if poller is not None and hasattr(
+                                poller, "on_auction_1530_tick"
+                            ):
+                                poller.on_auction_1530_tick(code, trade_lab)
+                    except Exception:
+                        pass
         except Exception:
             pass
         try:

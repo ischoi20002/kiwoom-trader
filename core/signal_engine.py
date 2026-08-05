@@ -575,6 +575,30 @@ class SignalEngine:
         except Exception:
             return False
 
+    def _allow_closed_15m_eval_wall_now(self, bar_ts: Any) -> bool:
+        """
+        완성15 평가를 허용하는 벽시계 구간인지.
+
+        정규장(09:00~15:30)은 그대로 허용.
+        ``15:30`` 슬롯 + next_open 은 단일가 틱확인·예약이 15:30 직후에도
+        이뤄지므로 당일 15:40까지 허용한다.
+        """
+        try:
+            now = datetime.now()
+            if is_krx_regular_session(now):
+                return True
+            if not self._next_open_1530_enabled():
+                return False
+            slot = pd.Timestamp(bar_ts)
+            if int(slot.hour) != 15 or int(slot.minute) != 30:
+                return False
+            if int(now.weekday()) >= 5:
+                return False
+            hm = int(now.hour) * 60 + int(now.minute)
+            return (15 * 60 + 30) <= hm <= (15 * 60 + 40)
+        except Exception:
+            return True
+
     def _queue_next_open_buy_signal(
         self,
         *,
@@ -862,14 +886,15 @@ class SignalEngine:
                 slot_key = slot_ts.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 return
-            if not self._mark_s1_closed_slot_done(nk, slot_key):
-                return
-
+            # 세션 가드를 done 마킹보다 먼저 — 실패 시 재시도 가능해야 함
             try:
-                if not is_krx_regular_session(datetime.now()):
+                if not self._allow_closed_15m_eval_wall_now(bar_ts):
                     return
             except Exception:
                 pass
+            if not self._mark_s1_closed_slot_done(nk, slot_key):
+                return
+
             try:
                 halt = self._market_halt_suppresses_s1(nk)
                 if halt:
@@ -1225,14 +1250,14 @@ class SignalEngine:
                 slot_key = slot_ts.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 return
-            if not self._mark_s1_closed_slot_done(nk, slot_key, prefix="held"):
-                return
-
             try:
-                if not is_krx_regular_session(datetime.now()):
+                if not self._allow_closed_15m_eval_wall_now(bar_ts):
                     return
             except Exception:
                 pass
+            if not self._mark_s1_closed_slot_done(nk, slot_key, prefix="held"):
+                return
+
             if not self._code_in_virtual_positions(nk):
                 return
 

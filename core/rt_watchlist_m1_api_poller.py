@@ -5,7 +5,9 @@
 - **매분 전종목 폴링 없음.** 15분 슬롯 앞구간(보통 14봉, ``15:15``는 4봉)이 닫힌 뒤
   종목별 분산으로 1페이지를 받아 head만 ``RtTickM1Store``에 반영.
 - **말분**: 기본은 틱 누적 seal 후 합성 15분 평가. 공식 말분 모드면 말분 마감 후
-  1회 더 조회해 평가. ``15:30``은 공식 단일가 경로.
+  1회 더 조회해 평가.
+- **15:30 단일가**: 틱말분과 동일 — 프로브 → 틱 확인 즉시 평가 → (설정 시) 익일 09:00 주문예약.
+  무거래/틱 누락 시 짧은 타임아웃 후 공식 1분 폴백.
 - 평가 후 공식 15분 교체는 기존 ``rt_closed_15m_official_replace`` 정렬 경로.
 - 매 head/말분 라운드 시작 시 상위 후보 프로브로 API 준비만 짧게 확인.
 """
@@ -63,6 +65,11 @@ class RtWatchlistM1ApiPoller:
         self._tick_tail_eval_done: Set[Tuple[str, str]] = set()
         self._tick_tail_eval_lock = threading.Lock()
         self._tick_tail_scheduled_rounds: Set[str] = set()
+        # 15:30 단일가: 당일 프로브·틱확인 라운드 1회
+        self._auction_1530_scheduled_day: str = ""
+        self._auction_1530_probe_started: bool = False
+        self._auction_1530_tick_debounce: Dict[str, Any] = {}
+        self._auction_1530_lock = threading.Lock()
         # 완성15 평가 로그 집계(슬롯별) — 종목별 반복 방지
         self._closed15_eval_log_agg: Dict[str, Dict[str, Any]] = {}
         self._closed15_eval_log_lock = threading.Lock()
@@ -262,6 +269,7 @@ class RtWatchlistM1ApiPoller:
         무거래 폴백: 말분 종료 + wait_sec 타임아웃 후 틱 seal → 합성 → 평가.
 
         활발한 종목은 ``on_tick_tail_next_minute``(:00 틱)이 먼저 평가한다.
+        ``15:30`` 단일가는 ``_schedule_auction_1530_tick_path`` 를 사용한다.
         """
         try:
             if is_krx_last_15m_slot(closed_lab):
@@ -317,12 +325,204 @@ class RtWatchlistM1ApiPoller:
             except Exception:
                 continue
 
+    def _auction_1530_tick_wait_sec(self) -> float:
+        """15:30 단일가: 첫 틱 없을 때 타임아웃(초). 기본 5.0."""
+        try:
+            v = float(
+                (self._settings() or {}).get("realtime_auction_1530_tick_wait_sec", 5.0)
+            )
+        except (TypeError, ValueError):
+            v = 5.0
+        return max(0.5, min(v, 30.0))
+
+    def _schedule_auction_1530_tick_path(
+        self, codes: List[str], auction_lab: pd.Timestamp
+    ) -> None:
+        """
+        15:30 단일가: 프로브 → 틱 확인 즉시 평가(틱말분과 동일 계열).
+
+        벽시계 15:30분대에 1회 기동. 틱이 오면 ``on_auction_1530_tick`` 이 즉시 평가하고,
+        무거래는 ``auction_lab + wait`` 타임아웃으로 공식 1분 폴백·평가.
+        """
+        try:
+            if not self._last_minute_from_ticks_enabled():
+                # 틱 경로 OFF 면 기존 공식 last 경로(15:31 wake)에 맡김
+                return
+            lab = pd.Timestamp(auction_lab).floor("min")
+            if not is_krx_last_15m_slot(lab):
+                return
+        except Exception:
+            return
+
+        day_key = lab.strftime("%Y-%m-%d")
+        sk = lab.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._auction_1530_lock:
+                if self._auction_1530_scheduled_day == day_key:
+                    return
+                self._auction_1530_scheduled_day = day_key
+                self._auction_1530_probe_started = False
+        except Exception:
+            return
+
+        wait = self._auction_1530_tick_wait_sec()
+        try:
+            due = lab.to_pydatetime() + timedelta(seconds=wait)
+            delay = max(0.05, (due - datetime.now()).total_seconds())
+        except Exception:
+            delay = wait
+
+        try:
+            self._emit(
+                f"ℹ️ [M1Poll] 15:30 단일가 틱경로 기동 "
+                f"(프로브+틱확인 즉시평가 · 타임아웃 {wait:.1f}s · n={len(codes)})"
+            )
+        except Exception:
+            pass
+
+        # 프로브 → 공식 1분 라운드(틱 없는 종목 폴백용). 틱 우선 평가는 별도.
+        try:
+            t_probe = threading.Timer(
+                0.0,
+                self._job_probe_round,
+                args=(list(codes), lab, sk, 0, None, "last"),
+            )
+            t_probe.daemon = True
+            t_probe.start()
+            with self._auction_1530_lock:
+                self._auction_1530_probe_started = True
+        except Exception:
+            pass
+
+        for nk in codes:
+            try:
+                t = threading.Timer(
+                    delay,
+                    self._job_auction_1530_timeout_eval,
+                    args=(nk, lab),
+                )
+                t.daemon = True
+                t.start()
+            except Exception:
+                continue
+
+    def on_auction_1530_tick(self, code: Any, auction_lab: Any) -> None:
+        """
+        15:30 단일가 체결 틱 확인 → (짧은 디바운스 후) seal·즉시 완성15 평가.
+
+        틱말분의 ``:00`` seal 트리거와 동일한 평가 경로(``_job_tick_tail_eval``).
+        """
+        try:
+            if not self._last_minute_from_ticks_enabled():
+                return
+            nk = canonical_stock_code(str(code).strip())
+            lab = pd.Timestamp(auction_lab).floor("min")
+            if not nk or not is_krx_last_15m_slot(lab):
+                return
+            slot = krx_15m_label_for_m1_open(lab)
+            if slot is None or self._is_tick_tail_eval_done(nk, slot):
+                return
+        except Exception:
+            return
+
+        # 프로브가 아직이면 기동(벽시계 스케줄보다 틱이 먼저일 수 있음)
+        try:
+            day_key = lab.strftime("%Y-%m-%d")
+            codes = self._active_codes()
+            with self._auction_1530_lock:
+                need_sched = self._auction_1530_scheduled_day != day_key
+            if need_sched and codes:
+                self._schedule_auction_1530_tick_path(codes, lab)
+            elif codes:
+                with self._auction_1530_lock:
+                    started = bool(self._auction_1530_probe_started)
+                if not started:
+                    sk = lab.strftime("%Y-%m-%d %H:%M:%S")
+                    try:
+                        t_probe = threading.Timer(
+                            0.0,
+                            self._job_probe_round,
+                            args=(list(codes), lab, sk, 0, None, "last"),
+                        )
+                        t_probe.daemon = True
+                        t_probe.start()
+                        with self._auction_1530_lock:
+                            self._auction_1530_probe_started = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 종목별 짧은 디바운스(동일 초 다중 체결 병합)
+        try:
+            with self._auction_1530_lock:
+                old = self._auction_1530_tick_debounce.pop(nk, None)
+            if old is not None:
+                try:
+                    old.cancel()
+                except Exception:
+                    pass
+
+            def _run(c: str = nk, lb: pd.Timestamp = lab) -> None:
+                try:
+                    with self._auction_1530_lock:
+                        self._auction_1530_tick_debounce.pop(c, None)
+                except Exception:
+                    pass
+                try:
+                    m1s = getattr(self._app, "rt_tick_m1_store", None)
+                    if m1s is not None:
+                        m1s.seal_tick_tail_minute(c, lb)
+                except Exception:
+                    pass
+                self._job_tick_tail_eval(c, lb, "auction_tick")
+
+            t = threading.Timer(0.15, _run)
+            t.daemon = True
+            with self._auction_1530_lock:
+                self._auction_1530_tick_debounce[nk] = t
+            t.start()
+        except Exception:
+            try:
+                self._job_tick_tail_eval(nk, lab, "auction_tick")
+            except Exception:
+                pass
+
+    def _job_auction_1530_timeout_eval(self, nk: str, auction_lab: pd.Timestamp) -> None:
+        """틱 미수신 종목: 공식 1분 반영 시도 후 틱말분과 동일 평가."""
+        if self._stop.is_set() or not self._monitoring():
+            return
+        try:
+            lab = pd.Timestamp(auction_lab).floor("min")
+            slot = krx_15m_label_for_m1_open(lab)
+            if slot is None or self._is_tick_tail_eval_done(nk, slot):
+                return
+            # 공식 1분이 있으면 completed에 반영(틱 없을 때 compose 폴백)
+            try:
+                sk = lab.strftime("%Y-%m-%d %H:%M:%S")
+                self._job_fetch_one(nk, lab, sk)
+            except Exception:
+                pass
+            try:
+                m1s = getattr(self._app, "rt_tick_m1_store", None)
+                if m1s is not None:
+                    m1s.seal_tick_tail_minute(nk, lab)
+            except Exception:
+                pass
+            self._job_tick_tail_eval(nk, lab, "auction_timeout")
+        except Exception as e:
+            try:
+                self._emit(f"⚠️ [M1Poll] 15:30 타임아웃 평가 예외 ({nk}): {e!r}")
+            except Exception:
+                pass
+
     def on_tick_tail_next_minute(self, code: Any, closed_lab: Any) -> None:
         """
         다음 분(:00) 체결로 말분이 seal된 직후 — 즉시 완성15 평가.
 
         WS 틱 스레드에서 호출될 수 있으므로 짧은 타이머(0)로 분리해도 되고,
         중복은 ``_tick_tail_eval_done`` 으로 막는다.
+        ``15:30`` 은 ``on_auction_1530_tick`` 경로를 사용한다.
         """
         try:
             if not self._last_minute_from_ticks_enabled():
@@ -332,6 +532,8 @@ class RtWatchlistM1ApiPoller:
             if not nk or not is_last_m1_open_of_15m_slot(lab):
                 return
             if is_krx_last_15m_slot(lab):
+                # 단일가: 다음 분 틱이 없을 수 있어 auction 경로로 위임
+                self.on_auction_1530_tick(nk, lab)
                 return
             slot = krx_15m_label_for_m1_open(lab)
             if slot is None or self._is_tick_tail_eval_done(nk, slot):
@@ -697,6 +899,18 @@ class RtWatchlistM1ApiPoller:
                 wall = datetime.now()
                 closed_lab = m1_bar_open_label_for_just_completed_minute(wall)
                 sk = closed_lab.strftime("%Y-%m-%d %H:%M:%S")
+
+                # 15:30 단일가: 벽시계 15:30분대에 프로브+틱확인 경로 기동
+                # (just-completed 규칙은 15:31에야 15:30을 닫힌 분으로 보므로 별도 처리)
+                try:
+                    wf = pd.Timestamp(wall).floor("min")
+                    if int(wf.hour) == 15 and int(wf.minute) == 30:
+                        codes_a = self._active_codes()
+                        if codes_a:
+                            self._schedule_auction_1530_tick_path(codes_a, wf)
+                except Exception:
+                    pass
+
                 if sk == self._last_scheduled_round:
                     continue
                 if not self._is_pollable_m1_label(closed_lab):
@@ -733,7 +947,7 @@ class RtWatchlistM1ApiPoller:
                 use_tick = bool(self._last_minute_from_ticks_enabled())
                 use_official_last = bool(self._eval_on_official_last_m1_enabled())
 
-                # 말분 틱 평가 예약(15:30 제외)
+                # 말분 틱 평가 예약(15:30 제외 — 단일가는 auction 틱경로)
                 try:
                     if is_last and (not is_auc) and use_tick:
                         self._schedule_tick_tail_evals(codes, closed_lab)
@@ -745,6 +959,15 @@ class RtWatchlistM1ApiPoller:
                     is_last
                     and (is_auc or ((not use_tick) and use_official_last))
                 )
+                # 당일 15:30 틱경로를 이미 기동했으면 15:31 공식 last 라운드 생략
+                if need_last_official and is_auc and use_tick:
+                    try:
+                        day_key = closed_lab.strftime("%Y-%m-%d")
+                        with self._auction_1530_lock:
+                            if self._auction_1530_scheduled_day == day_key:
+                                need_last_official = False
+                    except Exception:
+                        pass
                 if not need_head and not need_last_official:
                     continue
                 if self._is_round_dormant(sk):
