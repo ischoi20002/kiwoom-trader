@@ -29,6 +29,40 @@ from utils.krx_bars import is_krx_15m_slot_end
 from utils.normalization import canonical_stock_code
 
 
+def should_skip_pre_first_slot_or_prior_day_official_replace(
+    bar_ts: Any,
+    now: Any = None,
+) -> bool:
+    """
+    장시작~당일 첫 15분(09:00) 완성 전, 또는 전일 슬롯의 공식 15분 정렬교체를 스킵.
+
+    - ``bar_ts`` 캘린더일이 wall 기준 오늘보다 이전이면 True (전일 15:30 아침 교체 등)
+    - 당일이어도 wall < 오늘 09:15 이면 True (첫 15분봉 완성 전)
+    """
+    try:
+        bt = pd.Timestamp(bar_ts).floor("s")
+    except Exception:
+        return False
+    try:
+        wall = (
+            pd.Timestamp(now).floor("s")
+            if now is not None
+            else pd.Timestamp.now().floor("s")
+        )
+    except Exception:
+        return False
+    try:
+        day0 = wall.normalize()
+        if bt.normalize() < day0:
+            return True
+        first_slot_done = day0 + pd.Timedelta(hours=9, minutes=15)
+        if wall < first_slot_done:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _settings_bool(settings: Any, key: str, default: bool = True) -> bool:
     try:
         if settings is None:
@@ -722,6 +756,109 @@ class RtClosed15mOfficialReplaceScheduler:
         self._fail_counts: Dict[str, int] = {}
         # 슬롯(봉 시각)별 공식봉 준비 게이트 — 프로브 1종만 재시도
         self._slot_gate: Dict[str, Dict[str, Any]] = {}
+        # 정렬교체 로그 집계(슬롯별 ok/fail → 한 줄)
+        self._align_log_agg: Dict[str, Dict[str, Any]] = {}
+
+    def _note_alignment_log(
+        self,
+        bar_ts: Any,
+        *,
+        ok: bool,
+    ) -> None:
+        """정렬교체 성공/실패를 슬롯 단위로 모아 디바운스 후 1회 로그."""
+        if not self._log:
+            return
+        try:
+            slot_key = self._slot_ts_key(bar_ts)
+        except Exception:
+            return
+        timer_to_cancel: Any = None
+        new_timer: Any = None
+        try:
+            with self._lock:
+                st = self._align_log_agg.get(slot_key)
+                if st is None:
+                    st = {
+                        "ok": 0,
+                        "fail": 0,
+                        "timer": None,
+                        "bar_label": str(_norm_bar_ts(bar_ts)),
+                        "elapsed": 0.0,
+                    }
+                    self._align_log_agg[slot_key] = st
+                if ok:
+                    st["ok"] = int(st.get("ok", 0) or 0) + 1
+                else:
+                    st["fail"] = int(st.get("fail", 0) or 0) + 1
+                try:
+                    st["elapsed"] = float(_elapsed_sec_since_slot(bar_ts))
+                except Exception:
+                    pass
+                timer_to_cancel = st.get("timer")
+                st["timer"] = None
+
+                def _flush(sk: str = slot_key) -> None:
+                    self._flush_alignment_log(sk)
+
+                try:
+                    new_timer = threading.Timer(2.5, _flush)
+                    new_timer.daemon = True
+                    st["timer"] = new_timer
+                except Exception:
+                    new_timer = None
+        except Exception:
+            return
+        if timer_to_cancel is not None:
+            try:
+                timer_to_cancel.cancel()
+            except Exception:
+                pass
+        if new_timer is not None:
+            try:
+                new_timer.start()
+            except Exception:
+                try:
+                    self._flush_alignment_log(slot_key)
+                except Exception:
+                    pass
+
+    def _flush_alignment_log(self, slot_key: str) -> None:
+        """슬롯 정렬교체 집계 로그 1회 출력."""
+        st: Optional[Dict[str, Any]] = None
+        try:
+            with self._lock:
+                st = self._align_log_agg.pop(slot_key, None)
+        except Exception:
+            st = None
+        if not st or not self._log:
+            return
+        try:
+            ok_n = int(st.get("ok", 0) or 0)
+            fail_n = int(st.get("fail", 0) or 0)
+            label = str(st.get("bar_label") or slot_key)
+            el = float(st.get("elapsed", 0.0) or 0.0)
+        except Exception:
+            return
+        if ok_n <= 0 and fail_n <= 0:
+            return
+        try:
+            if fail_n <= 0:
+                self._log(
+                    f"✅ [RT15m-Official] {label} 정렬교체 완료 {ok_n}종목 "
+                    f"(슬롯 후 +{el:.1f}s)"
+                )
+            elif ok_n <= 0:
+                self._log(
+                    f"ℹ️ [RT15m-Official] {label} 정렬교체 실패 {fail_n}종목 "
+                    f"(슬롯 후 {el:.0f}s) — 평가 영향 없음"
+                )
+            else:
+                self._log(
+                    f"✅ [RT15m-Official] {label} 정렬교체 완료 {ok_n}종목 "
+                    f"(실패 {fail_n}, 슬롯 후 +{el:.1f}s)"
+                )
+        except Exception:
+            pass
 
     def _key(self, code: str, bar_ts: Any) -> str:
         nc = canonical_stock_code(str(code).strip())
@@ -913,6 +1050,13 @@ class RtClosed15mOfficialReplaceScheduler:
                 return
         except Exception:
             return
+
+        # 전일 슬롯·당일 첫 15분 완성 전 정렬교체 스킵 (장시작 15:30 잔여 등)
+        try:
+            if should_skip_pre_first_slot_or_prior_day_official_replace(bar_ts):
+                return
+        except Exception:
+            pass
 
         try:
             settings = getattr(app, "settings", None) or {}
@@ -1318,14 +1462,11 @@ class RtClosed15mOfficialReplaceScheduler:
                         self._scheduled.pop(k, None)
                     if self._log and tup is None:
                         try:
-                            cc = canonical_stock_code(str(code).strip())
-                            el = _elapsed_sec_since_slot(bar_ts)
                             if alignment:
-                                self._log(
-                                    f"ℹ️ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
-                                    f"정렬교체 실패(슬롯 후 {el:.0f}s) — 평가 영향 없음"
-                                )
+                                self._note_alignment_log(bar_ts, ok=False)
                             else:
+                                cc = canonical_stock_code(str(code).strip())
+                                el = _elapsed_sec_since_slot(bar_ts)
                                 role = "프로브" if is_probe else "백필"
                                 self._log(
                                     f"ℹ️ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
@@ -1339,14 +1480,11 @@ class RtClosed15mOfficialReplaceScheduler:
 
                 try:
                     if self._log:
-                        cc = canonical_stock_code(str(code).strip())
-                        el = _elapsed_sec_since_slot(bar_ts)
                         if alignment:
-                            self._log(
-                                f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
-                                f"정렬교체(슬롯 후 +{el:.1f}s)"
-                            )
+                            self._note_alignment_log(bar_ts, ok=True)
                         else:
+                            cc = canonical_stock_code(str(code).strip())
+                            el = _elapsed_sec_since_slot(bar_ts)
                             role = "프로브" if is_probe else "백필"
                             self._log(
                                 f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "

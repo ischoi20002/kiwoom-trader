@@ -63,12 +63,133 @@ class RtWatchlistM1ApiPoller:
         self._tick_tail_eval_done: Set[Tuple[str, str]] = set()
         self._tick_tail_eval_lock = threading.Lock()
         self._tick_tail_scheduled_rounds: Set[str] = set()
+        # 완성15 평가 로그 집계(슬롯별) — 종목별 반복 방지
+        self._closed15_eval_log_agg: Dict[str, Dict[str, Any]] = {}
+        self._closed15_eval_log_lock = threading.Lock()
 
     def _emit(self, msg: str) -> None:
         if self._log is None:
             return
         try:
             self._log(msg)
+        except Exception:
+            pass
+
+    def _note_closed15_eval_log(
+        self,
+        slot: Any,
+        *,
+        ok: bool = True,
+        reason: str = "",
+        label: str = "틱말분 완성15",
+    ) -> None:
+        """완성15 평가 성공/실패를 슬롯 단위로 모아 디바운스 후 1회 로그."""
+        if self._log is None:
+            return
+        try:
+            slot_key = pd.Timestamp(slot).floor("min").strftime("%Y-%m-%d %H:%M:%S")
+            slot_hm = pd.Timestamp(slot).strftime("%H:%M")
+        except Exception:
+            return
+        timer_to_cancel: Any = None
+        new_timer: Any = None
+        try:
+            with self._closed15_eval_log_lock:
+                st = self._closed15_eval_log_agg.get(slot_key)
+                if st is None:
+                    st = {
+                        "ok": 0,
+                        "fail": 0,
+                        "reasons": {},
+                        "timer": None,
+                        "slot_hm": slot_hm,
+                        "label": str(label or "완성15"),
+                    }
+                    self._closed15_eval_log_agg[slot_key] = st
+                if ok:
+                    st["ok"] = int(st.get("ok", 0) or 0) + 1
+                    r = str(reason or "").strip() or "ok"
+                    reasons = st.get("reasons")
+                    if not isinstance(reasons, dict):
+                        reasons = {}
+                        st["reasons"] = reasons
+                    reasons[r] = int(reasons.get(r, 0) or 0) + 1
+                else:
+                    st["fail"] = int(st.get("fail", 0) or 0) + 1
+                timer_to_cancel = st.get("timer")
+                st["timer"] = None
+
+                def _flush(sk: str = slot_key) -> None:
+                    self._flush_closed15_eval_log(sk)
+
+                try:
+                    new_timer = threading.Timer(2.5, _flush)
+                    new_timer.daemon = True
+                    st["timer"] = new_timer
+                except Exception:
+                    new_timer = None
+        except Exception:
+            return
+        if timer_to_cancel is not None:
+            try:
+                timer_to_cancel.cancel()
+            except Exception:
+                pass
+        if new_timer is not None:
+            try:
+                new_timer.start()
+            except Exception:
+                try:
+                    self._flush_closed15_eval_log(slot_key)
+                except Exception:
+                    pass
+
+    def _flush_closed15_eval_log(self, slot_key: str) -> None:
+        """슬롯 완성15 평가 집계 로그 1회 출력."""
+        st: Optional[Dict[str, Any]] = None
+        try:
+            with self._closed15_eval_log_lock:
+                st = self._closed15_eval_log_agg.pop(slot_key, None)
+        except Exception:
+            st = None
+        if not st:
+            return
+        try:
+            ok_n = int(st.get("ok", 0) or 0)
+            fail_n = int(st.get("fail", 0) or 0)
+            hm = str(st.get("slot_hm") or "")
+            label = str(st.get("label") or "완성15")
+            reasons = st.get("reasons") if isinstance(st.get("reasons"), dict) else {}
+        except Exception:
+            return
+        if ok_n <= 0 and fail_n <= 0:
+            return
+        extra = ""
+        try:
+            if reasons:
+                parts = [
+                    f"{k}={int(v)}"
+                    for k, v in sorted(reasons.items(), key=lambda x: str(x[0]))
+                    if int(v or 0) > 0
+                ]
+                if parts:
+                    extra = " (" + ", ".join(parts) + ")"
+        except Exception:
+            extra = ""
+        try:
+            if fail_n <= 0:
+                self._emit(
+                    f"ℹ️ [M1Poll] {label} 평가 완료 slot={hm} n={ok_n}{extra}"
+                )
+            elif ok_n <= 0:
+                self._emit(
+                    f"⚠️ [M1Poll] {label} 평가 실패 slot={hm} n={fail_n}"
+                )
+            else:
+                self._emit(
+                    f"ℹ️ [M1Poll] {label} 평가 완료 slot={hm} n={ok_n} "
+                    f"(실패 {fail_n}){extra}"
+                )
         except Exception:
             pass
 
@@ -247,12 +368,9 @@ class RtWatchlistM1ApiPoller:
                 return
             from core.rt_closed_15m_official_replace import (
                 closed_15m_eval_after_official_enabled,
-                official_replace_eval_eligible,
             )
 
             if closed_15m_eval_after_official_enabled(st):
-                return
-            if not official_replace_eval_eligible(self._app, nk, st):
                 return
 
             m1s = getattr(self._app, "rt_tick_m1_store", None)
@@ -271,9 +389,9 @@ class RtWatchlistM1ApiPoller:
             composed = apply_composed_closed_15m_from_m1(self._app, nk, slot)
             if composed is None:
                 try:
-                    self._emit(
-                        f"⚠️ [M1Poll] 틱말분 합성 실패/스킵 {nk} "
-                        f"slot={slot.strftime('%H:%M')} reason={reason}"
+                    self._note_closed15_eval_log(
+                        slot, ok=False, reason=str(reason or "compose_fail"),
+                        label="틱말분 완성15",
                     )
                 except Exception:
                     pass
@@ -293,10 +411,11 @@ class RtWatchlistM1ApiPoller:
                 pool = getattr(self._app, "_closed_15m_eval_pool", None)
                 if pool is not None:
                     pool.submit_eval(nk, slot)
-                    self._emit(
-                        f"ℹ️ [M1Poll] 틱말분 완성15 평가 {nk} "
-                        f"slot={slot.strftime('%H:%M')} reason={reason} "
-                        f"@ {datetime.now().strftime('%H:%M:%S.%f')[:-3]}"
+                    self._note_closed15_eval_log(
+                        slot,
+                        ok=True,
+                        reason=str(reason or "ok"),
+                        label="틱말분 완성15",
                     )
             except Exception as ex:
                 self._emit(f"⚠️ [M1Poll] {nk} 틱말분 submit_eval 실패: {ex!r}")
@@ -951,12 +1070,6 @@ class RtWatchlistM1ApiPoller:
                     self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
             except Exception:
                 pass
-            try:
-                self._emit(
-                    f"ℹ️ [M1Poll] {nk} {sk} 무거래 평봉 채움 (C={px:.0f}, V=0)"
-                )
-            except Exception:
-                pass
             return True
         except Exception:
             return False
@@ -1152,7 +1265,7 @@ class RtWatchlistM1ApiPoller:
         """
         슬롯 마지막 1분 반영 후 합성 15분으로 완성봉 평가.
 
-        보유·합치도 임박 종목만 평가(공식15 교체 우선순위와 동일 필터).
+        감시 종목 전부에 대해 평가(합치도 게이트 없음). 신호·사이징은 평가 내부에서 결정.
         틱 말분 경로로 이미 평가한 (code, slot) 은 스킵.
         """
         st = self._settings()
@@ -1164,13 +1277,10 @@ class RtWatchlistM1ApiPoller:
         try:
             from core.rt_closed_15m_official_replace import (
                 closed_15m_eval_after_official_enabled,
-                official_replace_eval_eligible,
             )
 
             # 공식 15분 대기 모드면 M1 경로에서 평가하지 않음
             if closed_15m_eval_after_official_enabled(st):
-                return
-            if not official_replace_eval_eligible(self._app, nk, st):
                 return
         except Exception:
             return
@@ -1214,8 +1324,8 @@ class RtWatchlistM1ApiPoller:
             if pool is not None:
                 pool.submit_eval(nk, slot)
                 try:
-                    self._emit(
-                        f"ℹ️ [M1Poll] 완성15 평가 요청 {nk} slot={slot.strftime('%H:%M')}"
+                    self._note_closed15_eval_log(
+                        slot, ok=True, reason="m1_path", label="완성15"
                     )
                 except Exception:
                     pass
