@@ -1426,7 +1426,7 @@ class RtWatchlistM1ApiPoller:
         try:
             from core.realtime_m1_fallback import apply_chart_catchup_to_m1_store
 
-            applied = apply_chart_catchup_to_m1_store(
+            apply_chart_catchup_to_m1_store(
                 self._app,
                 nk,
                 chart_df,
@@ -1461,14 +1461,6 @@ class RtWatchlistM1ApiPoller:
                 self._schedule_signal_eval(nk, close_px=close_px, volume=vol)
             except Exception:
                 pass
-        try:
-            if applied > 0:
-                self._emit(
-                    f"ℹ️ [M1Poll] {nk} slot={slot.strftime('%H:%M')} "
-                    f"head 반영 {int(applied)}분"
-                )
-        except Exception:
-            pass
 
     def _job_fetch_one(
         self,

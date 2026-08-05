@@ -756,74 +756,94 @@ class RtClosed15mOfficialReplaceScheduler:
         self._fail_counts: Dict[str, int] = {}
         # 슬롯(봉 시각)별 공식봉 준비 게이트 — 프로브 1종만 재시도
         self._slot_gate: Dict[str, Dict[str, Any]] = {}
-        # 정렬교체 로그 집계(슬롯별 ok/fail → 한 줄)
+        # 정렬교체 로그 집계: 슬롯에 예약한 종목이 모두 끝난 뒤 1회
         self._align_log_agg: Dict[str, Dict[str, Any]] = {}
 
-    def _note_alignment_log(
-        self,
-        bar_ts: Any,
-        *,
-        ok: bool,
-    ) -> None:
-        """정렬교체 성공/실패를 슬롯 단위로 모아 디바운스 후 1회 로그."""
-        if not self._log:
-            return
+    def _align_register_pending(self, code: Any, bar_ts: Any) -> None:
+        """정렬교체 예약 시 슬롯 pending에 종목 등록."""
         try:
+            nk = canonical_stock_code(str(code).strip())
             slot_key = self._slot_ts_key(bar_ts)
         except Exception:
             return
-        timer_to_cancel: Any = None
-        new_timer: Any = None
+        if not nk:
+            return
         try:
             with self._lock:
                 st = self._align_log_agg.get(slot_key)
                 if st is None:
                     st = {
+                        "pending": set(),
                         "ok": 0,
                         "fail": 0,
-                        "timer": None,
+                        "skip": 0,
+                        "flushed": False,
                         "bar_label": str(_norm_bar_ts(bar_ts)),
                         "elapsed": 0.0,
                     }
                     self._align_log_agg[slot_key] = st
-                if ok:
+                try:
+                    st["pending"].add(nk)
+                except Exception:
+                    pass
+                st["flushed"] = False
+        except Exception:
+            pass
+
+    def _align_finish(
+        self,
+        code: Any,
+        bar_ts: Any,
+        *,
+        ok: Optional[bool] = None,
+    ) -> None:
+        """
+        정렬교체 1종 종료.
+
+        ``ok=True`` 성공, ``ok=False`` 실패, ``ok=None`` 스킵(조기 return).
+        pending 이 비면 슬롯 전체 완료 로그 1회.
+        """
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            slot_key = self._slot_ts_key(bar_ts)
+        except Exception:
+            return
+        if not nk:
+            return
+        should_flush = False
+        try:
+            with self._lock:
+                st = self._align_log_agg.get(slot_key)
+                if st is None:
+                    return
+                pending = st.get("pending")
+                if isinstance(pending, set):
+                    pending.discard(nk)
+                if ok is True:
                     st["ok"] = int(st.get("ok", 0) or 0) + 1
-                else:
+                elif ok is False:
                     st["fail"] = int(st.get("fail", 0) or 0) + 1
+                else:
+                    st["skip"] = int(st.get("skip", 0) or 0) + 1
                 try:
                     st["elapsed"] = float(_elapsed_sec_since_slot(bar_ts))
                 except Exception:
                     pass
-                timer_to_cancel = st.get("timer")
-                st["timer"] = None
-
-                def _flush(sk: str = slot_key) -> None:
-                    self._flush_alignment_log(sk)
-
-                try:
-                    new_timer = threading.Timer(2.5, _flush)
-                    new_timer.daemon = True
-                    st["timer"] = new_timer
-                except Exception:
-                    new_timer = None
+                empty = not pending
+                flushed = bool(st.get("flushed", False))
+                if empty and (not flushed):
+                    st["flushed"] = True
+                    should_flush = True
         except Exception:
             return
-        if timer_to_cancel is not None:
+        if should_flush:
             try:
-                timer_to_cancel.cancel()
+                self._flush_alignment_log(slot_key)
             except Exception:
                 pass
-        if new_timer is not None:
-            try:
-                new_timer.start()
-            except Exception:
-                try:
-                    self._flush_alignment_log(slot_key)
-                except Exception:
-                    pass
 
     def _flush_alignment_log(self, slot_key: str) -> None:
-        """슬롯 정렬교체 집계 로그 1회 출력."""
+        """슬롯 정렬교체 전체 완료 로그 1회."""
         st: Optional[Dict[str, Any]] = None
         try:
             with self._lock:
@@ -835,27 +855,34 @@ class RtClosed15mOfficialReplaceScheduler:
         try:
             ok_n = int(st.get("ok", 0) or 0)
             fail_n = int(st.get("fail", 0) or 0)
+            skip_n = int(st.get("skip", 0) or 0)
             label = str(st.get("bar_label") or slot_key)
             el = float(st.get("elapsed", 0.0) or 0.0)
+            total = ok_n + fail_n + skip_n
         except Exception:
             return
-        if ok_n <= 0 and fail_n <= 0:
+        if total <= 0:
             return
         try:
-            if fail_n <= 0:
+            if fail_n <= 0 and skip_n <= 0:
                 self._log(
                     f"✅ [RT15m-Official] {label} 정렬교체 완료 {ok_n}종목 "
                     f"(슬롯 후 +{el:.1f}s)"
                 )
-            elif ok_n <= 0:
+            elif ok_n <= 0 and fail_n > 0 and skip_n <= 0:
                 self._log(
                     f"ℹ️ [RT15m-Official] {label} 정렬교체 실패 {fail_n}종목 "
                     f"(슬롯 후 {el:.0f}s) — 평가 영향 없음"
                 )
             else:
+                parts = [f"성공 {ok_n}"]
+                if fail_n > 0:
+                    parts.append(f"실패 {fail_n}")
+                if skip_n > 0:
+                    parts.append(f"스킵 {skip_n}")
                 self._log(
-                    f"✅ [RT15m-Official] {label} 정렬교체 완료 {ok_n}종목 "
-                    f"(실패 {fail_n}, 슬롯 후 +{el:.1f}s)"
+                    f"✅ [RT15m-Official] {label} 정렬교체 완료 {total}종목 "
+                    f"({', '.join(parts)}, 슬롯 후 +{el:.1f}s)"
                 )
         except Exception:
             pass
@@ -1099,6 +1126,12 @@ class RtClosed15mOfficialReplaceScheduler:
             except Exception:
                 pass
 
+        try:
+            if official_replace_alignment_mode(settings):
+                self._align_register_pending(code, bar_ts)
+        except Exception:
+            pass
+
         def _delay() -> float:
             if backfill_after_ready:
                 try:
@@ -1138,6 +1171,10 @@ class RtClosed15mOfficialReplaceScheduler:
                 if not mon:
                     with self._lock:
                         self._scheduled.pop(k, None)
+                    try:
+                        self._align_finish(code, bar_ts, ok=None)
+                    except Exception:
+                        pass
                     return
                 token = None
                 try:
@@ -1155,11 +1192,19 @@ class RtClosed15mOfficialReplaceScheduler:
                             pass
                     with self._lock:
                         self._scheduled.pop(k, None)
+                    try:
+                        self._align_finish(code, bar_ts, ok=None)
+                    except Exception:
+                        pass
                     return
                 dm = getattr(app, "data_manager", None)
                 if dm is None:
                     with self._lock:
                         self._scheduled.pop(k, None)
+                    try:
+                        self._align_finish(code, bar_ts, ok=None)
+                    except Exception:
+                        pass
                     return
                 try:
                     settings = getattr(app, "settings", None) or {}
@@ -1236,6 +1281,10 @@ class RtClosed15mOfficialReplaceScheduler:
                         if not mon2:
                             with self._lock:
                                 self._scheduled.pop(k, None)
+                            try:
+                                self._align_finish(code, bar_ts, ok=None)
+                            except Exception:
+                                pass
                             return
                     except Exception:
                         pass
@@ -1246,6 +1295,10 @@ class RtClosed15mOfficialReplaceScheduler:
                     if not token:
                         with self._lock:
                             self._scheduled.pop(k, None)
+                        try:
+                            self._align_finish(code, bar_ts, ok=None)
+                        except Exception:
+                            pass
                         return
 
                 try:
@@ -1460,11 +1513,11 @@ class RtClosed15mOfficialReplaceScheduler:
                             )
                             self._fail_cooldown_until[k] = time.monotonic() + delay
                         self._scheduled.pop(k, None)
-                    if self._log and tup is None:
+                    if tup is None:
                         try:
                             if alignment:
-                                self._note_alignment_log(bar_ts, ok=False)
-                            else:
+                                self._align_finish(code, bar_ts, ok=False)
+                            elif self._log:
                                 cc = canonical_stock_code(str(code).strip())
                                 el = _elapsed_sec_since_slot(bar_ts)
                                 role = "프로브" if is_probe else "백필"
@@ -1479,17 +1532,16 @@ class RtClosed15mOfficialReplaceScheduler:
                 o, h, l_, c, v = tup
 
                 try:
-                    if self._log:
-                        if alignment:
-                            self._note_alignment_log(bar_ts, ok=True)
-                        else:
-                            cc = canonical_stock_code(str(code).strip())
-                            el = _elapsed_sec_since_slot(bar_ts)
-                            role = "프로브" if is_probe else "백필"
-                            self._log(
-                                f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
-                                f"공식봉 확인({role}, 슬롯 후 +{el:.1f}s) — 교체·평가"
-                            )
+                    if alignment:
+                        self._align_finish(code, bar_ts, ok=True)
+                    elif self._log:
+                        cc = canonical_stock_code(str(code).strip())
+                        el = _elapsed_sec_since_slot(bar_ts)
+                        role = "프로브" if is_probe else "백필"
+                        self._log(
+                            f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
+                            f"공식봉 확인({role}, 슬롯 후 +{el:.1f}s) — 교체·평가"
+                        )
                 except Exception:
                     pass
 
@@ -1555,6 +1607,10 @@ class RtClosed15mOfficialReplaceScheduler:
                         pass
                 with self._lock:
                     self._scheduled.pop(k, None)
+                try:
+                    self._align_finish(code, bar_ts, ok=None)
+                except Exception:
+                    pass
 
         th = threading.Thread(
             target=_worker, name="rt15m-official-replace", daemon=True
