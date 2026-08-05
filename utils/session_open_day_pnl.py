@@ -3,9 +3,10 @@
 금일 손익 = 현재 총자산 − 장시작(시초가 반영 전) 총자산.
 
 기준 총자산은 **당일 시초가가 반영되기 전** 스냅이어야 한다.
-- 장전(09:00 미만) 감시 중: 당시 총자산으로 기준을 갱신하다가 09:00에 고정.
-- 09:00 전에 캡처를 못 한 경우: 보유 종목을 **직전 종가**로 평가한 합성 총자산으로 폴백.
-- 감시가 정규장 장중(09:00~15:30)에 시작되면 ``N/A``.
+- 장전(개장 미만) 감시 중: 당시 총자산으로 기준을 갱신하다가 개장에 고정.
+- 개장 전에 캡처를 못 한 경우: 보유 종목을 **직전 종가**로 평가한 합성 총자산으로 폴백.
+- 감시가 정규장 장중(SessionHours.open~close)에 시작되면 ``N/A``.
+개장·종가 시각은 ``utils.krx_session_hours`` (특수일 JSON 포함)를 따른다.
 """
 from __future__ import annotations
 
@@ -73,6 +74,17 @@ def _is_trading_day(d) -> bool:
 
 def _hm(now: datetime) -> int:
     return int(now.hour) * 60 + int(now.minute)
+
+
+def _session_open_close_minutes(day) -> tuple[int, int]:
+    """당일 개장·종가(분). 실패 시 기본 09:00 / 15:30."""
+    try:
+        from utils.krx_session_hours import get_session_hours
+
+        h = get_session_hours(day)
+        return int(h.open_minutes), int(h.close_minutes)
+    except Exception:
+        return 9 * 60, 15 * 60 + 30
 
 
 def _cancel_capture_after(app: Any, st: Dict[str, Any]) -> None:
@@ -241,8 +253,8 @@ def try_capture_open_baseline(app: Any, *, now: Optional[datetime] = None) -> bo
     """
     시초가 반영 전 기준 총자산 확보.
 
-    - 09:00 전: 현재 총자산으로 기준을 **갱신**(장전 최신 D+2·시세 반영).
-    - 09:00 도달: 마지막 장전 값을 **고정**. 장전 값이 없으면 직전종가 합성 폴백 예약.
+    - 개장 전: 현재 총자산으로 기준을 **갱신**(장전 최신 D+2·시세 반영).
+    - 개장 도달: 마지막 장전 값을 **고정**. 장전 값이 없으면 직전종가 합성 폴백 예약.
     - 이미 고정됐으면 no-op.
     """
     try:
@@ -256,8 +268,9 @@ def try_capture_open_baseline(app: Any, *, now: Optional[datetime] = None) -> bo
             return False
 
         hm = _hm(t)
+        open_m, _close_m = _session_open_close_minutes(t.date())
         # 장전: 시초가 전 스냅으로 계속 갱신
-        if hm < 9 * 60:
+        if hm < open_m:
             total = compute_current_total_assets_day_pnl(app)
             if total is None:
                 return False
@@ -272,7 +285,7 @@ def try_capture_open_baseline(app: Any, *, now: Optional[datetime] = None) -> bo
             )
             return True
 
-        # 09:00 이후: 장전 스냅이 있으면 고정만, 없으면 직전종가 폴백
+        # 개장 이후: 장전 스냅이 있으면 고정만, 없으면 직전종가 폴백
         if st.get("baseline") is not None and not st.get("baseline_locked"):
             st["baseline_locked"] = True
             try:
@@ -296,7 +309,7 @@ def try_capture_open_baseline(app: Any, *, now: Optional[datetime] = None) -> bo
 
 
 def _schedule_capture_tick(app: Any) -> None:
-    """장전까지 기준을 갱신하고, 09:00에 고정한다."""
+    """장전까지 기준을 갱신하고, 개장 시각에 고정한다."""
     try:
         root = getattr(app, "root", None)
         if root is None:
@@ -314,6 +327,7 @@ def _schedule_capture_tick(app: Any) -> None:
                     return
                 now = datetime.now()
                 hm = _hm(now)
+                open_m, _c = _session_open_close_minutes(now.date())
                 try_capture_open_baseline(app, now=now)
                 st2 = ensure_day_state(app)
                 if st2.get("baseline_locked") or st2.get("na"):
@@ -326,21 +340,21 @@ def _schedule_capture_tick(app: Any) -> None:
                     except Exception:
                         pass
                     return
-                if hm < 9 * 60:
+                if hm < open_m:
                     # 장시작 직전일수록 촘촘히 (최대 15초)
                     remain_sec = max(
-                        1, (9 * 60 - hm) * 60 - int(now.second)
+                        1, (open_m - hm) * 60 - int(now.second)
                     )
                     delay_ms = int(min(15_000, max(1_000, remain_sec * 1000)))
-                    # 08:59 이후는 2초 간격
-                    if hm >= (8 * 60 + 59):
+                    # 개장 1분 전부터는 2초 간격
+                    if hm >= (open_m - 1):
                         delay_ms = 2_000
                     try:
                         st2["capture_after_id"] = root.after(delay_ms, _tick)
                     except Exception:
                         pass
                     return
-                # 09:00 이후인데 아직 미고정 → 직전종가 폴백 대기, 5초마다 확인
+                # 개장 이후인데 아직 미고정 → 직전종가 폴백 대기, 5초마다 확인
                 try:
                     st2["capture_after_id"] = root.after(5_000, _tick)
                 except Exception:
@@ -388,8 +402,9 @@ def on_monitoring_started(app: Any, *, now: Optional[datetime] = None) -> None:
             return
 
         hm = _hm(t)
-        # 정규장 장중(09:00~15:30) 시작 → N/A
-        if (9 * 60) <= hm <= (15 * 60 + 30):
+        open_m, close_m = _session_open_close_minutes(t.date())
+        # 정규장 장중 시작 → N/A
+        if open_m <= hm <= close_m:
             st["na"] = True
             try:
                 log = getattr(app, "log", None)
@@ -403,7 +418,7 @@ def on_monitoring_started(app: Any, *, now: Optional[datetime] = None) -> None:
             return
 
         # 장마감 이후 시작 → 당일 장시작 기준 불가
-        if hm > (15 * 60 + 30):
+        if hm > close_m:
             st["na"] = True
             try:
                 log = getattr(app, "log", None)
@@ -413,7 +428,7 @@ def on_monitoring_started(app: Any, *, now: Optional[datetime] = None) -> None:
                 pass
             return
 
-        # 장전 시작: 시초가 전 스냅 → 09:00 고정
+        # 장전 시작: 시초가 전 스냅 → 개장 고정
         st["na"] = False
         try:
             log = getattr(app, "log", None)
@@ -444,10 +459,11 @@ def format_day_pnl_text(app: Any, current_total_assets: float) -> str:
             st = ensure_day_state(app, now)
         baseline = st.get("baseline")
         if baseline is None:
-            if _hm(now) < 9 * 60:
+            open_m, _c = _session_open_close_minutes(now.date())
+            if _hm(now) < open_m:
                 return "— (장시작 대기)"
             return "— (기준 계산 중)"
-        # 장전에도 기준이 있으면 잠정 표시(09:00에 최종 고정)
+        # 장전에도 기준이 있으면 잠정 표시(개장에 최종 고정)
         try:
             base = float(baseline)
             cur = float(current_total_assets)

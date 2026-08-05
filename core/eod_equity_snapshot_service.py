@@ -84,11 +84,16 @@ class EodEquitySnapshotService:
             today_d = now.date()
 
             def _end_of_day_due(day_d: date) -> datetime:
-                return datetime.combine(
-                    day_d, dtime(15, 30, 0)
-                ) + timedelta(
-                    minutes=max(0, int(buffer_minutes))
-                )
+                try:
+                    from utils.krx_session_hours import get_session_hours
+
+                    return get_session_hours(day_d).close_datetime() + timedelta(
+                        minutes=max(0, int(buffer_minutes))
+                    )
+                except Exception:
+                    return datetime.combine(
+                        day_d, dtime(15, 30, 0)
+                    ) + timedelta(minutes=max(0, int(buffer_minutes)))
 
             # (복구 포함) 이미 due가 지난 가장 최근 거래일을 대상으로 선택
             snap_date: Optional[date] = None

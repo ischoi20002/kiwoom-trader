@@ -3,20 +3,17 @@
 KRX 장중 15분봉·1분 창의 시간 정의.
 
 키움 ka10080(tic_scope=15) 과 동일하게 **좌측(시작) 라벨**을 쓴다.
+일자별 개장·마감은 ``utils.krx_session_hours.SessionHours`` 를 따른다
+(기본 09:00~15:30, 수능·신년 등은 ``krx_special_sessions.json``).
 
 1분봉 → 15분봉 합성은 봉 개수가 아니라 타임스탬프 구간으로 한다.
 
 - 일반 슬롯(라벨 ``T``): ``T ≤ ts < T+15분``
-  (예: 09:00 → 09:00~09:14, 09:15 → 09:15~09:29)
-- ``15:15``: ``15:15 ≤ ts < 15:20`` (연속매매 잔여분만)
-- ``15:30``: ``ts == 15:30`` (단일가)
+- 동시호가 직전 슬롯(``pre_auction``): ``T ≤ ts < continuous_end``
+- 종가 단일가 슬롯(``close``): ``ts == close``
 
-라벨 목록: 09:00, 09:15, …, 15:00, 15:15, 15:30.
-구간에 실제 존재하는 1분봉만 집계한다.
-
-신호 평가: ``15:30`` 단일가 슬롯만 ``is_krx_no_signal_eval_15m_slot`` 으로 스킵.
-``15:15`` 은 평가하되 체결은 동시호가 시장가 → 당일 ``15:30`` 종가
-(``is_krx_auction_market_fill_slot``). 봉 자체는 DB·차트에 유지.
+신호 평가: 종가 단일가 슬롯만 ``is_krx_no_signal_eval_15m_slot`` 으로 스킵.
+직전 슬롯은 동시호가 시장가 → 당일 종가 체결(``is_krx_auction_market_fill_slot``).
 """
 from __future__ import annotations
 
@@ -26,6 +23,7 @@ from typing import Any, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from utils.krx_session_hours import SessionHours, get_session_hours
 from utils.normalization import normalize_code
 
 __all__ = [
@@ -61,22 +59,38 @@ __all__ = [
 # 레거시 이름. 공식은 좌측 라벨(시작 시각). pandas label=left, closed=left 에 가깝다.
 KRX_15M_RESAMPLE_KWARGS: dict = {"label": "left", "closed": "left"}
 
-# KRX/키움 공식 15분 라벨 첫·마지막
+# 레거시 상수(기본일). 신규 로직은 SessionHours 를 사용한다.
 _KRX_FIRST_15M_END = time(9, 0)
 _KRX_LAST_15M_END = time(15, 30)
 
 
+def _hours_for_ts(ts: Union[pd.Timestamp, datetime, str]) -> SessionHours:
+    """타임스탬프 캘린더일의 SessionHours."""
+    try:
+        d = pd.Timestamp(ts).date()
+    except Exception:
+        d = datetime.now().date()
+    return get_session_hours(d)
+
+
+def _pd_at(day0: pd.Timestamp, t: time) -> pd.Timestamp:
+    return day0.normalize() + pd.Timedelta(hours=int(t.hour), minutes=int(t.minute))
+
+
 def _krx_day_first_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
-    """당일 첫 15분 라벨(09:00)."""
-    return day0.normalize() + pd.Timedelta(hours=9, minutes=0)
+    """당일 첫 15분 라벨(개장)."""
+    h = get_session_hours(day0.date())
+    return _pd_at(day0, h.open)
 
 
 def _krx_day_last_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
-    return day0.normalize() + pd.Timedelta(hours=15, minutes=30)
+    """당일 마지막 15분 라벨(종가 단일가)."""
+    h = get_session_hours(day0.date())
+    return _pd_at(day0, h.close)
 
 
 def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
-    """``t`` 날짜 **다음날**부터 찾은 첫 평일 09:00."""
+    """``t`` 날짜 **다음날**부터 찾은 첫 평일 개장 라벨."""
     try:
         d = pd.Timestamp(t).normalize() + pd.Timedelta(days=1)
         for _ in range(8):
@@ -90,7 +104,7 @@ def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
 
 def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """
-    KRX/키움 공식 15분봉 **라벨**(09:00~15:30, 15분 간격, 평일) 여부.
+    KRX/키움 공식 15분봉 **라벨**(당일 SessionHours 격자, 평일) 여부.
 
     공휴일은 미반영(평일만). 장외·야간 슬롯은 False.
     """
@@ -100,28 +114,33 @@ def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
             return False
         if t.second != 0 or t.microsecond != 0:
             return False
-        hm = t.hour * 60 + t.minute
-        if hm < 9 * 60 or hm > 15 * 60 + 30:
+        h = _hours_for_ts(t)
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm == h.close_minutes:
+            return True
+        if hm < h.open_minutes or hm > h.pre_auction_slot_minutes:
             return False
-        return (t.minute % 15) == 0
+        return ((hm - h.open_minutes) % 15) == 0
     except Exception:
         return False
 
 
 def is_krx_last_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
-    """라벨이 당일 마지막 15분봉(15:30, 단일가)인지."""
+    """라벨이 당일 마지막 15분봉(종가 단일가)인지."""
     try:
         t = pd.Timestamp(ts)
-        return int(t.hour) == 15 and int(t.minute) == 30
+        h = _hours_for_ts(t)
+        return h.is_last_slot_time(int(t.hour) * 60 + int(t.minute))
     except Exception:
         return False
 
 
 def is_krx_pre_auction_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
-    """라벨이 연속매매 마지막 잔여 구간(15:15)인지."""
+    """라벨이 연속매매 마지막 잔여 구간(기본 15:15)인지."""
     try:
         t = pd.Timestamp(ts)
-        return int(t.hour) == 15 and int(t.minute) == 15
+        h = _hours_for_ts(t)
+        return h.is_pre_auction_slot_time(int(t.hour) * 60 + int(t.minute))
     except Exception:
         return False
 
@@ -130,7 +149,7 @@ def is_krx_no_signal_eval_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bo
     """
     완성 15분 신호 평가(S1/S2/청산 콜백)를 하지 않는 슬롯인지.
 
-    ``15:30``(종가 단일가)만 스킵. ``15:15`` 은 평가 후 동시호가 시장가→15:30 종가 체결.
+    종가 단일가 슬롯만 스킵. 직전 슬롯은 평가 후 동시호가 시장가→종가 체결.
     """
     try:
         return bool(is_krx_last_15m_slot(ts))
@@ -140,7 +159,7 @@ def is_krx_no_signal_eval_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bo
 
 def is_krx_auction_market_fill_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """
-    완성 15:15 슬롯 주문을 동시호가 시장가로 내어 당일 15:30 종가로 체결할지.
+    동시호가 직전 슬롯 주문을 시장가로 내어 당일 종가로 체결할지.
     """
     try:
         return bool(is_krx_pre_auction_15m_slot(ts))
@@ -150,7 +169,7 @@ def is_krx_auction_market_fill_slot(ts: Union[pd.Timestamp, datetime, str]) -> b
 
 def is_krx_next_open_defer_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """
-    15:30 완성봉 신호를 익일 09:00 시가 체결 판정으로 이월할 슬롯인지.
+    종가 단일가 완성봉 신호를 익일 시가 체결 판정으로 이월할 슬롯인지.
     """
     try:
         return bool(is_krx_last_15m_slot(ts))
@@ -161,25 +180,20 @@ def is_krx_next_open_defer_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> b
 def krx_same_day_1530_label(
     ts: Union[pd.Timestamp, datetime, str],
 ) -> Optional[pd.Timestamp]:
-    """``ts`` 와 같은 캘린더일의 15:30 좌측 라벨."""
+    """``ts`` 와 같은 캘린더일의 종가 단일가 좌측 라벨(기본 15:30)."""
     try:
         t = pd.Timestamp(ts)
-        return t.normalize() + pd.Timedelta(hours=15, minutes=30)
+        return _krx_day_last_slot_end(t.normalize())
     except Exception:
         return None
 
 
 def iter_krx_15m_slot_ends_for_day(day: Union[pd.Timestamp, datetime, str]) -> List[pd.Timestamp]:
-    """해당 캘린더일의 KRX/키움 15분 라벨 목록(09:00 … 15:30)."""
+    """해당 캘린더일의 KRX/키움 15분 라벨 목록(개장 … 종가)."""
     try:
         day0 = pd.Timestamp(day).normalize()
-        out: List[pd.Timestamp] = []
-        t = _krx_day_first_slot_end(day0)
-        last = _krx_day_last_slot_end(day0)
-        while t <= last:
-            out.append(t)
-            t = t + pd.Timedelta(minutes=15)
-        return out
+        h = get_session_hours(day0.date())
+        return [pd.Timestamp(x) for x in h.iter_15m_slot_labels()]
     except Exception:
         return []
 
@@ -191,14 +205,16 @@ def krx_15m_slot_complete_ts(
     좌측 라벨 ``T`` 봉이 **완성되는 벽시계 시각**.
 
     - 일반: ``T+15분``
-    - 15:15: ``15:20`` (연속 잔여 종료)
-    - 15:30: ``15:30``
+    - 동시호가 직전: ``continuous_end``
+    - 종가 단일가: ``close``
     """
     t = pd.Timestamp(label_ts)
+    h = _hours_for_ts(t)
+    day0 = t.normalize()
     if is_krx_last_15m_slot(t):
         return t.floor("min")
     if is_krx_pre_auction_15m_slot(t):
-        return t.normalize() + pd.Timedelta(hours=15, minutes=20)
+        return _pd_at(day0, h.continuous_end)
     return t.floor("min") + pd.Timedelta(minutes=15)
 
 
@@ -206,10 +222,7 @@ def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp
     """
     벽시계 기준 **현재 형성 중** 15분봉의 **좌측 라벨**(KRX 장중만).
 
-    - 09:00 이전: 당일 09:00
-    - 09:00~15:14: 해당 15분 구간의 시작 라벨
-    - 15:15~15:29: 15:15
-    - 15:30 이후·주말: 당일(또는 직전 평일) 15:30
+    개장 전·장중·동시호가·마감 후는 당일 SessionHours 기준.
     """
     try:
         raw = now if now is not None else datetime.now()
@@ -221,17 +234,17 @@ def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp
                 d = d - pd.Timedelta(days=1)
             return _krx_day_last_slot_end(d)
 
-        hm = t.hour * 60 + t.minute
-        if hm < 9 * 60:
+        h = get_session_hours(day0.date())
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm < h.open_minutes:
             return _krx_day_first_slot_end(day0)
-        if hm >= 15 * 60 + 30:
+        if hm >= h.close_minutes:
             return _krx_day_last_slot_end(day0)
-        if hm >= 15 * 60 + 15:
-            return day0 + pd.Timedelta(hours=15, minutes=15)
+        if hm >= h.pre_auction_slot_minutes:
+            return _pd_at(day0, h.pre_auction_slot)
 
-        base_min = 9 * 60
-        offset = hm - base_min
-        slot_min = base_min + (offset // 15) * 15
+        offset = hm - h.open_minutes
+        slot_min = h.open_minutes + (offset // 15) * 15
         return day0 + pd.Timedelta(minutes=int(slot_min))
     except Exception:
         try:
@@ -246,7 +259,7 @@ def next_krx_15m_slot_end(
     """
     ``ts`` **이후** 첫 KRX 15분봉 라벨.
 
-    장마감(15:30) 다음은 **다음 평일 09:00** 으로 점프합니다.
+    장마감(종가 슬롯) 다음은 **다음 평일 개장** 으로 점프합니다.
     """
     try:
         t = pd.Timestamp(ts).floor("s")
@@ -255,28 +268,31 @@ def next_krx_15m_slot_end(
         if t.weekday() >= 5:
             return _next_weekday_first_slot_after(t)
 
-        hm = t.hour * 60 + t.minute
+        h = get_session_hours(day0.date())
+        hm = int(t.hour) * 60 + int(t.minute)
         last_end = _krx_day_last_slot_end(day0)
         first_end = _krx_day_first_slot_end(day0)
 
-        if hm >= 15 * 60 + 30:
+        if hm >= h.close_minutes:
             return _next_weekday_first_slot_after(t)
 
-        if hm < 9 * 60:
+        if hm < h.open_minutes:
             if t < first_end:
                 return first_end
             return next_krx_15m_slot_end(first_end)
 
         if is_krx_15m_slot_end(t):
+            # 직전 슬롯 다음은 종가 단일가(15분 격자 밖일 수 있음)
+            if is_krx_pre_auction_15m_slot(t):
+                return last_end
             nxt = t + pd.Timedelta(minutes=15)
-            if is_krx_15m_slot_end(nxt):
+            if is_krx_15m_slot_end(nxt) and not is_krx_last_15m_slot(nxt):
                 return nxt
             if t < last_end:
                 return last_end
             return _next_weekday_first_slot_after(t)
 
         up = krx_stream_slot_end_datetime(t.to_pydatetime())
-        # 형성 중 라벨이 t 이하면 그 다음 라벨
         if up > t:
             return up
         return next_krx_15m_slot_end(up)
@@ -330,25 +346,27 @@ def m1_continuous_end_exclusive_for_15m_end(
     연속매매 1분봉 창의 **끝(미포함)**.
 
     - 일반: ``T+15``
-    - 15:15: ``15:20``
-    - 15:30: ``T`` (연속 구간 없음 — 단일가만)
+    - 동시호가 직전: ``continuous_end``
+    - 종가 단일가: ``T`` (연속 구간 없음)
     """
     t = pd.Timestamp(end_ts).floor("min")
     if is_krx_last_15m_slot(t):
         return t
     if is_krx_pre_auction_15m_slot(t):
-        return t.normalize() + pd.Timedelta(hours=15, minutes=20)
+        h = _hours_for_ts(t)
+        return _pd_at(t.normalize(), h.continuous_end)
     return t + pd.Timedelta(minutes=15)
 
 
 def m1_closing_auction_ts_for_15m_end(
     end_ts: Union[pd.Timestamp, datetime, str],
 ) -> Optional[pd.Timestamp]:
-    """마지막 15:30 슬롯의 단일가 1분봉 시각. 그 외 ``None``."""
+    """종가 단일가 슬롯의 1분봉 시각. 그 외 ``None``."""
     t = pd.Timestamp(end_ts)
     if not is_krx_last_15m_slot(t):
         return None
-    return t.normalize() + pd.Timedelta(hours=15, minutes=30)
+    h = _hours_for_ts(t)
+    return _pd_at(t.normalize(), h.close)
 
 
 def m1_mask_for_15m_end(
@@ -521,24 +539,28 @@ def is_last_m1_open_of_15m_slot(
     open_ts: Union[pd.Timestamp, datetime, str],
 ) -> bool:
     """
-    닫힌 1분봉 open 라벨이 소속 15분 슬롯의 **마지막 연속매매 분**(또는 15:30 단일가)인지.
+    닫힌 1분봉 open 라벨이 소속 15분 슬롯의 **마지막 연속매매 분**(또는 종가 단일가)인지.
 
     - 일반: ``minute % 15 == 14`` (예: 09:14, 09:29)
-    - ``15:15`` 슬롯: ``15:19``
-    - ``15:30`` 슬롯: ``15:30``
+    - 동시호가 직전 슬롯: ``continuous_end - 1분``
+    - 종가 단일가 슬롯: ``close``
     """
     try:
         t = pd.Timestamp(open_ts).floor("min")
         if t.weekday() >= 5:
             return False
-        hm = t.hour * 60 + t.minute
-        if hm == 15 * 60 + 19:
+        h = _hours_for_ts(t)
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm == h.continuous_end_minutes - 1:
             return True
-        if hm == 15 * 60 + 30:
+        if hm == h.close_minutes:
             return True
-        if hm < 9 * 60 or hm > 15 * 60 + 14:
+        if hm < h.open_minutes or hm > h.continuous_end_minutes - 1:
             return False
-        return (t.minute % 15) == 14
+        # 동시호가 직전 슬롯 분은 위에서 처리; 일반 격자만
+        if hm >= h.pre_auction_slot_minutes:
+            return False
+        return (int(t.minute) % 15) == 14
     except Exception:
         return False
 
@@ -550,20 +572,23 @@ def is_slot_head_complete_m1_open(
     닫힌 1분봉이 슬롯 **앞구간(공식 head)의 마지막 분**인지.
 
     이 시점에 head 전 구간이 닫혀 일괄 ka10080 조회를 시작한다.
-    - 일반: ``minute % 15 == 13`` (예: 09:13 @ wall 09:14 → head 09:00~09:13 완료)
-    - ``15:15`` 슬롯: ``15:18`` (head 15:15~15:18)
-    - ``15:30``: False (단일가만, head 일괄 없음)
+    - 일반: ``minute % 15 == 13``
+    - 동시호가 직전: ``continuous_end - 2분``
+    - 종가 단일가: False
     """
     try:
         t = pd.Timestamp(open_ts).floor("min")
         if t.weekday() >= 5:
             return False
+        h = _hours_for_ts(t)
         hm = int(t.hour) * 60 + int(t.minute)
-        if hm == 15 * 60 + 18:
+        if hm == h.continuous_end_minutes - 2:
             return True
-        if hm == 15 * 60 + 30:
+        if hm == h.close_minutes:
             return False
-        if hm < 9 * 60 or hm > 15 * 60 + 14:
+        if hm < h.open_minutes or hm > h.continuous_end_minutes - 1:
+            return False
+        if hm >= h.pre_auction_slot_minutes:
             return False
         return (int(t.minute) % 15) == 13
     except Exception:
@@ -576,18 +601,20 @@ def slot_head_m1_range(
     """
     15분 슬롯의 공식 head 구간 ``[start, end_excl)`` (1분 open 라벨 기준).
 
-    - 일반 ``T``: ``[T, T+14분)`` → open ``T`` … ``T+13``
-    - ``15:15``: ``[15:15, 15:19)`` → open ``15:15`` … ``15:18``
-    - ``15:30``: None (head 없음)
+    - 일반 ``T``: ``[T, T+14분)``
+    - 동시호가 직전: ``[pre_auction, continuous_end - 1분)``
+    - 종가 단일가: None
     """
     try:
         slot = pd.Timestamp(slot_label).floor("min")
         if is_krx_last_15m_slot(slot):
             return None
-        hm = int(slot.hour) * 60 + int(slot.minute)
-        if hm == 15 * 60 + 15:
+        h = _hours_for_ts(slot)
+        if is_krx_pre_auction_15m_slot(slot):
             start = slot
-            end_excl = slot.normalize() + pd.Timedelta(hours=15, minutes=19)
+            end_excl = _pd_at(slot.normalize(), h.continuous_end) - pd.Timedelta(
+                minutes=1
+            )
             return start, end_excl
         if not is_krx_15m_slot_end(slot):
             return None
@@ -603,19 +630,23 @@ def krx_15m_label_for_m1_open(
 ) -> Optional[pd.Timestamp]:
     """
     1분봉 open 라벨이 속한 **좌측 라벨** 15분 슬롯 시각.
-
-    - ``15:19`` → ``15:15``
-    - ``15:30`` → ``15:30``
-    - 그 외: ``floor('15min')`` (예: 09:14 → 09:00)
     """
     try:
         t = pd.Timestamp(open_ts).floor("min")
-        hm = t.hour * 60 + t.minute
-        if hm == 15 * 60 + 19:
-            return t.normalize() + pd.Timedelta(hours=15, minutes=15)
-        if hm == 15 * 60 + 30:
-            return t.normalize() + pd.Timedelta(hours=15, minutes=30)
-        lab = t.floor("15min")
+        h = _hours_for_ts(t)
+        day0 = t.normalize()
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm == h.continuous_end_minutes - 1:
+            return _pd_at(day0, h.pre_auction_slot)
+        if hm == h.close_minutes:
+            return _pd_at(day0, h.close)
+        if hm < h.open_minutes or hm > h.continuous_end_minutes - 1:
+            return None
+        if hm >= h.pre_auction_slot_minutes:
+            return _pd_at(day0, h.pre_auction_slot)
+        offset = hm - h.open_minutes
+        slot_min = h.open_minutes + (offset // 15) * 15
+        lab = day0 + pd.Timedelta(minutes=int(slot_min))
         if not is_krx_15m_slot_end(lab):
             return None
         return lab
@@ -655,16 +686,17 @@ def is_krx_m1_closed_open_label(
 ) -> bool:
     """
     ``m1_bar_open_label_for_just_completed_minute`` 로 구한 **닫힌 1분봉 시작 라벨**이
-    KRX 연속매매 1분 격자(평일 09:00~15:19) 또는 15:30 단일가에 속하는지.
+    KRX 연속매매 1분 격자(개장~continuous_end-1) 또는 종가 단일가에 속하는지.
     """
     try:
         t = pd.Timestamp(closed_open).floor("min")
         if t.weekday() >= 5:
             return False
-        hm = t.hour * 60 + t.minute
-        if hm == 15 * 60 + 30:
+        h = _hours_for_ts(t)
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm == h.close_minutes:
             return True
-        return (9 * 60) <= hm <= (15 * 60 + 19)
+        return h.open_minutes <= hm <= (h.continuous_end_minutes - 1)
     except Exception:
         return False
 

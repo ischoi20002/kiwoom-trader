@@ -1,0 +1,11 @@
+{
+  "_comment": "우선순위: 일자 오버라이드 > 자동규칙(신년/수능) > 기본 09:00/15:20/15:30. use_default:true 로 자동규칙 해제 가능.",
+  "_auto_rules": {
+    "new_year_first_trading_day": true,
+    "csat": true
+  },
+  "_csat_dates": [
+    "2025-11-13",
+    "2026-11-12"
+  ]
+}

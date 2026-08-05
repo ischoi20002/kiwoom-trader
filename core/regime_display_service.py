@@ -139,24 +139,27 @@ class RegimeDisplayService:
             self._after_id = None
 
     def _resolve_eod_trading_day(self, now: datetime) -> Optional[date]:
-        """오늘이 거래일이고 15:30+버퍼 이후면 당일, 아니면 None."""
+        """오늘이 거래일이고 close+버퍼 이후면 당일, 아니면 None."""
         try:
             from reporting.krx_trading_calendar import is_trading_day
+            from utils.krx_session_hours import get_session_hours
 
             today_d = now.date()
             if not is_trading_day(today_d):
                 return None
-            due = datetime.combine(today_d, dtime(15, 30, 0)) + timedelta(
+            due = get_session_hours(today_d).close_datetime() + timedelta(
                 minutes=self._eod_buffer_minutes()
             )
             if now >= due:
                 return today_d
         except Exception:
             try:
+                from utils.krx_session_hours import get_session_hours
+
                 today_d = now.date()
                 if today_d.weekday() >= 5:
                     return None
-                due = datetime.combine(today_d, dtime(15, 30, 0)) + timedelta(
+                due = get_session_hours(today_d).close_datetime() + timedelta(
                     minutes=self._eod_buffer_minutes()
                 )
                 if now >= due:

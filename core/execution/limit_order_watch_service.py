@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -133,18 +133,23 @@ class LimitOrderWatchService:
 
     def _auction_fill_confirm_start_dt(self, now: Optional[datetime] = None) -> datetime:
         """
-        종가 동시호가 체결 확인 시작 시각(당일 15:30:00).
+        종가 동시호가 체결 확인 시작 시각(당일 SessionHours.close).
 
-        15:15 라벨 봉 완성(~15:20) 후 시장가 접수는 가능하지만,
-        15:20~15:30 사이에는 체결이 나지 않으므로 조회는 15:30부터.
+        동시호가 직전 슬롯 완성 후 시장가 접수는 가능하지만,
+        continuous_end~close 사이에는 체결이 나지 않으므로 조회는 close부터.
         """
         t = now if isinstance(now, datetime) else datetime.now()
-        return t.replace(hour=15, minute=30, second=0, microsecond=0)
+        try:
+            from utils.krx_session_hours import get_session_hours
+
+            return get_session_hours(t.date()).close_datetime()
+        except Exception:
+            return t.replace(hour=15, minute=30, second=0, microsecond=0)
 
     def _ms_until_auction_fill_confirm_start(
         self, now: Optional[datetime] = None
     ) -> int:
-        """15:30:00 까지 남은 ms. 이미 지났으면 0."""
+        """종가(close)까지 남은 ms. 이미 지났으면 0."""
         try:
             t = now if isinstance(now, datetime) else datetime.now()
             start = self._auction_fill_confirm_start_dt(t)
@@ -155,7 +160,7 @@ class LimitOrderWatchService:
             return 0
 
     def _auction_fill_confirm_window_open(self, now: Optional[datetime] = None) -> bool:
-        """체결 확인 가능 구간: 15:30:00 이상."""
+        """체결 확인 가능 구간: close 이상."""
         try:
             t = now if isinstance(now, datetime) else datetime.now()
             return t >= self._auction_fill_confirm_start_dt(t)
@@ -163,12 +168,19 @@ class LimitOrderWatchService:
             return True
 
     def _auction_watch_deadline_passed(self) -> bool:
-        """로컬 시각 기준 15:40 이후면 폴링 종료."""
+        """로컬 시각 기준 close+10분 이후면 폴링 종료."""
         try:
+            from utils.krx_session_hours import get_session_hours
+
             now = datetime.now()
-            return (now.hour > 15) or (now.hour == 15 and now.minute >= 40)
+            close_dt = get_session_hours(now.date()).close_datetime()
+            return now >= (close_dt + timedelta(minutes=10))
         except Exception:
-            return False
+            try:
+                now = datetime.now()
+                return (now.hour > 15) or (now.hour == 15 and now.minute >= 40)
+            except Exception:
+                return False
 
     def _schedule_auction_poll(
         self, order_no: str, *, delay_ms: Optional[int] = None

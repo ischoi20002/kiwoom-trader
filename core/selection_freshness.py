@@ -72,7 +72,12 @@ def selection_fresh_after_threshold(
             return None
 
     def _due(day_d: date) -> datetime:
-        return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(minutes=buf)
+        try:
+            from utils.krx_session_hours import get_session_hours
+
+            return get_session_hours(day_d).close_datetime() + timedelta(minutes=buf)
+        except Exception:
+            return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(minutes=buf)
 
     try:
         if is_trading_day(today_d):

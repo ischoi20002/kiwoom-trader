@@ -98,7 +98,7 @@ class ContinuousMonitorService:
             self._after_id = None
 
     def _eod_buffer_minutes(self) -> int:
-        """15:30 기준 버퍼(기본 30 → 선정 시각 16:00)."""
+        """종가(close) 기준 버퍼(기본 30분)."""
         try:
             st = getattr(self.app, "settings", None) or {}
             v = int(
@@ -113,11 +113,22 @@ class ContinuousMonitorService:
         except (TypeError, ValueError):
             return 30
 
-    def _format_eod_hhmm(self) -> str:
+    def _eod_due_datetime(self, day_d: date) -> datetime:
+        """해당일 장마감+버퍼 시각."""
         try:
-            due = datetime.combine(date.today(), dtime(15, 30, 0)) + timedelta(
+            from utils.krx_session_hours import get_session_hours
+
+            return get_session_hours(day_d).close_datetime() + timedelta(
                 minutes=self._eod_buffer_minutes()
             )
+        except Exception:
+            return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(
+                minutes=self._eod_buffer_minutes()
+            )
+
+    def _format_eod_hhmm(self) -> str:
+        try:
+            due = self._eod_due_datetime(date.today())
             return due.strftime("%H:%M")
         except Exception:
             return "16:00"
@@ -159,9 +170,7 @@ class ContinuousMonitorService:
             today_d = now.date()
             if not is_trading_day(today_d):
                 return None
-            due = datetime.combine(today_d, dtime(15, 30, 0)) + timedelta(
-                minutes=self._eod_buffer_minutes()
-            )
+            due = self._eod_due_datetime(today_d)
             if now >= due:
                 return today_d
         except Exception:
@@ -169,9 +178,7 @@ class ContinuousMonitorService:
                 today_d = now.date()
                 if today_d.weekday() >= 5:
                     return None
-                due = datetime.combine(today_d, dtime(15, 30, 0)) + timedelta(
-                    minutes=self._eod_buffer_minutes()
-                )
+                due = self._eod_due_datetime(today_d)
                 if now >= due:
                     return today_d
             except Exception:
@@ -196,9 +203,7 @@ class ContinuousMonitorService:
         h, m = self._auto_start_hm()
         start_at = datetime.combine(today_d, dtime(h, m, 0))
         # 장전 시작 시각~EOD 선정 시각 전까지만 오전 자동 시작
-        eod_due = datetime.combine(today_d, dtime(15, 30, 0)) + timedelta(
-            minutes=self._eod_buffer_minutes()
-        )
+        eod_due = self._eod_due_datetime(today_d)
         return start_at <= now < eod_due
 
     def tick(self) -> None:
@@ -491,7 +496,7 @@ class ContinuousMonitorService:
             return datetime.combine(day_d, dtime(h, m, 0))
 
         def _eod_at(day_d: date) -> datetime:
-            return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(minutes=buf)
+            return self._eod_due_datetime(day_d)
 
         today = t.date()
         try:

@@ -117,7 +117,7 @@ def required_eod_bar_date_asof_local(now: Optional[datetime] = None) -> date:
     """
     종목 선정용: 로컬 DB 일봉에 반드시 포함되어야 하는 '마지막 완결 일봉'의 영업일.
     - 비거래일: 직전 거래일
-    - 거래일 장마감(15:30) 이후: 당일
+    - 거래일 장마감(당일 SessionHours.close) 이후: 당일
     - 거래일 장전·장중: 직전 거래일(당일 일봉은 미완)
     """
     t = now or datetime.now()
@@ -126,8 +126,10 @@ def required_eod_bar_date_asof_local(now: Optional[datetime] = None) -> date:
         if not is_trading_day(d):
             prev = previous_trading_day(d)
             return prev if prev is not None else d
+        from utils.krx_session_hours import get_session_hours
+
+        close_end = get_session_hours(d).close_minutes
         mins = t.hour * 60 + t.minute
-        close_end = 15 * 60 + 30
         if mins > close_end:
             return d
         prev = previous_trading_day(d)
@@ -145,11 +147,8 @@ def completed_trading_day_asof_local(
     레짐·전환 게이트용: 마지막으로 **완료된** 거래일.
 
     - 비거래일: 직전 거래일
-    - 거래일 · 장마감(15:30)+버퍼 이전(장전·장중·직후): 직전 거래일
-    - 거래일 · 15:30+버퍼 이후: 당일
-
-    백테가 전일(ref) 레짐으로 당일을 도는 것과 맞춰, 실시간에서
-    미완성 당일 일봉으로 HARD↔OFF가 바뀌지 않게 한다.
+    - 거래일 · 장마감(close)+버퍼 이전(장전·장중·직후): 직전 거래일
+    - 거래일 · close+버퍼 이후: 당일
     """
     t = now or datetime.now()
     d = t.date()
@@ -161,7 +160,10 @@ def completed_trading_day_asof_local(
         if not is_trading_day(d):
             prev = previous_trading_day(d)
             return prev if prev is not None else d
-        due = datetime.combine(d, time(15, 30, 0)) + timedelta(minutes=buf)
+        from utils.krx_session_hours import get_session_hours
+
+        close_dt = get_session_hours(d).close_datetime()
+        due = close_dt + timedelta(minutes=buf)
         if t >= due:
             return d
         prev = previous_trading_day(d)
@@ -176,24 +178,27 @@ def completed_trading_day_asof_local(
 
 def required_eod_bar_datetime_asof_local(now: Optional[datetime] = None) -> Optional[datetime]:
     """
-    하베스팅·DB 완결성 판정용: 반드시 포함되어야 할 마지막 **1분봉** 시각(해당 영업일 15:30:00).
+    하베스팅·DB 완결성 판정용: 반드시 포함되어야 할 마지막 **1분봉** 시각
+    (해당 영업일 SessionHours.close).
     """
     try:
+        from utils.krx_session_hours import get_session_hours
+
         req_d = required_eod_bar_date_asof_local(now)
-        return datetime(req_d.year, req_d.month, req_d.day, 15, 30, 0)
+        return get_session_hours(req_d).close_datetime()
     except Exception:
         return None
 
 
 def is_krx_regular_session_local(now: Optional[datetime] = None) -> bool:
     """
-    PC 로컬 시각을 한국장 기준으로 본다고 가정할 때, KRX 정규장(09:00~15:30) 구간 여부.
-    (해외 타임존이면 설정 맞춤 필요)
+    PC 로컬 시각을 한국장 기준으로 본다고 가정할 때, KRX 정규장 구간 여부.
+    일자별 SessionHours(open~close)를 사용한다.
     """
     try:
-        t = now or datetime.now()
-        mins = t.hour * 60 + t.minute
-        return (9 * 60) <= mins <= (15 * 60 + 30)
+        from utils.krx_session_hours import is_in_regular_session
+
+        return bool(is_in_regular_session(now or datetime.now()))
     except Exception:
         return False
 
@@ -201,9 +206,11 @@ def is_krx_regular_session_local(now: Optional[datetime] = None) -> bool:
 def minute_harvest_datetime_cap_iso(now: Optional[datetime] = None) -> Optional[str]:
     """
     하베스팅용: 장중(정규장)이고 오늘이 거래일이면, DB에 넣을 수 있는 1분봉의 최대 시각(포함).
-    직전 거래일 15:30:00 — 당일 장중 봉은 저장하지 않기 위함. 그 외 None(제한 없음).
+    직전 거래일 close — 당일 장중 봉은 저장하지 않기 위함. 그 외 None(제한 없음).
     """
     try:
+        from utils.krx_session_hours import get_session_hours
+
         t = now or datetime.now()
         today_d = t.date()
         if not is_trading_day(today_d):
@@ -213,7 +220,8 @@ def minute_harvest_datetime_cap_iso(now: Optional[datetime] = None) -> Optional[
         prev = previous_trading_day(today_d)
         if prev is None:
             return None
-        return f"{prev.strftime('%Y-%m-%d')} 15:30:00"
+        close_dt = get_session_hours(prev).close_datetime()
+        return close_dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
 

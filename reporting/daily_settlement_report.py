@@ -358,9 +358,19 @@ def report_html_path(day: str) -> str:
 
 
 def _session_end_local(report_day: str, buffer_minutes: int) -> datetime:
-    """KST 로컬 기준 장 마감(15:30) + 버퍼."""
-    d = datetime.strptime(report_day[:10], "%Y-%m-%d")
-    return d.replace(hour=15, minute=30, second=0, microsecond=0) + timedelta(minutes=max(0, int(buffer_minutes)))
+    """KST 로컬 기준 장 마감(SessionHours.close) + 버퍼."""
+    try:
+        from utils.krx_session_hours import get_session_hours
+
+        d = datetime.strptime(report_day[:10], "%Y-%m-%d").date()
+        return get_session_hours(d).close_datetime() + timedelta(
+            minutes=max(0, int(buffer_minutes))
+        )
+    except Exception:
+        d = datetime.strptime(report_day[:10], "%Y-%m-%d")
+        return d.replace(hour=15, minute=30, second=0, microsecond=0) + timedelta(
+            minutes=max(0, int(buffer_minutes))
+        )
 
 
 def generation_is_complete(generated_at: datetime, report_day: str, buffer_minutes: int) -> bool:

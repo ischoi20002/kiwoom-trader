@@ -2413,9 +2413,9 @@ def select_monitoring_targets(
                         )
 
                         req_d = required_eod_bar_date_asof_local()
-                        end_anchor = datetime(
-                            req_d.year, req_d.month, req_d.day, 15, 30, 0
-                        )
+                        from utils.krx_session_hours import get_session_hours
+
+                        end_anchor = get_session_hours(req_d).close_datetime()
                 except Exception:
                     end_anchor = datetime.now()
                 max_d = end_anchor.strftime('%Y-%m-%d')

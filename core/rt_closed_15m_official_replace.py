@@ -34,10 +34,10 @@ def should_skip_pre_first_slot_or_prior_day_official_replace(
     now: Any = None,
 ) -> bool:
     """
-    장시작~당일 첫 15분(09:00) 완성 전, 또는 전일 슬롯의 공식 15분 정렬교체를 스킵.
+    장시작~당일 첫 15분 완성 전, 또는 전일 슬롯의 공식 15분 정렬교체를 스킵.
 
-    - ``bar_ts`` 캘린더일이 wall 기준 오늘보다 이전이면 True (전일 15:30 아침 교체 등)
-    - 당일이어도 wall < 오늘 09:15 이면 True (첫 15분봉 완성 전)
+    - ``bar_ts`` 캘린더일이 wall 기준 오늘보다 이전이면 True
+    - 당일이어도 wall < 오늘 개장+15분 이면 True (첫 15분봉 완성 전)
     """
     try:
         bt = pd.Timestamp(bar_ts).floor("s")
@@ -55,7 +55,10 @@ def should_skip_pre_first_slot_or_prior_day_official_replace(
         day0 = wall.normalize()
         if bt.normalize() < day0:
             return True
-        first_slot_done = day0 + pd.Timedelta(hours=9, minutes=15)
+        from utils.krx_session_hours import get_session_hours
+
+        h = get_session_hours(day0.date())
+        first_slot_done = day0 + pd.Timedelta(minutes=int(h.open_minutes) + 15)
         if wall < first_slot_done:
             return True
     except Exception:

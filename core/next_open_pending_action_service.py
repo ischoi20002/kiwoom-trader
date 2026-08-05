@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-15:30 완성봉 신호를 익일 09:00 시초 동시호가 지정가 주문으로 이월하는 서비스.
+종가 단일가 완성봉 신호를 익일 시초 동시호가 지정가 주문으로 이월하는 서비스.
 
 - 저장: JSON 파일 영속화
 - 복구: 앱 시작 시 자동 로드
-- 제출: 다음 거래일 08:59:50 이후 1회 제출
-- 만료: 09:05 이후까지 미제출/잔존 시 만료 처리
+- 제출: 다음 거래일 개장(SessionHours.open) 직전~직후 창에서 1회 제출
+- 만료: 개장+5분 이후까지 미제출/잔존 시 만료 처리
 """
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -224,13 +224,26 @@ class NextOpenPendingActionService:
             pass
         return True
 
-    @staticmethod
-    def _is_submit_window(now: datetime) -> bool:
-        return now.time() >= time(8, 59, 50) and now.time() <= time(9, 0, 30)
+    def _is_submit_window(self, now: datetime) -> bool:
+        """익일(또는 당일) 개장 직전~직후 제출 창(open-10초 ~ open+30초)."""
+        try:
+            from utils.krx_session_hours import get_session_hours
 
-    @staticmethod
-    def _is_expire_window(now: datetime) -> bool:
-        return now.time() > time(9, 5, 0)
+            h = get_session_hours(now.date())
+            open_dt = h.open_datetime()
+            return (open_dt - timedelta(seconds=10)) <= now <= (open_dt + timedelta(seconds=30))
+        except Exception:
+            return now.time() >= time(8, 59, 50) and now.time() <= time(9, 0, 30)
+
+    def _is_expire_window(self, now: datetime) -> bool:
+        """개장+5분 이후 미제출 만료."""
+        try:
+            from utils.krx_session_hours import get_session_hours
+
+            h = get_session_hours(now.date())
+            return now > (h.open_datetime() + timedelta(minutes=5))
+        except Exception:
+            return now.time() > time(9, 5, 0)
 
     def process_due_actions(self) -> None:
         if not bool(getattr(self.app, "settings", {}).get("next_open_1530_enabled", False)):
