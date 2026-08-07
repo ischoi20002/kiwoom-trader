@@ -332,7 +332,25 @@ def get_monthly_kospi_top_n(
                 asof_val = None
                 if "asof_date" in cached.columns and len(cached):
                     asof_val = str(cached["asof_date"].iloc[0])
+                # 전월 as-of 가 당월 파일에 남은 경우 폐기
+                if asof_val:
+                    try:
+                        if (
+                            pd.Timestamp(asof_val).normalize().strftime("%Y%m")
+                            != ym
+                        ):
+                            _log_cb(
+                                logger_callback,
+                                f"  [Marcap] {ym} 캐시 as-of {asof_val} 불일치 → 재생성",
+                            )
+                            raise ValueError("stale monthly asof month mismatch")
+                    except ValueError:
+                        raise
+                    except Exception:
+                        pass
                 return codes[:n], asof_val
+        except ValueError:
+            pass
         except Exception as e:
             try:
                 logging.info("월별 marcap 캐시 읽기 재시도: %s", e)
@@ -344,6 +362,18 @@ def get_monthly_kospi_top_n(
         asof_guess, n, logger_callback=logger_callback
     )
     if not codes:
+        return [], None
+
+    # lookback 으로 전월 날짜가 잡히면 당월 캐시로 저장하지 않음
+    try:
+        if asof_str and pd.Timestamp(asof_str).normalize().strftime("%Y%m") != ym:
+            _log_cb(
+                logger_callback,
+                f"  [Warn] {ym} 월 첫 영업일 marcap 없음 "
+                f"(가용 as-of {asof_str}) → 당월 캐시 보류",
+            )
+            return [], None
+    except Exception:
         return [], None
 
     try:
@@ -920,12 +950,16 @@ def ensure_realtime_kospi_universe_csv(
     kospi_universe_path: str = "kospi_universe.csv",
     target_n: int = 400,
     logger_callback: Optional[Callable[[str], None]] = None,
+    marcap_cache_max_age_days: int = 3,
 ) -> Tuple[list[str], Optional[str]]:
     """
     실시간 감시용: **당월 첫 영업일** marcap as-of 로 ``kospi_universe.csv`` 갱신.
 
     백테 ``get_monthly_kospi_top_n`` 과 동일. CSV가 이미 당월이면 스킵.
     (실시간 전용 갱신주기 설정 없음 — monthly 고정)
+
+    당월 전환 직후엔 로컬 marcap 연도 파일이 전월로 오래되면 as-of 가
+    이전 달에 머무를 수 있어, 갱신 전에 연도 캐시 신선도를 먼저 맞춘다.
     """
     try:
         tn = max(1, int(target_n))
@@ -941,6 +975,21 @@ def ensure_realtime_kospi_universe_csv(
         except Exception:
             pass
 
+    # 당월 CSV가 없으면 연도 marcap 을 먼저 갱신 (오래되면 전월 as-of 폴백됨)
+    try:
+        y_now = int(pd.Timestamp.now().year)
+        ensure_marcap_year(
+            y_now,
+            logger_callback=logger_callback,
+            max_cache_age_days=max(1, int(marcap_cache_max_age_days)),
+        )
+        _year_df_cache.pop(y_now, None)
+    except Exception as e:
+        try:
+            logging.warning("실시간 marcap 연도 선행 갱신 실패: %s", e, exc_info=True)
+        except Exception:
+            pass
+
     try:
         codes, asof_str = get_monthly_kospi_top_n(
             ym, tn, logger_callback=logger_callback
@@ -950,9 +999,17 @@ def ensure_realtime_kospi_universe_csv(
             logging.warning("실시간 월별 marcap 로드 실패: %s", e, exc_info=True)
         except Exception:
             pass
+        _log_cb(
+            logger_callback,
+            f"  [Warn] 당월({ym}) 유니버스 실패 → 기존 CSV as-of {cached_asof or '?'} 유지",
+        )
         return cached_codes[:tn], cached_asof
 
     if not codes:
+        _log_cb(
+            logger_callback,
+            f"  [Warn] 당월({ym}) 유니버스 비어 있음 → 기존 CSV as-of {cached_asof or '?'} 유지",
+        )
         return cached_codes[:tn], cached_asof
 
     # kospi_universe.csv 동기화 (감시목록이 CSV를 읽음)
