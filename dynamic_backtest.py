@@ -941,7 +941,22 @@ class DynamicBacktester:
                     except (TypeError, ValueError, KeyError):
                         pass
             current_equity = self.cash + holdings_mv
-            self.daily_equity.append({'date': current_day, 'equity': current_equity, 'cash': self.cash, 'holdings_n': len(self.holdings)})
+            # 시작점(start_date 08:59:00)과 동일하게 시각을 포함해야
+            # 리포트 문자열 정렬 시 같은 날 EOD가 시작점보다 앞에 오지 않음
+            try:
+                _eod_hm = int(get_session_hours(current_day).close_minutes)
+                _eod_h, _eod_m = divmod(max(0, _eod_hm), 60)
+                _eod_date = f"{current_day} {_eod_h:02d}:{_eod_m:02d}:00"
+            except Exception:
+                _eod_date = f"{current_day} 15:30:00"
+            self.daily_equity.append(
+                {
+                    "date": _eod_date,
+                    "equity": current_equity,
+                    "cash": self.cash,
+                    "holdings_n": len(self.holdings),
+                }
+            )
             
             # [Perf] 매매 CSV 버퍼 일괄 flush (하루 단위로 디스크 I/O 감소)
             try:

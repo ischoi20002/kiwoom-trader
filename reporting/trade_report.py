@@ -1684,12 +1684,30 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     equity_chart_html = ""
     if daily_equity:
         try:
-            # [v15.5.0] Sort by date to avoid plot artifacts
-            daily_equity = sorted(daily_equity, key=lambda x: x['date'])
-            dates = [d['date'] for d in daily_equity]
-            equities = [d['equity'] for d in daily_equity]
-            cashes = [d['cash'] for d in daily_equity]
-            holdings = [max(0, d['equity'] - d['cash']) for d in daily_equity]
+            # Timestamp 기준 정렬. 구 데이터(날짜만)는 자정으로 파싱되어
+            # 시작점(08:59)보다 앞에 오므로 당일 장마감으로 보정한다.
+            def _equity_ts(row: dict):
+                try:
+                    raw = str(row.get("date", "") or "").strip()
+                    ts = pd.Timestamp(raw)
+                    if len(raw) <= 10:
+                        try:
+                            from utils.krx_session_hours import get_session_hours
+
+                            hm = int(get_session_hours(ts.date()).close_minutes)
+                            h, m = divmod(max(0, hm), 60)
+                            ts = ts.normalize() + pd.Timedelta(hours=h, minutes=m)
+                        except Exception:
+                            ts = ts.normalize() + pd.Timedelta(hours=15, minutes=30)
+                    return ts
+                except Exception:
+                    return pd.Timestamp.min
+
+            daily_equity = sorted(daily_equity, key=_equity_ts)
+            dates = [str(d["date"]) for d in daily_equity]
+            equities = [d["equity"] for d in daily_equity]
+            cashes = [d["cash"] for d in daily_equity]
+            holdings = [max(0, d["equity"] - d["cash"]) for d in daily_equity]
             
             # [v32.1] Calculate Cash Metrics
             ratios = [(d['cash'] / d['equity'] * 100) for d in daily_equity if d['equity'] > 0]
