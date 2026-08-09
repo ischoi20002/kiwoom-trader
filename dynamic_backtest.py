@@ -452,20 +452,12 @@ class DynamicBacktester:
                 top_codes_a = self.schedule_a.get(ref_day, [])
                 top_codes_b = self.schedule_b.get(ref_day, [])
                 top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
-                if not top_codes:
-                    prev_day_dt = datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=1)
-                    candidates_df = strategy_selector.select_monitoring_targets(
-                        self.settings, logger_callback=lambda x: None, target_date=prev_day_dt, data_manager=self.db
-                    )
-                    if candidates_df is not None and not candidates_df.empty:
-                        max_fb = int(self.settings.get("max_slots_a", 20)) + int(
-                            self.settings.get("max_slots_b", 10)
-                        )
-                        for _, row in candidates_df.head(max_fb).iterrows():
-                            top_codes.append(row["Code"])
                 max_sa = int(self.settings.get("max_slots_a", 20))
                 max_sb = int(self.settings.get("max_slots_b", 10))
-                if top_codes_a or top_codes_b:
+                if not top_codes:
+                    # run() 과 동일: 느린 실시간 선정 폴백 없이 스케줄만 사용
+                    monitoring_list = []
+                elif top_codes_a or top_codes_b:
                     monitoring_list = _dual_track_new_candidates(
                         top_codes_a, top_codes_b, [], max_sa, max_sb
                     )
@@ -617,23 +609,10 @@ class DynamicBacktester:
             self._current_track_map = track_map
             
             if not top_codes and not bool(self.settings.get("transition_runtime_block_s1", False)):
-                # [v4.7] 폴백: select_monitoring_targets 결과에서 Track A/B 구분 시도
-                prev_day_dt = datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=1)
-                candidates_df = strategy_selector.select_monitoring_targets(
-                    self.settings, logger_callback=lambda x: None, target_date=prev_day_dt, data_manager=self.db
-                )
-                if candidates_df is not None and not candidates_df.empty:
-                    max_fb = int(self.settings.get("max_slots_a", 20)) + int(
-                        self.settings.get("max_slots_b", 10)
-                    )
-                    use_b_fb = self.settings.get('use_sel_track_b', True)
-                    for _, row in candidates_df.head(max_fb).iterrows():
-                        c = row['Code']
-                        top_codes.append(c)
-                        if use_b_fb and row.get('Valid_B', False):
-                            track_map[c] = 'B' if row.get('Valid_A', True) is False else 'AB'
-                        else:
-                            track_map.setdefault(c, 'A')
+                # 스케줄 공백 시 실시간 select_monitoring_targets 폴백은
+                # 일당 수십 초(FDR/교차섹션)라 포트폴리오 BT에서는 쓰지 않는다.
+                # 보유 종목만 감시(신규 진입 없음).
+                pass
             
             # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보: Track A/B 각각 max_slots_a·max_slots_b)
             max_sa = int(self.settings.get("max_slots_a", 20))
@@ -1022,6 +1001,7 @@ class DynamicBacktester:
             if lab is None:
                 return None
             close_hm = get_session_hours(pd.Timestamp(curr_time).date()).close_minutes
+            day0 = pd.Timestamp(curr_time).normalize()
         except Exception:
             return None
 
@@ -1035,16 +1015,22 @@ class DynamicBacktester:
                         return pd.Timestamp(lab), c
             except Exception:
                 pass
+            # 라벨 미소속 시: 전구간 순회 금지 — 당일 슬라이스만 검사
             try:
-                lab_f = pd.Timestamp(lab).floor("min")
-                for idx in df.index:
+                day_slice = df.loc[day0 : day0 + pd.Timedelta(hours=23, minutes=59)]
+            except Exception:
+                try:
+                    day_slice = df[
+                        (pd.DatetimeIndex(df.index).normalize() == day0)
+                    ]
+                except Exception:
+                    return None
+            try:
+                for idx in day_slice.index:
                     try:
                         t = pd.Timestamp(idx).floor("min")
-                        if (
-                            t.normalize() == lab_f.normalize()
-                            and int(t.hour) * 60 + int(t.minute) == close_hm
-                        ):
-                            c = float(df.loc[idx, "Close"])
+                        if int(t.hour) * 60 + int(t.minute) == close_hm:
+                            c = float(day_slice.loc[idx, "Close"])
                             if c > 0:
                                 return t, c
                     except Exception:
@@ -1095,38 +1081,80 @@ class DynamicBacktester:
         curr_time: Any,
         day_df: Any = None,
     ) -> Optional[Tuple[pd.Timestamp, float]]:
-        """현재 슬롯 이후 최초 거래일의 개장(SessionHours.open) 시가를 찾는다."""
+        """
+        현재 슬롯 이후 최초 거래일의 개장(SessionHours.open) 시가를 찾는다.
+
+        장기 백테에서 잔여 15분봉 전체를 순회하면 O(잔여봉)로 하루가
+        수십 초까지 늘어나므로, 다음 거래일 개장 라벨을 직접 조회한다.
+        """
         try:
             curr_ts = pd.Timestamp(curr_time)
         except Exception:
             return None
 
-        def _from_df(df: Any) -> Optional[Tuple[pd.Timestamp, float]]:
+        def _px_at(df: Any, open_ts: pd.Timestamp) -> Optional[Tuple[pd.Timestamp, float]]:
             if df is None or getattr(df, "empty", True):
                 return None
             try:
-                idx = pd.DatetimeIndex(pd.to_datetime(df.index))
-                fut = idx[idx > curr_ts]
+                if open_ts in df.index:
+                    px = float(df.loc[open_ts, "Open"])
+                    if px > 0:
+                        return pd.Timestamp(open_ts), px
             except Exception:
-                return None
-            for t in fut:
-                try:
-                    if bool(is_krx_first_15m_slot(t)):
-                        row = df.loc[t]
-                        px = float(row["Open"])
+                pass
+            # 분 단위 일치 폴백 (타임존/초 차이)
+            try:
+                day0 = open_ts.normalize()
+                open_hm = int(open_ts.hour) * 60 + int(open_ts.minute)
+                day_slice = df.loc[day0 : day0 + pd.Timedelta(hours=23, minutes=59)]
+                for idx in day_slice.index:
+                    t = pd.Timestamp(idx).floor("min")
+                    if int(t.hour) * 60 + int(t.minute) == open_hm:
+                        px = float(day_slice.loc[idx, "Open"])
                         if px > 0:
-                            return pd.Timestamp(t), px
-                except Exception:
-                    continue
+                            return t, px
+            except Exception:
+                pass
             return None
 
-        got = _from_df(day_df)
+        def _search_in(df: Any) -> Optional[Tuple[pd.Timestamp, float]]:
+            if df is None or getattr(df, "empty", True):
+                return None
+            try:
+                from reporting.krx_trading_calendar import next_trading_day
+
+                d0 = curr_ts.date()
+                nxt = next_trading_day(d0, max_lookahead=15)
+            except Exception:
+                nxt = None
+                try:
+                    # 캘린더 실패 시 평일만 전진
+                    d = curr_ts.normalize() + pd.Timedelta(days=1)
+                    for _ in range(15):
+                        if int(d.weekday()) < 5:
+                            nxt = d.date()
+                            break
+                        d = d + pd.Timedelta(days=1)
+                except Exception:
+                    return None
+            if nxt is None:
+                return None
+            try:
+                hours = get_session_hours(nxt)
+                open_ts = pd.Timestamp(nxt) + pd.Timedelta(
+                    hours=int(hours.open.hour), minutes=int(hours.open.minute)
+                )
+            except Exception:
+                open_ts = pd.Timestamp(nxt) + pd.Timedelta(hours=9)
+            return _px_at(df, open_ts)
+
+        got = _search_in(day_df)
         if got is not None:
             return got
         try:
             cache = getattr(self, "cached_15m_data", None) or {}
             for key in (code, str(code).zfill(6), str(code).strip()):
-                got = _from_df(cache.get(key))
+                got = _search_in(cache.get(key))
                 if got is not None:
                     return got
         except Exception:

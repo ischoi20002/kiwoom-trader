@@ -51,6 +51,8 @@ _special_meta: Dict[str, Any] = {}
 _special_mtime: Optional[float] = None
 _load_warned: bool = False
 _first_trading_day_cache: Dict[int, Optional[date]] = {}
+# 일자별 SessionHours 결과 캐시 (BT 슬롯 판정 핫패스) — 값은 SessionHours
+_session_hours_cache: Dict[str, Any] = {}
 
 
 def _parse_day(d: Union[str, date, datetime]) -> date:
@@ -246,11 +248,13 @@ def _get_special_meta() -> Dict[str, Any]:
 def reload_special_sessions() -> None:
     """테스트·수동 갱신용 캐시 무효화."""
     global _special_cache, _special_meta, _special_mtime, _load_warned, _first_trading_day_cache
+    global _session_hours_cache
     _special_cache = None
     _special_meta = {}
     _special_mtime = None
     _load_warned = False
     _first_trading_day_cache = {}
+    _session_hours_cache = {}
     _load_special_map(force=True)
 
 
@@ -414,7 +418,15 @@ def get_session_hours(day: Union[str, date, datetime]) -> SessionHours:
     """
     d = _parse_day(day)
     key = d.strftime("%Y-%m-%d")
+    try:
+        cached = _session_hours_cache.get(key)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
     special = _load_special_map().get(key)
+    result: Optional[SessionHours] = None
 
     # 1) JSON 일자 오버라이드
     if isinstance(special, dict):
@@ -422,14 +434,15 @@ def get_session_hours(day: Union[str, date, datetime]) -> SessionHours:
             if bool(special.get("use_default") or special.get("disabled")):
                 h = default_session_hours(d)
                 note = str(special.get("note") or "JSON:기본 정규장 강제")
-                return SessionHours(
+                result = SessionHours(
                     day=h.day,
                     open=h.open,
                     continuous_end=h.continuous_end,
                     close=h.close,
                     note=note,
                 )
-            return _hours_from_mapping(d, special)
+            else:
+                result = _hours_from_mapping(d, special)
         except Exception as e:
             try:
                 logger.warning("특수 세션 %s 파싱 실패 — 자동/기본값 시도: %s", key, e)
@@ -441,15 +454,23 @@ def get_session_hours(day: Union[str, date, datetime]) -> SessionHours:
                 pass
 
     # 2) 자동 규칙
-    try:
-        auto = _auto_rule_session_hours(d)
-        if auto is not None:
-            return auto
-    except Exception:
-        pass
+    if result is None:
+        try:
+            auto = _auto_rule_session_hours(d)
+            if auto is not None:
+                result = auto
+        except Exception:
+            pass
 
     # 3) 기본
-    return default_session_hours(d)
+    if result is None:
+        result = default_session_hours(d)
+
+    try:
+        _session_hours_cache[key] = result
+    except Exception:
+        pass
+    return result
 
 
 def is_in_regular_session(

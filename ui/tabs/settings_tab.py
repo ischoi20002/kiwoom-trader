@@ -618,15 +618,72 @@ class SettingsTab:
         )
         kospi_n_cmb.grid(row=1, column=1, sticky='w', padx=(5, 10), pady=(4, 0))
 
+        # 유니버스 갱신 주기 (백테·실시간 공통, 기본 분기)
+        _REFRESH_LABELS = [
+            ('quarterly', '분기'),
+            ('monthly', '월별'),
+            ('bimonthly', '2개월'),
+            ('fourmonth', '4개월'),
+            ('semiannual', '반기'),
+            ('biweekly', '격주'),
+            ('weekly', '주별'),
+            ('daily', '일별'),
+        ]
+        _REFRESH_DISP = [f'{lab} ({key})' for key, lab in _REFRESH_LABELS]
+        _REFRESH_BY_DISP = {f'{lab} ({key})': key for key, lab in _REFRESH_LABELS}
+        _REFRESH_BY_KEY = {key: f'{lab} ({key})' for key, lab in _REFRESH_LABELS}
+
+        try:
+            if 'kospi_universe_refresh' not in self.conf_vars:
+                init_ref = str(
+                    self.app.settings.get(
+                        'kospi_universe_refresh',
+                        self.default_settings.get('kospi_universe_refresh', 'quarterly'),
+                    )
+                ).strip().lower()
+                self.conf_vars['kospi_universe_refresh'] = tk.StringVar(
+                    value=_REFRESH_BY_KEY.get(init_ref, _REFRESH_BY_KEY['quarterly'])
+                )
+        except Exception:
+            self.conf_vars['kospi_universe_refresh'] = tk.StringVar(
+                value=_REFRESH_BY_KEY['quarterly']
+            )
+
+        kospi_ref_lbl = ttk.Label(
+            univ_source_f,
+            text='갱신 주기',
+            font=('Malgun Gothic', 9),
+            foreground=primary_col,
+        )
+        kospi_ref_lbl.grid(row=2, column=0, sticky='w', padx=(5, 10), pady=(4, 0))
+
+        kospi_ref_cmb = ttk.Combobox(
+            univ_source_f,
+            textvariable=self.conf_vars['kospi_universe_refresh'],
+            values=_REFRESH_DISP,
+            state='readonly',
+            width=18,
+        )
+        kospi_ref_cmb.grid(row=2, column=1, sticky='w', padx=(5, 10), pady=(4, 0))
+        ttk.Label(
+            univ_source_f,
+            text='(백테·실시간 공통, 권장: 분기)',
+            font=('Malgun Gothic', 9),
+            foreground=primary_col,
+        ).grid(row=2, column=2, sticky='w', padx=(10, 5), pady=(4, 0))
+
         def _sync_kospi_top_n_enabled(*_args: object) -> None:
-            """KODEX200이면 상위 N 비활성·흐리게, KOSPI면 활성."""
+            """KODEX200이면 상위 N·갱신주기 비활성·흐리게, KOSPI면 활성."""
             try:
                 choice = str(self.conf_vars['universe_index_choice'].get()).strip().upper()
                 is_kospi = choice in ('KOSPI', 'KOSPI200')
                 kospi_n_cmb.configure(state='readonly' if is_kospi else 'disabled')
                 kospi_n_lbl.configure(style='TLabel' if is_kospi else 'Dimmed.TLabel')
+                kospi_ref_cmb.configure(state='readonly' if is_kospi else 'disabled')
+                kospi_ref_lbl.configure(style='TLabel' if is_kospi else 'Dimmed.TLabel')
                 if is_kospi:
                     kospi_n_lbl.configure(foreground=primary_col)
+                    kospi_ref_lbl.configure(foreground=primary_col)
             except (tk.TclError, AttributeError, KeyError):
                 pass
 
@@ -635,6 +692,12 @@ class SettingsTab:
                 'write', _sync_kospi_top_n_enabled
             )
             _sync_kospi_top_n_enabled()
+        except Exception:
+            pass
+
+        # save 시 표시문구 → 내부 키로 변환하기 위해 매핑 보관
+        try:
+            self._kospi_refresh_disp_to_key = _REFRESH_BY_DISP
         except Exception:
             pass
 
@@ -2061,6 +2124,23 @@ class SettingsTab:
                             val = 'KODEX200'
                     except Exception:
                         val = 'KODEX200'
+                if k == 'kospi_universe_refresh':
+                    try:
+                        raw = str(val).strip()
+                        mapped = getattr(self, '_kospi_refresh_disp_to_key', {}).get(raw)
+                        if mapped:
+                            val = mapped
+                        else:
+                            # 이미 내부 키이거나 괄호 안 키 추출
+                            import re
+
+                            m = re.search(r'\(([a-z]+)\)\s*$', raw.lower())
+                            val = m.group(1) if m else raw.lower()
+                        from core.marcap_universe import normalize_refresh_mode
+
+                        val = normalize_refresh_mode(val)
+                    except Exception:
+                        val = 'quarterly'
                 self.app.settings[k] = val
 
         # 포지션 사이징은 %만 지원 (금액 단위 제거)

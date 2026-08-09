@@ -3497,8 +3497,16 @@ class DataManagerV2:
         try:
             if count <= 200:
                 if idx_choice == "KOSPI200":
-                    # 당월 첫 영업일 marcap as-of → kospi_universe.csv (실시간 월별 고정)
+                    # kospi_universe_refresh 주기(기본 분기) marcap as-of → kospi_universe.csv
                     try:
+                        _rmode = "quarterly"
+                        try:
+                            if isinstance(settings, dict):
+                                _rmode = str(
+                                    settings.get("kospi_universe_refresh", "quarterly")
+                                )
+                        except Exception:
+                            _rmode = "quarterly"
                         if force:
                             from core.marcap_universe import refresh_kospi_universe_csv_from_marcap
 
@@ -3506,6 +3514,7 @@ class DataManagerV2:
                                 kospi_universe_path=cache_file,
                                 target_n=max(400, effective_count),
                                 logger_callback=_ulog if universe_log is not None else None,
+                                refresh_mode=_rmode,
                             )
                         else:
                             from core.marcap_universe import ensure_realtime_kospi_universe_csv
@@ -3514,6 +3523,7 @@ class DataManagerV2:
                                 kospi_universe_path=cache_file,
                                 target_n=max(400, effective_count),
                                 logger_callback=_ulog if universe_log is not None else None,
+                                refresh_mode=_rmode,
                             )
                         if os.path.exists(cache_file) and os.path.getsize(cache_file) > 10:
                             df = pd.read_csv(cache_file, dtype=str)

@@ -275,13 +275,14 @@ def load_kospi_universe_codes(
     allow_fdr_generate: bool = True,
     pit_asof: Optional[Union[date, datetime, str, pd.Timestamp]] = None,
     daily_refresh: bool = False,
+    refresh_mode: Optional[str] = None,
 ) -> list[str]:
     """
     KOSPI 시총 상위 top_n 종목코드.
 
     - ``pit_asof`` 지정 시: marcap 과거 시점 as-of (FDR/CSV 무시)
-    - ``daily_refresh=True``: 실시간용 당월 첫 영업일 marcap as-of (월 1회 CSV 갱신)
-    - 그 외: ``kospi_universe.csv`` (없으면 당월 marcap → FDR 폴백)
+    - ``daily_refresh=True``: 실시간용 ``kospi_universe_refresh`` 주기 marcap as-of (CSV 갱신)
+    - 그 외: ``kospi_universe.csv`` (없으면 당기 marcap → FDR 폴백)
     """
     if pit_asof is not None:
         try:
@@ -312,36 +313,46 @@ def load_kospi_universe_codes(
 
     if daily_refresh and pit_asof is None:
         try:
-            from core.marcap_universe import ensure_realtime_kospi_universe_csv
+            from core.marcap_universe import (
+                ensure_realtime_kospi_universe_csv,
+                normalize_refresh_mode,
+            )
 
+            mode = normalize_refresh_mode(refresh_mode or "quarterly")
             codes, asof_str = ensure_realtime_kospi_universe_csv(
                 kospi_universe_path=kospi_universe_path,
                 target_n=max(400, int(top_n)),
                 logger_callback=logger_callback,
+                refresh_mode=mode,
             )
             if codes:
                 if logger_callback is not None and asof_str:
                     try:
                         logger_callback(
-                            f"  [Marcap] 실시간 유니버스(월별) as-of {asof_str} → {len(codes)}종목"
+                            f"  [Marcap] 실시간 유니버스({mode}) as-of {asof_str} → {len(codes)}종목"
                         )
                     except Exception:
                         pass
                 return codes[: int(top_n)]
         except Exception as e:
             try:
-                logging.info("실시간 marcap 일일 갱신 생략: %s", e)
+                logging.info("실시간 marcap 갱신 생략: %s", e)
             except Exception:
                 pass
 
     if force_refresh or not os.path.isfile(kospi_universe_path) or os.path.getsize(kospi_universe_path) <= 10:
         try:
-            from core.marcap_universe import refresh_kospi_universe_csv_from_marcap
+            from core.marcap_universe import (
+                normalize_refresh_mode,
+                refresh_kospi_universe_csv_from_marcap,
+            )
 
+            mode = normalize_refresh_mode(refresh_mode or "quarterly")
             refreshed = refresh_kospi_universe_csv_from_marcap(
                 kospi_universe_path=kospi_universe_path,
                 target_n=max(400, int(top_n)),
                 logger_callback=logger_callback,
+                refresh_mode=mode,
             )
             if refreshed:
                 return refreshed[: int(top_n)]
@@ -2266,6 +2277,7 @@ def select_monitoring_targets(
                     top_n=top_n,
                     allow_fdr_generate=False,
                     daily_refresh=True,
+                    refresh_mode=str(settings.get("kospi_universe_refresh", "quarterly")),
                 )
 
                 if os.path.exists(input_file):
@@ -2291,6 +2303,7 @@ def select_monitoring_targets(
                         top_n=top_n,
                         allow_fdr_generate=False,
                         daily_refresh=True,
+                        refresh_mode=str(settings.get("kospi_universe_refresh", "quarterly")),
                     )
                     df_fdr_names = fdr.StockListing("KOSPI")
                     name_map = dict(
@@ -3086,6 +3099,295 @@ def _apply_sel_track_b_batch_v2(
         df_all.loc[df_all["OSC"] > df_all["OSC_Prev"], "Score_B"] += 10.0
 
 
+def _resync_batch_valid_to_period_universe(
+    df_all: pd.DataFrame,
+    get_period_universe: Callable[[Any], list[str]],
+    settings: dict,
+) -> None:
+    """
+    일자별 **당기 유니버스** 안에서만 RS 분위·Valid/Score 를 다시 맞춘다.
+
+    패널(유니온)에 타월 종목이 섞여도, 같은 날짜의 레짐·스케줄이
+    BT 기간에 따라 바뀌지 않게 한다.
+    """
+    if df_all is None or df_all.empty or "time" not in df_all.columns:
+        return
+    if "code" not in df_all.columns:
+        return
+    try:
+        day_keys = df_all["time"].dt.strftime("%Y-%m-%d")
+    except Exception:
+        try:
+            day_keys = pd.to_datetime(df_all["time"]).dt.strftime("%Y-%m-%d")
+        except Exception:
+            return
+
+    univ_cache: Dict[str, set[str]] = {}
+    in_period = np.zeros(len(df_all), dtype=bool)
+    try:
+        codes = df_all["code"].astype(str).str.zfill(6).tolist()
+        for i, d_str in enumerate(day_keys.tolist()):
+            try:
+                if d_str not in univ_cache:
+                    univ_cache[d_str] = {
+                        str(c).zfill(6) for c in (get_period_universe(d_str) or [])
+                    }
+                in_period[i] = codes[i] in univ_cache[d_str]
+            except Exception:
+                in_period[i] = False
+    except Exception:
+        return
+
+    mask = pd.Series(in_period, index=df_all.index)
+    if not bool(mask.any()):
+        return
+
+    # 당기 유니버스 행만 RS 분위에 참여 (기간 불변)
+    try:
+        if "_sel_ret5_raw" in df_all.columns:
+            tmp = df_all["_sel_ret5_raw"].where(mask)
+            df_all["_sel_rs_pct"] = tmp.groupby(df_all["time"]).rank(
+                pct=True, ascending=True
+            )
+    except Exception:
+        pass
+    try:
+        if "_sel_b_ret_raw" in df_all.columns:
+            tmpb = df_all["_sel_b_ret_raw"].where(mask)
+            df_all["_sel_b_rs_pct"] = tmpb.groupby(df_all["time"]).rank(
+                pct=True, ascending=True
+            )
+    except Exception:
+        pass
+
+    # Valid_A 재적용 (행 단위 조건 + 재계산된 RS)
+    try:
+        if bool(settings.get("use_sel_track_a", True)) and "_sel_rs_pct" in df_all.columns:
+            rk_lo = float(settings.get("sel_a_rs_rank_min", 0.28))
+            rk_hi = float(settings.get("sel_a_rs_rank_max", 0.92))
+            pb_lo = float(settings.get("sel_a_pb_min_pct", 1.5))
+            pb_hi = float(settings.get("sel_a_pb_max_pct", 16.0))
+            atr_lo = float(settings.get("sel_a_atr_pct_min", 0.006))
+            atr_hi = float(settings.get("sel_a_atr_pct_max", 0.085))
+            gap_mx = float(settings.get("sel_a_gap_abs_max_pct", 6.0))
+            min_억 = float(settings.get("min_trde_val", 40.0))
+            m_rs = df_all["_sel_ret5_raw"].notna() & df_all["_sel_rs_pct"].between(
+                rk_lo, rk_hi, inclusive="both"
+            )
+            m_pb = (
+                df_all["_sel_pb_pct"].notna()
+                & df_all["_sel_pb_pct"].between(pb_lo, pb_hi, inclusive="both")
+                if "_sel_pb_pct" in df_all.columns
+                else pd.Series(False, index=df_all.index)
+            )
+            m_atr = (
+                df_all["_sel_atr_pct"].notna()
+                & df_all["_sel_atr_pct"].between(atr_lo, atr_hi, inclusive="both")
+                if "_sel_atr_pct" in df_all.columns
+                else pd.Series(False, index=df_all.index)
+            )
+            m_gap = (
+                df_all["_sel_gap_pct"].notna()
+                & (df_all["_sel_gap_pct"].abs() <= gap_mx)
+                if "_sel_gap_pct" in df_all.columns
+                else pd.Series(False, index=df_all.index)
+            )
+            ma_ok = (
+                df_all["_sel_ma_ok"].astype(bool)
+                if "_sel_ma_ok" in df_all.columns
+                else pd.Series(True, index=df_all.index)
+            )
+            c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
+            c5 = (
+                (df_all["OSC"] > 0)
+                if _settings_bool_sel(settings, "sel_a_require_osc_positive", True)
+                else pd.Series(True, index=df_all.index)
+            )
+            c_ma60 = df_all["MA60"].notna() & (df_all["MA60"].astype(float) > 0)
+            if not _settings_bool_sel(settings, "sel_a_require_ma60", True):
+                c_ma60 = pd.Series(True, index=df_all.index)
+            burst_ok = (
+                (df_all["VolBurstActive_A"] == 1)
+                if _settings_bool_sel(settings, "sel_a_require_vol_burst", False)
+                else pd.Series(True, index=df_all.index)
+            )
+            rmin = float(settings.get("sel_rsi_min", 35.0))
+            rmax = float(settings.get("sel_rsi_max", 70.0))
+            rsi_ok = (df_all["RSI"] >= rmin) & (df_all["RSI"] <= rmax)
+            if not _settings_bool_sel(settings, "sel_a_require_sel_rsi_band", False):
+                rsi_ok = pd.Series(True, index=df_all.index)
+            va = (
+                mask
+                & m_rs
+                & m_pb
+                & m_atr
+                & m_gap
+                & ma_ok
+                & c1
+                & c5
+                & c_ma60
+                & burst_ok
+                & rsi_ok
+            )
+            df_all["Valid_A"] = va.fillna(False)
+            # Score_A: Valid 아니면 0, 유효하면 RS 반영해 재계산(레거시 가중)
+            mid_pb = (pb_lo + pb_hi) / 2.0
+            half_w = max((pb_hi - pb_lo) / 2.0, 1e-6)
+            pb_score = (
+                (1.0 - (df_all["_sel_pb_pct"] - mid_pb).abs() / half_w).clip(
+                    lower=0.0, upper=1.0
+                )
+                * 100.0
+                if "_sel_pb_pct" in df_all.columns
+                else 0.0
+            )
+            rs_part = df_all["_sel_rs_pct"].fillna(0.0) * 55.0
+            pb_part = pb_score * 0.28 if not isinstance(pb_score, float) else 0.0
+            ma_part = ma_ok.astype(float) * 18.0
+            liq_part = (
+                (df_all["AvgVal5"] / 50000000000.0 * 100.0).clip(upper=100.0) * 0.12
+            )
+            osc_b = (df_all["OSC"] > df_all["OSC_Prev"]).astype(float) * 10.0
+            sc = (rs_part + pb_part + ma_part + liq_part + osc_b).clip(lower=0.0, upper=100.0)
+            df_all["Score_A"] = np.where(df_all["Valid_A"], np.round(sc, 1), 0.0)
+        elif "Valid_A" in df_all.columns:
+            df_all.loc[~mask, "Valid_A"] = False
+            if "Score_A" in df_all.columns:
+                df_all.loc[~mask, "Score_A"] = 0.0
+    except Exception as e:
+        try:
+            logging.warning("period-univ Valid_A 재동기화 실패: %s", e, exc_info=True)
+        except Exception:
+            pass
+
+    # Valid_B 재적용
+    try:
+        if bool(settings.get("use_sel_track_b", True)) and "_sel_b_rs_pct" in df_all.columns:
+            rk_lo = float(settings.get("sel_b_rs_rank_min", 0.38))
+            rk_hi = float(settings.get("sel_b_rs_rank_max", 0.97))
+            hi_lo = float(settings.get("sel_b_hi_min_pct", 92.0))
+            hi_hi = float(settings.get("sel_b_hi_max_pct", 99.7))
+            atr_lo = float(settings.get("sel_b_atr_pct_min", 0.005))
+            atr_hi = float(settings.get("sel_b_atr_pct_max", 0.09))
+            gap_mx = float(settings.get("sel_b_gap_abs_max_pct", 7.0))
+            sel_b_min_val = float(settings.get("sel_b_min_trde_val", 45.0)) * 100000000
+            m_rs = df_all["_sel_b_ret_raw"].notna() & df_all["_sel_b_rs_pct"].between(
+                rk_lo, rk_hi, inclusive="both"
+            )
+            m_hi = (
+                df_all["_sel_b_hi_pct"].notna()
+                & df_all["_sel_b_hi_pct"].between(hi_lo, hi_hi, inclusive="both")
+                if "_sel_b_hi_pct" in df_all.columns
+                else pd.Series(False, index=df_all.index)
+            )
+            m_atr = (
+                df_all["_sel_b_atr_pct"].notna()
+                & df_all["_sel_b_atr_pct"].between(atr_lo, atr_hi, inclusive="both")
+                if "_sel_b_atr_pct" in df_all.columns
+                else pd.Series(False, index=df_all.index)
+            )
+            m_gap = (
+                df_all["_sel_b_gap_pct"].notna()
+                & (df_all["_sel_b_gap_pct"].abs() <= gap_mx)
+                if "_sel_b_gap_pct" in df_all.columns
+                else pd.Series(False, index=df_all.index)
+            )
+            trend_ok = (
+                df_all["_sel_b_trend_ok"].astype(bool)
+                if "_sel_b_trend_ok" in df_all.columns
+                else pd.Series(False, index=df_all.index)
+            )
+            slope_ok = (
+                df_all["_sel_b_slope_ok"].astype(bool)
+                if "_sel_b_slope_ok" in df_all.columns
+                else pd.Series(True, index=df_all.index)
+            )
+            c1_b = df_all["AvgVal5"] >= sel_b_min_val
+            c5 = (
+                (df_all["OSC"] > 0)
+                if _settings_bool_sel(settings, "sel_b_require_osc_positive", True)
+                else pd.Series(True, index=df_all.index)
+            )
+            c_ma60 = df_all["MA60"].notna() & (df_all["MA60"].astype(float) > 0)
+            if not _settings_bool_sel(settings, "sel_b_require_ma60", True):
+                c_ma60 = pd.Series(True, index=df_all.index)
+            burst_ok = (
+                (df_all["VolBurstActive_B"] == 1)
+                if _settings_bool_sel(settings, "sel_b_require_vol_burst", True)
+                else pd.Series(True, index=df_all.index)
+            )
+            rmin = float(settings.get("sel_b_rsi_min", 45.0))
+            rmax = float(settings.get("sel_b_rsi_max", 75.0))
+            rsi_ok = (df_all["RSI"] >= rmin) & (df_all["RSI"] <= rmax)
+            if not _settings_bool_sel(settings, "sel_b_require_sel_rsi_band", True):
+                rsi_ok = pd.Series(True, index=df_all.index)
+            osc_rise_ok = (
+                (df_all["OSC"] > df_all["OSC_Prev"])
+                if _settings_bool_sel(settings, "sel_b_require_osc_rising", False)
+                else pd.Series(True, index=df_all.index)
+            )
+            vb = (
+                mask
+                & m_rs
+                & m_hi
+                & m_atr
+                & m_gap
+                & trend_ok
+                & slope_ok
+                & c1_b
+                & c5
+                & c_ma60
+                & burst_ok
+                & rsi_ok
+                & osc_rise_ok
+            )
+            df_all["Valid_B"] = vb.fillna(False)
+            half_hi = max((hi_hi - hi_lo) / 2.0, 1e-6)
+            hip = df_all["_sel_b_hi_pct"] if "_sel_b_hi_pct" in df_all.columns else None
+            if hip is not None:
+                hi_score = (
+                    (1.0 - (hip - (hi_lo + hi_hi) / 2.0).abs() / half_hi)
+                    .clip(lower=0.0, upper=1.0)
+                    * 100.0
+                )
+            else:
+                hi_score = 0.0
+            rs_part = df_all["_sel_b_rs_pct"].fillna(0.0) * 52.0
+            hi_part = hi_score * 0.28 if not isinstance(hi_score, float) else 0.0
+            lc = df_all["close"].astype(float)
+            ma20 = df_all["MA20"].astype(float)
+            tr_st = ((lc / ma20.replace(0, np.nan) - 1.0) * 100.0).clip(
+                lower=0.0, upper=10.0
+            ) * 10.0
+            tr_part = tr_st * 0.15
+            slope_bonus = slope_ok.astype(float) * 10.0
+            liq_part = (
+                (df_all["AvgVal5"] / 50000000000.0 * 100.0).clip(upper=100.0) * 0.12
+            )
+            osc_b = (df_all["OSC"] > df_all["OSC_Prev"]).astype(float) * 10.0
+            sc = (rs_part + hi_part + tr_part + slope_bonus + liq_part + osc_b).clip(
+                lower=0.0, upper=100.0
+            )
+            df_all["Score_B"] = np.where(df_all["Valid_B"], np.round(sc, 1), 0.0)
+        elif "Valid_B" in df_all.columns:
+            df_all.loc[~mask, "Valid_B"] = False
+            if "Score_B" in df_all.columns:
+                df_all.loc[~mask, "Score_B"] = 0.0
+    except Exception as e:
+        try:
+            logging.warning("period-univ Valid_B 재동기화 실패: %s", e, exc_info=True)
+        except Exception:
+            pass
+
+    try:
+        if "Valid_A" in df_all.columns and "Valid_B" in df_all.columns:
+            df_all["Valid"] = df_all["Valid_A"] | df_all["Valid_B"]
+        if "Score_A" in df_all.columns and "Score_B" in df_all.columns:
+            df_all["Score"] = df_all[["Score_A", "Score_B"]].max(axis=1)
+    except Exception:
+        pass
+
+
 def _score_dynamic_universe_daily_ohlcv(
     df_all: pd.DataFrame,
     settings: dict,
@@ -3184,7 +3486,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         logger_callback("  [Error] 거래일 데이터를 찾을 수 없습니다.")
         return {}
 
-    # 2. 주기별 코스피 유니버스 캐싱 (monthly|weekly|biweekly|daily|bimonthly|quarterly)
+    # 2. 주기별 코스피 유니버스 캐싱 (monthly|…|quarterly|fourmonth|semiannual)
     universe_cache = {}
     all_days = pd.date_range(start=start_date, end=end_date, freq='B')
     union_tickers = set()
@@ -3244,7 +3546,8 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             universe_cache[cache_key] = tickers
         return tickers
 
-    # Lean Mode: 월별 모드 + 6개월 미만만 단일 유니버스. 그 외는 주기 갱신.
+    # 월별(또는 주기) marcap as-of 순회.
+    # (구 Lean 시작월 단일 유니버스는 기간에 따라 같은 날 레짐이 달라져 제거)
     duration_days = (all_days[-1] - all_days[0]).days if not all_days.empty else 0
 
     if refresh_mode == "daily":
@@ -3269,15 +3572,9 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 logger_callback(
                     f"    - {curr_key} 유니버스 체크 완료 (누적 {len(union_tickers)}종목)"
                 )
-    elif duration_days < 180:
-        logger_callback(
-            f"  [Batch] Lean 모드 활성화 ({duration_days}일): "
-            f"시작월 marcap as-of 단일 유니버스"
-        )
-        union_tickers = set(get_period_universe(all_days[0]))
     else:
         logger_callback(
-            "  [Batch] 정밀 모드: 월별 marcap as-of 유니버스 순회…"
+            f"  [Batch] 월별 marcap as-of 유니버스 순회… ({duration_days}일)"
         )
         last_m = ""
         for d in all_days:
@@ -3285,7 +3582,10 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             if curr_m != last_m or not union_tickers:
                 union_tickers.update(get_period_universe(d))
                 last_m = curr_m
-                logger_callback(f"    - {d.strftime('%Y-%m')} 유니버스 체크 완료 (누적 {len(union_tickers)}종목)")
+                logger_callback(
+                    f"    - {d.strftime('%Y-%m')} 유니버스 체크 완료 "
+                    f"(누적 {len(union_tickers)}종목)"
+                )
     
     if not union_tickers:
         logger_callback(
@@ -3346,6 +3646,14 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
     logger_callback(f"  [Batch] {len(df_all)}개 데이터 포인트에 대해 고속 벡터 연산 중...")
     _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
+    # 일자별 당기 유니버스 기준으로 RS/Valid 재동기화 (BT 기간 불변)
+    try:
+        _resync_batch_valid_to_period_universe(df_all, get_period_universe, settings)
+    except Exception as e:
+        try:
+            logging.warning("period-univ Valid 재동기화 생략: %s", e, exc_info=True)
+        except Exception:
+            pass
 
     # 6. 스케줄 생성 (Track A / Track B 분리)
     logger_callback("  [Batch] 날짜별 상위 종목 추출 중 (Track A/B 분리)...")
@@ -3360,15 +3668,32 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     
     trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
 
-    # 일별 교차-section 수익률 표준편차(%)
+    # 일별 교차-section 수익률 표준편차(%) — 당기 유니버스만 (BT 기간 불변)
     xs_ret_std_by_day: Dict[str, float] = {}
     try:
         _xs_df = df_sim.sort_values(["code", "time"]).copy()
         _xs_df["ret1"] = _xs_df.groupby("code")["close"].pct_change()
-        _xs_s = _xs_df.groupby("time")["ret1"].std() * 100.0
-        for t_idx, val in _xs_s.items():
-            if val is not None and np.isfinite(float(val)):
-                xs_ret_std_by_day[pd.Timestamp(t_idx).strftime("%Y-%m-%d")] = float(val)
+        _xs_df["_day"] = _xs_df["time"].dt.strftime("%Y-%m-%d")
+        _xs_in = np.zeros(len(_xs_df), dtype=bool)
+        _xs_univ: Dict[str, set[str]] = {}
+        _xs_codes = _xs_df["code"].astype(str).str.zfill(6).tolist()
+        for _i, _d in enumerate(_xs_df["_day"].tolist()):
+            try:
+                if _d not in _xs_univ:
+                    _xs_univ[_d] = {
+                        str(c).zfill(6) for c in (get_period_universe(_d) or [])
+                    }
+                _xs_in[_i] = _xs_codes[_i] in _xs_univ[_d]
+            except Exception:
+                _xs_in[_i] = False
+        _xs_df = _xs_df.loc[_xs_in]
+        if not _xs_df.empty:
+            _xs_s = _xs_df.groupby("time")["ret1"].std() * 100.0
+            for t_idx, val in _xs_s.items():
+                if val is not None and np.isfinite(float(val)):
+                    xs_ret_std_by_day[pd.Timestamp(t_idx).strftime("%Y-%m-%d")] = float(
+                        val
+                    )
     except Exception:
         xs_ret_std_by_day = {}
 
@@ -3396,10 +3721,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         try:
             _t_rows: List[Dict[str, Any]] = []
             for _d_str in trading_days_list:
-                if use_period_univ or duration_days >= 180:
-                    _univ = get_period_universe(pd.to_datetime(_d_str))
-                else:
-                    _univ = all_codes
+                _univ = get_period_universe(pd.to_datetime(_d_str))
                 _dm = (df_sim["time"] == pd.to_datetime(_d_str)) & (
                     df_sim["code"].isin(_univ)
                 )
@@ -3433,10 +3755,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             transition_stats_by_day = {}
 
     for d_str in trading_days_list:
-        if use_period_univ or duration_days >= 180:
-            universe = get_period_universe(pd.to_datetime(d_str))
-        else:
-            universe = all_codes
+        universe = get_period_universe(pd.to_datetime(d_str))
 
         day_mask = (df_sim["time"] == pd.to_datetime(d_str)) & (df_sim["code"].isin(universe))
 
@@ -3762,7 +4081,6 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         pass
 
     all_days = pd.date_range(start=start_s, end=end_s, freq="B")
-    duration_days = (all_days[-1] - all_days[0]).days if not all_days.empty else 0
     union_cache: dict[str, list[str]] = {}
     union_tickers: set[str] = set()
     from core.marcap_universe import (
@@ -3809,8 +4127,6 @@ def diagnose_dynamic_universe_selection_by_trading_day(
                 if curr_key != last_key or not union_tickers:
                     union_tickers.update(get_period_universe(d))
                     last_key = curr_key
-        elif duration_days < 180:
-            union_tickers = set(get_period_universe(all_days[0]))
         else:
             last_m = ""
             for d in all_days:
@@ -3907,6 +4223,13 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         pass
 
     _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=True)
+    try:
+        _resync_batch_valid_to_period_universe(df_all, get_period_universe, settings)
+    except Exception as e:
+        try:
+            logging.warning("diagnose period-univ 재동기화 생략: %s", e, exc_info=True)
+        except Exception:
+            pass
     df_sim = df_all[df_all["time"] >= pd.to_datetime(start_s)].copy()
 
     dbg_cols = [
@@ -3933,11 +4256,7 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         )
         for d_str in trading_days_list2:
             try:
-                universe2 = (
-                    get_period_universe(pd.to_datetime(d_str))
-                    if (use_period_univ or duration_days >= 180)
-                    else all_codes
-                )
+                universe2 = get_period_universe(pd.to_datetime(d_str))
             except Exception:
                 universe2 = all_codes
             dmask = (df_sim["time"] == pd.to_datetime(d_str)) & (

@@ -25,6 +25,8 @@ _WEEKLY_CACHE_DIR = Path("data") / "universe_marcap_weekly"
 _BIWEEKLY_CACHE_DIR = Path("data") / "universe_marcap_biweekly"
 _BIMONTHLY_CACHE_DIR = Path("data") / "universe_marcap_bimonthly"
 _QUARTERLY_CACHE_DIR = Path("data") / "universe_marcap_quarterly"
+_FOURMONTH_CACHE_DIR = Path("data") / "universe_marcap_fourmonth"
+_SEMIANNUAL_CACHE_DIR = Path("data") / "universe_marcap_semiannual"
 _DAILY_CACHE_DIR = Path("data") / "universe_marcap_daily"
 _MARCAP_RAW_URL = (
     "https://raw.githubusercontent.com/FinanceData/marcap/master/data/marcap-{year}.parquet"
@@ -361,17 +363,51 @@ def get_monthly_kospi_top_n(
     codes, asof_str, detail = load_kospi_top_n_asof(
         asof_guess, n, logger_callback=logger_callback
     )
+
+    # lookback 이 전월로 떨어지면, 당월 안에서 첫 가용 거래일을 앞으로 탐색
+    try:
+        asof_ym = (
+            pd.Timestamp(asof_str).normalize().strftime("%Y%m")
+            if asof_str
+            else ""
+        )
+    except Exception:
+        asof_ym = ""
+    if (not codes) or (asof_ym and asof_ym != ym):
+        codes, asof_str, detail = [], None, pd.DataFrame()
+        try:
+            y = int(ym[:4])
+            m = int(ym[4:6])
+            start = pd.Timestamp(year=y, month=m, day=1)
+            if m == 12:
+                end = pd.Timestamp(year=y + 1, month=1, day=1) - pd.Timedelta(days=1)
+            else:
+                end = pd.Timestamp(year=y, month=m + 1, day=1) - pd.Timedelta(days=1)
+            d = max(asof_guess, start)
+            while d <= end:
+                if int(d.weekday()) < 5:
+                    c2, a2, det2 = load_kospi_top_n_asof(
+                        d, n, logger_callback=None
+                    )
+                    if c2 and a2:
+                        try:
+                            if pd.Timestamp(a2).normalize().strftime("%Y%m") == ym:
+                                codes, asof_str, detail = c2, a2, det2
+                                break
+                        except Exception:
+                            pass
+                d = d + pd.Timedelta(days=1)
+        except Exception as e:
+            try:
+                logging.warning("당월 marcap 전진 탐색 실패 %s: %s", ym, e, exc_info=True)
+            except Exception:
+                pass
+
     if not codes:
         return [], None
 
-    # lookback 으로 전월 날짜가 잡히면 당월 캐시로 저장하지 않음
     try:
         if asof_str and pd.Timestamp(asof_str).normalize().strftime("%Y%m") != ym:
-            _log_cb(
-                logger_callback,
-                f"  [Warn] {ym} 월 첫 영업일 marcap 없음 "
-                f"(가용 as-of {asof_str}) → 당월 캐시 보류",
-            )
             return [], None
     except Exception:
         return [], None
@@ -503,6 +539,14 @@ def _bimonthly_cache_path(period_key: str, top_n: int) -> Path:
 
 def _quarterly_cache_path(period_key: str, top_n: int) -> Path:
     return _QUARTERLY_CACHE_DIR / f"kospi_top{int(top_n)}_{period_key}.csv"
+
+
+def _fourmonth_cache_path(period_key: str, top_n: int) -> Path:
+    return _FOURMONTH_CACHE_DIR / f"kospi_top{int(top_n)}_{period_key}.csv"
+
+
+def _semiannual_cache_path(period_key: str, top_n: int) -> Path:
+    return _SEMIANNUAL_CACHE_DIR / f"kospi_top{int(top_n)}_{period_key}.csv"
 
 
 def _biweekly_key(asof: date | datetime | str | pd.Timestamp) -> str:
@@ -735,6 +779,156 @@ def get_quarterly_kospi_top_n(
     return codes, asof_str
 
 
+def _fourmonth_key(asof: date | datetime | str | pd.Timestamp) -> str:
+    """4개월 키 (예: 2025FM01 = Jan-Apr, FM02 = May-Aug, FM03 = Sep-Dec)."""
+    ts = _normalize_asof(asof)
+    block = (int(ts.month) - 1) // 4 + 1
+    return f"{int(ts.year)}FM{block:02d}"
+
+
+def _first_fourmonth_asof(asof: date | datetime | str | pd.Timestamp) -> pd.Timestamp:
+    """4개월 구간의 첫 영업일."""
+    ts = _normalize_asof(asof)
+    start_month = ((int(ts.month) - 1) // 4) * 4 + 1
+    start = pd.Timestamp(year=int(ts.year), month=start_month, day=1)
+    for offset in range(12):
+        d = start + pd.Timedelta(days=offset)
+        if d.weekday() < 5:
+            return d
+    return start
+
+
+def get_fourmonth_kospi_top_n(
+    asof: date | datetime | str | pd.Timestamp,
+    top_n: int,
+    *,
+    logger_callback: Optional[Callable[[str], None]] = None,
+) -> Tuple[list[str], Optional[str]]:
+    """4개월마다 KOSPI 시총 상위 N."""
+    try:
+        n = max(1, int(top_n))
+    except (TypeError, ValueError):
+        n = 150
+    try:
+        key = _fourmonth_key(asof)
+    except Exception:
+        return [], None
+
+    cache_path = _fourmonth_cache_path(key, n)
+    if cache_path.is_file():
+        try:
+            cached = pd.read_csv(cache_path, dtype=str)
+            if "Code" in cached.columns and len(cached) >= min(n, 10):
+                codes = [
+                    str(c).strip().zfill(6)
+                    for c in cached["Code"].tolist()
+                    if str(c).strip().isdigit()
+                ]
+                asof_val = None
+                if "asof_date" in cached.columns and len(cached):
+                    asof_val = str(cached["asof_date"].iloc[0])
+                return codes[:n], asof_val
+        except Exception:
+            pass
+
+    asof_guess = _first_fourmonth_asof(asof)
+    codes, asof_str, detail = load_kospi_top_n_asof(
+        asof_guess, n, logger_callback=logger_callback
+    )
+    if not codes:
+        return [], None
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        out = detail.copy()
+        if "Name" not in out.columns:
+            out["Name"] = out["Code"]
+        out["asof_date"] = asof_str or asof_guess.strftime("%Y-%m-%d")
+        out[["Code", "Name", "asof_date"]].to_csv(
+            cache_path, index=False, encoding="utf-8-sig"
+        )
+    except Exception as e:
+        try:
+            logging.warning("4개월 marcap 캐시 저장 실패: %s", e, exc_info=True)
+        except Exception:
+            pass
+    return codes, asof_str
+
+
+def _semiannual_key(asof: date | datetime | str | pd.Timestamp) -> str:
+    """반기 키 (예: 2025H1 = Jan-Jun, 2025H2 = Jul-Dec)."""
+    ts = _normalize_asof(asof)
+    half = 1 if int(ts.month) <= 6 else 2
+    return f"{int(ts.year)}H{half}"
+
+
+def _first_semiannual_asof(asof: date | datetime | str | pd.Timestamp) -> pd.Timestamp:
+    """반기 구간의 첫 영업일."""
+    ts = _normalize_asof(asof)
+    start_month = 1 if int(ts.month) <= 6 else 7
+    start = pd.Timestamp(year=int(ts.year), month=start_month, day=1)
+    for offset in range(12):
+        d = start + pd.Timedelta(days=offset)
+        if d.weekday() < 5:
+            return d
+    return start
+
+
+def get_semiannual_kospi_top_n(
+    asof: date | datetime | str | pd.Timestamp,
+    top_n: int,
+    *,
+    logger_callback: Optional[Callable[[str], None]] = None,
+) -> Tuple[list[str], Optional[str]]:
+    """6개월(반기)마다 KOSPI 시총 상위 N."""
+    try:
+        n = max(1, int(top_n))
+    except (TypeError, ValueError):
+        n = 150
+    try:
+        key = _semiannual_key(asof)
+    except Exception:
+        return [], None
+
+    cache_path = _semiannual_cache_path(key, n)
+    if cache_path.is_file():
+        try:
+            cached = pd.read_csv(cache_path, dtype=str)
+            if "Code" in cached.columns and len(cached) >= min(n, 10):
+                codes = [
+                    str(c).strip().zfill(6)
+                    for c in cached["Code"].tolist()
+                    if str(c).strip().isdigit()
+                ]
+                asof_val = None
+                if "asof_date" in cached.columns and len(cached):
+                    asof_val = str(cached["asof_date"].iloc[0])
+                return codes[:n], asof_val
+        except Exception:
+            pass
+
+    asof_guess = _first_semiannual_asof(asof)
+    codes, asof_str, detail = load_kospi_top_n_asof(
+        asof_guess, n, logger_callback=logger_callback
+    )
+    if not codes:
+        return [], None
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        out = detail.copy()
+        if "Name" not in out.columns:
+            out["Name"] = out["Code"]
+        out["asof_date"] = asof_str or asof_guess.strftime("%Y-%m-%d")
+        out[["Code", "Name", "asof_date"]].to_csv(
+            cache_path, index=False, encoding="utf-8-sig"
+        )
+    except Exception as e:
+        try:
+            logging.warning("반기 marcap 캐시 저장 실패: %s", e, exc_info=True)
+        except Exception:
+            pass
+    return codes, asof_str
+
+
 def _daily_cache_path(asof_ymd: str, top_n: int) -> Path:
     ymd = str(asof_ymd).replace("-", "")[:8]
     return _DAILY_CACHE_DIR / f"kospi_top{int(top_n)}_{ymd}.csv"
@@ -830,6 +1024,8 @@ REFRESH_MODES: tuple[str, ...] = (
     "monthly",
     "bimonthly",
     "quarterly",
+    "fourmonth",
+    "semiannual",
 )
 
 
@@ -856,6 +1052,10 @@ def universe_period_key(
         return _bimonthly_key(ts)
     if m == "quarterly":
         return _quarterly_key(ts)
+    if m == "fourmonth":
+        return _fourmonth_key(ts)
+    if m == "semiannual":
+        return _semiannual_key(ts)
     return ts.strftime("%Y%m")
 
 
@@ -878,6 +1078,10 @@ def get_kospi_top_n_for_refresh(
         return get_bimonthly_kospi_top_n(asof, top_n, logger_callback=logger_callback)
     if m == "quarterly":
         return get_quarterly_kospi_top_n(asof, top_n, logger_callback=logger_callback)
+    if m == "fourmonth":
+        return get_fourmonth_kospi_top_n(asof, top_n, logger_callback=logger_callback)
+    if m == "semiannual":
+        return get_semiannual_kospi_top_n(asof, top_n, logger_callback=logger_callback)
     return get_monthly_kospi_top_n(asof, top_n, logger_callback=logger_callback)
 
 
@@ -945,39 +1149,66 @@ def _read_kospi_universe_csv_asof(
     return codes, asof_val, df
 
 
+def _first_asof_for_refresh(
+    asof: date | datetime | str | pd.Timestamp,
+    mode: str,
+) -> pd.Timestamp:
+    """갱신 주기 구간의 첫 영업일(as-of 후보)."""
+    m = normalize_refresh_mode(mode)
+    ts = _normalize_asof(asof)
+    try:
+        if m == "daily":
+            # 전일 as-of는 get_daily 쪽에서 처리. 여기선 당일 정규화.
+            return ts
+        if m == "weekly":
+            return _first_week_asof(ts)
+        if m == "biweekly":
+            return _first_biweek_asof(ts)
+        if m == "bimonthly":
+            return _first_bimonth_asof(ts)
+        if m == "quarterly":
+            return _first_quarter_asof(ts)
+        if m == "fourmonth":
+            return _first_fourmonth_asof(ts)
+        if m == "semiannual":
+            return _first_semiannual_asof(ts)
+        return _first_month_asof(ts.strftime("%Y%m"))
+    except Exception:
+        return ts
+
+
 def ensure_realtime_kospi_universe_csv(
     *,
     kospi_universe_path: str = "kospi_universe.csv",
     target_n: int = 400,
     logger_callback: Optional[Callable[[str], None]] = None,
     marcap_cache_max_age_days: int = 3,
+    refresh_mode: Optional[str] = None,
 ) -> Tuple[list[str], Optional[str]]:
     """
-    실시간 감시용: **당월 첫 영업일** marcap as-of 로 ``kospi_universe.csv`` 갱신.
+    실시간 감시용: ``kospi_universe_refresh`` 주기의 첫 영업일 marcap as-of 로
+    ``kospi_universe.csv`` 갱신.
 
-    백테 ``get_monthly_kospi_top_n`` 과 동일. CSV가 이미 당월이면 스킵.
-    (실시간 전용 갱신주기 설정 없음 — monthly 고정)
-
-    당월 전환 직후엔 로컬 marcap 연도 파일이 전월로 오래되면 as-of 가
-    이전 달에 머무를 수 있어, 갱신 전에 연도 캐시 신선도를 먼저 맞춘다.
+    CSV as-of 가 **현재 주기 키**와 같으면 스킵.
+    기본 갱신주기는 ``quarterly`` (달력 분기).
     """
     try:
         tn = max(1, int(target_n))
     except (TypeError, ValueError):
         tn = 400
 
-    ym = pd.Timestamp.now().normalize().strftime("%Y%m")
-    cached_codes, cached_asof, _ = _read_kospi_universe_csv_asof(kospi_universe_path)
-    if cached_asof and len(cached_codes) >= min(tn, 50):
-        try:
-            if pd.Timestamp(cached_asof).normalize().strftime("%Y%m") == ym:
-                return cached_codes[:tn], cached_asof
-        except Exception:
-            pass
-
-    # 당월 CSV가 없으면 연도 marcap 을 먼저 갱신 (오래되면 전월 as-of 폴백됨)
+    mode = normalize_refresh_mode(refresh_mode or "quarterly")
+    now = pd.Timestamp.now().normalize()
     try:
-        y_now = int(pd.Timestamp.now().year)
+        period_key = universe_period_key(now, mode)
+    except Exception:
+        period_key = now.strftime("%Y%m")
+
+    cached_codes, cached_asof, _ = _read_kospi_universe_csv_asof(kospi_universe_path)
+
+    # 주기 전환 직후엔 로컬 marcap 연도 파일이 오래되면 이전 as-of 폴백될 수 있어 선행 갱신
+    try:
+        y_now = int(now.year)
         ensure_marcap_year(
             y_now,
             logger_callback=logger_callback,
@@ -991,41 +1222,58 @@ def ensure_realtime_kospi_universe_csv(
             pass
 
     try:
-        codes, asof_str = get_monthly_kospi_top_n(
-            ym, tn, logger_callback=logger_callback
+        codes, asof_str = get_kospi_top_n_for_refresh(
+            now, tn, mode, logger_callback=logger_callback
         )
     except Exception as e:
         try:
-            logging.warning("실시간 월별 marcap 로드 실패: %s", e, exc_info=True)
+            logging.warning(
+                "실시간 marcap 로드 실패 (mode=%s): %s", mode, e, exc_info=True
+            )
         except Exception:
             pass
         _log_cb(
             logger_callback,
-            f"  [Warn] 당월({ym}) 유니버스 실패 → 기존 CSV as-of {cached_asof or '?'} 유지",
+            f"  [Warn] 유니버스({mode}/{period_key}) 실패 → 기존 CSV as-of {cached_asof or '?'} 유지",
         )
         return cached_codes[:tn], cached_asof
 
     if not codes:
         _log_cb(
             logger_callback,
-            f"  [Warn] 당월({ym}) 유니버스 비어 있음 → 기존 CSV as-of {cached_asof or '?'} 유지",
+            f"  [Warn] 유니버스({mode}/{period_key}) 비어 있음 → 기존 CSV as-of {cached_asof or '?'} 유지",
         )
         return cached_codes[:tn], cached_asof
 
+    # 당기 as-of 와 CSV as-of 가 동일하면 스킵 (월별→분기 전환 시 같은 분기라도 재동기화)
+    try:
+        if (
+            cached_asof
+            and asof_str
+            and len(cached_codes) >= min(tn, 50)
+            and str(cached_asof)[:10] == str(asof_str)[:10]
+        ):
+            return cached_codes[:tn], cached_asof
+    except Exception:
+        pass
+
     # kospi_universe.csv 동기화 (감시목록이 CSV를 읽음)
     try:
-        month_asof = _first_month_asof(ym)
+        period_asof = _first_asof_for_refresh(now, mode)
         refreshed = refresh_kospi_universe_csv_from_marcap(
             kospi_universe_path=kospi_universe_path,
             target_n=tn,
-            asof=month_asof,
+            asof=period_asof,
             logger_callback=logger_callback,
+            refresh_mode=mode,
         )
         if refreshed:
             return refreshed[:tn], asof_str
     except Exception as e:
         try:
-            logging.warning("kospi_universe.csv 월별 동기화 실패: %s", e, exc_info=True)
+            logging.warning(
+                "kospi_universe.csv 동기화 실패 (mode=%s): %s", mode, e, exc_info=True
+            )
         except Exception:
             pass
 
@@ -1038,9 +1286,10 @@ def refresh_kospi_universe_csv_from_marcap(
     target_n: int = 400,
     asof: Optional[date | datetime | str] = None,
     logger_callback: Optional[Callable[[str], None]] = None,
+    refresh_mode: Optional[str] = None,
 ) -> list[str]:
     """
-    지정(또는 당월 첫 영업일) marcap 시총 상위 target_n 을 ``kospi_universe.csv`` 에 저장.
+    지정(또는 갱신주기 첫 영업일) marcap 시총 상위 target_n 을 ``kospi_universe.csv`` 에 저장.
     실시간 감시용 — FDR 현재 시총 스냅샷 대신 marcap 사용.
     """
     try:
@@ -1048,10 +1297,9 @@ def refresh_kospi_universe_csv_from_marcap(
     except (TypeError, ValueError):
         tn = 400
 
+    mode = normalize_refresh_mode(refresh_mode or "quarterly")
     if asof is None:
-        # 실시간 기본: 당월 첫 영업일 (monthly 고정)
-        ym = pd.Timestamp.now().normalize().strftime("%Y%m")
-        asof_ts = _first_month_asof(ym)
+        asof_ts = _first_asof_for_refresh(pd.Timestamp.now().normalize(), mode)
     else:
         asof_ts = _normalize_asof(asof)
 
@@ -1072,7 +1320,8 @@ def refresh_kospi_universe_csv_from_marcap(
         )
         _log_cb(
             logger_callback,
-            f"  [Marcap] kospi_universe.csv 갱신 (as-of {asof_str}, {len(codes)}종목)",
+            f"  [Marcap] kospi_universe.csv 갱신 "
+            f"(mode={mode}, as-of {asof_str}, {len(codes)}종목)",
         )
     except Exception as e:
         try:

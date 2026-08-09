@@ -52,6 +52,16 @@ EXPERIMENTS = [
     {"id": "DAILY", "title": "일별 marcap as-of (전일)", "overrides": {"kospi_universe_refresh": "daily"}},
     {"id": "BIMONTHLY", "title": "2개월 marcap as-of", "overrides": {"kospi_universe_refresh": "bimonthly"}},
     {"id": "QUARTERLY", "title": "분기 marcap as-of", "overrides": {"kospi_universe_refresh": "quarterly"}},
+    {
+        "id": "FOURMONTH",
+        "title": "4개월 marcap as-of (1-4/5-8/9-12)",
+        "overrides": {"kospi_universe_refresh": "fourmonth"},
+    },
+    {
+        "id": "SEMIANNUAL",
+        "title": "6개월(반기) marcap as-of",
+        "overrides": {"kospi_universe_refresh": "semiannual"},
+    },
 ]
 
 
@@ -173,13 +183,37 @@ def main() -> None:
         default=None,
         help="실행할 실험 ID만 (쉼표 구분). 예: BIWEEKLY,BIMONTHLY,QUARTERLY",
     )
+    ap.add_argument("--start", default=None, help="BT 시작일 YYYY-MM-DD")
+    ap.add_argument("--end", default=None, help="BT 종료일 YYYY-MM-DD")
+    ap.add_argument(
+        "--full-only",
+        action="store_true",
+        help="전체 기간만 실행 (OOS 생략)",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="기존 meta 캐시 무시하고 재실행",
+    )
     args = ap.parse_args()
     only = _parse_only(args.only)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     base = _load_base()
-    start = str(base.get("bt_start_date", "2024-06-03"))
-    end = str(base.get("bt_end_date", "2026-07-27"))
+    start = str(args.start or base.get("bt_start_date", "2024-06-03"))
+    end = str(args.end or base.get("bt_end_date", "2026-07-27"))
+    base["bt_start_date"] = start
+    base["bt_end_date"] = end
+    if args.force:
+        # run_one 캐시 우회: 임시로 start 마커를 바꿔 쓰지 않고 meta 삭제
+        for exp in EXPERIMENTS:
+            for period in ("full", "oos"):
+                meta_path = OUT_DIR / f"{exp['id']}_{period}" / "meta.json"
+                try:
+                    if meta_path.is_file():
+                        meta_path.unlink()
+                except Exception:
+                    pass
 
     exps = [e for e in EXPERIMENTS if only is None or e["id"] in only]
     if only is not None:
@@ -187,12 +221,14 @@ def main() -> None:
         if unknown:
             print(f"[warn] 알 수 없는 id: {sorted(unknown)}")
         print(f"[only] 실행 대상: {[e['id'] for e in exps]}")
+    print(f"[기간] {start} ~ {end}  full_only={bool(args.full_only)}")
 
     rows: List[Dict[str, Any]] = []
     for exp in exps:
         rows.append(run_one(exp, base, start, end))
-    for exp in exps:
-        rows.append(run_one(exp, base, OOS_START, end))
+    if not args.full_only:
+        for exp in exps:
+            rows.append(run_one(exp, base, OOS_START, end))
 
     # --only 시에도 기존 meta를 모아 전체 summary 유지
     if only is not None:
