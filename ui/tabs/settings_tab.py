@@ -537,6 +537,61 @@ class SettingsTab:
             toggle_key='exclude_trading_halt_on_selection',
         )
 
+        # ── 모바일 읽기 전용 현황 API ──
+        mobile_f = ttk.LabelFrame(
+            _sec_parent('fund'),
+            text=' 📱 모바일 현황 API (읽기 전용 · 포트포워딩) ',
+            padding='15',
+        )
+        mobile_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            mobile_f,
+            '모바일 현황 API 사용',
+            None,
+            '',
+            '공유기 포트포워딩으로 외부 조회 (주문 불가)',
+            toggle_key='mobile_status_api_enabled',
+        )
+        add_param_row(
+            mobile_f,
+            'API 포트',
+            'mobile_status_api_port',
+            '',
+            '기본 8765 — Windows 방화벽·공유기 내부 포트와 맞춤',
+        )
+        # 문자열 설정은 conf_vars로 수집 (params_entries float 변환 회피)
+        for _mk, _mlabel, _mhint in (
+            ('mobile_status_api_token', '접속 PIN', '숫자 8자리 — 아래 생성 버튼 (공백 입력도 가능)'),
+            ('mobile_status_public_url', '공개 URL', '예: http://mydomain.ddns.net:28765'),
+            ('mobile_status_tls_cert', 'TLS 인증서 경로', '선택 — PEM cert (없으면 HTTP)'),
+            ('mobile_status_tls_key', 'TLS 키 경로', '선택 — PEM private key'),
+            ('mobile_status_api_host', '바인드 주소', '기본 0.0.0.0 (포트포워딩용)'),
+        ):
+            r = get_next_row(mobile_f)
+            ttk.Label(mobile_f, text=_mlabel, font=('Malgun Gothic', 10), foreground=txt_col).grid(
+                row=r, column=1, sticky='w', pady=4
+            )
+            _init = str(self.app.settings.get(_mk, self.default_settings.get(_mk, '')) or '')
+            self.conf_vars[_mk] = tk.StringVar(value=_init)
+            _ent = ttk.Entry(mobile_f, textvariable=self.conf_vars[_mk], width=42, exportselection=0)
+            _ent.grid(row=r, column=2, columnspan=3, sticky='we', padx=5)
+            if _mhint:
+                ttk.Label(mobile_f, text=f'  ({_mhint})', style='Dimmed.TLabel').grid(
+                    row=r, column=5, sticky='w', padx=10
+                )
+        r_tok = get_next_row(mobile_f)
+        ttk.Button(
+            mobile_f,
+            text='PIN 생성·채우기',
+            width=18,
+            command=self._generate_mobile_status_token,
+        ).grid(row=r_tok, column=2, sticky='w', padx=5, pady=(4, 0))
+        ttk.Label(
+            mobile_f,
+            text='  (저장 후 재기동 · 대시보드「설정 링크」로 폰 전달)',
+            style='Dimmed.TLabel',
+        ).grid(row=r_tok, column=5, sticky='w', padx=10)
+
         _univ_root = _sec_parent('univ')
 
         # ── 유니버스 인덱스 소스 선택 (KODEX200 vs KOSPI 시총 상위 N) ──
@@ -2088,6 +2143,33 @@ class SettingsTab:
             except Exception:
                 pass
                                    
+    def _generate_mobile_status_token(self) -> None:
+        """모바일 현황 API용 랜덤 토큰을 생성해 입력란에 채웁니다."""
+        try:
+            from core.status_api import generate_status_api_token
+
+            tok = generate_status_api_token()
+            var = self.conf_vars.get("mobile_status_api_token")
+            if var is not None and hasattr(var, "set"):
+                var.set(tok)
+            else:
+                self.app.settings["mobile_status_api_token"] = tok
+            try:
+                pretty = f"{tok[:4]} {tok[4:]}" if len(tok) == 8 else tok
+                messagebox.showinfo(
+                    "PIN 생성",
+                    f"새 PIN: {pretty}\n\n「설정 저장 및 즉시 적용」을 눌러 주세요.\n"
+                    "대시보드「설정 링크」로 폰에내면 입력 없이 접속됩니다.",
+                    parent=self.parent,
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", f"토큰 생성 실패: {e}", parent=self.parent)
+            except Exception:
+                pass
+
     def collect_from_ui(self) -> None:
         """설정 탭 위젯 값을 ``app.settings`` 메모리에만 반영한다 (파일 저장 없음)."""
         for k, ent in self.params_entries.items():
@@ -2107,6 +2189,7 @@ class SettingsTab:
                 'atr_period', 'atr_period_a', 'atr_period_b',
                 'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
                 'gc_window', 'rsi_window',
+                'mobile_status_api_port',
             ]:
                 self.app.settings[k] = int(float(v))
             else:
@@ -2156,6 +2239,11 @@ class SettingsTab:
                     self.app.stream_processor.settings = self.app.settings
                 if hasattr(self.app, 'backtest_tab'):
                     # [v16.48] 자동 동기화 로직 제거 (최적화 선택은 사용자가 직접 수동으로만 수행)
+                    pass
+                try:
+                    if hasattr(self.app, 'restart_status_api_from_settings'):
+                        self.app.restart_status_api_from_settings()
+                except Exception:
                     pass
                 self.status_label.config(text="✅ 설정이 저장되었습니다.", foreground="#A3BE8C")
                 self.app.log('✅ 설정이 저장되었습니다. (유효 파라미터 동기화 완료)')

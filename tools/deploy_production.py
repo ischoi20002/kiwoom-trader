@@ -103,6 +103,31 @@ def _copy_file(src: Path, dst: Path) -> bool:
     return True
 
 
+def _copy_mobile_web(src_dir: Path, dst_dir: Path) -> int:
+    """모바일 PWA 정적 파일 복사 (html/js/css/manifest)."""
+    count = 0
+    if not src_dir.is_dir():
+        print(f"[경고] mobile_web 없음: {src_dir}")
+        return 0
+    allow_suffix = {".html", ".js", ".css", ".webmanifest", ".svg", ".png", ".ico", ".json"}
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for item in sorted(src_dir.rglob("*")):
+        if any(p in SKIP_DIR_NAMES for p in item.parts):
+            continue
+        if not item.is_file():
+            continue
+        if item.suffix.lower() not in allow_suffix and item.name not in (
+            "manifest.webmanifest",
+        ):
+            continue
+        rel = item.relative_to(src_dir)
+        target = dst_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, target)
+        count += 1
+    return count
+
+
 def _patch_k_trader_gui_for_production(path: Path) -> None:
     """운영 빌드: 백테스트 탭·미사용 import 제거."""
     text = path.read_text(encoding="utf-8")
@@ -202,6 +227,9 @@ def deploy() -> None:
         n = _copy_tree(SOURCE / rel, DEST / rel, exc)
         py_count += n
 
+    # 모바일 읽기 전용 PWA (html/js/css — .py 트리 복사와 별도)
+    mobile_n = _copy_mobile_web(SOURCE / "mobile_web", DEST / "mobile_web")
+
     gui_path = DEST / "k_trader_gui.py"
     if gui_path.is_file():
         _patch_k_trader_gui_for_production(gui_path)
@@ -213,6 +241,7 @@ def deploy() -> None:
     print(f"[배포 완료] {SOURCE} -> {DEST}")
     print(f"  루트 파일: {len(copied)}개")
     print(f"  Python 모듈: {py_count}개")
+    print(f"  mobile_web 파일: {mobile_n}개")
     print("  백테스트 탭 제거 패치 적용됨 (k_trader_gui.py)")
     print(f"\n실행: cd {DEST} && run_k_trader.bat")
     print(f"  (최초/패키지 오류: {DEST}\\install_k_trader.bat)")

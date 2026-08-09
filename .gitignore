@@ -18,6 +18,8 @@ trading_state_mock.db
 # 실시간 일일 결산 리포트(HTML)·세션 이벤트(jsonl) — GitHub 백업 시 항상 포함
 !realtime_session_logs/**/*.html
 !realtime_session_logs/**/*.jsonl
+# 모바일 읽기 전용 PWA
+!mobile_web/**/*.html
 *.log
 .idea/
 # 워크스페이스 launch/tasks 등 백업 포함 (.vscode)

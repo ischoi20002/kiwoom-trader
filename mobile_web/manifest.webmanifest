@@ -1,0 +1,10 @@
+{
+  "name": "K-Trader Status",
+  "short_name": "KStatus",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#2E3440",
+  "theme_color": "#2E3440",
+  "lang": "ko",
+  "icons": []
+}

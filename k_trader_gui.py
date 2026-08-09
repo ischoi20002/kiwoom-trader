@@ -46,6 +46,7 @@ from ui.styles import NordicStyle
 # [v3.8] Core Modules extraction
 from core.portfolio_manager import PortfolioManager
 from core.remote_commander import RemoteCommander
+from core.status_api import StatusApiServer
 from core.trading_controller import TradingController, virtual_position_reference_price_for_monitor
 from core.strategy_engine import StrategyEngine
 from core.selection_service import SelectionService
@@ -868,6 +869,7 @@ class KiwoomApp:
             self.data_manager,
             log_func=self.log
         )
+        self.status_api_server = StatusApiServer(self, log_func=self.log)
         # 주문 집행(S1/S2/EXIT) — TradingController 와 분리
         self.order_execution_service = OrderExecutionService(
             self, log_func=self.log
@@ -1111,11 +1113,57 @@ class KiwoomApp:
             # 인증은 내부에서 백그라운드 워커로 재시도하므로 여기서는 추가 스레드 불필요
             self.get_auth_token()
         try:
+            # 모바일 읽기 API: 인증과 독립적으로 설정에 따라 기동
+            self.root.after(1200, self._maybe_start_status_api)
+        except Exception:
+            pass
+        try:
             # UI 루프가 끊긴 상태(_update_timer_active만 True로 고정 등)를 자동 복구
             if self._ui_watchdog_after_id is None:
                 self._ui_watchdog_after_id = self.root.after(
                     800, self._ui_render_watchdog_tick
                 )
+        except Exception:
+            pass
+
+    def _maybe_start_status_api(self) -> None:
+        """설정이 켜져 있으면 모바일 상태 API를 기동하고 대시보드 라벨을 갱신합니다."""
+        try:
+            api = getattr(self, "status_api_server", None)
+            if api is None:
+                return
+            api.start()
+        except Exception as e:
+            try:
+                self.log(f"[MobileAPI] 기동 예외: {e}")
+            except Exception:
+                pass
+        try:
+            dt = getattr(self, "dashboard_tab", None)
+            if dt is not None and hasattr(dt, "refresh_mobile_api_status"):
+                dt.refresh_mobile_api_status()
+        except Exception:
+            pass
+
+    def restart_status_api_from_settings(self) -> None:
+        """설정 저장 후 모바일 API 재기동."""
+        try:
+            api = getattr(self, "status_api_server", None)
+            if api is None:
+                return
+            if api.is_enabled():
+                api.restart()
+            else:
+                api.stop()
+        except Exception as e:
+            try:
+                self.log(f"[MobileAPI] 재기동 실패: {e}")
+            except Exception:
+                pass
+        try:
+            dt = getattr(self, "dashboard_tab", None)
+            if dt is not None and hasattr(dt, "refresh_mobile_api_status"):
+                dt.refresh_mobile_api_status()
         except Exception:
             pass
 

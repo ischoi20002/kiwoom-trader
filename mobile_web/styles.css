@@ -1,0 +1,138 @@
+:root {
+  --bg: #2E3440;
+  --bg2: #3B4252;
+  --bg3: #242933;
+  --fg: #ECEFF4;
+  --muted: #8C94A8;
+  --accent: #88C0D0;
+  --gain: #A3BE8C;
+  --loss: #BF616A;
+  --warn: #D08770;
+  --radius: 14px;
+  --pad: 14px;
+  font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #3B4252 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #434C5E 0%, transparent 50%),
+    var(--bg);
+  color: var(--fg);
+  min-height: 100%;
+}
+body { padding: 12px 12px 28px; }
+
+.hidden { display: none !important; }
+.view { max-width: 520px; margin: 0 auto; }
+
+.brand { text-align: center; padding: 36px 8px 18px; }
+.brand h1 { margin: 0; font-size: 2rem; letter-spacing: 0.04em; color: var(--accent); }
+.brand p { margin: 8px 0 0; color: var(--muted); }
+
+.card {
+  background: rgba(36, 41, 51, 0.92);
+  border: 1px solid #434C5E;
+  border-radius: var(--radius);
+  padding: var(--pad);
+  margin-bottom: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+}
+
+.login-card label { display: block; margin-bottom: 8px; color: var(--muted); font-size: 0.9rem; }
+.login-card input {
+  width: 100%;
+  padding: 14px 14px;
+  border-radius: 10px;
+  border: 1px solid #4C566A;
+  background: var(--bg2);
+  color: var(--fg);
+  font-size: 1.35rem;
+  letter-spacing: 0.12em;
+  text-align: center;
+  margin-bottom: 12px;
+}
+.hint { color: var(--muted); font-size: 0.8rem; margin: 10px 0 0; line-height: 1.4; }
+.btn {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.btn.primary { width: 100%; background: var(--accent); color: #2E3440; font-weight: 700; }
+.btn.ghost { background: transparent; color: var(--muted); border: 1px solid #4C566A; }
+.error { color: var(--loss); margin-top: 10px; font-size: 0.9rem; }
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.brand-mini { font-weight: 700; color: var(--accent); letter-spacing: 0.03em; }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.badge {
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg2);
+  color: var(--fg);
+}
+.badge.mock { background: #5E81AC; }
+.badge.live { background: #BF616A; }
+.badge.on { background: #A3BE8C; color: #2E3440; }
+.badge.off { background: #4C566A; }
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.conn { font-size: 0.8rem; }
+.conn.ok { color: var(--gain); }
+.conn.bad { color: var(--loss); }
+
+.label { color: var(--muted); font-size: 0.8rem; margin-bottom: 4px; }
+.pnl { font-size: 1.6rem; font-weight: 700; margin-bottom: 12px; }
+.pnl.pos { color: var(--gain); }
+.pnl.neg { color: var(--loss); }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.num { font-size: 1rem; font-weight: 600; word-break: break-all; }
+
+.section-head, .section-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.section-toggle {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+h2 { margin: 0; font-size: 1rem; font-weight: 700; }
+.muted { color: var(--muted); font-size: 0.85rem; }
+.collapsed { display: none; }
+
+.list { display: flex; flex-direction: column; gap: 8px; }
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(59, 66, 82, 0.55);
+}
+.row .title { font-weight: 600; }
+.row .sub { color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
+.row .right { text-align: right; }
+.pos { color: var(--gain); }
+.neg { color: var(--loss); }
+.empty { color: var(--muted); padding: 8px 2px; font-size: 0.9rem; }
+
+#equity-chart { width: 100%; height: 120px; display: block; }
+.foot { text-align: center; margin-top: 8px; }

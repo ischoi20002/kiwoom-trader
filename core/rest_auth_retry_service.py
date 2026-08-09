@@ -216,6 +216,15 @@ class RestAuthRetryService:
         try:
             self.app.portfolio.load_all()
             self.app.remote_commander.start()
+            try:
+                api = getattr(self.app, "status_api_server", None)
+                if api is not None:
+                    api.start()
+            except Exception:
+                try:
+                    self._safe_log("[MobileAPI] 인증 후 기동 실패")
+                except Exception:
+                    pass
 
             try:
                 self.app._schedule_vp_stub_price_refresh_after_auth()

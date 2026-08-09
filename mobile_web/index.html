@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#2E3440" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>K-Trader Status</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="login-view" class="view hidden">
+    <header class="brand">
+      <h1>K-Trader</h1>
+      <p>읽기 전용 현황</p>
+    </header>
+    <form id="login-form" class="card login-card">
+      <label for="token-input">접속 PIN (숫자 8자리)</label>
+      <input
+        id="token-input"
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9\\s\\-]{6,20}"
+        autocomplete="one-time-code"
+        maxlength="20"
+        placeholder="예: 4829 1033"
+      />
+      <button type="submit" class="btn primary">접속</button>
+      <p class="hint">PC에서 「설정 링크 복사」하면 입력 없이 열 수 있습니다.</p>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </div>
+
+  <div id="dash-view" class="view hidden">
+    <header class="topbar">
+      <div>
+        <div class="brand-mini">K-Trader</div>
+        <div id="badges" class="badges"></div>
+      </div>
+      <div class="top-actions">
+        <span id="conn-state" class="conn ok">연결</span>
+        <button type="button" id="btn-logout" class="btn ghost">로그아웃</button>
+      </div>
+    </header>
+
+    <section class="card pnl-card">
+      <div class="label">당일 손익</div>
+      <div id="day-pnl" class="pnl">—</div>
+      <div class="grid3">
+        <div>
+          <div class="label">총자산</div>
+          <div id="total-assets" class="num">—</div>
+        </div>
+        <div>
+          <div class="label">현금</div>
+          <div id="cash" class="num">—</div>
+        </div>
+        <div>
+          <div class="label">평가</div>
+          <div id="stock-eval" class="num">—</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>보유</h2>
+        <span id="holdings-count" class="muted"></span>
+      </div>
+      <div id="holdings-list" class="list"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>오늘 체결</h2>
+      </div>
+      <div id="orders-list" class="list"></div>
+    </section>
+
+    <section class="card collapsible">
+      <button type="button" class="section-toggle" id="btn-watchlist" aria-expanded="false">
+        <h2>감시목록</h2>
+        <span id="watch-count" class="muted"></span>
+      </button>
+      <div id="watchlist-panel" class="collapsed">
+        <div id="watchlist-list" class="list"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>자산 추이</h2>
+      </div>
+      <canvas id="equity-chart" width="360" height="120"></canvas>
+    </section>
+
+    <footer class="foot">
+      <span id="server-time" class="muted"></span>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
