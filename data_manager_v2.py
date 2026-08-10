@@ -117,6 +117,121 @@ def _ka10080_global_bump_cooldown(extra_sec: float) -> None:
         pass
 
 
+def _ka10080_response_diag(
+    res: Any,
+    data: Any,
+    raw_list: Any,
+) -> Dict[str, Any]:
+    """
+    ka10080 실패 분석용 응답 요약.
+
+    empty_response / 429 등에서 return_code·msg·바디 크기·키를 남겨
+    모의 API 장애·한도·토큰 문제를 구분할 수 있게 합니다.
+    """
+    out: Dict[str, Any] = {
+        "body_bytes": 0,
+        "content_type": "",
+        "return_code": None,
+        "return_msg": "",
+        "body_keys": [],
+        "raw_len": 0,
+        "raw_type": "",
+        "body_preview": "",
+    }
+    try:
+        out["body_bytes"] = int(len(getattr(res, "content", None) or b"") or 0)
+    except Exception:
+        out["body_bytes"] = 0
+    try:
+        hdrs = getattr(res, "headers", None)
+        if hdrs is not None:
+            out["content_type"] = str(hdrs.get("Content-Type") or "")[:120]
+    except Exception:
+        pass
+    try:
+        if isinstance(raw_list, list):
+            out["raw_len"] = len(raw_list)
+            out["raw_type"] = "list"
+        elif raw_list is None:
+            out["raw_type"] = "none"
+        else:
+            out["raw_type"] = type(raw_list).__name__
+    except Exception:
+        pass
+    if isinstance(data, dict):
+        try:
+            out["body_keys"] = sorted(str(k) for k in data.keys())[:24]
+        except Exception:
+            out["body_keys"] = []
+        try:
+            rc = data.get("return_code", data.get("returnCode"))
+            if rc is not None and rc != "":
+                try:
+                    out["return_code"] = int(rc)
+                except (TypeError, ValueError):
+                    out["return_code"] = rc
+        except Exception:
+            pass
+        try:
+            rm = (
+                data.get("return_msg")
+                or data.get("returnMsg")
+                or data.get("msg")
+                or data.get("message")
+                or ""
+            )
+            out["return_msg"] = str(rm)[:300]
+        except Exception:
+            out["return_msg"] = ""
+        try:
+            # 차트 배열은 제외하고 메타만 미리보기
+            slim: Dict[str, Any] = {}
+            for k, v in data.items():
+                ks = str(k)
+                if ks in (
+                    "stk_min_pole_chart_qry",
+                    "output",
+                    "data",
+                    "chart",
+                ):
+                    if isinstance(v, list):
+                        slim[ks] = f"<list:{len(v)}>"
+                    else:
+                        slim[ks] = f"<{type(v).__name__}>"
+                else:
+                    slim[ks] = v
+            import json as _json
+
+            out["body_preview"] = _json.dumps(slim, ensure_ascii=False)[:400]
+        except Exception:
+            try:
+                out["body_preview"] = str(data)[:400]
+            except Exception:
+                out["body_preview"] = ""
+    elif not data:
+        # 진짜 빈 바디
+        try:
+            txt = getattr(res, "text", None) or ""
+            out["body_preview"] = str(txt)[:200]
+        except Exception:
+            pass
+    return out
+
+
+def _ka10080_diag_detail(kind: str, diag: Dict[str, Any]) -> str:
+    """record_fail detail 문자열(한 줄, 분석용)."""
+    try:
+        import json as _json
+
+        payload = {"kind": str(kind), **(diag or {})}
+        return _json.dumps(payload, ensure_ascii=False)[:500]
+    except Exception:
+        try:
+            return f"{kind}|rc={diag.get('return_code')}|msg={diag.get('return_msg')}"
+        except Exception:
+            return str(kind)
+
+
 class DataManagerV2:
     _instance = None
     _initialized = False
@@ -2901,8 +3016,31 @@ class DataManagerV2:
             except Exception:
                 pass
 
-        def _fail(reason: str, *, http_status: int = 0, detail: str = "", attempt: int = 0) -> Tuple[None, str]:
+        def _fail(
+            reason: str,
+            *,
+            http_status: int = 0,
+            detail: str = "",
+            attempt: int = 0,
+            return_code: Any = None,
+            return_msg: str = "",
+            body_bytes: int = 0,
+            body_keys: Any = None,
+        ) -> Tuple[None, str]:
             _set_meta(ok=False, reason=reason, http_status=http_status, detail=detail)
+            try:
+                meta = getattr(self, "last_ka10080_fetch_meta", None)
+                if isinstance(meta, dict):
+                    if return_code is not None:
+                        meta["return_code"] = return_code
+                    if return_msg:
+                        meta["return_msg"] = str(return_msg)[:300]
+                    if body_bytes:
+                        meta["body_bytes"] = int(body_bytes)
+                    if body_keys is not None:
+                        meta["body_keys"] = body_keys
+            except Exception:
+                pass
             if ka10080_fetch_diag is not None:
                 try:
                     ka10080_fetch_diag.record_fail(
@@ -2913,6 +3051,10 @@ class DataManagerV2:
                         http_status=http_status,
                         detail=detail,
                         attempt=attempt,
+                        return_code=return_code,
+                        return_msg=return_msg,
+                        body_bytes=body_bytes,
+                        body_keys=body_keys,
                     )
                 except Exception:
                     pass
@@ -2955,11 +3097,16 @@ class DataManagerV2:
                         except Exception:
                             nk_out = ""
                     if not raw_list and not nk_in:
+                        diag = _ka10080_response_diag(res, data, raw_list)
                         return _fail(
                             "empty_response",
                             http_status=200,
-                            detail="status200_empty_body",
+                            detail=_ka10080_diag_detail("status200_empty_chart", diag),
                             attempt=attempt + 1,
+                            return_code=diag.get("return_code"),
+                            return_msg=str(diag.get("return_msg") or ""),
+                            body_bytes=int(diag.get("body_bytes") or 0),
+                            body_keys=diag.get("body_keys"),
                         )
                     _set_meta(ok=True, reason="ok")
                     if ka10080_fetch_diag is not None:
@@ -2973,6 +3120,12 @@ class DataManagerV2:
                             pass
                     return raw_list, nk_out
                 if res.status_code == 429:
+                    # 한도 초과 본문(return_code/msg)도 남겨 빈응답과 구분
+                    try:
+                        data_429 = res.json() if res.content else {}
+                    except Exception:
+                        data_429 = {}
+                    diag_429 = _ka10080_response_diag(res, data_429, None)
                     _ka10080_global_bump_cooldown(1.5 * (2**attempt))
                     if attempt + 1 < max_retries:
                         try:
@@ -2987,13 +3140,27 @@ class DataManagerV2:
                     return _fail(
                         "http_429",
                         http_status=429,
-                        detail="rate_limit_exhausted",
+                        detail=_ka10080_diag_detail("rate_limit", diag_429),
                         attempt=attempt + 1,
+                        return_code=diag_429.get("return_code"),
+                        return_msg=str(diag_429.get("return_msg") or ""),
+                        body_bytes=int(diag_429.get("body_bytes") or 0),
+                        body_keys=diag_429.get("body_keys"),
                     )
                 try:
                     print(f"  [Error] ka10080 Status {res.status_code} ({code})")
                 except Exception:
                     pass
+                try:
+                    data_err = res.json() if res.content else {}
+                except Exception:
+                    data_err = {}
+                diag_err = _ka10080_response_diag(res, data_err, None)
+                if not diag_err.get("body_preview"):
+                    try:
+                        diag_err["body_preview"] = (res.text or "")[:200]
+                    except Exception:
+                        pass
                 reason = (
                     f"http_{int(res.status_code)}"
                     if int(res.status_code) > 0
@@ -3002,8 +3169,12 @@ class DataManagerV2:
                 return _fail(
                     reason,
                     http_status=int(res.status_code),
-                    detail=(res.text or "")[:200],
+                    detail=_ka10080_diag_detail(reason, diag_err),
                     attempt=attempt + 1,
+                    return_code=diag_err.get("return_code"),
+                    return_msg=str(diag_err.get("return_msg") or ""),
+                    body_bytes=int(diag_err.get("body_bytes") or 0),
+                    body_keys=diag_err.get("body_keys"),
                 )
             except Exception as e:
                 if attempt + 1 < max_retries:

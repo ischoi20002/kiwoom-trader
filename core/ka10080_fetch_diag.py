@@ -108,6 +108,10 @@ class Ka10080FetchDiag:
         detail: str = "",
         closed_minute: str = "",
         attempt: int = 0,
+        return_code: Any = None,
+        return_msg: str = "",
+        body_bytes: int = 0,
+        body_keys: Any = None,
     ) -> None:
         """
         실패 1건 기록.
@@ -119,6 +123,8 @@ class Ka10080FetchDiag:
         reason
             ``http_429`` | ``http_502`` | ``http_other`` | ``network_error`` |
             ``empty_response`` | ``row_not_found`` | ``no_token`` | ...
+        return_code / return_msg
+            키움 JSON 본문 코드·메시지(empty_response·429 구분용).
         """
         try:
             nk = canonical_stock_code(str(code).strip())
@@ -137,6 +143,31 @@ class Ka10080FetchDiag:
             "closed_minute": str(closed_minute or ""),
             "attempt": int(attempt or 0),
         }
+        try:
+            if return_code is not None and return_code != "":
+                payload["return_code"] = return_code
+        except Exception:
+            pass
+        try:
+            rm = str(return_msg or "").strip()
+            if rm:
+                payload["return_msg"] = rm[:300]
+        except Exception:
+            pass
+        try:
+            bb = int(body_bytes or 0)
+            if bb > 0:
+                payload["body_bytes"] = bb
+        except Exception:
+            pass
+        try:
+            if body_keys is not None:
+                if isinstance(body_keys, (list, tuple)):
+                    payload["body_keys"] = [str(x) for x in list(body_keys)[:24]]
+                else:
+                    payload["body_keys"] = str(body_keys)[:200]
+        except Exception:
+            pass
         stats_snap: Dict[str, Any]
 
         with self._lock:
@@ -174,8 +205,22 @@ class Ka10080FetchDiag:
                 ctx_kr = {"m1_poll": "M1", "rt15m_official": "15m확정"}.get(ctx, ctx)
                 hp = f" HTTP{http_status}" if http_status else ""
                 cm = f" 분={closed_minute}" if closed_minute else ""
+                rc_s = ""
+                try:
+                    if return_code is not None and return_code != "":
+                        rc_s = f" rc={return_code}"
+                except Exception:
+                    rc_s = ""
+                msg_s = ""
+                try:
+                    rm = str(return_msg or "").strip()
+                    if rm:
+                        # 대시보드는 짧게
+                        msg_s = f" msg={rm[:80]}"
+                except Exception:
+                    msg_s = ""
                 self._ui_log(
-                    f"⚠️ [ka10080/{ctx_kr}] {nk} 실패 {rsn}{hp}{cm} "
+                    f"⚠️ [ka10080/{ctx_kr}] {nk} 실패 {rsn}{hp}{rc_s}{msg_s}{cm} "
                     f"(누적 실패 {stats_snap.get('fail_total', 0)}건)"
                 )
             except Exception:

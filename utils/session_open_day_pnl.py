@@ -51,13 +51,53 @@ def ensure_day_state(app: Any, now: Optional[datetime] = None) -> Dict[str, Any]
         day_key = t.date().isoformat()
     except Exception:
         day_key = ""
+        t = datetime.now()
     st = _state(app)
+    rolled = False
     try:
         if str(st.get("day") or "") != day_key:
-            return _reset_state(app, day_key)
+            st = _reset_state(app, day_key)
+            rolled = True
     except Exception:
-        return _reset_state(app, day_key)
+        st = _reset_state(app, day_key)
+        rolled = True
+    # 자정 롤오버 후에도 감시가 켜져 있으면 당일 금일손익 기준을 다시 잡는다.
+    # (리셋만 하고 on_monitoring_started 를 안 부르면 started_at 이 비어 「—」로 고착)
+    if rolled:
+        try:
+            _rearm_day_pnl_if_monitoring(app, now=t)
+            st = _state(app)
+        except Exception:
+            pass
     return st
+
+
+def _is_app_monitoring(app: Any) -> bool:
+    """GUI·TradingController 감시 플래그."""
+    try:
+        if bool(getattr(app, "is_monitoring", False)):
+            return True
+    except Exception:
+        pass
+    try:
+        tc = getattr(app, "trading_controller", None)
+        if tc is not None and bool(getattr(tc, "is_monitoring", False)):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _rearm_day_pnl_if_monitoring(
+    app: Any, *, now: Optional[datetime] = None
+) -> None:
+    """날짜 변경 직후, 이미 감시 중이면 금일손익 세션을 재무장한다."""
+    try:
+        if not _is_app_monitoring(app):
+            return
+        on_monitoring_started(app, now=now)
+    except Exception:
+        pass
 
 
 def _is_trading_day(d) -> bool:
@@ -450,19 +490,48 @@ def format_day_pnl_text(app: Any, current_total_assets: float) -> str:
     try:
         now = datetime.now()
         st = ensure_day_state(app, now)
+        # 감시 중인데 기준 세션이 비어 있으면(자정 롤오버 누락 등) 즉시 재무장.
+        # 단, 장마감 후에는 on_monitoring_started 가 N/A 로 고정하므로 호출하지 않음.
+        if not st.get("started_at") and _is_app_monitoring(app):
+            try:
+                open_m, close_m = _session_open_close_minutes(now.date())
+                if _hm(now) <= close_m:
+                    on_monitoring_started(app, now=now)
+                    st = ensure_day_state(app, now)
+            except Exception:
+                pass
         if st.get("na"):
             return "N/A"
         if not st.get("started_at"):
+            # 장마감 후·자정 롤오버로 기준이 비었으면 원인을 드러냄
+            try:
+                _o, close_m = _session_open_close_minutes(now.date())
+                if _hm(now) > close_m and _is_app_monitoring(app):
+                    return "— (장시작 기준 없음)"
+            except Exception:
+                pass
             return "—"
         if st.get("baseline") is None or not st.get("baseline_locked"):
             try_capture_open_baseline(app, now=now)
             st = ensure_day_state(app, now)
         baseline = st.get("baseline")
         if baseline is None:
-            open_m, _c = _session_open_close_minutes(now.date())
-            if _hm(now) < open_m:
+            open_m, close_m = _session_open_close_minutes(now.date())
+            hm = _hm(now)
+            if hm < open_m:
                 return "— (장시작 대기)"
-            return "— (기준 계산 중)"
+            if hm > close_m:
+                # 장마감 후에도 기준이 없으면 직전종가 폴백을 한 번 더 유도
+                try:
+                    try_capture_open_baseline(app, now=now)
+                    st = ensure_day_state(app, now)
+                    baseline = st.get("baseline")
+                except Exception:
+                    baseline = None
+                if baseline is None:
+                    return "— (장시작 기준 없음)"
+            else:
+                return "— (기준 계산 중)"
         # 장전에도 기준이 있으면 잠정 표시(개장에 최종 고정)
         try:
             base = float(baseline)
