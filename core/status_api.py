@@ -17,7 +17,7 @@ import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, Type
 from urllib.parse import parse_qs, urlparse
 
 from core import status_snapshot as snap
@@ -25,6 +25,38 @@ from utils.server_mode_paths import project_root
 
 
 LogFn = Callable[[str], None]
+
+# 모바일·스캐너가 요청 중 소켓을 끊을 때 흔한 예외 — traceback 스팸·로그 섞임 방지
+_BENIGN_DISCONNECT_EXC: Tuple[Type[BaseException], ...] = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,
+)
+
+
+class _QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """연결 강제 종료 시 Python 기본 handle_error traceback을 억제."""
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        try:
+            import sys
+
+            exc = sys.exc_info()[1]
+            if isinstance(exc, _BENIGN_DISCONNECT_EXC):
+                return
+            # WinError 10054/10053 등 OSError 계열도 무해 끊김으로 취급
+            if isinstance(exc, OSError):
+                winerr = getattr(exc, "winerror", None)
+                errno = getattr(exc, "errno", None)
+                if winerr in (10054, 10053, 10058) or errno in (104, 32, 54):
+                    return
+        except Exception:
+            pass
+        try:
+            super().handle_error(request, client_address)
+        except Exception:
+            pass
 
 
 def normalize_status_api_token(raw: Any) -> str:
@@ -144,7 +176,7 @@ class StatusApiServer:
 
             try:
                 handler = self._make_handler()
-                httpd = ThreadingHTTPServer((host, port), handler)
+                httpd = _QuietThreadingHTTPServer((host, port), handler)
                 httpd.daemon_threads = True
                 if use_tls:
                     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -272,6 +304,22 @@ class StatusApiServer:
             def log_message(self, fmt: str, *args: Any) -> None:
                 # 기본 stderr 로그 억제 (대시보드 스팸 방지)
                 return
+
+            def handle(self) -> None:
+                """원격 호스트 강제 끊김은 traceback 없이 종료."""
+                try:
+                    super().handle()
+                except _BENIGN_DISCONNECT_EXC:
+                    return
+                except OSError as e:
+                    try:
+                        winerr = getattr(e, "winerror", None)
+                        errno = getattr(e, "errno", None)
+                        if winerr in (10054, 10053, 10058) or errno in (104, 32, 54):
+                            return
+                    except Exception:
+                        pass
+                    raise
 
             def _client_ip(self) -> str:
                 try:

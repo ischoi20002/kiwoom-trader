@@ -335,6 +335,55 @@ class RtWatchlistM1ApiPoller:
             v = 5.0
         return max(0.5, min(v, 30.0))
 
+    def _auction_1530_eval_max_attempts(self) -> int:
+        """15:30 공식1분/합성 미준비 시 종목당 최대 평가 시도 횟수."""
+        try:
+            v = int(
+                float(
+                    (self._settings() or {}).get(
+                        "realtime_auction_1530_eval_max_attempts", 12
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            v = 12
+        return max(1, min(v, 30))
+
+    def _auction_1530_eval_retry_gap_sec(self) -> float:
+        """15:30 재시도 간격(초). ka10080 유량(1/s)을 고려해 기본 2초."""
+        try:
+            v = float(
+                (self._settings() or {}).get(
+                    "realtime_auction_1530_eval_retry_gap_sec", 2.0
+                )
+            )
+        except (TypeError, ValueError):
+            v = 2.0
+        return max(0.5, min(v, 10.0))
+
+    def _auction_1530_pending_codes(
+        self, codes: List[str], auction_lab: pd.Timestamp
+    ) -> List[str]:
+        """15:30 슬롯 완성15 평가가 아직 안 끝난 종목."""
+        pending: List[str] = []
+        try:
+            lab = pd.Timestamp(auction_lab).floor("min")
+            slot = krx_15m_label_for_m1_open(lab)
+            if slot is None:
+                return list(codes)
+        except Exception:
+            return list(codes)
+        for raw in codes:
+            try:
+                nk = canonical_stock_code(str(raw).strip())
+                if not nk:
+                    continue
+                if not self._is_tick_tail_eval_done(nk, slot):
+                    pending.append(nk)
+            except Exception:
+                continue
+        return pending
+
     def _schedule_auction_1530_tick_path(
         self, codes: List[str], auction_lab: pd.Timestamp
     ) -> None:
@@ -343,6 +392,7 @@ class RtWatchlistM1ApiPoller:
 
         벽시계 15:30분대에 1회 기동. 틱이 오면 ``on_auction_1530_tick`` 이 즉시 평가하고,
         무거래는 ``auction_lab + wait`` 타임아웃으로 공식 1분 폴백·평가.
+        공식1분·틱이 늦으면 재시도·최종 스윕·(필요 시) 평봉 폴백으로 전 종목 평가를 보장한다.
         """
         try:
             if not self._last_minute_from_ticks_enabled():
@@ -366,6 +416,8 @@ class RtWatchlistM1ApiPoller:
             return
 
         wait = self._auction_1530_tick_wait_sec()
+        max_att = self._auction_1530_eval_max_attempts()
+        gap = self._auction_1530_eval_retry_gap_sec()
         try:
             due = lab.to_pydatetime() + timedelta(seconds=wait)
             delay = max(0.05, (due - datetime.now()).total_seconds())
@@ -375,7 +427,8 @@ class RtWatchlistM1ApiPoller:
         try:
             self._emit(
                 f"ℹ️ [M1Poll] 15:30 단일가 틱경로 기동 "
-                f"(프로브+틱확인 즉시평가 · 타임아웃 {wait:.1f}s · n={len(codes)})"
+                f"(프로브+틱확인 즉시평가 · 타임아웃 {wait:.1f}s · "
+                f"재시도 {max_att}회/{gap:.1f}s · n={len(codes)})"
             )
         except Exception:
             pass
@@ -394,17 +447,32 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
-        for nk in codes:
+        code_list = [canonical_stock_code(str(c).strip()) for c in codes]
+        code_list = [c for c in code_list if c]
+        for nk in code_list:
             try:
                 t = threading.Timer(
                     delay,
                     self._job_auction_1530_timeout_eval,
-                    args=(nk, lab),
+                    args=(nk, lab, 0),
                 )
                 t.daemon = True
                 t.start()
             except Exception:
                 continue
+
+        # 최종 스윕: 재시도 창 종료 후에도 남은 종목 강제 평가
+        try:
+            sweep_delay = max(delay + float(max_att) * float(gap) + 1.0, delay + 3.0)
+            t_sw = threading.Timer(
+                sweep_delay,
+                self._job_auction_1530_final_sweep,
+                args=(list(code_list), lab),
+            )
+            t_sw.daemon = True
+            t_sw.start()
+        except Exception:
+            pass
 
     def on_auction_1530_tick(self, code: Any, auction_lab: Any) -> None:
         """
@@ -475,7 +543,9 @@ class RtWatchlistM1ApiPoller:
                         m1s.seal_tick_tail_minute(c, lb)
                 except Exception:
                     pass
-                self._job_tick_tail_eval(c, lb, "auction_tick")
+                self._job_tick_tail_eval(
+                    c, lb, "auction_tick", record_compose_fail=False
+                )
 
             t = threading.Timer(0.15, _run)
             t.daemon = True
@@ -484,12 +554,24 @@ class RtWatchlistM1ApiPoller:
             t.start()
         except Exception:
             try:
-                self._job_tick_tail_eval(nk, lab, "auction_tick")
+                self._job_tick_tail_eval(
+                    nk, lab, "auction_tick", record_compose_fail=False
+                )
             except Exception:
                 pass
 
-    def _job_auction_1530_timeout_eval(self, nk: str, auction_lab: pd.Timestamp) -> None:
-        """틱 미수신 종목: 공식 1분 반영 시도 후 틱말분과 동일 평가."""
+    def _job_auction_1530_timeout_eval(
+        self,
+        nk: str,
+        auction_lab: pd.Timestamp,
+        attempt: int = 0,
+    ) -> None:
+        """
+        틱 미수신(또는 합성 미준비) 종목: 공식 1분 반영 후 완성15 평가.
+
+        ka10080 유량·단일가 지연으로 첫 시도가 비어도 재시도하고,
+        마지막 시도에서는 무거래 평봉 폴백까지 적용해 평가를 보장한다.
+        """
         if self._stop.is_set() or not self._monitoring():
             return
         try:
@@ -497,6 +579,10 @@ class RtWatchlistM1ApiPoller:
             slot = krx_15m_label_for_m1_open(lab)
             if slot is None or self._is_tick_tail_eval_done(nk, slot):
                 return
+            max_att = self._auction_1530_eval_max_attempts()
+            att = max(0, int(attempt or 0))
+            is_last = att >= (max_att - 1)
+
             # 공식 1분이 있으면 completed에 반영(틱 없을 때 compose 폴백)
             try:
                 sk = lab.strftime("%Y-%m-%d %H:%M:%S")
@@ -509,12 +595,124 @@ class RtWatchlistM1ApiPoller:
                     m1s.seal_tick_tail_minute(nk, lab)
             except Exception:
                 pass
-            self._job_tick_tail_eval(nk, lab, "auction_timeout")
+
+            ok = self._job_tick_tail_eval(
+                nk,
+                lab,
+                "auction_timeout" if not is_last else "auction_timeout_final",
+                record_compose_fail=is_last,
+            )
+            if ok or self._is_tick_tail_eval_done(nk, slot):
+                return
+
+            # 마지막 시도: 공식행 영구 부재(무거래)면 평봉으로라도 평가
+            if is_last:
+                try:
+                    sk = lab.strftime("%Y-%m-%d %H:%M:%S")
+                    if self._apply_flat_no_trade_minute(nk, lab, sk):
+                        ok2 = self._job_tick_tail_eval(
+                            nk,
+                            lab,
+                            "auction_flat",
+                            record_compose_fail=True,
+                        )
+                        if ok2 or self._is_tick_tail_eval_done(nk, slot):
+                            return
+                except Exception:
+                    pass
+                try:
+                    self._emit(
+                        f"⚠️ [M1Poll] 15:30 평가 최종 실패 {nk} "
+                        f"(시도 {att + 1}/{max_att})"
+                    )
+                except Exception:
+                    pass
+                return
+
+            gap = self._auction_1530_eval_retry_gap_sec()
+            try:
+                t = threading.Timer(
+                    gap,
+                    self._job_auction_1530_timeout_eval,
+                    args=(nk, lab, att + 1),
+                )
+                t.daemon = True
+                t.start()
+            except Exception:
+                pass
         except Exception as e:
             try:
                 self._emit(f"⚠️ [M1Poll] 15:30 타임아웃 평가 예외 ({nk}): {e!r}")
             except Exception:
                 pass
+
+    def _job_auction_1530_final_sweep(
+        self, codes: List[str], auction_lab: pd.Timestamp
+    ) -> None:
+        """재시도 창 종료 후 미평가 종목 일괄 강제 평가(평봉 폴백 포함)."""
+        if self._stop.is_set() or not self._monitoring():
+            return
+        try:
+            lab = pd.Timestamp(auction_lab).floor("min")
+            pending = self._auction_1530_pending_codes(codes, lab)
+        except Exception:
+            return
+        if not pending:
+            try:
+                self._emit(
+                    f"ℹ️ [M1Poll] 15:30 최종 스윕 — 전 종목 평가 완료 "
+                    f"n={len(codes)}"
+                )
+            except Exception:
+                pass
+            return
+        try:
+            self._emit(
+                f"⚠️ [M1Poll] 15:30 최종 스윕 — 미평가 {len(pending)}종목 "
+                f"강제 평가: {','.join(pending)}"
+            )
+        except Exception:
+            pass
+        max_att = self._auction_1530_eval_max_attempts()
+        for i, nk in enumerate(pending):
+            try:
+                # 유량 보호: 종목 간 짧게 분산
+                delay = 0.05 + 0.35 * float(i)
+                t = threading.Timer(
+                    delay,
+                    self._job_auction_1530_timeout_eval,
+                    args=(nk, lab, max(0, max_att - 1)),
+                )
+                t.daemon = True
+                t.start()
+            except Exception:
+                try:
+                    self._job_auction_1530_timeout_eval(nk, lab, max(0, max_att - 1))
+                except Exception:
+                    continue
+        # 스윕 직후 잔여 확인 로그
+        try:
+
+            def _report() -> None:
+                try:
+                    left = self._auction_1530_pending_codes(codes, lab)
+                    if left:
+                        self._emit(
+                            f"❌ [M1Poll] 15:30 평가 미완 잔여 {len(left)}: "
+                            f"{','.join(left)}"
+                        )
+                    else:
+                        self._emit(
+                            "ℹ️ [M1Poll] 15:30 최종 스윕 후 전 종목 평가 완료"
+                        )
+                except Exception:
+                    pass
+
+            t_r = threading.Timer(max(3.0, 0.4 * float(len(pending)) + 2.0), _report)
+            t_r.daemon = True
+            t_r.start()
+        except Exception:
+            pass
 
     def on_tick_tail_next_minute(self, code: Any, closed_lab: Any) -> None:
         """
@@ -554,26 +752,33 @@ class RtWatchlistM1ApiPoller:
         nk: str,
         closed_lab: pd.Timestamp,
         reason: str = "timeout",
-    ) -> None:
-        """틱 말분 seal·합성 15분 평가 (``:00`` 틱 또는 타임아웃)."""
+        *,
+        record_compose_fail: bool = True,
+    ) -> bool:
+        """
+        틱 말분 seal·합성 15분 평가 (``:00`` 틱 또는 타임아웃).
+
+        Returns:
+            완성15 평가 제출 성공 여부.
+        """
         if self._stop.is_set() or not self._monitoring():
-            return
+            return False
         try:
             slot = krx_15m_label_for_m1_open(closed_lab)
             if slot is None:
-                return
+                return False
             if self._is_tick_tail_eval_done(nk, slot):
-                return
+                return True
 
             st = self._settings()
             if not self._settings_bool(st, "realtime_s1_eval_on_local_15m_close", True):
-                return
+                return False
             from core.rt_closed_15m_official_replace import (
                 closed_15m_eval_after_official_enabled,
             )
 
             if closed_15m_eval_after_official_enabled(st):
-                return
+                return False
 
             m1s = getattr(self._app, "rt_tick_m1_store", None)
             if m1s is not None:
@@ -590,14 +795,18 @@ class RtWatchlistM1ApiPoller:
             maybe_roll_15m_slot_on_clock(self._app, nk)
             composed = apply_composed_closed_15m_from_m1(self._app, nk, slot)
             if composed is None:
-                try:
-                    self._note_closed15_eval_log(
-                        slot, ok=False, reason=str(reason or "compose_fail"),
-                        label="틱말분 완성15",
-                    )
-                except Exception:
-                    pass
-                return
+                # 중간 시도(재시도 예정)는 '실패'로 집계하지 않음 — 로그 오해 방지
+                if record_compose_fail:
+                    try:
+                        self._note_closed15_eval_log(
+                            slot,
+                            ok=False,
+                            reason=str(reason or "compose_fail"),
+                            label="틱말분 완성15",
+                        )
+                    except Exception:
+                        pass
+                return False
             o, h, l_, c, v = composed
 
             self._mark_tick_tail_eval_done(nk, slot)
@@ -619,13 +828,16 @@ class RtWatchlistM1ApiPoller:
                         reason=str(reason or "ok"),
                         label="틱말분 완성15",
                     )
+                    return True
             except Exception as ex:
                 self._emit(f"⚠️ [M1Poll] {nk} 틱말분 submit_eval 실패: {ex!r}")
+            return False
         except Exception as e:
             try:
                 self._emit(f"⚠️ [M1Poll] 틱말분 평가 예외 ({nk}): {e!r}")
             except Exception:
                 pass
+            return False
 
     def _schedule_signal_eval(
         self, nk: str, *, close_px: float = 0.0, volume: float = 0.0
@@ -959,13 +1171,27 @@ class RtWatchlistM1ApiPoller:
                     is_last
                     and (is_auc or ((not use_tick) and use_official_last))
                 )
-                # 당일 15:30 틱경로를 이미 기동했으면 15:31 공식 last 라운드 생략
+                # 당일 15:30 틱경로를 이미 기동했어도, 미평가 종목은 15:31 공식 last로 구조
                 if need_last_official and is_auc and use_tick:
                     try:
                         day_key = closed_lab.strftime("%Y-%m-%d")
                         with self._auction_1530_lock:
-                            if self._auction_1530_scheduled_day == day_key:
+                            auc_scheduled = self._auction_1530_scheduled_day == day_key
+                        if auc_scheduled:
+                            pending = self._auction_1530_pending_codes(
+                                codes, closed_lab
+                            )
+                            if not pending:
                                 need_last_official = False
+                            else:
+                                codes = pending
+                                try:
+                                    self._emit(
+                                        f"ℹ️ [M1Poll] 15:30 미평가 {len(pending)}종목 "
+                                        f"→ 15:31 공식1분 구조"
+                                    )
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
                 if not need_head and not need_last_official:

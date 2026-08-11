@@ -95,6 +95,9 @@ DEFAULT_SETTINGS = {
     "realtime_15m_last_minute_from_ticks": True,
     "realtime_15m_tick_tail_wait_sec": 1.5,
     "realtime_auction_1530_tick_wait_sec": 5.0,
+    # 15:30 단일가: 틱/공식1분 미준비 시 재시도(전 종목 평가 보장)
+    "realtime_auction_1530_eval_max_attempts": 12,
+    "realtime_auction_1530_eval_retry_gap_sec": 2.0,
     "realtime_15m_eval_on_official_last_m1": False,
     "realtime_m1_probe_not_ready_poll_sec": 0.5,
     "realtime_m1_probe_not_ready_max_wait_sec": 2.5,
