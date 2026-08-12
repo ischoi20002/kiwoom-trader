@@ -294,6 +294,14 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
+        # 신호·주문 우선: 틱말분 평가 창 동안 공식 M1/15분 REST 양보
+        try:
+            from core.closed_15m_fast_path import mark_rt15_official_quiet
+
+            mark_rt15_official_quiet(self._app)
+        except Exception:
+            pass
+
         wait = self._tick_tail_wait_sec()
         try:
             end_wall = (
@@ -430,6 +438,19 @@ class RtWatchlistM1ApiPoller:
                 f"(프로브+틱확인 즉시평가 · 타임아웃 {wait:.1f}s · "
                 f"재시도 {max_att}회/{gap:.1f}s · n={len(codes)})"
             )
+        except Exception:
+            pass
+
+        # 신호·주문 우선: 단일가 초반(틱 즉시평가) 동안만 공식 REST 양보.
+        # 이후 타임아웃·재시도의 공식1분 폴백은 조용 구간 종료 후 진행.
+        try:
+            from core.closed_15m_fast_path import (
+                closed_15m_defer_official_sec,
+                mark_rt15_official_quiet,
+            )
+
+            quiet = max(float(wait) + 1.0, float(closed_15m_defer_official_sec(self._app)))
+            mark_rt15_official_quiet(self._app, quiet)
         except Exception:
             pass
 
@@ -1928,27 +1949,26 @@ class RtWatchlistM1ApiPoller:
                 return
             if t0_mono is None:
                 t0_mono = time.monotonic()
-            # 15분 슬롯 확정 직후 조용 구간: 중간 분만 연기.
-            # 마지막 1분은 평가 트리거라 즉시 조회.
-            if not is_last_m1_open_of_15m_slot(closed_lab):
-                try:
-                    from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
+            # 슬롯 확정 직후 조용 구간: 말분 공식 조회도 양보.
+            # (틱 말분이 신호·주문을 담당 — 공식 말분 REST가 ka10004/주문과 경합하지 않게)
+            try:
+                from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
 
-                    rem = float(rt15_official_quiet_remaining_sec(self._app))
+                rem = float(rt15_official_quiet_remaining_sec(self._app))
+            except Exception:
+                rem = 0.0
+            if rem > 0.05:
+                try:
+                    t = threading.Timer(
+                        rem,
+                        self._job_fetch_one,
+                        args=(code, closed_lab, sk, t0_mono),
+                    )
+                    t.daemon = True
+                    t.start()
                 except Exception:
-                    rem = 0.0
-                if rem > 0.05:
-                    try:
-                        t = threading.Timer(
-                            rem,
-                            self._job_fetch_one,
-                            args=(code, closed_lab, sk, t0_mono),
-                        )
-                        t.daemon = True
-                        t.start()
-                    except Exception:
-                        pass
-                    return
+                    pass
+                return
             nk = canonical_stock_code(str(code).strip())
             if not nk:
                 return

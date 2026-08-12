@@ -71,6 +71,7 @@ DEFAULT_SETTINGS = {
     "realtime_closed_15m_official_replace_retry_gap_sec": 15.0,
     "realtime_closed_15m_official_replace_stagger_cap_sec": 45.0,
     "realtime_closed_15m_priority_spacing_sec": 0.45,
+    "realtime_closed_15m_defer_official_sec": 8.0,
     "realtime_closed_15m_official_min_met_ratio": 0.5,
     "realtime_closed_15m_backfill_after_ready": True,
     "realtime_closed_15m_backfill_base_delay_sec": 0.3,

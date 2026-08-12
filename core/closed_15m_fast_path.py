@@ -19,13 +19,13 @@ _official_quiet_until_mono: float = 0.0
 
 
 def closed_15m_defer_official_sec(app: Any) -> float:
-    """로컬 15분 확정 직후 공식 REST/동기화를 미룰 초."""
+    """로컬 15분 확정 직후 공식 REST/동기화를 미룰 초(신호·주문 우선)."""
     try:
         st = getattr(app, "settings", None) or {}
-        v = float(st.get("realtime_closed_15m_defer_official_sec", 4.0))
-        return max(0.0, min(30.0, v))
+        v = float(st.get("realtime_closed_15m_defer_official_sec", 8.0))
+        return max(0.0, min(45.0, v))
     except Exception:
-        return 4.0
+        return 8.0
 
 
 def mark_rt15_official_quiet(app: Any, duration_sec: Optional[float] = None) -> float:
@@ -43,8 +43,8 @@ def mark_rt15_official_quiet(app: Any, duration_sec: Optional[float] = None) -> 
             else closed_15m_defer_official_sec(app)
         )
     except Exception:
-        dur = 4.0
-    dur = max(0.0, min(30.0, float(dur)))
+        dur = 8.0
+    dur = max(0.0, min(45.0, float(dur)))
     if dur <= 0.0:
         return 0.0
     try:
@@ -250,6 +250,11 @@ class Closed15mEvalPool:
     def submit_eval(self, code: Any, bar_ts: Any) -> None:
         """종목별 확정 평가를 풀에 제출합니다."""
         try:
+            # 평가·주문 동안 공식 M1/15분 REST 양보
+            try:
+                mark_rt15_official_quiet(self._app)
+            except Exception:
+                pass
             ex = self._ensure()
 
             def _run() -> None:

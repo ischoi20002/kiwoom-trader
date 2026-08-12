@@ -107,6 +107,13 @@ class OrderExecutionService:
     ) -> Tuple[Optional[float], Optional[float]]:
         """터치 주문용 (bid1, ask1). ``nxt=True`` 이면 ka10004 ``_NX``."""
         try:
+            # 호가 조회·주문 직전: 말분 공식봉 REST가 끼어들지 않도록 양보
+            try:
+                from core.closed_15m_fast_path import mark_rt15_official_quiet
+
+                mark_rt15_official_quiet(self.app, 5.0)
+            except Exception:
+                pass
             nc = str(canonical_stock_code(code) or code).zfill(6)
             om = getattr(self.app, "order_manager", None)
             if om is None:
