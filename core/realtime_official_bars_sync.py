@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-실시간 **신호용** 15분봉: 앞 구간은 공식 1분(ka10080)으로 채우고,
-슬롯 마지막 1분 완성(프로브) 후 합성 15분으로 S1·S2·청산을 평가합니다.
+실시간 **신호용** 15분봉: 틱 1분 선적재 + 공식 soft replace 후 S1·S2·청산 평가.
 
-- 완성봉 OHLCV 권위: 공식 1분 합성(``compose_local_15m_ohlcv``).
-- 공식 15분 REST 교체는 선택(기본 스킵)이며, 평가 게이트로 쓰지 않습니다.
-- 감시 트리·체결가 등 UI/주문용 틱 가격은 ``SignalEngine.on_tick_received`` 가 별도 처리합니다.
-- 본 모듈은 ``_signal_skip_bar_update=True`` 로 신호 재평가만 트리거할 때 사용합니다.
+- 완성봉 OHLCV: ``compose_local_15m_ohlcv`` (공식 우선, 결측은 틱).
+- 말분은 ``realtime_15m_last_minute_from_ticks`` 로 틱 우선 가능.
+- head REST는 soft catchup(선택)이며 평가 게이트가 아님.
 """
 
 from __future__ import annotations
@@ -49,16 +47,98 @@ def _last_minute_from_ticks_enabled(app: Any) -> bool:
         return True
 
 
+def _tick_fill_on_api_miss_enabled(app: Any) -> bool:
+    """
+    공식 1분이 없는 분을 틱 seal로 채울지(기본 ON).
+
+    ON이면 S1/S2/청산 완성15 합성이 API miss에도 틱만으로 가능.
+    """
+    try:
+        st = getattr(app, "settings", None) or {}
+        return bool(st.get("realtime_15m_compose_tick_fill_on_api_miss", True))
+    except Exception:
+        return True
+
+
+def _minute_ohlcv_official_or_tick(
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+    *,
+    prefer_tick: bool = False,
+    allow_tick_fill: bool = True,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """
+    단일 1분 OHLCV.
+
+    - ``prefer_tick``: 틱 우선(말분·15:30).
+    - 그 외: 공식 completed 우선, 없으면 틱(``allow_tick_fill``).
+    """
+    tick_bar: Optional[Tuple[float, float, float, float, float]] = None
+    if prefer_tick or allow_tick_fill:
+        try:
+            tick_bar = m1s.tick_minute_ohlcv(nk, open_lab)
+        except Exception:
+            tick_bar = None
+
+    if prefer_tick and tick_bar is not None:
+        to, th, tl, tc, tv = tick_bar
+        if float(tc) > 0:
+            return (
+                float(to),
+                float(th),
+                float(tl),
+                float(tc),
+                max(0.0, float(tv)),
+            )
+
+    try:
+        off = m1s.dataframe_for_window(
+            nk, open_lab, open_lab, include_open_bucket=False
+        )
+    except TypeError:
+        try:
+            off = m1s.dataframe_for_window(nk, open_lab, open_lab)
+        except Exception:
+            off = None
+    except Exception:
+        off = None
+    if off is not None and not getattr(off, "empty", True):
+        try:
+            o = float(off["Open"].iloc[-1])
+            h = float(off["High"].iloc[-1])
+            l_ = float(off["Low"].iloc[-1])
+            c = float(off["Close"].iloc[-1])
+            v = max(0.0, float(off["Volume"].iloc[-1]))
+            if c > 0:
+                return o, h, l_, c, v
+        except Exception:
+            pass
+
+    if allow_tick_fill and tick_bar is not None:
+        to, th, tl, tc, tv = tick_bar
+        if float(tc) > 0:
+            return (
+                float(to),
+                float(th),
+                float(tl),
+                float(tc),
+                max(0.0, float(tv)),
+            )
+    return None
+
+
 def compose_local_15m_ohlcv(
     app: Any, code: str, slot_end: Any
 ) -> Optional[Tuple[float, float, float, float, float]]:
     """
-    공식 1분으로 로컬 15분 OHLCV 합성(좌측 라벨 창).
+    로컬 15분 OHLCV 합성(좌측 라벨 창).
 
     - 일반: ``[T, T+15)`` 의 완료 1분
     - ``15:15``: ``[15:15, 15:20)``
     - ``15:30``: 단일가 1분만
-    - ``realtime_15m_last_minute_from_ticks`` ON 이면 마지막 1분만 틱 버킷 우선
+    - ``realtime_15m_last_minute_from_ticks`` ON 이면 말분은 틱 우선
+    - ``realtime_15m_compose_tick_fill_on_api_miss`` ON 이면 공식 결측 분을 틱으로 채움
     """
     try:
         nk = canonical_stock_code(str(code).strip())
@@ -69,43 +149,22 @@ def compose_local_15m_ohlcv(
         if m1s is None:
             return None
 
-        # 15:30 단일가 — 틱 말분과 동일하게 틱 봉 우선, 없으면 공식 completed
+        use_tick_tail = _last_minute_from_ticks_enabled(app)
+        allow_fill = _tick_fill_on_api_miss_enabled(app)
+
+        # 15:30 단일가 — 틱 우선, 없으면 공식, (fill ON이면 틱만으로도 가능)
         if is_krx_last_15m_slot(slot):
             auc = m1_closing_auction_ts_for_15m_end(slot)
             if auc is None:
                 return None
-            use_tick = _last_minute_from_ticks_enabled(app)
-            if use_tick:
-                try:
-                    tick_bar = m1s.tick_minute_ohlcv(nk, auc)
-                except Exception:
-                    tick_bar = None
-                if tick_bar is not None:
-                    to, th, tl, tc, tv = tick_bar
-                    if float(tc) > 0:
-                        return (
-                            float(to),
-                            float(th),
-                            float(tl),
-                            float(tc),
-                            max(0.0, float(tv)),
-                        )
-            try:
-                tail = m1s.dataframe_for_window(
-                    nk, auc, auc, include_open_bucket=False
-                )
-            except TypeError:
-                tail = m1s.dataframe_for_window(nk, auc, auc)
-            if tail is None or getattr(tail, "empty", True):
-                return None
-            o = float(tail["Open"].iloc[-1])
-            h = float(tail["High"].iloc[-1])
-            l_ = float(tail["Low"].iloc[-1])
-            c = float(tail["Close"].iloc[-1])
-            v = max(0.0, float(tail["Volume"].iloc[-1]))
-            if c <= 0:
-                return None
-            return o, h, l_, c, v
+            bar = _minute_ohlcv_official_or_tick(
+                m1s,
+                nk,
+                auc,
+                prefer_tick=bool(use_tick_tail),
+                allow_tick_fill=bool(use_tick_tail or allow_fill),
+            )
+            return bar
 
         t0 = m1_window_start_for_15m_end(slot)
         t_end_excl = m1_continuous_end_exclusive_for_15m_end(slot)
@@ -113,9 +172,50 @@ def compose_local_15m_ohlcv(
         if last_open < t0:
             return None
 
-        use_tick = _last_minute_from_ticks_enabled(app)
+        # API miss 틱 채움: 슬롯 전 분을 공식우선(+틱결측)으로 순회
+        if allow_fill:
+            opens: list[float] = []
+            highs: list[float] = []
+            lows: list[float] = []
+            closes: list[float] = []
+            vols: list[float] = []
+            cur = pd.Timestamp(t0).floor("min")
+            end_last = pd.Timestamp(last_open).floor("min")
+            while cur <= end_last:
+                is_tail = cur == end_last
+                bar = _minute_ohlcv_official_or_tick(
+                    m1s,
+                    nk,
+                    cur,
+                    prefer_tick=bool(use_tick_tail and is_tail),
+                    allow_tick_fill=True,
+                )
+                if bar is not None:
+                    o, h, l_, c, v = bar
+                    opens.append(float(o))
+                    highs.append(float(h))
+                    lows.append(float(l_))
+                    closes.append(float(c))
+                    vols.append(max(0.0, float(v)))
+                cur = cur + pd.Timedelta(minutes=1)
+            if not closes:
+                return None
+            o0 = float(opens[0])
+            h0 = float(max(highs)) if highs else o0
+            l0 = (
+                float(min(x for x in lows if x > 0))
+                if any(x > 0 for x in lows)
+                else o0
+            )
+            c0 = float(closes[-1])
+            v0 = float(sum(max(0.0, x) for x in vols))
+            if c0 <= 0:
+                return None
+            return o0, h0, l0, c0, v0
+
+        # fill OFF: 기존 동작 — head는 공식만, 말분만 틱 우선
         tick_bar = None
-        if use_tick:
+        if use_tick_tail:
             try:
                 tick_bar = m1s.tick_minute_ohlcv(nk, last_open)
             except Exception:
@@ -132,43 +232,43 @@ def compose_local_15m_ohlcv(
         except Exception:
             head = None
 
-        opens: list[float] = []
-        highs: list[float] = []
-        lows: list[float] = []
-        closes: list[float] = []
-        vols: list[float] = []
+        opens2: list[float] = []
+        highs2: list[float] = []
+        lows2: list[float] = []
+        closes2: list[float] = []
+        vols2: list[float] = []
         if head is not None and not getattr(head, "empty", True):
             try:
-                opens.extend([float(x) for x in head["Open"].tolist()])
-                highs.extend([float(x) for x in head["High"].tolist()])
-                lows.extend([float(x) for x in head["Low"].tolist()])
-                closes.extend([float(x) for x in head["Close"].tolist()])
-                vols.extend([float(x) for x in head["Volume"].tolist()])
+                opens2.extend([float(x) for x in head["Open"].tolist()])
+                highs2.extend([float(x) for x in head["High"].tolist()])
+                lows2.extend([float(x) for x in head["Low"].tolist()])
+                closes2.extend([float(x) for x in head["Close"].tolist()])
+                vols2.extend([float(x) for x in head["Volume"].tolist()])
             except Exception:
                 pass
 
         if tick_bar is not None:
             to, th, tl, tc, tv = tick_bar
-            opens.append(float(to))
-            highs.append(float(th))
-            lows.append(float(tl))
-            closes.append(float(tc))
-            vols.append(max(0.0, float(tv)))
+            opens2.append(float(to))
+            highs2.append(float(th))
+            lows2.append(float(tl))
+            closes2.append(float(tc))
+            vols2.append(max(0.0, float(tv)))
         else:
             try:
                 tail = m1s.dataframe_for_window(
                     nk, last_open, last_open, include_open_bucket=False
                 )
                 if tail is not None and not getattr(tail, "empty", True):
-                    opens.append(float(tail["Open"].iloc[-1]))
-                    highs.append(float(tail["High"].iloc[-1]))
-                    lows.append(float(tail["Low"].iloc[-1]))
-                    closes.append(float(tail["Close"].iloc[-1]))
-                    vols.append(max(0.0, float(tail["Volume"].iloc[-1])))
+                    opens2.append(float(tail["Open"].iloc[-1]))
+                    highs2.append(float(tail["High"].iloc[-1]))
+                    lows2.append(float(tail["Low"].iloc[-1]))
+                    closes2.append(float(tail["Close"].iloc[-1]))
+                    vols2.append(max(0.0, float(tail["Volume"].iloc[-1])))
             except Exception:
                 pass
 
-        if not closes:
+        if not closes2:
             try:
                 full = m1s.dataframe_for_window(
                     nk, t0, last_open, include_open_bucket=False
@@ -186,11 +286,11 @@ def compose_local_15m_ohlcv(
             except Exception:
                 return None
 
-        o = float(opens[0])
-        h = float(max(highs)) if highs else o
-        l_ = float(min(x for x in lows if x > 0)) if any(x > 0 for x in lows) else o
-        c = float(closes[-1])
-        v = float(sum(max(0.0, x) for x in vols))
+        o = float(opens2[0])
+        h = float(max(highs2)) if highs2 else o
+        l_ = float(min(x for x in lows2 if x > 0)) if any(x > 0 for x in lows2) else o
+        c = float(closes2[-1])
+        v = float(sum(max(0.0, x) for x in vols2))
         if c <= 0:
             return None
         return o, h, l_, c, v

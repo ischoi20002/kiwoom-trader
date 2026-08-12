@@ -94,6 +94,8 @@ DEFAULT_SETTINGS = {
     "realtime_tick_m1_seal_defer_sec": 4.0,
     "realtime_tick_m1_calendar_retention_days": 60,
     "realtime_15m_last_minute_from_ticks": True,
+    "realtime_15m_compose_tick_fill_on_api_miss": True,
+    "realtime_m1_head_official_catchup_enabled": True,
     "realtime_15m_tick_tail_wait_sec": 1.5,
     "realtime_auction_1530_tick_wait_sec": 5.0,
     # 15:30 단일가: 틱/공식1분 미준비 시 재시도(전 종목 평가 보장)

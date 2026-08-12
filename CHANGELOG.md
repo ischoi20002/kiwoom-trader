@@ -13,6 +13,12 @@
 
 ---
 
+## 0.18.7 (2026-08-12)
+
+- **15:30→next_open 누락 방지**: 완성15 S1/held 평가를 봉·최소길이 준비 뒤에만 done 마킹. 조기 점유로 재시도가 막히던 버그 수정. 지표 실패 시 unmark (`signal_engine`).
+- **15:30 진단 로그**: `auction_1530_scheduled`·`auction_1530_eval_final_fail`·`signal_s1_closed_15m_eval`·`next_open_buy_queued` 를 session JSONL에 기록 (`rt_watchlist_m1_api_poller`, `next_open_pending_action_service`).
+- **틱 주경로·API miss 폴백**: 매분 틱 1분 seal, 합성15 시 공식 결측분을 틱으로 채움. head ka10080은 soft catchup(실패해도 평가 유지). 설정 토글 추가 (`rt_tick_m1_store`, `realtime_official_bars_sync`, `rt_watchlist_m1_api_poller`, `settings_tab`).
+
 ## 0.18.6 (2026-08-12)
 
 - **ka10004 유량 대응**: 호가 조회 전역 직렬화(≈1.05s)·429 재시도(최대 4회). 청산 터치호가 실패 시 참고가 폴백으로 매도 생략 방지 (`order_manager`, `order_execution_service`).

@@ -895,6 +895,28 @@ class SignalEngine:
         except Exception:
             return True
 
+    def _unmark_s1_closed_slot_done(
+        self, code: str, slot_key: str, *, prefix: str = "s1"
+    ) -> None:
+        """봉 미준비·예외 등으로 평가를 못 끝냈을 때 재시도 가능하도록 done 해제."""
+        try:
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            key = f"{prefix}|{nk}|{slot_key}"
+            done = getattr(self, "_s1_closed_slot_done", None)
+            if isinstance(done, dict):
+                done.pop(key, None)
+        except Exception:
+            pass
+
+    def _session_log(self, kind: str, data: Dict[str, Any]) -> None:
+        """세션 이벤트 로그(진단용). 실패해도 본 로직에 영향 없음."""
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl is not None and hasattr(sl, "log"):
+                sl.log(str(kind), dict(data or {}))
+        except Exception:
+            pass
+
     def eval_s1_on_completed_15m(self, code: str, bar_ts: Any) -> None:
         """
         로컬/공식 15분 슬롯 확정 후 S1 1회 평가(저정밀 백테 정합).
@@ -925,14 +947,12 @@ class SignalEngine:
                 slot_key = slot_ts.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 return
-            # 세션 가드를 done 마킹보다 먼저 — 실패 시 재시도 가능해야 함
+            # 세션·봉 미준비는 done 마킹 전 — 실패 시 재시도 가능해야 함
             try:
                 if not self._allow_closed_15m_eval_wall_now(bar_ts):
                     return
             except Exception:
                 pass
-            if not self._mark_s1_closed_slot_done(nk, slot_key):
-                return
 
             try:
                 halt = self._market_halt_suppresses_s1(nk)
@@ -961,7 +981,7 @@ class SignalEngine:
                     mi_key = k
                     break
             if info is None:
-                # 감시 목록에 없으면 스킵(일일 선정 외)
+                # 감시 목록에 없으면 스킵(일일 선정 외) — done 미마킹(웜업 레이스 재시도)
                 return
 
             # bars: bar_ts 이하만 (새 forming 행 제외)
@@ -995,7 +1015,7 @@ class SignalEngine:
                 return
             try:
                 if pd.Timestamp(closed_df.index[-1]) != slot_ts:
-                    # 확정 시각 행이 없으면 평가하지 않음(부분 데이터)
+                    # 확정 시각 행이 없으면 평가하지 않음(부분 데이터) — 재시도 허용
                     return
             except Exception:
                 pass
@@ -1014,29 +1034,73 @@ class SignalEngine:
                     pass
                 return
 
+            # 봉·최소길이 준비된 뒤에만 슬롯 점유(조기 done으로 15:30 재시도가 막히던 버그 방지)
+            if not self._mark_s1_closed_slot_done(nk, slot_key):
+                return
+
             settings = getattr(self.app, "settings", None) or {}
             # 지표 계산과 호가 REST를 겹쳐 touch 주문 RTT를 숨김
-            self._prefetch_touch_quote_async(nk)
-            calc_df = self._closed_df_for_indicator_calc(closed_df)
-            df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
-            df_ind = self._apply_ready_column_to_indicators(df_ind)
-            detailed = TradingStrategy.get_buy_signals_detailed(df_ind, settings, "UP")
-            last_ser = detailed.iloc[-1]
-            last_sig = (
-                last_ser.to_dict() if hasattr(last_ser, "to_dict") else dict(last_ser)
-            )
-            last_sig = self._merge_ready_into_sig(last_sig, bar_count)
-            is_buy = self._s1_buy_from_sig_dict(last_sig, bar_count)
-            _sel_tr = str(
-                info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
-            ).strip().upper()
-            info["last_sig_cache"] = last_sig
-            info["last_detailed_sig"] = detailed
-            info["last_row_cache"] = df_ind.iloc[-1].to_dict()
-            info["last_bar_count"] = bar_count
-            info["confluence"] = self._format_s1_confluence_status_line(last_sig, _sel_tr)
-            info["met_ratio"] = float(self._to_scalar(last_sig.get("Met_Ratio"), 0.0))
-            info["s1_closed_slot_key"] = slot_key
+            try:
+                self._prefetch_touch_quote_async(nk)
+                calc_df = self._closed_df_for_indicator_calc(closed_df)
+                df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
+                df_ind = self._apply_ready_column_to_indicators(df_ind)
+                detailed = TradingStrategy.get_buy_signals_detailed(df_ind, settings, "UP")
+                last_ser = detailed.iloc[-1]
+                last_sig = (
+                    last_ser.to_dict() if hasattr(last_ser, "to_dict") else dict(last_ser)
+                )
+                last_sig = self._merge_ready_into_sig(last_sig, bar_count)
+                is_buy = self._s1_buy_from_sig_dict(last_sig, bar_count)
+                _sel_tr = str(
+                    info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                ).strip().upper()
+                info["last_sig_cache"] = last_sig
+                info["last_detailed_sig"] = detailed
+                info["last_row_cache"] = df_ind.iloc[-1].to_dict()
+                info["last_bar_count"] = bar_count
+                info["confluence"] = self._format_s1_confluence_status_line(
+                    last_sig, _sel_tr
+                )
+                info["met_ratio"] = float(
+                    self._to_scalar(last_sig.get("Met_Ratio"), 0.0)
+                )
+                info["s1_closed_slot_key"] = slot_key
+            except Exception as e:
+                # 지표 계산 실패 시 재시도 가능해야 함
+                try:
+                    self._unmark_s1_closed_slot_done(nk, slot_key)
+                except Exception:
+                    pass
+                try:
+                    print(
+                        f"[SignalEngine] eval_s1_on_completed_15m 지표 실패 ({nk}): {e}"
+                    )
+                except Exception:
+                    pass
+                return
+
+            # 15:30은 신호 유무와 무관하게 평가 결과를 남겨 next_open 누락을 추적
+            try:
+                if self._is_1530_bar_slot(slot_ts):
+                    self._session_log(
+                        "signal_s1_closed_15m_eval",
+                        {
+                            "code": nk,
+                            "name": str(info.get("name", "")),
+                            "slot": slot_key,
+                            "signal_on": bool(is_buy),
+                            "sig_type": str(
+                                last_sig.get("Sig_Type") or last_sig.get("sig_type") or ""
+                            ),
+                            "met_ratio": float(
+                                self._to_scalar(info.get("met_ratio", 0.0), 0.0)
+                            ),
+                            "confluence": str(info.get("confluence", "")),
+                        },
+                    )
+            except Exception:
+                pass
 
             if not is_buy:
                 return
@@ -1297,13 +1361,12 @@ class SignalEngine:
                     return
             except Exception:
                 pass
-            if not self._mark_s1_closed_slot_done(nk, slot_key, prefix="held"):
-                return
 
+            # 미보유면 done 점유하지 않음(같은 슬롯에 나중에 보유될 수 있음)
             if not self._code_in_virtual_positions(nk):
                 return
 
-            # bars ≤ bar_ts
+            # bars ≤ bar_ts (미준비 시 done 미마킹 → 재시도)
             lk = getattr(self.app, "_bars_data_lock", None)
             bd_root = getattr(self.app, "bars_data", None)
             if not isinstance(bd_root, dict):
@@ -1338,11 +1401,27 @@ class SignalEngine:
             except Exception:
                 pass
 
+            if not self._mark_s1_closed_slot_done(nk, slot_key, prefix="held"):
+                return
+
             settings = getattr(self.app, "settings", None) or {}
-            self._prefetch_touch_quote_async(nk)
-            calc_df = self._closed_df_for_indicator_calc(closed_df)
-            df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
-            last_row = df_ind.iloc[-1].to_dict()
+            try:
+                self._prefetch_touch_quote_async(nk)
+                calc_df = self._closed_df_for_indicator_calc(closed_df)
+                df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
+                last_row = df_ind.iloc[-1].to_dict()
+            except Exception as e:
+                try:
+                    self._unmark_s1_closed_slot_done(nk, slot_key, prefix="held")
+                except Exception:
+                    pass
+                try:
+                    print(
+                        f"[SignalEngine] eval_held_on_completed_15m 지표 실패 ({nk}): {e}"
+                    )
+                except Exception:
+                    pass
+                return
             try:
                 close_px = float(self._to_scalar(last_row.get("Close"), 0.0))
             except Exception:
@@ -1351,8 +1430,12 @@ class SignalEngine:
                 try:
                     close_px = float(closed_df["Close"].iloc[-1])
                 except Exception:
-                    return
+                    close_px = 0.0
             if close_px <= 0:
+                try:
+                    self._unmark_s1_closed_slot_done(nk, slot_key, prefix="held")
+                except Exception:
+                    pass
                 return
 
             # monitor_info 수급(없으면 중립)

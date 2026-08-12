@@ -175,6 +175,22 @@ class NextOpenPendingActionService:
             )
         except Exception:
             pass
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl is not None and hasattr(sl, "log"):
+                sl.log(
+                    "next_open_buy_queued",
+                    {
+                        "code": row["code"],
+                        "name": row["name"],
+                        "sig_type": row["sig_type"],
+                        "limit_price": float(row["limit_price"]),
+                        "target_date": target_date,
+                        "source_slot": str(source_slot),
+                    },
+                )
+        except Exception:
+            pass
         return True
 
     def queue_strategy_action(

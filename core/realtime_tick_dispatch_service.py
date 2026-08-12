@@ -234,7 +234,7 @@ class RealtimeTickDispatchService:
           UI 반영은 메인 큐 폴러로 위임합니다.
         - root가 없으면 즉시 SignalEngine 호출(호환/테스트용)
         """
-        # 검증용 틱→1분 DB(기본 OFF): 신호용 말분 틱은 아래 RtTickM1Store.feed_tick
+        # 검증용 틱→1분 DB(기본 OFF): 신호용 전분 틱은 아래 RtTickM1Store.feed_tick
         try:
             skip = bool(kwargs.get("_orderbook_only", False)) or bool(
                 kwargs.get("_official_sync_eval", False)

@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-감시 종목(_active_stream_codes)에 대해 ka10080(1분)을 **슬롯 단위로 일괄 조회**합니다.
+감시 종목(_active_stream_codes) 실시간 1분·완성15 경로.
 
-- **매분 전종목 폴링 없음.** 15분 슬롯 앞구간(보통 14봉, ``15:15``는 4봉)이 닫힌 뒤
-  종목별 분산으로 1페이지를 받아 head만 ``RtTickM1Store``에 반영.
-- **말분**: 기본은 틱 누적 seal 후 합성 15분 평가. 공식 말분 모드면 말분 마감 후
-  1회 더 조회해 평가.
-- **15:30 단일가**: 틱말분과 동일 — 프로브 → 틱 확인 즉시 평가 → (설정 시) 익일 09:00 주문예약.
-  무거래/틱 누락 시 짧은 타임아웃 후 공식 1분 폴백.
-- 평가 후 공식 15분 교체는 기존 ``rt_closed_15m_official_replace`` 정렬 경로.
-- 매 head/말분 라운드 시작 시 상위 후보 프로브로 API 준비만 짧게 확인.
+**주경로 (틱 선적재)**
+- 매분 틱으로 1분봉을 seal (``RtTickM1Store.feed_tick`` + 벽시계 seal).
+- 슬롯 말분: 틱(+공식 교체분)으로 15분 합성 → S1·S2·청산 평가.
+
+**보조 (공식 soft replace)**
+- head 구간 닫힌 뒤 ka10080 1페이지 catchup으로 공식 1분을 store에 덮어씀.
+  실패해도 평가를 막지 않음(틱봉 유지).
+- 말분 공식 REST는 설정 ``realtime_15m_eval_on_official_last_m1`` ON일 때만.
+
+**15:30 단일가**: 틱 확인 즉시 평가, 무거래 시 짧은 타임아웃 후 공식 폴백.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from utils.normalization import canonical_stock_code
 CacheKey = Tuple[str, str]
 CacheVal = Tuple[float, float, float, float, float]
 FetchResult = Tuple[Optional[pd.Series], Optional[pd.DataFrame], str]
-# head = 슬롯 앞구간 일괄, last = 말분(공식) 1회
+# head = 공식 soft catchup, last = 말분(공식) 1회
 RoundKind = str
 
 
@@ -440,6 +442,21 @@ class RtWatchlistM1ApiPoller:
             )
         except Exception:
             pass
+        try:
+            sl = getattr(self._app, "session_logger", None)
+            if sl is not None and hasattr(sl, "log"):
+                sl.log(
+                    "auction_1530_scheduled",
+                    {
+                        "slot": sk,
+                        "n_codes": int(len(codes)),
+                        "wait_sec": float(wait),
+                        "max_attempts": int(max_att),
+                        "retry_gap_sec": float(gap),
+                    },
+                )
+        except Exception:
+            pass
 
         # 신호·주문 우선: 단일가 초반(틱 즉시평가) 동안만 공식 REST 양보.
         # 이후 타임아웃·재시도의 공식1분 폴백은 조용 구간 종료 후 진행.
@@ -646,6 +663,20 @@ class RtWatchlistM1ApiPoller:
                         f"⚠️ [M1Poll] 15:30 평가 최종 실패 {nk} "
                         f"(시도 {att + 1}/{max_att})"
                     )
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self._app, "session_logger", None)
+                    if sl is not None and hasattr(sl, "log"):
+                        sl.log(
+                            "auction_1530_eval_final_fail",
+                            {
+                                "code": nk,
+                                "slot": lab.strftime("%Y-%m-%d %H:%M:%S"),
+                                "attempt": int(att + 1),
+                                "max_attempts": int(max_att),
+                            },
+                        )
                 except Exception:
                     pass
                 return
@@ -1102,6 +1133,79 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
+    def _head_official_catchup_enabled(self) -> bool:
+        """슬롯 head 구간 공식 soft catchup(기본 ON). 실패해도 평가 비차단."""
+        return self._settings_bool(
+            self._settings(), "realtime_m1_head_official_catchup_enabled", True
+        )
+
+    def _schedule_minute_tick_seals(
+        self, codes: List[str], closed_lab: pd.Timestamp
+    ) -> None:
+        """
+        닫힌 1분을 벽시계 기준으로 틱 seal (다음분 틱이 없어도 확정).
+
+        말분은 ``_schedule_tick_tail_evals`` 가 seal+평가를 담당하므로 여기서는
+        seal만 중복 호출(멱등)해도 무방하나, 말분은 스킵해 타이머 수를 줄인다.
+        """
+        try:
+            if is_last_m1_open_of_15m_slot(closed_lab):
+                return
+            if is_krx_last_15m_slot(closed_lab):
+                return
+        except Exception:
+            return
+
+        wait = self._tick_tail_wait_sec()
+        try:
+            end_wall = (
+                pd.Timestamp(closed_lab).floor("min") + pd.Timedelta(minutes=1)
+            ).to_pydatetime()
+            due = end_wall + timedelta(seconds=wait)
+            delay = max(0.05, (due - datetime.now()).total_seconds())
+        except Exception:
+            delay = wait
+
+        for raw in codes:
+            try:
+                nk = canonical_stock_code(str(raw).strip())
+                if not nk:
+                    continue
+                t = threading.Timer(
+                    delay,
+                    self._job_seal_tick_minute,
+                    args=(nk, closed_lab),
+                )
+                t.daemon = True
+                t.start()
+            except Exception:
+                continue
+
+    def _job_seal_tick_minute(
+        self, nk: str, closed_lab: pd.Timestamp
+    ) -> None:
+        """닫힌 1분 틱 forming → seal (API 없음)."""
+        if self._stop.is_set() or not self._monitoring():
+            return
+        try:
+            m1s = getattr(self._app, "rt_tick_m1_store", None)
+            if m1s is None:
+                return
+            m1s.seal_tick_tail_minute(nk, closed_lab)
+        except Exception:
+            pass
+
+    def _tick_minute_has_bar(self, nk: str, closed_lab: pd.Timestamp) -> bool:
+        """해당 분에 틱 1분봉(종가>0)이 있으면 True."""
+        try:
+            m1s = getattr(self._app, "rt_tick_m1_store", None)
+            if m1s is None:
+                return False
+            bar = m1s.tick_minute_ohlcv(nk, closed_lab)
+            return bar is not None and float(bar[3]) > 0
+        except Exception:
+            return False
+
     @staticmethod
     def _is_pollable_m1_label(closed_lab: pd.Timestamp) -> bool:
         """
@@ -1116,7 +1220,7 @@ class RtWatchlistM1ApiPoller:
             return False
 
     def _wake_loop(self) -> None:
-        """새로 닫힌 1분 라벨이 바뀌었을 때만 head 일괄·말분(틱/공식) 스케줄."""
+        """새로 닫힌 1분 라벨이 바뀌었을 때만: 틱 seal · (선택) head soft catchup · 말분 평가."""
         while not self._stop.wait(0.25):
             try:
                 try:
@@ -1180,6 +1284,12 @@ class RtWatchlistM1ApiPoller:
                 use_tick = bool(self._last_minute_from_ticks_enabled())
                 use_official_last = bool(self._eval_on_official_last_m1_enabled())
 
+                # 매분 틱 seal (말분·단일가 제외 — 말분은 tick_tail 경로)
+                try:
+                    self._schedule_minute_tick_seals(codes, closed_lab)
+                except Exception:
+                    pass
+
                 # 말분 틱 평가 예약(15:30 제외 — 단일가는 auction 틱경로)
                 try:
                     if is_last and (not is_auc) and use_tick:
@@ -1187,7 +1297,9 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     pass
 
-                need_head = bool(is_head_done)
+                need_head = bool(
+                    is_head_done and self._head_official_catchup_enabled()
+                )
                 need_last_official = bool(
                     is_last
                     and (is_auc or ((not use_tick) and use_official_last))
@@ -1518,10 +1630,22 @@ class RtWatchlistM1ApiPoller:
         """
         공식 1분 행이 영구 부재(무거래 등)일 때 직전 종가 평봉(V=0)을 채운다.
 
+        틱 1분이 이미 있으면 덮어쓰지 않는다(틱 선적재 · 공식 soft replace).
+
         Returns:
             반영 성공 여부.
         """
         try:
+            # 틱봉이 있으면 평봉으로 공식 completed를 오염시키지 않음
+            try:
+                if self._settings_bool(
+                    self._settings(),
+                    "realtime_15m_compose_tick_fill_on_api_miss",
+                    True,
+                ) and self._tick_minute_has_bar(nk, closed_lab):
+                    return False
+            except Exception:
+                pass
             px = float(self._resolve_prev_close_for_flat(nk, closed_lab))
             if px <= 0:
                 return False
@@ -1814,13 +1938,16 @@ class RtWatchlistM1ApiPoller:
         t0_mono: Optional[float] = None,
     ) -> None:
         """
-        슬롯 앞구간(공식 head) 일괄 조회 — ka10080 1페이지에서 head만 store 반영.
+        슬롯 head 구간 **공식 soft catchup** — ka10080 1페이지로 공식 1분을 store에 덮어씀.
 
+        틱으로 이미 seal된 분은 compose 시 공식이 우선 교체된다.
+        조회 실패 시 평봉으로 틱을 덮지 않으며, 말분 평가도 막지 않는다.
         ``head_last_open``: head의 마지막 1분 open (예: 09:13, 15:18).
-        말분 평가·합성은 틱/공식 말분 경로가 담당한다.
         """
         try:
             if not self._monitoring():
+                return
+            if not self._head_official_catchup_enabled():
                 return
             if not self._is_pollable_m1_label(head_last_open):
                 return
@@ -1885,10 +2012,11 @@ class RtWatchlistM1ApiPoller:
             return
 
         if chart_df is None or getattr(chart_df, "empty", True):
-            # head 전 구간 평봉 채움은 과도 — 마지막 분만 평봉 시도
+            # soft catchup 실패: 틱봉이 있으면 평봉 미적용(틱 유지)
             if status in ("row_not_found", "fetch_error"):
                 try:
-                    self._apply_flat_no_trade_minute(nk, head_last_open, sk)
+                    if not self._tick_minute_has_bar(nk, head_last_open):
+                        self._apply_flat_no_trade_minute(nk, head_last_open, sk)
                 except Exception:
                     pass
             return
@@ -1905,15 +2033,16 @@ class RtWatchlistM1ApiPoller:
             )
         except Exception as ex:
             try:
-                self._emit(f"⚠️ [M1Poll] {nk} head catchup 실패: {ex!r}")
+                self._emit(f"⚠️ [M1Poll] {nk} head soft catchup 실패: {ex!r}")
             except Exception:
                 pass
             return
 
-        # head 마지막 분이 차트에 없으면 평봉 보강
+        # head 마지막 분이 차트에 없으면 — 틱 없을 때만 평봉
         if row is None and status == "row_not_found":
             try:
-                self._apply_flat_no_trade_minute(nk, head_last_open, sk)
+                if not self._tick_minute_has_bar(nk, head_last_open):
+                    self._apply_flat_no_trade_minute(nk, head_last_open, sk)
             except Exception:
                 pass
 
@@ -2093,6 +2222,18 @@ class RtWatchlistM1ApiPoller:
                     pass
             if eval_on_fail:
                 self._schedule_signal_eval(nk)
+            # API miss(empty 등)여도 슬롯 말분이면 틱 누적 합성으로 완성15 평가
+            try:
+                if is_last_m1_open_of_15m_slot(closed_lab):
+                    try:
+                        m1s = getattr(self._app, "rt_tick_m1_store", None)
+                        if m1s is not None:
+                            m1s.seal_tick_tail_minute(nk, closed_lab)
+                    except Exception:
+                        pass
+                    self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
+            except Exception:
+                pass
             return
 
         o, h, l_, c, v = ohlcv

@@ -1368,16 +1368,34 @@ class SettingsTab:
             '틱 말분 합성 평가',
             None,
             '',
-            'ON(권장)=슬롯 head는 공식 1분 일괄 조회, 말분만 틱 seal 후 평가. '
+            'ON(권장)=매분 틱 1분 seal, 말분에 15분 합성 후 S1·S2·청산. '
             '다음분 :00 틱 즉시, 무거래는 타임아웃(초)',
             toggle_key='realtime_15m_last_minute_from_ticks',
+        )
+        add_param_row(
+            strat_f,
+            'API실패 시 틱 결측채움',
+            None,
+            '',
+            'ON(권장)=완성15 합성 시 공식 1분이 없는 분을 틱 seal로 채움. '
+            'S1·S2·청산 모두 동일(ka10080 empty 등에서도 평가 진행)',
+            toggle_key='realtime_15m_compose_tick_fill_on_api_miss',
+        )
+        add_param_row(
+            strat_f,
+            'head 공식 soft교체',
+            None,
+            '',
+            'ON(권장)=슬롯 앞구간 닫힌 뒤 ka10080 1회로 공식 1분을 덮어씀(정합). '
+            '실패해도 틱봉·말분 평가 유지',
+            toggle_key='realtime_m1_head_official_catchup_enabled',
         )
         add_param_row(
             strat_f,
             '틱말분 타임아웃',
             'realtime_15m_tick_tail_wait_sec',
             '초',
-            '다음분 :00 틱이 없을 때(무거래) 말분 종료 후 대기. 기본 1.5',
+            '다음분 :00 틱이 없을 때(무거래) 말분·매분 seal 대기. 기본 1.5',
         )
         add_param_row(
             strat_f,
