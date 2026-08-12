@@ -13,6 +13,11 @@
 
 ---
 
+## 0.18.8 (2026-08-13)
+
+- **금일손익 N/A 고착 해소**: 장중·장마감 후 감시 시작도 N/A 고정 대신 직전 거래일 EOD 스냅→직전종가 합성 폴백. 기존 N/A 세션 자동 복구 (`session_open_day_pnl`, `virtual_tab`).
+- **모바일 자산추이 복구**: `load_equity_snapshots_range`가 `date`와 파일명 문자열을 비교하다 TypeError로 빈 points를 반환하던 버그 수정. mock/live 후보 폴더 병합 (`equity_snapshots_store`, `mobile_web`).
+
 ## 0.18.7 (2026-08-12)
 
 - **15:30→next_open 누락 방지**: 완성15 S1/held 평가를 봉·최소길이 준비 뒤에만 done 마킹. 조기 점유로 재시도가 막히던 버그 수정. 지표 실패 시 unmark (`signal_engine`).

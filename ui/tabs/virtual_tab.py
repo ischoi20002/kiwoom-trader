@@ -157,7 +157,7 @@ class VirtualTab:
             ("D+2 예상", "d2_cash", self.app.colors['primary']),
             ("주식 평가금", "stock", None),
             ("미실현 손익", "open_ur", "#88C0D0"),
-            ("금일 손익 (장시작 기준)", "day", "#EBCB8B"),
+            ("금일 손익 (시초前/전일종가)", "day", "#EBCB8B"),
         ]:
             f = ttk.Frame(summary_f)
             f.pack(side=tk.LEFT, padx=(0, 15))
@@ -2943,7 +2943,7 @@ class VirtualTab:
         (REST를 다시 호출하지 않음). 동기화 후 구조 시그니처가 같으면 경량 경로만 타는데,
         그때 이 필드를 갱신하지 않으면 예수·D+n이 0으로 남는 버그가 있었음.
 
-        금일손익은 장시작(09:00) 총자산 대비로 계산한다(장중 감시 시작 시 N/A).
+        금일손익은 장전 스냅(시초 전) 또는 직전 거래일 EOD/종가 대비로 계산한다.
         """
         try:
             def _set_if_diff(key: str, text: str) -> None:

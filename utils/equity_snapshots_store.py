@@ -115,32 +115,63 @@ def load_equity_snapshots_range(
     """
     그래프 생성용: 날짜 범위 내 존재하는 스냅샷만 로드합니다.
     """
-    s = start_day if isinstance(start_day, date) else str(start_day)[:10]
-    e = end_day if isinstance(end_day, date) else str(end_day)[:10]
+    def _as_day_str(v: date | str) -> str:
+        if isinstance(v, date):
+            return v.isoformat()
+        return str(v)[:10]
+
+    s = _as_day_str(start_day)
+    e = _as_day_str(end_day)
     try:
         lo = min(s, e)
         hi = max(s, e)
     except Exception:
         lo, hi = s, e
 
-    root = equity_snapshots_root_dir()
-    if not os.path.isdir(root):
-        return [], []
+    # 모드 폴더 우선, 비어 있으면 mock/live 후보도 탐색(배포·모드 불일치 대비)
+    roots: list[str] = []
+    try:
+        primary = equity_snapshots_root_dir()
+        if primary:
+            roots.append(primary)
+    except Exception:
+        pass
+    try:
+        for r in equity_snapshots_root_candidates():
+            if r and r not in roots:
+                roots.append(r)
+    except Exception:
+        pass
 
     days: list[str] = []
     recs: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            if not os.path.isdir(root):
+                continue
+            for fn in sorted(os.listdir(root)):
+                if not fn.endswith(".json"):
+                    continue
+                d = fn[:10]
+                if d < lo or d > hi:
+                    continue
+                if d in seen:
+                    continue
+                data = read_equity_snapshot_from_root(root, d)
+                if data is None:
+                    continue
+                seen.add(d)
+                days.append(d)
+                recs.append(data)
+        except Exception:
+            continue
+
+    # 날짜 오름차순 유지(복수 루트 병합 시)
     try:
-        for fn in sorted(os.listdir(root)):
-            if not fn.endswith(".json"):
-                continue
-            d = fn[:10]
-            if d < lo or d > hi:
-                continue
-            data = read_equity_snapshot(d)
-            if data is None:
-                continue
-            days.append(d)
-            recs.append(data)
+        paired = sorted(zip(days, recs), key=lambda x: x[0])
+        days = [p[0] for p in paired]
+        recs = [p[1] for p in paired]
     except Exception:
         pass
 

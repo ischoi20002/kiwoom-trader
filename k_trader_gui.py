@@ -3202,7 +3202,7 @@ class KiwoomApp:
                 self._start_eod_equity_snapshot_scheduler()
             except Exception:
                 pass
-            # 금일손익: 장전 시작 → 09:00 총자산 기준 / 장중 시작 → N/A
+            # 금일손익: 장전→시초前 스냅 / 장중·장마감後→직전 EOD·종가 폴백
             try:
                 from utils.session_open_day_pnl import on_monitoring_started
 

@@ -280,7 +280,11 @@
     if (pts.length < 2) {
       ctx.fillStyle = "#8C94A8";
       ctx.font = "12px sans-serif";
-      ctx.fillText("추이 데이터 부족", 8, 24);
+      ctx.fillText(
+        pts.length === 0 ? "추이 스냅샷 없음" : "추이 데이터 부족 (2일 이상 필요)",
+        8,
+        24
+      );
       return;
     }
     var vals = pts.map(function (p) {
