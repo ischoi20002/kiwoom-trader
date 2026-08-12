@@ -120,7 +120,12 @@ class OrderExecutionService:
                 return None, None
             venue = "NXT" if nxt else "KRX"
             return om.fetch_best_bid_ask_rest(
-                nc, prefer_cache=False, update_cache=True, venue=venue
+                nc,
+                prefer_cache=False,
+                update_cache=True,
+                venue=venue,
+                max_retries=4,
+                log_fail=True,
             )
         except Exception:
             return None, None
@@ -1001,15 +1006,32 @@ class OrderExecutionService:
                 except Exception:
                     bid_t, ask_t = None, None
                 if bid_t is None or float(bid_t) <= 0:
+                    # 유량/일시 실패 시 익절·청산을 통째로 버리지 않음 — 참고가 폴백
                     try:
-                        venue_label = "NXT" if nxt_src else "KRX"
-                        self.log(
-                            f"⚠️ [Exit Signal/{reason}] {pos.get('name', code)}({code}) "
-                            f"매도 생략: ka10004({venue_label}) 매수1호가 조회 실패"
-                        )
+                        fb = float(order_ref_px or np_hint or 0.0)
                     except Exception:
-                        pass
-                    return
+                        fb = 0.0
+                    if fb > 0:
+                        try:
+                            venue_label = "NXT" if nxt_src else "KRX"
+                            self.log(
+                                f"⚠️ [Exit Signal/{reason}] {pos.get('name', code)}({code}) "
+                                f"ka10004({venue_label}) 매수1호가 실패 → "
+                                f"참고가 폴백 {int(round(fb)):,}원"
+                            )
+                        except Exception:
+                            pass
+                        bid_t = fb
+                    else:
+                        try:
+                            venue_label = "NXT" if nxt_src else "KRX"
+                            self.log(
+                                f"⚠️ [Exit Signal/{reason}] {pos.get('name', code)}({code}) "
+                                f"매도 생략: ka10004({venue_label}) 매수1호가 조회 실패"
+                            )
+                        except Exception:
+                            pass
+                        return
                 try:
                     exit_ord_price = int(round(float(bid_t)))
                 except (TypeError, ValueError):

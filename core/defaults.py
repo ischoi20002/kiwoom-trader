@@ -111,6 +111,7 @@ DEFAULT_SETTINGS = {
     "realtime_market_halt_m1_min_bars_per_code": 8,
     "realtime_market_halt_m1_scale_volume_by_bars": True,
     "realtime_ka10080_global_min_interval_sec": 0.5,
+    "realtime_ka10004_global_min_interval_sec": 1.05,
     "realtime_ka10080_fail_log_ui_throttle_sec": 90.0,
     "realtime_ka10080_fail_summary_interval_sec": 300.0,
     "realtime_market_halt_slot_detection": True,

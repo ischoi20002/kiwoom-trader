@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.6 (2026-08-12)
+
+- **ka10004 유량 대응**: 호가 조회 전역 직렬화(≈1.05s)·429 재시도(최대 4회). 청산 터치호가 실패 시 참고가 폴백으로 매도 생략 방지 (`order_manager`, `order_execution_service`).
+
 ## 0.18.5 (2026-08-12)
 
 - **신호·주문 우선**: 말분 공식1분(`ka10080`)이 조용 구간을 우회하던 경로 제거. 틱말분/15:30 평가·`submit_eval`·터치호가 조회 시 공식 REST 양보. 조용 구간 기본 8초 (`closed_15m_fast_path`, `rt_watchlist_m1_api_poller`, `order_execution_service`).

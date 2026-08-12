@@ -11,6 +11,32 @@ from utils.normalization import get_tick_size, normalize_code
 from core.price_guard import validate_limit_order_reference_price
 from core.supply_display import capture_supply_snapshot
 
+# ka10004(호가) 전역 최소 간격 — 모의/실전 유량=1(초당 1회) 대응
+_KA10004_GLOBAL_LOCK = threading.Lock()
+_KA10004_GLOBAL_NEXT_MONOTONIC: float = 0.0
+
+
+def _ka10004_global_min_interval_sec(app: Any = None) -> float:
+    try:
+        st = getattr(app, "settings", None) or {}
+        v = float(st.get("realtime_ka10004_global_min_interval_sec", 1.05))
+        return max(0.35, min(3.0, v))
+    except Exception:
+        return 1.05
+
+
+def _ka10004_wait_global_slot(app: Any = None) -> None:
+    """ka10004 호출 직전 — 전역 최소 간격만큼 대기."""
+    global _KA10004_GLOBAL_NEXT_MONOTONIC
+    gap = _ka10004_global_min_interval_sec(app)
+    with _KA10004_GLOBAL_LOCK:
+        now = time.monotonic()
+        wait_s = float(_KA10004_GLOBAL_NEXT_MONOTONIC) - now
+        if wait_s > 0.0:
+            time.sleep(wait_s)
+        _KA10004_GLOBAL_NEXT_MONOTONIC = time.monotonic() + gap
+
+
 # [v4.0] Kiwoom REST API 공식 패키지 모듈 도입
 try:
     from kiwoom_rest_api.koreanstock.order import Order
@@ -662,12 +688,15 @@ class OrderManager:
         update_cache: bool = True,
         max_age_sec: Optional[float] = None,
         venue: str = "KRX",
+        max_retries: int = 3,
+        log_fail: bool = False,
     ) -> Tuple[Optional[float], Optional[float]]:
         """
         키움 REST ``ka10004``(주식호가)로 **매수1호가·매도1호가** 를 조회합니다.
 
         prefer_cache=True 이면 TTL 내 캐시를 우선 반환해 touch 주문 지연을 줄입니다.
         ``venue="NXT"`` 이면 ``{code}_NX`` 로 NXT 호가를 조회합니다(실전 전용).
+        모의/실전 유량(초당 1회)에 맞춰 전역 직렬화·429 재시도합니다.
 
         Returns
         -------
@@ -734,52 +763,115 @@ class OrderManager:
                 for it in obj:
                     _walk_collect(it, best)
 
-        try:
-            use_mock = getattr(config, "USE_MOCK", False)
-            host = config.MOCK_URL if use_mock else config.URL
-            token = self.app.auth_manager.get_auth_token()
-            if not token:
-                return None, None
-            url = f"{host}/api/dostk/mrkcond"
-            headers = {
-                "Content-Type": "application/json;charset=UTF-8",
-                "authorization": f"Bearer {token}",
-                "api-id": "ka10004",
-            }
-            res = requests.post(
-                url, headers=headers, json={"stk_cd": api_stk}, timeout=8
-            )
-            if res.status_code != 200:
-                return None, None
+        last_fail = ""
+        retries = max(1, min(int(max_retries or 1), 6))
+        for attempt in range(retries):
             try:
-                data = res.json()
-            except Exception:
-                return None, None
-            if not isinstance(data, dict):
-                return None, None
-            acc = [0, 0]
-            _walk_collect(data, acc)
-            bid1, ask1 = acc[0], acc[1]
-            if bid1 <= 0 and ask1 <= 0:
-                return None, None
-            out_bid = float(bid1) if bid1 > 0 else None
-            out_ask = float(ask1) if ask1 > 0 else None
-            if update_cache:
+                use_mock = getattr(config, "USE_MOCK", False)
+                host = config.MOCK_URL if use_mock else config.URL
+                token = self.app.auth_manager.get_auth_token()
+                if not token:
+                    last_fail = "no_token"
+                    break
+                url = f"{host}/api/dostk/mrkcond"
+                headers = {
+                    "Content-Type": "application/json;charset=UTF-8",
+                    "authorization": f"Bearer {token}",
+                    "api-id": "ka10004",
+                }
                 try:
-                    self.cache_best_bid_ask(
-                        code, out_bid, out_ask, venue=venue
-                    )
+                    _ka10004_wait_global_slot(self.app)
                 except Exception:
                     pass
-            return out_bid, out_ask
-        except requests.RequestException as e:
+                res = requests.post(
+                    url, headers=headers, json={"stk_cd": api_stk}, timeout=8
+                )
+                http_st = int(getattr(res, "status_code", 0) or 0)
+                data: Any = None
+                try:
+                    data = res.json()
+                except Exception:
+                    data = None
+                rc = None
+                rm = ""
+                if isinstance(data, dict):
+                    try:
+                        rc = data.get("return_code")
+                    except Exception:
+                        rc = None
+                    try:
+                        rm = str(data.get("return_msg") or "")
+                    except Exception:
+                        rm = ""
+
+                # 유량 초과: 대기 후 재시도
+                rate_limited = http_st == 429 or (
+                    isinstance(rc, (int, float)) and int(rc) == 5
+                ) or ("허용된 요청" in rm)
+                if rate_limited:
+                    last_fail = f"http_{http_st}_rc={rc}_rate_limit"
+                    if attempt + 1 < retries:
+                        time.sleep(1.05 + 0.15 * float(attempt))
+                        continue
+                    break
+
+                if http_st != 200:
+                    last_fail = f"http_{http_st}_rc={rc}"
+                    if attempt + 1 < retries:
+                        time.sleep(0.35)
+                        continue
+                    break
+
+                if not isinstance(data, dict):
+                    last_fail = "bad_json"
+                    break
+
+                acc = [0, 0]
+                _walk_collect(data, acc)
+                bid1, ask1 = acc[0], acc[1]
+                if bid1 <= 0 and ask1 <= 0:
+                    last_fail = f"empty_bid_ask_rc={rc}"
+                    if attempt + 1 < retries:
+                        time.sleep(0.35)
+                        continue
+                    break
+                out_bid = float(bid1) if bid1 > 0 else None
+                out_ask = float(ask1) if ask1 > 0 else None
+                if update_cache:
+                    try:
+                        self.cache_best_bid_ask(
+                            code, out_bid, out_ask, venue=venue
+                        )
+                    except Exception:
+                        pass
+                return out_bid, out_ask
+            except requests.RequestException as e:
+                last_fail = f"req:{e}"
+                try:
+                    self.logger.debug("fetch_best_bid_ask_rest 요청 실패: %s", e)
+                except Exception:
+                    pass
+                if attempt + 1 < retries:
+                    time.sleep(0.5)
+                    continue
+            except Exception as e:
+                last_fail = f"exc:{e}"
+                try:
+                    self.logger.debug("fetch_best_bid_ask_rest 예외: %s", e)
+                except Exception:
+                    pass
+                break
+
+        if log_fail or last_fail:
             try:
-                self.logger.debug("fetch_best_bid_ask_rest 요청 실패: %s", e)
-            except Exception:
-                pass
-        except Exception as e:
-            try:
-                self.logger.debug("fetch_best_bid_ask_rest 예외: %s", e)
+                msg = (
+                    f"⚠️ [ka10004] {code}({venue}) 호가 조회 실패 "
+                    f"({last_fail or 'unknown'}, tries={retries})"
+                )
+                if log_fail:
+                    self.app.log(msg)
+                else:
+                    self.logger.debug(msg)
             except Exception:
                 pass
         return None, None
