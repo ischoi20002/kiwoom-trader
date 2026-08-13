@@ -254,11 +254,11 @@ def compute_rt15m_official_replace_delay_sec(
         # 최하위 우선순위가 전역 페이싱(0.5s×N)을 크게 넘지 않도록 캡
         try:
             gmin = float(
-                settings.get("realtime_ka10080_global_min_interval_sec", 0.5)
+                settings.get("realtime_ka10080_global_min_interval_sec", 1.05)
             )
         except (TypeError, ValueError):
-            gmin = 0.5
-        spread = max(float(n_codes) * per, float(n_codes) * max(0.3, gmin))
+            gmin = 1.05
+        spread = max(float(n_codes) * per, float(n_codes) * max(0.8, gmin))
         spread = max(2.0, min(spread, 45.0))
 
         try:

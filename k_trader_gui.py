@@ -435,12 +435,13 @@ class KiwoomApp:
         """settings → config.KA10080_GLOBAL_MIN_INTERVAL_SEC (ka10080 REST 전역 최소 간격)."""
         try:
             st = getattr(self, "settings", None) or {}
-            g = float(st.get("realtime_ka10080_global_min_interval_sec", 0.35))
-            g = max(0.12, min(g, 2.0))
+            # 키움 ka10080 유량=1 → 기본 1.05초(여유). 0.5 이하는 429 위험이 큼.
+            g = float(st.get("realtime_ka10080_global_min_interval_sec", 1.05))
+            g = max(0.8, min(g, 3.0))
             self.config.KA10080_GLOBAL_MIN_INTERVAL_SEC = g
         except Exception:
             try:
-                self.config.KA10080_GLOBAL_MIN_INTERVAL_SEC = 0.35
+                self.config.KA10080_GLOBAL_MIN_INTERVAL_SEC = 1.05
             except Exception:
                 pass
 

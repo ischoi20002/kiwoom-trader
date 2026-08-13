@@ -1417,6 +1417,13 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
+            'ka10080 전역 간격',
+            'realtime_ka10080_global_min_interval_sec',
+            '초',
+            '키움 ka10080 유량=1(초당 1회). 권장 1.05. 0.5 이하면 429(허용요청초과) 위험',
+        )
+        add_param_row(
+            strat_f,
             '라이브가 주문 게이트(S1·S2·EXIT)',
             None,
             '',

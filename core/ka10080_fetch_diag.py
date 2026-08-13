@@ -32,6 +32,10 @@ class Ka10080FetchDiag:
         self._fail_by_code: DefaultDict[str, int] = defaultdict(int)
         self._ui_throttle_at: Dict[str, float] = {}
         self._summary_last_mono: float = 0.0
+        # UI 요약은 「신규 실패」가 있을 때만 — 누적 FAIL 을 매 슬롯 반복 출력하지 않음
+        self._ui_summary_last_fail_total: int = 0
+        self._summary_last_ok: int = 0
+        self._summary_last_fail: int = 0
 
     def configure(
         self,
@@ -229,14 +233,39 @@ class Ka10080FetchDiag:
         self._maybe_emit_summary(force=False)
 
     def _maybe_emit_summary(self, *, force: bool) -> None:
+        """
+        주기 요약.
+
+        - session JSONL: 간격마다(또는 신규 실패 시) 누적·구간 델타 기록
+        - UI: **신규 실패가 늘었을 때만** 출력 (누적 FAIL 을 매 15분 반복 출력하지 않음)
+        """
         now_m = time.monotonic()
         with self._lock:
-            if not force and (now_m - self._summary_last_mono) < self._summary_interval_sec():
+            fail_n = int(self._fail_total)
+            ok_n = int(self._ok_total)
+            ui_fail_delta = max(0, fail_n - int(self._ui_summary_last_fail_total))
+            interval_ok = bool(force) or (
+                (now_m - self._summary_last_mono) >= self._summary_interval_sec()
+            )
+            # 신규 실패면 간격과 무관하게 요약 허용
+            if not interval_ok and ui_fail_delta <= 0:
                 return
-            if not force and self._fail_total <= 0:
+            if not force and fail_n <= 0 and ui_fail_delta <= 0:
                 return
             self._summary_last_mono = now_m
-            snap = self.snapshot_stats()
+            ok_delta = max(0, ok_n - int(self._summary_last_ok))
+            fail_delta = max(0, fail_n - int(self._summary_last_fail))
+            self._summary_last_ok = ok_n
+            self._summary_last_fail = fail_n
+            snap = {
+                "ok_total": ok_n,
+                "fail_total": fail_n,
+                "ok_delta": int(ok_delta),
+                "fail_delta": int(fail_delta),
+                "fail_by_reason": dict(self._fail_by_reason),
+                "fail_by_context": dict(self._fail_by_context),
+                "fail_by_code_top": self._top_codes(12),
+            }
 
         try:
             sl = self._session_logger
@@ -245,19 +274,23 @@ class Ka10080FetchDiag:
         except Exception:
             pass
 
-        if self._ui_log is not None and snap.get("fail_total", 0) > 0:
-            try:
-                by_ctx = snap.get("fail_by_context") or {}
-                by_rsn = snap.get("fail_by_reason") or {}
-                ctx_s = ", ".join(f"{k}:{v}" for k, v in sorted(by_ctx.items()))
-                rsn_s = ", ".join(f"{k}:{v}" for k, v in sorted(by_rsn.items()))
-                self._ui_log(
-                    f"ℹ️ [ka10080 통계] OK {snap.get('ok_total', 0)} / "
-                    f"FAIL {snap.get('fail_total', 0)} | "
-                    f"경로 [{ctx_s}] | 원인 [{rsn_s}]"
-                )
-            except Exception:
-                pass
+        # UI: 신규 실패가 있을 때만
+        if self._ui_log is None or ui_fail_delta <= 0:
+            return
+        try:
+            by_ctx = snap.get("fail_by_context") or {}
+            by_rsn = snap.get("fail_by_reason") or {}
+            ctx_s = ", ".join(f"{k}:{v}" for k, v in sorted(by_ctx.items()))
+            rsn_s = ", ".join(f"{k}:{v}" for k, v in sorted(by_rsn.items()))
+            self._ui_log(
+                f"ℹ️ [ka10080 통계] 신규 FAIL +{ui_fail_delta} "
+                f"(누적 OK {snap.get('ok_total', 0)} / FAIL {snap.get('fail_total', 0)}) | "
+                f"경로 [{ctx_s}] | 원인 [{rsn_s}]"
+            )
+            with self._lock:
+                self._ui_summary_last_fail_total = int(snap.get("fail_total", 0) or 0)
+        except Exception:
+            pass
 
 
 ka10080_fetch_diag = Ka10080FetchDiag()

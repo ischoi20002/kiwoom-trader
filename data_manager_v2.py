@@ -86,10 +86,10 @@ def _ka10080_global_acquire_slot() -> None:
     """다음 ka10080 POST 직전까지 대기하고, 이후 호출을 위해 전역 다음 허용 시각을 갱신합니다."""
     global _KA10080_GLOBAL_NEXT_MONOTONIC
     try:
-        gap = float(getattr(config, "KA10080_GLOBAL_MIN_INTERVAL_SEC", 0.35))
+        gap = float(getattr(config, "KA10080_GLOBAL_MIN_INTERVAL_SEC", 1.05))
     except Exception:
-        gap = 0.35
-    gap = max(0.12, min(gap, 2.0))
+        gap = 1.05
+    gap = max(0.8, min(gap, 3.0))
     with _KA10080_GLOBAL_LOCK:
         try:
             now = time.monotonic()
@@ -3126,15 +3126,18 @@ class DataManagerV2:
                     except Exception:
                         data_429 = {}
                     diag_429 = _ka10080_response_diag(res, data_429, None)
-                    _ka10080_global_bump_cooldown(1.5 * (2**attempt))
+                    # 유량=1 한도이므로 429 직후 최소 ~3초+ 전역 쿨다운
+                    _ka10080_global_bump_cooldown(
+                        max(3.0, 2.5 * (2**attempt) + random.uniform(0.3, 0.8))
+                    )
                     if attempt + 1 < max_retries:
                         try:
                             time.sleep(
-                                2.5 * (attempt + 1)
-                                + random.uniform(0.2, 0.6)
+                                3.0 * (attempt + 1)
+                                + random.uniform(0.3, 0.9)
                             )
                         except Exception:
-                            time.sleep(2.5 * (attempt + 1))
+                            time.sleep(3.0 * (attempt + 1))
                         continue
                     _log_ka10080_rate_limit_throttled(code, status_code=429)
                     return _fail(
