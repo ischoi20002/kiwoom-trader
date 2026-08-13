@@ -1143,6 +1143,22 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "use_s1_a_stop_loss",
     ),
     SettingUiRow(
+        7055,
+        "⑦ 청산 · 리스크 (A/B)",
+        "[7] Flash 고점 기준 (공통)",
+        "Flash 고점",
+        "봉 High 사용 — 토글",
+        "use_flash_peak_bar_high",
+    ),
+    SettingUiRow(
+        7057,
+        "⑦ 청산 · 리스크 (A/B)",
+        "[7] Flash 고점 기준 (공통)",
+        "ATR 트레일 고점",
+        "봉 High 사용 — 토글",
+        "use_atr_peak_bar_high",
+    ),
+    SettingUiRow(
         7090,
         "⑦ 청산 · 리스크 (A/B)",
         "[7-A] Type A 청산 · 리스크 (눌림·A추매)",

@@ -353,6 +353,10 @@ DEFAULT_SETTINGS = {
     "s1_b_flash_exit_pct": 2.0,
     "use_s2_flash_exit": True,
     "s2_flash_exit_pct": 2.5,
+    # Flash/ATR 고점: False=종가·평가가만(BT·RT 통일), True=봉 High 시드
+    "use_flash_peak_bar_high": False,
+    # ATR 트레일 고점만 봉 High (Flash는 use_flash_peak_bar_high)
+    "use_atr_peak_bar_high": False,
     "use_s2_b_tp": True,
     "s2_b_take_profit": 5.0,
     "use_s2_b_stop_loss": True,

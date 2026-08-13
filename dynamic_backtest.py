@@ -232,6 +232,37 @@ class DynamicBacktester:
         except (TypeError, ValueError):
             self.atr_sl_streak_min_count = 2
 
+    def _bump_holding_bar_high(self, h_info: Optional[dict], high: Any) -> None:
+        """Flash/ATR High 모드에 맞춰 max_p / max_p_high 갱신."""
+        if not isinstance(h_info, dict):
+            return
+        try:
+            use_f = bool(self.settings.get("use_flash_peak_bar_high", False))
+            use_a = bool(self.settings.get("use_atr_peak_bar_high", False))
+        except Exception:
+            use_f, use_a = False, False
+        if not use_f and not use_a:
+            return
+        try:
+            hi = float(high)
+        except (TypeError, ValueError):
+            return
+        if hi <= 0:
+            return
+        if use_a:
+            try:
+                if hi > float(h_info.get("max_p_high", 0) or 0):
+                    h_info["max_p_high"] = hi
+            except Exception:
+                h_info["max_p_high"] = hi
+        if use_f:
+            try:
+                if hi > float(h_info.get("max_p", 0) or 0):
+                    h_info["max_p"] = hi
+                    h_info["max_price"] = hi
+            except Exception:
+                pass
+
     def _s1_blocked_by_atr_sl_cooldown(self, code: str, curr_time: Any) -> bool:
         """ATR_SL 이후 설정 일수 동안 동일 종목 S1 신규 진입 차단."""
         try:
@@ -734,6 +765,12 @@ class DynamicBacktester:
                     if d_df is None or curr_time not in d_df.index: continue
                     
                     curr_row = d_df.loc[curr_time]
+                    # 저정밀: Flash/ATR High 모드면 완성 15m High 선반영
+                    try:
+                        hi = float(curr_row.get("High", curr_row.get("high", 0)) or 0)
+                        self._bump_holding_bar_high(h_info, hi)
+                    except Exception:
+                        pass
                     res = TradingStrategy.evaluate_position(
                         code, curr_row['Close'], h_info, self.settings,
                         indicator_row=curr_row, current_time=curr_time,
@@ -1514,8 +1551,7 @@ class DynamicBacktester:
             if h_info is not None:
                 try:
                     hi = float(sig_row.get("High", fill_px) or fill_px)
-                    if hi > float(h_info.get("max_p", 0) or 0):
-                        h_info["max_p"] = hi
+                    self._bump_holding_bar_high(h_info, hi)
                 except Exception:
                     pass
                 res = TradingStrategy.evaluate_position(
@@ -1618,8 +1654,7 @@ class DynamicBacktester:
             if h_info is not None:
                 try:
                     hi = float(curr_row.get("High", curr_row.get("high", 0)) or 0)
-                    if hi > float(h_info.get("max_p", 0) or 0):
-                        h_info["max_p"] = hi
+                    self._bump_holding_bar_high(h_info, hi)
                 except Exception:
                     pass
                 res = TradingStrategy.evaluate_position(
@@ -2321,8 +2356,11 @@ class DynamicBacktester:
 
             # 1. 매도(Exit) 감시 - 보유 중인 경우 최우선 순위
             if h_info is not None:
-                # 고가 갱신 (익절/트레일링용)
-                if m1_r['High'] > h_info['max_p']: h_info['max_p'] = m1_r['High']
+                # 고가 갱신 (Flash/ATR High 모드)
+                try:
+                    self._bump_holding_bar_high(h_info, m1_r["High"])
+                except Exception:
+                    pass
                 
                 # 보수적 백테: EXIT 판가·체결을 1분 저가 기준(종가 X)
                 px_sell = m1_sell_price_conservative(m1_r)

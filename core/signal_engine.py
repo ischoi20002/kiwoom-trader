@@ -2036,26 +2036,36 @@ class SignalEngine:
                 return None
             full_15m, m1df = pair
             pos_sim = copy.deepcopy(pos_live)
-            # [버그픽스] RT 미러는 현재 15분 슬롯 M1 고점만 누적하므로, 이전 슬롯에서 형성된
-            # 당일 고점이 유실되어 Flash/ATR 트레일 무장 기준(max_p)이 백테스트와 어긋난다.
-            # full_15m(당일 봉)에서 진입 시각 이후 고가를 복원해 pos_sim.max_p 를 시드한다(상향만).
+            st = getattr(self.app, "settings", None) or {}
+            # use_flash_peak_bar_high → max_p High 시드
+            # use_atr_peak_bar_high → max_p_high High 시드 (Flash 종가 / ATR 고가 분리)
             try:
-                entry_ts = pos_live.get("entry_time") or ""
-                peak_hi = TradingStrategy._peak_high_from_bars_df(
-                    full_15m, since=(entry_ts or None)
-                )
-                if peak_hi is not None and float(peak_hi) > 0:
-                    cur_mp = 0.0
-                    for _mk in ("max_p", "max_price", "max_now"):
-                        try:
-                            _v = float(pos_sim.get(_mk, 0) or 0)
-                            if _v > cur_mp:
-                                cur_mp = _v
-                        except (TypeError, ValueError):
-                            continue
-                    seeded = max(cur_mp, float(peak_hi))
-                    pos_sim["max_p"] = seeded
-                    pos_sim["max_price"] = seeded
+                use_flash_hi = bool(st.get("use_flash_peak_bar_high", False))
+                use_atr_hi = bool(st.get("use_atr_peak_bar_high", False))
+                if use_flash_hi or use_atr_hi:
+                    entry_ts = pos_live.get("entry_time") or ""
+                    peak_hi = TradingStrategy._peak_high_from_bars_df(
+                        full_15m, since=(entry_ts or None)
+                    )
+                    if peak_hi is not None and float(peak_hi) > 0:
+                        if use_atr_hi:
+                            try:
+                                cur_h = float(pos_sim.get("max_p_high", 0) or 0)
+                            except (TypeError, ValueError):
+                                cur_h = 0.0
+                            pos_sim["max_p_high"] = max(cur_h, float(peak_hi))
+                        if use_flash_hi:
+                            cur_mp = 0.0
+                            for _mk in ("max_p", "max_price", "max_now"):
+                                try:
+                                    _v = float(pos_sim.get(_mk, 0) or 0)
+                                    if _v > cur_mp:
+                                        cur_mp = _v
+                                except (TypeError, ValueError):
+                                    continue
+                            seeded = max(cur_mp, float(peak_hi))
+                            pos_sim["max_p"] = seeded
+                            pos_sim["max_price"] = seeded
             except Exception:
                 pass
             ct = str(
@@ -2063,7 +2073,6 @@ class SignalEngine:
             ).strip().upper()
             if ct not in ("A", "B", "AB"):
                 ct = "AB"
-            st = getattr(self.app, "settings", None) or {}
             out = evaluate_bt_hp_intrabar_unified(
                 st, nk, full_15m, m1df, pos_sim, ct, skip_holder_exit=skip_exit
             )

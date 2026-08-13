@@ -1835,6 +1835,28 @@ class SettingsTab:
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락 폭(%) — 양수 권장. 음수 입력 시에도 절댓값으로 동일 적용', toggle_key='use_smart_exit')
 
         exit_parent = _sec_parent('exit')
+        exit_common_f = ttk.LabelFrame(
+            exit_parent,
+            text=' 🛡️ [6] Flash 고점 기준 (BT·RT 공통) ',
+            padding='15',
+        )
+        exit_common_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            exit_common_f,
+            'Flash 고점 — 봉 High 사용',
+            None,
+            '',
+            'OFF(권장)=종가·평가가만 누적. ON=봉 High 시드(고가 Flash, 수익↓·RT 공격적)',
+            toggle_key='use_flash_peak_bar_high',
+        )
+        add_param_row(
+            exit_common_f,
+            'ATR 트레일 고점 — 봉 High 사용',
+            None,
+            '',
+            'ON이면 ATR 무장·트레일만 High. Flash는 위 토글. (Flash 종가+ATR High 혼합 가능)',
+            toggle_key='use_atr_peak_bar_high',
+        )
         exit_a_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [6-A] Type A 청산 · 리스크 (눌림·A추매) ', padding='15')
         exit_a_f.pack(fill=tk.X, pady=10)
         add_param_row(

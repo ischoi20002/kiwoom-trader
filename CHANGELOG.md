@@ -13,6 +13,12 @@
 
 ---
 
+## 0.18.10 (2026-08-13)
+
+- **Flash 고점 종가 통일(옵션3)**: 기본 `use_flash_peak_bar_high=false` — Flash/Smart Exit 고점을 종가·평가가만 누적. 봉 High 시드는 토글 ON일 때만 (`backtest_engine`, `dynamic_backtest`, `signal_engine`).
+- **ATR 트레일 고점 분리**: `use_atr_peak_bar_high` — ATR 무장·트레일만 High, Flash는 종가 유지 가능. 기본 OFF (`defaults`, `settings_tab`).
+- 저정밀 BT가 Flash 고점에 High를 안 넣어 RT와 어긋나던 경로 정리. 2026-01~08 비교에서 종가 고점이 High 대비 우위.
+
 ## 0.18.9 (2026-08-13)
 
 - **ka10080 유량=1 정합**: 전역 최소 간격을 0.5→**1.05초**로 상향(클램프 하한 0.8). 429 직후 쿨다운·재시도 대기 강화 (`config`, `defaults`, `data_manager_v2`, `k_trader_gui`).

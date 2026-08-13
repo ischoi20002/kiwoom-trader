@@ -336,13 +336,21 @@ def evaluate_bt_hp_intrabar_unified(
             )
             if isinstance(pos_h, dict) and pos_h is not None:
                 try:
+                    use_flash_hi = bool(settings.get("use_flash_peak_bar_high", False))
+                    use_atr_hi = bool(settings.get("use_atr_peak_bar_high", False))
                     pos_sim_mp = copy.deepcopy(pos_h)
-                    for m1_idx in range(len(m1_chunk)):
-                        m1_r = m1_chunk.iloc[m1_idx]
-                        hi = _m1_hi_for_maxp(m1_r)
-                        mp = float(pos_sim_mp.get("max_p", 0) or 0)
-                        if hi > mp:
-                            pos_sim_mp["max_p"] = hi
+                    if use_flash_hi or use_atr_hi:
+                        for m1_idx in range(len(m1_chunk)):
+                            m1_r = m1_chunk.iloc[m1_idx]
+                            hi = _m1_hi_for_maxp(m1_r)
+                            if use_atr_hi:
+                                mp_h = float(pos_sim_mp.get("max_p_high", 0) or 0)
+                                if hi > mp_h:
+                                    pos_sim_mp["max_p_high"] = hi
+                            if use_flash_hi:
+                                mp = float(pos_sim_mp.get("max_p", 0) or 0)
+                                if hi > mp:
+                                    pos_sim_mp["max_p"] = hi
                     out["pos_max_p"] = float(pos_sim_mp.get("max_p", 0) or 0)
                 except Exception:
                     pass
@@ -403,10 +411,18 @@ def evaluate_bt_hp_intrabar_unified(
                 before_entry = _m1_is_before_position_entry(m1_time, pos_sim)
                 if not before_entry:
                     try:
-                        hi = _m1_hi_for_maxp(m1_r)
-                        mp = float(pos_sim.get("max_p", 0) or 0)
-                        if hi > mp:
-                            pos_sim["max_p"] = hi
+                        use_flash_hi = bool(settings.get("use_flash_peak_bar_high", False))
+                        use_atr_hi = bool(settings.get("use_atr_peak_bar_high", False))
+                        if use_flash_hi or use_atr_hi:
+                            hi = _m1_hi_for_maxp(m1_r)
+                            if use_atr_hi:
+                                mp_h = float(pos_sim.get("max_p_high", 0) or 0)
+                                if hi > mp_h:
+                                    pos_sim["max_p_high"] = hi
+                            if use_flash_hi:
+                                mp = float(pos_sim.get("max_p", 0) or 0)
+                                if hi > mp:
+                                    pos_sim["max_p"] = hi
                     except (TypeError, ValueError, KeyError):
                         pass
 

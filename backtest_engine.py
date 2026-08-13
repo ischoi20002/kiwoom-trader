@@ -1203,21 +1203,24 @@ class TradingStrategy:
         bars_df: Any,
         since: Optional[Any] = None,
         bar_minutes: int = 15,
+        price_col: str = "High",
     ) -> Optional[float]:
         """
-        당일 15분(등) 봉 High 로 고가를 복원할 때 사용한다.
+        당일 15분(등) 봉 가격열(기본 High)로 고점을 복원할 때 사용한다.
         `since`(진입·추매 시각)가 있으면 **해당 시각 이전에 시작된 봉은 제외**한다.
         (같은 15분 봉 안에서 진입 전에 형성된 wick 이 Flash/ATR 고점에 섞이지 않도록)
 
         인덱스는 `StreamProcessor` 기준 **봉 종료(슬롯) 시각**이므로
         bar_start = index - bar_minutes 로 시작 시각을 복원한다.
+        price_col=\"Close\" 이면 종가 고점(옵션3)용.
         """
         try:
             if bars_df is None or getattr(bars_df, "empty", True):
                 return None
-            if "High" not in bars_df.columns:
+            col = str(price_col or "High")
+            if col not in bars_df.columns:
                 return None
-            hi = pd.to_numeric(bars_df["High"], errors="coerce")
+            hi = pd.to_numeric(bars_df[col], errors="coerce")
             if hi.isna().all():
                 return None
             idx = bars_df.index
@@ -1290,6 +1293,17 @@ class TradingStrategy:
             return None
 
     @staticmethod
+    def _peak_close_from_bars_df(
+        bars_df: Any,
+        since: Optional[Any] = None,
+        bar_minutes: int = 15,
+    ) -> Optional[float]:
+        """진입 이후 봉 Close 상한(Flash 종가 고점 모드)."""
+        return TradingStrategy._peak_high_from_bars_df(
+            bars_df, since=since, bar_minutes=bar_minutes, price_col="Close"
+        )
+
+    @staticmethod
     def _peak_price_from_position(
         pos: dict,
         now_price: float,
@@ -1337,36 +1351,46 @@ class TradingStrategy:
         return float(max(bests))
 
     @staticmethod
-    def _cached_bars_peak_high(pos: dict, bars_df: Any) -> Optional[float]:
+    def _cached_bars_peak_high(
+        pos: dict, bars_df: Any, price_col: str = "High"
+    ) -> Optional[float]:
         """
-        진입·추매 앵커 이후 ``bars_df`` High 상한(Flash/ATR 고점 보강).
+        진입·추매 앵커 이후 ``bars_df`` 가격열 상한(Flash/ATR 고점 보강).
 
-        ``evaluate_position`` 과 ATR 표시가 동일한 ``_rt_bars_peak_cache`` 를 재사용해
-        봉 전체 스캔을 줄입니다.
+        ``evaluate_position`` 과 ATR 표시가 동일한 캐시를 재사용해
+        봉 전체 스캔을 줄입니다. price_col=\"Close\" 이면 종가 고점 캐시.
         """
         try:
             if bars_df is None or getattr(bars_df, "empty", True):
+                return None
+            col = str(price_col or "High")
+            if col not in bars_df.columns:
                 return None
             anchor = TradingStrategy._peak_anchor_timestamp_for_bars(pos)
             try:
                 lk = int(len(bars_df))
                 li = bars_df.index[-1]
-                last_hi = float(
-                    pd.to_numeric(bars_df["High"], errors="coerce").iloc[-1]
+                last_px = float(
+                    pd.to_numeric(bars_df[col], errors="coerce").iloc[-1]
                 )
             except Exception:
-                lk, li, last_hi = -1, None, float("nan")
+                lk, li, last_px = -1, None, float("nan")
             try:
-                ck = (lk, li, last_hi, repr(anchor))
+                ck = (col, lk, li, last_px, repr(anchor))
             except Exception:
-                ck = (lk, None, last_hi, "")
-            cached = (pos or {}).get("_rt_bars_peak_cache")
+                ck = (col, lk, None, last_px, "")
+            cache_key = (
+                "_rt_bars_peak_cache" if col == "High" else "_rt_bars_peak_close_cache"
+            )
+            cached = (pos or {}).get(cache_key)
             if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == ck:
                 return cached[1]
-            peak = TradingStrategy._peak_high_from_bars_df(bars_df, since=anchor)
+            peak = TradingStrategy._peak_high_from_bars_df(
+                bars_df, since=anchor, price_col=col
+            )
             try:
                 if isinstance(pos, dict):
-                    pos["_rt_bars_peak_cache"] = (ck, peak)
+                    pos[cache_key] = (ck, peak)
             except Exception:
                 pass
             return peak
@@ -1408,12 +1432,53 @@ class TradingStrategy:
             avg_p = float(pos.get("avg_p", pos.get("avg_price", now_price)) or now_price)
             if avg_p <= 0:
                 avg_p = float(now_price)
-            bh = TradingStrategy._cached_bars_peak_high(pos, bars_df)
-            max_p = float(
-                TradingStrategy._peak_price_from_position(
-                    pos, float(now_price), bars_peak_high=bh
+            try:
+                use_flash_hi = bool(settings.get("use_flash_peak_bar_high", False))
+            except Exception:
+                use_flash_hi = False
+            try:
+                use_atr_hi = bool(settings.get("use_atr_peak_bar_high", False))
+            except Exception:
+                use_atr_hi = False
+            # Flash 표시용 max_p
+            if use_flash_hi:
+                bh = TradingStrategy._cached_bars_peak_high(pos, bars_df)
+                max_p = float(
+                    TradingStrategy._peak_price_from_position(
+                        pos, float(now_price), bars_peak_high=bh
+                    )
                 )
-            )
+            else:
+                bc = TradingStrategy._cached_bars_peak_high(
+                    pos, bars_df, price_col="Close"
+                )
+                if bc is not None:
+                    try:
+                        max_p = max(float(now_price), float(bc))
+                    except (TypeError, ValueError):
+                        max_p = float(now_price)
+                else:
+                    max_p = float(
+                        TradingStrategy._peak_price_from_position(
+                            pos, float(now_price), bars_peak_high=None
+                        )
+                    )
+            # ATR 트레일 표시용 고점
+            if use_atr_hi:
+                bh2 = TradingStrategy._cached_bars_peak_high(pos, bars_df)
+                atr_peak = float(
+                    TradingStrategy._peak_price_from_position(
+                        pos, float(now_price), bars_peak_high=bh2
+                    )
+                )
+                try:
+                    mph = float(pos.get("max_p_high", 0) or 0)
+                    if mph > atr_peak:
+                        atr_peak = mph
+                except (TypeError, ValueError):
+                    pass
+            else:
+                atr_peak = float(max_p)
 
             def _ir_get(key: str, default: float = 0.0) -> float:
                 if indicator_row is None:
@@ -1500,7 +1565,7 @@ class TradingStrategy:
                     )
                 )
                 try:
-                    peak_pct = (max_p / avg_p - 1.0) * 100.0 if avg_p > 0 else 0.0
+                    peak_pct = (atr_peak / avg_p - 1.0) * 100.0 if avg_p > 0 else 0.0
                 except Exception:
                     peak_pct = 0.0
                 trail_armed = peak_pct >= tp_arm_pct
@@ -1558,8 +1623,8 @@ class TradingStrategy:
             if run_atr_exit and use_trail_atr and trail_armed and curr_atr > 0:
                 try:
                     trail_mult = float(s.get(f"atr_multiplier_trail{suff}", 4.0))
-                    tr_px = max_p - (trail_mult * curr_atr)
-                    if np.isfinite(tr_px) and np.isfinite(max_p):
+                    tr_px = atr_peak - (trail_mult * curr_atr)
+                    if np.isfinite(tr_px) and np.isfinite(atr_peak):
                         candidates.append(("ATR TRL", float(tr_px)))
                 except Exception:
                     pass
@@ -1622,21 +1687,112 @@ class TradingStrategy:
         avg_p = pos.get('avg_p', pos.get('avg_price', now_price))
         profit_ratio = (now_price / avg_p - 1) * 100
         
-        # 2. 최고가 갱신 — 키가 없던 포지션도 매 틱 누적해야 트레일 무장·Flash 가 맞음
-        bars_peak = None
-        if kwargs:
+        # 2. 최고가 갱신 — Flash 고점(max_p)과 ATR 트레일 고점(max_p_high)을 분리 가능
+        # use_flash_peak_bar_high / use_atr_peak_bar_high (기본 False=종가·평가가)
+        try:
+            use_flash_hi = bool(settings.get("use_flash_peak_bar_high", False))
+        except Exception:
+            use_flash_hi = False
+        try:
+            use_atr_hi = bool(settings.get("use_atr_peak_bar_high", False))
+        except Exception:
+            use_atr_hi = False
+        bars_df_kw = None
+        try:
+            if kwargs:
+                bars_df_kw = kwargs.get("bars_df")
+        except Exception:
+            bars_df_kw = None
+
+        # --- 종가(평가가) 고점 ---
+        peak_close = None
+        try:
+            bc = TradingStrategy._cached_bars_peak_high(
+                pos, bars_df_kw, price_col="Close"
+            )
+        except Exception:
+            bc = None
+        if bc is not None:
             try:
-                bars_peak = TradingStrategy._cached_bars_peak_high(
-                    pos, kwargs.get("bars_df")
-                )
+                peak_close = max(float(now_price), float(bc))
+            except (TypeError, ValueError):
+                peak_close = float(now_price)
+        else:
+            # bars 없으면 평가가 누적. max_p_close 우선, 없으면 max_p(종가모드 이력)
+            bests: list = []
+            try:
+                bests.append(float(now_price))
+            except (TypeError, ValueError):
+                pass
+            for k in ("max_p_close",):
+                try:
+                    v = float((pos or {}).get(k, 0) or 0)
+                    if v > 0:
+                        bests.append(v)
+                except (TypeError, ValueError):
+                    pass
+            if not use_flash_hi:
+                for k in ("max_p", "max_price", "max_now"):
+                    try:
+                        v = float((pos or {}).get(k, 0) or 0)
+                        if v > 0:
+                            bests.append(v)
+                    except (TypeError, ValueError):
+                        pass
+            peak_close = float(max(bests)) if bests else float(now_price)
+
+        # --- 봉 High 고점 ---
+        peak_high = None
+        if use_flash_hi or use_atr_hi:
+            bars_hi = None
+            try:
+                bars_hi = TradingStrategy._cached_bars_peak_high(pos, bars_df_kw)
             except Exception:
-                bars_peak = None
-        max_p = TradingStrategy._peak_price_from_position(
-            pos, now_price, bars_peak_high=bars_peak
-        )
+                bars_hi = None
+            if bars_hi is None:
+                try:
+                    ih = float(_get_val("High", 0) or 0)
+                    if ih > 0:
+                        bars_hi = ih
+                except (TypeError, ValueError):
+                    pass
+            hi_bests: list = []
+            try:
+                hi_bests.append(float(now_price))
+            except (TypeError, ValueError):
+                pass
+            if bars_hi is not None:
+                try:
+                    hi_bests.append(float(bars_hi))
+                except (TypeError, ValueError):
+                    pass
+            for k in ("max_p_high",):
+                try:
+                    v = float((pos or {}).get(k, 0) or 0)
+                    if v > 0:
+                        hi_bests.append(v)
+                except (TypeError, ValueError):
+                    pass
+            if use_flash_hi:
+                # Flash도 High면 기존 max_p 키를 High 후보에 포함
+                for k in ("max_p", "max_price", "max_now"):
+                    try:
+                        v = float((pos or {}).get(k, 0) or 0)
+                        if v > 0:
+                            hi_bests.append(v)
+                    except (TypeError, ValueError):
+                        pass
+            peak_high = float(max(hi_bests)) if hi_bests else float(now_price)
+
+        max_p = float(peak_high if use_flash_hi else peak_close)
+        atr_peak = float(peak_high if use_atr_hi else peak_close)
         try:
             pos["max_p"] = max_p
             pos["max_price"] = max_p
+            pos["max_p_close"] = float(peak_close)
+            if peak_high is not None:
+                pos["max_p_high"] = float(peak_high)
+            pos["max_p_atr"] = float(atr_peak)
         except Exception:
             pass
         
@@ -1760,7 +1916,8 @@ class TradingStrategy:
             except Exception:
                 pass
 
-        # 고정TP 연기 모드에서 목표% 무장 후에는 Flash가 ATR 트레일보다 먼저 청산하는 것을 막음(리포트에 ATR_TRAIL이 0건으로 남는 주원인)
+        # 고정TP 연기 모드에서 목표% 무장 후에는 Flash가 ATR 트레일보다 먼저 청산하는 것을 막음
+        # (무장 판정은 ATR 고점 기준)
         tp_pct_for_trail_arm = float(
             s.get(
                 _exit_key(
@@ -1774,7 +1931,9 @@ class TradingStrategy:
         )
         try:
             peak_profit_pct_gate = (
-                (max_p / float(avg_p) - 1.0) * 100.0 if avg_p is not None and float(avg_p) > 0 else profit_ratio
+                (atr_peak / float(avg_p) - 1.0) * 100.0
+                if avg_p is not None and float(avg_p) > 0
+                else profit_ratio
             )
         except (TypeError, ValueError, ZeroDivisionError):
             peak_profit_pct_gate = profit_ratio
@@ -1812,7 +1971,7 @@ class TradingStrategy:
                     # 리포트·CSV에서 설정 반영 여부 확인용(STOP_LOSS 문자열은 유지 → SL 버킷 집계 동일)
                     is_exit, exit_reason = True, f"STOP_LOSS|SL%={sl_pct:g}"
 
-        # 3. Flash Exit (Trailing from High)
+        # 3. Flash Exit (Trailing from High) — Flash 고점(max_p) 기준
         if not is_exit:
             use_flash = s.get(_exit_key('use_s1_a_flash_exit', 'use_s1_b_flash_exit', 'use_s2_flash_exit', 'use_s2_b_flash_exit'), True)
             if use_flash and profit_ratio >= 0 and not skip_flash_for_atr_trail:
@@ -1820,7 +1979,7 @@ class TradingStrategy:
                 if now_price <= max_p * (1.0 - f_pct / 100.0):
                     is_exit, exit_reason = True, "FLASH_EXIT"
 
-        # 4. Smart Exit (Supply/Demand Trap)
+        # 4. Smart Exit (Supply/Demand Trap) — Flash와 동일 고점(종가/고가 정책 공유)
         # smart_exit_price_threshold: 고점 대비 '하락 폭(%)'을 양수로 적는 것이 의도.
         # 과거 호환을 위해 음수 입력은 절댓값으로 동일 해석(예: -1 과 1 동일 → 1% 하락 후 매도벽 조건 평가).
         if not is_exit and s.get('use_smart_exit', True):
@@ -1834,7 +1993,7 @@ class TradingStrategy:
                 if sell_buy_wall_ratio >= min_trap or (is_realtime and is_power_exhausted):
                     is_exit, exit_reason = True, "SMART_EXIT"
 
-        # 5. ATR 기반 손절 및 트레일링 스톱
+        # 5. ATR 기반 손절 및 트레일링 스톱 — ATR 고점(atr_peak) 기준
         # use_atr_exit: ATR 주기 UI 마스터. OFF여도 ATR SL/트레일 개별 토글이면 해당 로직만 수행(지표 ATR은 이미 존재)
         if not is_exit:
             try:
@@ -1874,7 +2033,9 @@ class TradingStrategy:
                                 )
                             )
                             peak_pct = (
-                                (max_p / avg_p - 1.0) * 100.0 if avg_p and float(avg_p) > 0 else profit_ratio
+                                (atr_peak / avg_p - 1.0) * 100.0
+                                if avg_p and float(avg_p) > 0
+                                else profit_ratio
                             )
                             trail_armed = peak_pct >= tp_arm_pct
 
@@ -1901,7 +2062,7 @@ class TradingStrategy:
 
                         if use_sl_atr and now_price <= avg_p - (eff_sl_mult * entry_atr):
                             is_exit, exit_reason = True, "ATR_SL"
-                        elif use_trail_atr and trail_armed and now_price <= max_p - (trail_mult * curr_atr):
+                        elif use_trail_atr and trail_armed and now_price <= atr_peak - (trail_mult * curr_atr):
                             is_exit, exit_reason = True, "ATR_TRAIL"
             except Exception:
                 pass
@@ -1960,6 +2121,60 @@ class SimpleBacktester:
         self.gap_down_limit = -5.0
         self.use_s2_tp_active = True
         self.use_type_b = False
+
+    def _use_flash_peak_bar_high(self) -> bool:
+        """True면 Flash 고점에 봉 High 반영. 기본 False(종가·평가가)."""
+        try:
+            return bool(self.settings.get("use_flash_peak_bar_high", False))
+        except Exception:
+            return False
+
+    def _use_atr_peak_bar_high(self) -> bool:
+        """True면 ATR 트레일 고점에 봉 High 반영."""
+        try:
+            return bool(self.settings.get("use_atr_peak_bar_high", False))
+        except Exception:
+            return False
+
+    def _bump_pos_max_from_high(self, pos: Optional[dict], high: Any) -> None:
+        """Flash/ATR 중 High 모드인 쪽에만 고점 상향."""
+        if not pos:
+            return
+        use_flash = self._use_flash_peak_bar_high()
+        use_atr = self._use_atr_peak_bar_high()
+        if not use_flash and not use_atr:
+            return
+        try:
+            hi = float(high)
+            if not (np.isfinite(hi) and hi > 0):
+                return
+            if use_atr:
+                try:
+                    if hi > float(pos.get("max_p_high", 0) or 0):
+                        pos["max_p_high"] = hi
+                except Exception:
+                    pos["max_p_high"] = hi
+            if use_flash:
+                if hi > float(pos.get("max_price", 0) or 0):
+                    pos["max_price"] = hi
+                try:
+                    if hi > float(pos.get("max_p", 0) or 0):
+                        pos["max_p"] = hi
+                except Exception:
+                    pass
+        except (TypeError, ValueError):
+            pass
+
+    def _entry_max_p(self, fill_px: float, bar_high: Any) -> float:
+        """매수 직후 max_p 초기값 — Flash High 모드면 봉고가, 아니면 체결가."""
+        if self._use_flash_peak_bar_high():
+            try:
+                hi = float(bar_high)
+                if np.isfinite(hi) and hi > 0:
+                    return max(float(fill_px), hi)
+            except (TypeError, ValueError):
+                pass
+        return float(fill_px)
         
     def calculate_rsi(self, series, period=14):
         delta = series.diff()
@@ -2480,8 +2695,7 @@ class SimpleBacktester:
                 if pos is not None and m1_highs is not None and len(m1_highs) > 0:
                     try:
                         hi = float(np.nanmax(np.asarray(m1_highs, dtype=float)))
-                        if np.isfinite(hi) and hi > float(pos.get("max_price", 0) or 0):
-                            pos["max_price"] = hi
+                        self._bump_pos_max_from_high(pos, hi)
                     except Exception:
                         pass
             except Exception:
@@ -2534,7 +2748,7 @@ class SimpleBacktester:
             # 1. 매도(Exit) 및 추가매수(Addon) 감시 (보유 중인 경우)
             if params['position'] is not None:
                 pos = params['position']
-                if m1_h > pos['max_price']: pos['max_price'] = m1_h
+                self._bump_pos_max_from_high(pos, m1_h)
                 
                 try:
                     _lo = float(m1_l)
@@ -2687,14 +2901,11 @@ class SimpleBacktester:
                                         )
                                     )
                                 )
-                                if np.isfinite(hi) and hi > float(
-                                    pos.get("max_price", 0) or 0
-                                ):
-                                    pos["max_price"] = hi
+                                self._bump_pos_max_from_high(pos, hi)
                             except Exception:
                                 pass
-                    elif curr_high > float(pos.get("max_price", 0) or 0):
-                        pos["max_price"] = curr_high
+                    else:
+                        self._bump_pos_max_from_high(pos, curr_high)
             except Exception:
                 pass
             return params
@@ -2751,7 +2962,7 @@ class SimpleBacktester:
         # 2. Standard Sim Logic
         if params['position'] is not None:
             pos = params['position']
-            if curr_high > pos['max_price']: pos['max_price'] = curr_high
+            self._bump_pos_max_from_high(pos, curr_high)
             
             # Exit Check
             exit_res = self._check_exits_optimized(curr_date, curr_close, curr_high, curr_low, pos, indicators=indicators, i=i)
@@ -2813,7 +3024,7 @@ class SimpleBacktester:
                         params,
                         stage=1,
                         entry_idx=i,
-                        max_p=float(curr_high),
+                        max_p=self._entry_max_p(float(curr_close), curr_high),
                         reason=reason,
                         indicators=indicators,
                         i=i,
@@ -2972,11 +3183,7 @@ class SimpleBacktester:
 
         if params.get("position") is not None:
             pos = params["position"]
-            try:
-                if curr_high > float(pos.get("max_price", 0) or 0):
-                    pos["max_price"] = curr_high
-            except Exception:
-                pass
+            self._bump_pos_max_from_high(pos, curr_high)
 
             exit_res = self._check_exits_optimized(
                 curr_date,
@@ -3076,7 +3283,7 @@ class SimpleBacktester:
                     params,
                     stage=1,
                     entry_idx=i,
-                    max_p=float(curr_high),
+                    max_p=self._entry_max_p(float(px), curr_high),
                     reason=rsn,
                     indicators=indicators,
                     i=i,
