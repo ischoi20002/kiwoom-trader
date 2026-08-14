@@ -751,7 +751,7 @@ class SignalEngine:
         return False
 
     def _prefetch_touch_quote_async(self, code: str) -> None:
-        """touch 주문용 ka10004를 지표 계산과 겹쳐 미리 조회합니다."""
+        """touch 주문용 ka10004를 백그라운드 조회(레거시·선택적)."""
         try:
             oes = getattr(self.app, "order_execution_service", None)
             if oes is None:
@@ -762,7 +762,6 @@ class SignalEngine:
                 if str(ex_style) != "touch":
                     return
         except Exception:
-            # 스펙 확인 실패 시에도 prefetch 시도(캐시만 채움)
             pass
 
         nk = str(canonical_stock_code(code) or code).zfill(6)
@@ -779,6 +778,34 @@ class SignalEngine:
             threading.Thread(
                 target=_run, name=f"quote_pf_{nk}", daemon=True
             ).start()
+        except Exception:
+            pass
+
+    def _prefetch_touch_quote_sync_for_order(self, code: str) -> None:
+        """
+        매수/청산 확정 직후 해당 종목만 ka10004를 동기 조회해 캐시에 넣습니다.
+
+        슬롯 경계 전 종목 prefetch는 유량 큐를 막아 주문만 늦추므로,
+        신호가 난 종목에만 1회 호출합니다.
+        """
+        try:
+            oes = getattr(self.app, "order_execution_service", None)
+            if oes is None:
+                tc = getattr(self.app, "trading_controller", None)
+                oes = getattr(tc, "order_execution_service", None) if tc else None
+            if oes is not None and hasattr(oes, "_realtime_live_order_spec"):
+                _ot, ex_style = oes._realtime_live_order_spec()
+                if str(ex_style) != "touch":
+                    return
+        except Exception:
+            pass
+        nk = str(canonical_stock_code(code) or code).zfill(6)
+        if len(nk) != 6:
+            return
+        try:
+            om = getattr(self.app, "order_manager", None)
+            if om is not None and hasattr(om, "prefetch_best_bid_ask_rest"):
+                om.prefetch_best_bid_ask_rest(nk)
         except Exception:
             pass
 
@@ -1039,9 +1066,9 @@ class SignalEngine:
                 return
 
             settings = getattr(self.app, "settings", None) or {}
-            # 지표 계산과 호가 REST를 겹쳐 touch 주문 RTT를 숨김
+            # 전 종목 ka10004 prefetch 금지 — 유량 큐가 막혀 실제 주문만 지연됨.
+            # 매수 확정 시에만 `_prefetch_touch_quote_sync_for_order` 호출.
             try:
-                self._prefetch_touch_quote_async(nk)
                 calc_df = self._closed_df_for_indicator_calc(closed_df)
                 df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
                 df_ind = self._apply_ready_column_to_indicators(df_ind)
@@ -1297,6 +1324,11 @@ class SignalEngine:
 
             # 주문 패스트패스(Tk 메인 큐 우회) — 틱 경로와 분리
             try:
+                # 매수 확정 종목만 호가 1회 동기 조회 → 주문 경로 prefer_cache 히트
+                try:
+                    self._prefetch_touch_quote_sync_for_order(nk)
+                except Exception:
+                    pass
                 self.last_buy_sig_time[nk] = datetime.now()
                 if mi_key and mi_key != nk:
                     self.last_buy_sig_time[mi_key] = self.last_buy_sig_time[nk]
@@ -1405,8 +1437,8 @@ class SignalEngine:
                 return
 
             settings = getattr(self.app, "settings", None) or {}
+            # 보유 평가도 전 종목 prefetch 하지 않음 — 액션 확정 후 동기 1회
             try:
-                self._prefetch_touch_quote_async(nk)
                 calc_df = self._closed_df_for_indicator_calc(closed_df)
                 df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
                 last_row = df_ind.iloc[-1].to_dict()
@@ -1607,6 +1639,11 @@ class SignalEngine:
                 pass
 
             try:
+                # EXIT/S2 확정 시에만 해당 종목 호가 동기 조회
+                try:
+                    self._prefetch_touch_quote_sync_for_order(nk)
+                except Exception:
+                    pass
                 payload = (
                     nk,
                     act,
@@ -3451,6 +3488,10 @@ class SignalEngine:
                         if defer_main_callbacks:
                             try:
                                 # 메인 처리 전 동일 종목이 연속 큐 적재되는 것을 막기 위해 쿨타임 앵커를 먼저 둡니다.
+                                try:
+                                    self._prefetch_touch_quote_sync_for_order(code)
+                                except Exception:
+                                    pass
                                 self.last_buy_sig_time[code] = datetime.now()
                                 self.app.enqueue_tick_main_action(
                                     "buy_signal",
@@ -3467,6 +3508,10 @@ class SignalEngine:
                                 pass
                         else:
                             try:
+                                try:
+                                    self._prefetch_touch_quote_sync_for_order(code)
+                                except Exception:
+                                    pass
                                 buy_ok = bool(
                                     self.app._on_buy_signal_received(
                                         code,

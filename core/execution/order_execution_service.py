@@ -103,9 +103,13 @@ class OrderExecutionService:
         return f"{head}|{r}"
 
     def _fetch_touch_bid_ask(
-        self, code: Any, *, nxt: bool
+        self, code: Any, *, nxt: bool, prefer_cache: bool = True
     ) -> Tuple[Optional[float], Optional[float]]:
-        """터치 주문용 (bid1, ask1). ``nxt=True`` 이면 ka10004 ``_NX``."""
+        """터치 주문용 (bid1, ask1). ``nxt=True`` 이면 ka10004 ``_NX``.
+
+        기본 ``prefer_cache=True`` — 신호 확정 직후 prefetch 한 호가를 우선 사용해
+        슬롯 경계 ka10004 큐 대기를 피합니다.
+        """
         try:
             # 호가 조회·주문 직전: 말분 공식봉 REST가 끼어들지 않도록 양보
             try:
@@ -119,13 +123,21 @@ class OrderExecutionService:
             if om is None:
                 return None, None
             venue = "NXT" if nxt else "KRX"
+            max_age: Optional[float] = None
+            try:
+                st = getattr(self.app, "settings", None) or {}
+                max_age = float(st.get("realtime_touch_quote_cache_ttl_sec", 15.0))
+                max_age = max(0.5, min(60.0, max_age))
+            except Exception:
+                max_age = 15.0
             return om.fetch_best_bid_ask_rest(
                 nc,
-                prefer_cache=False,
+                prefer_cache=bool(prefer_cache),
                 update_cache=True,
                 venue=venue,
                 max_retries=4,
                 log_fail=True,
+                max_age_sec=max_age,
             )
         except Exception:
             return None, None

@@ -26,15 +26,22 @@ def _ka10004_global_min_interval_sec(app: Any = None) -> float:
 
 
 def _ka10004_wait_global_slot(app: Any = None) -> None:
-    """ka10004 호출 직전 — 전역 최소 간격만큼 대기."""
+    """ka10004 호출 직전 — 전역 최소 간격만큼 대기(락 밖에서 sleep)."""
     global _KA10004_GLOBAL_NEXT_MONOTONIC
     gap = _ka10004_global_min_interval_sec(app)
-    with _KA10004_GLOBAL_LOCK:
-        now = time.monotonic()
-        wait_s = float(_KA10004_GLOBAL_NEXT_MONOTONIC) - now
+    try:
+        with _KA10004_GLOBAL_LOCK:
+            now = time.monotonic()
+            start_at = max(now, float(_KA10004_GLOBAL_NEXT_MONOTONIC))
+            _KA10004_GLOBAL_NEXT_MONOTONIC = start_at + gap
+        wait_s = float(start_at) - time.monotonic()
         if wait_s > 0.0:
             time.sleep(wait_s)
-        _KA10004_GLOBAL_NEXT_MONOTONIC = time.monotonic() + gap
+    except Exception:
+        try:
+            time.sleep(min(0.2, gap))
+        except Exception:
+            pass
 
 
 # [v4.0] Kiwoom REST API 공식 패키지 모듈 도입
@@ -72,10 +79,10 @@ class OrderManager:
     def _touch_quote_cache_ttl_sec(self) -> float:
         try:
             st = getattr(self.app, "settings", None) or {}
-            v = float(st.get("realtime_touch_quote_cache_ttl_sec", 2.0))
-            return max(0.2, min(10.0, v))
+            v = float(st.get("realtime_touch_quote_cache_ttl_sec", 15.0))
+            return max(0.5, min(60.0, v))
         except Exception:
-            return 2.0
+            return 15.0
 
     @staticmethod
     def quote_venue_stk_cd(stk_cd: str, *, venue: str = "KRX") -> str:

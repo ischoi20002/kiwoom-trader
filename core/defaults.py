@@ -163,7 +163,7 @@ DEFAULT_SETTINGS = {
     "realtime_15m_slot_roll_workers": 8,
     "realtime_closed_15m_eval_workers": 8,
     "realtime_closed_15m_indicator_max_rows": 300,
-    "realtime_touch_quote_cache_ttl_sec": 2.0,
+    "realtime_touch_quote_cache_ttl_sec": 15.0,
     "ws_reg_max_codes_per_chunk": 80,
     "realtime_tree_first_refresh_delay_ms": 48,
     "realtime_rsi_calc_min_interval_sec": 1.0,

@@ -13,6 +13,11 @@
 
 ---
 
+## 0.18.12 (2026-08-14)
+
+- **터치호가 주문 지연 완화**: 슬롯마다 전 종목 ka10004 prefetch를 제거하고, 매수·청산 확정 종목만 호가 1회 동기 조회. 주문 경로는 캐시 우선(`prefer_cache`)·TTL 15초 (`signal_engine`, `order_execution_service`, `defaults`).
+- **ka10004 대기**: 전역 유량 대기를 락 밖에서 sleep 하도록 수정해 대기 직렬화가 덜 꼬이게 함 (`order_manager`).
+
 ## 0.18.11 (2026-08-14)
 
 - **감시 시작 UI 프리징**: Transition 게이트 FDR(~200종 일봉) 조회를 메인 스레드에서 워밍업 백그라운드로 이동. 선정 직후(~15분) 레짐 결과는 재조회 생략 (`trading_controller`, `warmup_stream_prep_service`, `monitor_tab`).
