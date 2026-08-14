@@ -2,6 +2,24 @@ import pandas as pd
 import numpy as np
 
 
+def settings_allow_1530_signal_eval(settings: dict | None) -> bool:
+    """
+    종가 단일가(15:30) 슬롯에서 S1·S2·청산 평가를 허용할지.
+
+    BT ``next_open`` / RT 모의 익일예약 / 실전 NXT 모두 이 플래그로 신호를 살리고,
+    체결만 경로가 갈라진다.
+    """
+    try:
+        st = settings or {}
+        return bool(
+            st.get("_bt_allow_1530_signal_eval", False)
+            or st.get("allow_1530_signal_eval", False)
+            or st.get("next_open_1530_enabled", False)
+        )
+    except Exception:
+        return False
+
+
 def _normalize_same_bar_priority(settings: dict | None) -> str:
     """동일 봉 A+B 동시 신호 시 Sig_Type 우선순위 (settings 키: same_bar_sig_priority)."""
     try:
@@ -197,11 +215,7 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     #   이면 허용. 체결만 경로가 갈림(모의=익일09:00 예약, 실전=NXT+SOR, BT=시초 이월).
     try:
         _idx = pd.DatetimeIndex(pd.to_datetime(df.index))
-        _allow_1530 = bool(
-            settings.get("_bt_allow_1530_signal_eval", False)
-            or settings.get("allow_1530_signal_eval", False)
-            or settings.get("next_open_1530_enabled", False)
-        )
+        _allow_1530 = bool(settings_allow_1530_signal_eval(settings))
         try:
             from utils.krx_bars import is_krx_last_15m_slot
 

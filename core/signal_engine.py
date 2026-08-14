@@ -629,6 +629,62 @@ class SignalEngine:
             except Exception:
                 return False
 
+    def _route_1530_strategy_execution(
+        self,
+        code: str,
+        action: str,
+        *,
+        reason: str = "",
+        limit_price: float = 0.0,
+        profit_ratio: float = 0.0,
+        bar_ts: Any = None,
+    ) -> str:
+        """
+        15:30 S2/청산 체결 경로.
+
+        Returns
+        -------
+        ``queued``
+            모의 next_open 예약 완료 → 즉시 주문 금지.
+        ``nxt``
+            실전 NXT 플래그 설정 → 호출측이 바로 주문.
+        ``none``
+            15:30 아님 또는 해당 없음.
+        """
+        try:
+            act = str(action or "").upper()
+            if act not in ("EXIT", "STAGE2"):
+                return "none"
+            ts = bar_ts
+            if ts is None:
+                try:
+                    from utils.krx_bars import krx_stream_slot_end_datetime
+
+                    ts = krx_stream_slot_end_datetime()
+                except Exception:
+                    ts = None
+            if not self._is_1530_bar_slot(ts):
+                return "none"
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            if self._use_nxt_sor_touch_orders():
+                oes = self._order_execution_service()
+                if oes is not None and hasattr(oes, "mark_nxt_touch_order"):
+                    oes.mark_nxt_touch_order(nk, src="15:30")
+                return "nxt"
+            if self._next_open_1530_enabled():
+                ok = self._queue_next_open_strategy_action(
+                    code=nk,
+                    action=act,
+                    reason=str(reason or ""),
+                    limit_price=float(limit_price or 0.0),
+                    profit_ratio=float(profit_ratio or 0.0),
+                    bar_ts=ts,
+                )
+                return "queued" if ok else "none"
+        except Exception:
+            return "none"
+        return "none"
+
     def _order_execution_service(self) -> Any:
         try:
             oes = getattr(self.app, "order_execution_service", None)
@@ -1554,27 +1610,21 @@ class SignalEngine:
                 return
 
             order_px = float(close_px)
-            _is_1530 = self._is_1530_bar_slot(bar_ts)
-            _use_nxt = self._use_nxt_sor_touch_orders()
             try:
-                if _is_1530:
-                    if _use_nxt:
-                        oes = self._order_execution_service()
-                        if oes is not None and hasattr(oes, "mark_nxt_touch_order"):
-                            oes.mark_nxt_touch_order(nk, src="15:30")
-                    elif self._next_open_1530_enabled():
-                        ok_next = self._queue_next_open_strategy_action(
-                            code=nk,
-                            action=act,
-                            reason=str(res.get("reason") or ""),
-                            limit_price=float(order_px),
-                            profit_ratio=float(res.get("profit_ratio", 0) or 0),
-                            bar_ts=bar_ts,
-                        )
-                        if ok_next:
-                            return
+                _routed = self._route_1530_strategy_execution(
+                    nk,
+                    act,
+                    reason=str(res.get("reason") or ""),
+                    limit_price=float(order_px),
+                    profit_ratio=float(res.get("profit_ratio", 0) or 0),
+                    bar_ts=bar_ts,
+                )
+                if _routed == "queued":
+                    return
             except Exception:
                 pass
+            _is_1530 = self._is_1530_bar_slot(bar_ts)
+            _use_nxt = self._use_nxt_sor_touch_orders()
             # 15:15: 모의→동시호가 시장가 / 실전→NXT 터치+SOR
             _auction_1515 = False
             try:
@@ -3861,26 +3911,44 @@ class SignalEngine:
                                     _act_kw[_ak] = str(_av)
                             except Exception:
                                 pass
-                        if defer_main_callbacks:
-                            try:
-                                self.app.enqueue_tick_main_action(
-                                    "strategy_action",
-                                    (
-                                        str(code).zfill(6),
-                                        str(res.get("action") or ""),
-                                        str(res.get("reason") or ""),
-                                        _act_kw,
-                                    ),
-                                )
-                            except Exception:
-                                pass
-                        else:
-                            self.app._on_strategy_action_needed(
-                                code,
-                                res.get("action"),
-                                res.get("reason"),
-                                **_act_kw,
+                        # 15:30: 모의→익일예약 / 실전→NXT (완성봉 held 경로와 동일)
+                        _skip_immediate_order = False
+                        try:
+                            _r1530 = self._route_1530_strategy_execution(
+                                str(code).zfill(6),
+                                str(res.get("action") or ""),
+                                reason=str(res.get("reason") or ""),
+                                limit_price=float(_eff_np),
+                                profit_ratio=float(
+                                    res.get("profit_ratio", 0) or 0
+                                ),
+                                bar_ts=None,
                             )
+                            if _r1530 == "queued":
+                                _skip_immediate_order = True
+                        except Exception:
+                            _skip_immediate_order = False
+                        if not _skip_immediate_order:
+                            if defer_main_callbacks:
+                                try:
+                                    self.app.enqueue_tick_main_action(
+                                        "strategy_action",
+                                        (
+                                            str(code).zfill(6),
+                                            str(res.get("action") or ""),
+                                            str(res.get("reason") or ""),
+                                            _act_kw,
+                                        ),
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                self.app._on_strategy_action_needed(
+                                    code,
+                                    res.get("action"),
+                                    res.get("reason"),
+                                    **_act_kw,
+                                )
 
                     if held_eval_due and has_m1_store:
                         try:

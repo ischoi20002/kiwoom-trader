@@ -2676,14 +2676,17 @@ class SimpleBacktester:
         - 미보유 S1: 15분 벡터 신호를 그대로 덮어쓰지 않고, 1~k분 누적 가상 15분봉으로
           ``calculate_indicators`` + ``get_buy_signals_detailed`` 를 다시 돌려 인과적으로 진입 시점만 잡음.
         """
-        # 종가 단일가 슬롯: S1·S2·청산 전부 스킵. 동시호가 직전은 호출측 auction fill.
+        # 종가 단일가 슬롯: 기본 S1·S2·청산 스킵. next_open 허용 시 평가(체결은 호출측).
         try:
             from utils.krx_bars import (
                 is_krx_auction_market_fill_slot,
                 is_krx_last_15m_slot,
             )
+            from strategy.signals import settings_allow_1530_signal_eval
 
             _skip_eod_sig = bool(is_krx_last_15m_slot(slot_ts))
+            if _skip_eod_sig and settings_allow_1530_signal_eval(self.settings):
+                _skip_eod_sig = False
             _auction_1515 = bool(is_krx_auction_market_fill_slot(slot_ts))
         except Exception:
             _skip_eod_sig = False
@@ -2865,14 +2868,17 @@ class SimpleBacktester:
         curr_high = high_vals[i]
         curr_low = low_vals[i]
 
-        # 종가 단일가 — S1·S2·청산 전부 스킵(RT 완성봉 평가 스킵과 정합). max_p만 갱신.
+        # 종가 단일가 — 기본 스킵(RT 완성봉 평가 스킵과 정합). next_open 허용 시 평가.
         try:
             from utils.krx_bars import (
                 is_krx_auction_market_fill_slot,
                 is_krx_last_15m_slot,
             )
+            from strategy.signals import settings_allow_1530_signal_eval
 
             _skip_eod_sig = bool(is_krx_last_15m_slot(curr_date))
+            if _skip_eod_sig and settings_allow_1530_signal_eval(self.settings):
+                _skip_eod_sig = False
             _auction_1515 = bool(is_krx_auction_market_fill_slot(curr_date))
         except Exception:
             _skip_eod_sig = False

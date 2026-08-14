@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.16 (2026-08-14)
+
+- **15:30 S2·청산도 S1과 동일 허용**: `next_open`/허용 플래그 시 고정밀·bt_hp EOD 스킵 해제. RT 틱·완성봉 held 경로에서 모의=익일예약·실전=NXT 분기 공통화 (`bt_hp_intrabar_unified`, `backtest_engine`, `signal_engine`, `signals.settings_allow_1530_signal_eval`).
+
 ## 0.18.15 (2026-08-14)
 
 - **RT 15:30 S1 신호 허용**: `next_open_1530_enabled`(모의 익일예약) 또는 실전 NXT일 때 종가 단일가 슬롯 신호를 마스크하지 않음. BT와 동일하게 신호는 허용하고 체결만 예약/SOR로 분기 (`signals`, `signal_engine`).

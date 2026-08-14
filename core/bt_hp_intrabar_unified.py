@@ -316,15 +316,18 @@ def evaluate_bt_hp_intrabar_unified(
             return out
 
         curr_15m = full_15m.iloc[-1]
-        # 15:30 — 평가/체결 생략. 15:15 — 인트라바 체결 금지(호출측 auction fill).
+        # 15:30 — next_open/허용 플래그 없으면 평가 생략. 15:15 — 인트라바 체결 금지.
         try:
             from utils.krx_bars import (
                 is_krx_auction_market_fill_slot,
                 is_krx_no_signal_eval_15m_slot,
             )
+            from strategy.signals import settings_allow_1530_signal_eval
 
             _slot_ts = getattr(curr_15m, "name", None) or full_15m.index[-1]
             _skip_eod_sig = bool(is_krx_no_signal_eval_15m_slot(_slot_ts))
+            if _skip_eod_sig and settings_allow_1530_signal_eval(settings):
+                _skip_eod_sig = False
             _auction_1515 = bool(is_krx_auction_market_fill_slot(_slot_ts))
         except Exception:
             _skip_eod_sig = False
