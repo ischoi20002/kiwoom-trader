@@ -13,6 +13,11 @@
 
 ---
 
+## 0.18.15 (2026-08-14)
+
+- **RT 15:30 S1 신호 허용**: `next_open_1530_enabled`(모의 익일예약) 또는 실전 NXT일 때 종가 단일가 슬롯 신호를 마스크하지 않음. BT와 동일하게 신호는 허용하고 체결만 예약/SOR로 분기 (`signals`, `signal_engine`).
+- 15:30 슬롯 판별을 특수개장일 `close` 라벨 기준으로 정합 (`is_krx_last_15m_slot`).
+
 ## 0.18.14 (2026-08-14)
 
 - **레짐 30일 이력 표 본문 미표시**: 전역 Treeview `foreground=""`(감시 탭 태그용) 때문에 태그 없는 이력 행 글자가 안 보이던 문제 — `RegimeHistory.Treeview` 전용 스타일·레짐 색 태그 적용 (`regime_history_dialog`).

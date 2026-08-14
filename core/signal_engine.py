@@ -597,13 +597,37 @@ class SignalEngine:
         except Exception:
             return False
 
+    def _settings_for_s1_signals(self) -> Dict[str, Any]:
+        """
+        S1 신호 계산용 settings 복사본.
+
+        모의 next_open·실전 NXT 모두 15:30 신호를 허용한다.
+        (체결만 예약 vs SOR 로 갈라짐 — ``signals.py`` 마스크 해제)
+        """
+        try:
+            st = dict(getattr(self.app, "settings", None) or {})
+        except Exception:
+            st = {}
+        try:
+            if self._eval_1530_slot_enabled():
+                st["allow_1530_signal_eval"] = True
+                st["_bt_allow_1530_signal_eval"] = True
+        except Exception:
+            pass
+        return st
+
     @staticmethod
     def _is_1530_bar_slot(bar_ts: Any) -> bool:
         try:
-            t = pd.Timestamp(bar_ts)
-            return int(t.hour) == 15 and int(t.minute) == 30
+            from utils.krx_bars import is_krx_last_15m_slot
+
+            return bool(is_krx_last_15m_slot(bar_ts))
         except Exception:
-            return False
+            try:
+                t = pd.Timestamp(bar_ts)
+                return int(t.hour) == 15 and int(t.minute) == 30
+            except Exception:
+                return False
 
     def _order_execution_service(self) -> Any:
         try:
@@ -1065,7 +1089,7 @@ class SignalEngine:
             if not self._mark_s1_closed_slot_done(nk, slot_key):
                 return
 
-            settings = getattr(self.app, "settings", None) or {}
+            settings = self._settings_for_s1_signals()
             # 전 종목 ka10004 prefetch 금지 — 유량 큐가 막혀 실제 주문만 지연됨.
             # 매수 확정 시에만 `_prefetch_touch_quote_sync_for_order` 호출.
             try:
@@ -1436,7 +1460,7 @@ class SignalEngine:
             if not self._mark_s1_closed_slot_done(nk, slot_key, prefix="held"):
                 return
 
-            settings = getattr(self.app, "settings", None) or {}
+            settings = self._settings_for_s1_signals()
             # 보유 평가도 전 종목 prefetch 하지 않음 — 액션 확정 후 동기 1회
             try:
                 calc_df = self._closed_df_for_indicator_calc(closed_df)
@@ -3140,13 +3164,14 @@ class SignalEngine:
                         _src_df = _bd
                     _mirror_15m_src = _src_df
                     df_with_ind = TradingStrategy.calculate_indicators(
-                        _src_df, self.app.settings
+                        _src_df, self._settings_for_s1_signals()
                     )
                     df_with_ind = self._apply_ready_column_to_indicators(df_with_ind)
                     _mirror_df_ind = df_with_ind
                     try:
+                        _sig_st = self._settings_for_s1_signals()
                         info["last_detailed_sig"] = TradingStrategy.get_buy_signals_detailed(
-                            df_with_ind, self.app.settings, "UP"
+                            df_with_ind, _sig_st, "UP"
                         )
                         info["last_bar_count"] = current_bar_count
                         info["last_row_cache"] = df_with_ind.iloc[-1].to_dict()

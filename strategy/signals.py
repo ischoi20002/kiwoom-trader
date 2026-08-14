@@ -191,16 +191,29 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         & np.asarray(signal, dtype=bool)
     )
 
-    # 15:30 — 기본은 종가 단일가 슬롯 S1 신호 제외.
-    # 단, DynamicBacktester 내부 실험/옵션에서 `_bt_allow_1530_signal_eval` 이 켜진 경우에는
-    # 15:30 신호를 남겨 두고, 체결 시점만 익일 09:00 시가로 이월한다.
+    # 15:30(종가 단일가) S1 신호:
+    # - 기본 OFF(마스크)
+    # - next_open_1530_enabled / allow_1530_signal_eval / _bt_allow_1530_signal_eval
+    #   이면 허용. 체결만 경로가 갈림(모의=익일09:00 예약, 실전=NXT+SOR, BT=시초 이월).
     try:
         _idx = pd.DatetimeIndex(pd.to_datetime(df.index))
-        _hm = _idx.hour.to_numpy(dtype=np.int32) * 60 + _idx.minute.to_numpy(
-            dtype=np.int32
+        _allow_1530 = bool(
+            settings.get("_bt_allow_1530_signal_eval", False)
+            or settings.get("allow_1530_signal_eval", False)
+            or settings.get("next_open_1530_enabled", False)
         )
-        _allow_1530 = bool(settings.get("_bt_allow_1530_signal_eval", False))
-        _eod = _hm == (15 * 60 + 30)
+        try:
+            from utils.krx_bars import is_krx_last_15m_slot
+
+            _eod = np.asarray(
+                [bool(is_krx_last_15m_slot(t)) for t in _idx],
+                dtype=bool,
+            )
+        except Exception:
+            _hm = _idx.hour.to_numpy(dtype=np.int32) * 60 + _idx.minute.to_numpy(
+                dtype=np.int32
+            )
+            _eod = _hm == (15 * 60 + 30)
         if not _allow_1530:
             signal = np.asarray(signal, dtype=bool) & ~_eod
             s1_simul_ab = np.asarray(s1_simul_ab, dtype=bool) & ~_eod

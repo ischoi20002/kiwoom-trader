@@ -117,8 +117,11 @@ class DynamicBacktester:
         self.bt_open_auction_pass_enabled = bool(
             self.settings.get("bt_open_auction_pass_enabled", False)
         )
-        # 실시간 경로와 분리하기 위해 15:30 신호 허용은 동적 백테 내부 설정에만 주입한다.
+        # 15:30 신호 허용(모의 next_open·실전 NXT 공통). 체결 경로만 갈라짐.
         self.settings["_bt_allow_1530_signal_eval"] = bool(
+            self.bt_1530_signal_next_open_fill
+        )
+        self.settings["allow_1530_signal_eval"] = bool(
             self.bt_1530_signal_next_open_fill
         )
         self.db = DataManagerV2("trading_data.db")
