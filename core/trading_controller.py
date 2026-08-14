@@ -154,10 +154,18 @@ class TradingController:
                 out.append(nk)
         return out
 
-    def _refresh_transition_runtime_flags(self) -> None:
+    def _refresh_transition_runtime_flags(self, *, force: bool = False) -> None:
         """
-        감시 시작 시 레짐 런타임 플래그를 갱신합니다.
+        레짐 런타임 플래그를 갱신합니다.
+
+        FDR로 유니버스 일봉을 다시 받기 때문에 **수 초~수십 초** 걸릴 수 있습니다.
+        반드시 워밍업 백그라운드 스레드에서만 호출하세요(메인/Tk 스레드 금지).
         HARD(붕괴)는 S1·S2만 차단하고, 청산(EXIT)은 막지 않습니다.
+
+        Parameters
+        ----------
+        force
+            True 이면 최근 선정·갱신 캐시를 무시하고 FDR을 다시 조회합니다.
         """
         st = getattr(self.app, "settings", None)
         if not isinstance(st, dict):
@@ -170,6 +178,24 @@ class TradingController:
                 return
         except Exception:
             return
+        # 일일 선정 직후 등: 같은 프로세스에서 방금 FDR 레짐을 이미 넣었으면 재조회 생략
+        if not force:
+            try:
+                import time as _time
+
+                ts = float(getattr(self, "_transition_flags_mono_ts", 0.0) or 0.0)
+                age = _time.monotonic() - ts if ts > 0 else 1e9
+                if age < 900.0 and "transition_runtime_regime" in st:
+                    try:
+                        self.log(
+                            "ℹ️ [Transition] 최근 레짐 결과 재사용 "
+                            f"(약 {age:.0f}초 전, FDR 재조회 생략)"
+                        )
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
         try:
             import strategy_selector
 
@@ -184,6 +210,12 @@ class TradingController:
             st["transition_runtime_block_s1"] = bool(tg.get("block_s1", False))
             st["transition_runtime_block_s2"] = bool(tg.get("block_s2", False))
             try:
+                import time as _time
+
+                self._transition_flags_mono_ts = float(_time.monotonic())
+            except Exception:
+                pass
+            try:
                 if reg == "HARD":
                     self.log(
                         "ℹ️ [Transition] HARD(붕괴) — 신규 S1·추매 S2 차단, "
@@ -194,6 +226,18 @@ class TradingController:
         except Exception as e:
             try:
                 self.log(f"⚠️ [Transition] 시작 시 레짐 갱신 실패: {e}")
+            except Exception:
+                pass
+
+    def mark_transition_flags_fresh(self) -> None:
+        """선정 등에서 레짐을 막 반영했을 때 FDR 재조회 생략용 시각을 찍습니다."""
+        try:
+            import time as _time
+
+            self._transition_flags_mono_ts = float(_time.monotonic())
+        except Exception:
+            try:
+                self._transition_flags_mono_ts = 0.0
             except Exception:
                 pass
 
@@ -223,10 +267,7 @@ class TradingController:
         codes = [c for c in held_codes if c]
         if not codes:
             return False
-        try:
-            self._refresh_transition_runtime_flags()
-        except Exception:
-            pass
+        # 레짐 FDR 조회는 메인 스레드에서 하지 않음 → WarmupStreamPrepService 백그라운드에서 수행
         rows: List[Dict[str, Any]] = []
         try:
             vpd = getattr(self.app.portfolio, "virtual_positions", None) or {}
@@ -376,10 +417,7 @@ class TradingController:
                         "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
                     )
                 return False
-            try:
-                self._refresh_transition_runtime_flags()
-            except Exception:
-                pass
+            # 레짐 FDR(~200종 일봉)은 메인 스레드 금지 — 백그라운드 시작 시퀀스에서 갱신
             self.monitor_codes = df_targets['Code'].tolist()
             self._initialize_monitor_info(df_targets)
             try:

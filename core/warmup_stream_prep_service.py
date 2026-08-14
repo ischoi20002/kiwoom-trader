@@ -39,6 +39,23 @@ class WarmupStreamPrepService:
             c.app._active_stream_codes = []
             c._incremental_stream_bootstrapped = False
 
+            # Transition 게이트 FDR 일봉 조회는 수 초~수십 초 걸릴 수 있음.
+            # start() 메인 스레드에서 돌리면 UI가 멈춘 것처럼 보이므로 여기서 수행.
+            try:
+                c._status_cb_on_main(
+                    "STATUS_TEXT",
+                    "상태: 레짐 게이트 갱신 중…",
+                )
+            except Exception:
+                pass
+            try:
+                c._refresh_transition_runtime_flags()
+            except Exception as e:
+                try:
+                    c.log(f"⚠️ [Transition] 백그라운드 레짐 갱신 실패: {e}")
+                except Exception:
+                    pass
+
             merged = c._merged_warmup_codes()
             c._ensure_watchlist_monitor_info()
             c._ensure_virtual_positions_monitor_info()

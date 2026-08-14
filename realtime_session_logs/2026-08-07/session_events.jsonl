@@ -6856,3 +6856,9 @@
 {"ts": "2026-08-07 21:15:18", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
 {"ts": "2026-08-07 21:15:28", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
 {"ts": "2026-08-07 21:15:32", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-08-07 21:19:00", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-08-07 21:19:08", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-08-07 21:19:11", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-08-07 21:19:21", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-08-07 21:19:24", "kind": "monitor_tab_update_view_budget_yield", "data": {"budget_sec": 0.045, "processed": 8, "remain": 9}}
+{"ts": "2026-08-07 21:19:31", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}

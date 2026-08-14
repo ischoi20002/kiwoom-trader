@@ -3771,6 +3771,11 @@ class KiwoomApp:
             prev = getattr(self, "_last_vp_render_sig", None)
             if prev is not None and sig == prev:
                 self.virtual_tab.refresh_portfolio_light()
+                # 보유 구조가 같아도 주문·체결(접수→FILLED)은 바뀔 수 있음 — 주문 트리 갱신 누락 방지
+                try:
+                    self.request_virtual_tab_orders_refresh()
+                except Exception:
+                    pass
                 try:
                     mt = getattr(self, "monitor_tab", None)
                     if mt is not None:

@@ -13,6 +13,12 @@
 
 ---
 
+## 0.18.11 (2026-08-14)
+
+- **감시 시작 UI 프리징**: Transition 게이트 FDR(~200종 일봉) 조회를 메인 스레드에서 워밍업 백그라운드로 이동. 선정 직후(~15분) 레짐 결과는 재조회 생략 (`trading_controller`, `warmup_stream_prep_service`, `monitor_tab`).
+- **주문·체결 날짜 자동 오늘**: 밤새 켜 두면 조회일이 어제로 남는 문제 — follow 모드에서 자정·체결 갱신 시 「오늘」로 맞춤. ◀/▶ 과거 조회 시 follow 해제 (`virtual_tab`).
+- **체결 후 주문 트리 누락 완화**: 보유 구조 시그니처가 같아도 주문·체결 트리를 갱신. 체결 확정 경로에서도 주문 트리 갱신 요청 (`k_trader_gui`, `fill_confirmation_service`).
+
 ## 0.18.10 (2026-08-13)
 
 - **Flash 고점 종가 통일(옵션3)**: 기본 `use_flash_peak_bar_high=false` — Flash/Smart Exit 고점을 종가·평가가만 누적. 봉 High 시드는 토글 ON일 때만 (`backtest_engine`, `dynamic_backtest`, `signal_engine`).

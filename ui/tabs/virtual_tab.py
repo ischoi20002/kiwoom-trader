@@ -84,6 +84,10 @@ class VirtualTab:
         self._fallback_quote_inflight: set = set()
         # 주문 로그: 조회 중인 날짜(네비게이션). 기본은 오늘.
         self._order_log_view_date: date = date.today()
+        # True면 자정·당일 체결 갱신 시 자동으로 「오늘」로 맞춤.
+        # ◀/▶ 로 과거를 보면 False, 「오늘」 버튼·오늘로 이동 시 True.
+        self._order_log_follow_today: bool = True
+        self._order_log_midnight_after_id: Optional[Any] = None
         self._order_log_date_var: Optional[tk.StringVar] = None
         self._btn_order_log_prev: Optional[tk.Button] = None
         self._btn_order_log_next: Optional[tk.Button] = None
@@ -114,6 +118,10 @@ class VirtualTab:
 
         self._setup_ui()
         self._render_virtual_positions()
+        try:
+            self._schedule_order_log_midnight_rollover()
+        except Exception:
+            pass
         try:
             self.app.trading_controller._ensure_virtual_positions_monitor_info()
             self.app.monitor_info = dict(self.app.trading_controller.monitor_info or {})
@@ -1491,6 +1499,8 @@ class VirtualTab:
             if nd is None:
                 return
             self._order_log_view_date = nd
+            # 과거 조회 모드 — 자정 자동 「오늘」 이동을 잠시 끔
+            self._order_log_follow_today = False
             self._sync_order_log_date_label()
             self._kick_order_log_exchange_sync_for_view_date()
             self._render_orders()
@@ -1507,6 +1517,10 @@ class VirtualTab:
             if nd is None:
                 return
             self._order_log_view_date = nd
+            try:
+                self._order_log_follow_today = nd >= date.today()
+            except Exception:
+                self._order_log_follow_today = False
             self._sync_order_log_date_label()
             self._kick_order_log_exchange_sync_for_view_date()
             self._render_orders()
@@ -1519,6 +1533,7 @@ class VirtualTab:
     def _order_log_today(self) -> None:
         """주문 로그: 오늘 날짜로 이동."""
         try:
+            self._order_log_follow_today = True
             self._order_log_view_date = date.today()
             self._sync_order_log_date_label()
             self._kick_order_log_exchange_sync_for_view_date()
@@ -1528,6 +1543,77 @@ class VirtualTab:
                 print(f"[UI Error] _order_log_today: {e}")
             except Exception:
                 pass
+
+    def _order_log_ensure_follow_today(self) -> bool:
+        """
+        follow 모드이고 조회일이 오늘보다 이전이면 오늘로 맞춥니다.
+
+        Returns
+        -------
+        bool
+            날짜가 바뀌었으면 True.
+        """
+        try:
+            if not bool(getattr(self, "_order_log_follow_today", True)):
+                return False
+            today = date.today()
+            view_d = getattr(self, "_order_log_view_date", today)
+            if view_d is None or view_d < today:
+                self._order_log_view_date = today
+                try:
+                    self._sync_order_log_date_label()
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _schedule_order_log_midnight_rollover(self) -> None:
+        """다음 로컬 자정(+1초)에 follow 모드면 주문 로그를 오늘로 갱신하도록 예약."""
+        try:
+            root = getattr(self.app, "root", None)
+            if root is None:
+                return
+            try:
+                jid = getattr(self, "_order_log_midnight_after_id", None)
+                if jid is not None:
+                    root.after_cancel(jid)
+            except Exception:
+                pass
+
+            now = datetime.now()
+            tomorrow = (now + timedelta(days=1)).date()
+            target = datetime.combine(tomorrow, datetime.min.time()) + timedelta(seconds=1)
+            delay_ms = int(max(1000.0, (target - now).total_seconds() * 1000.0))
+            # Tk after 상한 완화: 하루를 넘어가면 6시간 단위로 재예약
+            delay_ms = min(delay_ms, 6 * 60 * 60 * 1000)
+
+            def _tick() -> None:
+                self._order_log_midnight_after_id = None
+                try:
+                    if bool(getattr(self, "_order_log_follow_today", True)):
+                        today = date.today()
+                        if getattr(self, "_order_log_view_date", today) != today:
+                            self._order_log_view_date = today
+                            try:
+                                self._sync_order_log_date_label()
+                            except Exception:
+                                pass
+                            try:
+                                self._render_orders()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    self._schedule_order_log_midnight_rollover()
+                except Exception:
+                    pass
+
+            self._order_log_midnight_after_id = root.after(delay_ms, _tick)
+        except Exception:
+            pass
 
     def _open_watchlist_dialog(self) -> None:
         """텔레그램 전용 관심목록 편집 (추가·삭제·저장)."""
@@ -3174,6 +3260,11 @@ class VirtualTab:
         """
         if not getattr(self, "tree_orders", None):
             return
+        # 밤새 켜둔 경우: follow 모드면 조회일을 오늘로 맞춤(체결 갱신 경로 포함)
+        try:
+            self._order_log_ensure_follow_today()
+        except Exception:
+            pass
         self.tree_orders.delete(*self.tree_orders.get_children())
         want_side: Literal["all", "buy", "sell"] = "all"
         want_fill: Literal["all", "filled", "unfilled"] = "all"

@@ -461,6 +461,13 @@ class FillConfirmationService:
                 fn()
         except Exception:
             pass
+        # 체결 DB 반영 직후 주문·체결 트리를 확실히 갱신(경량 경로가 주문 갱신을 건너뛰는 경우 대비)
+        try:
+            fn2 = getattr(self.app, "request_virtual_tab_orders_refresh", None)
+            if callable(fn2):
+                fn2()
+        except Exception:
+            pass
 
     def ingest_che(
         self,

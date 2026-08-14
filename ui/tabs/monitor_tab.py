@@ -1439,6 +1439,10 @@ class MonitorTab:
                     except Exception:
                         pass
                 self.app.trading_controller.set_monitor_targets(df_snap)
+                try:
+                    self.app.trading_controller.mark_transition_flags_fresh()
+                except Exception:
+                    pass
                 self.app.monitor_codes = self.app.trading_controller.monitor_codes
                 self.app.monitor_info = self.app.trading_controller.monitor_info
                 self.update_watchlist(self.app.monitor_info)
