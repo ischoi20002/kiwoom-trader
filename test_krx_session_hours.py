@@ -149,6 +149,35 @@ def test_default_15m_labels_regression() -> None:
     )
 
 
+def test_stream_slot_rolls_to_close_after_continuous_end() -> None:
+    """
+    15:15 잔여봉은 continuous_end(15:20)에 완성 → 그 시각부터 want=15:30.
+    (이전: 15:30까지 want=15:15 유지 → 정렬교체가 +860s로 밀림)
+    """
+    from datetime import datetime
+
+    from utils.krx_bars import (
+        krx_stream_slot_end_datetime,
+        seconds_until_next_krx_15m_boundary,
+    )
+
+    assert krx_stream_slot_end_datetime(datetime(2026, 3, 10, 15, 15, 0)) == pd.Timestamp(
+        "2026-03-10 15:15:00"
+    )
+    assert krx_stream_slot_end_datetime(datetime(2026, 3, 10, 15, 19, 59)) == pd.Timestamp(
+        "2026-03-10 15:15:00"
+    )
+    assert krx_stream_slot_end_datetime(datetime(2026, 3, 10, 15, 20, 0)) == pd.Timestamp(
+        "2026-03-10 15:30:00"
+    )
+    assert krx_stream_slot_end_datetime(datetime(2026, 3, 10, 15, 25, 0)) == pd.Timestamp(
+        "2026-03-10 15:30:00"
+    )
+    # 15:15 구간 중에는 완성 경계(15:20)까지 대기
+    rem = seconds_until_next_krx_15m_boundary(datetime(2026, 3, 10, 15, 15, 0))
+    assert 299.0 <= rem <= 300.0
+
+
 def test_csat_15m_labels() -> None:
     mapping = {
         "2026-11-12": {

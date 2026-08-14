@@ -234,6 +234,10 @@ def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp
     벽시계 기준 **현재 형성 중** 15분봉의 **좌측 라벨**(KRX 장중만).
 
     개장 전·장중·동시호가·마감 후는 당일 SessionHours 기준.
+
+    - ``[pre_auction, continuous_end)`` (기본 15:15~15:20): 잔여 연속봉 라벨
+    - ``continuous_end`` 이후(기본 15:20~): 종가 단일가 라벨(15:30) —
+      15:15 봉을 일반 슬롯처럼 완성 직후 롤·공식 정렬교체(+~270s) 가능하게 함
     """
     try:
         raw = now if now is not None else datetime.now()
@@ -250,6 +254,9 @@ def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp
         if hm < h.open_minutes:
             return _krx_day_first_slot_end(day0)
         if hm >= h.close_minutes:
+            return _krx_day_last_slot_end(day0)
+        # 연속매매 종료 후 ~ 종가: 단일가 슬롯 형성 (15:15는 이미 완성)
+        if hm >= h.continuous_end_minutes:
             return _krx_day_last_slot_end(day0)
         if hm >= h.pre_auction_slot_minutes:
             return _pd_at(day0, h.pre_auction_slot)
