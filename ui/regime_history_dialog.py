@@ -149,11 +149,45 @@ def open_regime_history_dialog(
         canvas.tag_bind(tag, "<Leave>", _reset_title)
 
     # 표
+    # 전역 Treeview 는 감시 탭 태그 색상 우선을 위해 foreground="" 이라
+    # 태그 없는 기본 행은 글자가 안 보임 → 이력 전용 스타일 사용
     table_f = ttk.Frame(outer)
     table_f.pack(fill=tk.BOTH, expand=True)
 
+    try:
+        style = ttk.Style()
+        style.configure(
+            "RegimeHistory.Treeview",
+            background="#242933",
+            foreground=fg,
+            fieldbackground="#242933",
+            rowheight=26,
+            borderwidth=0,
+        )
+        style.configure(
+            "RegimeHistory.Treeview.Heading",
+            background="#434C5E",
+            foreground=primary,
+            font=("Malgun Gothic", 9, "bold"),
+            borderwidth=1,
+            relief=tk.FLAT,
+        )
+        style.map(
+            "RegimeHistory.Treeview",
+            background=[("selected", primary)],
+            foreground=[("selected", bg)],
+        )
+    except Exception:
+        pass
+
     cols = ("date", "regime", "label")
-    tree = ttk.Treeview(table_f, columns=cols, show="headings", height=min(12, max(6, n)))
+    tree = ttk.Treeview(
+        table_f,
+        columns=cols,
+        show="headings",
+        height=min(12, max(6, n)),
+        style="RegimeHistory.Treeview",
+    )
     tree.heading("date", text="적용일")
     tree.heading("regime", text="코드")
     tree.heading("label", text="상태")
@@ -166,16 +200,27 @@ def open_regime_history_dialog(
     tree.configure(yscrollcommand=sb.set)
     sb.pack(side=tk.RIGHT, fill=tk.Y)
 
+    for key, col in _REGIME_COLORS.items():
+        try:
+            tree.tag_configure(key, foreground=col)
+        except Exception:
+            pass
+
     for row in reversed(rows):
-        tree.insert(
-            "",
-            tk.END,
-            values=(
-                row.get("date", "") or row.get("apply_on", ""),
-                row.get("regime", ""),
-                row.get("label", ""),
-            ),
-        )
+        reg = str(row.get("regime", "") or "").strip().upper() or "UNKNOWN"
+        try:
+            tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("date", "") or row.get("apply_on", ""),
+                    row.get("regime", ""),
+                    row.get("label", ""),
+                ),
+                tags=(reg if reg in _REGIME_COLORS else "UNKNOWN",),
+            )
+        except Exception:
+            continue
 
     btn_f = ttk.Frame(outer)
     btn_f.pack(fill=tk.X, pady=(10, 0))
