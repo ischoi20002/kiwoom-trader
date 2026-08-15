@@ -3,11 +3,12 @@
 연속 실시간 감시 스케줄.
 
 - **16:00**(15:30+버퍼, 기본 30분): 감시 중단 → 일일 선정 (재시작 없음)
-- **08:50**(설정): 다음날/당일 장전 실시간 감시 시작
+- **개장 N분 전**(기본 25분, 정규장 08:35): 다음날/당일 장전 실시간 감시 시작
+  - 수능·신년 등 특수 개장일은 ``get_session_hours`` 개장 시각 기준
   - 직전 장마감 선정이 **실패**했으면 장전에 **강제 재선정** 후 시작
   - CSV 신선도 만료 시에도 기존처럼 선정 후 시작
 
-「실시간 감시 시작」과 함께 ``arm()`` 됩니다.
+앱 기동 시 ``arm()`` 되며, 수동 감시 중단 후에도 다음날 장전 스케줄은 유지됩니다.
 """
 from __future__ import annotations
 
@@ -24,13 +25,14 @@ class ContinuousMonitorService:
         self.log = log_func or print
         self.armed: bool = False
         self._after_id: Any = None
+        self._morning_alarm_id: Any = None
         self._cancelled: bool = False
         self._cycle_in_progress: bool = False
         self._last_cycle_trading_day: Optional[str] = None
         self._last_morning_start_day: Optional[str] = None
         # EOD 사이클용 stop() 인지 — STOPPED 콜백에서 연속 모드 해제 방지
         self._eod_stop_for_cycle: bool = False
-        # 장마감 선정 실패 → 다음 장전(08:50)에 강제 재선정
+        # 장마감 선정 실패 → 다음 장전에 강제 재선정
         self._pending_morning_reselect: bool = False
         # 장전 시작(선정 포함) 진행 중 — 30초 tick 중복 기동 방지
         self._morning_start_in_progress: bool = False
@@ -41,14 +43,16 @@ class ContinuousMonitorService:
         self.armed = True
         self._cancelled = False
         self.start_scheduler()
+        self._schedule_morning_alarm()
         if already:
             return
         try:
             eod_hm = self._format_eod_hhmm()
             start_hm = self._auto_start_hhmm_str()
+            mins = self._minutes_before_open()
             self.log(
                 f"🔄 [연속감시] 실시간 감시와 연동 — "
-                f"장마감 선정 {eod_hm}, 감시 시작 {start_hm}"
+                f"장마감 선정 {eod_hm}, 감시 시작 {start_hm} (개장 {mins}분 전)"
             )
         except Exception:
             pass
@@ -76,6 +80,7 @@ class ContinuousMonitorService:
         except Exception:
             pass
         self._after_id = None
+        self._cancel_morning_alarm()
 
     def start_scheduler(self) -> None:
         """30초 주기 tick 예약(중복 방지)."""
@@ -133,22 +138,115 @@ class ContinuousMonitorService:
         except Exception:
             return "16:00"
 
-    def _auto_start_hhmm_str(self) -> str:
-        h, m = self._auto_start_hm()
-        return f"{h:02d}:{m:02d}"
-
-    def _auto_start_hm(self) -> Tuple[int, int]:
+    def _minutes_before_open(self) -> int:
+        """개장 몇 분 전에 감시를 시작할지(0~180, 기본 25)."""
         try:
             st = getattr(self.app, "settings", None) or {}
-            raw = str(st.get("realtime_monitor_auto_start_hhmm", "08:50") or "08:50")
-            parts = raw.strip().replace(".", ":").split(":")
-            h = int(parts[0])
-            m = int(parts[1]) if len(parts) > 1 else 0
-            h = max(0, min(23, h))
-            m = max(0, min(59, m))
-            return h, m
+            v = int(
+                float(
+                    st.get("realtime_monitor_auto_start_minutes_before_open", 25)
+                )
+            )
+            return max(0, min(v, 180))
+        except (TypeError, ValueError):
+            return 25
+
+    def _open_datetime(self, day_d: date) -> datetime:
+        """해당일 정규장 개장 시각. 실패 시 09:00."""
+        try:
+            from utils.krx_session_hours import get_session_hours
+
+            return get_session_hours(day_d).open_datetime()
         except Exception:
-            return 8, 50
+            return datetime.combine(day_d, dtime(9, 0, 0))
+
+    def _auto_start_datetime(self, day_d: date) -> datetime:
+        """해당일 장전 자동 시작 시각(개장 − N분)."""
+        try:
+            return self._open_datetime(day_d) - timedelta(
+                minutes=self._minutes_before_open()
+            )
+        except Exception:
+            return datetime.combine(day_d, dtime(8, 35, 0))
+
+    def _auto_start_hhmm_str(self, day_d: Optional[date] = None) -> str:
+        h, m = self._auto_start_hm(day_d)
+        return f"{h:02d}:{m:02d}"
+
+    def _auto_start_hm(self, day_d: Optional[date] = None) -> Tuple[int, int]:
+        try:
+            d = day_d if day_d is not None else date.today()
+            start_at = self._auto_start_datetime(d)
+            return start_at.hour, start_at.minute
+        except Exception:
+            return 8, 35
+
+    def mark_morning_start_done(self, day_d: Optional[date] = None) -> None:
+        """당일 장전 자동 시작을 소비해 같은 날 재기동을 막는다."""
+        try:
+            d = day_d if day_d is not None else date.today()
+            self._last_morning_start_day = self._trading_day_key(d)
+        except Exception:
+            pass
+        try:
+            self._schedule_morning_alarm()
+        except Exception:
+            pass
+
+    def _cancel_morning_alarm(self) -> None:
+        try:
+            root = getattr(self.app, "root", None)
+            if root is not None and self._morning_alarm_id is not None:
+                root.after_cancel(self._morning_alarm_id)
+        except Exception:
+            pass
+        self._morning_alarm_id = None
+
+    def _schedule_morning_alarm(self) -> None:
+        """다음 장전 시작 시각에 맞춰 1회 after 예약(30초 tick 백업)."""
+        if self._cancelled or not self.armed:
+            self._cancel_morning_alarm()
+            return
+        try:
+            root = getattr(self.app, "root", None)
+            if root is None:
+                return
+            self._cancel_morning_alarm()
+            ms = int(self.ms_until_auto_start())
+            if ms <= 0:
+                return
+            # Tk after 지연은 구현에 따라 32bit 제한이 있어 상한을 둔다.
+            delay = max(200, min(ms, 2_000_000_000))
+            self._morning_alarm_id = root.after(delay, self._on_morning_alarm)
+        except Exception:
+            self._morning_alarm_id = None
+
+    def _on_morning_alarm(self) -> None:
+        """예약된 장전 시각 도달 — 조건이면 감시 시작."""
+        self._morning_alarm_id = None
+        try:
+            if self._cancelled or not self.armed:
+                return
+            if self._morning_start_in_progress or self._cycle_in_progress:
+                return
+            tc = getattr(self.app, "trading_controller", None)
+            if tc is None:
+                return
+            if bool(getattr(tc, "is_monitoring", False)):
+                return
+            now = datetime.now()
+            if self._should_morning_start(now):
+                self._begin_morning_start(now.date())
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [연속감시] 장전 알람 오류: {e}")
+            except Exception:
+                pass
+        finally:
+            try:
+                self._schedule_morning_alarm()
+            except Exception:
+                pass
 
     def _stop_settle_ms(self) -> int:
         try:
@@ -185,26 +283,36 @@ class ContinuousMonitorService:
                 pass
         return None
 
-    def _should_morning_start(self, now: datetime) -> bool:
-        """armed·미감시 상태에서 당일 08:50 이후 1회 시작 여부."""
+    def _is_trading_day(self, day_d: date) -> bool:
         try:
             from reporting.krx_trading_calendar import is_trading_day
 
-            today_d = now.date()
-            if not is_trading_day(today_d):
-                return False
+            return bool(is_trading_day(day_d))
         except Exception:
-            today_d = now.date()
-            if today_d.weekday() >= 5:
+            return day_d.weekday() < 5
+
+    def is_before_eod_on_trading_day(self, now: Optional[datetime] = None) -> bool:
+        """오늘이 거래일이고 장마감+버퍼 이전이면 True (--auto-start 장중 즉시 시작용)."""
+        t = now if now is not None else datetime.now()
+        try:
+            if not self._is_trading_day(t.date()):
                 return False
+            return t < self._eod_due_datetime(t.date())
+        except Exception:
+            return False
+
+    def _should_morning_start(self, now: datetime) -> bool:
+        """armed·미감시 상태에서 당일 개장 N분 전~개장 직전 1회 시작 여부."""
+        today_d = now.date()
+        if not self._is_trading_day(today_d):
+            return False
         day_key = self._trading_day_key(today_d)
         if self._last_morning_start_day == day_key:
             return False
-        h, m = self._auto_start_hm()
-        start_at = datetime.combine(today_d, dtime(h, m, 0))
-        # 장전 시작 시각~EOD 선정 시각 전까지만 오전 자동 시작
-        eod_due = self._eod_due_datetime(today_d)
-        return start_at <= now < eod_due
+        start_at = self._auto_start_datetime(today_d)
+        open_at = self._open_datetime(today_d)
+        # 장전 윈도우만 자동 시작(장중 앱 실행으로 감시가 켜지지 않게)
+        return start_at <= now < open_at
 
     def tick(self) -> None:
         """30초마다 EOD 선정·장전 시작 조건 확인."""
@@ -247,8 +355,21 @@ class ContinuousMonitorService:
             except Exception:
                 pass
 
+    def request_morning_start(self, day_d: Optional[date] = None) -> None:
+        """장전 감시 시작을 1회 요청(중복 기동 방지)."""
+        try:
+            if self._morning_start_in_progress:
+                return
+            d = day_d if day_d is not None else date.today()
+            self._begin_morning_start(d)
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [연속감시] 장전 시작 요청 실패: {e}")
+            except Exception:
+                pass
+
     def _begin_morning_start(self, day_d: date) -> None:
-        """08:50 등 장전 감시 시작(필요 시 재선정)."""
+        """개장 N분 전 장전 감시 시작(필요 시 재선정)."""
         day_key = self._trading_day_key(day_d)
         force_sel = bool(self._pending_morning_reselect)
         try:
@@ -269,7 +390,7 @@ class ContinuousMonitorService:
             try:
                 self._morning_start_in_progress = False
                 if ok:
-                    self._last_morning_start_day = day_key
+                    self.mark_morning_start_done(day_d)
                     self._pending_morning_reselect = False
                     return
                 # 실패 시 당일 플래그를 남기지 않아 EOD 전까지 재시도
@@ -399,7 +520,7 @@ class ContinuousMonitorService:
             if ok:
                 self._pending_morning_reselect = False
             else:
-                # 다음 거래일 장전(08:50)에 강제 재선정
+                # 다음 거래일 장전에 강제 재선정
                 self._pending_morning_reselect = True
         except Exception:
             self._pending_morning_reselect = not bool(ok)
@@ -468,12 +589,10 @@ class ContinuousMonitorService:
         다음 자동 감시 시작까지 밀리초.
 
         - 거래일·장전 시작 시각 이전이면 그 시각까지
-        - 거래일·장전~EOD 이전이면 0(즉시)
-        - 그 외(EOD 이후·비거래일)면 다음 거래일 장전 시각까지
+        - 거래일·장전~개장 이전이면 0(즉시)
+        - 당일 이미 시작했거나 개장 이후·비거래일이면 다음 거래일 장전 시각까지
         """
         t = now if now is not None else datetime.now()
-        h, m = self._auto_start_hm()
-        buf = self._eod_buffer_minutes()
         try:
             from reporting.krx_trading_calendar import (
                 is_trading_day,
@@ -492,25 +611,22 @@ class ContinuousMonitorService:
                         return cur
                 return None
 
-        def _start_at(day_d: date) -> datetime:
-            return datetime.combine(day_d, dtime(h, m, 0))
-
-        def _eod_at(day_d: date) -> datetime:
-            return self._eod_due_datetime(day_d)
-
         today = t.date()
         try:
             if is_trading_day(today):
-                st = _start_at(today)
-                eod = _eod_at(today)
-                if t < st:
-                    return max(0, int((st - t).total_seconds() * 1000))
-                if t < eod:
-                    return 0
+                day_key = self._trading_day_key(today)
+                already = self._last_morning_start_day == day_key
+                st = self._auto_start_datetime(today)
+                open_at = self._open_datetime(today)
+                if not already:
+                    if t < st:
+                        return max(0, int((st - t).total_seconds() * 1000))
+                    if t < open_at:
+                        return 0
             nxt = next_trading_day(today)
             if nxt is None:
                 nxt = today + timedelta(days=1)
-            st2 = _start_at(nxt)
+            st2 = self._auto_start_datetime(nxt)
             return max(1000, int((st2 - t).total_seconds() * 1000))
         except Exception:
             return 8_000

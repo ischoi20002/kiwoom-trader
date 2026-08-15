@@ -955,8 +955,221 @@ def build_virtual_portfolio_analysis_html(
     return f'<div class="vr-analysis-wrap">{analysis_stats_html}</div>'
 
 
-def generate_trade_report(df, interval, output_path="trade_report.html", total_trades=0, win_rate=0, avg_ret=0, best_settings=None, callback=None, target_codes=None, start_date=None, end_date=None, daily_equity=None, high_precision=False):
-    """매매 실행 내역 HTML 리포트 생성 (v8.1) - 고정밀 모드 표시 지원"""
+_PRICE_CHART_MAX_BARS: int = 6000
+_EMPTY_TRADE_COLS: List[str] = [
+    "Date", "Code", "Name", "Action", "Price", "Qty", "Return", "Reason", "Fee", "Sig_Type",
+]
+
+
+def _chart_ts_str(value: Any) -> str:
+    """차트 x축용 시각 문자열."""
+    try:
+        ts = pd.Timestamp(value)
+        if pd.isna(ts):
+            return ""
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(value or "")
+
+
+def _trade_marker_hover(row: pd.Series) -> str:
+    """마커 호버에 넣을 짧은 사유 텍스트."""
+    try:
+        reason = str(row.get("Reason", "") or "").replace("<", " ").replace(">", " ")
+        if len(reason) > 80:
+            reason = reason[:80] + "…"
+        ret = row.get("Return", "")
+        ret_s = ""
+        try:
+            if ret is not None and not pd.isna(ret) and float(ret) != 0:
+                ret_s = f" / {float(ret):+.2f}%"
+        except Exception:
+            ret_s = ""
+        return (reason + ret_s).strip() or "-"
+    except Exception:
+        return "-"
+
+
+def _split_s1_s2_exit_trades(trades_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """매매 로그를 S1 / S2 / 청산 / 미청산(HOLD)으로 나눈다."""
+    empty = pd.DataFrame(columns=["Date", "Price", "hover"])
+    if trades_df is None or trades_df.empty or "Action" not in trades_df.columns:
+        return empty, empty, empty, empty
+    try:
+        work = trades_df.copy()
+        act = work["Action"].astype(str).str.upper()
+        is_buy = act.str.startswith("BUY", na=False)
+        is_s2 = (
+            act.eq("BUY_2ND")
+            | act.str.contains("2ND", na=False)
+            | act.str.contains("BUY2", na=False)
+            | act.eq("ADDON")
+        )
+        s1 = work[is_buy & ~is_s2]
+        s2 = work[is_buy & is_s2]
+        sells = work[act.eq("SELL") | act.str.startswith("SELL", na=False)]
+        holds = work[act.eq("HOLD")]
+        return s1, s2, sells, holds
+    except Exception:
+        return empty, empty, empty, empty
+
+
+def _marker_xy(subset: pd.DataFrame) -> tuple[list[str], list[float], list[str]]:
+    """마커용 x/y/hover 리스트."""
+    xs: list[str] = []
+    ys: list[float] = []
+    hs: list[str] = []
+    if subset is None or subset.empty:
+        return xs, ys, hs
+    for _, row in subset.iterrows():
+        try:
+            x = _chart_ts_str(row.get("Date"))
+            y = float(row.get("Price", 0) or 0)
+            if not x or y <= 0:
+                continue
+            xs.append(x)
+            ys.append(y)
+            hs.append(_trade_marker_hover(row))
+        except Exception:
+            continue
+    return xs, ys, hs
+
+
+def _prepare_price_close_series(price_df: pd.DataFrame) -> tuple[pd.Series, pd.DataFrame]:
+    """주가 Close 시계열과(다운샘플 여부 판단용) 원본 정렬 DF를 반환한다."""
+    work = price_df.copy()
+    if not isinstance(work.index, pd.DatetimeIndex):
+        if "Date" in work.columns:
+            work = work.set_index(pd.to_datetime(work["Date"], errors="coerce"))
+        elif "Datetime" in work.columns:
+            work = work.set_index(pd.to_datetime(work["Datetime"], errors="coerce"))
+        else:
+            raise ValueError("주가 데이터에 DatetimeIndex 또는 Date 열이 없습니다.")
+    work = work[~work.index.duplicated(keep="last")].sort_index()
+    work = work[work.index.notna()]
+    if "Close" not in work.columns:
+        raise ValueError("주가 데이터에 Close 열이 없습니다.")
+    close = pd.to_numeric(work["Close"], errors="coerce")
+    valid_idx = close.dropna().index
+    work = work.loc[valid_idx]
+    close = close.loc[valid_idx]
+    if close.empty:
+        raise ValueError("유효한 종가가 없습니다.")
+    if len(close) > _PRICE_CHART_MAX_BARS:
+        close = close.resample("1D").last().dropna()
+        work = work.reindex(close.index)
+    return close, work
+
+
+def _build_price_trade_chart_html(
+    price_df: pd.DataFrame,
+    trades_df: pd.DataFrame,
+    title: str = "주가 및 S1 / S2 / 청산",
+) -> str:
+    """단일 종목 리포트용: 종가 라인 + S1/S2/청산 마커 Plotly HTML."""
+    try:
+        close, work = _prepare_price_close_series(price_df)
+        px = [_chart_ts_str(ts) for ts in close.index]
+        py = [float(v) for v in close.values]
+        traces: list[str] = []
+        traces.append(
+            """{{
+                x: {x}, y: {y},
+                name: '종가', type: 'scatter', mode: 'lines',
+                line: {{ color: '#ECEFF4', width: 2 }},
+                hovertemplate: '종가 %{{y:,.0f}}원<extra></extra>'
+            }}""".format(x=json.dumps(px), y=json.dumps(py))
+        )
+        if "MA5" in work.columns and len(work) == len(close):
+            try:
+                ma5 = pd.to_numeric(work["MA5"], errors="coerce")
+                traces.append(
+                    """{{
+                        x: {x}, y: {y},
+                        name: 'MA5', type: 'scatter', mode: 'lines',
+                        line: {{ color: '#EBCB8B', width: 1 }},
+                        hoverinfo: 'skip'
+                    }}""".format(x=json.dumps(px), y=json.dumps([None if pd.isna(v) else float(v) for v in ma5]))
+                )
+            except Exception:
+                pass
+        if "MA20" in work.columns and len(work) == len(close):
+            try:
+                ma20 = pd.to_numeric(work["MA20"], errors="coerce")
+                traces.append(
+                    """{{
+                        x: {x}, y: {y},
+                        name: 'MA20', type: 'scatter', mode: 'lines',
+                        line: {{ color: '#88C0D0', width: 1 }},
+                        hoverinfo: 'skip'
+                    }}""".format(x=json.dumps(px), y=json.dumps([None if pd.isna(v) else float(v) for v in ma20]))
+                )
+            except Exception:
+                pass
+
+        s1, s2, sells, holds = _split_s1_s2_exit_trades(trades_df)
+        marker_specs = [
+            (s1, "S1", "triangle-up", "#A3BE8C", 14),
+            (s2, "S2", "diamond", "#88C0D0", 13),
+            (sells, "청산", "triangle-down", "#BF616A", 14),
+            (holds, "미청산(평가)", "circle", "#EBCB8B", 11),
+        ]
+        for subset, name, symbol, color, size in marker_specs:
+            xs, ys, hs = _marker_xy(subset)
+            if not xs:
+                continue
+            traces.append(
+                """{{
+                    x: {x}, y: {y}, text: {t},
+                    name: '{name}', type: 'scatter', mode: 'markers',
+                    marker: {{ symbol: '{symbol}', size: {size}, color: '{color}',
+                               line: {{ width: 1, color: '#2E3440' }} }},
+                    hovertemplate: '{name} %{{x}}<br>%{{y:,.0f}}원<br>%{{text}}<extra></extra>'
+                }}""".format(
+                    x=json.dumps(xs),
+                    y=json.dumps(ys),
+                    t=json.dumps(hs, ensure_ascii=False),
+                    name=name,
+                    symbol=symbol,
+                    size=int(size),
+                    color=color,
+                )
+            )
+
+        traces_js = ",\n                    ".join(traces)
+        safe_title = str(title or "주가 및 S1 / S2 / 청산").replace("<", " ").replace(">", " ")
+        return f"""
+            <div id="price-trade-chart-wrap" style="background:var(--card-bg); border-radius:12px; padding:20px; margin-top:30px; border:1px solid #334155; display: block; clear: both; width: 100%; box-sizing: border-box; overflow: hidden;">
+                <h3 style="margin-top:0; margin-bottom:15px; font-size:1.15rem; color:var(--primary); border-bottom: 1px solid #334155; padding-bottom: 10px;">📈 {safe_title}</h3>
+                <div id="price-trade-chart" style="height:480px; width:100%; min-height:480px;"></div>
+                <script>
+                    Plotly.newPlot('price-trade-chart', [
+                    {traces_js}
+                    ], {{
+                        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+                        margin: {{ t: 10, b: 40, l: 70, r: 20 }},
+                        legend: {{ orientation: 'h', x: 0.5, xanchor: 'center', y: 1.08, font: {{ color: '#ccc' }} }},
+                        xaxis: {{ gridcolor: '#333', tickfont: {{ color: '#888' }} }},
+                        yaxis: {{ gridcolor: '#333', tickfont: {{ color: '#888' }}, title: '가격 (원)', tickformat: ',' }},
+                        hovermode: 'closest'
+                    }}, {{ responsive: true, displayModeBar: true }});
+                </script>
+            </div>
+            """
+    except Exception as e:
+        try:
+            logging.warning("주가·매매 차트 생성 실패: %s", e)
+        except Exception:
+            pass
+        return f"<p style='color:#BF616A'>주가 차트 생성 오류: {e}</p>"
+
+
+def generate_trade_report(df, interval, output_path="trade_report.html", total_trades=0, win_rate=0, avg_ret=0, best_settings=None, callback=None, target_codes=None, start_date=None, end_date=None, daily_equity=None, high_precision=False, price_df=None, price_chart_title=None):
+    """매매 실행 내역 HTML 리포트 생성 (v8.1) - 고정밀 모드 표시 지원.
+
+    price_df 가 있으면 포트폴리오 자산추이 대신 주가+S1/S2/청산 마커 차트를 넣는다.
+    price_chart_title 이 있으면 주가 차트 제목을 덮어쓴다.
+    """
     # [v8.2] 표시용 인터벌 조정
     display_interval = "1m" if high_precision else interval
     # [v8.1] 모드 텍스트 결정
@@ -967,11 +1180,21 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     if not df.empty and 'Date' in df.columns:
         df['Date'] = pd.to_datetime(df['Date'])
 
+    _has_price = False
+    try:
+        _has_price = (
+            price_df is not None
+            and isinstance(price_df, pd.DataFrame)
+            and (not price_df.empty)
+        )
+    except Exception:
+        _has_price = False
+
     # [v15.4.0] 종목 필터를 먼저 적용 (통계·표시 동일 유니버스)
     if target_codes is not None and not df.empty:
         codes_set = set([str(c).strip().zfill(6) for c in target_codes])
         df = df[df['Code'].astype(str).str.strip().str.zfill(6).isin(codes_set)].copy()
-        if df.empty:
+        if df.empty and not _has_price:
             try:
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(f"<html><body style='background:#0f172a; color:white; padding:50px; text-align:center;'><h1>매매 내역 없음</h1><p>지정된 종목군에 대한 체결 내역이 없습니다.</p></body></html>")
@@ -988,12 +1211,16 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         df = df[mask].copy()
 
     if df.empty:
-        try:
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(f"<html><body style='background:#0f172a; color:white; padding:50px; text-align:center;'><h1>매매 성공 내역 없음</h1><p>필터링 결과 실제 체결된 내역이 없습니다.</p></body></html>")
-        except Exception:
-            pass
-        return
+        if not _has_price:
+            try:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    f.write(f"<html><body style='background:#0f172a; color:white; padding:50px; text-align:center;'><h1>매매 성공 내역 없음</h1><p>필터링 결과 실제 체결된 내역이 없습니다.</p></body></html>")
+            except Exception:
+                pass
+            return
+        if "Action" not in df.columns:
+            df = pd.DataFrame(columns=_EMPTY_TRADE_COLS)
+            df_stats = df.copy()
     
     avg_cash_ratio = 0 # [v32.1] Initialize for template
     
@@ -1680,9 +1907,31 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     </div>
     """
 
-    # Portfolio Equity Chart
+    # 단일종목: 주가+S1/S2/청산. 그 외: 포트폴리오 자산추이.
     equity_chart_html = ""
-    if daily_equity:
+    if _has_price:
+        try:
+            chart_title = "주가 및 S1 / S2 / 청산"
+            try:
+                _custom = str(price_chart_title or "").strip()
+            except Exception:
+                _custom = ""
+            if _custom:
+                chart_title = _custom
+            else:
+                try:
+                    if not df.empty and "Name" in df.columns and "Code" in df.columns:
+                        _nm = str(df["Name"].iloc[0] or "")
+                        _cd = str(df["Code"].iloc[0]).strip().zfill(6)
+                        chart_title = f"{_nm} ({_cd}) 주가 및 S1 / S2 / 청산".strip()
+                    elif target_codes:
+                        chart_title = f"{str(list(target_codes)[0]).zfill(6)} 주가 및 S1 / S2 / 청산"
+                except Exception:
+                    pass
+            equity_chart_html = _build_price_trade_chart_html(price_df, df, title=chart_title)
+        except Exception as e:
+            equity_chart_html = f"<p style='color:#BF616A'>주가 차트 생성 오류: {e}</p>"
+    elif daily_equity:
         try:
             # Timestamp 기준 정렬. 구 데이터(날짜만)는 자정으로 파싱되어
             # 시작점(08:59)보다 앞에 오므로 당일 장마감으로 보정한다.
@@ -1763,7 +2012,10 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
     loader = BacktestDataLoader()
     content = []
     sidebar_items = []
-    sorted_codes = sorted(df['Code'].unique())
+    try:
+        sorted_codes = sorted(df["Code"].unique()) if (not df.empty and "Code" in df.columns) else []
+    except Exception:
+        sorted_codes = []
     
     if callback: callback("매매 리포트 생성 중...", 95)
 
@@ -1902,6 +2154,11 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
         0,
         '<li class="nav-item"><a href="#analysis-stats" style="color:#38bdf8;font-weight:700;">📋 분석 통계</a></li>',
     )
+    if _has_price:
+        sidebar_items.insert(
+            1,
+            '<li class="nav-item"><a href="#price-trade-chart-wrap" style="color:#88C0D0;font-weight:700;">📈 주가·매매</a></li>',
+        )
 
     ret_color = "var(--gain)" if avg_ret > 0 else "var(--loss)"
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

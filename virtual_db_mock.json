@@ -5698,6 +5698,229 @@
             "exit_time": "13:13:13",
             "exit_datetime": "2026-07-14 13:13:13",
             "code": "259960"
+        },
+        {
+            "name": "현대엘리베이터",
+            "avg_price": 67111.0,
+            "qty": 28,
+            "stage": 1,
+            "invested": 1885684.878,
+            "entry_time": "2026-07-31T09:46:07.628117",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-08-03 09:18:37",
+                    "action": "SELL",
+                    "price": 66600.0,
+                    "qty": 28,
+                    "snapshot": {
+                        "time": "2026-08-03 09:18:37",
+                        "price": 66600.0,
+                        "market_trend": "N/A",
+                        "vol_power": 100.55,
+                        "reason": "MANUAL_SELECTED_ORDER",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 2.59
+                    }
+                }
+            ],
+            "max_now": 67111.0,
+            "ka_cur_prc": 67500.0,
+            "ka_evlu_amt": 1890000.0,
+            "ka_evlu_pfls_amt": 10900.0,
+            "ka_prft_rt": 0.5800649246979938,
+            "ka_pur_amt": 1879100.0,
+            "ka_sync_iso": "2026-08-03T00:08:17.704666",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-08-03T09:30:00",
+                    66600.0,
+                    "Timestamp('2026-07-31 09:46:07.628117+0900', tz='Asia/Seoul')"
+                ],
+                66600.0
+            ],
+            "max_p": 67900.0,
+            "max_price": 67900.0,
+            "current_price": 67900.0,
+            "exit_reason": "MANUAL_SELECTED_ORDER",
+            "final_pnl_pct": -1.6514571635653712,
+            "realized_pnl_amt": -31141.277999999933,
+            "exit_price": 66600.0,
+            "exit_date": "2026-08-03",
+            "exit_time": "09:18:37",
+            "exit_datetime": "2026-08-03 09:18:37",
+            "code": "017800"
+        },
+        {
+            "name": "이마트",
+            "avg_price": 79788.0,
+            "qty": 21,
+            "stage": 1,
+            "invested": 1681412.418,
+            "entry_time": "2026-07-31T15:01:09.656741",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-08-03 09:21:53",
+                    "action": "SYNC_EXIT",
+                    "price": 77900.0,
+                    "qty": 21,
+                    "pnl": "-2.37%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 79788.0,
+            "ka_cur_prc": -77800.0,
+            "ka_evlu_amt": 0.0,
+            "ka_evlu_pfls_amt": 0.0,
+            "ka_prft_rt": 0.0,
+            "ka_pur_amt": 1675538.0,
+            "ka_sync_iso": "2026-08-03T09:19:34.990637",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-08-03T09:30:00",
+                    77900.0,
+                    "Timestamp('2026-07-31 15:01:09.656741+0900', tz='Asia/Seoul')"
+                ],
+                78000.0
+            ],
+            "max_p": 79800.0,
+            "max_price": 79800.0,
+            "current_price": 77900.0,
+            "final_pnl_pct": -2.366270617135413,
+            "realized_pnl_amt": -39648.0,
+            "exit_price": 77900.0,
+            "exit_date": "2026-08-03",
+            "exit_time": "09:21:53",
+            "exit_datetime": "2026-08-03 09:21:53",
+            "code": "139480"
+        },
+        {
+            "name": "LG전자",
+            "avg_price": 180800.0,
+            "qty": 10,
+            "stage": 1,
+            "invested": 1814328.0,
+            "entry_time": "2026-08-07T09:16:05.224954",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-08-12 09:45:37",
+                    "action": "SELL",
+                    "price": 199900.0,
+                    "qty": 10,
+                    "snapshot": {
+                        "time": "2026-08-12 09:45:37",
+                        "price": 199900.0,
+                        "market_trend": "N/A",
+                        "vol_power": 138.76,
+                        "reason": "EXIT_TAKE_PROFIT",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 0.13
+                    }
+                }
+            ],
+            "max_now": 180800.0,
+            "ka_cur_prc": 195200.0,
+            "ka_evlu_amt": 1952000.0,
+            "ka_evlu_pfls_amt": 144000.0,
+            "ka_prft_rt": 7.964601769911504,
+            "ka_pur_amt": 1808000.0,
+            "ka_sync_iso": "2026-08-12T09:38:00.545847",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-08-12T09:45:00",
+                    199900.0,
+                    "Timestamp('2026-08-07 09:16:05.224954+0900', tz='Asia/Seoul')"
+                ],
+                199900.0
+            ],
+            "max_p": 199900.0,
+            "max_price": 199900.0,
+            "exit_pending": true,
+            "exit_reason": "EXIT_TAKE_PROFIT",
+            "pending_exit_ord_no": "0053050",
+            "final_pnl_pct": 9.57255248224136,
+            "realized_pnl_amt": 173677.5,
+            "exit_price": 199900.0,
+            "exit_date": "2026-08-12",
+            "exit_time": "09:45:37",
+            "exit_datetime": "2026-08-12 09:45:37",
+            "code": "066570"
+        },
+        {
+            "name": "현대모비스",
+            "avg_price": 506000.0,
+            "qty": 3,
+            "stage": 1,
+            "invested": 1523313.0,
+            "entry_time": "2026-08-12T10:46:20.423424",
+            "reason": "TYPE_A",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-08-13 10:30:41",
+                    "action": "SELL",
+                    "price": 506000.0,
+                    "qty": 3,
+                    "snapshot": {
+                        "time": "2026-08-13 10:30:41",
+                        "price": 506000.0,
+                        "market_trend": "N/A",
+                        "vol_power": 98.77,
+                        "reason": "EXIT_FLASH_EXIT",
+                        "rsi": NaN,
+                        "macd": NaN,
+                        "osc": NaN,
+                        "adx": NaN,
+                        "ma_alignment": "혼조(Neutral)",
+                        "bid_ask_ratio": 1.99
+                    }
+                }
+            ],
+            "max_now": 506000.0,
+            "ka_cur_prc": 502000.0,
+            "ka_evlu_amt": 1506000.0,
+            "ka_evlu_pfls_amt": -12000.0,
+            "ka_prft_rt": -0.7905138339920948,
+            "ka_pur_amt": 1518000.0,
+            "ka_sync_iso": "2026-08-13T01:54:34.494701",
+            "_rt_bars_peak_cache": [
+                [
+                    300,
+                    "2026-08-13T10:30:00",
+                    506000.0,
+                    "Timestamp('2026-08-12 10:46:20.423424+0900', tz='Asia/Seoul')"
+                ],
+                530000.0
+            ],
+            "max_p": 530000.0,
+            "max_price": 530000.0,
+            "current_price": 510000.0,
+            "exit_pending": true,
+            "exit_reason": "EXIT_FLASH_EXIT",
+            "pending_exit_ord_no": "0076722",
+            "final_pnl_pct": -0.8968609865470852,
+            "realized_pnl_amt": -13662.0,
+            "exit_price": 506000.0,
+            "exit_date": "2026-08-13",
+            "exit_time": "10:30:41",
+            "exit_datetime": "2026-08-13 10:30:41",
+            "code": "012330"
         }
     ],
     "pending_exit_snapshots": {}

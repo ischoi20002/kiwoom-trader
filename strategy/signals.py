@@ -195,6 +195,27 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if _settings_bool(settings, "use_type_b_vol", True):
         signal_b &= cond_vol_b
 
+    # 6b. 트리플 볼린저 과열 차단 (기본 OFF — 백테스트 비교용)
+    try:
+        if "BB_Z" in df.columns:
+            bb_z = pd.to_numeric(df["BB_Z"], errors="coerce")
+            if _settings_bool(settings, "use_bb_block_a_2s", False):
+                try:
+                    thr_a = float(settings.get("bb_block_a_z", 2.0))
+                except (TypeError, ValueError):
+                    thr_a = 2.0
+                signal_a = signal_a & ~(bb_z >= thr_a)
+            if _settings_bool(settings, "use_bb_block_all_3s", False):
+                try:
+                    thr_all = float(settings.get("bb_block_all_z", 3.0))
+                except (TypeError, ValueError):
+                    thr_all = 3.0
+                hot = bb_z >= thr_all
+                signal_a = signal_a & ~hot
+                signal_b = signal_b & ~hot
+    except Exception:
+        pass
+
     # 7. 최종 신호 및 공통 필터
     signal = signal_a | signal_b
     

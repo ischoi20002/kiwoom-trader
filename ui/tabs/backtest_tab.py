@@ -18,7 +18,21 @@ class BacktestTab:
         self.gui_queue = queue.Queue() # [v35.2] Thread-safe GUI update queue
         self.btn_narrative_report: Optional[ttk.Button] = None
         self.btn_daily_settlement: Optional[ttk.Button] = None
+        self.btn_single_stock_sim: Optional[ttk.Button] = None
         self.last_opt_df = None  # [v25.2] 최적합 파라미터 저장용
+        self._ss_dlg: Optional[tk.Toplevel] = None
+        self._ss_status_lbl: Optional[tk.Label] = None
+        self._ss_btn_run: Optional[tk.Button] = None
+        self._ss_code_entry: Optional[tk.Entry] = None
+        self._ss_start_entry: Optional[tk.Entry] = None
+        self._ss_end_entry: Optional[tk.Entry] = None
+        self._ss_hp_var: Optional[tk.BooleanVar] = None
+        self._ss_strategy_var: Optional[tk.StringVar] = None
+        self._ss_vol_k_entry: Optional[tk.Entry] = None
+        self._ss_vol_k_hint: Optional[tk.Label] = None
+        self._ss_header_lbl: Optional[tk.Label] = None
+        self._ss_sub_lbl: Optional[tk.Label] = None
+        self._ss_running: bool = False
         self._init_vars()
         self._setup_ui()
         self._poll_queue()
@@ -274,6 +288,14 @@ class BacktestTab:
             command=lambda: self._call_virtual_tab("generate_daily_settlement"),
         )
         self.btn_daily_settlement.pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_single_stock_sim = ttk.Button(
+            btn_cluster,
+            text="종목시뮬",
+            style=_rep_style,
+            width=_rep_w,
+            command=self._open_single_stock_sim_dialog,
+        )
+        self.btn_single_stock_sim.pack(side=tk.LEFT, padx=(0, 4))
         self.btn_harvest_prices = ttk.Button(
             btn_cluster,
             text="최신주가데이타수집",
@@ -1463,3 +1485,567 @@ class BacktestTab:
         from ui.gui_utils import CustomDatePicker
         entry = self.backtest_entries.get(key)
         if entry: CustomDatePicker(self.parent, entry, initial_date=entry.get(), colors=self.app.colors)
+
+    def _ss_widget_alive(self, widget: Optional[tk.Misc]) -> bool:
+        """다이얼로그 위젯이 아직 살아 있는지 확인한다."""
+        try:
+            return widget is not None and bool(widget.winfo_exists())
+        except Exception:
+            return False
+
+    def _ss_on_strategy_change(self) -> None:
+        """전략 선택에 따라 K 입력·안내 문구를 전환한다."""
+        try:
+            strat = str(self._ss_strategy_var.get() or "s1_s2") if self._ss_strategy_var is not None else "s1_s2"
+        except Exception:
+            strat = "s1_s2"
+        is_vb = strat == "vol_breakout"
+        try:
+            if self._ss_widget_alive(self._ss_vol_k_entry):
+                state = tk.NORMAL if is_vb else tk.DISABLED
+                self._ss_vol_k_entry.config(state=state)
+        except Exception:
+            pass
+        try:
+            if self._ss_widget_alive(self._ss_header_lbl):
+                self._ss_header_lbl.config(
+                    text="단일 종목 변동성 돌파 재현" if is_vb else "단일 종목 S1 / S2 / 청산 재현"
+                )
+        except Exception:
+            pass
+        try:
+            if self._ss_widget_alive(self._ss_sub_lbl):
+                self._ss_sub_lbl.config(
+                    text=(
+                        "당일 시가 + 전일 고저폭×K 를 넘으면 매수하고 당일 종가에 청산합니다. 자금 1,000만원."
+                        if is_vb
+                        else "유니버스·슬롯 없이 해당 종목만 재현합니다. 자금은 1,000만원 · S1 44% · S2 54% 고정."
+                    )
+                )
+        except Exception:
+            pass
+        try:
+            if self._ss_widget_alive(self._ss_vol_k_hint):
+                self._ss_vol_k_hint.config(
+                    fg="#88C0D0" if is_vb else "#787c99"
+                )
+        except Exception:
+            pass
+
+    def _ss_set_status(self, text: str, color: str = "#88C0D0") -> None:
+        """종목시뮬 다이얼로그·전략검증 상태바에 진행 문구를 반영한다."""
+        try:
+            if self._ss_widget_alive(self._ss_status_lbl):
+                self._ss_status_lbl.config(text=text, fg=color)
+        except Exception:
+            pass
+        try:
+            self.lbl_bt_status.config(text=text, foreground=color)
+        except Exception:
+            pass
+
+    def _ss_default_dates(self) -> tuple[str, str]:
+        """탭 기간 입력을 기본값으로 쓴다."""
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        start = "2025-03-04"
+        end = yesterday
+        try:
+            ent_s = self.backtest_entries.get("start_date")
+            if ent_s is not None:
+                start = str(ent_s.get() or "").strip() or start
+        except Exception:
+            try:
+                start = str(self.app.settings.get("bt_start_date", start) or start)
+            except Exception:
+                pass
+        try:
+            ent_e = self.backtest_entries.get("end_date")
+            if ent_e is not None:
+                end = str(ent_e.get() or "").strip() or end
+        except Exception:
+            try:
+                end = str(self.app.settings.get("bt_end_date", end) or end)
+            except Exception:
+                pass
+        return start, end
+
+    def _ss_show_date_picker(self, entry: tk.Entry) -> None:
+        """다이얼로그 날짜 엔트리용 달력을 연다."""
+        try:
+            from ui.gui_utils import CustomDatePicker
+            parent = self._ss_dlg if self._ss_widget_alive(self._ss_dlg) else self.parent
+            CustomDatePicker(parent, entry, initial_date=entry.get(), colors=self.app.colors)
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", f"날짜 선택기를 열 수 없습니다:\n{e}", parent=self.parent)
+            except Exception:
+                pass
+
+    def _open_single_stock_report(self) -> None:
+        """마지막 단일 종목 시뮬 리포트를 브라우저에서 연다."""
+        try:
+            from single_stock_sim import DEFAULT_REPORT_PATH
+            path = os.path.abspath(DEFAULT_REPORT_PATH)
+        except Exception:
+            path = os.path.abspath("single_stock_trade_report.html")
+        try:
+            if os.path.exists(path):
+                webbrowser.open(f"file://{path}")
+            else:
+                parent = self._ss_dlg if self._ss_widget_alive(self._ss_dlg) else self.parent
+                messagebox.showinfo("알림", "아직 생성된 종목시뮬 리포트가 없습니다.", parent=parent)
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", str(e), parent=self.parent)
+            except Exception:
+                pass
+
+    def _open_single_stock_sim_dialog(self) -> None:
+        """단일 종목 S1/S2/청산 시뮬 다이얼로그를 연다."""
+        try:
+            if self._ss_widget_alive(self._ss_dlg):
+                try:
+                    self._ss_dlg.lift()
+                    self._ss_dlg.focus_force()
+                except Exception:
+                    pass
+                return
+
+            colors = getattr(self.app, "colors", None) or {}
+            bg = colors.get("bg", "#2E3440")
+            card = colors.get("card", "#3B4252")
+            fg = colors.get("fg", "#ECEFF4")
+            primary = colors.get("primary", "#88C0D0")
+            muted = colors.get("secondary", "#787c99")
+
+            dlg = tk.Toplevel(self.app.root)
+            self._ss_dlg = dlg
+            dlg.title("종목 시뮬")
+            dlg.configure(bg=bg)
+            dlg.resizable(False, False)
+            try:
+                dlg.transient(self.app.root)
+            except Exception:
+                pass
+
+            w, h = 500, 430
+            try:
+                self.app.root.update_idletasks()
+                pos_x = self.app.root.winfo_x() + (self.app.root.winfo_width() // 2) - (w // 2)
+                pos_y = self.app.root.winfo_y() + (self.app.root.winfo_height() // 2) - (h // 2)
+                dlg.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+            except Exception:
+                dlg.geometry(f"{w}x{h}")
+
+            header = tk.Frame(dlg, bg=card)
+            header.pack(fill=tk.X)
+            self._ss_header_lbl = tk.Label(
+                header,
+                text="단일 종목 S1 / S2 / 청산 재현",
+                font=("Malgun Gothic", 11, "bold"),
+                bg=card,
+                fg=primary,
+            )
+            self._ss_header_lbl.pack(anchor=tk.W, padx=16, pady=(12, 2))
+            self._ss_sub_lbl = tk.Label(
+                header,
+                text="유니버스·슬롯 없이 해당 종목만 재현합니다. 자금은 1,000만원 · S1 44% · S2 54% 고정.",
+                font=("Malgun Gothic", 8),
+                bg=card,
+                fg=muted,
+            )
+            self._ss_sub_lbl.pack(anchor=tk.W, padx=16, pady=(0, 12))
+
+            body = tk.Frame(dlg, bg=bg, padx=16, pady=12)
+            body.pack(fill=tk.BOTH, expand=True)
+            body.columnconfigure(1, weight=1)
+
+            tk.Label(body, text="종목코드", bg=bg, fg=fg, font=("Malgun Gothic", 9)).grid(
+                row=0, column=0, sticky=tk.W, pady=4
+            )
+            self._ss_code_entry = tk.Entry(
+                body, width=14, bg=card, fg=fg, insertbackground=fg, relief=tk.FLAT,
+                font=("Consolas", 11),
+            )
+            self._ss_code_entry.grid(row=0, column=1, sticky=tk.W, padx=(10, 0), pady=4)
+            try:
+                self._ss_code_entry.focus_set()
+            except Exception:
+                pass
+
+            start_default, end_default = self._ss_default_dates()
+
+            tk.Label(body, text="시작일", bg=bg, fg=fg, font=("Malgun Gothic", 9)).grid(
+                row=1, column=0, sticky=tk.W, pady=4
+            )
+            start_row = tk.Frame(body, bg=bg)
+            start_row.grid(row=1, column=1, sticky=tk.W, padx=(10, 0), pady=4)
+            self._ss_start_entry = tk.Entry(
+                start_row, width=12, bg=card, fg=fg, insertbackground=fg, relief=tk.FLAT,
+                font=("Consolas", 10),
+            )
+            self._ss_start_entry.insert(0, start_default)
+            self._ss_start_entry.pack(side=tk.LEFT)
+            tk.Button(
+                start_row, text="📅", width=3, relief=tk.FLAT, bg=card, fg=fg,
+                command=lambda: self._ss_show_date_picker(self._ss_start_entry),
+            ).pack(side=tk.LEFT, padx=(4, 0))
+
+            tk.Label(body, text="종료일", bg=bg, fg=fg, font=("Malgun Gothic", 9)).grid(
+                row=2, column=0, sticky=tk.W, pady=4
+            )
+            end_row = tk.Frame(body, bg=bg)
+            end_row.grid(row=2, column=1, sticky=tk.W, padx=(10, 0), pady=4)
+            self._ss_end_entry = tk.Entry(
+                end_row, width=12, bg=card, fg=fg, insertbackground=fg, relief=tk.FLAT,
+                font=("Consolas", 10),
+            )
+            self._ss_end_entry.insert(0, end_default)
+            self._ss_end_entry.pack(side=tk.LEFT)
+            tk.Button(
+                end_row, text="📅", width=3, relief=tk.FLAT, bg=card, fg=fg,
+                command=lambda: self._ss_show_date_picker(self._ss_end_entry),
+            ).pack(side=tk.LEFT, padx=(4, 0))
+
+            try:
+                hp_default = bool(self.bt_high_precision_var.get())
+            except Exception:
+                try:
+                    hp_default = bool(self.app.settings.get("bt_high_precision", True))
+                except Exception:
+                    hp_default = True
+            tk.Label(body, text="전략", bg=bg, fg=fg, font=("Malgun Gothic", 9)).grid(
+                row=3, column=0, sticky=tk.W, pady=4
+            )
+            strat_row = tk.Frame(body, bg=bg)
+            strat_row.grid(row=3, column=1, sticky=tk.W, padx=(10, 0), pady=4)
+            self._ss_strategy_var = tk.StringVar(value="s1_s2")
+            tk.Radiobutton(
+                strat_row,
+                text="기존 (Type A/B)",
+                variable=self._ss_strategy_var,
+                value="s1_s2",
+                command=self._ss_on_strategy_change,
+                bg=bg,
+                fg=fg,
+                selectcolor=card,
+                activebackground=bg,
+                activeforeground=fg,
+                font=("Malgun Gothic", 9),
+            ).pack(side=tk.LEFT)
+            tk.Radiobutton(
+                strat_row,
+                text="변동성 돌파",
+                variable=self._ss_strategy_var,
+                value="vol_breakout",
+                command=self._ss_on_strategy_change,
+                bg=bg,
+                fg=fg,
+                selectcolor=card,
+                activebackground=bg,
+                activeforeground=fg,
+                font=("Malgun Gothic", 9),
+            ).pack(side=tk.LEFT, padx=(12, 0))
+
+            tk.Label(body, text="K 값", bg=bg, fg=fg, font=("Malgun Gothic", 9)).grid(
+                row=4, column=0, sticky=tk.W, pady=4
+            )
+            k_row = tk.Frame(body, bg=bg)
+            k_row.grid(row=4, column=1, sticky=tk.W, padx=(10, 0), pady=4)
+            self._ss_vol_k_entry = tk.Entry(
+                k_row, width=8, bg=card, fg=fg, insertbackground=fg, relief=tk.FLAT,
+                font=("Consolas", 10),
+            )
+            self._ss_vol_k_entry.insert(0, "0.5")
+            self._ss_vol_k_entry.pack(side=tk.LEFT)
+            self._ss_vol_k_hint = tk.Label(
+                k_row,
+                text="목표가 = 시가 + 전일레인지×K",
+                bg=bg,
+                fg=muted,
+                font=("Malgun Gothic", 8),
+            )
+            self._ss_vol_k_hint.pack(side=tk.LEFT, padx=(8, 0))
+
+            self._ss_hp_var = tk.BooleanVar(value=hp_default)
+            tk.Checkbutton(
+                body,
+                text="고정밀(1분)",
+                variable=self._ss_hp_var,
+                bg=bg,
+                fg=fg,
+                selectcolor=card,
+                activebackground=bg,
+                activeforeground=fg,
+                font=("Malgun Gothic", 9),
+            ).grid(row=5, column=1, sticky=tk.W, padx=(10, 0), pady=(8, 4))
+
+            self._ss_status_lbl = tk.Label(
+                body,
+                text="대기 중",
+                bg=bg,
+                fg=primary,
+                font=("Malgun Gothic", 8),
+                anchor=tk.W,
+            )
+            self._ss_status_lbl.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(10, 0))
+
+            try:
+                self._ss_on_strategy_change()
+            except Exception:
+                pass
+
+            footer = tk.Frame(dlg, bg=bg, pady=12)
+            footer.pack(side=tk.BOTTOM, fill=tk.X, padx=16)
+            self._ss_btn_run = tk.Button(
+                footer,
+                text="시뮬 실행",
+                width=14,
+                height=1,
+                bg="#A3BE8C",
+                fg="#2E3440",
+                font=("Malgun Gothic", 10, "bold"),
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=self._on_single_stock_sim_run,
+            )
+            self._ss_btn_run.pack(side=tk.LEFT)
+            tk.Button(
+                footer,
+                text="마지막 리포트",
+                width=14,
+                height=1,
+                bg="#5E81AC",
+                fg="#ECEFF4",
+                font=("Malgun Gothic", 10, "bold"),
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=self._open_single_stock_report,
+            ).pack(side=tk.LEFT, padx=(8, 0))
+
+            def _on_close() -> None:
+                try:
+                    if self._ss_running:
+                        messagebox.showinfo(
+                            "실행 중",
+                            "시뮬이 끝날 때까지 기다려 주세요.",
+                            parent=dlg,
+                        )
+                        return
+                except Exception:
+                    pass
+                try:
+                    dlg.destroy()
+                except Exception:
+                    pass
+                self._ss_dlg = None
+
+            try:
+                dlg.protocol("WM_DELETE_WINDOW", _on_close)
+            except Exception:
+                pass
+            try:
+                dlg.bind("<Return>", lambda _e: self._on_single_stock_sim_run())
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self._show_copyable_error(
+                    "오류",
+                    f"종목시뮬 창을 열지 못했습니다:\n{e}\n\n{traceback.format_exc()}",
+                )
+            except Exception:
+                pass
+
+    def _on_single_stock_sim_run(self) -> None:
+        """다이얼로그 입력을 검증하고 백그라운드 시뮬을 시작한다."""
+        if self._ss_running:
+            return
+        try:
+            code_raw = ""
+            if self._ss_widget_alive(self._ss_code_entry):
+                code_raw = str(self._ss_code_entry.get() or "").strip()
+            start_raw = ""
+            if self._ss_widget_alive(self._ss_start_entry):
+                start_raw = str(self._ss_start_entry.get() or "").strip()
+            end_raw = ""
+            if self._ss_widget_alive(self._ss_end_entry):
+                end_raw = str(self._ss_end_entry.get() or "").strip()
+            try:
+                hp = bool(self._ss_hp_var.get()) if self._ss_hp_var is not None else False
+            except Exception:
+                hp = False
+            try:
+                strategy = (
+                    str(self._ss_strategy_var.get() or "s1_s2")
+                    if self._ss_strategy_var is not None
+                    else "s1_s2"
+                )
+            except Exception:
+                strategy = "s1_s2"
+            vol_k_raw = "0.5"
+            if self._ss_widget_alive(self._ss_vol_k_entry):
+                try:
+                    # DISABLED 상태에서도 get 가능
+                    vol_k_raw = str(self._ss_vol_k_entry.get() or "0.5").strip()
+                except Exception:
+                    vol_k_raw = "0.5"
+        except Exception as e:
+            messagebox.showerror("오류", f"입력을 읽지 못했습니다:\n{e}", parent=self.parent)
+            return
+
+        parent = self._ss_dlg if self._ss_widget_alive(self._ss_dlg) else self.parent
+        if not code_raw:
+            messagebox.showwarning("알림", "종목코드를 입력해 주세요.", parent=parent)
+            return
+        try:
+            datetime.strptime(start_raw[:10], "%Y-%m-%d")
+            datetime.strptime(end_raw[:10], "%Y-%m-%d")
+        except Exception:
+            messagebox.showwarning("알림", "날짜는 YYYY-MM-DD 형식으로 입력해 주세요.", parent=parent)
+            return
+        if strategy == "vol_breakout":
+            try:
+                k_chk = float(vol_k_raw)
+                if k_chk < 0.01 or k_chk > 2.0:
+                    raise ValueError("range")
+            except Exception:
+                messagebox.showwarning(
+                    "알림",
+                    "K 값은 0.01 ~ 2.0 사이 숫자로 입력해 주세요. (예: 0.5)",
+                    parent=parent,
+                )
+                return
+
+        self._ss_running = True
+        try:
+            if self._ss_widget_alive(self._ss_btn_run):
+                self._ss_btn_run.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        try:
+            if self.btn_single_stock_sim is not None:
+                self.btn_single_stock_sim.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        self._ss_set_status("종목 시뮬 시작...", "#EBCB8B")
+        threading.Thread(
+            target=self._run_single_stock_sim_thread,
+            args=(code_raw, start_raw, end_raw, hp, strategy, vol_k_raw),
+            daemon=True,
+        ).start()
+
+    def _run_single_stock_sim_thread(
+        self,
+        code: str,
+        start: str,
+        end: str,
+        high_precision: bool,
+        strategy: str = "s1_s2",
+        vol_k: str = "0.5",
+    ) -> None:
+        """단일 종목 시뮬을 백그라운드에서 실행하고 리포트를 연다."""
+        try:
+            from single_stock_sim import SingleStockSimError, run_single_stock_simulation
+
+            def update(msg: str, val: Optional[float] = None) -> None:
+                self.gui_queue.put(lambda m=str(msg): self._ss_set_status(m, "#EBCB8B"))
+
+            try:
+                active = self.app.settings.copy()
+            except Exception:
+                active = dict(self.app.settings or {})
+
+            result = run_single_stock_simulation(
+                active,
+                code,
+                start,
+                end,
+                high_precision=high_precision,
+                callback=update,
+                strategy=strategy,
+                vol_k=vol_k,
+            )
+            n_trades = int(result.get("n_trades") or 0)
+            name = str(result.get("name") or result.get("code") or code)
+            code_n = str(result.get("code") or code)
+            report = str(result.get("report_path") or "")
+            strat = str(result.get("strategy") or strategy or "s1_s2")
+            if strat == "vol_breakout":
+                try:
+                    k_show = result.get("vol_k")
+                    k_txt = f"K={float(k_show):g}" if k_show is not None else "K=?"
+                except Exception:
+                    k_txt = "K=?"
+                mode = f"변동성돌파 {k_txt}"
+                if result.get("high_precision"):
+                    mode += " / 고정밀"
+            else:
+                mode = "고정밀" if result.get("high_precision") else "15분"
+            done_msg = f"종목시뮬 완료 ({name} {code_n} / {mode} / 매매 {n_trades}건)"
+            color = "#A3BE8C" if n_trades > 0 else "#EBCB8B"
+
+            def _finish() -> None:
+                self._ss_set_status(done_msg, color)
+                if report and os.path.exists(report):
+                    try:
+                        webbrowser.open(f"file://{os.path.abspath(report)}")
+                    except Exception:
+                        pass
+                if n_trades <= 0:
+                    parent = self._ss_dlg if self._ss_widget_alive(self._ss_dlg) else self.parent
+                    try:
+                        empty_kind = (
+                            "변동성 돌파 체결"
+                            if strat == "vol_breakout"
+                            else "S1/S2/청산"
+                        )
+                        messagebox.showinfo(
+                            "매매 없음",
+                            f"{name}({code_n}) {start} ~ {end}\n해당 기간에 체결된 {empty_kind}이 없습니다.\n리포트는 생성되었습니다.",
+                            parent=parent,
+                        )
+                    except Exception:
+                        pass
+
+            self.gui_queue.put(_finish)
+        except Exception as _err:
+            err_text = str(_err)
+            tb = traceback.format_exc()
+
+            def _fail() -> None:
+                self._ss_set_status("종목시뮬 실패", "#BF616A")
+                parent = self._ss_dlg if self._ss_widget_alive(self._ss_dlg) else self.parent
+                try:
+                    from single_stock_sim import SingleStockSimError
+                    is_user = isinstance(_err, SingleStockSimError)
+                except Exception:
+                    is_user = False
+                try:
+                    if is_user:
+                        messagebox.showwarning("종목시뮬", err_text, parent=parent)
+                    else:
+                        self._show_copyable_error("종목시뮬 오류", f"{err_text}\n\n{tb}")
+                except Exception:
+                    try:
+                        messagebox.showerror("종목시뮬 오류", err_text, parent=parent)
+                    except Exception:
+                        pass
+
+            self.gui_queue.put(_fail)
+        finally:
+            def _unlock() -> None:
+                self._ss_running = False
+                try:
+                    if self._ss_widget_alive(self._ss_btn_run):
+                        self._ss_btn_run.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+                try:
+                    if self.btn_single_stock_sim is not None:
+                        self.btn_single_stock_sim.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+
+            self.gui_queue.put(_unlock)
+

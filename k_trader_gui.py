@@ -954,29 +954,63 @@ class KiwoomApp:
             pass
 
         # RemoteCommander는 인증 성공 후 RestAuthRetryService에서 1회만 기동합니다.
-        if self.auto_start:
-            try:
-                cms = getattr(self, "continuous_monitor_service", None)
-                if cms is not None:
-                    cms.arm()
-                    ms = int(cms.ms_until_auto_start())
-                    hm = cms._auto_start_hhmm_str()
-                    if ms <= 0:
-                        self.log(
-                            f"[Auto] 장전 시작 시각({hm}) 경과 — "
-                            "실시간 감시를 곧 시작합니다..."
-                        )
-                        self.root.after(1000, self.ensure_fresh_selection_then_start)
+        # 앱이 켜져 있으면 거래일마다 개장 N분 전(기본 25분)에 감시를 자동 시작.
+        try:
+            cms = getattr(self, "continuous_monitor_service", None)
+            if cms is not None:
+                cms.arm()
+                ms = int(cms.ms_until_auto_start())
+                hm = cms._auto_start_hhmm_str()
+                in_morning_window = ms <= 0
+                mid_day_catchup = False
+                try:
+                    mid_day_catchup = bool(
+                        self.auto_start
+                        and (not in_morning_window)
+                        and cms.is_before_eod_on_trading_day()
+                    )
+                except Exception:
+                    mid_day_catchup = bool(self.auto_start)
+                if in_morning_window or mid_day_catchup:
+                    self.log(
+                        f"[Auto] 장전 시작 시각({hm}) 경과 — "
+                        "실시간 감시를 곧 시작합니다..."
+                    )
+                    if in_morning_window:
+                        self.root.after(1000, cms.request_morning_start)
                     else:
-                        self.log(
-                            f"[Auto] 연속 스케줄 활성화 — "
-                            f"감시 시작 {hm} (약 {ms // 1000}초 후), "
-                            f"장마감 선정 {cms._format_eod_hhmm()}"
+                        self.root.after(
+                            1000, self.ensure_fresh_selection_then_start
                         )
                 else:
-                    self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
-                    self.root.after(8000, self.ensure_fresh_selection_then_start)
-            except Exception:
+                    try:
+                        mins = int(cms._minutes_before_open())
+                    except Exception:
+                        mins = 25
+                    self.log(
+                        f"[Auto] 연속 스케줄 활성화 — "
+                        f"감시 시작 {hm} (개장 {mins}분 전, 약 {ms // 1000}초 후), "
+                        f"장마감 선정 {cms._format_eod_hhmm()}"
+                    )
+                    try:
+                        wait_txt = f"상태: 대기 중 (감시 시작 {hm})"
+                        if getattr(self, "lbl_monitor_status", None) is not None:
+                            self.lbl_monitor_status.config(
+                                text=wait_txt,
+                                foreground=self.colors.get("primary", "#88C0D0"),
+                            )
+                        if getattr(self, "status_label", None) is not None:
+                            self.status_label.config(
+                                text=wait_txt,
+                                foreground=self.colors.get("primary", "#88C0D0"),
+                            )
+                    except Exception:
+                        pass
+            elif self.auto_start:
+                self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
+                self.root.after(8000, self.ensure_fresh_selection_then_start)
+        except Exception:
+            if self.auto_start:
                 self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
                 self.root.after(8000, self.ensure_fresh_selection_then_start)
         
@@ -2778,7 +2812,9 @@ class KiwoomApp:
         실시간 감시 토글.
 
         시작 시 일일 감시목록이 만료·없으면 선정을 먼저 수행한 뒤 감시를 시작합니다.
-        ContinuousMonitorService 가 연동되어 장마감 후 중단→선정→재시작을 자동 수행합니다.
+        ContinuousMonitorService 가 연동되어 장마감 후 중단→선정,
+        다음날 개장 N분 전 자동 재시작을 수행합니다. 수동 중단 시에도
+        다음날 장전 스케줄은 유지됩니다.
         """
         tc = self.trading_controller
         try:
@@ -2786,7 +2822,8 @@ class KiwoomApp:
                 try:
                     cms = getattr(self, "continuous_monitor_service", None)
                     if cms is not None:
-                        cms.disarm(manual=True)
+                        # 수동 중단은 당일만 멈추고, 다음날 장전 자동 시작은 유지
+                        cms.mark_morning_start_done()
                 except Exception:
                     pass
                 return tc.stop()
@@ -3218,6 +3255,10 @@ class KiwoomApp:
                         cms.arm()
                     else:
                         cms.start_scheduler()
+                    try:
+                        cms.mark_morning_start_done()
+                    except Exception:
+                        pass
             except Exception:
                 pass
             if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
@@ -3266,7 +3307,7 @@ class KiwoomApp:
                 try:
                     hm = cms._auto_start_hhmm_str()
                 except Exception:
-                    hm = "08:50"
+                    hm = "08:35"
                 _wait_txt = f"상태: 장마감 선정 중 → 감시 시작 {hm}"
                 if self.lbl_monitor_status:
                     self.lbl_monitor_status.config(
@@ -3278,17 +3319,26 @@ class KiwoomApp:
                     )
             else:
                 try:
-                    if cms is not None and cms.armed and not eod_cycle_stop:
-                        cms.disarm(manual=True)
+                    if cms is not None:
+                        cms.mark_morning_start_done()
+                        if not cms.armed:
+                            cms.arm()
+                except Exception:
+                    pass
+                wait_txt = "상태: 대기 중"
+                try:
+                    if cms is not None:
+                        hm = cms._auto_start_hhmm_str()
+                        wait_txt = f"상태: 대기 중 (감시 시작 {hm})"
                 except Exception:
                     pass
                 if self.lbl_monitor_status:
                     self.lbl_monitor_status.config(
-                        text="상태: 대기 중", foreground=self.colors["primary"]
+                        text=wait_txt, foreground=self.colors["primary"]
                     )
                 if self.status_label:
                     self.status_label.config(
-                        text="상태: 대기 중", foreground=self.colors["primary"]
+                        text=wait_txt, foreground=self.colors["primary"]
                     )
 
     def on_close(self):

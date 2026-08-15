@@ -13,6 +13,18 @@
 
 ---
 
+## 0.18.19 (2026-08-15)
+
+- **볼린저 과열 필터(기본 OFF)**: 15분 종가 Z=(Close−MA20)/σ. Type A +2σ 차단·전 타입 +3σ 차단을 설정으로 켜 비교 가능 (`use_bb_block_a_2s`, `use_bb_block_all_3s`).
+
+## 0.18.18 (2026-08-15)
+
+- **종목시뮬 변동성 돌파**: 단일 종목 시뮬에서 기존 Type A/B 외에 래리 윌리엄스식 변동성 돌파(시가+전일레인지×K, 당일 종가 청산)를 선택 가능. K(0.01~2.0)와 고정밀(1분 최초 터치) 지원.
+
+## 0.18.17 (2026-08-15)
+
+- **장전 자동 감시 시작**: 앱이 켜져 있으면 `--auto-start` 없이도 거래일마다 **개장 25분 전**에 실시간 감시를 자동 시작. 수능·신년 등 특수 개장일도 세션 시각 기준 (`realtime_monitor_auto_start_minutes_before_open`).
+
 ## 0.18.16 (2026-08-14)
 
 - **15:30 S2·청산도 S1과 동일 허용**: `next_open`/허용 플래그 시 고정밀·bt_hp EOD 스킵 해제. RT 틱·완성봉 held 경로에서 모의=익일예약·실전=NXT 분기 공통화 (`bt_hp_intrabar_unified`, `backtest_engine`, `signal_engine`, `signals.settings_allow_1530_signal_eval`).

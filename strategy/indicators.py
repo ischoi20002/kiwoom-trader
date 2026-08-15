@@ -11,6 +11,28 @@ from strategy.indicator_constants import (
     RSI_SIG_LOOKBACK,
 )
 
+def attach_bollinger_z(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+    """종가 기준 볼린저 Z=(Close−MA)/σ. 과열 필터·비교 실험용 (기본 20봉, 모집단 σ)."""
+    try:
+        p = max(2, int(period))
+    except (TypeError, ValueError):
+        p = 20
+    try:
+        close = pd.to_numeric(df["Close"], errors="coerce")
+        mid = close.rolling(p, min_periods=p).mean()
+        std = close.rolling(p, min_periods=p).std(ddof=0)
+        df["BB_MID"] = mid
+        df["BB_STD"] = std
+        safe_std = std.where(std > 1e-12, np.nan)
+        df["BB_Z"] = (close - mid) / safe_std
+    except Exception:
+        try:
+            df["BB_Z"] = np.nan
+        except Exception:
+            pass
+    return df
+
+
 def calculate_atr(df, period=14):
     """ATR (Average True Range) 계산 (Wilder's Smoothing)"""
     if df.empty or len(df) < period:
@@ -233,6 +255,12 @@ def calculate_all_indicators(df, settings):
     if "Volume" in df.columns:
         attach_prev_day_volume_quartet(df, settings)
 
+    try:
+        bb_p = int(settings.get("bb_period", 20))
+    except (TypeError, ValueError):
+        bb_p = 20
+    attach_bollinger_z(df, bb_p)
+
     return df
 
 def calculate_buy_indicators_light(df, settings):
@@ -277,5 +305,11 @@ def calculate_buy_indicators_light(df, settings):
         df["ATR_A"] = calculate_atr(df, max(1, atr_pa))
         df["ATR_B"] = calculate_atr(df, max(1, atr_pb))
         df["ATR"] = df["ATR_A"]
-    
+
+    try:
+        bb_p = int(settings.get("bb_period", 20))
+    except (TypeError, ValueError):
+        bb_p = 20
+    attach_bollinger_z(df, bb_p)
+
     return df
