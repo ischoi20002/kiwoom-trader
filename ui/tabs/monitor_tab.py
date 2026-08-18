@@ -135,6 +135,19 @@ def format_strategy_type_label(sel_track: object) -> str:
         return "전략 A+B"
 
 
+def _open_holding_pos(pos: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """수량>0 인 실제 보유 dict만 반환. 미체결·유령 dict는 선정 트랙 표시를 오염시키지 않습니다."""
+    try:
+        if not isinstance(pos, dict):
+            return None
+        qty = int(pos.get("qty") or pos.get("quantity") or 0)
+        if qty > 0:
+            return pos
+    except Exception:
+        return None
+    return None
+
+
 def format_entry_signal_type_label(
     pos: Optional[Dict[str, Any]],
     sel_track: object,
@@ -150,6 +163,7 @@ def format_entry_signal_type_label(
     (DB 복구 후 sig_type 누락·SYNCED 등) 보강합니다.
     """
     try:
+        pos = _open_holding_pos(pos)
         # 보유(dict)일 때만 포트폴리오 추정 — 미보유면 과거 매수 reason 으로 오표시될 수 있음
         if app is not None and code and isinstance(pos, dict):
             pf = getattr(app, "portfolio", None)
@@ -3662,21 +3676,31 @@ class MonitorTab:
                     _step_log("target_tree_item_compare_call", {"curr_values_len": len(curr.get("values", ())) if isinstance(curr, dict) else None})
                     curr_values = curr.get("values", ()) if isinstance(curr, dict) else ()
                     curr_tags = curr.get("tags", ()) if isinstance(curr, dict) else ()
-                    # 감시만 하는 종목의 전략유형은 틱마다 깜빡이지 않게 기존 값을 유지.
-                    # 보유 종목은 실제 매수 유형(TYPE_A/B)으로 갱신해야 함
-                    # (감시 시절 '전략 A'가 Type B 체결 후에도 남는 오표시 방지).
+                    # 전략유형: 실제 보유(is_active_raw)이고 새 값이 전략 A/B 일 때만 체결 유형으로 갱신.
+                    # 감시만 하는 종목·미체결 재주문은 기존 표시를 유지해 A↔A+B 깜빡임을 막습니다.
                     if (
                         not allow_strat_type_live_update
-                        and not is_active
                         and isinstance(curr_values, (list, tuple))
                         and len(curr_values) > 3
                         and isinstance(values, (list, tuple))
                         and len(values) > 3
                     ):
                         try:
-                            values = list(values)
-                            values[3] = curr_values[3]
-                            values = tuple(values)
+                            incoming_st = str(
+                                values[3] if values[3] is not None else ""
+                            ).strip()
+                            current_st = str(
+                                curr_values[3] if curr_values[3] is not None else ""
+                            ).strip()
+                            allow_entry_lock = bool(
+                                is_active_raw
+                                and incoming_st in ("전략 A", "전략 B")
+                                and incoming_st != current_st
+                            )
+                            if not allow_entry_lock:
+                                values = list(values)
+                                values[3] = curr_values[3]
+                                values = tuple(values)
                         except Exception:
                             pass
                     # 도달시 매도 기준가(AtrExit)는 강제 최소 주입 경로에서 '—'가 들어올 수 있어,

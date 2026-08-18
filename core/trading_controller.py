@@ -799,8 +799,9 @@ class TradingController:
 
     def _narrow_monitor_sel_track_after_s1_buy(self, code: object, reason: object) -> None:
         """
-        S1 매수(TYPE_A/B) 접수 후 감시 메타 sel_track 을 실제 체결 유형과 맞춥니다.
-        선정 트랙이 A인데 Type B로 나간 경우에도 덮어, 전략유형·스마트매수 분기가 갈라지지 않게 합니다.
+        선정 트랙이 AB(또는 미지정)인 종목이 S1 매수(TYPE_A/B)로 나가면
+        감시 메타 sel_track 을 단일 A/B 로 좁힙니다.
+        이미 A/B 로 확정된 트랙은 미체결 재주문 때문에 되돌리지 않습니다.
         """
         try:
             nk = str(code or "").split("_")[0].zfill(6)
@@ -821,7 +822,11 @@ class TradingController:
                     ent = mi.get(key)
                     if not isinstance(ent, dict):
                         continue
-                    # 선정 트랙이 A인데 Type B로 체결된 경우 등, 실제 매수 유형으로 맞춤
+                    cur = str(
+                        ent.get("sel_track") or ent.get("SelTrack") or ""
+                    ).strip().upper()
+                    if cur not in ("AB", "A+B", ""):
+                        continue
                     ent["sel_track"] = new_tr
                     try:
                         ent["SelTrack"] = new_tr
