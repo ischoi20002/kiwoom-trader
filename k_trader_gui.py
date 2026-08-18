@@ -397,6 +397,25 @@ class ConfigHandler:
 
     def save_settings(self, settings):
         try:
+            if isinstance(settings, dict):
+                drop_keys = {
+                    "harvest_kosdaq150_enabled",
+                    "kosdaq_top_n",
+                    "kosdaq_harvest_union_start",
+                }
+                for k in list(settings.keys()):
+                    try:
+                        ks = str(k)
+                    except Exception:
+                        continue
+                    if ks in drop_keys or ks.startswith("kq_"):
+                        settings.pop(k, None)
+                try:
+                    choice = str(settings.get("universe_index_choice", "") or "").strip().upper()
+                except Exception:
+                    choice = ""
+                if choice in ("KOSDAQ", "KOSDAQ150", "KQ150"):
+                    settings["universe_index_choice"] = "KOSPI200"
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=4, ensure_ascii=False)
             return True
@@ -1495,7 +1514,7 @@ class KiwoomApp:
             idx_choice = self.settings.get("universe_index_choice", "KODEX200")
         except Exception:
             idx_choice = "KODEX200"
-        self.log(f"[Data] 유니버스({idx_choice}) 로드(kodex200.csv/kospi_universe.csv)...")
+        self.log(f"[Data] 유니버스({idx_choice}) 로드...")
         df_200 = self.data_manager.get_kospi_list(
             count=200,
             force=force,

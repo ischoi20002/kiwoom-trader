@@ -166,7 +166,9 @@ class TradingStrategy:
             choice = str(universe_index_choice).strip().upper()
         except Exception:
             choice = "KODEX200"
-        if choice not in ("KODEX200", "KOSPI200"):
+        if choice in ("KOSPI", "KOSPI200"):
+            choice = "KOSPI200"
+        else:
             choice = "KODEX200"
 
         cached = TradingStrategy._name_map_by_choice.get(choice)

@@ -1734,7 +1734,7 @@ class DataManagerV2:
 
     def get_latest_buy_reason_with_sig_type(self, code: str) -> Optional[str]:
         """
-        매수 이력 중 reason 에 TYPE_A / TYPE_B 가 명시된 가장 최근 건.
+        해당 종목 매수 이력 중 reason 에 TYPE_A / TYPE_B 가 명시된 가장 최근 건.
         (kt00007 FILLED 등이 최상단이어도 실제 전략 구분이 있는 행을 찾기 위함)
         """
         try:
@@ -1744,7 +1744,7 @@ class DataManagerV2:
             with self._get_state_connection() as conn:
                 cur = conn.execute(
                     """
-                    SELECT reason
+                    SELECT reason, code
                     FROM order_history
                     WHERE lower(side) = 'buy'
                       AND (
@@ -1752,11 +1752,21 @@ class DataManagerV2:
                           OR result = 'MOCK'
                       )
                     ORDER BY timestamp DESC
-                    LIMIT 120
+                    LIMIT 200
                     """,
                 )
                 rows = cur.fetchall()
-            for (rs,) in rows:
+            for row in rows:
+                try:
+                    rs = row[0] if row is not None else None
+                    raw_c = row[1] if row is not None and len(row) > 1 else None
+                except Exception:
+                    continue
+                try:
+                    if self._normalize_order_stock_code(raw_c) != target:
+                        continue
+                except Exception:
+                    continue
                 try:
                     r = str(rs or "").upper()
                 except Exception:
@@ -3624,15 +3634,11 @@ class DataManagerV2:
 
     def get_kospi_list(self, count=200, force=False, settings=None, universe_log=None):
         """
-        KODEX200/KOSPI200 유니버스 확보.
+        KODEX200 / KOSPI200 유니버스 확보.
 
-        count<=200: ``core.kodex200_universe.resolve_kodex200_universe`` —
-        ``kodex200_universe_priority`` (예: ``csv_only``=kodex200.csv 전용, ``etf_api_first`` 등).
-        단, settings['universe_index_choice']=='KOSPI200' 이면 ``kospi_universe.csv``를 사용합니다.
-        - ``kospi_universe.csv``는 상위 큰 리스트(예: top 400)를 저장
-        - 반환 시에는 ``min(count, kospi_top_n)`` 또는 기존 count 파라미터를 head로 슬라이스
-
-        count>200: FDR 코스피 시총 상위 ``count`` (기존과 동일).
+        count<=200:
+        - KOSPI200: ``kospi_universe.csv``
+        - KODEX200: ``core.kodex200_universe.resolve_kodex200_universe``
         """
         import os
 
@@ -3641,8 +3647,13 @@ class DataManagerV2:
 
         idx_choice = "KODEX200"
         if isinstance(settings, dict):
-            idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
-        if idx_choice not in ("KODEX200", "KOSPI200"):
+            try:
+                idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+            except Exception:
+                idx_choice = "KODEX200"
+        if idx_choice in ("KOSPI", "KOSPI200"):
+            idx_choice = "KOSPI200"
+        else:
             idx_choice = "KODEX200"
 
         kospi_top_n = 200

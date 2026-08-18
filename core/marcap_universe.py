@@ -190,26 +190,52 @@ def _normalize_asof(asof: date | datetime | str | pd.Timestamp) -> pd.Timestamp:
     return pd.to_datetime(asof).normalize()
 
 
-def _filter_kospi_common(df: pd.DataFrame) -> pd.DataFrame:
-    """KOSPI 보통주(코드 끝 0) 필터."""
+def _normalize_market_id(market: str) -> str:
+    """유니버스 시장 키(KOSPI/KOSDAQ) 정규화."""
+    try:
+        m = str(market or "KOSPI").strip().upper()
+    except Exception:
+        m = "KOSPI"
+    return "KOSDAQ" if m in ("KOSDAQ", "KSQ", "KQ") else "KOSPI"
+
+
+def _filter_common_stocks(df: pd.DataFrame, market: str = "KOSPI") -> pd.DataFrame:
+    """보통주(코드 끝 0) 필터. KOSPI=STK, KOSDAQ=KSQ(GLOBAL 포함)."""
     if df.empty:
         return df
     out = df.copy()
-    if "MarketId" in out.columns:
-        out = out[out["MarketId"].astype(str).str.upper() == "STK"]
-    elif "Market" in out.columns:
-        out = out[out["Market"].astype(str).str.upper().str.contains("KOSPI", na=False)]
-    if "Code" in out.columns:
-        out["Code"] = out["Code"].astype(str).str.zfill(6)
-        out = out[out["Code"].str.endswith("0")]
+    mkt = _normalize_market_id(market)
+    try:
+        if "MarketId" in out.columns:
+            mid = "KSQ" if mkt == "KOSDAQ" else "STK"
+            out = out[out["MarketId"].astype(str).str.upper() == mid]
+        elif "Market" in out.columns:
+            needle = "KOSDAQ" if mkt == "KOSDAQ" else "KOSPI"
+            out = out[out["Market"].astype(str).str.upper().str.contains(needle, na=False)]
+        if "Code" in out.columns:
+            out["Code"] = out["Code"].astype(str).str.zfill(6)
+            out = out[out["Code"].str.fullmatch(r"\d{6}", na=False)]
+            out = out[out["Code"].str.endswith("0")]
+    except Exception:
+        return pd.DataFrame(columns=list(df.columns))
     return out
 
 
-def _top_n_from_day_df(day_df: pd.DataFrame, top_n: int) -> pd.DataFrame:
+def _filter_kospi_common(df: pd.DataFrame) -> pd.DataFrame:
+    """KOSPI 보통주(코드 끝 0) 필터."""
+    return _filter_common_stocks(df, "KOSPI")
+
+
+def _top_n_from_day_df(
+    day_df: pd.DataFrame,
+    top_n: int,
+    *,
+    market: str = "KOSPI",
+) -> pd.DataFrame:
     """일자 스냅샷에서 시총 상위 N."""
     if day_df.empty:
         return pd.DataFrame(columns=["Code", "Name", "Marcap", "Rank"])
-    stk = _filter_kospi_common(day_df)
+    stk = _filter_common_stocks(day_df, market)
     if stk.empty:
         return pd.DataFrame(columns=["Code", "Name", "Marcap", "Rank"])
     if "Marcap" in stk.columns:
@@ -245,6 +271,43 @@ def load_marcap_day(
     return pd.DataFrame(), None
 
 
+def load_market_top_n_asof(
+    asof: date | datetime | str | pd.Timestamp,
+    top_n: int,
+    *,
+    market: str = "KOSPI",
+    logger_callback: Optional[Callable[[str], None]] = None,
+) -> Tuple[list[str], Optional[str], pd.DataFrame]:
+    """
+    as-of 시장별 시총 상위 N 종목코드.
+
+    Returns
+    -------
+    (codes, asof_str, detail_df)
+    """
+    try:
+        n = max(1, int(top_n))
+    except (TypeError, ValueError):
+        n = 150
+
+    mkt = _normalize_market_id(market)
+    day_df, actual = load_marcap_day(asof, logger_callback=logger_callback)
+    detail = _top_n_from_day_df(day_df, n, market=mkt)
+    if detail.empty or actual is None:
+        return [], None, detail
+
+    codes: list[str] = []
+    try:
+        for c in detail["Code"].tolist():
+            s = str(c).strip().zfill(6)
+            if len(s) == 6 and s.isdigit():
+                codes.append(s)
+    except Exception:
+        codes = []
+    asof_str = actual.strftime("%Y-%m-%d")
+    return codes, asof_str, detail
+
+
 def load_kospi_top_n_asof(
     asof: date | datetime | str | pd.Timestamp,
     top_n: int,
@@ -258,23 +321,9 @@ def load_kospi_top_n_asof(
     -------
     (codes, asof_str, detail_df)
     """
-    try:
-        n = max(1, int(top_n))
-    except (TypeError, ValueError):
-        n = 150
-
-    day_df, actual = load_marcap_day(asof, logger_callback=logger_callback)
-    detail = _top_n_from_day_df(day_df, n)
-    if detail.empty or actual is None:
-        return [], None, detail
-
-    codes: list[str] = []
-    for c in detail["Code"].tolist():
-        s = str(c).strip().zfill(6)
-        if len(s) == 6 and s.isdigit():
-            codes.append(s)
-    asof_str = actual.strftime("%Y-%m-%d")
-    return codes, asof_str, detail
+    return load_market_top_n_asof(
+        asof, top_n, market="KOSPI", logger_callback=logger_callback
+    )
 
 
 def _monthly_cache_path(year_month: str, top_n: int) -> Path:
@@ -1083,8 +1132,6 @@ def get_kospi_top_n_for_refresh(
     if m == "semiannual":
         return get_semiannual_kospi_top_n(asof, top_n, logger_callback=logger_callback)
     return get_monthly_kospi_top_n(asof, top_n, logger_callback=logger_callback)
-
-
 def get_latest_marcap_asof(
     *,
     logger_callback: Optional[Callable[[str], None]] = None,

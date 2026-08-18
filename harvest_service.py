@@ -74,6 +74,31 @@ class HarvestService:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{now}] {msg}", flush=True)
 
+    def _harvest_project_root(self) -> str:
+        """GUI와 동일한 프로젝트 루트(trading_data.db 위치)."""
+        try:
+            return os.path.dirname(os.path.abspath(DataManagerV2.DEFAULT_DB_PATH))
+        except Exception:
+            return os.getcwd()
+
+    def _load_harvest_settings(self) -> dict:
+        """하베스팅 유니버스용 settings.json (실패 시 빈 dict)."""
+        try:
+            path = os.path.join(self._harvest_project_root(), "settings.json")
+            if not os.path.isfile(path):
+                path = "settings.json"
+            if not os.path.isfile(path):
+                return {}
+            with open(path, encoding="utf-8-sig") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            try:
+                self.log(f"[WARN] settings.json 로드 실패: {e}")
+            except Exception:
+                pass
+            return {}
+
     def _fetch_minute_data(self, code, token, next_key="", *, tic_scope: str = "1"):
         """
         키움 ka10080 분봉 1페이지 조회.
@@ -302,20 +327,15 @@ class HarvestService:
             # [v16.9.7] 조기 종료 기준 분기:
             # - COMPLETE: 증분만 — 수집 시작 시점의 DB 최신(initial_last_sync) 이전까지 역행하면 이후 페이지는
             #   대부분 이미 보유분(INSERT OR IGNORE)이라 API 낭비. last_sync 기준으로 멈춤.
-            # - 비COMPLETE: 과거 백필 — DB 맨 앞(earliest)까지 내려가야 하므로 earliest 와 비교.
+            # - 비COMPLETE: 과거 백필 — API next-key 가 없을 때까지 역행한다.
+            #   저장 직후 DB earliest 와 비교하면 신규 종목이 1페이지(~900봉) 만에
+            #   '겹침'으로 오판되어 백필이 끊긴다.
             status = self.db.get_sync_status(code)
             if status == "COMPLETE":
                 if initial_last_sync and current_bottom_time <= initial_last_sync:
                     self.log(
                         f"   - {code}: 증분 완료 — 청크 하단 {current_bottom_time} ≤ 기존 최신 {initial_last_sync}. "
                         f"조기 종료(중복 구간 이하 페이지 생략)."
-                    )
-                    break
-            else:
-                earliest_db = self.db.get_earliest_sync_time(code)
-                if earliest_db and current_bottom_time <= earliest_db:
-                    self.log(
-                        f"   - {code}: 백필 구간 연결 — {current_bottom_time} ≤ DB 최초 {earliest_db}. 조기 종료 (Overlapped)."
                     )
                     break
             
@@ -516,6 +536,22 @@ class HarvestService:
             if status != "COMPLETE":
                 return False
 
+            # 1페이지(~900봉, 약 2거래일)만 받고 COMPLETE 된 종목은 백필 미완으로 재수집
+            try:
+                earliest = None
+                if meta:
+                    earliest = meta.get("earliest_sync_dt") or None
+                if not earliest:
+                    earliest = self.db.get_earliest_sync_time(code)
+                if earliest:
+                    earliest_dt = datetime.strptime(
+                        str(earliest)[:19], "%Y-%m-%d %H:%M:%S"
+                    )
+                    if (last_dt - earliest_dt).days < 14:
+                        return False
+            except Exception:
+                pass
+
             # COMPLETE: last_sync 가 KRX 기준 '마지막 완결 1분봉'까지 도달했는지 확인
             required_close = self._required_close_dt_once
             if required_close is None:
@@ -542,7 +578,7 @@ class HarvestService:
             return False
 
     def run(self):
-        """메인 수집 루프 (v18.0.0: KODEX 200 + KOSPI 500 통합 유니버스)"""
+        """메인 수집 루프 (KOSPI 전종목)."""
         # 0. 공공데이터포털 KRX 상장종목(금융위 API) — 인증키가 있으면 최신 KOSPI 전체를 우선 사용
         codes_kospi_official: list = []
         svc_key = str(getattr(config, "DATA_GO_KR_SERVICE_KEY", "") or "").strip()
@@ -624,7 +660,7 @@ class HarvestService:
             except Exception as e:
                 self.log(f"[WARN] KODEX 200 보강 로드 실패: {e}")
 
-        # 3. 합집합 (주식 + [선택] K200). 시장지수·VIX는 수집하지 않음.
+        # 3. 합집합 (코스피 + [선택] K200). 시장지수·VIX는 수집하지 않음.
         all_codes = []
         seen = set()
 
@@ -636,7 +672,7 @@ class HarvestService:
         _k200_note = f" + K200보강 {len(codes_k200)}" if codes_k200 else ""
         self.log(
             f"🚀 [START] 하베스팅 유니버스 총 {len(all_codes)}개 종목 "
-            f"(주식 {len(codes_stocks)}{_k200_note}, 지수/VIX 제외)"
+            f"(코스피 {len(codes_stocks)}{_k200_note}, 지수/VIX 제외)"
         )
         
         token = self.token_manager.get_auth_token()

@@ -3662,10 +3662,12 @@ class MonitorTab:
                     _step_log("target_tree_item_compare_call", {"curr_values_len": len(curr.get("values", ())) if isinstance(curr, dict) else None})
                     curr_values = curr.get("values", ()) if isinstance(curr, dict) else ()
                     curr_tags = curr.get("tags", ()) if isinstance(curr, dict) else ()
-                    # 전략유형(StratType)은 실시간 틱마다 변할 필요가 없어,
-                    # 기본값으로 기존 화면 값을 유지해 깜빡임을 줄입니다.
+                    # 감시만 하는 종목의 전략유형은 틱마다 깜빡이지 않게 기존 값을 유지.
+                    # 보유 종목은 실제 매수 유형(TYPE_A/B)으로 갱신해야 함
+                    # (감시 시절 '전략 A'가 Type B 체결 후에도 남는 오표시 방지).
                     if (
                         not allow_strat_type_live_update
+                        and not is_active
                         and isinstance(curr_values, (list, tuple))
                         and len(curr_values) > 3
                         and isinstance(values, (list, tuple))

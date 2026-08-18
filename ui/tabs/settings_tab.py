@@ -395,9 +395,14 @@ class SettingsTab:
             self.grid_rows[parent] += 1
             return curr
 
-        def add_header(parent, text):
+        def add_header(parent, text, fg=None):
             r = get_next_row(parent)
-            ttk.Label(parent, text=text, font=('Malgun Gothic', 10, 'bold'), foreground=primary_col).grid(row=r, column=0, columnspan=6, sticky='w', pady=(15, 5))
+            ttk.Label(
+                parent,
+                text=text,
+                font=('Malgun Gothic', 10, 'bold'),
+                foreground=fg or primary_col,
+            ).grid(row=r, column=0, columnspan=6, sticky='w', pady=(15, 5))
 
         def add_param_row(
             parent,
@@ -408,6 +413,7 @@ class SettingsTab:
             toggle_key=None,
             widget_list=None,
             group_toggle_widgets: bool = False,
+            label_fg=None,
         ):
             r = get_next_row(parent)
             if toggle_key:
@@ -439,7 +445,12 @@ class SettingsTab:
                 except Exception:
                     pass
             
-            lbl = ttk.Label(parent, text=label, font=('Malgun Gothic', 10), foreground=txt_col)
+            lbl = ttk.Label(
+                parent,
+                text=label,
+                font=('Malgun Gothic', 10),
+                foreground=label_fg or txt_col,
+            )
             lbl.grid(row=r, column=1, sticky='w', pady=4)
             
             if key:
@@ -594,9 +605,9 @@ class SettingsTab:
 
         _univ_root = _sec_parent('univ')
 
-        # ── 유니버스 인덱스 소스 선택 (KODEX200 vs KOSPI 시총 상위 N) ──
-        # settings['universe_index_choice'] 내부값은 KODEX200 / KOSPI200 유지.
-        # UI 표시만 'KOSPI' (저장 시 KOSPI → KOSPI200 매핑).
+        # ── 유니버스 인덱스 소스 선택 (KODEX200 / KOSPI 시총 상위 N) ──
+        # settings['universe_index_choice'] 내부값: KODEX200 / KOSPI200.
+        # UI 표시 'KOSPI' → 저장 시 KOSPI200.
         univ_source_f = ttk.LabelFrame(
             _univ_root,
             text=' 🔎 유니버스 인덱스 소스 ',
@@ -728,7 +739,7 @@ class SettingsTab:
         ).grid(row=2, column=2, sticky='w', padx=(10, 5), pady=(4, 0))
 
         def _sync_kospi_top_n_enabled(*_args: object) -> None:
-            """KODEX200이면 상위 N·갱신주기 비활성·흐리게, KOSPI면 활성."""
+            """KODEX200이면 상위 N·갱신주기 비활성, KOSPI이면 해당 컨트롤 활성."""
             try:
                 choice = str(self.conf_vars['universe_index_choice'].get()).strip().upper()
                 is_kospi = choice in ('KOSPI', 'KOSPI200')

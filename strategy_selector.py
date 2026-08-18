@@ -374,6 +374,48 @@ def load_kospi_universe_codes(
     return codes[: int(top_n)]
 
 
+def resolve_universe_codes(
+    settings: Optional[dict],
+    logger_callback: Optional[Callable[[str], None]] = None,
+    *,
+    pit_asof: Optional[Union[date, datetime, str]] = None,
+    daily_refresh: bool = False,
+    allow_fdr_generate: bool = True,
+) -> list[str]:
+    """
+    설정 ``universe_index_choice``에 따라 감시·백테 유니버스 코드를 반환한다.
+
+    - ``KOSPI200``: ``kospi_universe.csv`` / marcap
+    - ``KODEX200``: ``kodex200.csv``
+    """
+    s = settings if isinstance(settings, dict) else {}
+    try:
+        choice = str(s.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
+    except Exception:
+        choice = "KODEX200"
+    if choice in ("KOSPI", "KOSPI200"):
+        choice = "KOSPI200"
+    else:
+        choice = "KODEX200"
+    refresh = str(s.get("kospi_universe_refresh", "quarterly") or "quarterly")
+
+    if choice == "KOSPI200":
+        try:
+            top_n = int(s.get("kospi_top_n", 200) or 200)
+        except Exception:
+            top_n = 200
+        return load_kospi_universe_codes(
+            logger_callback=logger_callback,
+            top_n=top_n,
+            refresh_mode=refresh,
+            pit_asof=pit_asof,
+            daily_refresh=daily_refresh,
+            allow_fdr_generate=allow_fdr_generate,
+        )
+
+    return load_kodex200_universe_codes(logger_callback=logger_callback)
+
+
 def calculate_rsi(series, period=14):
     """
     RSI(Relative Strength Index)를 계산합니다.
@@ -1676,13 +1718,7 @@ def _compute_transition_regime_map_fdr(
     try:
         start_s = pd.to_datetime(start_date).strftime("%Y-%m-%d")
         end_s = pd.to_datetime(end_date).strftime("%Y-%m-%d")
-        idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
-        top_n = int(settings.get("kospi_top_n", 200) or 200)
-        codes = (
-            load_kospi_universe_codes(logger_callback=log, top_n=top_n)
-            if idx_choice == "KOSPI200"
-            else load_kodex200_universe_codes(logger_callback=log)
-        )
+        codes = resolve_universe_codes(settings, logger_callback=log)
         if not codes:
             return regime_map
 
@@ -1981,13 +2017,7 @@ def resolve_transition_gate_for_live(
             pass
         end_s = as_of_dt.strftime("%Y-%m-%d")
         start_s = (as_of_dt - timedelta(days=30)).strftime("%Y-%m-%d")
-        idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
-        top_n = int(settings.get("kospi_top_n", 200) or 200)
-        codes = (
-            load_kospi_universe_codes(logger_callback=log, top_n=top_n)
-            if idx_choice == "KOSPI200"
-            else load_kodex200_universe_codes(logger_callback=log)
-        )
+        codes = resolve_universe_codes(settings, logger_callback=log)
         if not codes:
             return result
         fetch_start = (as_of_dt - timedelta(days=120)).strftime("%Y-%m-%d")
@@ -2122,10 +2152,12 @@ def select_monitoring_targets(
     logger_callback(f"[Select] [전략 종목 선정] ({t_str}) 분석 시작...")
 
     try:
-        univ_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+        univ_choice = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
+        if univ_choice in ("KOSPI", "KOSPI200"):
+            univ_choice = "KOSPI200"
+        else:
+            univ_choice = "KODEX200"
     except Exception:
-        univ_choice = "KODEX200"
-    if univ_choice not in ("KODEX200", "KOSPI200"):
         univ_choice = "KODEX200"
 
     try:
@@ -2193,51 +2225,50 @@ def select_monitoring_targets(
                 )
                 raise SelectionDbStaleError(stale_msg)
     
-    # 1. 대상 유니버스 확보 (KOSPI 200) — KRX·pykrx 미사용, kodex200.csv(및 대체 경로) 고정
+    # 1. 대상 유니버스 확보 — KRX·pykrx 미사용
     tickers = []
     if target_date:
         dt_str = target_date.strftime("%Y%m%d")
-        # KOSPI200 선택 시 kospi_universe.csv에서 상위 top_n만 사용
         top_n = 200
         try:
-            top_n = int(settings.get("kospi_top_n", 200))
+            top_n = int(settings.get("kospi_top_n", 200) or 200)
         except Exception:
             top_n = 200
         try:
-            tickers = (
-                load_kospi_universe_codes(
-                    logger_callback=logger_callback,
-                    top_n=top_n,
-                    pit_asof=target_date,
-                    allow_fdr_generate=False,
-                )
-                if univ_choice == "KOSPI200"
-                else load_kodex200_universe_codes(logger_callback=logger_callback)
+            tickers = resolve_universe_codes(
+                settings,
+                logger_callback=logger_callback,
+                pit_asof=target_date,
+                allow_fdr_generate=False,
             )
         except Exception as e:
             try:
                 logging.warning("과거 선정 유니버스 로드 예외: %s", e, exc_info=True)
             except Exception:
                 pass
-            logger_callback(f"  [Warn] 유니버스 CSV 로드 오류: {e}")
+            logger_callback(f"  [Warn] 유니버스 로드 오류: {e}")
             tickers = []
         if not tickers:
-            logger_callback("  [Info] FDR StockListing에서 상위 종목을 추출합니다. (KRX 미사용)")
+            listing = "KOSPI"
+            logger_callback(f"  [Info] FDR StockListing({listing})에서 상위 종목을 추출합니다.")
             try:
-                df_fdr = fdr.StockListing('KOSPI')
-                df_fdr['Code'] = df_fdr['Code'].astype(str)
-                df_fdr = df_fdr[df_fdr['Code'].str.endswith('0')]
-                m_col = 'Marcap' if 'Marcap' in df_fdr.columns else 'MarketCap'
+                df_fdr = fdr.StockListing(listing)
+                df_fdr["Code"] = df_fdr["Code"].astype(str)
+                if listing == "KOSPI":
+                    df_fdr = df_fdr[df_fdr["Code"].str.endswith("0")]
+                m_col = "Marcap" if "Marcap" in df_fdr.columns else "MarketCap"
                 if m_col not in df_fdr.columns:
                     m_col = df_fdr.columns[-1]
                 tickers = (
-                    df_fdr.sort_values(by=m_col, ascending=False).head(int(top_n))['Code']
-                    .astype(str).str.zfill(6)
+                    df_fdr.sort_values(by=m_col, ascending=False)
+                    .head(int(top_n))["Code"]
+                    .astype(str)
+                    .str.zfill(6)
                     .tolist()
                 )
             except Exception as e:
                 try:
-                    logging.error("FDR KOSPI 상위 200 fallback 실패: %s", e, exc_info=True)
+                    logging.error("FDR %s 상위 fallback 실패: %s", listing, e, exc_info=True)
                 except Exception:
                     pass
                 logger_callback(f"  [Error] FDR fallback 실패: {e}")
@@ -2246,11 +2277,11 @@ def select_monitoring_targets(
             return pd.DataFrame()
         name_map: dict[str, str] = {}
         try:
-            df_fdr_names = fdr.StockListing('KOSPI')
+            df_fdr_names = fdr.StockListing("KOSPI")
             name_map = dict(
                 zip(
-                    df_fdr_names['Code'].astype(str).str.zfill(6),
-                    df_fdr_names['Name'],
+                    df_fdr_names["Code"].astype(str).str.zfill(6),
+                    df_fdr_names["Name"],
                 )
             )
         except Exception as e:
@@ -2259,7 +2290,7 @@ def select_monitoring_targets(
             except Exception:
                 pass
         df_top = pd.DataFrame(
-            [{'Code': t, 'Name': name_map.get(t, t)} for t in tickers]
+            [{"Code": t, "Name": name_map.get(t, t)} for t in tickers]
         )
     else:
         # 실시간: 선택값에 따라 유니버스 소스 분기
@@ -3502,7 +3533,11 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
     def get_period_universe(dt):
         """유니버스: KOSPI200=marcap as-of(갱신주기), KODEX200=고정 CSV."""
-        idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+        try:
+            idx_raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
+        except Exception:
+            idx_raw = "KODEX200"
+        idx_choice = "KOSPI200" if idx_raw in ("KOSPI", "KOSPI200") else "KODEX200"
         d_ts = pd.Timestamp(dt).normalize()
         cache_key = universe_period_key(d_ts, refresh_mode)
         if cache_key in universe_cache:
@@ -3510,7 +3545,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         try:
             top_n = 200
             try:
-                top_n = int(settings.get("kospi_top_n", 200))
+                top_n = int(settings.get("kospi_top_n", 200) or 200)
             except Exception:
                 top_n = 200
             if idx_choice == "KOSPI200":
@@ -3591,28 +3626,33 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         logger_callback(
             "  [Warning] 유니버스 파일에서 유니버스를 읽지 못해 추가 시도합니다."
         )
+        try:
+            idx_raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
+        except Exception:
+            idx_raw = "KODEX200"
+        idx_choice = "KOSPI200" if idx_raw in ("KOSPI", "KOSPI200") else "KODEX200"
         candidate_files = ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]
-        if str(settings.get("universe_index_choice", "KODEX200")).strip().upper() == "KOSPI200":
+        if idx_choice == "KOSPI200":
             candidate_files = ["kospi_universe.csv", "kospi_top_500.csv"]
         for f_name in candidate_files:
-            if os.path.exists(f_name):
-                try:
-                    df_k = pd.read_csv(f_name, dtype=str)
-                    c_col = 'Code' if 'Code' in df_k.columns else ('종목코드' if '종목코드' in df_k.columns else None)
-                    if c_col:
-                        # KOSPI 쪽은 kospi_top_n 슬라이스를 먼저 반영합니다.
-                        top_n = 200
-                        try:
-                            top_n = int(settings.get("kospi_top_n", 200))
-                        except Exception:
+                if os.path.exists(f_name):
+                    try:
+                        df_k = pd.read_csv(f_name, dtype=str)
+                        c_col = 'Code' if 'Code' in df_k.columns else ('종목코드' if '종목코드' in df_k.columns else None)
+                        if c_col:
                             top_n = 200
-                        vals = df_k[c_col].apply(lambda x: str(x).zfill(6)).tolist()
-                        if str(settings.get("universe_index_choice", "KODEX200")).strip().upper() == "KOSPI200":
-                            vals = vals[: int(top_n)]
-                        union_tickers = set(vals)
-                        logger_callback(f"    - {f_name}에서 {len(union_tickers)}종목 로드 완료")
-                        break
-                except: pass
+                            try:
+                                top_n = int(settings.get("kospi_top_n", 200))
+                            except Exception:
+                                top_n = 200
+                            vals = df_k[c_col].apply(lambda x: str(x).zfill(6)).tolist()
+                            if idx_choice == "KOSPI200":
+                                vals = vals[: int(top_n)]
+                            union_tickers = set(vals)
+                            logger_callback(f"    - {f_name}에서 {len(union_tickers)}종목 로드 완료")
+                            break
+                    except Exception:
+                        pass
 
     if not union_tickers:
         logger_callback("  [Error] 유니버스 종목 확보 실패.")
@@ -4098,10 +4138,14 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         if cache_key in union_cache:
             return union_cache[cache_key]
         try:
-            idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
+            try:
+                idx_raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
+            except Exception:
+                idx_raw = "KODEX200"
+            idx_choice = "KOSPI200" if idx_raw in ("KOSPI", "KOSPI200") else "KODEX200"
             top_n = 200
             try:
-                top_n = int(settings.get("kospi_top_n", 200))
+                top_n = int(settings.get("kospi_top_n", 200) or 200)
             except Exception:
                 top_n = 200
             if idx_choice == "KOSPI200":
@@ -4142,19 +4186,27 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         union_tickers = set()
 
     if not union_tickers:
-        for f_name in ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]:
-            if not os.path.isfile(f_name):
-                continue
-            try:
-                df_k = pd.read_csv(f_name, dtype=str)
-                c_col = "Code" if "Code" in df_k.columns else (
-                    "종목코드" if "종목코드" in df_k.columns else None
-                )
-                if c_col:
-                    union_tickers = set(df_k[c_col].apply(lambda x: str(x).zfill(6)).tolist())
-                    break
-            except Exception:
-                pass
+        try:
+            _raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
+        except Exception:
+            _raw = "KODEX200"
+        _idx = "KOSPI200" if _raw in ("KOSPI", "KOSPI200") else "KODEX200"
+        files = ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]
+        if _idx == "KOSPI200":
+            files = ["kospi_universe.csv", "kospi_top_500.csv"]
+        for f_name in files:
+                if not os.path.isfile(f_name):
+                    continue
+                try:
+                    df_k = pd.read_csv(f_name, dtype=str)
+                    c_col = "Code" if "Code" in df_k.columns else (
+                        "종목코드" if "종목코드" in df_k.columns else None
+                    )
+                    if c_col:
+                        union_tickers = set(df_k[c_col].apply(lambda x: str(x).zfill(6)).tolist())
+                        break
+                except Exception:
+                    pass
 
     if not union_tickers:
         return pd.DataFrame(

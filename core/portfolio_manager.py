@@ -920,85 +920,109 @@ class PortfolioManager:
         except Exception:
             return False
 
+    def _sig_type_from_order_history(self, code: str) -> Optional[str]:
+        """해당 종목 매수 주문의 TYPE_A/B. 없으면 None."""
+        try:
+            nk = str(code or "").split("_")[0].zfill(6)
+            rs_hint = self.data_manager.get_latest_buy_reason_with_sig_type(nk)
+            if not rs_hint:
+                return None
+            br = str(rs_hint).upper()
+            if "TYPE_B" in br:
+                return "TYPE_B"
+            if "TYPE_A" in br:
+                return "TYPE_A"
+        except Exception:
+            pass
+        return None
+
+    def _sig_type_from_sel_track(self, code: str) -> Optional[str]:
+        """감시 선정 트랙 A/B → TYPE_A/B. AB·미지정이면 None."""
+        try:
+            nk = str(code or "").split("_")[0].zfill(6)
+            mi = getattr(self.app, "monitor_info", None) or {}
+            for k in (nk, str(code or "").strip()):
+                inf = mi.get(k)
+                if not isinstance(inf, dict):
+                    continue
+                st = str(
+                    inf.get("sel_track") or inf.get("SelTrack") or ""
+                ).strip().upper()
+                if st == "B":
+                    return "TYPE_B"
+                if st == "A":
+                    return "TYPE_A"
+                break
+        except Exception:
+            pass
+        return None
+
     def _infer_sig_type_from_entry_reason(self, code: str, reason: Any) -> str:
         """
         active_positions.reason 등만 있을 때 TYPE_A / TYPE_B 를 복원합니다.
-        SYNCED·API 문자열 등에는 감시 sel_track·최근 매수 주문 reason 으로 보강합니다.
+        SYNCED·API 문자열은 오늘 선정 트랙보다 해당 종목 매수 이력을 우선합니다.
         """
         try:
             nk = str(code or "").split("_")[0].zfill(6)
             r = str(reason or "").upper()
             if "TYPE_B" in r:
                 return "TYPE_B"
-            if "TYPE_A" in r:
+            if "TYPE_A" in r and "TYPE_B" not in r:
                 return "TYPE_A"
-            if "SYNCED" in r or r.strip() == "SYNCED":
-                try:
-                    mi = getattr(self.app, "monitor_info", None) or {}
-                    for k in (nk, str(code or "").strip()):
-                        inf = mi.get(k)
-                        if isinstance(inf, dict):
-                            st = str(
-                                inf.get("sel_track")
-                                or inf.get("SelTrack")
-                                or ""
-                            ).strip().upper()
-                            if st == "B":
-                                return "TYPE_B"
-                            if st == "A":
-                                return "TYPE_A"
-                            break
-                except Exception:
-                    pass
-                try:
-                    rs_hint = self.data_manager.get_latest_buy_reason_with_sig_type(
-                        nk
-                    )
-                    if rs_hint:
-                        br = str(rs_hint).upper()
-                        if "TYPE_B" in br:
-                            return "TYPE_B"
-                        if "TYPE_A" in br:
-                            return "TYPE_A"
-                except Exception:
-                    pass
-                return "TYPE_A"
-        except Exception:
-            pass
-        try:
-            rs_hint = self.data_manager.get_latest_buy_reason_with_sig_type(
-                str(code or "").split("_")[0].zfill(6)
-            )
-            if rs_hint:
-                br = str(rs_hint).upper()
-                if "TYPE_B" in br:
-                    return "TYPE_B"
-                if "TYPE_A" in br:
-                    return "TYPE_A"
+            hist = self._sig_type_from_order_history(nk)
+            if hist in ("TYPE_A", "TYPE_B"):
+                return hist
+            sel = self._sig_type_from_sel_track(nk)
+            if sel in ("TYPE_A", "TYPE_B"):
+                return sel
         except Exception:
             pass
         return "TYPE_A"
 
+    def _apply_inferred_sig_type_to_pos(
+        self, pos: Dict[str, Any], eff: str
+    ) -> None:
+        """복원된 유형을 보유 dict에 반영해 전략유형·추매 문구·청산 키가 갈라지지 않게 합니다."""
+        try:
+            if eff not in ("TYPE_A", "TYPE_B"):
+                return
+            cur = str(pos.get("sig_type") or "").strip().upper()
+            rsn = str(pos.get("reason") or "").upper()
+            if "TYPE_B" in cur and eff != "TYPE_B":
+                return
+            if (
+                (not cur)
+                or ("SYNCED" in rsn and cur != eff)
+                or (cur == "TYPE_A" and eff == "TYPE_B")
+            ):
+                pos["sig_type"] = eff
+        except Exception:
+            pass
+
     def infer_sig_type_for_ui(self, code: str, pos: Optional[Dict[str, Any]]) -> str:
         """
         감시 트리「전략유형」용: 보유 dict 의 sig_type·reason 우선, 없으면 주문·선정 맥락으로 단일 A/B.
+        SYNCED 기본 TYPE_A 는 해당 종목 매수 이력으로 덮어 Type B 체결이 전략 A로 보이지 않게 합니다.
         """
         try:
+            nk = str(code or "").split("_")[0].zfill(6)
             if isinstance(pos, dict):
                 st = str(pos.get("sig_type") or "").strip().upper()
-                if st == "TYPE_B" or "TYPE_B" in st:
-                    return "TYPE_B"
-                if st == "TYPE_A" or (st and "TYPE_A" in st):
-                    return "TYPE_A"
                 rsn = str(pos.get("reason") or "").upper()
-                if "TYPE_B" in rsn:
-                    return "TYPE_B"
-                if "TYPE_A" in rsn and "TYPE_B" not in rsn:
-                    return "TYPE_A"
-                return self._infer_sig_type_from_entry_reason(
-                    str(code or "").split("_")[0].zfill(6),
-                    pos.get("reason"),
-                )
+                if "TYPE_B" in st or "TYPE_B" in rsn:
+                    eff = "TYPE_B"
+                elif "SYNCED" in rsn or not st:
+                    eff = self._infer_sig_type_from_entry_reason(
+                        nk, pos.get("reason")
+                    )
+                elif "TYPE_A" in st or ("TYPE_A" in rsn and "TYPE_B" not in rsn):
+                    eff = "TYPE_A"
+                else:
+                    eff = self._infer_sig_type_from_entry_reason(
+                        nk, pos.get("reason")
+                    )
+                self._apply_inferred_sig_type_to_pos(pos, eff)
+                return eff
         except Exception:
             pass
         return self._infer_sig_type_from_entry_reason(
@@ -1089,6 +1113,15 @@ class PortfolioManager:
                             try:
                                 _old = prev_by_base.get(_nk)
                                 if isinstance(_old, dict):
+                                    try:
+                                        _old_sig = str(
+                                            _old.get("sig_type") or ""
+                                        ).strip().upper()
+                                        if "TYPE_B" in _old_sig:
+                                            new_pos["sig_type"] = "TYPE_B"
+                                            _sig = "TYPE_B"
+                                    except Exception:
+                                        pass
                                     for _vf in (
                                         "exit_pending",
                                         "pending_exit_ord_no",
@@ -1424,22 +1457,12 @@ class PortfolioManager:
                                 except Exception:
                                     pass
                             continue
-                    _sync_sig = "TYPE_A"
                     try:
-                        mi = getattr(self.app, "monitor_info", None) or {}
-                        for _k in (code, str(code).zfill(6)):
-                            _inf = mi.get(_k)
-                            if isinstance(_inf, dict):
-                                _st = str(
-                                    _inf.get("sel_track")
-                                    or _inf.get("SelTrack")
-                                    or ""
-                                ).strip().upper()
-                                if _st == "B":
-                                    _sync_sig = "TYPE_B"
-                                break
+                        _sync_sig = self._infer_sig_type_from_entry_reason(
+                            code, "SYNCED"
+                        )
                     except Exception:
-                        pass
+                        _sync_sig = "TYPE_A"
                     _inv_sync = self._gross_to_invested_with_buy_fee(
                         float(qty) * float(avg_price)
                     )
