@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-KRX(XKRX) 거래일 판정 — pandas_market_calendars 고정 사용.
+KRX(XKRX) 거래일 판정 — pandas_market_calendars + 로컬 휴장 보정.
+
 휴장일·주말은 스킵, 라이브러리 미설치 시 폴백(주말만 제외).
+XKRX가 놓친 대체공휴일은 양력 법정공휴일 규칙과
+``krx_closed_day_overrides.json`` 으로 보정한다.
 """
 from __future__ import annotations
 
+import json
 import warnings
 from datetime import date, datetime, time, timedelta
-from typing import Any, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
 try:
     import pandas_market_calendars as mcal
@@ -19,8 +24,26 @@ except Exception:
 # XKRX 캘린더는 생성 비용·경고가 있어 프로세스당 1회만 로드합니다.
 _xkrx_cal_cache: Optional[Any] = None
 
+# 양력 법정공휴일 — 토·일에 걸리면 다음 월요일(평일)이 대체공휴일
+# (삼일절·어린이날·광복절·개천절·한글날, 2023년 개정 기준)
+_SOLAR_PUBLIC_HOLIDAYS: tuple[tuple[int, int], ...] = (
+    (3, 1),
+    (5, 5),
+    (8, 15),
+    (10, 3),
+    (10, 9),
+)
+
+_OVERRIDE_PATH = Path(__file__).resolve().parents[1] / "krx_closed_day_overrides.json"
+_override_closed: Set[date] = set()
+_override_open: Set[date] = set()
+_override_mtime: Optional[float] = None
+_solar_sub_cache: Dict[int, Set[date]] = {}
+
 
 def _parse_day(d: str | date) -> date:
+    if isinstance(d, datetime):
+        return d.date()
     if isinstance(d, date):
         return d
     return datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
@@ -52,9 +75,80 @@ def get_xkrx_calendar():
         return None
 
 
+def _solar_substitute_days(year: int) -> Set[date]:
+    """해당 연도 양력 공휴일이 주말에 걸린 경우의 대체공휴일."""
+    cached = _solar_sub_cache.get(year)
+    if cached is not None:
+        return cached
+    out: Set[date] = set()
+    try:
+        for month, day in _SOLAR_PUBLIC_HOLIDAYS:
+            try:
+                hol = date(year, month, day)
+            except ValueError:
+                continue
+            if hol.weekday() == 5:
+                sub = hol + timedelta(days=2)
+            elif hol.weekday() == 6:
+                sub = hol + timedelta(days=1)
+            else:
+                continue
+            while sub.weekday() >= 5:
+                sub += timedelta(days=1)
+            out.add(sub)
+    except Exception:
+        out = set()
+    _solar_sub_cache[year] = out
+    return out
+
+
+def _reload_closed_day_overrides(*, force: bool = False) -> None:
+    """``krx_closed_day_overrides.json`` 을 mtime 기준으로 로드."""
+    global _override_closed, _override_open, _override_mtime
+    try:
+        p = _OVERRIDE_PATH
+        mt: Optional[float] = p.stat().st_mtime if p.is_file() else None
+    except Exception:
+        mt = None
+    if not force and mt == _override_mtime:
+        return
+    closed: Set[date] = set()
+    opened: Set[date] = set()
+    try:
+        if mt is not None:
+            raw = json.loads(_OVERRIDE_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for key, dest in (("closed", closed), ("open", opened)):
+                    arr = raw.get(key, [])
+                    if not isinstance(arr, list):
+                        continue
+                    for item in arr:
+                        try:
+                            dest.add(_parse_day(item))
+                        except Exception:
+                            continue
+    except Exception:
+        closed, opened = set(), set()
+    _override_closed = closed
+    _override_open = opened
+    _override_mtime = mt
+
+
 def is_trading_day(day: str | date) -> bool:
     """해당 일자가 KRX 거래일이면 True."""
     d = _parse_day(day)
+    if d.weekday() >= 5:
+        return False
+    try:
+        _reload_closed_day_overrides()
+        if d in _override_open:
+            return True
+        if d in _override_closed:
+            return False
+        if d in _solar_substitute_days(d.year):
+            return False
+    except Exception:
+        pass
     cal = get_xkrx_calendar()
     if cal is not None:
         try:
@@ -66,6 +160,31 @@ def is_trading_day(day: str | date) -> bool:
             pass
     # 폴백: 월~금
     return d.weekday() < 5
+
+
+def filter_ohlcv_index_to_trading_days(df: Any) -> Any:
+    """
+    DatetimeIndex OHLCV에서 비거래일(주말·휴장) 행을 제거.
+
+    슬롯 롤이 넣은 휴장 가짜봉·API 플랫봉이 MA60 등을 오염시키지 않게 한다.
+    """
+    try:
+        if df is None or getattr(df, "empty", True):
+            return df
+        idx = getattr(df, "index", None)
+        if idx is None:
+            return df
+        import pandas as pd
+
+        ts_idx = pd.DatetimeIndex(pd.to_datetime(idx, errors="coerce"))
+        uniq_days = {t.date() for t in ts_idx if t is not None and not pd.isna(t)}
+        ok_days = {d for d in uniq_days if is_trading_day(d)}
+        if not ok_days:
+            return df.iloc[0:0].copy() if hasattr(df, "iloc") else df
+        mask = [(t.date() in ok_days) if t is not None and not pd.isna(t) else False for t in ts_idx]
+        return df.loc[mask]
+    except Exception:
+        return df
 
 
 def trading_days_inclusive(start: str | date, end: str | date) -> List[date]:
@@ -80,14 +199,14 @@ def trading_days_inclusive(start: str | date, end: str | date) -> List[date]:
             import pandas as pd
 
             vd = cal.valid_days(start_date=pd.Timestamp(s), end_date=pd.Timestamp(e))
-            return [t.date() for t in vd]
+            return [t.date() for t in vd if is_trading_day(t.date())]
         except Exception:
             pass
-    # 폴백: 주말 제외
+    # 폴백: is_trading_day (주말·대체공휴일 제외)
     out: List[date] = []
     cur = s
     while cur <= e:
-        if cur.weekday() < 5:
+        if is_trading_day(cur):
             out.append(cur)
         cur += timedelta(days=1)
     return out

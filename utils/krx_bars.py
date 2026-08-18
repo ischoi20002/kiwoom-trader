@@ -90,12 +90,26 @@ def _krx_day_last_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
     return _pd_at(day0, h.close)
 
 
-def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
-    """``t`` 날짜 **다음날**부터 찾은 첫 평일 개장 라벨."""
+def _is_krx_session_day(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """KRX 정규 거래일이면 True. 주말·휴장(대체공휴일 포함)은 False."""
+    try:
+        d = pd.Timestamp(ts).date()
+        from reporting.krx_trading_calendar import is_trading_day
+
+        return bool(is_trading_day(d))
+    except Exception:
+        try:
+            return int(pd.Timestamp(ts).weekday()) < 5
+        except Exception:
+            return True
+
+
+def _next_trading_day_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
+    """``t`` 날짜 **다음날**부터 찾은 첫 거래일 개장 라벨 (주말·휴장 스킵)."""
     try:
         d = pd.Timestamp(t).normalize() + pd.Timedelta(days=1)
-        for _ in range(8):
-            if d.weekday() < 5:
+        for _ in range(16):
+            if _is_krx_session_day(d):
                 return _krx_day_first_slot_end(d)
             d = d + pd.Timedelta(days=1)
     except Exception:
@@ -103,15 +117,20 @@ def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
     return _krx_day_first_slot_end(pd.Timestamp(t).normalize() + pd.Timedelta(days=1))
 
 
+def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
+    """레거시 별칭 — 거래일 개장 라벨."""
+    return _next_trading_day_first_slot_after(t)
+
+
 def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """
-    KRX/키움 공식 15분봉 **라벨**(당일 SessionHours 격자, 평일) 여부.
+    KRX/키움 공식 15분봉 **라벨**(당일 SessionHours 격자, 거래일) 여부.
 
-    공휴일은 미반영(평일만). 장외·야간 슬롯은 False.
+    주말·휴장(대체공휴일 포함)과 장외·야간 슬롯은 False.
     """
     try:
         t = pd.Timestamp(ts).floor("s")
-        if t.weekday() >= 5:
+        if not _is_krx_session_day(t):
             return False
         if t.second != 0 or t.microsecond != 0:
             return False
@@ -130,6 +149,8 @@ def is_krx_last_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """라벨이 당일 마지막 15분봉(종가 단일가)인지."""
     try:
         t = pd.Timestamp(ts)
+        if not _is_krx_session_day(t):
+            return False
         h = _hours_for_ts(t)
         return h.is_last_slot_time(int(t.hour) * 60 + int(t.minute))
     except Exception:
@@ -140,6 +161,8 @@ def is_krx_first_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """라벨이 당일 첫 15분봉(개장)인지."""
     try:
         t = pd.Timestamp(ts)
+        if not _is_krx_session_day(t):
+            return False
         h = _hours_for_ts(t)
         return int(t.hour) * 60 + int(t.minute) == h.open_minutes
     except Exception:
@@ -243,11 +266,13 @@ def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp
         raw = now if now is not None else datetime.now()
         t = pd.Timestamp(raw)
         day0 = t.normalize()
-        if t.weekday() >= 5:
+        if not _is_krx_session_day(day0):
             d = day0
-            while d.weekday() >= 5:
+            for _ in range(16):
                 d = d - pd.Timedelta(days=1)
-            return _krx_day_last_slot_end(d)
+                if _is_krx_session_day(d):
+                    return _krx_day_last_slot_end(d)
+            return _krx_day_last_slot_end(day0 - pd.Timedelta(days=1))
 
         h = get_session_hours(day0.date())
         hm = int(t.hour) * 60 + int(t.minute)
@@ -277,14 +302,14 @@ def next_krx_15m_slot_end(
     """
     ``ts`` **이후** 첫 KRX 15분봉 라벨.
 
-    장마감(종가 슬롯) 다음은 **다음 평일 개장** 으로 점프합니다.
+    장마감(종가 슬롯) 다음은 **다음 거래일 개장** 으로 점프합니다.
     """
     try:
         t = pd.Timestamp(ts).floor("s")
         day0 = t.normalize()
 
-        if t.weekday() >= 5:
-            return _next_weekday_first_slot_after(t)
+        if not _is_krx_session_day(day0):
+            return _next_trading_day_first_slot_after(t)
 
         h = get_session_hours(day0.date())
         hm = int(t.hour) * 60 + int(t.minute)
@@ -292,7 +317,7 @@ def next_krx_15m_slot_end(
         first_end = _krx_day_first_slot_end(day0)
 
         if hm >= h.close_minutes:
-            return _next_weekday_first_slot_after(t)
+            return _next_trading_day_first_slot_after(t)
 
         if hm < h.open_minutes:
             if t < first_end:
@@ -308,7 +333,7 @@ def next_krx_15m_slot_end(
                 return nxt
             if t < last_end:
                 return last_end
-            return _next_weekday_first_slot_after(t)
+            return _next_trading_day_first_slot_after(t)
 
         up = krx_stream_slot_end_datetime(t.to_pydatetime())
         if up > t:

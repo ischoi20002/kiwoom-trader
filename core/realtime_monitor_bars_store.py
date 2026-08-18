@@ -49,6 +49,10 @@ class RealtimeMonitorBarsStore:
             d = 365
         self._retention_days: int = max(1, min(d, 3650))
         self._ensure_schema()
+        try:
+            self.purge_non_trading_day_bars()
+        except Exception:
+            pass
 
     def _retention_cutoff_str(self, days: Optional[int] = None) -> str:
         """현재 시각 기준 `days`일 이전 시각 (로컬 타임존). 문자열 비교용 ISO 형식."""
@@ -75,6 +79,69 @@ class RealtimeMonitorBarsStore:
                 self._log(f"⚠️ [RT15mDB] 롤링 삭제 실패 ({code}): {e}")
             except Exception:
                 pass
+
+    def purge_non_trading_day_bars(self) -> int:
+        """
+        주말·휴장일 15분봉을 삭제한다.
+
+        슬롯 롤이 대체공휴일에 직전 종가·거래량 0 행을 넣어 MA60이
+        백테스트와 어긋나던 오염을 정리한다.
+        """
+        deleted = 0
+        try:
+            from reporting.krx_trading_calendar import is_trading_day
+        except Exception:
+            return 0
+        closed: list[str] = []
+        try:
+            with self._lock:
+                with sqlite3.connect(self._db_path) as conn:
+                    days = [
+                        str(r[0])
+                        for r in conn.execute(
+                            "SELECT DISTINCT substr(datetime, 1, 10) FROM bars_15m_rt"
+                        ).fetchall()
+                        if r and r[0]
+                    ]
+                    for day_s in days:
+                        try:
+                            if not is_trading_day(day_s):
+                                closed.append(day_s)
+                        except Exception:
+                            continue
+                    for day_s in closed:
+                        try:
+                            d0 = datetime.strptime(day_s, "%Y-%m-%d")
+                            nxt = (d0 + timedelta(days=1)).strftime("%Y-%m-%d")
+                            cur = conn.execute(
+                                "DELETE FROM bars_15m_rt "
+                                "WHERE datetime >= ? AND datetime < ?",
+                                (f"{day_s} 00:00:00", f"{nxt} 00:00:00"),
+                            )
+                            deleted += int(cur.rowcount or 0)
+                        except (sqlite3.Error, ValueError):
+                            continue
+                    if closed:
+                        conn.commit()
+            if deleted > 0:
+                try:
+                    self._log(
+                        f"ℹ️ [RT15mDB] 비거래일 15분봉 {deleted}건 삭제 "
+                        f"({len(closed)}일)"
+                    )
+                except Exception:
+                    pass
+        except sqlite3.Error as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] 비거래일 봉 정리 실패: {e}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] 비거래일 봉 정리 예외: {e}")
+            except Exception:
+                pass
+        return deleted
 
     def _ensure_schema(self) -> None:
         try:
@@ -190,6 +257,13 @@ class RealtimeMonitorBarsStore:
             return
         try:
             ts = pd.Timestamp(bar_ts)
+            try:
+                from reporting.krx_trading_calendar import is_trading_day
+
+                if not is_trading_day(ts.date()):
+                    return
+            except Exception:
+                pass
             dt_str = ts.strftime("%Y-%m-%d %H:%M:%S")
             o = int(round(float(open_)))
             h = int(round(float(high)))
@@ -253,6 +327,12 @@ class RealtimeMonitorBarsStore:
                 return 0
             d = d.sort_index()
             d = d[~d.index.duplicated(keep="last")]
+            try:
+                from reporting.krx_trading_calendar import filter_ohlcv_index_to_trading_days
+
+                d = filter_ohlcv_index_to_trading_days(d)
+            except Exception:
+                pass
             if max_rows is not None and int(max_rows) > 0:
                 d = d.tail(int(max_rows))
             if d.empty:
@@ -349,7 +429,18 @@ class RealtimeMonitorBarsStore:
                 return pd.DataFrame()
             df["time"] = pd.to_datetime(df["time"], errors="coerce")
             df = df.dropna(subset=["time"])
-            return df
+            try:
+                from reporting.krx_trading_calendar import is_trading_day
+
+                uniq = {pd.Timestamp(t).date() for t in df["time"]}
+                ok = {d for d in uniq if is_trading_day(d)}
+                if ok:
+                    df = df[df["time"].map(lambda t: pd.Timestamp(t).date() in ok)]
+                else:
+                    df = df.iloc[0:0]
+            except Exception:
+                pass
+            return df.reset_index(drop=True)
         except Exception as e:
             try:
                 self._log(f"⚠️ [RT15mDB] 조회 실패 ({nc}): {e}")

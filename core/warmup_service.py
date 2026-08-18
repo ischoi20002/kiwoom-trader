@@ -644,6 +644,12 @@ class WarmupService:
                 return a.copy()
             out = pd.concat([a, b]).sort_index()
             out = out[~out.index.duplicated(keep="last")]
+            try:
+                from reporting.krx_trading_calendar import filter_ohlcv_index_to_trading_days
+
+                out = filter_ohlcv_index_to_trading_days(out)
+            except Exception:
+                pass
             return out
         except Exception as e:
             self.log(f"⚠️ [Warmup] 15m 병합 실패: {e}")
@@ -985,8 +991,14 @@ class WarmupService:
             if not bool(self.app.settings.get("use_intraday_api_backfill", True)):
                 return False
             now = datetime.now()
-            if now.weekday() >= 5:
-                return False
+            try:
+                from reporting.krx_trading_calendar import is_trading_day
+
+                if not is_trading_day(now.date()):
+                    return False
+            except Exception:
+                if now.weekday() >= 5:
+                    return False
             open_t = datetime.strptime("09:00", "%H:%M").time()
             close_t = datetime.strptime("15:30", "%H:%M").time()
             if now.time() < open_t or now.time() > close_t:

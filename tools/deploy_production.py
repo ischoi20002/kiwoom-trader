@@ -25,6 +25,7 @@ ROOT_FILES: List[str] = [
     "strategy_selector.py",
     "settings.json",
     "krx_special_sessions.json",
+    "krx_closed_day_overrides.json",
     "kodex200.csv",
     "kodex_200.csv",
     "requirements.txt",

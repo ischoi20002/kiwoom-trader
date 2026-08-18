@@ -482,21 +482,20 @@ def is_in_regular_session(
     """
     정규장 구간이면 True (open ≤ now ≤ close, 분 단위).
 
-    ``require_trading_day=True`` 이면 KRX 거래일만 True.
-    주말은 기본적으로 False(거래일 검사 없이도 weekday>=5 차단).
+    주말·휴장일은 False. ``require_trading_day`` 는 호환용(항상 거래일 검사를 수행).
     """
     try:
         t = now if now is not None else datetime.now()
         if t.weekday() >= 5:
             return False
-        if require_trading_day:
-            try:
-                from reporting.krx_trading_calendar import is_trading_day
+        try:
+            from reporting.krx_trading_calendar import is_trading_day
 
-                if not is_trading_day(t.date()):
-                    return False
-            except Exception:
-                pass
+            if not is_trading_day(t.date()):
+                return False
+        except Exception:
+            if require_trading_day:
+                return False
         h = hours if hours is not None else get_session_hours(t.date())
         hm = t.hour * 60 + t.minute
         return h.open_minutes <= hm <= h.close_minutes
