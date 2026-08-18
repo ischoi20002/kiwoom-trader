@@ -3676,8 +3676,9 @@ class MonitorTab:
                     _step_log("target_tree_item_compare_call", {"curr_values_len": len(curr.get("values", ())) if isinstance(curr, dict) else None})
                     curr_values = curr.get("values", ()) if isinstance(curr, dict) else ()
                     curr_tags = curr.get("tags", ()) if isinstance(curr, dict) else ()
-                    # 전략유형: 실제 보유(is_active_raw)이고 새 값이 전략 A/B 일 때만 체결 유형으로 갱신.
-                    # 감시만 하는 종목·미체결 재주문은 기존 표시를 유지해 A↔A+B 깜빡임을 막습니다.
+                    # 전략유형: 전략 A/B 로 확정되면 A+B 로 되돌리지 않음.
+                    # A+B·빈값 → A/B 확정은 허용(호텔신라·카카오페이 Type A 가 A+B로 남는 것 방지).
+                    # 보유 중 A↔B 교체만 추가로 허용.
                     if (
                         not allow_strat_type_live_update
                         and isinstance(curr_values, (list, tuple))
@@ -3692,10 +3693,18 @@ class MonitorTab:
                             current_st = str(
                                 curr_values[3] if curr_values[3] is not None else ""
                             ).strip()
+                            entry_labels = ("전략 A", "전략 B")
+                            incoming_is_entry = incoming_st in entry_labels
+                            current_is_entry = current_st in entry_labels
                             allow_entry_lock = bool(
-                                is_active_raw
-                                and incoming_st in ("전략 A", "전략 B")
-                                and incoming_st != current_st
+                                incoming_is_entry
+                                and (
+                                    (not current_is_entry)
+                                    or (
+                                        is_active_raw
+                                        and incoming_st != current_st
+                                    )
+                                )
                             )
                             if not allow_entry_lock:
                                 values = list(values)
