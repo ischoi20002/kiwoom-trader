@@ -4,6 +4,9 @@
 
 - 완성봉 OHLCV: ``compose_local_15m_ohlcv`` (공식 우선, 결측은 틱).
 - 말분은 ``realtime_15m_last_minute_from_ticks`` 로 틱 우선 가능.
+- 슬롯 앞구간(말분 제외)에 공식 1분이 없으면 틱만으로 완성15를 만들지 않음
+  (장중 재시작 직후 틱전용봉 방지). 공식 catchup 후 재시도.
+- 말분 틱이 중간부터면 부분 틱으로 평가하지 않고 공식 말분 1분을 기다림.
 - head REST는 soft catchup(선택)이며 평가 게이트가 아님.
 """
 
@@ -51,13 +54,158 @@ def _tick_fill_on_api_miss_enabled(app: Any) -> bool:
     """
     공식 1분이 없는 분을 틱 seal로 채울지(기본 ON).
 
-    ON이면 S1/S2/청산 완성15 합성이 API miss에도 틱만으로 가능.
+    ON이면 결측 분을 틱으로 채우되, 슬롯 앞구간에 공식 1분이
+    하나도 없으면 ``_require_official_head_enabled`` 가 합성을 보류한다.
     """
     try:
         st = getattr(app, "settings", None) or {}
         return bool(st.get("realtime_15m_compose_tick_fill_on_api_miss", True))
     except Exception:
         return True
+
+
+def _require_official_head_enabled(app: Any) -> bool:
+    """
+    완성 15분 합성 시 슬롯 앞구간(말분 제외)에 공식 1분이 필요한지(기본 ON).
+
+    장중 재시작 직후 M1 스토어에 틱만 있으면 워밍업 1m 합산봉을
+    틱전용 합성으로 덮지 않고, 공식 catchup 까지 평가를 미룬다.
+    """
+    try:
+        st = getattr(app, "settings", None) or {}
+        return bool(st.get("realtime_15m_compose_require_official_head", True))
+    except Exception:
+        return True
+
+
+def _wait_official_last_if_tick_incomplete_enabled(app: Any) -> bool:
+    """말분 틱이 중간부터면 공식 말분 1분을 기다릴지(기본 ON)."""
+    try:
+        st = getattr(app, "settings", None) or {}
+        return bool(
+            st.get("realtime_15m_wait_official_last_if_tick_incomplete", True)
+        )
+    except Exception:
+        return True
+
+
+def mark_tick_stream_ready(app: Any, when: Optional[datetime] = None) -> None:
+    """웹소켓 틱 수신이 시작된 시각을 한 번만 기록합니다."""
+    try:
+        if getattr(app, "rt_tick_stream_ready_at", None) is not None:
+            return
+        app.rt_tick_stream_ready_at = when if when is not None else datetime.now()
+    except Exception:
+        pass
+
+
+def clear_tick_stream_session(app: Any) -> None:
+    """감시 중단 시 말분 틱 완전성 판별용 세션 상태를 지웁니다."""
+    try:
+        app.rt_tick_stream_ready_at = None
+    except Exception:
+        pass
+    try:
+        app.rt_monitor_inprogress_slot = None
+    except Exception:
+        pass
+    try:
+        m1s = getattr(app, "rt_tick_m1_store", None)
+        if m1s is not None and hasattr(m1s, "reset_tick_session"):
+            m1s.reset_tick_session()
+    except Exception:
+        pass
+
+
+def remember_monitor_inprogress_slot(app: Any, when: Optional[datetime] = None) -> None:
+    """감시 시작(워밍업) 시점의 형성 중 15분 슬롯 라벨을 기록합니다."""
+    try:
+        wall = when if when is not None else datetime.now()
+        app.rt_monitor_inprogress_slot = stream_slot_end_datetime(wall)
+    except Exception:
+        try:
+            app.rt_monitor_inprogress_slot = None
+        except Exception:
+            pass
+
+
+def tick_stream_covers_minute_open(app: Any, last_open: pd.Timestamp) -> bool:
+    """
+    틱 스트림이 해당 분 시작 시점부터 살아 있었는지(전역).
+
+    워밍업 중이거나 재시작 직후면 False.
+    """
+    try:
+        ready = getattr(app, "rt_tick_stream_ready_at", None)
+        if ready is None:
+            return False
+        return pd.Timestamp(ready) <= pd.Timestamp(last_open).floor("min")
+    except Exception:
+        return False
+
+
+def last_minute_ticks_complete_for_eval(
+    app: Any, code: str, last_open: Any
+) -> bool:
+    """
+    말분 틱으로 평가해도 되는가.
+
+    말분 시작 전에 틱을 받고 있었으면 True.
+    재시작으로 말분 중간에 붙었으면 False → 공식 1분을 기다린다.
+    """
+    try:
+        if not _wait_official_last_if_tick_incomplete_enabled(app):
+            return True
+        lab = pd.Timestamp(last_open).floor("min")
+        m1s = getattr(app, "rt_tick_m1_store", None)
+        first = None
+        if m1s is not None and hasattr(m1s, "first_tick_at"):
+            try:
+                first = m1s.first_tick_at(code)
+            except Exception:
+                first = None
+        if isinstance(first, datetime):
+            # 말분 시작 전에 이 종목 틱이 있었으면 완전
+            if pd.Timestamp(first) < lab:
+                return True
+        # 말분에야 첫 체결이 온 종목(유동성 낮음)은 전역 스트림 시작 시각으로 판별
+        return tick_stream_covers_minute_open(app, lab)
+    except Exception:
+        return False
+
+
+def has_official_minute(m1s: Any, nk: str, open_lab: pd.Timestamp) -> bool:
+    """공식 completed 에 해당 1분이 있는지."""
+    try:
+        ol = pd.Timestamp(open_lab).floor("min")
+        df = m1s.dataframe_for_window(nk, ol, ol, include_open_bucket=False)
+        return df is not None and not getattr(df, "empty", True)
+    except Exception:
+        return False
+
+
+def slot_has_official_head_m1(
+    m1s: Any,
+    nk: str,
+    t0: pd.Timestamp,
+    last_open: pd.Timestamp,
+) -> bool:
+    """
+    슬롯 앞구간 ``[t0, last_open)`` 에 공식 completed 1분이 하나라도 있는지.
+
+    말분은 틱 우선이므로 검사에서 제외한다. 앞구간이 없는 1분 슬롯은 True.
+    """
+    try:
+        head_hi = pd.Timestamp(last_open).floor("min") - pd.Timedelta(minutes=1)
+        t0s = pd.Timestamp(t0).floor("min")
+        if head_hi < t0s:
+            return True
+        head = m1s.dataframe_for_window(
+            nk, t0s, head_hi, include_open_bucket=False
+        )
+        return head is not None and not getattr(head, "empty", True)
+    except Exception:
+        return False
 
 
 def _minute_ohlcv_official_or_tick(
@@ -139,6 +287,10 @@ def compose_local_15m_ohlcv(
     - ``15:30``: 단일가 1분만
     - ``realtime_15m_last_minute_from_ticks`` ON 이면 말분은 틱 우선
     - ``realtime_15m_compose_tick_fill_on_api_miss`` ON 이면 공식 결측 분을 틱으로 채움
+    - ``realtime_15m_compose_require_official_head`` ON 이면 앞구간에 공식 1분이
+      없을 때 None (틱만으로 완성15 금지). 폴러 catchup 후 재시도.
+    - 말분 틱이 중간부터(장중 재시작)이면 공식 말분 1분이 올 때까지 None.
+      도착 후에는 공식 1분만으로 합성한다.
     """
     try:
         nk = canonical_stock_code(str(code).strip())
@@ -152,11 +304,22 @@ def compose_local_15m_ohlcv(
         use_tick_tail = _last_minute_from_ticks_enabled(app)
         allow_fill = _tick_fill_on_api_miss_enabled(app)
 
-        # 15:30 단일가 — 틱 우선, 없으면 공식, (fill ON이면 틱만으로도 가능)
+        # 15:30 단일가 — 틱 우선, 없으면 공식.
+        # 말분 틱이 중간부터면 공식 1분만 사용(없으면 None → 대기).
         if is_krx_last_15m_slot(slot):
             auc = m1_closing_auction_ts_for_15m_end(slot)
             if auc is None:
                 return None
+            incomplete_tail = not last_minute_ticks_complete_for_eval(app, nk, auc)
+            if incomplete_tail:
+                bar = _minute_ohlcv_official_or_tick(
+                    m1s,
+                    nk,
+                    auc,
+                    prefer_tick=False,
+                    allow_tick_fill=False,
+                )
+                return bar
             bar = _minute_ohlcv_official_or_tick(
                 m1s,
                 nk,
@@ -170,6 +333,28 @@ def compose_local_15m_ohlcv(
         t_end_excl = m1_continuous_end_exclusive_for_15m_end(slot)
         last_open = t_end_excl - pd.Timedelta(minutes=1)
         if last_open < t0:
+            return None
+
+        # 말분 틱 불완전(재시작 등): 공식 말분 1분이 올 때까지 합성 거부, 오면 공식 1분만.
+        incomplete_tail = not last_minute_ticks_complete_for_eval(
+            app, nk, last_open
+        )
+        if incomplete_tail:
+            use_tick_tail = False
+            allow_fill = False
+            try:
+                if not has_official_minute(m1s, nk, last_open):
+                    return None
+            except Exception:
+                return None
+
+        # 장중 재시작: 앞구간 공식 1분이 없으면 틱전용 합성 거부
+        try:
+            if _require_official_head_enabled(app) and not slot_has_official_head_m1(
+                m1s, nk, t0, last_open
+            ):
+                return None
+        except Exception:
             return None
 
         # API miss 틱 채움: 슬롯 전 분을 공식우선(+틱결측)으로 순회

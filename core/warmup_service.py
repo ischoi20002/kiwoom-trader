@@ -748,6 +748,59 @@ class WarmupService:
         except Exception:
             return True
 
+    def _warmup_seed_m1_store_enabled(self) -> bool:
+        """워밍업 1분봉을 RtTickM1Store에 선적재할지(기본 ON)."""
+        try:
+            return bool(
+                self.app.settings.get(
+                    "realtime_warmup_seed_m1_store_from_1m", True
+                )
+            )
+        except Exception:
+            return True
+
+    def _seed_rt_tick_m1_store_from_warmup_1m(
+        self, code: str, name: str, df_1m: pd.DataFrame
+    ) -> int:
+        """
+        워밍업 ka10080(1분)을 RtTickM1Store 공식 completed에 선적재합니다.
+
+        장중 재시작 직후 틱만으로 완성 15분을 합성하지 않도록,
+        현재 분 직전까지의 공식 1분을 스토어에 넣어둡니다.
+        """
+        try:
+            if not self._warmup_seed_m1_store_enabled():
+                return 0
+            if df_1m is None or getattr(df_1m, "empty", True):
+                return 0
+            m1s = getattr(self.app, "rt_tick_m1_store", None)
+            if m1s is None:
+                return 0
+            now_floor = pd.Timestamp(datetime.now()).floor("min")
+            upto = now_floor - pd.Timedelta(minutes=1)
+            from core.realtime_m1_fallback import apply_chart_catchup_to_m1_store
+
+            n = int(
+                apply_chart_catchup_to_m1_store(self.app, code, df_1m, upto) or 0
+            )
+            if n > 0:
+                try:
+                    self.log(
+                        f"🔄 [Warmup-1m] {name}({code}) M1스토어 선적재 {n}분 "
+                        f"(~{upto.strftime('%H:%M')}까지)"
+                    )
+                except Exception:
+                    pass
+            return n
+        except Exception as e:
+            try:
+                self.log(
+                    f"⚠️ [Warmup-1m] {name}({code}) M1스토어 선적재 실패: {e!r}"
+                )
+            except Exception:
+                pass
+            return 0
+
     def _minute_api_raw_to_1m_ohlcv(self, raw_api: Any) -> pd.DataFrame:
         """
         ka10080(tic_scope='1') 응답 → DatetimeIndex Open/High/Low/Close/Volume(1분봉).
@@ -837,12 +890,15 @@ class WarmupService:
         """
         재시작 시 진행 중 15m 슬롯의 V/OHLC 가 부분 손실됐을 가능성을 보정합니다.
 
-        ka10080(tic_scope='1') 로 1분봉 1페이지를 받아 진행 중 슬롯 ``[label, complete)``
-        구간에 속하는 1분봉을 합산해 base 의 해당 슬롯 봉을 정확한 OHLCV 로 덮어씁니다.
+        ka10080(tic_scope='1') 로 1분봉 1페이지를 받아
+        (1) RtTickM1Store 에 공식 1분을 선적재하고
+        (2) 진행 중 슬롯 ``[label, complete)`` 1분봉을 합산해 base 해당 슬롯을 덮어씁니다.
         - 결과 봉의 인덱스는 좌측 라벨(키움 공식 15분과 동일).
         """
         try:
-            if not self._inprogress_slot_recover_with_1m_enabled():
+            recover_on = self._inprogress_slot_recover_with_1m_enabled()
+            seed_on = self._warmup_seed_m1_store_enabled()
+            if not recover_on and not seed_on:
                 return base
             if not token:
                 return base
@@ -866,6 +922,12 @@ class WarmupService:
                 return base
             df_1m = self._minute_api_raw_to_1m_ohlcv(raw_list)
             if df_1m is None or df_1m.empty:
+                return base
+            try:
+                self._seed_rt_tick_m1_store_from_warmup_1m(code, name, df_1m)
+            except Exception:
+                pass
+            if not recover_on:
                 return base
             mask = (df_1m.index >= slot_start) & (df_1m.index < slot_end)
             in_slot = df_1m[mask]

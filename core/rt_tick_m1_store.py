@@ -61,6 +61,8 @@ class RtTickM1Store:
         self._tick_sealed_by_min: Dict[str, Dict[pd.Timestamp, _SealedTup]] = {}
         # 호환: 종목별 가장 최근 seal (말분 amend·구 경로)
         self._tick_sealed: Dict[str, _SealedTup] = {}
+        # 종목별 이번 감시 세션 첫 틱 시각 — 말분 틱 완전성 판별용
+        self._first_tick_at: Dict[str, datetime] = {}
 
     def _emit_log(self, msg: str) -> None:
         if self._log is None:
@@ -294,6 +296,8 @@ class RtTickM1Store:
 
         with self._lock:
             try:
+                if nk not in self._first_tick_at:
+                    self._first_tick_at[nk] = trade_dt
                 # 이미 seal된 분에 대한 늦은 체결
                 if self._amend_sealed_unlocked(nk, cur, px, cum_v, trade_dt):
                     return None
@@ -495,6 +499,26 @@ class RtTickM1Store:
                 return int(self._revision.get(nk, 0))
         except (TypeError, ValueError):
             return 0
+
+    def first_tick_at(self, code: str) -> Optional[datetime]:
+        """이번 감시 세션에서 해당 종목의 첫 틱 시각. 없으면 None."""
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            if not nk:
+                return None
+            with self._lock:
+                v = self._first_tick_at.get(nk)
+            return v if isinstance(v, datetime) else None
+        except Exception:
+            return None
+
+    def reset_tick_session(self) -> None:
+        """감시 시작/중단 시 틱 세션 시각만 비웁니다(공식 completed는 유지)."""
+        try:
+            with self._lock:
+                self._first_tick_at.clear()
+        except Exception:
+            pass
 
     def last_completed_close(self, code: str) -> float:
         """완료 공식 1분 중 가장 최근 종가. 없으면 0."""

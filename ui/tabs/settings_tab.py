@@ -1389,8 +1389,26 @@ class SettingsTab:
             None,
             '',
             'ON(권장)=완성15 합성 시 공식 1분이 없는 분을 틱 seal로 채움. '
-            'S1·S2·청산 모두 동일(ka10080 empty 등에서도 평가 진행)',
+            '앞구간 공식 1분이 하나도 없으면(재시작 직후) 아래 공식1분 필수가 합성을 보류',
             toggle_key='realtime_15m_compose_tick_fill_on_api_miss',
+        )
+        add_param_row(
+            strat_f,
+            '완성15 공식1분 필수',
+            None,
+            '',
+            'ON(권장)=슬롯 앞구간(말분 제외)에 공식 1분이 없으면 틱만으로 완성15를 만들지 않음. '
+            '워밍업 선적재·폴러 catchup 후 재시도',
+            toggle_key='realtime_15m_compose_require_official_head',
+        )
+        add_param_row(
+            strat_f,
+            '말분 틱불완전 시 공식대기',
+            None,
+            '',
+            'ON(권장)=장중 재시작 등으로 말분 틱이 중간부터면 부분 틱으로 평가하지 않고 '
+            '공식 말분 1분을 받은 뒤 공식 1분만으로 평가',
+            toggle_key='realtime_15m_wait_official_last_if_tick_incomplete',
         )
         add_param_row(
             strat_f,

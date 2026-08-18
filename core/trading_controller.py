@@ -458,6 +458,12 @@ class TradingController:
                 poller.reset_round_state()
         except Exception:
             pass
+        try:
+            from core.realtime_official_bars_sync import clear_tick_stream_session
+
+            clear_tick_stream_session(self.app)
+        except Exception:
+            pass
         # 워밍업·감시 외 구간에서 틱 워커가 bars_data 를 건드리지 않도록 먼저 정지합니다.
         try:
             tds = getattr(self.app, "tick_dispatch_service", None)

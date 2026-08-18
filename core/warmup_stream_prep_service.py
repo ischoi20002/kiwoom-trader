@@ -38,6 +38,14 @@ class WarmupStreamPrepService:
             c._abort_monitor_start = False
             c.app._active_stream_codes = []
             c._incremental_stream_bootstrapped = False
+            try:
+                from core.realtime_official_bars_sync import (
+                    remember_monitor_inprogress_slot,
+                )
+
+                remember_monitor_inprogress_slot(c.app)
+            except Exception:
+                pass
 
             # Transition 게이트 FDR 일봉 조회는 수 초~수십 초 걸릴 수 있음.
             # start() 메인 스레드에서 돌리면 UI가 멈춘 것처럼 보이므로 여기서 수행.
@@ -247,11 +255,26 @@ class WarmupStreamPrepService:
                 pass
             _notify_started_and_reg_refresh()
 
+            def _mark_ready_and_catchup() -> None:
+                try:
+                    from core.realtime_official_bars_sync import mark_tick_stream_ready
+
+                    mark_tick_stream_ready(c.app)
+                except Exception:
+                    pass
+                try:
+                    poller = getattr(c.app, "rt_watchlist_m1_api_poller", None)
+                    if poller is not None:
+                        poller.catchup_eval_inprogress_slot_after_stream_ready()
+                except Exception:
+                    pass
+
             # [Step 2] 가상 실천 엔진(WS Worker) 구동 (이미 살아 있으면 재시작하지 않음)
             if ws_already_running:
                 c.log(
                     "ℹ️ [System] 웹소켓 워커가 이미 동작 중이어서 추가 기동을 건너뜁니다."
                 )
+                _mark_ready_and_catchup()
                 return
 
             c._stop_event.clear()
@@ -268,6 +291,7 @@ class WarmupStreamPrepService:
             except Exception:
                 pass
             c.monitor_thread.start()
+            _mark_ready_and_catchup()
 
         except Exception as e:
             self.log(f"❌ [Error] 시작 시퀀스 실패: {e}")
