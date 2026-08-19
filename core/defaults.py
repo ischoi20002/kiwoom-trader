@@ -207,7 +207,7 @@ DEFAULT_SETTINGS = {
     "realtime_use_market_orders": False,
     "realtime_touch_quote_orders": True,
     "touch_quote_order_poll_sec": 30.0,
-    "touch_quote_first_confirm_sec": 40.0,
+    "touch_quote_first_confirm_sec": 60.0,
     "touch_quote_order_max_amends": 3,
     "touch_pending_confirm_max": 20,
     "reconcile_remove_grace_seconds": 180,

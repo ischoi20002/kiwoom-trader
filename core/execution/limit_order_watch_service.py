@@ -79,14 +79,14 @@ class LimitOrderWatchService:
         """
         접수·정정 직후 첫 kt00007 체결 확인까지 대기(ms).
 
-        모의/실전 모두 접수 후 약 30초 시점의 조회는 거의 미반영이고,
-        다음 주기(총 ~60초)에야 체결이 잡히는 경우가 많아 기본 40초로 둔다.
+        접수 후 30·40초 조회는 kt00007 미반영인 경우가 많아 기본 60초로 둔다.
+        이후 재확인은 ``touch_quote_order_poll_sec``(기본 30초) 간격이다.
         """
         try:
             st = getattr(self.app, "settings", None) or {}
-            sec = float(st.get("touch_quote_first_confirm_sec", 40.0))
+            sec = float(st.get("touch_quote_first_confirm_sec", 60.0))
         except (TypeError, ValueError):
-            sec = 40.0
+            sec = 60.0
         sec = max(10.0, min(sec, 90.0))
         return int(sec * 1000)
 
@@ -336,7 +336,7 @@ class LimitOrderWatchService:
         """
         다음 터치 폴링 타이머 예약(``touch_chain_key`` 기준).
 
-        - confirm + first: 접수·정정 직후 ``touch_quote_first_confirm_sec``(기본 40초)
+        - confirm + first: 접수·정정 직후 ``touch_quote_first_confirm_sec``(기본 60초)
         - confirm 재시도: ``touch_quote_order_poll_sec``(기본 30초)
         - amend: ``touch_quote_order_poll_sec`` 후 호가 정정
         """
@@ -416,7 +416,7 @@ class LimitOrderWatchService:
     def _touch_run_amend_phase(
         self, chain_key: str, current_ord: str, meta: LimitOrderMeta
     ) -> None:
-        """(confirm에서 넘어옴) 호가 정정만 수행하고, 다음 confirm은 첫 확인 간격(기본 40초)으로 예약합니다."""
+        """(confirm에서 넘어옴) 호가 정정만 수행하고, 다음 confirm은 첫 확인 간격(기본 60초)으로 예약합니다."""
         max_a = self._get_touch_max_amends()
         if meta.touch_amend_attempts_done >= max_a:
             self.timeout(current_ord)
@@ -435,7 +435,7 @@ class LimitOrderWatchService:
         except Exception:
             pass
         if bool(should_schedule):
-            # 정정도 새 접수로 보아 kt00007 반영까지 첫 확인 간격(기본 40초)을 둔다.
+            # 정정도 새 접수로 보아 kt00007 반영까지 첫 확인 간격(기본 60초)을 둔다.
             self._schedule_touch_timer(chain_key, phase="confirm", first=True)
 
     def _touch_apply_ord_no_remap(
