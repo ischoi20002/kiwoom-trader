@@ -48,6 +48,22 @@ from strategy.synthetic_realtime_fill import (
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
+def snapshot_holdings_for_same_slot_s1(
+    holdings: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    같은 15분 슬롯 S1을 동시주문으로 볼 때 쓰는 보유 스냅샷.
+
+    슬롯 안에서 먼저 체결된 종목이 다음 종목의 동수 타이브레이크·트랙 판정을
+    바꾸지 않게, 얕은 복사본을 고정한다. (실시간은 봉 마감 평가 시점에
+    같은 슬롯 신규 매수가 아직 보유에 없는 것과 맞춘다.)
+    """
+    try:
+        return dict(holdings or {})
+    except Exception:
+        return {}
+
+
 def _dual_track_new_candidates(
     top_codes_a: List[str],
     top_codes_b: List[str],
@@ -135,6 +151,8 @@ class DynamicBacktester:
         # [v17.5] 수수료/세금 설정 (기본값 방어)
         self.buy_f_rate, self.sell_f_rate = fee_decimal_rates_backtest(self.settings)
         self.holdings = {} # {code: {'qty': Q, 'avg_p': P, 'entry_n': N, 'max_p': H, 'min_p': L}}
+        # 현재 15분 슬롯 S1 타입 판정용. None=미고정, dict=슬롯 시작 보유.
+        self._s1_slot_holdings_snapshot: Optional[Dict[str, Any]] = None
         self.trades_history = []
         self.daily_equity = []
         self.cached_15m_data = {} # Step 3 (Phase 2) initialized as empty
@@ -314,15 +332,43 @@ class DynamicBacktester:
         except Exception:
             pass
 
+    def _begin_s1_slot_holdings_snapshot(self) -> None:
+        """현재 15분 시각 처리 직전 보유를 S1 타입·동수 판정용으로 고정."""
+        try:
+            self._s1_slot_holdings_snapshot = snapshot_holdings_for_same_slot_s1(
+                self.holdings
+            )
+        except Exception:
+            self._s1_slot_holdings_snapshot = {}
+
+    def _s1_holdings_for_type_decision(self) -> Dict[str, Any]:
+        """S1 확정 타입·동수 차단에 쓰는 보유. 슬롯 스냅샷이 있으면 그것을 우선."""
+        try:
+            snap = getattr(self, "_s1_slot_holdings_snapshot", None)
+            if snap is not None and isinstance(snap, dict):
+                return snap
+        except Exception:
+            pass
+        try:
+            return self.holdings if isinstance(self.holdings, dict) else {}
+        except Exception:
+            return {}
+
     def _effective_s1_sig_type_for_buy(
         self, row: Any, code_track: Any = None
     ) -> str:
         """15분 행·1분 indicator dict 등에서 Sig_Type 확정(동시신호+보유 A/B 동점 시 B 우선).
 
+        보유는 **현재 슬롯 시작 스냅샷**을 쓴다. 같은 봉에서 먼저 산 종목이
+        다음 종목의 동수 타이브레이크를 바꾸지 않게 한다.
+
         ``code_track`` 은 ``same_bar_sig_prefer_sel_track`` 이 켜졌을 때만 사용된다.
         """
         return TradingStrategy.effective_s1_sig_type_for_buy(
-            self.settings, row, self.holdings, code_track
+            self.settings,
+            row,
+            self._s1_holdings_for_type_decision(),
+            code_track,
         )
 
     def _bootstrap_portfolio_data(
@@ -695,6 +741,8 @@ class DynamicBacktester:
                     code_to_rank[c] = offset_b + i
             
             for curr_time in timeline:
+                # 같은 슬롯 S1은 동시주문 — 타입·동수는 이 시각 직전 보유로만 판정
+                self._begin_s1_slot_holdings_snapshot()
                 # BT 전용 조기 패스: 당일 개장 슬롯에서 첫 1분봉으로 EXIT/S1 → 이후 완성15분(Pass2)
                 try:
                     _is_open_slot = bool(is_krx_first_15m_slot(curr_time))
@@ -868,7 +916,9 @@ class DynamicBacktester:
                                 ):
                                     can_execute = False
                                 elif TradingStrategy.simultaneous_equal_holdings_blocked(
-                                    self.settings, last_sig, self.holdings
+                                    self.settings,
+                                    last_sig,
+                                    self._s1_holdings_for_type_decision(),
                                 ):
                                     can_execute = False
                                 
@@ -1613,7 +1663,7 @@ class DynamicBacktester:
             ):
                 return
             if TradingStrategy.simultaneous_equal_holdings_blocked(
-                self.settings, sig_row, self.holdings
+                self.settings, sig_row, self._s1_holdings_for_type_decision()
             ):
                 return
             buy_reason = self._tag_open_auction_reason("SIG")
@@ -2415,7 +2465,9 @@ class DynamicBacktester:
                     ):
                         continue
                     if (not is_addon_target) and TradingStrategy.simultaneous_equal_holdings_blocked(
-                        self.settings, indicator_to_use, self.holdings
+                        self.settings,
+                        indicator_to_use,
+                        self._s1_holdings_for_type_decision(),
                     ):
                         continue
                     

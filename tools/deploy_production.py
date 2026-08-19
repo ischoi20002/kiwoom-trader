@@ -22,6 +22,7 @@ ROOT_FILES: List[str] = [
     "config.py",
     "backtest_engine.py",
     "data_manager_v2.py",
+    "dynamic_backtest.py",
     "strategy_selector.py",
     "settings.json",
     "krx_special_sessions.json",
