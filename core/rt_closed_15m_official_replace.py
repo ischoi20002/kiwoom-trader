@@ -3,7 +3,8 @@
 15분 슬롯이 바뀔 때 확정된 직전 봉을 키움 ka10080(15분)으로 조회해
 메모리 ``bars_data`` 및 RT15m DB에 덮어씁니다(틱 누락 시 OHLCV 정합성).
 
-- 완성 봉 한 줄만 갱신(형성 중 현재 봉은 틱 경로 유지).
+- 완성 봉을 갱신(형성 중 현재 봉은 틱 경로 유지).
+- 같은 ka10080 페이지의 이전 완성봉도 값이 다르면 덮어 MA60 정합을 회복.
 - 종목·슬롯당 스케줄 1회(중복 타이머 방지).
 - 조회는 데몬 스레드, ``bars_data`` 반영은 Tk ``after(0)`` 로 메인 스레드.
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -27,6 +29,19 @@ from core.ka10080_spread import (
 )
 from utils.krx_bars import is_krx_15m_slot_end
 from utils.normalization import canonical_stock_code
+
+# 한 슬롯의 공식 OHLCV
+OfficialOhlcv = Tuple[float, float, float, float, float]
+# (봉시각, O, H, L, C, V)
+OfficialBarRow = Tuple[pd.Timestamp, float, float, float, float, float]
+
+
+@dataclass
+class Official15mFetchHit:
+    """현재 슬롯 공식봉 + 같은 응답의 이전 완성봉(형성 중 봉 제외)."""
+
+    ohlcv: OfficialOhlcv
+    completed_bars: List[OfficialBarRow] = field(default_factory=list)
 
 
 def should_skip_pre_first_slot_or_prior_day_official_replace(
@@ -578,7 +593,53 @@ def _find_row_for_bar_end(
         return None
 
 
-def fetch_official_15m_row_for_timestamp(
+def _row_ohlcv(
+    row: Any,
+) -> Optional[OfficialOhlcv]:
+    """OHLCV 행에서 양수 가격이 하나라도 있으면 튜플."""
+    try:
+        o = float(row["Open"])
+        h = float(row["High"])
+        l_ = float(row["Low"])
+        c = float(row["Close"])
+        v = float(row["Volume"])
+        if o > 0 or h > 0 or l_ > 0 or c > 0:
+            return (o, h, l_, c, v)
+    except Exception:
+        return None
+    return None
+
+
+def _completed_bars_upto(
+    merged: pd.DataFrame, want: Any
+) -> List[OfficialBarRow]:
+    """
+    API 프레임에서 ``want`` 이하 완성봉만 추출합니다.
+
+    형성 중(``want`` 이후) 봉은 틱 경로를 유지하기 위해 제외합니다.
+    """
+    out: List[OfficialBarRow] = []
+    try:
+        if merged is None or getattr(merged, "empty", True):
+            return out
+        want_n = _norm_bar_ts(want)
+        for ts, row in merged.iterrows():
+            try:
+                t = _norm_bar_ts(ts)
+                if t > want_n:
+                    continue
+                oh = _row_ohlcv(row)
+                if oh is None:
+                    continue
+                out.append((t, oh[0], oh[1], oh[2], oh[3], oh[4]))
+            except Exception:
+                continue
+    except Exception:
+        return out
+    return out
+
+
+def fetch_official_15m_hit(
     data_manager: Any,
     code: str,
     token: str,
@@ -592,12 +653,9 @@ def fetch_official_15m_row_for_timestamp(
     inter_retry_sec: float = 0.6,
     log: Optional[Callable[[str], None]] = None,
     app: Any = None,
-) -> Optional[Tuple[float, float, float, float, float]]:
+) -> Optional[Official15mFetchHit]:
     """
-    ka10080(15분) 연속조회로 ``bar_ts`` 에 해당하는 완성 봉 한 줄을 찾습니다.
-
-    Returns:
-        (open, high, low, close, volume) 또는 실패 시 None.
+    ka10080(15분) 연속조회로 ``bar_ts`` 완성 봉과, 같은 응답의 이전 완성봉을 반환합니다.
     """
     nc = canonical_stock_code(str(code).strip())
     if not nc or not token:
@@ -638,7 +696,6 @@ def fetch_official_15m_row_for_timestamp(
                 if attempt + 1 >= retries:
                     try:
                         meta = getattr(data_manager, "last_ka10080_fetch_meta", None) or {}
-                        # HTTP 실패는 data_manager 가 기록 — 차트는 OK 인데 15m 병합만 비었을 때만 추가
                         if bool(meta.get("ok")):
                             from core.ka10080_fetch_diag import ka10080_fetch_diag
 
@@ -698,16 +755,15 @@ def fetch_official_15m_row_for_timestamp(
                             except Exception:
                                 pass
             else:
-                try:
-                    o = float(row["Open"])
-                    h = float(row["High"])
-                    l_ = float(row["Low"])
-                    c = float(row["Close"])
-                    v = float(row["Volume"])
-                    if o > 0 or h > 0 or l_ > 0 or c > 0:
-                        return (o, h, l_, c, v)
-                except Exception:
-                    pass
+                oh = _row_ohlcv(row)
+                if oh is not None:
+                    bars = _completed_bars_upto(merged, want)
+                    try:
+                        if not any(_norm_bar_ts(t) == want for t, *_rest in bars):
+                            bars.append((want, oh[0], oh[1], oh[2], oh[3], oh[4]))
+                    except Exception:
+                        bars.append((want, oh[0], oh[1], oh[2], oh[3], oh[4]))
+                    return Official15mFetchHit(ohlcv=oh, completed_bars=bars)
         except Exception as e:
             if attempt + 1 >= retries:
                 try:
@@ -739,10 +795,58 @@ def fetch_official_15m_row_for_timestamp(
     return None
 
 
+def fetch_official_15m_row_for_timestamp(
+    data_manager: Any,
+    code: str,
+    token: str,
+    bar_ts: Any,
+    *,
+    tic_scope: str = "15",
+    max_pages: int = 8,
+    page_delay_min: float = 0.08,
+    page_delay_max: float = 0.22,
+    max_retries: int = 3,
+    inter_retry_sec: float = 0.6,
+    log: Optional[Callable[[str], None]] = None,
+    app: Any = None,
+) -> Optional[OfficialOhlcv]:
+    """
+    ka10080(15분) 연속조회로 ``bar_ts`` 에 해당하는 완성 봉 한 줄을 찾습니다.
+
+    Returns:
+        (open, high, low, close, volume) 또는 실패 시 None.
+    """
+    try:
+        hit = fetch_official_15m_hit(
+            data_manager,
+            code,
+            token,
+            bar_ts,
+            tic_scope=tic_scope,
+            max_pages=max_pages,
+            page_delay_min=page_delay_min,
+            page_delay_max=page_delay_max,
+            max_retries=max_retries,
+            inter_retry_sec=inter_retry_sec,
+            log=log,
+            app=app,
+        )
+    except Exception:
+        return None
+    if hit is None:
+        return None
+    try:
+        return hit.ohlcv
+    except Exception:
+        return None
+
+
 class RtClosed15mOfficialReplaceScheduler:
     """
     슬롯 확정 콜백에서 ``schedule`` 만 호출합니다.
-    HTTP는 지연 후 데몬 스레드에서 수행하고, 결과는 ``KiwoomApp._apply_official_closed_15m_bar`` 로 전달합니다.
+    HTTP는 지연 후 데몬 스레드에서 수행하고, 결과는
+    ``KiwoomApp._apply_official_closed_15m_bars`` 로 전달합니다
+    (현재 슬롯 + 같은 응답의 이전 완성봉).
 
     공식교체 후 평가 모드:
     - 1차: 보유·합치도(임박) 종목만 스케줄
@@ -1381,7 +1485,7 @@ class RtClosed15mOfficialReplaceScheduler:
 
                 per_try_retries = 1 if (max_wait >= 5.0 or alignment) else max(1, min(mr, 3))
                 deadline = _monotonic_deadline_for_slot(bar_ts, max_wait)
-                tup = None
+                hit: Optional[Official15mFetchHit] = None
 
                 if use_slot_probe and not is_probe:
                     if gate is not None and not bool(gate.get("ready")):
@@ -1408,7 +1512,7 @@ class RtClosed15mOfficialReplaceScheduler:
                             _wait_official_quiet_chunks(app)
                         except Exception:
                             pass
-                        tup = fetch_official_15m_row_for_timestamp(
+                        hit = fetch_official_15m_hit(
                             dm,
                             code,
                             token,
@@ -1422,7 +1526,7 @@ class RtClosed15mOfficialReplaceScheduler:
                             log=self._log,
                             app=app,
                         )
-                        if tup is not None:
+                        if hit is not None:
                             break
                         if ai + 1 >= int(attempts):
                             break
@@ -1439,7 +1543,7 @@ class RtClosed15mOfficialReplaceScheduler:
                 else:
                     # 프로브·백필 공통: 슬롯 기준 deadline까지 폴링
                     while True:
-                        tup = fetch_official_15m_row_for_timestamp(
+                        hit = fetch_official_15m_hit(
                             dm,
                             code,
                             token,
@@ -1453,7 +1557,7 @@ class RtClosed15mOfficialReplaceScheduler:
                             log=self._log,
                             app=app,
                         )
-                        if tup is not None:
+                        if hit is not None:
                             break
                         if time.monotonic() + poll_sec >= deadline:
                             break
@@ -1470,14 +1574,14 @@ class RtClosed15mOfficialReplaceScheduler:
 
                 if use_slot_probe and gate is not None and is_probe:
                     try:
-                        gate["ready"] = tup is not None
+                        gate["ready"] = hit is not None
                         ev = gate.get("ready_event")
                         if ev is not None:
                             ev.set()
                     except Exception:
                         pass
                     # 공식봉 확인 후 나머지 감시 종목 백필
-                    if tup is not None:
+                    if hit is not None:
                         try:
                             self._enqueue_slot_backfill(
                                 app,
@@ -1489,7 +1593,7 @@ class RtClosed15mOfficialReplaceScheduler:
                             pass
 
                 root = getattr(app, "root", None)
-                if tup is None or root is None:
+                if hit is None or root is None:
                     try:
                         from core.krx_market_halt_slots import is_market_halt_15m_slot
 
@@ -1516,7 +1620,7 @@ class RtClosed15mOfficialReplaceScheduler:
                             )
                             self._fail_cooldown_until[k] = time.monotonic() + delay
                         self._scheduled.pop(k, None)
-                    if tup is None:
+                    if hit is None:
                         try:
                             if alignment:
                                 self._align_finish(code, bar_ts, ok=False)
@@ -1532,7 +1636,21 @@ class RtClosed15mOfficialReplaceScheduler:
                         except Exception:
                             pass
                     return
-                o, h, l_, c, v = tup
+                try:
+                    o, h, l_, c, v = hit.ohlcv
+                except Exception:
+                    o = h = l_ = c = v = 0.0
+                try:
+                    heal_bars = list(hit.completed_bars or [])
+                except Exception:
+                    heal_bars = []
+                if not heal_bars:
+                    try:
+                        heal_bars = [
+                            (_norm_bar_ts(bar_ts), o, h, l_, c, v)
+                        ]
+                    except Exception:
+                        heal_bars = []
 
                 try:
                     if alignment:
@@ -1565,9 +1683,17 @@ class RtClosed15mOfficialReplaceScheduler:
                 def _apply_main() -> None:
                     applied = False
                     try:
-                        ret = app._apply_official_closed_15m_bar(  # type: ignore[attr-defined]
-                            code, bar_ts, o, h, l_, c, v
+                        apply_fn = getattr(
+                            app, "_apply_official_closed_15m_bars", None
                         )
+                        if callable(apply_fn):
+                            ret = apply_fn(
+                                code, heal_bars, primary_ts=bar_ts
+                            )
+                        else:
+                            ret = app._apply_official_closed_15m_bar(  # type: ignore[attr-defined]
+                                code, bar_ts, o, h, l_, c, v
+                            )
                         applied = True if ret is None else bool(ret)
                     except Exception as ex:
                         if self._log:

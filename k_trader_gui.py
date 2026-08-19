@@ -3526,35 +3526,105 @@ class KiwoomApp:
         volume: float,
     ) -> bool:
         """
-        확정된 15분 봉 한 줄을 REST(ka10080, tic_scope=설정) OHLCV로 덮어씁니다.
+        확정된 15분 봉 한 줄을 REST(ka10080) OHLCV로 덮어씁니다.
         Tk 메인 스레드에서만 호출합니다.
+        """
+        try:
+            want = pd.Timestamp(bar_ts).floor("s")
+            row = (want, float(open_), float(high), float(low), float(close), float(volume))
+        except Exception:
+            return False
+        return self._apply_official_closed_15m_bars(code, [row], primary_ts=bar_ts)
 
-        Returns:
-            bars_data 반영 성공 시 True(이후 S1·S2·청산 평가 가능).
+    def _apply_official_closed_15m_bars(
+        self,
+        code: str,
+        bars: Any,
+        *,
+        primary_ts: Any = None,
+    ) -> bool:
+        """
+        공식 15분봉 여러 줄을 덮어씁니다. 형성 중 봉은 호출 측에서 제외해야 합니다.
+
+        ``primary_ts`` 행이 bars_data 에 있으면 True(평가 가능).
+        값이 다른 이전 슬롯도 같이 맞춰 MA60 이 어긋나지 않게 합니다.
         """
         from utils.bars_data_keys import resolve_bars_data_frame
         from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
+
+        def _ohlcv_differs(
+            row: Any,
+            o: float,
+            h: float,
+            l_: float,
+            c: float,
+            v: float,
+        ) -> bool:
+            try:
+                if abs(float(row["Open"]) - float(o)) >= 0.5:
+                    return True
+                if abs(float(row["High"]) - float(h)) >= 0.5:
+                    return True
+                if abs(float(row["Low"]) - float(l_)) >= 0.5:
+                    return True
+                if abs(float(row["Close"]) - float(c)) >= 0.5:
+                    return True
+                if abs(float(row["Volume"]) - float(v)) >= 0.5:
+                    return True
+            except Exception:
+                return True
+            return False
 
         try:
             cc = canonical_stock_code(str(code).strip())
             if not cc:
                 return False
-            want = pd.Timestamp(bar_ts).floor("s")
         except Exception:
+            return False
+        try:
+            primary = (
+                pd.Timestamp(primary_ts).floor("s")
+                if primary_ts is not None
+                else None
+            )
+        except Exception:
+            primary = None
+
+        parsed: List[Tuple[Any, float, float, float, float, float]] = []
+        try:
+            for item in list(bars or []):
+                try:
+                    ts = pd.Timestamp(item[0]).floor("s")
+                    o = float(item[1])
+                    h = float(item[2])
+                    l_ = float(item[3])
+                    c = float(item[4])
+                    v = float(item[5])
+                    if o > 0 or h > 0 or l_ > 0 or c > 0:
+                        parsed.append((ts, o, h, l_, c, v))
+                except Exception:
+                    continue
+        except Exception:
+            parsed = []
+        if not parsed:
             return False
 
         lk = getattr(self, "_bars_data_lock", None)
         bd = getattr(self, "bars_data", None)
         if lk is None or not isinstance(bd, dict):
             try:
-                self.realtime_monitor_bars_store.upsert_completed_bar(
-                    cc, want, open_, high, low, close, volume
-                )
+                for ts, o, h, l_, c, v in parsed:
+                    self.realtime_monitor_bars_store.upsert_completed_bar(
+                        cc, ts, o, h, l_, c, v
+                    )
             except Exception:
                 pass
             return False
 
         recalc_key: Optional[str] = None
+        primary_applied = False
+        extra_changed = 0
+        upserts: List[Tuple[Any, float, float, float, float, float]] = []
         try:
             with lk:
                 nk, df = resolve_bars_data_frame(bd, cc, migrate_alias=True)
@@ -3563,59 +3633,82 @@ class KiwoomApp:
                     return False
                 if df is None or getattr(df, "empty", True):
                     try:
-                        self.realtime_monitor_bars_store.upsert_completed_bar(
-                            use_key, want, open_, high, low, close, volume
-                        )
+                        for ts, o, h, l_, c, v in parsed:
+                            self.realtime_monitor_bars_store.upsert_completed_bar(
+                                use_key, ts, o, h, l_, c, v
+                            )
                     except Exception:
                         pass
                     return False
-                hit_idx = None
-                for ix in df.index:
-                    try:
-                        if pd.Timestamp(ix).floor("s") == want:
-                            hit_idx = ix
-                            break
-                    except Exception:
-                        continue
-                if hit_idx is None:
-                    try:
-                        self.log(
-                            f"ℹ️ [RT15m-Official] bars_data 에 해당 시각 없음 — DB만 갱신 "
-                            f"({use_key} {want})"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        self.realtime_monitor_bars_store.upsert_completed_bar(
-                            use_key, want, open_, high, low, close, volume
-                        )
-                    except Exception:
-                        pass
-                    return False
+
+                idx_map: Dict[Any, Any] = {}
                 try:
-                    df.at[hit_idx, "Open"] = float(open_)
-                    df.at[hit_idx, "High"] = float(high)
-                    df.at[hit_idx, "Low"] = float(low)
-                    df.at[hit_idx, "Close"] = float(close)
-                    df.at[hit_idx, "Volume"] = float(volume)
-                    if "time" in df.columns:
-                        df.at[hit_idx, "time"] = ts_to_slot_hhmm(hit_idx)
-                except Exception as ex:
-                    try:
-                        self.log(
-                            f"⚠️ [RT15m-Official] OHLCV 덮어쓰기 실패 ({use_key}): {ex!r}"
-                        )
-                    except Exception:
-                        pass
-                    return False
-                try:
-                    df["ma5"] = df["Close"].rolling(window=5).mean()
-                    df["ma20"] = df["Close"].rolling(window=20).mean()
-                    df["ma60"] = df["Close"].rolling(window=60).mean()
+                    for ix in df.index:
+                        try:
+                            idx_map[pd.Timestamp(ix).floor("s")] = ix
+                        except Exception:
+                            continue
                 except Exception:
-                    pass
-                bd[use_key] = df
-                recalc_key = use_key
+                    idx_map = {}
+
+                any_write = False
+                for ts, o, h, l_, c, v in parsed:
+                    hit_idx = idx_map.get(ts)
+                    if hit_idx is None:
+                        try:
+                            self.realtime_monitor_bars_store.upsert_completed_bar(
+                                use_key, ts, o, h, l_, c, v
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    is_primary = primary is not None and ts == primary
+                    try:
+                        row = df.loc[hit_idx]
+                        differs = _ohlcv_differs(row, o, h, l_, c, v)
+                    except Exception:
+                        differs = True
+                    if not differs and not is_primary:
+                        continue
+                    if not differs and is_primary:
+                        primary_applied = True
+                        continue
+                    try:
+                        df.at[hit_idx, "Open"] = float(o)
+                        df.at[hit_idx, "High"] = float(h)
+                        df.at[hit_idx, "Low"] = float(l_)
+                        df.at[hit_idx, "Close"] = float(c)
+                        df.at[hit_idx, "Volume"] = float(v)
+                        if "time" in df.columns:
+                            df.at[hit_idx, "time"] = ts_to_slot_hhmm(hit_idx)
+                    except Exception as ex:
+                        try:
+                            self.log(
+                                f"⚠️ [RT15m-Official] OHLCV 덮어쓰기 실패 ({use_key}): {ex!r}"
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    any_write = True
+                    upserts.append((ts, o, h, l_, c, v))
+                    if is_primary:
+                        primary_applied = True
+                    elif primary is None or ts != primary:
+                        extra_changed += 1
+
+                if not any_write and not primary_applied:
+                    return False
+                if any_write:
+                    try:
+                        df["ma5"] = df["Close"].rolling(window=5).mean()
+                        df["ma20"] = df["Close"].rolling(window=20).mean()
+                        df["ma60"] = df["Close"].rolling(window=60).mean()
+                    except Exception:
+                        pass
+                    bd[use_key] = df
+                    recalc_key = use_key
+                elif primary_applied:
+                    return True
             if recalc_key:
                 import threading
 
@@ -3634,16 +3727,25 @@ class KiwoomApp:
                 ).start()
             if recalc_key:
                 try:
-                    self.realtime_monitor_bars_store.upsert_completed_bar(
-                        recalc_key, want, open_, high, low, close, volume
-                    )
+                    for ts, o, h, l_, c, v in upserts:
+                        self.realtime_monitor_bars_store.upsert_completed_bar(
+                            recalc_key, ts, o, h, l_, c, v
+                        )
                 except Exception:
                     pass
-                return True
-            return False
+                if extra_changed > 0:
+                    try:
+                        self.log(
+                            f"ℹ️ [RT15m-Official] {cc} 이전 슬롯 공식 정합 "
+                            f"{extra_changed}봉 (MA60 유지)"
+                        )
+                    except Exception:
+                        pass
+                return bool(primary_applied or any_write)
+            return bool(primary_applied)
         except Exception as e:
             try:
-                self.log(f"⚠️ [RT15m-Official] _apply_official_closed_15m_bar 예외: {e!r}")
+                self.log(f"⚠️ [RT15m-Official] _apply_official_closed_15m_bars 예외: {e!r}")
             except Exception:
                 pass
             return False
