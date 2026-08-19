@@ -28,7 +28,7 @@ class LimitOrderMeta:
     # False: 체결 동기화/DB 반영 대기 목적(예: RC4042)이라면 소진하지 않음
     touch_amend_should_increment: bool = True
     fill_price_hint: float = 0.0
-    # "confirm": kt00007 체결 확인만 / "amend": 호가 정정만 (확인 후 touch_quote_order_poll_sec 대기)
+    # "confirm": kt00007 체결 확인만 / "amend": 호가 정정만 (확인 후 재시도 간격 대기)
     touch_poll_phase: str = "confirm"
     touch_pending_logged: bool = False
     # 15:15 동시호가 시장가 — 취소/정정 없이 kt00007 폴링만
@@ -77,33 +77,29 @@ class LimitOrderWatchService:
 
     def _get_touch_first_poll_ms(self) -> int:
         """
-        터치호가 "확인/정정 한 세트" 동작 간격(ms).
+        접수·정정 직후 첫 kt00007 체결 확인까지 대기(ms).
 
-        요구사항:
-        - 체결 확인(kt00007) 후 미체결이면 정정(kt10002)을 "추가 대기" 없이 곧바로 수행
-        - 따라서 첫 확인 타이머를 `touch_quote_order_poll_sec`(기본 30초) 기준으로 맞춰야
-          "확인+정정"이 한 세트로 30초 후 진행됩니다.
+        모의/실전 모두 접수 후 약 30초 시점의 조회는 거의 미반영이고,
+        다음 주기(총 ~60초)에야 체결이 잡히는 경우가 많아 기본 40초로 둔다.
         """
         try:
             st = getattr(self.app, "settings", None) or {}
-            # confirm 콜백 시점(=한 세트 시작/끝)을 30초로 맞춥니다.
-            sec = float(st.get("touch_quote_order_poll_sec", 30.0))
+            sec = float(st.get("touch_quote_first_confirm_sec", 40.0))
         except (TypeError, ValueError):
-            sec = 30.0
-        # 기존 구현은 max 8초로 클램프되어 30초 반영이 불가능했습니다.
-        sec = max(1.0, min(sec, 60.0))
+            sec = 40.0
+        sec = max(10.0, min(sec, 90.0))
         return int(sec * 1000)
 
     def _get_touch_poll_ms(self) -> int:
-        """터치호가 정정 루프: 미체결 재확인 간격(ms)."""
+        """터치호가 미반영 재확인·정정 후 확인 간격(ms)."""
         try:
             sec = float(
                 (getattr(self.app, "settings", None) or {}).get(
-                    "touch_quote_order_poll_sec", 5.0
+                    "touch_quote_order_poll_sec", 30.0
                 )
             )
         except (TypeError, ValueError):
-            sec = 5.0
+            sec = 30.0
         sec = max(2.0, min(sec, 60.0))
         return int(sec * 1000)
 
@@ -331,12 +327,17 @@ class LimitOrderWatchService:
         return False
 
     def _schedule_touch_timer(
-        self, chain_key: str, *, phase: str = "confirm"
+        self,
+        chain_key: str,
+        *,
+        phase: str = "confirm",
+        first: bool = False,
     ) -> None:
         """
         다음 터치 폴링 타이머 예약(``touch_chain_key`` 기준).
 
-        - confirm: ``touch_quote_order_poll_sec`` 후 체결 확인(접수·정정 직후)
+        - confirm + first: 접수·정정 직후 ``touch_quote_first_confirm_sec``(기본 40초)
+        - confirm 재시도: ``touch_quote_order_poll_sec``(기본 30초)
         - amend: ``touch_quote_order_poll_sec`` 후 호가 정정
         """
         ck = str(chain_key or "").strip()
@@ -348,11 +349,12 @@ class LimitOrderWatchService:
         ph = str(phase or "confirm").strip().lower()
         if ph not in ("confirm", "amend"):
             ph = "confirm"
-        ms = (
-            self._get_touch_poll_ms()
-            if ph == "amend"
-            else self._get_touch_first_poll_ms()
-        )
+        if ph == "amend":
+            ms = self._get_touch_poll_ms()
+        elif first:
+            ms = self._get_touch_first_poll_ms()
+        else:
+            ms = self._get_touch_poll_ms()
 
         def _cb() -> None:
             # 호가 조회·정정 REST는 메인 스레드에서 하면 Tk가 4~6초 멈춘 것처럼 보임
@@ -414,7 +416,7 @@ class LimitOrderWatchService:
     def _touch_run_amend_phase(
         self, chain_key: str, current_ord: str, meta: LimitOrderMeta
     ) -> None:
-        """(confirm에서 넘어옴) 호가 정정만 수행하고, 다음 confirm은 한 세트 간격(30초)으로 예약합니다."""
+        """(confirm에서 넘어옴) 호가 정정만 수행하고, 다음 confirm은 첫 확인 간격(기본 40초)으로 예약합니다."""
         max_a = self._get_touch_max_amends()
         if meta.touch_amend_attempts_done >= max_a:
             self.timeout(current_ord)
@@ -433,7 +435,8 @@ class LimitOrderWatchService:
         except Exception:
             pass
         if bool(should_schedule):
-            self._schedule_touch_timer(chain_key, phase="confirm")
+            # 정정도 새 접수로 보아 kt00007 반영까지 첫 확인 간격(기본 40초)을 둔다.
+            self._schedule_touch_timer(chain_key, phase="confirm", first=True)
 
     def _touch_apply_ord_no_remap(
         self,
@@ -678,7 +681,7 @@ class LimitOrderWatchService:
             elif status == "pending":
                 if not bool(getattr(meta, "touch_pending_logged", False)):
                     meta.touch_pending_logged = True
-                    _sec = self._get_touch_first_poll_ms() // 1000
+                    _sec = self._get_touch_poll_ms() // 1000
                     self.log(
                         f"ℹ️ [터치호가] kt00007 미반영 — {_sec}초 후 재확인 "
                         f"(ord={current_ord})"
@@ -752,7 +755,7 @@ class LimitOrderWatchService:
             pass
 
     def _on_touch_poll(self, chain_key: str) -> None:
-        """터치호가: kt00007 확인(기준 30초) → 미체결이면 곧바로 kt10002 정정."""
+        """터치호가: kt00007 확인 → 미체결이면 곧바로 kt10002 정정."""
         current_ord, meta = self._find_touch_entry(chain_key)
         if not current_ord or meta is None or not meta.touch_mode:
             return
@@ -948,9 +951,10 @@ class LimitOrderWatchService:
 
         - 일반 지정가: 미체결 ``limit_order_unfilled_timeout_sec`` 후 취소.
         - 시장가: 플래그만(취소 타이머 없음).
-        - 터치호가: ``touch_quote_order_poll_sec`` 후 kt00007 체결 확인,
-          미체결이면 즉시 정정(최대
-          ``touch_quote_order_max_amends``), 정정 직후 다시 첫 확인 간격으로 루프.
+        - 터치호가: ``touch_quote_first_confirm_sec`` 후 kt00007 체결 확인,
+          미반영이면 ``touch_quote_order_poll_sec``마다 재확인,
+          미체결이면 즉시 정정(최대 ``touch_quote_order_max_amends``),
+          정정 직후 다시 첫 확인 간격으로 루프.
         - auction_watch: 동시호가 시장가 — 15:30~15:40 kt00007 폴링(그 전·취소·정정 없음).
         """
         oid = str(order_no or "").strip()
@@ -1043,9 +1047,11 @@ class LimitOrderWatchService:
 
                 try:
                     _sec = ms // 1000
+                    _retry = poll_sec
                     self.log(
-                        f"⏱️ [터치호가] ord={oid} · {_sec}초마다 체결 확인 "
-                        f"(미체결 시 정정, 최대 {self._get_touch_max_amends()}회)"
+                        f"⏱️ [터치호가] ord={oid} · 첫 체결확인 {_sec}초 후 "
+                        f"(미반영 시 {_retry}초마다 재확인, "
+                        f"미체결 시 정정 최대 {self._get_touch_max_amends()}회)"
                     )
                 except Exception:
                     pass
