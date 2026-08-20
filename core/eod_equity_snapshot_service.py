@@ -2,7 +2,49 @@
 import threading
 import time
 from datetime import date, datetime, timedelta, time as dtime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+
+def resolve_eod_snapshot_date(
+    now: datetime,
+    *,
+    is_trading_day_fn: Optional[Callable[[date], bool]],
+    previous_trading_day_fn: Optional[Callable[[date], Optional[date]]],
+    end_of_day_due_fn: Callable[[date], datetime],
+) -> Optional[date]:
+    """
+    EOD 스냅샷을 **지금** 저장해도 되는 영업일.
+
+    장중(당일 종가+버퍼 전)에는 어제 파일을 현재 잔고로 덮지 않습니다.
+    휴일에 과거 영업일을 오늘 잔고로 갱신하지도 않습니다.
+    """
+    try:
+        today_d = now.date()
+    except Exception:
+        return None
+    try:
+        if callable(is_trading_day_fn) and bool(is_trading_day_fn(today_d)):
+            try:
+                due_today = end_of_day_due_fn(today_d)
+            except Exception:
+                return None
+            if now < due_today:
+                return None
+            return today_d
+        if not callable(previous_trading_day_fn):
+            return None
+        last = previous_trading_day_fn(today_d)
+        if last is None:
+            return None
+        try:
+            due_last = end_of_day_due_fn(last)
+        except Exception:
+            return None
+        if now < due_last:
+            return None
+        return last
+    except Exception:
+        return None
 
 
 class EodEquitySnapshotService:
@@ -95,34 +137,41 @@ class EodEquitySnapshotService:
                         day_d, dtime(15, 30, 0)
                     ) + timedelta(minutes=max(0, int(buffer_minutes)))
 
-            # (복구 포함) 이미 due가 지난 가장 최근 거래일을 대상으로 선택
-            snap_date: Optional[date] = None
-            if callable(is_trading_day) and callable(previous_trading_day):
-                try:
-                    last_trading_day = (
-                        today_d
-                        if is_trading_day(today_d)
-                        else previous_trading_day(today_d)
-                    )
-                    due1 = _end_of_day_due(last_trading_day)
-                    if now >= due1:
-                        snap_date = last_trading_day
-                    else:
-                        snap_date = previous_trading_day(last_trading_day)
-                except Exception:
-                    snap_date = today_d
-            else:
-                # 예외 상황: 주말만 휴장 처리
-                if today_d.weekday() < 5:
-                    last_trading_day = today_d
-                else:
-                    last_trading_day = today_d - timedelta(days=1)
-                if now >= _end_of_day_due(last_trading_day):
-                    snap_date = last_trading_day
-                else:
-                    snap_date = last_trading_day - timedelta(days=1)
-
+            snap_date = resolve_eod_snapshot_date(
+                now,
+                is_trading_day_fn=is_trading_day if callable(is_trading_day) else None,
+                previous_trading_day_fn=(
+                    previous_trading_day if callable(previous_trading_day) else None
+                ),
+                end_of_day_due_fn=_end_of_day_due,
+            )
             if snap_date is None:
+                return
+            # 과거 영업일 파일이 이미 있으면 장중 현재값으로 덮지 않음
+            if snap_date < today_d:
+                try:
+                    from utils.equity_snapshots_store import read_equity_snapshot
+
+                    existing = read_equity_snapshot(snap_date)
+                except Exception:
+                    existing = None
+                if existing is not None:
+                    try:
+                        self.app._equity_snapshot_last_saved_date = str(snap_date)[:10]
+                    except Exception:
+                        pass
+                    return
+                try:
+                    self.log(
+                        f"ℹ️ [EOD Snapshot] {snap_date} 파일 없음 — "
+                        "장중 현재 잔고로 과거일을 채우지 않음"
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.app._equity_snapshot_last_saved_date = str(snap_date)[:10]
+                except Exception:
+                    pass
                 return
 
             snap_date_str = str(snap_date)[:10]

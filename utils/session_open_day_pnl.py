@@ -9,10 +9,13 @@
   2) 보유 종목 **직전 종가** 합성 총자산
   순으로 폴백한다 (더 이상 장중 시작만으로 ``N/A`` 고정하지 않음).
 - 비거래일 감시 시작만 ``N/A``.
+- 당일 고정 기준은 ``equity_snapshots_*/_day_pnl_baseline.json`` 에 남겨 재시작 후에도 유지한다.
 개장·종가 시각은 ``utils.krx_session_hours`` (특수일 JSON 포함)를 따른다.
 """
 from __future__ import annotations
 
+import json
+import os
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 
@@ -39,12 +42,89 @@ def _reset_state(app: Any, day_key: str) -> Dict[str, Any]:
         "captured_at": None,
         "capture_after_id": None,
         "prev_close_warmup_inflight": False,
+        "restored": False,
     }
     try:
         app._session_open_day_pnl = st
     except Exception:
         pass
     return st
+
+
+def day_pnl_baseline_path() -> str:
+    """당일 금일손익 기준 총자산 JSON (모의/실전 폴더, 일자 파일과 구분)."""
+    try:
+        from utils.server_mode_paths import equity_snapshots_root_dir
+
+        return os.path.join(equity_snapshots_root_dir(), "_day_pnl_baseline.json")
+    except Exception:
+        return os.path.join(os.getcwd(), "_day_pnl_baseline.json")
+
+
+def persist_day_pnl_baseline(
+    st: Dict[str, Any], *, path: Optional[str] = None
+) -> bool:
+    """고정/갱신된 장시작 기준을 디스크에 남겨 재시작 후에도 유지합니다."""
+    try:
+        day_key = str(st.get("day") or "").strip()
+        raw = st.get("baseline")
+        if not day_key or raw is None:
+            return False
+        fv = float(raw)
+        if not (fv > 0) or fv != fv:
+            return False
+        out = {
+            "day": day_key,
+            "baseline": fv,
+            "baseline_locked": bool(st.get("baseline_locked")),
+            "baseline_source": st.get("baseline_source"),
+            "captured_at": st.get("captured_at"),
+        }
+        dest = path or day_pnl_baseline_path()
+        parent = os.path.dirname(dest)
+        if parent:
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError:
+                pass
+        tmp = dest + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, dest)
+        return True
+    except Exception:
+        try:
+            tmp2 = (path or day_pnl_baseline_path()) + ".tmp"
+            if os.path.isfile(tmp2):
+                os.remove(tmp2)
+        except Exception:
+            pass
+        return False
+
+
+def load_day_pnl_baseline(
+    day_key: str, *, path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """같은 날짜의 저장된 장시작 기준. 없거나 날짜가 다르면 None."""
+    try:
+        want = str(day_key or "").strip()
+        if not want:
+            return None
+        src = path or day_pnl_baseline_path()
+        if not os.path.isfile(src):
+            return None
+        with open(src, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        if str(data.get("day") or "").strip() != want:
+            return None
+        fv = float(data.get("baseline"))
+        if not (fv > 0) or fv != fv:
+            return None
+        return data
+    except Exception:
+        return None
 
 
 def ensure_day_state(app: Any, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -180,6 +260,8 @@ def _set_baseline(
     source: str,
     now: datetime,
     locked: bool,
+    persist: bool = True,
+    log_line: bool = True,
 ) -> None:
     st["baseline"] = float(value)
     st["baseline_source"] = source
@@ -189,16 +271,69 @@ def _set_baseline(
         setattr(app, "_vt_day_pnl_tick_cache", None)
     except Exception:
         pass
+    if log_line:
+        try:
+            log = getattr(app, "log", None)
+            if callable(log):
+                lock_txt = "고정" if locked else "갱신"
+                log(
+                    f"📌 [금일손익] 장시작 기준 총자산 {lock_txt}: {int(value):,} "
+                    f"(source={source}, {st.get('captured_at')})"
+                )
+        except Exception:
+            pass
+    if persist:
+        try:
+            persist_day_pnl_baseline(st)
+        except Exception:
+            pass
+
+
+def _try_restore_persisted_baseline(
+    app: Any, st: Dict[str, Any], now: datetime
+) -> bool:
+    """같은 날 저장된 장시작 기준이 있으면 재사용합니다."""
     try:
-        log = getattr(app, "log", None)
-        if callable(log):
-            lock_txt = "고정" if locked else "갱신"
-            log(
-                f"📌 [금일손익] 장시작 기준 총자산 {lock_txt}: {int(value):,} "
-                f"(source={source}, {st.get('captured_at')})"
-            )
+        day_key = str(st.get("day") or now.date().isoformat())
+        rec = load_day_pnl_baseline(day_key)
+        if rec is None:
+            return False
+        fv = float(rec.get("baseline"))
+        src = str(rec.get("baseline_source") or "persisted")
+        was_locked = bool(rec.get("baseline_locked"))
+        hm = _hm(now)
+        open_m, _c = _session_open_close_minutes(now.date())
+        lock_now = bool(was_locked or hm >= open_m)
+        cap = rec.get("captured_at")
+        st["na"] = False
+        st["restored"] = True
+        st["started_at"] = now.isoformat(timespec="seconds")
+        _set_baseline(
+            app,
+            st,
+            fv,
+            source=src,
+            now=now,
+            locked=lock_now,
+            persist=lock_now and not was_locked,
+            log_line=False,
+        )
+        if cap:
+            st["captured_at"] = cap
+        try:
+            log = getattr(app, "log", None)
+            if callable(log):
+                log(
+                    f"📌 [금일손익] 장시작 기준 총자산 유지(재시작): {int(fv):,} "
+                    f"(source={src}, captured_at={st.get('captured_at')})"
+                )
+        except Exception:
+            pass
+        if lock_now:
+            _cancel_capture_after(app, st)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _baseline_from_prev_equity_snapshot(app: Any) -> Optional[float]:
@@ -504,18 +639,12 @@ def on_monitoring_started(app: Any, *, now: Optional[datetime] = None) -> None:
     """
     실시간 감시 STARTED 시 호출.
     장전이면 시초가 전 기준 캡처, 장중·장마감 후면 직전 EOD/종가 폴백.
+    같은 날 이미 고정된 기준이 디스크에 있으면 재시작해도 유지한다.
     비거래일만 ``N/A``.
     """
     try:
         t = now if now is not None else datetime.now()
         st = ensure_day_state(app, t)
-        st["started_at"] = t.isoformat(timespec="seconds")
-        st["baseline"] = None
-        st["baseline_locked"] = False
-        st["baseline_source"] = None
-        st["captured_at"] = None
-        st["na"] = False
-        st["prev_close_warmup_inflight"] = False
         _cancel_capture_after(app, st)
         try:
             setattr(app, "_vt_day_pnl_tick_cache", None)
@@ -523,6 +652,9 @@ def on_monitoring_started(app: Any, *, now: Optional[datetime] = None) -> None:
             pass
 
         if not _is_trading_day(t.date()):
+            st["started_at"] = t.isoformat(timespec="seconds")
+            st["baseline"] = None
+            st["baseline_locked"] = False
             st["na"] = True
             try:
                 log = getattr(app, "log", None)
@@ -531,6 +663,22 @@ def on_monitoring_started(app: Any, *, now: Optional[datetime] = None) -> None:
             except Exception:
                 pass
             return
+
+        if _try_restore_persisted_baseline(app, st, t):
+            hm = _hm(t)
+            open_m, _c = _session_open_close_minutes(t.date())
+            if hm < open_m and not st.get("baseline_locked"):
+                _schedule_capture_tick(app)
+            return
+
+        st["started_at"] = t.isoformat(timespec="seconds")
+        st["baseline"] = None
+        st["baseline_locked"] = False
+        st["baseline_source"] = None
+        st["captured_at"] = None
+        st["na"] = False
+        st["prev_close_warmup_inflight"] = False
+        st["restored"] = False
 
         hm = _hm(t)
         open_m, close_m = _session_open_close_minutes(t.date())

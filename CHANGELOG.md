@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.33 (2026-08-20)
+
+- **장시작 기준 총자산이 재시작마다 바뀌던 문제**: 장중 기동이 어제 EOD 스냅샷을 지금 잔고로 덮어 금일손익 분모가 흔들림. 장중에는 어제 파일을 갱신하지 않고, 당일 고정 기준은 `_day_pnl_baseline.json`에 남겨 재시작 후에도 유지 (`eod_equity_snapshot_service`, `session_open_day_pnl`).
+
 ## 0.18.32 (2026-08-20)
 
 - **공식 15분 교체 UI 멈춤**: 슬롯 마감 ~2분 후(09:47·10:02) 전 종목 교체를 Tk `after(0)`에 올려 pandas 롤링·지표 재계산이 메인을 막음. 메모리 반영은 워커에서 한 종목씩 직렬 수행 (`rt_closed_15m_official_replace`, `rt_ui_responsiveness`, `k_trader_gui`).
