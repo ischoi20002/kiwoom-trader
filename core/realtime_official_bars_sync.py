@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import pandas as pd
 
 from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
+from core.rt_ui_responsiveness import clamp_slot_roll_workers, yield_gil_for_ui
 from utils.bars_data_keys import resolve_bars_data_frame
 from utils.krx_bars import (
     is_krx_15m_slot_end,
@@ -648,13 +649,12 @@ def maybe_roll_15m_slot_on_clock(app: Any, code: str) -> bool:
 
 
 def _slot_roll_parallel_workers(app: Any) -> int:
-    """슬롯 경계 롤 병렬 워커 수."""
+    """슬롯 경계 롤 병렬 워커 수. UI GIL 기아 방지를 위해 상한 2."""
     try:
         st = getattr(app, "settings", None) or {}
-        v = int(float(st.get("realtime_15m_slot_roll_workers", 8)))
-        return max(1, min(16, v))
+        return clamp_slot_roll_workers(st.get("realtime_15m_slot_roll_workers", 2))
     except Exception:
-        return 8
+        return clamp_slot_roll_workers(2)
 
 
 def roll_needed_codes_parallel(app: Any, codes: List[str]) -> None:
@@ -677,6 +677,7 @@ def roll_needed_codes_parallel(app: Any, codes: List[str]) -> None:
                 maybe_roll_15m_slot_on_clock(app, nk)
             except Exception:
                 pass
+            yield_gil_for_ui()
         return
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -690,12 +691,14 @@ def roll_needed_codes_parallel(app: Any, codes: List[str]) -> None:
                     fut.result()
                 except Exception:
                     pass
+                yield_gil_for_ui()
     except Exception:
         for nk in need:
             try:
                 maybe_roll_15m_slot_on_clock(app, nk)
             except Exception:
                 pass
+            yield_gil_for_ui()
 
 
 def sync_forming_15m_last_row_from_official_m1(app: Any, code: str) -> bool:

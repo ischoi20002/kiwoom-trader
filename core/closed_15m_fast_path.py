@@ -14,6 +14,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional, Tuple
 
+from core.rt_ui_responsiveness import (
+    clamp_closed_15m_eval_workers,
+    yield_gil_for_ui,
+)
+
 _official_quiet_lock = threading.Lock()
 _official_quiet_until_mono: float = 0.0
 
@@ -220,10 +225,11 @@ class Closed15mEvalPool:
     def _desired_workers(self) -> int:
         try:
             st = getattr(self._app, "settings", None) or {}
-            v = int(float(st.get("realtime_closed_15m_eval_workers", 8)))
-            return max(2, min(16, v))
+            return clamp_closed_15m_eval_workers(
+                st.get("realtime_closed_15m_eval_workers", 2)
+            )
         except Exception:
-            return 8
+            return clamp_closed_15m_eval_workers(2)
 
     def _ensure(self) -> ThreadPoolExecutor:
         with self._lock:
@@ -264,14 +270,26 @@ class Closed15mEvalPool:
                         se.eval_on_completed_15m(code, bar_ts)
                 except Exception:
                     pass
+                finally:
+                    # pandas 평가 후 GIL을 놓아 Tk after/렌더가 돌게 함
+                    yield_gil_for_ui()
 
             ex.submit(_run)
         except Exception:
             # 폴백: 단일 데몬 스레드
             try:
+                def _fallback() -> None:
+                    try:
+                        se = getattr(self._app, "signal_engine", None)
+                        if se is not None:
+                            se.eval_on_completed_15m(code, bar_ts)
+                    except Exception:
+                        pass
+                    finally:
+                        yield_gil_for_ui()
+
                 threading.Thread(
-                    target=lambda: getattr(self._app, "signal_engine", None)
-                    and self._app.signal_engine.eval_on_completed_15m(code, bar_ts),
+                    target=_fallback,
                     name=f"closed15m_{code}",
                     daemon=True,
                 ).start()

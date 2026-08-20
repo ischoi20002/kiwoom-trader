@@ -67,6 +67,7 @@ from core.supply_display import capture_supply_snapshot
 from core.signal_callbacks_service import SignalCallbacksService
 from core.ui_trading_status_service import UiTradingStatusService
 from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
+from core.rt_ui_responsiveness import drain_ui_call_queue_once
 from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
 from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 from core.next_open_pending_action_service import NextOpenPendingActionService
@@ -1361,38 +1362,54 @@ class KiwoomApp:
     def _drain_ui_call_queue(self) -> None:
         """메인 스레드: 백그라운드가 넣은 UI 작업을 꺼내 after 로 실행/예약."""
         self._ui_call_drain_after_id = None
+        remaining = False
         try:
-            while True:
+            budget_sec = 0.012
+            max_n = 8
+            try:
+                st = getattr(self, "settings", None) or {}
+                budget_sec = float(st.get("ui_call_queue_drain_budget_sec", 0.012))
+                max_n = int(float(st.get("ui_call_queue_drain_max_n", 8)))
+            except (TypeError, ValueError):
+                budget_sec = 0.012
+                max_n = 8
+            r = getattr(self, "root", None)
+
+            def _run_now(cb: Any) -> None:
+                if r is None or not callable(cb):
+                    return
                 try:
-                    delay, callback = self._ui_call_queue.get_nowait()
-                except queue.Empty:
-                    break
-                try:
-                    d = max(0, int(delay or 0))
-                except Exception:
-                    d = 0
-                try:
-                    r = getattr(self, "root", None)
-                    if r is None:
-                        continue
-                    if d <= 0:
-                        try:
-                            callback()
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            r.after(d, callback)
-                        except Exception:
-                            pass
+                    cb()
                 except Exception:
                     pass
+
+            def _schedule_delayed(d: int, cb: Any) -> None:
+                if r is None or not callable(cb):
+                    return
+                try:
+                    r.after(d, cb)
+                except Exception:
+                    pass
+
+            remaining = bool(
+                drain_ui_call_queue_once(
+                    self._ui_call_queue,
+                    run_now=_run_now,
+                    schedule_delayed=_schedule_delayed,
+                    budget_sec=budget_sec,
+                    max_n=max_n,
+                )
+            )
         except Exception:
-            pass
+            remaining = False
         try:
-            r = getattr(self, "root", None)
-            if r is not None:
-                self._ui_call_drain_after_id = r.after(50, self._drain_ui_call_queue)
+            r2 = getattr(self, "root", None)
+            if r2 is not None:
+                # 남은 작업이 있으면 바로 이어서, 없으면 50ms 폴링
+                delay_ms = 1 if remaining else 50
+                self._ui_call_drain_after_id = r2.after(
+                    delay_ms, self._drain_ui_call_queue
+                )
         except Exception:
             pass
 
@@ -1670,7 +1687,20 @@ class KiwoomApp:
             except (TypeError, ValueError):
                 max_burst = 48
             max_burst = max(4, min(max_burst, 200))
+            budget_sec = 0.015
+            try:
+                budget_sec = float(
+                    st.get("realtime_tick_main_queue_budget_sec", 0.015)
+                )
+            except (TypeError, ValueError):
+                budget_sec = 0.015
+            budget_sec = max(0.004, min(budget_sec, 0.080))
             while processed < max_burst:
+                try:
+                    if processed > 0 and (time.perf_counter() - t0) >= budget_sec:
+                        break
+                except Exception:
+                    break
                 try:
                     kind, payload = self._tick_main_actions_queue.get_nowait()
                 except queue.Empty:
