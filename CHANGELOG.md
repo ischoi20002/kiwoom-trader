@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.32 (2026-08-20)
+
+- **공식 15분 교체 UI 멈춤**: 슬롯 마감 ~2분 후(09:47·10:02) 전 종목 교체를 Tk `after(0)`에 올려 pandas 롤링·지표 재계산이 메인을 막음. 메모리 반영은 워커에서 한 종목씩 직렬 수행 (`rt_closed_15m_official_replace`, `rt_ui_responsiveness`, `k_trader_gui`).
+
 ## 0.18.31 (2026-08-20)
 
 - **15분봉 마감 UI 멈춤 재발 방지**: 09:15 등 슬롯 마감 때 평가·롤 워커 8개가 pandas로 GIL을 점유하면 Tk 메인이 1분 가까이 after를 못 돌림. 워커는 설정과 무관하게 최대 2, 평가/롤 후 짧게 양보. UI 콜백·틱 큐는 한 틱 시간 예산을 넘기지 않음 (`rt_ui_responsiveness`, `closed_15m_fast_path`, `realtime_official_bars_sync`, `k_trader_gui`).

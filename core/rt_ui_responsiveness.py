@@ -8,8 +8,14 @@ pandas/지표 계산 워커가 많으면 CPython GIL 때문에 Tk 메인이
 """
 from __future__ import annotations
 
+import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeVar
+
+_T = TypeVar("_T")
+
+# 공식 15분 메모리 반영을 한 번에 1종목만 (40종 동시 pandas가 Tk를 굶기지 않게)
+_official_15m_apply_lock = threading.Lock()
 
 # 8워커가 09:15 슬롯에서 UI를 ~60초 멈춘 이력. 코드에서 강제 상한.
 CLOSED_15M_EVAL_WORKERS_CAP: int = 2
@@ -43,6 +49,20 @@ def yield_gil_for_ui(sec: float = GIL_YIELD_SEC) -> None:
         time.sleep(max(0.0, min(float(sec), 0.05)))
     except Exception:
         pass
+
+
+def run_official_15m_memory_apply(apply_fn: Callable[[], _T]) -> _T:
+    """
+    공식 15분 OHLCV·지표 반영은 호출 스레드에서 직렬 실행합니다.
+
+    Tk ``after(0)`` 로 넘기면 슬롯당 수십 종목이 메인 한 틱에 몰려
+    09:47·10:02처럼 UI가 1분 가까이 멈춥니다.
+    """
+    with _official_15m_apply_lock:
+        try:
+            return apply_fn()
+        finally:
+            yield_gil_for_ui()
 
 
 def drain_ui_call_queue_once(

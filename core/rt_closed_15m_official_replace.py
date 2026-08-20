@@ -6,7 +6,7 @@
 - 완성 봉을 갱신(형성 중 현재 봉은 틱 경로 유지).
 - 같은 ka10080 페이지의 이전 완성봉도 값이 다르면 덮어 MA60 정합을 회복.
 - 종목·슬롯당 스케줄 1회(중복 타이머 방지).
-- 조회는 데몬 스레드, ``bars_data`` 반영은 Tk ``after(0)`` 로 메인 스레드.
+- 조회·``bars_data`` 반영은 데몬 워커(직렬). Tk 메인에 pandas 롤링을 올리지 않습니다.
 
 M1 평가 경로(정렬용 교체): 슬롯 완성 후 고정 지연(~120초) + 짧은 재시도만.
 조기 폴링으로 M1 프로브·평가 REST 와 경쟁하지 않습니다.
@@ -1592,8 +1592,7 @@ class RtClosed15mOfficialReplaceScheduler:
                         except Exception:
                             pass
 
-                root = getattr(app, "root", None)
-                if hit is None or root is None:
+                if hit is None:
                     try:
                         from core.krx_market_halt_slots import is_market_halt_15m_slot
 
@@ -1721,7 +1720,9 @@ class RtClosed15mOfficialReplaceScheduler:
                             pass
 
                 try:
-                    root.after(0, _apply_main)
+                    from core.rt_ui_responsiveness import run_official_15m_memory_apply
+
+                    run_official_15m_memory_apply(_apply_main)
                 except Exception:
                     try:
                         _apply_main()

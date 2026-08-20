@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 from types import SimpleNamespace
 
 from core.closed_15m_fast_path import Closed15mEvalPool
@@ -81,6 +82,19 @@ def test_drain_respects_time_budget() -> None:
     assert remaining is True
 
 
+def test_official_apply_runs_on_calling_thread() -> None:
+    from core.rt_ui_responsiveness import run_official_15m_memory_apply
+
+    ran: list = []
+
+    def _fn() -> str:
+        ran.append(threading.get_ident())
+        return "ok"
+
+    assert run_official_15m_memory_apply(_fn) == "ok"
+    assert ran == [threading.get_ident()]
+
+
 def test_delayed_callbacks_are_scheduled() -> None:
     q: queue.Queue = queue.Queue()
     scheduled: list = []
@@ -103,5 +117,6 @@ if __name__ == "__main__":
     test_slot_roll_ignores_settings_eight()
     test_drain_respects_max_n()
     test_drain_respects_time_budget()
+    test_official_apply_runs_on_calling_thread()
     test_delayed_callbacks_are_scheduled()
     print("ok")

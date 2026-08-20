@@ -3740,9 +3740,7 @@ class KiwoomApp:
                 elif primary_applied:
                     return True
             if recalc_key:
-                import threading
-
-                def _bg_recalc() -> None:
+                def _do_recalc() -> None:
                     try:
                         self.strategy_engine.recalculate_indicators(
                             recalc_key, bd, self.settings
@@ -3750,11 +3748,21 @@ class KiwoomApp:
                     except Exception:
                         pass
 
-                threading.Thread(
-                    target=_bg_recalc,
-                    name="rt15m-ind-recalc",
-                    daemon=True,
-                ).start()
+                try:
+                    on_main = (
+                        threading.current_thread() is threading.main_thread()
+                    )
+                except Exception:
+                    on_main = False
+                if on_main:
+                    # 메인에서 호출된 폴백만 별도 스레드 — 워커에서는 그대로 계산
+                    threading.Thread(
+                        target=_do_recalc,
+                        name="rt15m-ind-recalc",
+                        daemon=True,
+                    ).start()
+                else:
+                    _do_recalc()
             if recalc_key:
                 try:
                     for ts, o, h, l_, c, v in upserts:
