@@ -825,7 +825,7 @@ class DynamicBacktester:
                     res = TradingStrategy.evaluate_position(
                         code, curr_row['Close'], h_info, self.settings,
                         indicator_row=curr_row, current_time=curr_time,
-                        is_realtime=False
+                        is_realtime=False, time_is_bar_label=True
                     )
                     
                     if res['action'] == 'EXIT':
@@ -1718,6 +1718,7 @@ class DynamicBacktester:
                     indicator_row=curr_row,
                     current_time=curr_15m_time,
                     is_realtime=False,
+                    time_is_bar_label=True,
                 )
                 if isinstance(res, dict) and res.get("action") == "EXIT":
                     e_price = float(curr_row["Close"])

@@ -1672,10 +1672,35 @@ class TradingStrategy:
             return "—"
 
     @staticmethod
-    def evaluate_position(code, now_price, pos, settings, indicator_row=None, current_time=None, is_realtime=False, kwargs=None, indicators_dict=None, i=None):
+    def _time_gate_ts(current_time: Any, is_bar_label: bool = False) -> Any:
+        """
+        시간대 게이트(개장 매도 유예·진입 후 유예)에 쓸 **실제 판정 벽시계 시각**.
+
+        BT 15분 경로의 ``current_time`` 은 봉의 좌측 라벨이라, 그 봉으로 판정하는
+        실제 시점은 봉이 닫히는 시각(보통 라벨+15분)이다. 라벨을 그대로 쓰면
+        벽시계로 판정하는 실시간보다 유예가 한 봉 더 길어져 RT/BT 정합이 깨진다.
+        실시간·1분 경로는 이미 실제 시각이므로 그대로 반환한다.
+        """
+        ts = pd.to_datetime(current_time)
+        if not is_bar_label:
+            return ts
+        try:
+            from utils.krx_bars import is_krx_15m_slot_end, krx_15m_slot_complete_ts
+
+            if is_krx_15m_slot_end(ts):
+                return pd.Timestamp(krx_15m_slot_complete_ts(ts))
+        except Exception:
+            return ts
+        return ts
+
+    @staticmethod
+    def evaluate_position(code, now_price, pos, settings, indicator_row=None, current_time=None, is_realtime=False, kwargs=None, indicators_dict=None, i=None, time_is_bar_label=False):
         """
         [v35.0] 실시간 감시와 모든 백테스팅(포트폴리오 포함)이 공유하는 통합 포지션 평가(매도 결정) 함수.
         (v40.0: Optimized direct indexing support)
+
+        ``time_is_bar_label`` 이 True 면 ``current_time`` 을 15분봉 **좌측 라벨**로 보고
+        시간대 게이트(개장 매도 유예 등)는 봉이 닫히는 시각으로 환산해 판정한다.
         """
         if now_price <= 0: return {'action': 'HOLD'}
         
@@ -2050,7 +2075,9 @@ class TradingStrategy:
                             if grace_mult > sl_mult and current_time is not None:
                                 et_raw = pos.get("entry_date") or pos.get("entry_time")
                                 if et_raw is not None:
-                                    _ct = pd.to_datetime(current_time)
+                                    _ct = TradingStrategy._time_gate_ts(
+                                        current_time, time_is_bar_label
+                                    )
                                     _et = pd.to_datetime(et_raw)
                                     if grace_same_day:
                                         if _ct.normalize() == _et.normalize():
@@ -2076,7 +2103,9 @@ class TradingStrategy:
                     try:
                         from utils.krx_session_hours import get_session_hours
 
-                        dt = pd.to_datetime(current_time)
+                        dt = TradingStrategy._time_gate_ts(
+                            current_time, time_is_bar_label
+                        )
                         open_m = get_session_hours(dt.date()).open_minutes
                         hm = int(dt.hour) * 60 + int(dt.minute)
                         if open_m <= hm < open_m + int(_rx["gap_grace_mins"]):
@@ -3055,7 +3084,8 @@ class SimpleBacktester:
         res = TradingStrategy.evaluate_position(
             None, price, pos, self.settings,
             current_time=date, is_realtime=False,
-            indicators_dict=indicators, i=i
+            indicators_dict=indicators, i=i,
+            time_is_bar_label=True
         )
         
         if res['action'] == 'EXIT':
