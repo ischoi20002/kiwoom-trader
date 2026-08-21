@@ -580,11 +580,28 @@ class SignalEngine:
         실전 서버: KRX 마감 직후(15:15·15:30 슬롯) NXT 1호가 터치 + SOR.
 
         모의 서버는 False — 기존 동시호가 시장가·익일 예약 유지.
+        종목별 가능 여부는 ``_code_uses_nxt_touch`` 를 사용한다.
         """
         try:
             import config
 
             return not bool(getattr(config, "USE_MOCK", False))
+        except Exception:
+            return False
+
+    def _code_uses_nxt_touch(self, code: Any) -> bool:
+        """
+        실전 + 해당 종목 NXT 거래가능일 때만 True.
+
+        불가·미조회는 False → 15:30은 next_open, 15:15는 동시호가 시장가(모의와 동일).
+        """
+        if not self._use_nxt_sor_touch_orders():
+            return False
+        try:
+            svc = getattr(self.app, "nxt_eligibility_service", None)
+            if svc is None:
+                return False
+            return bool(svc.is_nxt_tradable(code, fetch_if_unknown=True))
         except Exception:
             return False
 
@@ -645,9 +662,10 @@ class SignalEngine:
         Returns
         -------
         ``queued``
-            모의 next_open 예약 완료 → 즉시 주문 금지.
+            next_open 예약 완료 → 즉시 주문 금지.
+            (모의 또는 실전 NXT 불가 종목)
         ``nxt``
-            실전 NXT 플래그 설정 → 호출측이 바로 주문.
+            실전 NXT 가능 종목 플래그 설정 → 호출측이 바로 주문.
         ``none``
             15:30 아님 또는 해당 없음.
         """
@@ -666,12 +684,13 @@ class SignalEngine:
             if not self._is_1530_bar_slot(ts):
                 return "none"
             nk = str(canonical_stock_code(code) or code).zfill(6)
-            if self._use_nxt_sor_touch_orders():
+            if self._code_uses_nxt_touch(nk):
                 oes = self._order_execution_service()
                 if oes is not None and hasattr(oes, "mark_nxt_touch_order"):
                     oes.mark_nxt_touch_order(nk, src="15:30")
                 return "nxt"
-            if self._next_open_1530_enabled():
+            # 모의 또는 실전 NXT 불가 → 익일 09:00 예약
+            if self._next_open_1530_enabled() or self._use_nxt_sor_touch_orders():
                 ok = self._queue_next_open_strategy_action(
                     code=nk,
                     action=act,
@@ -680,6 +699,15 @@ class SignalEngine:
                     profit_ratio=float(profit_ratio or 0.0),
                     bar_ts=ts,
                 )
+                if ok:
+                    try:
+                        if self._use_nxt_sor_touch_orders():
+                            self.app.log(
+                                f"📌 [NextOpen] 실전 NXT 불가 → 익일09:00 예약 "
+                                f"({nk} {act})"
+                            )
+                    except Exception:
+                        pass
                 return "queued" if ok else "none"
         except Exception:
             return "none"
@@ -1304,16 +1332,16 @@ class SignalEngine:
             ):
                 return
 
-            # 15:30: 모의→익일09:00 예약 / 실전→NXT 터치+SOR 즉시
+            # 15:30: NXT 가능→터치+SOR / 불가·모의→익일09:00 예약
             _is_1530 = self._is_1530_bar_slot(bar_ts)
-            _use_nxt = self._use_nxt_sor_touch_orders()
+            _use_nxt = self._code_uses_nxt_touch(nk)
             try:
                 if _is_1530:
                     if _use_nxt:
                         oes = self._order_execution_service()
                         if oes is not None and hasattr(oes, "mark_nxt_touch_order"):
                             oes.mark_nxt_touch_order(nk, src="15:30")
-                    elif self._next_open_1530_enabled():
+                    elif self._next_open_1530_enabled() or self._use_nxt_sor_touch_orders():
                         ok_next = self._queue_next_open_buy_signal(
                             code=nk,
                             name=str(info.get("name", "")),
@@ -1322,11 +1350,19 @@ class SignalEngine:
                             bar_ts=bar_ts,
                         )
                         if ok_next:
+                            try:
+                                if self._use_nxt_sor_touch_orders():
+                                    self.app.log(
+                                        f"📌 [NextOpen] 실전 NXT 불가 → 익일09:00 매수 예약 "
+                                        f"({nk})"
+                                    )
+                            except Exception:
+                                pass
                             return
             except Exception:
                 pass
 
-            # 15:15: 모의→동시호가 시장가 / 실전→NXT 터치+SOR
+            # 15:15: NXT 가능→터치+SOR / 불가·모의→동시호가 시장가
             _auction_1515 = False
             try:
                 from utils.krx_bars import is_krx_auction_market_fill_slot
@@ -1624,8 +1660,8 @@ class SignalEngine:
             except Exception:
                 pass
             _is_1530 = self._is_1530_bar_slot(bar_ts)
-            _use_nxt = self._use_nxt_sor_touch_orders()
-            # 15:15: 모의→동시호가 시장가 / 실전→NXT 터치+SOR
+            _use_nxt = self._code_uses_nxt_touch(nk)
+            # 15:15: NXT 가능→터치+SOR / 불가·모의→동시호가 시장가
             _auction_1515 = False
             try:
                 from utils.krx_bars import is_krx_auction_market_fill_slot

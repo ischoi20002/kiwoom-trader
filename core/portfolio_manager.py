@@ -63,6 +63,8 @@ class PortfolioManager:
         self._gui_cb_last_flush_ts: float = 0.0
         self._gui_cb_dirty: bool = False
         self._gui_cb_in_progress: bool = False
+        # load_all 중복 호출 방지(기동 GUI + 인증 후 경로 등)
+        self._positions_db_loaded: bool = False
 
     def _virtual_db_path(self) -> str:
         """종료내역 JSON — config.USE_MOCK 에 따라 virtual_db_mock.json / virtual_db_live.json."""
@@ -1029,9 +1031,15 @@ class PortfolioManager:
             str(code or "").split("_")[0].zfill(6), None
         )
 
-    def load_all(self):
-        """DB 및 파일에서 포지션 데이터를 로드합니다."""
+    def load_all(self, *, force: bool = False) -> None:
+        """DB 및 파일에서 포지션 데이터를 로드합니다.
+
+        기동 시 GUI 초기화에서 1회 호출합니다. 이미 로드된 뒤 재호출은
+        ``force=True``가 아니면 무시합니다(인증 완료 경로 중복 방지).
+        """
         with self.lock:
+            if self._positions_db_loaded and not force:
+                return
             try:
                 migrate_legacy_virtual_db_files()
             except Exception:
@@ -1075,7 +1083,7 @@ class PortfolioManager:
                 if active:
                     # active가 리스트라면 딕셔너리로 변환
                     if isinstance(active, list):
-                        # [버그픽스] 재인증 등으로 load_all 이 재호출되면 DB active 에는
+                        # [버그픽스] force 재로드 시 DB active 에는
                         # exit_pending/pending_*·max_p·events 같은 휘발 상태가 없어 그대로
                         # 덮으면 '매도 진행 중' 플래그가 사라져 이중 매도가 날 수 있다.
                         # 기존 메모리 포지션의 휘발 필드를 베이스코드 기준으로 보존한다.
@@ -1160,6 +1168,9 @@ class PortfolioManager:
                     self._dedupe_all_vp_keys()
             except Exception as e:
                 self.log(f"[Error] [Portfolio] DB 포지션 복구 실패: {e}")
+            finally:
+                # 활성 포지션 0건이어도 '로드 시도 완료'로 표시해 중복 호출을 막음
+                self._positions_db_loaded = True
 
     def save_db(self):
         """현재 상태를 파일에 저장합니다 (히스토리 위주).

@@ -263,6 +263,11 @@ def _set_baseline(
     persist: bool = True,
     log_line: bool = True,
 ) -> None:
+    prev_raw = st.get("baseline")
+    try:
+        prev_f = float(prev_raw) if prev_raw is not None else None
+    except (TypeError, ValueError):
+        prev_f = None
     st["baseline"] = float(value)
     st["baseline_source"] = source
     st["baseline_locked"] = bool(locked)
@@ -275,11 +280,38 @@ def _set_baseline(
         try:
             log = getattr(app, "log", None)
             if callable(log):
-                lock_txt = "고정" if locked else "갱신"
-                log(
-                    f"📌 [금일손익] 장시작 기준 총자산 {lock_txt}: {int(value):,} "
-                    f"(source={source}, {st.get('captured_at')})"
-                )
+                new_i = int(float(value))
+                # 장전 반복 캡처: 동일 금액·미세 변동은 로그 생략(기동 시 혼란 방지)
+                should_log = True
+                if not locked and prev_f is not None and prev_f == prev_f:
+                    prev_i = int(prev_f)
+                    if prev_i == new_i:
+                        should_log = False
+                    else:
+                        try:
+                            thr = max(10_000.0, abs(float(prev_f)) * 0.001)
+                            if abs(float(value) - float(prev_f)) < thr:
+                                should_log = False
+                        except (TypeError, ValueError):
+                            pass
+                if should_log:
+                    if locked:
+                        msg = (
+                            f"📌 [금일손익] 장시작 기준 총자산 고정: {new_i:,} "
+                            f"(source={source}, {st.get('captured_at')})"
+                        )
+                    elif prev_f is None:
+                        msg = (
+                            f"📌 [금일손익] 장시작 기준 총자산 설정: {new_i:,} "
+                            f"(source={source}, {st.get('captured_at')})"
+                        )
+                    else:
+                        msg = (
+                            f"📌 [금일손익] 장시작 기준 재산정: "
+                            f"{int(prev_f):,} → {new_i:,} "
+                            f"(source={source}, {st.get('captured_at')})"
+                        )
+                    log(msg)
         except Exception:
             pass
     if persist:
@@ -287,6 +319,17 @@ def _set_baseline(
             persist_day_pnl_baseline(st)
         except Exception:
             pass
+
+
+def _portfolio_has_synced(app: Any) -> bool:
+    """첫 계좌 동기화 전 불완전 총자산(예수금만 등)으로 기준을 잡지 않기 위함."""
+    try:
+        pf = getattr(app, "portfolio", None)
+        if pf is None:
+            return False
+        return float(getattr(pf, "last_sync_time", 0) or 0) > 0.0
+    except Exception:
+        return False
 
 
 def _try_restore_persisted_baseline(
@@ -521,6 +564,7 @@ def try_capture_open_baseline(app: Any, *, now: Optional[datetime] = None) -> bo
     - 개장 전: 현재 총자산으로 기준을 **갱신**(장전 최신 D+2·시세 반영).
     - 개장 도달: 마지막 장전 값을 **고정**. 장전 값이 없으면 직전종가 합성 폴백 예약.
     - 이미 고정됐으면 no-op.
+    - 첫 계좌 동기화 전에는 캡처하지 않음(기동 직후 과소 총자산 방지).
     """
     try:
         t = now if now is not None else datetime.now()
@@ -536,6 +580,8 @@ def try_capture_open_baseline(app: Any, *, now: Optional[datetime] = None) -> bo
         open_m, _close_m = _session_open_close_minutes(t.date())
         # 장전: 시초가 전 스냅으로 계속 갱신
         if hm < open_m:
+            if not _portfolio_has_synced(app):
+                return False
             total = compute_current_total_assets_day_pnl(app)
             if total is None:
                 return False
@@ -560,6 +606,10 @@ def try_capture_open_baseline(app: Any, *, now: Optional[datetime] = None) -> bo
                         f"📌 [금일손익] 장시작 기준 고정(시초가 전 스냅): "
                         f"{int(float(st['baseline'])):,}"
                     )
+            except Exception:
+                pass
+            try:
+                persist_day_pnl_baseline(st)
             except Exception:
                 pass
             _cancel_capture_after(app, st)

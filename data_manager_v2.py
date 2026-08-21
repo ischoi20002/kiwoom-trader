@@ -3543,11 +3543,44 @@ class DataManagerV2:
         except: return pd.DataFrame()
 
     def fetch_nxt_status(self, code, token):
-        if not token: return False
+        """ka10100으로 NXT 거래가능 여부(``nxtEnable == 'Y'``)를 조회합니다."""
+        if not token:
+            return False
         try:
-            res = requests.post(f"{config.URL}/api/dostk/stkinfo", headers={'Content-Type': 'application/json;charset=UTF-8', 'authorization': f'Bearer {token}', 'api-id': 'ka10100'}, json={'stk_cd': code}, timeout=3)
-            if res.status_code == 200: return res.json().get('nxtEnable') == 'Y'
-        except: pass
+            from utils.normalization import canonical_stock_code
+
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+        except Exception:
+            try:
+                nk = str(code or "").split("_")[0].zfill(6)
+            except Exception:
+                return False
+        if len(nk) != 6:
+            return False
+        try:
+            res = requests.post(
+                f"{config.URL}/api/dostk/stkinfo",
+                headers={
+                    "Content-Type": "application/json;charset=UTF-8",
+                    "authorization": f"Bearer {token}",
+                    "api-id": "ka10100",
+                },
+                json={"stk_cd": nk},
+                timeout=5,
+            )
+            if res.status_code != 200:
+                return False
+            data = res.json() if res is not None else {}
+            if not isinstance(data, dict):
+                return False
+            # 필드명 변형 대비
+            for key in ("nxtEnable", "nxt_enable", "nxtYn", "nxt_yn"):
+                v = data.get(key)
+                if v is None:
+                    continue
+                return str(v).strip().upper() in ("Y", "1", "TRUE")
+        except Exception:
+            pass
         return False
 
     def prepare_volume_profiles(self, monitor_codes, token, bars_data, volume_profiles, min_volume_profiles):

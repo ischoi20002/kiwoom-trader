@@ -13,6 +13,12 @@
 
 ---
 
+## 0.18.34 (2026-08-21)
+
+- **실전 15:30/15:15 NXT 불가 종목 폴백**: `ka10100`(`nxtEnable`)으로 종목별 NXT 가능 여부를 아침·감시 시작 시 갱신. 가능 종목은 기존 NXT 1호가+SOR, 불가 종목은 모의와 같이 15:30→익일 09:00 예약·15:15→동시호가 시장가 (`nxt_eligibility_service`, `signal_engine`).
+- **기동 시 포지션 복구 로그 중복 제거**: GUI `load_all` 1회만 수행, 인증 후 재호출 생략 (`portfolio_manager`, `rest_auth_retry_service`).
+- **금일손익 장전 기준 로그 정리**: 계좌 동기화 전에는 캡처하지 않고, 동일·미세 변동 로그 생략·의미 있는 변경만 설정/재산정으로 표시 (`session_open_day_pnl`, `virtual_tab`).
+
 ## 0.18.33 (2026-08-20)
 
 - **장시작 기준 총자산이 재시작마다 바뀌던 문제**: 장중 기동이 어제 EOD 스냅샷을 지금 잔고로 덮어 금일손익 분모가 흔들림. 장중에는 어제 파일을 갱신하지 않고, 당일 고정 기준은 `_day_pnl_baseline.json`에 남겨 재시작 후에도 유지 (`eod_equity_snapshot_service`, `session_open_day_pnl`).

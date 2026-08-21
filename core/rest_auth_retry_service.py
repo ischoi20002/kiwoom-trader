@@ -214,7 +214,9 @@ class RestAuthRetryService:
             pass
 
         try:
-            self.app.portfolio.load_all()
+            # 포지션/이력은 GUI 초기화의 portfolio.load_all()에서 1회만 복구.
+            # 인증 후 재로드는 동일 로그·DB 덮어쓰기만 반복하므로 생략하고,
+            # 계좌와의 정합은 아래 첫 동기화에서 맞춘다.
             self.app.remote_commander.start()
             try:
                 api = getattr(self.app, "status_api_server", None)

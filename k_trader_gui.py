@@ -71,6 +71,7 @@ from core.rt_ui_responsiveness import drain_ui_call_queue_once
 from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
 from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 from core.next_open_pending_action_service import NextOpenPendingActionService
+from core.nxt_eligibility_service import NxtEligibilityService
 
 from utils.monitor_vp_stub import is_vp_price_stub_active, stamp_vp_price_stub
 from utils.normalization import canonical_stock_code
@@ -896,6 +897,9 @@ class KiwoomApp:
             self, log_func=self.log
         )
         self.next_open_pending_action_service = NextOpenPendingActionService(
+            self, log_func=self.log
+        )
+        self.nxt_eligibility_service = NxtEligibilityService(
             self, log_func=self.log
         )
         self.trading_controller = TradingController(
@@ -3278,6 +3282,14 @@ class KiwoomApp:
             self.trading_controller.monitor_codes = self.monitor_codes
             if hasattr(self, "monitor_tab"):
                 self.monitor_tab.update_watchlist(self.monitor_info)
+            try:
+                nxt_svc = getattr(self, "nxt_eligibility_service", None)
+                if nxt_svc is not None:
+                    nxt_svc.refresh_codes(
+                        self.monitor_codes, force=False, background=True
+                    )
+            except Exception:
+                pass
         elif status == "STARTED":
             self.is_monitoring = True
             try:
@@ -3294,6 +3306,13 @@ class KiwoomApp:
                 from utils.session_open_day_pnl import on_monitoring_started
 
                 on_monitoring_started(self)
+            except Exception:
+                pass
+            # 실전: 감시·보유 종목 NXT 거래가능 여부 아침/기동 갱신
+            try:
+                nxt_svc = getattr(self, "nxt_eligibility_service", None)
+                if nxt_svc is not None:
+                    nxt_svc.refresh_morning(force=True)
             except Exception:
                 pass
             try:

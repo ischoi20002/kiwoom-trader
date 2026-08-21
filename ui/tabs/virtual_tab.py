@@ -9,7 +9,7 @@ from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import config
-from utils.session_open_day_pnl import format_day_pnl_text, try_capture_open_baseline
+from utils.session_open_day_pnl import format_day_pnl_text
 from utils.equity_snapshots_store import (
     equity_snapshots_root_candidates,
     read_equity_snapshot_from_root,
@@ -2947,11 +2947,7 @@ class VirtualTab:
             open_ur_pct = 0.0
 
         # 금일 손익: 현재 총자산 − 장시작(시초가 반영 전) 총자산.
-        # 장중 감시 시작이면 N/A. 장전 시작 후 09:00 전이면 「장시작 대기」.
-        try:
-            try_capture_open_baseline(self.app)
-        except Exception:
-            pass
+        # 캡처는 format_day_pnl_text 내부에서 1회만 수행(중복 로그 방지).
         try:
             day_pnl_txt = format_day_pnl_text(
                 self.app, float(total_assets_day_pnl)
@@ -3105,10 +3101,7 @@ class VirtualTab:
             else:
                 open_ur_pct = 0.0
 
-            try:
-                try_capture_open_baseline(self.app)
-            except Exception:
-                pass
+            # 캡처는 format_day_pnl_text 내부에서 1회만 수행(중복 로그 방지).
             try:
                 day_pnl_txt = format_day_pnl_text(
                     self.app, float(total_assets_day_pnl)

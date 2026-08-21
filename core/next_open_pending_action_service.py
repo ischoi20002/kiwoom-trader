@@ -262,7 +262,9 @@ class NextOpenPendingActionService:
             return now.time() > time(9, 5, 0)
 
     def process_due_actions(self) -> None:
-        if not bool(getattr(self.app, "settings", {}).get("next_open_1530_enabled", False)):
+        # next_open_1530_enabled 가 꺼져 있어도 큐에 남은 건 제출
+        # (실전 NXT 불가 종목 폴백 예약 등)
+        if not self._actions:
             return
         now = self._now()
         today_s = now.strftime("%Y-%m-%d")
