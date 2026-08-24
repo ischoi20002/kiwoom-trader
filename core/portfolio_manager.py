@@ -463,7 +463,7 @@ class PortfolioManager:
                 except Exception:
                     pass
                 try:
-                    self.data_manager.save_active_position(
+                    self._save_active_position(
                         nk,
                         pos.get("name", ""),
                         float(pos.get("avg_price", 0)),
@@ -498,7 +498,7 @@ class PortfolioManager:
                     pass
             self.virtual_positions[nk] = best_pos
             try:
-                self.data_manager.save_active_position(
+                self._save_active_position(
                     nk,
                     best_pos.get("name", ""),
                     float(best_pos.get("avg_price", 0)),
@@ -670,6 +670,136 @@ class PortfolioManager:
             return not self._has_confirmed_buy_events(pos)
         except Exception:
             return False
+
+    @staticmethod
+    def _extract_position_peaks(
+        pos: Optional[Dict[str, Any]],
+        *,
+        avg_fallback: float = 0.0,
+    ) -> Tuple[float, float]:
+        """Flash 고점(max_p)·ATR High 고점(max_p_high)을 pos에서 추출."""
+        mp = 0.0
+        mph = 0.0
+        if not isinstance(pos, dict):
+            try:
+                return max(0.0, float(avg_fallback or 0)), 0.0
+            except (TypeError, ValueError):
+                return 0.0, 0.0
+        for k in ("max_p", "max_price", "max_now", "max_p_close"):
+            try:
+                v = float(pos.get(k, 0) or 0)
+                if v > mp:
+                    mp = v
+            except (TypeError, ValueError):
+                continue
+        try:
+            mph = float(pos.get("max_p_high", 0) or 0)
+        except (TypeError, ValueError):
+            mph = 0.0
+        try:
+            avg = float(
+                pos.get("avg_price", pos.get("avg_p", avg_fallback)) or avg_fallback or 0
+            )
+        except (TypeError, ValueError):
+            avg = float(avg_fallback or 0)
+        if avg > mp:
+            mp = avg
+        return float(mp), float(mph if mph > 0 else 0.0)
+
+    def persist_holding_peaks(self, code: str) -> None:
+        """
+        메모리 포지션의 Flash/ATR 고점을 state DB에 단방향 저장.
+
+        재시작 후에도 다일 보유 Flash가 전일 고점을 잃지 않도록 한다.
+        """
+        try:
+            nk = self._normalize_stock_code(code)
+        except Exception:
+            nk = str(code or "").zfill(6)
+        if not nk:
+            return
+        mp = 0.0
+        mph = 0.0
+        try:
+            with self.lock:
+                pos = self.virtual_positions.get(nk) or self.virtual_positions.get(code)
+                if pos is None:
+                    for k, v in list(self.virtual_positions.items()):
+                        try:
+                            if self._normalize_stock_code(k) == nk and isinstance(v, dict):
+                                pos = v
+                                break
+                        except Exception:
+                            continue
+                if not isinstance(pos, dict):
+                    return
+                mp, mph = self._extract_position_peaks(pos)
+                # 메모리에도 정규화해 두어 이후 평가와 일치
+                try:
+                    if mp > float(pos.get("max_p", 0) or 0):
+                        pos["max_p"] = mp
+                        pos["max_price"] = mp
+                        pos["max_now"] = mp
+                    if mph > float(pos.get("max_p_high", 0) or 0):
+                        pos["max_p_high"] = mph
+                except Exception:
+                    pass
+        except Exception:
+            return
+        if mp <= 0:
+            return
+        try:
+            dm = self.data_manager
+            if dm is None or not hasattr(dm, "update_active_position_peaks"):
+                return
+            dm.update_active_position_peaks(
+                nk, mp, max_p_high=mph if mph > 0 else None
+            )
+        except Exception:
+            pass
+
+    def _save_active_position(
+        self,
+        code: str,
+        name: str,
+        avg_price: Any,
+        qty: Any,
+        stage: Any,
+        invested: Any,
+        entry_time: Any,
+        reason: Any,
+        pos: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """active_positions UPSERT — 메모리 고점(max_p)을 함께 저장."""
+        try:
+            if pos is None:
+                try:
+                    nk = self._normalize_stock_code(code)
+                except Exception:
+                    nk = str(code or "").zfill(6)
+                pos = self.virtual_positions.get(nk) or self.virtual_positions.get(code)
+            try:
+                avg_f = float(avg_price or 0)
+            except (TypeError, ValueError):
+                avg_f = 0.0
+            mp, mph = self._extract_position_peaks(pos, avg_fallback=avg_f)
+            self._save_active_position(
+                code,
+                name,
+                avg_price,
+                qty,
+                stage,
+                invested,
+                entry_time,
+                reason,
+                max_p=mp if mp > 0 else None,
+                max_p_high=mph if mph > 0 else None,
+            )
+        except Exception as e:
+            try:
+                self.log(f"[Portfolio] active_position 저장 실패 ({code}): {e}")
+            except Exception:
+                pass
 
     def _should_skip_reconcile_remove(self, pos: Dict[str, Any]) -> bool:
         """
@@ -1097,7 +1227,7 @@ class PortfolioManager:
                         except Exception:
                             prev_by_base = {}
                         for row in active:
-                            # row: (code, name, avg_p, qty, stage, invested, time, reason)
+                            # row: (code, name, avg_p, qty, stage, invested, time, reason[, max_p, max_p_high])
                             code = row[0]
                             try:
                                 _nk = str(code or "").split("_")[0].zfill(6)
@@ -1106,13 +1236,31 @@ class PortfolioManager:
                                 )
                             except Exception:
                                 _sig = "TYPE_A"
+                            try:
+                                _avg = float(row[2] or 0)
+                            except (TypeError, ValueError):
+                                _avg = 0.0
+                            try:
+                                _db_mp = float(row[8] or 0) if len(row) > 8 else 0.0
+                            except (TypeError, ValueError):
+                                _db_mp = 0.0
+                            try:
+                                _db_mph = float(row[9] or 0) if len(row) > 9 else 0.0
+                            except (TypeError, ValueError):
+                                _db_mph = 0.0
+                            _peak0 = max(_avg, _db_mp)
                             new_pos: Dict[str, Any] = {
-                                "name": row[1], "avg_price": float(row[2]), "qty": int(row[3]),
+                                "name": row[1], "avg_price": _avg, "qty": int(row[3]),
                                 "stage": int(row[4]), "invested": float(row[5]),
                                 "entry_time": row[6], "reason": row[7],
                                 "sig_type": _sig,
-                                "events": [], "max_now": float(row[2])
+                                "events": [],
+                                "max_now": float(_peak0),
+                                "max_p": float(_peak0),
+                                "max_price": float(_peak0),
                             }
+                            if _db_mph > 0:
+                                new_pos["max_p_high"] = float(_db_mph)
                             try:
                                 if int(new_pos.get("stage", 1) or 1) >= 2:
                                     new_pos["entry_n"] = 2
@@ -1483,7 +1631,7 @@ class PortfolioManager:
                         "entry_time": datetime.now().isoformat(),
                         "reason": "SYNCED", "sig_type": _sync_sig, "events": [], "max_now": avg_price
                     }
-                    self.data_manager.save_active_position(
+                    self._save_active_position(
                         code, name, avg_price, qty, 1, _inv_sync, datetime.now().isoformat(), "SYNCED"
                     )
                     new_count += 1
@@ -2452,7 +2600,7 @@ class PortfolioManager:
                             "snapshot": _snap_s1,
                         }
                     )
-                    self.data_manager.save_active_position(code, reg_name, fp, iq, 1, total_invested, datetime.now().isoformat(), reg_reason)
+                    self._save_active_position(code, reg_name, fp, iq, 1, total_invested, datetime.now().isoformat(), reg_reason)
                     _ord_sfx = f" ord={order_no}" if order_no else ""
                     self.log(
                         f"[Portfolio] {reg_name}({code}) S1 진입 · {iq}주 @ {int(fp):,}원{_ord_sfx}"
@@ -2506,7 +2654,7 @@ class PortfolioManager:
                                     fill_qty=fill_q,
                                     now_str=now_str,
                                 )
-                                self.data_manager.save_active_position(
+                                self._save_active_position(
                                     code,
                                     pos["name"],
                                     float(pos.get("avg_price", 0)),
@@ -2576,7 +2724,7 @@ class PortfolioManager:
                                     pos.get("invested", 0) or 0
                                 ) + _p2 * float(_q2) + _fee2
 
-                            self.data_manager.save_active_position(
+                            self._save_active_position(
                                 code,
                                 pos["name"],
                                 pos["avg_price"],
@@ -2644,7 +2792,7 @@ class PortfolioManager:
                                 "snapshot": _snap_s1,
                             }
                         ]
-                        self.data_manager.save_active_position(
+                        self._save_active_position(
                             code,
                             reg_name,
                             fp,
@@ -2709,7 +2857,7 @@ class PortfolioManager:
                             pos["invested"] = float(pos.get("invested", 0) or 0) + _p2 * float(_q2) + _fee2
 
                         # DB 동기화
-                        self.data_manager.save_active_position(code, pos['name'], pos['avg_price'], new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
+                        self._save_active_position(code, pos['name'], pos['avg_price'], new_total_qty, 2, pos['invested'], pos['entry_time'], pos['reason'])
                         _ord_sfx = f" ord={order_no}" if order_no else ""
                         self.log(
                             f"[Portfolio] {pos['name']}({code}) S2 추매 · "
@@ -2844,7 +2992,7 @@ class PortfolioManager:
 
                         # DB 갱신(보유 유지)
                         try:
-                            self.data_manager.save_active_position(
+                            self._save_active_position(
                                 code,
                                 pos.get("name", code),
                                 pos.get("avg_price", avg_p),

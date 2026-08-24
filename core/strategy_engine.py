@@ -81,6 +81,13 @@ class StrategyEngine:
                 is_realtime=True,
                 kwargs=merged_kw,
             )
+            # Flash/ATR 고점 DB 보존(재시작·다일 보유)
+            try:
+                pf = getattr(self.app, "portfolio", None)
+                if pf is not None and hasattr(pf, "persist_holding_peaks"):
+                    pf.persist_holding_peaks(code)
+            except Exception:
+                pass
 
             if res["action"] == "EXIT":
                 return {

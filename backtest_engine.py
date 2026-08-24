@@ -1208,9 +1208,11 @@ class TradingStrategy:
         price_col: str = "High",
     ) -> Optional[float]:
         """
-        당일 15분(등) 봉 가격열(기본 High)로 고점을 복원할 때 사용한다.
-        `since`(진입·추매 시각)가 있으면 **해당 시각 이전에 시작된 봉은 제외**한다.
-        (같은 15분 봉 안에서 진입 전에 형성된 wick 이 Flash/ATR 고점에 섞이지 않도록)
+        15분(등) 봉 가격열(기본 High)로 Flash/ATR 고점을 복원할 때 사용한다.
+
+        `since`(진입·추매 시각)가 있으면 **해당 시각 이전에 시작된 봉은 제외**하고,
+        진입 이후 **전 영업일** 봉을 포함한다.
+        (과거: 당일 봉만 써서 다일 보유 Flash가 BT와 어긋남 — 재시작 복원용 당일 제한 제거)
 
         인덱스는 `StreamProcessor` 기준 **봉 종료(슬롯) 시각**이므로
         bar_start = index - bar_minutes 로 시작 시각을 복원한다.
@@ -1231,7 +1233,6 @@ class TradingStrategy:
                     from zoneinfo import ZoneInfo
 
                     seoul = ZoneInfo("Asia/Seoul")
-                    today = pd.Timestamp.now(tz=seoul).date()
 
                     since_ts: Optional[pd.Timestamp] = None
                     if since is not None:
@@ -1255,8 +1256,7 @@ class TradingStrategy:
                     except (TypeError, ValueError):
                         step = pd.Timedelta(minutes=15)
 
-                    sel = []
-                    post_entry = []
+                    post_entry: list[bool] = []
                     for ts in idx:
                         try:
                             t_end = pd.Timestamp(ts)
@@ -1266,25 +1266,21 @@ class TradingStrategy:
                                 )
                             else:
                                 t_end = t_end.tz_convert(seoul)
-                            sel.append(t_end.date() == today)
                             if since_ts is not None:
                                 t_start = t_end - step
-                                post_entry.append(t_start >= since_ts)
+                                post_entry.append(bool(t_start >= since_ts))
                             else:
                                 post_entry.append(True)
                         except Exception:
-                            sel.append(True)
                             post_entry.append(True)
-                    if any(sel):
-                        arr = hi.to_numpy(dtype=float, copy=False)
-                        m_today = np.array(sel, dtype=bool)
-                        m_post = np.array(post_entry, dtype=bool)
-                        picked = arr[m_today & m_post & ~np.isnan(arr)]
-                        if picked.size > 0:
-                            return float(np.max(picked))
+                    arr = hi.to_numpy(dtype=float, copy=False)
+                    m_post = np.array(post_entry, dtype=bool)
+                    picked = arr[m_post & ~np.isnan(arr)]
+                    if picked.size > 0:
+                        return float(np.max(picked))
                 except Exception:
                     pass
-            # since 가 있는데 인덱스로 필터할 수 없으면(레거시 DF 등) 당일 전체 max 사용 금지
+            # since 가 있는데 인덱스로 필터할 수 없으면(레거시 DF 등) 전체 max 사용 금지
             if since is not None:
                 return None
             tail = hi.dropna().tail(96)
@@ -1317,7 +1313,8 @@ class TradingStrategy:
         evaluate_position 매 틱 pos 에 써 넣지 않으면 고가가 유지되지 않아
         'TRL 무장전'이 잘못 표시된다. max_now(구 스키마)는 동일 의미로 병합.
         bars_peak_high: `_peak_high_from_bars_df(..., since=진입시각)`로
-        매수(·추매) 이후에 **시작된 봉**의 High 만 반영한 상한(실시간).
+        매수(·추매) 이후에 **시작된 봉**의 High/Close 상한(실시간·다일 포함).
+        저장된 max_p 계열과 병합해 봉 복원이 낮아도 기존 고점을 잃지 않는다.
         """
         try:
             nw = float(now_price)
@@ -1333,7 +1330,7 @@ class TradingStrategy:
                     bests.append(bh)
             except (TypeError, ValueError):
                 pass
-        for k in ("max_p", "max_price", "max_now"):
+        for k in ("max_p", "max_price", "max_now", "max_p_close", "max_p_high"):
             try:
                 v = (pos or {}).get(k)
                 if v is None:
@@ -1411,7 +1408,7 @@ class TradingStrategy:
         """
         감시 화면·일일 리포트용 ATR 손절·트레일 기준가 문자열.
         evaluate_position 의 ATR 구간과 동일 분기(표시만, pos/지표 비변경).
-        bars_df: 있으면 당일 봉 High 로 재시작 후 고가 복원.
+        bars_df: 있으면 진입 이후 봉으로 재시작 후 고가 복원(다일 포함).
         sel_track_hint: 감시 트리 sel_track 이 \"B\"일 때만 Type B ATR/TP 키로 표시 보정(계좌 동기화만 한 포지션 등).
         """
         try:
@@ -1442,7 +1439,7 @@ class TradingStrategy:
                 use_atr_hi = bool(settings.get("use_atr_peak_bar_high", False))
             except Exception:
                 use_atr_hi = False
-            # Flash 표시용 max_p
+            # Flash 표시용 max_p (봉 복원 + 저장 고점 병합)
             if use_flash_hi:
                 bh = TradingStrategy._cached_bars_peak_high(pos, bars_df)
                 max_p = float(
@@ -1454,17 +1451,11 @@ class TradingStrategy:
                 bc = TradingStrategy._cached_bars_peak_high(
                     pos, bars_df, price_col="Close"
                 )
-                if bc is not None:
-                    try:
-                        max_p = max(float(now_price), float(bc))
-                    except (TypeError, ValueError):
-                        max_p = float(now_price)
-                else:
-                    max_p = float(
-                        TradingStrategy._peak_price_from_position(
-                            pos, float(now_price), bars_peak_high=None
-                        )
+                max_p = float(
+                    TradingStrategy._peak_price_from_position(
+                        pos, float(now_price), bars_peak_high=bc
                     )
+                )
             # ATR 트레일 표시용 고점
             if use_atr_hi:
                 bh2 = TradingStrategy._cached_bars_peak_high(pos, bars_df)
@@ -1732,6 +1723,7 @@ class TradingStrategy:
             bars_df_kw = None
 
         # --- 종가(평가가) 고점 ---
+        # 봉 복원(진입 이후·다일) + 저장 max_p 병합 — 당일만 보면 전일 고점이 지워짐
         peak_close = None
         try:
             bc = TradingStrategy._cached_bars_peak_high(
@@ -1739,34 +1731,17 @@ class TradingStrategy:
             )
         except Exception:
             bc = None
-        if bc is not None:
+        try:
+            peak_close = float(
+                TradingStrategy._peak_price_from_position(
+                    pos, float(now_price), bars_peak_high=bc
+                )
+            )
+        except Exception:
             try:
-                peak_close = max(float(now_price), float(bc))
-            except (TypeError, ValueError):
                 peak_close = float(now_price)
-        else:
-            # bars 없으면 평가가 누적. max_p_close 우선, 없으면 max_p(종가모드 이력)
-            bests: list = []
-            try:
-                bests.append(float(now_price))
             except (TypeError, ValueError):
-                pass
-            for k in ("max_p_close",):
-                try:
-                    v = float((pos or {}).get(k, 0) or 0)
-                    if v > 0:
-                        bests.append(v)
-                except (TypeError, ValueError):
-                    pass
-            if not use_flash_hi:
-                for k in ("max_p", "max_price", "max_now"):
-                    try:
-                        v = float((pos or {}).get(k, 0) or 0)
-                        if v > 0:
-                            bests.append(v)
-                    except (TypeError, ValueError):
-                        pass
-            peak_close = float(max(bests)) if bests else float(now_price)
+                peak_close = 0.0
 
         # --- 봉 High 고점 ---
         peak_high = None
