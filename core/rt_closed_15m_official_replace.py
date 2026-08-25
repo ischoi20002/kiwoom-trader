@@ -1333,7 +1333,7 @@ class RtClosed15mOfficialReplaceScheduler:
                             nk,
                             heal_bars,
                             primary_ts=bar_ts,
-                            log_extra_heal=False,
+                            log_ohlcv_diff=True,
                         )
                         applied = True if ret is None else bool(ret)
                     else:

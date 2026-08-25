@@ -101,7 +101,6 @@ DEFAULT_SETTINGS = {
     "realtime_15m_compose_tick_fill_on_api_miss": True,
     "realtime_15m_compose_require_official_head": True,
     "realtime_15m_wait_official_last_if_tick_incomplete": True,
-    "realtime_warmup_seed_m1_store_from_1m": True,
     "realtime_m1_head_official_catchup_enabled": True,
     "realtime_15m_tick_tail_wait_sec": 1.5,
     "realtime_auction_1530_tick_wait_sec": 5.0,

@@ -3591,7 +3591,8 @@ class KiwoomApp:
         bars: Any,
         *,
         primary_ts: Any = None,
-        log_extra_heal: bool = True,
+        log_ohlcv_diff: bool = True,
+        log_extra_heal: Optional[bool] = None,
     ) -> bool:
         """
         공식 15분봉 여러 줄을 덮어씁니다. 형성 중 봉은 호출 측에서 제외해야 합니다.
@@ -3601,7 +3602,12 @@ class KiwoomApp:
 
         메모리에 없는 API 과거 봉은 DB에 넣지 않습니다(1페이지 수십~수백 행 ×
         종목당 purge 가 반영을 수 초씩 늘리던 원인).
+
+        틱 합성봉과 OHLCV 차이가 있어 실제 덮어쓴 경우 ``log_ohlcv_diff`` 로 로그합니다.
+        ``log_extra_heal`` 은 구 인자(호환) — 지정 시 ``log_ohlcv_diff`` 대신 사용.
         """
+        if log_extra_heal is not None:
+            log_ohlcv_diff = bool(log_extra_heal)
         from utils.bars_data_keys import resolve_bars_data_frame
         from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
 
@@ -3683,6 +3689,7 @@ class KiwoomApp:
 
         recalc_key: Optional[str] = None
         primary_applied = False
+        primary_changed = False
         extra_changed = 0
         upserts: List[Tuple[Any, float, float, float, float, float]] = []
         try:
@@ -3758,6 +3765,7 @@ class KiwoomApp:
                     upserts.append((ts, o, h, l_, c, v))
                     if is_primary:
                         primary_applied = True
+                        primary_changed = True
                     elif primary is None or ts != primary:
                         extra_changed += 1
 
@@ -3819,11 +3827,24 @@ class KiwoomApp:
                                 )
                 except Exception:
                     pass
-                if extra_changed > 0 and log_extra_heal:
+                if any_write and log_ohlcv_diff and upserts:
                     try:
+                        parts: List[str] = []
+                        for ts, _o, _h, _l, _c, _v in upserts:
+                            try:
+                                parts.append(pd.Timestamp(ts).strftime("%H:%M"))
+                            except Exception:
+                                continue
+                        slot_txt = ",".join(parts) if parts else "?"
+                        kind = []
+                        if primary_changed:
+                            kind.append("당슬롯")
+                        if extra_changed > 0:
+                            kind.append(f"이전{extra_changed}")
+                        kind_txt = "+".join(kind) if kind else "OHLCV"
                         self.log(
-                            f"ℹ️ [RT15m-Official] {cc} 이전 슬롯 공식 정합 "
-                            f"{extra_changed}봉 (MA60 유지)"
+                            f"ℹ️ [RT15m-Official] {cc} 공식15 정렬 차이 반영 "
+                            f"{len(upserts)}봉 ({slot_txt}, {kind_txt})"
                         )
                     except Exception:
                         pass
