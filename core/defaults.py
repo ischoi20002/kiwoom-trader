@@ -485,6 +485,7 @@ DEFAULT_SETTINGS = {
     "exchange_fill_no_open_confirm_attempts": 8,
     "exchange_fill_no_open_confirm_interval_sec": 0.8,
     "touch_pending_cancel_probe_after": 2,
+    "touch_pending_cancel_probe_min_sec": 180.0,
     "touch_exit_pending_probe_after": 1,
     "exchange_fill_trust_no_open_qty": True,
     "portfolio_gui_callback_debounce_ms": 1200,

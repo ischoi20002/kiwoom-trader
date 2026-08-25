@@ -13,6 +13,14 @@
 
 ---
 
+## 0.18.45 (2026-08-25)
+
+- **부분체결 수량 미반영**: 취소 접수 시 `filled_qty`를 0으로 덮어쓰고, 접수 행만 보면 kt00007 부분체결 합산을 놓쳤다. 취소 시 누적 체결을 보존·PARTIAL 표기, 체결확인은 합산 수량으로 보강, DB는 체결수량을 줄이지 않음 (`order_manager`, `fill_reconciliation_service`, `data_manager_v2`, `virtual_tab`).
+
+## 0.18.44 (2026-08-25)
+
+- **터치호가 취소 프로브가 너무 빠름**: kt00007 미반영 2회(~90초)만에 취소 API를 넣어 호가 대기 주문이 조기 취소됐다. 접수 후 최소 3분(`touch_pending_cancel_probe_min_sec`)이 지나야 취소 프로브를 한다 (`limit_order_watch_service`).
+
 ## 0.18.43 (2026-08-25)
 
 - **장중 재시작 후 신호평가 누락**: 워밍업 catch-up이 형성 중 슬롯만 봐서(예: 13:48→13:45봉) 이미 끝난 직전 완성봉(13:30) 평가를 건너뛰었다. 당일 직전 완성 15분 슬롯을 워밍업 OHLCV로 즉시 평가한다 (`rt_watchlist_m1_api_poller`, `krx_bars`).

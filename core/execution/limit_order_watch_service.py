@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -31,6 +32,8 @@ class LimitOrderMeta:
     # "confirm": kt00007 체결 확인만 / "amend": 호가 정정만 (확인 후 재시도 간격 대기)
     touch_poll_phase: str = "confirm"
     touch_pending_logged: bool = False
+    # 접수 시각(time.time) — 취소 프로브 최소 대기 산정용
+    registered_at: float = 0.0
     # 15:15 동시호가 시장가 — 취소/정정 없이 kt00007 폴링만
     auction_watch: bool = False
 
@@ -783,8 +786,13 @@ class LimitOrderWatchService:
 
         max_a = self._get_touch_max_amends()
         probe_after = self._touch_pending_probe_after()
+        probe_min_sec = self._touch_pending_cancel_probe_min_sec()
+        elapsed_sec = self._touch_elapsed_sec(meta)
         if pending_cnt > 0:
-            do_probe = pending_cnt >= probe_after
+            # pending 횟수 + 최소 대기(기본 3분) 둘 다 충족해야 취소 프로브
+            do_probe = (pending_cnt >= probe_after) and (
+                elapsed_sec >= float(probe_min_sec)
+            )
             if str(meta.kind or "") == "exit_sell":
                 try:
                     st = getattr(self.app, "settings", None) or {}
@@ -1048,9 +1056,11 @@ class LimitOrderWatchService:
                 try:
                     _sec = ms // 1000
                     _retry = poll_sec
+                    _cancel_min = int(self._touch_pending_cancel_probe_min_sec())
                     self.log(
                         f"⏱️ [터치호가] ord={oid} · 첫 체결확인 {_sec}초 후 "
                         f"(미반영 시 {_retry}초마다 재확인, "
+                        f"취소프로브 최소 {_cancel_min}초, "
                         f"미체결 시 정정 최대 {self._get_touch_max_amends()}회)"
                     )
                 except Exception:
@@ -1104,6 +1114,7 @@ class LimitOrderWatchService:
             if (touch_mode or use_auction)
             else 0.0,
             touch_poll_phase="confirm",
+            registered_at=float(time.time()),
             auction_watch=use_auction,
         )
 
@@ -1123,6 +1134,30 @@ class LimitOrderWatchService:
         except (TypeError, ValueError):
             n = 2
         return max(1, min(n, 5))
+
+    def _touch_pending_cancel_probe_min_sec(self) -> float:
+        """
+        kt00007 미반영(pending) 후 취소 프로브까지 최소 대기(초).
+
+        예전 기본(~90초: 첫확인 60초+재확인 1회)은 너무 빨라
+        호가 대기 중 주문이 취소되는 경우가 잦았다. 기본 3분.
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            sec = float(st.get("touch_pending_cancel_probe_min_sec", 180.0))
+        except (TypeError, ValueError):
+            sec = 180.0
+        return max(60.0, min(sec, 900.0))
+
+    def _touch_elapsed_sec(self, meta: LimitOrderMeta) -> float:
+        """접수 후 경과 초. registered_at 없으면 충분히 지난 것으로 간주."""
+        try:
+            t0 = float(getattr(meta, "registered_at", 0.0) or 0.0)
+            if t0 <= 0.0:
+                return 1.0e9
+            return max(0.0, float(time.time()) - t0)
+        except Exception:
+            return 1.0e9
 
     def _run_terminal_fill_confirm(self, meta: LimitOrderMeta, order_no: str) -> None:
         """RC4033·no_open_qty 직후 즉시 체결 확정(백그라운드)."""

@@ -156,6 +156,58 @@ class FillReconciliationService:
             return True
         return None
 
+    def _enrich_row_with_cumulative_fills(
+        self,
+        order_no: str,
+        row: Dict[str, Any],
+        *,
+        expect_qty: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        접수 행의 filled_qty=0 이어도 kt00007·fill_state 누적 체결을 row에 합칩니다.
+        """
+        out = dict(row or {})
+        oid = str(order_no or "").strip()
+        try:
+            cur = int(out.get("filled_qty") or 0)
+        except (TypeError, ValueError):
+            cur = 0
+        best = cur
+        try:
+            dm = getattr(self.app, "data_manager", None)
+            if dm is not None:
+                best = max(best, int(dm.sum_order_history_filled_qty(oid) or 0))
+        except Exception:
+            pass
+        try:
+            fcs = self._fcs()
+            if fcs is not None:
+                best = max(
+                    best,
+                    int(fcs.get_exchange_filled_qty(oid) or 0),
+                    int(fcs.get_applied_qty(oid) or 0),
+                )
+        except Exception:
+            pass
+        if best <= cur:
+            return out
+        out["filled_qty"] = int(best)
+        try:
+            oq = int(out.get("qty") or 0)
+        except (TypeError, ValueError):
+            oq = 0
+        if oq <= 0:
+            oq = max(0, int(expect_qty or 0))
+        res_u = str(out.get("result") or "").strip().upper()
+        if res_u in ("CANCELLED", "CANCELED", "REJECTED", "FAILED"):
+            # 종료 상태는 유지하되 filled_qty 만 보강(판정·증분 반영용)
+            pass
+        elif oq > 0 and best >= oq:
+            out["result"] = "FILLED"
+        else:
+            out["result"] = "PARTIAL"
+        return out
+
     def _apply_confirmed_exchange_fill(
         self,
         *,
@@ -235,6 +287,12 @@ class FillReconciliationService:
         if not isinstance(row, dict):
             return "pending"
 
+        # 접수 행(SUCCESS·filled_qty=0)만 있어도 kt00007 부분체결 합산을 row에 얹는다.
+        try:
+            row = self._enrich_row_with_cumulative_fills(oid, row, expect_qty=int(qty))
+        except Exception:
+            pass
+
         try:
             st = getattr(self.app, "settings", None) or {}
             if bool(st.get("enable_fill_reconcile_row_debug", False)):
@@ -262,6 +320,34 @@ class FillReconciliationService:
 
         decision = self._exchange_fill_row_decision(row)
         if decision is False:
+            # CANCELLED 라도 누적 체결이 있으면 부분체결 반영 후 terminal
+            try:
+                fq_term = int((row or {}).get("filled_qty") or 0)
+            except (TypeError, ValueError):
+                fq_term = 0
+            if fq_term > 0:
+                try:
+                    self._apply_confirmed_exchange_fill(
+                        code=code,
+                        order_no=order_no,
+                        side=side,
+                        qty=int(qty),
+                        fill_price=float(fill_price),
+                        name=name,
+                        reason=reason,
+                        row=row,
+                    )
+                except Exception:
+                    pass
+                try:
+                    res = str(row.get("result", "") or "").strip().upper()
+                    self.log(
+                        f"ℹ️ [체결 동기화] 주문번호 {oid} — "
+                        f"종료({res})·부분체결 {fq_term}주 반영 후 폴링 중단"
+                    )
+                except Exception:
+                    pass
+                return "terminal"
             try:
                 res = str(row.get("result", "") or "").strip().upper()
                 self.log(

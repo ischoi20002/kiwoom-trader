@@ -1679,12 +1679,23 @@ class VirtualTab:
         # UI에서는 두 의미를 구분해 표기합니다.
         if su == "FILLED":
             return "성공"
+        if su == "PARTIAL":
+            try:
+                fq = int(f_qty or 0)
+            except (TypeError, ValueError):
+                fq = 0
+            return f"부분체결({fq})" if fq > 0 else "부분체결"
         if su in ("CANCELLED", "CANCELED", "CANCEL", "CNCL"):
+            try:
+                if int(f_qty or 0) > 0:
+                    return f"취소(부분체결 {int(f_qty)}주)"
+            except (TypeError, ValueError):
+                pass
             return "취소(미체결)"
         if su == "SUCCESS":
             try:
                 if int(f_qty or 0) > 0:
-                    return "성공"
+                    return f"부분체결({int(f_qty)})"
             except (TypeError, ValueError):
                 pass
             return "접수"

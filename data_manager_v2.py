@@ -2417,6 +2417,29 @@ class DataManagerV2:
 
         with self._lock, self._get_state_connection() as conn:
             try:
+                # 체결수량은 절대 감소시키지 않음(취소·상태 덮어쓰기 시 부분체결 보존)
+                try:
+                    fq_in = int(filled_qty or 0)
+                except (TypeError, ValueError):
+                    fq_in = 0
+                try:
+                    prev = conn.execute(
+                        """
+                        SELECT COALESCE(MAX(filled_qty), 0), COALESCE(MAX(filled_price), 0)
+                        FROM order_history
+                        WHERE order_no = ?
+                          AND timestamp >= ?
+                        """,
+                        (oid, today_start),
+                    ).fetchone()
+                    if prev:
+                        fq_in = max(fq_in, int(prev[0] or 0))
+                        if int(filled_price or 0) <= 0 and int(prev[1] or 0) > 0:
+                            filled_price = int(prev[1] or 0)
+                except Exception:
+                    pass
+                params[1] = filled_price
+                params[2] = fq_in
                 if oid.upper() == "MOCK_ID":
                     sql = f"""
                         UPDATE order_history

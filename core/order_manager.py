@@ -1886,14 +1886,15 @@ class OrderManager:
                 self.app.log(
                     f"✅ [{mode_str}] 주문 취소 접수: 원주문 {oid} / 응답 ord_no={out_ord or '-'}"
                 )
-                # 주문 로그 상태를 '접수'로 남기지 않도록 취소 접수 시 즉시 CANCELLED 반영.
-                # 부분체결 이력이 있을 수 있어 기존 filled_price/filled_qty는 최대한 보존합니다.
+                # 주문 로그: 부분체결 수량을 절대 0으로 덮지 않음.
+                # (예전엔 CANCELLED+filled_qty=0 으로 덮어 UI·동기화가 체결을 놓침)
                 try:
                     dm = getattr(self.app, "data_manager", None)
                     if dm is not None and hasattr(dm, "update_order_status"):
                         keep_code = code
                         keep_filled_price = 0
                         keep_filled_qty = 0
+                        keep_order_qty = 0
                         try:
                             row = dm.get_order_history_row_by_order_no(oid)
                         except Exception:
@@ -1911,13 +1912,81 @@ class OrderManager:
                                 keep_filled_qty = int(row.get("filled_qty") or 0)
                             except (TypeError, ValueError):
                                 keep_filled_qty = 0
+                            try:
+                                keep_order_qty = int(row.get("qty") or 0)
+                            except (TypeError, ValueError):
+                                keep_order_qty = 0
+                        # kt00007 다건·fill_state 누적과 MAX
+                        try:
+                            sum_fq = int(dm.sum_order_history_filled_qty(oid) or 0)
+                            keep_filled_qty = max(keep_filled_qty, sum_fq)
+                        except Exception:
+                            pass
+                        try:
+                            fcs = getattr(self.app, "fill_confirmation_service", None)
+                            if fcs is not None:
+                                keep_filled_qty = max(
+                                    keep_filled_qty,
+                                    int(fcs.get_exchange_filled_qty(oid) or 0),
+                                    int(fcs.get_applied_qty(oid) or 0),
+                                )
+                                if keep_order_qty <= 0:
+                                    keep_order_qty = int(fcs.get_order_qty(oid) or 0)
+                        except Exception:
+                            pass
+                        if keep_filled_qty > 0 and keep_order_qty > 0:
+                            if keep_filled_qty >= keep_order_qty:
+                                new_st = "FILLED"
+                            else:
+                                new_st = "PARTIAL"
+                        elif keep_filled_qty > 0:
+                            new_st = "PARTIAL"
+                        else:
+                            new_st = "CANCELLED"
                         dm.update_order_status(
                             keep_code,
                             oid,
-                            "CANCELLED",
+                            new_st,
                             filled_price=keep_filled_price,
                             filled_qty=keep_filled_qty,
                         )
+                        # 부분체결분만 증분 반영(잔량 취소를 전량체결로 오인하지 않음)
+                        if keep_filled_qty > 0:
+                            try:
+                                fcs2 = getattr(
+                                    self.app, "fill_confirmation_service", None
+                                )
+                                if fcs2 is not None:
+                                    side_l = "buy"
+                                    nm = ""
+                                    rs = ""
+                                    if isinstance(row, dict):
+                                        side_l = str(
+                                            row.get("side") or "buy"
+                                        ).strip().lower()
+                                        nm = str(row.get("name") or "")
+                                        rs = str(row.get("reason") or "")
+                                    if side_l not in ("buy", "sell"):
+                                        side_l = "buy"
+                                    fcs2.ingest_rest_confirmed(
+                                        code=keep_code,
+                                        order_no=oid,
+                                        side=side_l,
+                                        qty=int(keep_order_qty or keep_filled_qty),
+                                        fill_price=float(keep_filled_price or 0),
+                                        name=nm,
+                                        reason=rs,
+                                        row={
+                                            "filled_qty": int(keep_filled_qty),
+                                            "filled_price": int(keep_filled_price),
+                                            "qty": int(
+                                                keep_order_qty or keep_filled_qty
+                                            ),
+                                            "result": str(new_st),
+                                        },
+                                    )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 try:
