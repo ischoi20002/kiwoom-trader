@@ -384,11 +384,17 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
-        # 신호·주문 우선: 틱말분 평가 창 동안 공식 M1/15분 REST 양보
+        # 신호·주문 우선: 틱말분 평가 창 동안 공식 M1/15분 REST·정렬 양보
+        # (종목 수에 비례해 quiet를 늘려 평가가 끝날 때까지 공식 반영이 GIL을 뺏지 않게)
         try:
-            from core.closed_15m_fast_path import mark_rt15_official_quiet
+            from core.closed_15m_fast_path import (
+                closed_15m_defer_official_sec,
+                mark_rt15_official_quiet,
+            )
 
-            mark_rt15_official_quiet(self._app)
+            base = float(closed_15m_defer_official_sec(self._app))
+            quiet = max(base, min(45.0, 6.0 + 1.2 * float(len(codes))))
+            mark_rt15_official_quiet(self._app, quiet)
         except Exception:
             pass
 

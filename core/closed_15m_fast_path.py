@@ -256,7 +256,7 @@ class Closed15mEvalPool:
             return str(bar_ts or "")
 
     def _eval_priority(self, code: Any) -> int:
-        """낮을수록 먼저. 0=보유, 1=고합치도, 2=나머지."""
+        """낮을수록 먼저. 보유=0, 그 외는 (1-합치도)*1000."""
         try:
             from core.rt_closed_15m_official_replace import (
                 official_replace_priority_score,
@@ -267,9 +267,26 @@ class Closed15mEvalPool:
             sc = 0.0
         if sc >= 0.999:
             return 0
-        if sc >= 0.5:
-            return 1
-        return 2
+        sc = max(0.0, min(1.0, sc))
+        # 고합치도(0.9) → 100, 저합치도(0.1) → 900 — 매수 임박을 앞으로
+        return max(1, int(round((1.0 - sc) * 1000.0)))
+
+    def pending_approx(self) -> int:
+        """평가 대기·실행 중 대략 건수(공식 정렬 양보 판단용)."""
+        try:
+            with self._lock:
+                inflight = len(self._inflight)
+            try:
+                qn = int(self._pq.qsize())
+            except Exception:
+                qn = 0
+            try:
+                hn = int(self._held_pq.qsize())
+            except Exception:
+                hn = 0
+            return max(0, inflight + qn + hn)
+        except Exception:
+            return 0
 
     def _ensure_workers(self) -> None:
         with self._lock:
@@ -344,11 +361,16 @@ class Closed15mEvalPool:
     def submit_eval(self, code: Any, bar_ts: Any) -> None:
         """종목별 확정 평가를 풀에 제출합니다(보유 전용 워커, 슬롯 중복 생략)."""
         try:
-            # 평가·주문 동안 공식 M1/15분 REST 양보
+            # 평가 폭주 동안 공식 정렬·지표 재계산이 GIL을 뺏지 않게 quiet 연장
             try:
-                mark_rt15_official_quiet(self._app)
+                pending_n = max(1, int(self.pending_approx()) + 1)
+                quiet = min(45.0, 8.0 + float(pending_n) * 1.2)
+                mark_rt15_official_quiet(self._app, quiet)
             except Exception:
-                pass
+                try:
+                    mark_rt15_official_quiet(self._app)
+                except Exception:
+                    pass
             try:
                 from utils.normalization import canonical_stock_code
 
@@ -422,7 +444,7 @@ _official_recalc_thread: Optional[threading.Thread] = None
 
 
 def _official_recalc_loop() -> None:
-    """공식 15분 교체 후 지표 재계산 — 1워커, 교체 경로를 막지 않음."""
+    """공식 15분 교체 후 지표 재계산 — 1워커, 조용/평가 구간에는 양보."""
     while True:
         try:
             item = _official_recalc_q.get()
@@ -432,6 +454,22 @@ def _official_recalc_loop() -> None:
             continue
         app, code = item
         try:
+            # 신호·주문 우선: quiet 동안은 재계산을 미룸
+            for _ in range(180):
+                try:
+                    rem = float(rt15_official_quiet_remaining_sec(app))
+                except Exception:
+                    rem = 0.0
+                busy = 0
+                try:
+                    pool = getattr(app, "_closed_15m_eval_pool", None)
+                    if pool is not None and hasattr(pool, "pending_approx"):
+                        busy = int(pool.pending_approx())
+                except Exception:
+                    busy = 0
+                if rem <= 0.05 and busy <= 0:
+                    break
+                time.sleep(max(0.2, min(rem if rem > 0 else 0.5, 2.0)))
             se = getattr(app, "strategy_engine", None)
             bd = getattr(app, "bars_data", None)
             st = getattr(app, "settings", None) or {}
@@ -457,6 +495,18 @@ def enqueue_official_indicator_recalc(app: Any, code: Any) -> None:
     """
     global _official_recalc_thread
     try:
+        # M1 평가 + 공식 정렬 모드: 평가는 평가 경로에서 다시 계산하므로
+        # 여기서 돌리면 GIL만 잡아 다음 슬롯 주문을 늦춘다.
+        try:
+            from core.rt_closed_15m_official_replace import (
+                official_replace_alignment_mode,
+            )
+
+            st = getattr(app, "settings", None) or {}
+            if official_replace_alignment_mode(st):
+                return
+        except Exception:
+            pass
         nk = str(code or "").strip()
         if not nk:
             return
@@ -480,3 +530,33 @@ def enqueue_official_indicator_recalc(app: Any, code: Any) -> None:
                 _official_recalc_pending.discard(nk)
     except Exception:
         pass
+
+
+def wait_out_signal_eval_window(app: Any, *, max_wait_sec: float = 45.0) -> None:
+    """
+    공식 15분 메모리 반영 직전: quiet·평가 큐가 비울 때까지 양보.
+
+    이전 슬롯 정렬이 다음 슬롯 틱말분 평가와 GIL을 다투지 않게 한다.
+    """
+    try:
+        deadline = time.monotonic() + max(1.0, min(float(max_wait_sec), 90.0))
+    except Exception:
+        deadline = time.monotonic() + 45.0
+    while time.monotonic() < deadline:
+        try:
+            rem = float(rt15_official_quiet_remaining_sec(app))
+        except Exception:
+            rem = 0.0
+        busy = 0
+        try:
+            pool = getattr(app, "_closed_15m_eval_pool", None)
+            if pool is not None and hasattr(pool, "pending_approx"):
+                busy = int(pool.pending_approx())
+        except Exception:
+            busy = 0
+        if rem <= 0.05 and busy <= 0:
+            return
+        try:
+            time.sleep(max(0.2, min(rem if rem > 0 else 0.4, 1.5)))
+        except Exception:
+            return

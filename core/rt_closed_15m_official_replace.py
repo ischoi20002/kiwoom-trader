@@ -1709,8 +1709,11 @@ class RtClosed15mOfficialReplaceScheduler:
                             pass
 
                 try:
+                    from core.closed_15m_fast_path import wait_out_signal_eval_window
                     from core.rt_ui_responsiveness import run_official_15m_memory_apply
 
+                    # 틱말분 평가·주문 중이면 메모리 반영을 양보
+                    wait_out_signal_eval_window(app, max_wait_sec=45.0)
                     run_official_15m_memory_apply(_apply_main)
                 except Exception:
                     try:

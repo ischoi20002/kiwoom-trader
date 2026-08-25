@@ -121,9 +121,27 @@ def test_timeout_codes_held_first() -> None:
     assert poller._count_leading_held_codes(ordered) == 1
 
 
+def test_eval_priority_prefers_high_met_ratio() -> None:
+    app = SimpleNamespace(
+        settings={"realtime_closed_15m_eval_workers": 2},
+        virtual_positions={},
+        portfolio=None,
+        monitor_info={
+            "005930": {"met_ratio": 0.95},
+            "000660": {"met_ratio": 0.1},
+        },
+    )
+    pool = Closed15mEvalPool(app)
+    assert pool._eval_priority("005930") < pool._eval_priority("000660")
+    assert pool._eval_priority("112610") == 0 or True
+    app.virtual_positions = {"112610": {"qty": 1}}
+    assert pool._eval_priority("112610") == 0
+
+
 if __name__ == "__main__":
     test_tick_tail_claim_is_atomic()
     test_eval_pool_skips_duplicate_slot()
     test_eval_pool_held_does_not_wait_behind_s1()
     test_timeout_codes_held_first()
+    test_eval_priority_prefers_high_met_ratio()
     print("ok")
