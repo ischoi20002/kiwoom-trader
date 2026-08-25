@@ -244,6 +244,29 @@ def test_bad_json_falls_back() -> None:
     _with_special(mapping, _run)
 
 
+def test_last_completed_15m_slot_mid_restart() -> None:
+    """장중 재시작(예: 13:48) → 직전 완성 슬롯(13:30)을 잡는다."""
+    from datetime import datetime
+
+    from utils.krx_bars import (
+        last_completed_krx_15m_slot_end,
+        prev_krx_15m_slot_end,
+    )
+
+    assert prev_krx_15m_slot_end(pd.Timestamp("2026-03-10 13:45:00")) == pd.Timestamp(
+        "2026-03-10 13:30:00"
+    )
+    assert last_completed_krx_15m_slot_end(
+        datetime(2026, 3, 10, 13, 48, 0)
+    ) == pd.Timestamp("2026-03-10 13:30:00")
+    # 슬롯 완성 직후(13:45:01)에도 13:30
+    assert last_completed_krx_15m_slot_end(
+        datetime(2026, 3, 10, 13, 45, 1)
+    ) == pd.Timestamp("2026-03-10 13:30:00")
+    # 당일 첫 슬롯 형성 중(09:05) → None (전일 종가 평가 금지)
+    assert last_completed_krx_15m_slot_end(datetime(2026, 3, 10, 9, 5, 0)) is None
+
+
 if __name__ == "__main__":
     test_default_session_hours()
     test_auto_new_year_without_day_entry()
@@ -254,4 +277,5 @@ if __name__ == "__main__":
     test_csat_15m_labels()
     test_is_krx_regular_session_uses_hours()
     test_bad_json_falls_back()
+    test_last_completed_15m_slot_mid_restart()
     print("OK: all krx session hours tests passed")

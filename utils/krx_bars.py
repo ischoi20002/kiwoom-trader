@@ -54,6 +54,8 @@ __all__ = [
     "is_krx_15m_slot_end",
     "krx_stream_slot_end_datetime",
     "next_krx_15m_slot_end",
+    "prev_krx_15m_slot_end",
+    "last_completed_krx_15m_slot_end",
     "seconds_until_next_krx_15m_boundary",
 ]
 
@@ -339,6 +341,70 @@ def next_krx_15m_slot_end(
         if up > t:
             return up
         return next_krx_15m_slot_end(up)
+    except Exception:
+        return None
+
+
+def prev_krx_15m_slot_end(
+    label_ts: Union[pd.Timestamp, datetime, str],
+) -> Optional[pd.Timestamp]:
+    """
+    ``label_ts``(15분 좌측 라벨) **직전** KRX 15분봉 라벨.
+
+    당일 첫 슬롯이면 ``None`` (전일 종가 슬롯으로 넘기지 않음).
+    """
+    try:
+        t = pd.Timestamp(label_ts).floor("min")
+        day0 = t.normalize()
+        if not _is_krx_session_day(day0):
+            return None
+        first_end = _krx_day_first_slot_end(day0)
+        if t <= first_end:
+            return None
+        if is_krx_last_15m_slot(t):
+            h = get_session_hours(day0.date())
+            return _pd_at(day0, h.pre_auction_slot)
+        prev = t - pd.Timedelta(minutes=15)
+        if is_krx_15m_slot_end(prev) and prev.normalize() == day0:
+            return prev.floor("min")
+        return None
+    except Exception:
+        return None
+
+
+def last_completed_krx_15m_slot_end(
+    now: Optional[Union[datetime, pd.Timestamp]] = None,
+) -> Optional[pd.Timestamp]:
+    """
+    벽시계 기준 **이미 완성된** 가장 최근 당일 15분봉 라벨.
+
+    장중 재시작 시 형성 중 슬롯만 보면 직전 완성봉 평가가 빠지므로
+    catch-up 평가 대상 산정에 사용합니다.
+    """
+    try:
+        raw = now if now is not None else datetime.now()
+        t = pd.Timestamp(raw)
+        day0 = t.normalize()
+        if not _is_krx_session_day(day0):
+            return None
+        forming = pd.Timestamp(
+            krx_stream_slot_end_datetime(
+                t.to_pydatetime() if hasattr(t, "to_pydatetime") else t
+            )
+        ).floor("min")
+        complete_f = krx_15m_slot_complete_ts(forming)
+        if t >= pd.Timestamp(complete_f):
+            slot = forming
+        else:
+            slot = prev_krx_15m_slot_end(forming)
+        if slot is None:
+            return None
+        slot = pd.Timestamp(slot).floor("min")
+        if slot.normalize() < day0:
+            return None
+        if t < pd.Timestamp(krx_15m_slot_complete_ts(slot)):
+            return None
+        return slot
     except Exception:
         return None
 

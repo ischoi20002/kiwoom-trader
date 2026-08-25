@@ -1163,61 +1163,155 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
+    def _bars_data_has_slot(self, nk: str, slot_ts: pd.Timestamp) -> bool:
+        """워밍업 bars_data 에 해당 15분 슬롯 행이 있는지."""
+        try:
+            from utils.bars_data_keys import resolve_bars_data_frame
+
+            bd = getattr(self._app, "bars_data", None)
+            if not isinstance(bd, dict):
+                return False
+            lk = getattr(self._app, "_bars_data_lock", None)
+
+            def _has() -> bool:
+                _k, df = resolve_bars_data_frame(bd, nk, migrate_alias=True)
+                if df is None or getattr(df, "empty", True):
+                    return False
+                want = pd.Timestamp(slot_ts).floor("min")
+                try:
+                    if want in df.index:
+                        return True
+                except Exception:
+                    pass
+                try:
+                    for ix in df.index:
+                        if pd.Timestamp(ix).floor("min") == want:
+                            return True
+                except Exception:
+                    pass
+                return False
+
+            if lk is not None:
+                with lk:
+                    return bool(_has())
+            return bool(_has())
+        except Exception:
+            return False
+
     def catchup_eval_inprogress_slot_after_stream_ready(self) -> None:
         """
-        감시 시작 시 진행 중이던 슬롯이 이미 닫혔고 말분 틱이 불완전하면
-        공식 1분 합성으로 평가를 한 번 시도합니다.
+        감시 시작(워밍업) 직후: **당일 직전 완성 15분 슬롯**을 한 번 평가합니다.
 
-        공식 말분이 아직 없으면 compose 가 None → 이후 last 라운드가 이어서 평가.
+        예전에는 ``rt_monitor_inprogress_slot``(형성 중 봉)만 봐서,
+        예: 13:48 재시작 시 13:45봉은 미완성 → 조기 return 하고
+        이미 끝난 13:30봉 평가가 영구 누락됐습니다.
+        워밍업으로 채워 둔 15분 OHLCV가 있으면 M1 합성 실패여도 평가합니다.
         """
         try:
             if self._stop.is_set() or not self._monitoring():
                 return
-            slot = getattr(self._app, "rt_monitor_inprogress_slot", None)
-            if slot is None:
-                return
-            slot_ts = pd.Timestamp(slot).floor("min")
-            from utils.krx_bars import (
-                is_krx_last_15m_slot,
-                krx_15m_slot_complete_ts,
-                m1_closing_auction_ts_for_15m_end,
-                m1_continuous_end_exclusive_for_15m_end,
-            )
+            from utils.krx_bars import last_completed_krx_15m_slot_end
 
-            complete = krx_15m_slot_complete_ts(slot_ts)
-            if pd.Timestamp(datetime.now()) < pd.Timestamp(complete):
+            slot_ts = last_completed_krx_15m_slot_end(datetime.now())
+            if slot_ts is None:
                 return
-            if is_krx_last_15m_slot(slot_ts):
-                last_open = m1_closing_auction_ts_for_15m_end(slot_ts)
-            else:
-                last_open = m1_continuous_end_exclusive_for_15m_end(slot_ts) - pd.Timedelta(
-                    minutes=1
+            slot_ts = pd.Timestamp(slot_ts).floor("min")
+
+            try:
+                st = self._settings()
+                if not self._settings_bool(
+                    st, "realtime_s1_eval_on_local_15m_close", True
+                ):
+                    return
+                from core.rt_closed_15m_official_replace import (
+                    closed_15m_eval_after_official_enabled,
                 )
-            if last_open is None:
+
+                if closed_15m_eval_after_official_enabled(st):
+                    return
+            except Exception:
+                pass
+
+            codes = self._active_codes()
+            if not codes:
                 return
-            last_open = pd.Timestamp(last_open).floor("min")
-            from core.realtime_official_bars_sync import (
-                last_minute_ticks_complete_for_eval,
-            )
+            # 보유·합치도 높은 종목 우선
+            try:
+                from core.rt_closed_15m_official_replace import (
+                    official_replace_priority_score,
+                )
+
+                codes = sorted(
+                    codes,
+                    key=lambda c: (
+                        -float(official_replace_priority_score(self._app, c)),
+                        str(c),
+                    ),
+                )
+            except Exception:
+                pass
 
             n_try = 0
-            for nk in self._active_codes():
+            n_skip = 0
+            for raw in codes:
                 try:
+                    nk = canonical_stock_code(str(raw).strip())
+                    if not nk:
+                        continue
                     if self._is_tick_tail_eval_done(nk, slot_ts):
+                        n_skip += 1
                         continue
-                    if last_minute_ticks_complete_for_eval(
-                        self._app, nk, last_open
-                    ):
+                    if not self._claim_tick_tail_eval(nk, slot_ts):
+                        n_skip += 1
                         continue
-                    self._maybe_eval_closed_15m_from_m1(nk, last_open)
+                    try:
+                        from core.realtime_official_bars_sync import (
+                            apply_composed_closed_15m_from_m1,
+                            maybe_roll_15m_slot_on_clock,
+                        )
+
+                        maybe_roll_15m_slot_on_clock(self._app, nk)
+                        try:
+                            apply_composed_closed_15m_from_m1(
+                                self._app, nk, slot_ts
+                            )
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    # M1 스토어가 비어 compose 실패해도 워밍업 15분봉으로 평가
+                    if not self._bars_data_has_slot(nk, slot_ts):
+                        try:
+                            self._release_tick_tail_eval(nk, slot_ts)
+                        except Exception:
+                            pass
+                        continue
+                    pool = getattr(self._app, "_closed_15m_eval_pool", None)
+                    if pool is None:
+                        try:
+                            self._release_tick_tail_eval(nk, slot_ts)
+                        except Exception:
+                            pass
+                        continue
+                    pool.submit_eval(nk, slot_ts)
                     n_try += 1
+                    try:
+                        self._note_closed15_eval_log(
+                            slot_ts,
+                            ok=True,
+                            reason="restart_catchup",
+                            label="재시작 완성15",
+                        )
+                    except Exception:
+                        pass
                 except Exception:
                     continue
-            if n_try > 0:
+            if n_try > 0 or n_skip > 0:
                 try:
                     self._emit(
-                        f"ℹ️ [M1Poll] 재시작 슬롯 공식1분 평가 시도 "
-                        f"{slot_ts.strftime('%H:%M')} n={n_try}"
+                        f"ℹ️ [M1Poll] 재시작 완성슬롯 평가 "
+                        f"{slot_ts.strftime('%H:%M')} "
+                        f"submit={n_try} skip={n_skip}"
                     )
                 except Exception:
                     pass
