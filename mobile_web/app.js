@@ -181,6 +181,8 @@
     list.innerHTML = rows
       .map(function (h) {
         var pct = clsPnL(h.unrealized_pct);
+        var avg = Number(h.avg_price || 0);
+        var avgTxt = avg > 0 ? "평단 " + fmtMoney(avg) : "";
         return (
           '<div class="row"><div><div class="title">' +
           escapeHtml(h.name || h.code) +
@@ -190,11 +192,14 @@
           (h.qty || 0) +
           "주 · S" +
           (h.stage || 1) +
-          '</div></div><div class="right ' +
+          (avgTxt ? " · " + avgTxt : "") +
+          '</div></div><div class="right"><div>' +
+          fmtMoney(h.last_price) +
+          '</div><div class="sub ' +
           pct +
-          '"><div>' +
+          '">' +
           fmtPct(h.unrealized_pct) +
-          "</div><div class=\"sub\">" +
+          " · " +
           fmtMoney(h.unrealized_amt) +
           "</div></div></div>"
         );

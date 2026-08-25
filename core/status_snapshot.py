@@ -61,6 +61,25 @@ def _monitor_last_price(info: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _position_last_price(pos: Dict[str, Any], info: Dict[str, Any]) -> float:
+    """
+    보유 종목 현재가.
+
+    틱/모니터 시세 우선, 없으면 ka10085 스냅샷(``ka_cur_prc``),
+    그래도 없으면 평단(표시용 폴백).
+    """
+    lp = _monitor_last_price(info if isinstance(info, dict) else {})
+    if lp > 0:
+        return lp
+    if isinstance(pos, dict):
+        for k in ("ka_cur_prc", "cur_prc", "last_price", "price"):
+            p = _safe_float(pos.get(k), 0.0)
+            if p > 0:
+                return p
+        return _safe_float(pos.get("avg_price"), 0.0)
+    return 0.0
+
+
 def _copy_positions(portfolio: Any) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     try:
@@ -271,9 +290,7 @@ def build_portfolio(app: Any) -> Dict[str, Any]:
     total_invested = 0.0
     total_unreal = 0.0
     for code, pos in positions.items():
-        lp = _monitor_last_price(mi.get(code, {}))
-        if lp <= 0:
-            lp = _safe_float(pos.get("avg_price"), 0.0)
+        lp = _position_last_price(pos, mi.get(code, {}))
         m = _holding_metrics(pos, lp, settings)
         total_invested += m["invested"]
         total_unreal += m["unrealized_amt"]
@@ -335,9 +352,7 @@ def build_holdings(app: Any) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     for code, pos in positions.items():
         info = mi.get(code, {})
-        lp = _monitor_last_price(info)
-        if lp <= 0:
-            lp = _safe_float(pos.get("avg_price"), 0.0)
+        lp = _position_last_price(pos, info)
         m = _holding_metrics(pos, lp, settings)
         rows.append(
             {
