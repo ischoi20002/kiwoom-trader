@@ -2435,7 +2435,8 @@ def select_monitoring_targets(
                     else:
                         end_dt = datetime.now()
                     end_s = end_dt.strftime('%Y-%m-%d')
-                    start_s = (end_dt - timedelta(days=300)).strftime('%Y-%m-%d')
+                    _lb_db = _selection_daily_lookback_calendar_days(settings)
+                    start_s = (end_dt - timedelta(days=_lb_db)).strftime('%Y-%m-%d')
                     df = data_manager.get_daily_bars(code, start_s, end_s)
                 except Exception as _dm_e:
                     try:
@@ -2463,10 +2464,13 @@ def select_monitoring_targets(
                 except Exception:
                     end_anchor = datetime.now()
                 max_d = end_anchor.strftime('%Y-%m-%d')
+                _lb_live = _selection_daily_lookback_calendar_days(settings)
                 try:
-                    start_s = (end_anchor - timedelta(days=250)).strftime('%Y-%m-%d')
+                    start_s = (end_anchor - timedelta(days=_lb_live)).strftime('%Y-%m-%d')
                 except Exception:
-                    start_s = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
+                    start_s = (
+                        datetime.now() - timedelta(days=_lb_live)
+                    ).strftime('%Y-%m-%d')
                 if _kiwoom_tok:
                     try:
                         from core.kiwoom_daily_bars import fetch_kiwoom_daily_ohlcv_dataframe
@@ -2512,17 +2516,8 @@ def select_monitoring_targets(
                     # 과거에는 ``KRX:{code}`` 로 KRX 오픈API 일봉을 썼으나, 포털이 400+본문 LOGOUT 을
                     # 반환하는 경우가 많아(라이브러리 메시지는 'Period is up to 2 years' 로 오인 유발)
                     # **6자리 코드 + (시작, 종료)** 직접 조회로 통일한다.
-                    _raw_lb = settings.get(
-                        "fdr_krx_lookback_days_try", (280, 200, 150, 120)
-                    )
-                    lookbacks: Tuple[int, ...] = ()
-                    if isinstance(_raw_lb, (list, tuple)) and len(_raw_lb) > 0:
-                        try:
-                            lookbacks = tuple(int(x) for x in _raw_lb)
-                        except (TypeError, ValueError):
-                            lookbacks = ()
-                    if not lookbacks:
-                        lookbacks = (280, 200, 150, 120)
+                    # BT 배치와 동일: as-of 평가일 기준 고정 lookback(기본 280일).
+                    lookbacks: Tuple[int, ...] = (_lb_live,)
                     df = None
                     last_err: Optional[BaseException] = None
                     for lb in lookbacks:
@@ -3500,9 +3495,49 @@ def _score_dynamic_universe_daily_ohlcv(
     df_all["Score"] = df_all[["Score_A", "Score_B"]].max(axis=1)
 
 
+def _selection_daily_lookback_calendar_days(settings: Optional[dict] = None) -> int:
+    """
+    선정용 일봉 lookback (달력일).
+
+    실시간 FDR·동적 BT 배치가 동일 키를 쓴다.
+    평가일 D 기준 ``[D-N, D]`` 창으로 지표를 다시 계산한다(슬라이딩).
+    """
+    try:
+        lookback = int(
+            (settings or {}).get("bt_universe_indicator_lookback_days", 280) or 280
+        )
+    except Exception:
+        lookback = 280
+    try:
+        return max(120, min(int(lookback), 800))
+    except Exception:
+        return 280
+
+
+def _universe_batch_indicator_lookback_days(settings: Optional[dict] = None) -> int:
+    """하위 호환 별칭 — ``_selection_daily_lookback_calendar_days`` 와 동일."""
+    return _selection_daily_lookback_calendar_days(settings)
+
+
+def _universe_batch_indicator_left_clip(
+    end_date: str,
+    settings: Optional[dict] = None,
+) -> str:
+    """하위 호환: 평가일(end) 기준 lookback 시작일."""
+    try:
+        end_dt = pd.to_datetime(end_date)
+    except Exception:
+        end_dt = pd.Timestamp(end_date)
+    lookback = _selection_daily_lookback_calendar_days(settings)
+    return (end_dt - timedelta(days=lookback)).strftime("%Y-%m-%d")
+
+
 def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logger_callback):
     """
-    [v17.7] True Batching: 전 기간 데이터를 한 번에 조회하고 Pandas 벡터 연산으로 스크리닝 (성능 10x+ 향상)
+    [v17.7] True Batching: 전 기간 데이터를 한 번에 조회하고 Pandas 벡터 연산으로 스크리닝.
+
+    일봉 지표는 평가일 D마다 ``[D-N, D]`` 슬라이딩 창에서 다시 계산한다
+    (N = ``bt_universe_indicator_lookback_days``, 기본 280 — 실시간 선정과 동일).
     """
     # [v18.8] Date Normalization (YYYY-MM-DD)
     start_date = pd.to_datetime(start_date).strftime('%Y-%m-%d')
@@ -3658,13 +3693,22 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         logger_callback("  [Error] 유니버스 종목 확보 실패.")
         return {}
 
-    # 3. 전체 기간 일봉 데이터 한 번에 로드 (True Batching 핵심)
+    # 3. 일봉 로드: 첫 평가일(start) 기준 lookback ~ end
+    #    지표는 날짜마다 [D-N, D] 창에서 다시 계산(실시간 FDR과 동일 as-of)
     all_codes = list(union_tickers)
-    # 120일 이전 데이터부터 가져와야 지표 계산이 정확함 (MA60 등)
-    fetch_start_dt = pd.to_datetime(start_date) - timedelta(days=120)
-    fetch_start = fetch_start_dt.strftime('%Y-%m-%d')
-    
+    lookback_n = _selection_daily_lookback_calendar_days(settings)
+    fetch_start = (
+        pd.to_datetime(start_date) - timedelta(days=lookback_n)
+    ).strftime("%Y-%m-%d")
+
     logger_callback(f"  [Batch] {len(all_codes)}개 종목의 전체 일봉 데이터 로드 중...")
+    try:
+        logger_callback(
+            f"  [Batch] 슬라이딩 lookback={lookback_n}일 "
+            f"(fetch={fetch_start} ~ {end_date}, 평가일마다 D-{lookback_n}~D)"
+        )
+    except Exception:
+        pass
     placeholders = ",".join(["?"] * len(all_codes))
     query = f"""
         SELECT code, datetime as time, open, high, low, close, volume 
@@ -3683,20 +3727,15 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
     # [Bugfix] Convert time to datetime to use .dt accessor later
     df_all['time'] = pd.to_datetime(df_all['time'])
-
-    logger_callback(f"  [Batch] {len(df_all)}개 데이터 포인트에 대해 고속 벡터 연산 중...")
-    _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
-    # 일자별 당기 유니버스 기준으로 RS/Valid 재동기화 (BT 기간 불변)
     try:
-        _resync_batch_valid_to_period_universe(df_all, get_period_universe, settings)
-    except Exception as e:
-        try:
-            logging.warning("period-univ Valid 재동기화 생략: %s", e, exc_info=True)
-        except Exception:
-            pass
+        df_all["code"] = df_all["code"].astype(str).str.zfill(6)
+    except Exception:
+        pass
 
-    # 6. 스케줄 생성 (Track A / Track B 분리)
-    logger_callback("  [Batch] 날짜별 상위 종목 추출 중 (Track A/B 분리)...")
+    # 6. 스케줄 생성 — 평가일마다 [D-N, D] 창으로 지표·Valid 재판정
+    logger_callback(
+        "  [Batch] 날짜별 슬라이딩 lookback 지표·상위 종목 추출 중 (Track A/B)..."
+    )
     schedule_a = {}
     schedule_b = {}
     schedule = {}  # 기존 호환용 (합집합)
@@ -3704,14 +3743,26 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     max_s_b = int(settings.get('max_slots_b', 10))
     floor_sa = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
     floor_sb = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
-    df_sim = df_all[df_all['time'] >= pd.to_datetime(start_date)].copy()
-    
-    trading_days_list = df_sim['time'].dt.strftime('%Y-%m-%d').unique().tolist()
 
-    # 일별 교차-section 수익률 표준편차(%) — 당기 유니버스만 (BT 기간 불변)
+    # 스케줄 일자 = prepare 구간의 거래일 (DB 캘린더)
+    try:
+        trading_days_list = [
+            pd.to_datetime(d).strftime("%Y-%m-%d") for d in (trading_days or [])
+        ]
+    except Exception:
+        trading_days_list = sorted(
+            df_all.loc[
+                df_all["time"] >= pd.to_datetime(start_date), "time"
+            ]
+            .dt.strftime("%Y-%m-%d")
+            .unique()
+            .tolist()
+        )
+
+    # 일별 교차-section 수익률 표준편차(%) — 원시 종가(당기 유니버스)
     xs_ret_std_by_day: Dict[str, float] = {}
     try:
-        _xs_df = df_sim.sort_values(["code", "time"]).copy()
+        _xs_df = df_all.sort_values(["code", "time"]).copy()
         _xs_df["ret1"] = _xs_df.groupby("code")["close"].pct_change()
         _xs_df["_day"] = _xs_df["time"].dt.strftime("%Y-%m-%d")
         _xs_in = np.zeros(len(_xs_df), dtype=bool)
@@ -3746,63 +3797,132 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     index_vol_by_day: Dict[str, Dict[str, float]] = {}
     if transition_gate_on:
         try:
-            fetch_start_iv = (
-                pd.to_datetime(start_date) - timedelta(days=60)
-            ).strftime("%Y-%m-%d")
+            fetch_start_iv = fetch_start
             index_vol_by_day = _build_index_vol_by_day(
                 data_manager, fetch_start_iv, end_date
             )
         except Exception:
             index_vol_by_day = {}
 
-    # Transition: 일별 valid/share → 5일·3일 변화율
+    # 일자별 Valid 집계(슬라이딩 점수) → share_delta
     transition_stats_by_day: Dict[str, Dict[str, float]] = {}
-    if transition_gate_on:
+    _t_va_list: List[int] = []
+    _t_vb_list: List[int] = []
+    _t_share_list: List[float] = []
+    _t_day_list: List[str] = []
+    _day_snapshots: List[Tuple[str, pd.DataFrame]] = []
+
+    n_days = len(trading_days_list)
+    for _di, d_str in enumerate(trading_days_list):
         try:
-            _t_rows: List[Dict[str, Any]] = []
-            for _d_str in trading_days_list:
-                _univ = get_period_universe(pd.to_datetime(_d_str))
-                _dm = (df_sim["time"] == pd.to_datetime(_d_str)) & (
-                    df_sim["code"].isin(_univ)
+            d_ts = pd.Timestamp(d_str).normalize()
+            left_ts = d_ts - timedelta(days=lookback_n)
+            win = df_all.loc[
+                (df_all["time"] >= left_ts)
+                & (
+                    df_all["time"]
+                    <= d_ts + timedelta(hours=23, minutes=59, seconds=59)
                 )
-                _day = df_sim[_dm]
-                _va = int(_day["Valid_A"].astype(bool).sum()) if "Valid_A" in _day.columns else 0
-                _vb = int(_day["Valid_B"].astype(bool).sum()) if "Valid_B" in _day.columns else 0
-                _tot = _va + _vb
-                _share = (_vb / _tot * 100.0) if _tot > 0 else 0.0
-                _t_rows.append({"d": _d_str, "va": _va, "vb": _vb, "share": _share})
-            _tdf = pd.DataFrame(_t_rows)
-            if not _tdf.empty:
-                _tdf["share_delta5"] = _tdf["share"] - _tdf["share"].shift(5)
-                _tdf["share_delta3"] = _tdf["share"] - _tdf["share"].shift(3)
-                for _, _tr in _tdf.iterrows():
-                    transition_stats_by_day[str(_tr["d"])] = {
-                        "va": float(_tr["va"]),
-                        "vb": float(_tr["vb"]),
-                        "share": float(_tr["share"]),
-                        "share_delta5": (
-                            float(_tr["share_delta5"])
-                            if pd.notna(_tr["share_delta5"])
-                            else float("nan")
-                        ),
-                        "share_delta3": (
-                            float(_tr["share_delta3"])
-                            if pd.notna(_tr["share_delta3"])
-                            else float("nan")
-                        ),
-                    }
+            ].copy()
+        except Exception:
+            continue
+        if win is None or win.empty:
+            continue
+        try:
+            _score_dynamic_universe_daily_ohlcv(win, settings, with_b_debug=False)
+            _resync_batch_valid_to_period_universe(
+                win, get_period_universe, settings
+            )
+        except Exception as e:
+            try:
+                logging.warning(
+                    "슬라이딩 일봉 스코어 실패 %s: %s", d_str, e, exc_info=True
+                )
+            except Exception:
+                pass
+            continue
+
+        try:
+            day_mask = win["time"].dt.normalize() == d_ts
+        except Exception:
+            day_mask = win["time"].dt.strftime("%Y-%m-%d") == d_str
+        day = win.loc[day_mask]
+        if day is None or day.empty:
+            continue
+
+        universe = get_period_universe(d_ts)
+        try:
+            univ_set = {str(c).zfill(6) for c in (universe or [])}
+            day_u = day.loc[day["code"].astype(str).str.zfill(6).isin(univ_set)].copy()
+        except Exception:
+            day_u = day.copy()
+
+        try:
+            _va = (
+                int(day_u["Valid_A"].astype(bool).sum())
+                if "Valid_A" in day_u.columns
+                else 0
+            )
+            _vb = (
+                int(day_u["Valid_B"].astype(bool).sum())
+                if "Valid_B" in day_u.columns
+                else 0
+            )
+            _tot = _va + _vb
+            _share = (_vb / _tot * 100.0) if _tot > 0 else 0.0
+            _t_day_list.append(d_str)
+            _t_va_list.append(_va)
+            _t_vb_list.append(_vb)
+            _t_share_list.append(_share)
+        except Exception:
+            pass
+
+        _day_snapshots.append((d_str, day_u))
+
+        if n_days > 40 and (_di + 1) % 40 == 0:
+            try:
+                logger_callback(
+                    f"  [Batch] 슬라이딩 스코어 진행 {_di + 1}/{n_days}일…"
+                )
+            except Exception:
+                pass
+
+    # transition share delta
+    if transition_gate_on and _t_day_list:
+        try:
+            _tdf = pd.DataFrame(
+                {
+                    "d": _t_day_list,
+                    "va": _t_va_list,
+                    "vb": _t_vb_list,
+                    "share": _t_share_list,
+                }
+            )
+            _tdf["share_delta5"] = _tdf["share"] - _tdf["share"].shift(5)
+            _tdf["share_delta3"] = _tdf["share"] - _tdf["share"].shift(3)
+            for _, _tr in _tdf.iterrows():
+                transition_stats_by_day[str(_tr["d"])] = {
+                    "va": float(_tr["va"]),
+                    "vb": float(_tr["vb"]),
+                    "share": float(_tr["share"]),
+                    "share_delta5": (
+                        float(_tr["share_delta5"])
+                        if pd.notna(_tr["share_delta5"])
+                        else float("nan")
+                    ),
+                    "share_delta3": (
+                        float(_tr["share_delta3"])
+                        if pd.notna(_tr["share_delta3"])
+                        else float("nan")
+                    ),
+                }
         except Exception:
             transition_stats_by_day = {}
 
-    for d_str in trading_days_list:
-        universe = get_period_universe(pd.to_datetime(d_str))
-
-        day_mask = (df_sim["time"] == pd.to_datetime(d_str)) & (df_sim["code"].isin(universe))
-
+    # 2-pass: transition 반영 후 Track A/B 스케줄
+    for d_str, day_u in _day_snapshots:
         day_max_a = max_s_a
         day_max_b = max_s_b
-
-        # [Transition] B-share 급락 + 변동성
         if transition_gate_on:
             try:
                 _ts = transition_stats_by_day.get(d_str, {})
@@ -3840,8 +3960,23 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
         if transition_gate_on and day_max_a <= 0 and day_max_b <= 0:
             continue
 
-        # Track A 스케줄
-        day_a = df_sim[day_mask & df_sim["Valid_A"]]
+        try:
+            day_a = (
+                day_u.loc[day_u["Valid_A"].astype(bool)]
+                if "Valid_A" in day_u.columns
+                else day_u.iloc[:0]
+            )
+        except Exception:
+            day_a = day_u.iloc[:0]
+        try:
+            day_b = (
+                day_u.loc[day_u["Valid_B"].astype(bool)]
+                if "Valid_B" in day_u.columns
+                else day_u.iloc[:0]
+            )
+        except Exception:
+            day_b = day_u.iloc[:0]
+
         if not day_a.empty and day_max_a > 0:
             schedule_a[d_str] = (
                 _df_top_by_score_slot_band(
@@ -3854,9 +3989,6 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 )["code"]
                 .tolist()
             )
-
-        # Track B 스케줄 (NEUTRAL에서도 동등 슬롯 허용 — block은 policy.slots_b=0 일 때만)
-        day_b = df_sim[day_mask & df_sim["Valid_B"]]
         if not day_b.empty and day_max_b > 0:
             schedule_b[d_str] = (
                 _df_top_by_score_slot_band(
@@ -3869,8 +4001,9 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 )["code"]
                 .tolist()
             )
-
-        combined = list(dict.fromkeys(schedule_a.get(d_str, []) + schedule_b.get(d_str, [])))
+        combined = list(
+            dict.fromkeys(schedule_a.get(d_str, []) + schedule_b.get(d_str, []))
+        )
         if combined:
             schedule[d_str] = combined
 
@@ -3886,6 +4019,7 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
     else:
         logger_callback(f"[Batch] 완료. Track A: {a_days}일, Track B: {b_days}일, 합산: {len(schedule)}일")
     return schedule, schedule_a, schedule_b, transition_regime_by_day
+
 
 
 def collect_dynamic_schedule_codes(
@@ -4227,8 +4361,7 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         )
 
     all_codes = list(union_tickers)
-    fetch_start_dt = pd.to_datetime(start_s) - timedelta(days=120)
-    fetch_start = fetch_start_dt.strftime("%Y-%m-%d")
+    fetch_start = _universe_batch_indicator_left_clip(end_s, settings)
     ph = ",".join(["?"] * len(all_codes))
     q = f"""
         SELECT code, datetime as time, open, high, low, close, volume

@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     "next_open_1530_enabled": True,
     "bt_open_auction_pass_enabled": False,
     "bt_universe_schedule_warmup_trading_days": 20,
+    "bt_universe_indicator_lookback_days": 280,
     "bt_rt_parity_fast_rsi_delta": 0.35,
     "bt_rt_parity_fast_osc_delta": 0.08,
     "bt_rt_parity_fast_osc_abs_max": 0.0,

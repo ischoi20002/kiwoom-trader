@@ -13,6 +13,14 @@
 
 ---
 
+## 0.18.51 (2026-08-25)
+
+- **선정 lookback을 실시간과 동일 280일로 정렬**: 동적 BT는 평가일 D마다 `[D-280, D]` 슬라이딩 창에서 일봉 지표를 다시 계산하고, 실시간 FDR/DB/키움 일봉도 동일 `bt_universe_indicator_lookback_days`(기본 280)을 쓴다. end 고정 800일·FDR 폴백 계단(280→120)을 제거해 BT 시작일과 무관하게 같은 평가일의 유니버스가 맞도록 함 (`strategy_selector`, `settings`/`defaults`).
+
+## 0.18.50 (2026-08-25)
+
+- **동일 평가일 유니버스가 BT 기간에 따라 달라짐**: 일봉 RSI/MACD EWM 조회를 `start_date-120`에 묶어 OSC 부호·Valid가 바뀌고(예: 103140 vs 457190) 당일만/장기 구간 결과가 갈렸다. `end_date` 기준 고정 lookback(`bt_universe_indicator_lookback_days`)으로 지표·transition delta를 기간 불변 처리 (`strategy_selector`).
+
 ## 0.18.49 (2026-08-25)
 
 - **공식15 정렬 차이 로그**: 틱 합성봉과 OHLCV가 달라 실제 덮어쓸 때만 종목·슬롯 시각을 로그한다 (`k_trader_gui`).

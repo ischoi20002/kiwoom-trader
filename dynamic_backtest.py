@@ -419,8 +419,7 @@ class DynamicBacktester:
 
         # prepare_dynamic_universe 시작일:
         # 1) 첫 시뮬일의 ref_day(직전 영업일) 키가 스케줄에 포함되도록 최소 확장
-        # 2) 단일일 BT처럼 창이 짧으면 일봉 지표 시드·레짐 통계가 흔들려
-        #    유니버스가 RT/장기 BT와 달라질 수 있음 → 선정 워밍업 영업일을 추가로 붙임
+        # 2) transition share_delta 등 일별 통계 워밍업(지표 EWM 은 end 앵커 lookback)
         sched_anchor = self._bt_ref_day_for_first or start_date
         sched_start = str(sched_anchor)
         try:
