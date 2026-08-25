@@ -672,12 +672,17 @@ def _row_ohlcv(
 
 
 def _completed_bars_upto(
-    merged: pd.DataFrame, want: Any
+    merged: pd.DataFrame,
+    want: Any,
+    *,
+    max_bars: Optional[int] = None,
 ) -> List[OfficialBarRow]:
     """
     API 프레임에서 ``want`` 이하 완성봉만 추출합니다.
 
     형성 중(``want`` 이후) 봉은 틱 경로를 유지하기 위해 제외합니다.
+    ``max_bars`` 가 있으면 최신 N봉만(정렬교체: 1페이지에 수십~수백 봉이
+    와도 MA 정합에 필요한 최근만 반영).
     """
     out: List[OfficialBarRow] = []
     try:
@@ -697,6 +702,16 @@ def _completed_bars_upto(
                 continue
     except Exception:
         return out
+    if max_bars is not None:
+        try:
+            lim = max(1, int(max_bars))
+        except (TypeError, ValueError):
+            lim = 1
+        if len(out) > lim:
+            try:
+                out = sorted(out, key=lambda r: r[0])[-lim:]
+            except Exception:
+                out = out[-lim:]
     return out
 
 
@@ -712,11 +727,14 @@ def fetch_official_15m_hit(
     page_delay_max: float = 0.22,
     max_retries: int = 3,
     inter_retry_sec: float = 0.6,
+    heal_max_bars: Optional[int] = None,
     log: Optional[Callable[[str], None]] = None,
     app: Any = None,
 ) -> Optional[Official15mFetchHit]:
     """
     ka10080(15분) 연속조회로 ``bar_ts`` 완성 봉과, 같은 응답의 이전 완성봉을 반환합니다.
+
+    ``heal_max_bars``: 정렬용으로 이전 봉 개수 상한(None 이면 페이지 내 전체).
     """
     nc = canonical_stock_code(str(code).strip())
     if not nc or not token:
@@ -724,6 +742,14 @@ def fetch_official_15m_hit(
     want = _norm_bar_ts(bar_ts)
     mp = max(1, min(int(max_pages), 40))
     retries = max(1, min(int(max_retries), 8))
+    try:
+        heal_lim = (
+            None
+            if heal_max_bars is None
+            else max(1, min(int(heal_max_bars), 64))
+        )
+    except (TypeError, ValueError):
+        heal_lim = None
 
     for attempt in range(retries):
         try:
@@ -818,10 +844,12 @@ def fetch_official_15m_hit(
             else:
                 oh = _row_ohlcv(row)
                 if oh is not None:
-                    bars = _completed_bars_upto(merged, want)
+                    bars = _completed_bars_upto(merged, want, max_bars=heal_lim)
                     try:
                         if not any(_norm_bar_ts(t) == want for t, *_rest in bars):
                             bars.append((want, oh[0], oh[1], oh[2], oh[3], oh[4]))
+                            if heal_lim is not None and len(bars) > heal_lim:
+                                bars = sorted(bars, key=lambda r: r[0])[-heal_lim:]
                     except Exception:
                         bars.append((want, oh[0], oh[1], oh[2], oh[3], oh[4]))
                     return Official15mFetchHit(ohlcv=oh, completed_bars=bars)
@@ -1155,24 +1183,79 @@ class RtClosed15mOfficialReplaceScheduler:
         except (TypeError, ValueError):
             ir = 0.6
         attempts, gap_sec = _alignment_retry_params(settings)
+        # 정렬 배치는 최근 봉만 필요 — 페이지·재시도가 길면 완료 로그가 수분 지연됨
+        try:
+            mp_align = int(
+                float(
+                    settings.get(
+                        "realtime_closed_15m_alignment_batch_max_pages", 1
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            mp_align = 1
+        mp = max(1, min(mp_align, mp, 3))
+        try:
+            gap_align = float(
+                settings.get(
+                    "realtime_closed_15m_alignment_batch_retry_gap_sec", 3.0
+                )
+            )
+        except (TypeError, ValueError):
+            gap_align = 3.0
+        gap_sec = max(1.0, min(float(gap_align), float(gap_sec), 15.0))
+        try:
+            attempts_align = int(
+                float(
+                    settings.get(
+                        "realtime_closed_15m_alignment_batch_retry_attempts", 1
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            attempts_align = 1
+        attempts = max(1, min(int(attempts_align), int(attempts), 2))
         spacing = _alignment_batch_fetch_spacing_sec(settings)
+
+        try:
+            heal_max = int(
+                float(
+                    settings.get(
+                        "realtime_closed_15m_alignment_heal_max_bars", 4
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            heal_max = 4
+        heal_max = max(1, min(heal_max, 16))
 
         if self._log:
             try:
                 el = _elapsed_sec_since_slot(bar_ts)
                 self._log(
                     f"ℹ️ [RT15m-Official] {slot_key} 정렬 배치 시작 "
-                    f"{len(codes)}종목 (슬롯 후 +{el:.1f}s)"
+                    f"{len(codes)}종목 (슬롯 후 +{el:.1f}s, "
+                    f"pages≤{mp}, retry={attempts})"
                 )
             except Exception:
                 pass
 
         # (code, hit|None)
         fetched: List[Tuple[str, Optional[Official15mFetchHit]]] = []
+        n_codes = len(codes)
         for i, nk in enumerate(codes):
             if i > 0:
                 try:
                     time.sleep(spacing)
+                except Exception:
+                    pass
+            # 진행 로그(막힘 여부 확인용) — 5종마다·마지막
+            if self._log and (i == 0 or (i + 1) % 5 == 0 or i + 1 == n_codes):
+                try:
+                    self._log(
+                        f"ℹ️ [RT15m-Official] {slot_key} 정렬 배치 조회 "
+                        f"{i + 1}/{n_codes} ({nk})"
+                    )
                 except Exception:
                     pass
             hit: Optional[Official15mFetchHit] = None
@@ -1196,6 +1279,7 @@ class RtClosed15mOfficialReplaceScheduler:
                         page_delay_max=dmax,
                         max_retries=1,
                         inter_retry_sec=ir,
+                        heal_max_bars=heal_max,
                         log=self._log,
                         app=app,
                     )
@@ -1211,7 +1295,18 @@ class RtClosed15mOfficialReplaceScheduler:
                     break
             fetched.append((nk, hit))
 
+        if self._log:
+            try:
+                ok_f = sum(1 for _n, h in fetched if h is not None)
+                self._log(
+                    f"ℹ️ [RT15m-Official] {slot_key} 정렬 배치 조회 끝 "
+                    f"hit={ok_f}/{len(fetched)} — 메모리 반영"
+                )
+            except Exception:
+                pass
+
         apply_results: Dict[str, bool] = {}
+        apply_t0 = time.perf_counter()
 
         def _apply_all() -> None:
             for nk, hit in fetched:
@@ -1235,13 +1330,17 @@ class RtClosed15mOfficialReplaceScheduler:
                 try:
                     if hasattr(app, "_apply_official_closed_15m_bars"):
                         ret = app._apply_official_closed_15m_bars(  # type: ignore[attr-defined]
-                            nk, heal_bars, primary_ts=bar_ts
+                            nk,
+                            heal_bars,
+                            primary_ts=bar_ts,
+                            log_extra_heal=False,
                         )
+                        applied = True if ret is None else bool(ret)
                     else:
                         ret = app._apply_official_closed_15m_bar(  # type: ignore[attr-defined]
                             nk, bar_ts, o, h, l_, c, v
                         )
-                    applied = True if ret is None else bool(ret)
+                        applied = True if ret is None else bool(ret)
                 except Exception as ex:
                     if self._log:
                         try:
@@ -1264,6 +1363,20 @@ class RtClosed15mOfficialReplaceScheduler:
                 for nk, _hit in fetched:
                     apply_results.setdefault(nk, False)
 
+        try:
+            apply_sec = float(time.perf_counter() - apply_t0)
+        except Exception:
+            apply_sec = 0.0
+        if self._log:
+            try:
+                ok_a = sum(1 for v in apply_results.values() if v)
+                self._log(
+                    f"ℹ️ [RT15m-Official] {slot_key} 메모리 반영 끝 "
+                    f"{ok_a}/{len(fetched)}종 {apply_sec:.2f}s"
+                )
+            except Exception:
+                pass
+
         for nk, hit in fetched:
             try:
                 k = self._key(nk, bar_ts)
@@ -1285,6 +1398,26 @@ class RtClosed15mOfficialReplaceScheduler:
                     )
             except Exception:
                 pass
+
+        # 스냅샷 밖·고아 pending 이 있으면 완료 로그가 영원히 안 나옴 → 강제 스킵
+        try:
+            leftovers: List[str] = []
+            with self._lock:
+                st = self._align_log_agg.get(slot_key)
+                if st is not None:
+                    pending = st.get("pending")
+                    if isinstance(pending, set) and pending:
+                        leftovers = sorted(str(x) for x in pending if x)
+            for nk in leftovers:
+                try:
+                    k = self._key(nk, bar_ts)
+                    with self._lock:
+                        self._scheduled.pop(k, None)
+                    self._align_finish(nk, bar_ts, ok=None)
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
         try:
             with self._lock:
@@ -1915,6 +2048,18 @@ class RtClosed15mOfficialReplaceScheduler:
                 if alignment:
                     # 고정 지연 후 소수 회 조회만 (M1/평가 REST 와 경쟁 최소화)
                     attempts, gap_sec = _alignment_retry_params(settings)
+                    try:
+                        heal_max = int(
+                            float(
+                                settings.get(
+                                    "realtime_closed_15m_alignment_heal_max_bars",
+                                    4,
+                                )
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        heal_max = 4
+                    heal_max = max(1, min(heal_max, 16))
                     for ai in range(int(attempts)):
                         try:
                             _wait_official_quiet_chunks(app)
@@ -1931,6 +2076,7 @@ class RtClosed15mOfficialReplaceScheduler:
                             page_delay_max=dmax,
                             max_retries=per_try_retries,
                             inter_retry_sec=ir,
+                            heal_max_bars=heal_max,
                             log=self._log,
                             app=app,
                         )

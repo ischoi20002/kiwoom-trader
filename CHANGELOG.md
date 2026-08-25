@@ -13,6 +13,14 @@
 
 ---
 
+## 0.18.47 (2026-08-25)
+
+- **정렬 메모리 반영이 종목당 수 초**: ka10080 1페이지의 과거 봉을 메모리에 없어도 행마다 SQLite INSERT+purge 해서 반영이 수분 걸렸다. heal은 최근 4봉, 메모리에 있는 봉만 반영, DB는 종목당 1트랜잭션, 반영 소요 요약 로그 (`realtime_monitor_bars_store`, `rt_closed_15m_official_replace`, `k_trader_gui`).
+
+## 0.18.46 (2026-08-25)
+
+- **정렬 배치 완료 로그 지연**: 26종×최대 8페이지·재시도 15초로 ka10080 조회가 수분 걸려 시작만 찍히고 완료가 안 보였다. 정렬 배치는 1페이지·재시도 1회, 5종마다 진행 로그, 고아 pending 강제 정리 (`rt_closed_15m_official_replace`).
+
 ## 0.18.45 (2026-08-25)
 
 - **부분체결 수량 미반영**: 취소 접수 시 `filled_qty`를 0으로 덮어쓰고, 접수 행만 보면 kt00007 부분체결 합산을 놓쳤다. 취소 시 누적 체결을 보존·PARTIAL 표기, 체결확인은 합산 수량으로 보강, DB는 체결수량을 줄이지 않음 (`order_manager`, `fill_reconciliation_service`, `data_manager_v2`, `virtual_tab`).

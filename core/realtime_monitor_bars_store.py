@@ -218,10 +218,13 @@ class RealtimeMonitorBarsStore:
         low: float,
         close: float,
         volume: float,
+        *,
+        purge: bool = True,
     ) -> None:
         """
         확정된 한 개의 15분봉을 저장합니다.
         bar_ts: pandas Timestamp 또는 datetime 호환.
+        purge=False 이면 롤링 DELETE 생략(배치 저장 후 1회 purge 용).
         """
         self._upsert_ohlcv_row(
             "bars_15m_rt",
@@ -233,7 +236,84 @@ class RealtimeMonitorBarsStore:
             close,
             volume,
             log_tag="RT15mDB",
+            purge=purge,
         )
+
+    def upsert_completed_bars_batch(
+        self,
+        code: str,
+        rows: list[tuple[Any, float, float, float, float, float]],
+    ) -> int:
+        """
+        여러 확정 15분봉을 한 트랜잭션으로 저장합니다.
+
+        정렬교체처럼 종목당 수~수십 행을 넣을 때, 행마다 connect+purge 하면
+        종목당 수 초가 걸려 배치 반영이 분 단위로 늘어납니다.
+        반환: 실제 INSERT 시도 행 수(실패 시 0).
+        """
+        nc = _norm_code(code)
+        if not nc or not rows:
+            return 0
+        prepared: list[tuple[Any, ...]] = []
+        try:
+            from reporting.krx_trading_calendar import is_trading_day
+        except Exception:
+            is_trading_day = None  # type: ignore[assignment]
+        for item in rows:
+            try:
+                ts = pd.Timestamp(item[0])
+                if is_trading_day is not None:
+                    try:
+                        if not is_trading_day(ts.date()):
+                            continue
+                    except Exception:
+                        pass
+                dt_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+                o = int(round(float(item[1])))
+                h = int(round(float(item[2])))
+                l = int(round(float(item[3])))
+                c = int(round(float(item[4])))
+                v = int(round(float(item[5])))
+                prepared.append((nc, dt_str, o, h, l, c, v))
+            except Exception:
+                continue
+        if not prepared:
+            return 0
+        now_meta = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._lock:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.executemany(
+                        """
+                        INSERT OR REPLACE INTO bars_15m_rt
+                        (code, datetime, open, high, low, close, volume)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        prepared,
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO symbol_meta_rt (code, last_seen)
+                        VALUES (?, ?)
+                        ON CONFLICT(code) DO UPDATE SET last_seen = excluded.last_seen
+                        """,
+                        (nc, now_meta),
+                    )
+                    self._purge_old_bars_for_code(conn, nc)
+                    conn.commit()
+            return len(prepared)
+        except sqlite3.Error as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] 배치 봉 INSERT 실패 ({nc}): {e}")
+            except Exception:
+                pass
+            return 0
+        except Exception as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] 배치 봉 INSERT 예외 ({nc}): {e}")
+            except Exception:
+                pass
+            return 0
 
     def _upsert_ohlcv_row(
         self,
@@ -248,6 +328,7 @@ class RealtimeMonitorBarsStore:
         *,
         log_tag: str = "RT15mDB",
         touch_meta: bool = True,
+        purge: bool = True,
     ) -> None:
         """공통 INSERT OR REPLACE (허용 테이블만)."""
         if table != "bars_15m_rt":
@@ -296,7 +377,8 @@ class RealtimeMonitorBarsStore:
                             """,
                             (nc, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                         )
-                    self._purge_old_bars_for_code(conn, nc)
+                    if purge:
+                        self._purge_old_bars_for_code(conn, nc)
                     conn.commit()
         except sqlite3.Error as e:
             try:

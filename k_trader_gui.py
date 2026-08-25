@@ -3591,12 +3591,16 @@ class KiwoomApp:
         bars: Any,
         *,
         primary_ts: Any = None,
+        log_extra_heal: bool = True,
     ) -> bool:
         """
         공식 15분봉 여러 줄을 덮어씁니다. 형성 중 봉은 호출 측에서 제외해야 합니다.
 
         ``primary_ts`` 행이 bars_data 에 있으면 True(평가 가능).
         값이 다른 이전 슬롯도 같이 맞춰 MA60 이 어긋나지 않게 합니다.
+
+        메모리에 없는 API 과거 봉은 DB에 넣지 않습니다(1페이지 수십~수백 행 ×
+        종목당 purge 가 반영을 수 초씩 늘리던 원인).
         """
         from utils.bars_data_keys import resolve_bars_data_frame
         from core.rt_closed_15m_official_replace import ts_to_slot_hhmm
@@ -3661,11 +3665,18 @@ class KiwoomApp:
         lk = getattr(self, "_bars_data_lock", None)
         bd = getattr(self, "bars_data", None)
         if lk is None or not isinstance(bd, dict):
+            # 메모리 프레임이 없으면 primary 만 DB 보강(전체 페이지 폭주 방지)
             try:
-                for ts, o, h, l_, c, v in parsed:
-                    self.realtime_monitor_bars_store.upsert_completed_bar(
-                        cc, ts, o, h, l_, c, v
-                    )
+                store = getattr(self, "realtime_monitor_bars_store", None)
+                if store is not None:
+                    only = parsed
+                    if primary is not None:
+                        only = [r for r in parsed if r[0] == primary] or parsed[-1:]
+                    if hasattr(store, "upsert_completed_bars_batch"):
+                        store.upsert_completed_bars_batch(cc, only)
+                    else:
+                        for ts, o, h, l_, c, v in only:
+                            store.upsert_completed_bar(cc, ts, o, h, l_, c, v)
             except Exception:
                 pass
             return False
@@ -3682,10 +3693,20 @@ class KiwoomApp:
                     return False
                 if df is None or getattr(df, "empty", True):
                     try:
-                        for ts, o, h, l_, c, v in parsed:
-                            self.realtime_monitor_bars_store.upsert_completed_bar(
-                                use_key, ts, o, h, l_, c, v
-                            )
+                        store = getattr(self, "realtime_monitor_bars_store", None)
+                        if store is not None:
+                            only = parsed
+                            if primary is not None:
+                                only = [
+                                    r for r in parsed if r[0] == primary
+                                ] or parsed[-1:]
+                            if hasattr(store, "upsert_completed_bars_batch"):
+                                store.upsert_completed_bars_batch(use_key, only)
+                            else:
+                                for ts, o, h, l_, c, v in only:
+                                    store.upsert_completed_bar(
+                                        use_key, ts, o, h, l_, c, v
+                                    )
                     except Exception:
                         pass
                     return False
@@ -3704,12 +3725,7 @@ class KiwoomApp:
                 for ts, o, h, l_, c, v in parsed:
                     hit_idx = idx_map.get(ts)
                     if hit_idx is None:
-                        try:
-                            self.realtime_monitor_bars_store.upsert_completed_bar(
-                                use_key, ts, o, h, l_, c, v
-                            )
-                        except Exception:
-                            pass
+                        # 메모리에 없는 과거 API 봉 → 정렬/MA 대상 아님(DB 폭주 방지)
                         continue
                     is_primary = primary is not None and ts == primary
                     try:
@@ -3792,13 +3808,18 @@ class KiwoomApp:
                         _do_recalc()
             if recalc_key:
                 try:
-                    for ts, o, h, l_, c, v in upserts:
-                        self.realtime_monitor_bars_store.upsert_completed_bar(
-                            recalc_key, ts, o, h, l_, c, v
-                        )
+                    store = getattr(self, "realtime_monitor_bars_store", None)
+                    if store is not None and upserts:
+                        if hasattr(store, "upsert_completed_bars_batch"):
+                            store.upsert_completed_bars_batch(recalc_key, upserts)
+                        else:
+                            for ts, o, h, l_, c, v in upserts:
+                                store.upsert_completed_bar(
+                                    recalc_key, ts, o, h, l_, c, v
+                                )
                 except Exception:
                     pass
-                if extra_changed > 0:
+                if extra_changed > 0 and log_extra_heal:
                     try:
                         self.log(
                             f"ℹ️ [RT15m-Official] {cc} 이전 슬롯 공식 정합 "
