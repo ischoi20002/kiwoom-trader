@@ -6,10 +6,11 @@
 - 완성 봉을 갱신(형성 중 현재 봉은 틱 경로 유지).
 - 같은 ka10080 페이지의 이전 완성봉도 값이 다르면 덮어 MA60 정합을 회복.
 - 종목·슬롯당 스케줄 1회(중복 타이머 방지).
-- 조회·``bars_data`` 반영은 데몬 워커(직렬). Tk 메인에 pandas 롤링을 올리지 않습니다.
+- 조회·``bars_data`` 반영은 데몬 워커. Tk 메인에 pandas 롤링을 올리지 않습니다.
 
-M1 평가 경로(정렬용 교체): 슬롯 완성 후 고정 지연(~120초) + 짧은 재시도만.
-조기 폴링으로 M1 프로브·평가 REST 와 경쟁하지 않습니다.
+M1 평가 경로(정렬용 교체): 슬롯 완성 후 고정 지연(~120초) 뒤 **슬롯 단위 배치**로
+전 감시 종목을 짧은 REST 간격으로 조회·OHLCV/MA 반영합니다.
+종목별 quiet/평가큐 양보(최대 45초)로 1분 간격이 나던 경로를 쓰지 않습니다.
 """
 
 from __future__ import annotations
@@ -528,6 +529,7 @@ def wait_for_alignment_replace_window(
     슬롯 완성 + 고정지연(+종목 stagger)까지 대기.
 
     대기 중 공식 조용 구간이 켜지면 그 시간을 존중해 필수 M1/평가 REST 에 양보합니다.
+    (단종목 폴백·비배치 경로용. 정렬 배치는 ``wait_for_alignment_batch_window``.)
     """
     from datetime import datetime, timedelta
 
@@ -560,6 +562,65 @@ def wait_for_alignment_replace_window(
         except Exception:
             break
     _wait_official_quiet_chunks(app)
+
+
+def wait_for_alignment_batch_window(app: Any, bar_ts: Any, settings: Any) -> None:
+    """
+    정렬 배치: 슬롯 완성 + 고정지연만 대기(종목 stagger·quiet 연장 없음).
+
+    quiet/평가큐를 존중하느라 목표 시각을 계속 미루면 종목마다 1분씩 벌어지므로,
+    wall-clock 기준으로만 기다린 뒤 짧은 quiet 양보(최대 5초)만 합니다.
+    """
+    from datetime import datetime, timedelta
+
+    from utils.krx_bars import krx_15m_slot_complete_ts
+
+    fixed = _alignment_fixed_delay_sec(settings)
+    try:
+        slot = krx_15m_slot_complete_ts(bar_ts).to_pydatetime()
+        target = slot + timedelta(seconds=float(fixed))
+    except Exception:
+        try:
+            time.sleep(float(fixed))
+        except Exception:
+            pass
+        return
+
+    while True:
+        try:
+            left = (target - datetime.now()).total_seconds()
+        except Exception:
+            left = 0.0
+        if left <= 0.05:
+            break
+        try:
+            time.sleep(min(2.0, left))
+        except Exception:
+            break
+
+    # 틱말분 평가가 막 돌아가면 짧게만 양보(배치 전체를 45초씩 밀지 않음)
+    try:
+        from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
+
+        rem = float(rt15_official_quiet_remaining_sec(app))
+        if rem > 0.05:
+            time.sleep(min(rem, 5.0))
+    except Exception:
+        pass
+
+
+def _alignment_batch_fetch_spacing_sec(settings: Any) -> float:
+    """배치 내 종목 간 ka10080 간격(초)."""
+    try:
+        v = float(
+            settings.get(
+                "realtime_closed_15m_alignment_batch_spacing_sec",
+                settings.get("realtime_closed_15m_backfill_spacing_sec", 0.45),
+            )
+        )
+    except (TypeError, ValueError):
+        v = 0.45
+    return max(0.2, min(v, 2.0))
 
 
 def _find_row_for_bar_end(
@@ -865,6 +926,9 @@ class RtClosed15mOfficialReplaceScheduler:
         self._slot_gate: Dict[str, Dict[str, Any]] = {}
         # 정렬교체 로그 집계: 슬롯에 예약한 종목이 모두 끝난 뒤 1회
         self._align_log_agg: Dict[str, Dict[str, Any]] = {}
+        # 정렬 모드: 슬롯당 1개 배치 워커 (종목별 스레드·1분 간격 방지)
+        self._align_batch_codes: Dict[str, set] = {}
+        self._align_batch_started: Dict[str, bool] = {}
 
     def _align_register_pending(self, code: Any, bar_ts: Any) -> None:
         """정렬교체 예약 시 슬롯 pending에 종목 등록."""
@@ -894,6 +958,338 @@ class RtClosed15mOfficialReplaceScheduler:
                 except Exception:
                     pass
                 st["flushed"] = False
+        except Exception:
+            pass
+
+    def _align_batch_offer(self, app: Any, code: Any, bar_ts: Any) -> None:
+        """정렬 모드: 슬롯 배치에 종목을 넣고, 미시작이면 배치 워커 1개만 기동."""
+        try:
+            nk = canonical_stock_code(str(code).strip())
+            slot_key = self._slot_ts_key(bar_ts)
+        except Exception:
+            return
+        if not nk:
+            return
+        start_worker = False
+        try:
+            with self._lock:
+                codes = self._align_batch_codes.get(slot_key)
+                if codes is None:
+                    codes = set()
+                    self._align_batch_codes[slot_key] = codes
+                codes.add(nk)
+                if not bool(self._align_batch_started.get(slot_key)):
+                    self._align_batch_started[slot_key] = True
+                    start_worker = True
+        except Exception:
+            return
+        if not start_worker:
+            return
+        th = threading.Thread(
+            target=self._align_batch_worker,
+            args=(app, bar_ts),
+            name="rt15m-official-align-batch",
+            daemon=True,
+        )
+        th.start()
+
+    def _align_batch_worker(self, app: Any, bar_ts: Any) -> None:
+        """
+        정렬교체 슬롯 배치: 고정 지연 후 전 종목 조회 → 한 락으로 OHLCV/MA 반영.
+
+        종목마다 wait_out(최대 45초)·quiet 연장·전역 락을 쓰면 1분 간격이 납니다.
+        """
+        slot_key = ""
+        try:
+            slot_key = self._slot_ts_key(bar_ts)
+        except Exception:
+            slot_key = str(bar_ts)
+
+        try:
+            settings = getattr(app, "settings", None) or {}
+        except Exception:
+            settings = {}
+
+        try:
+            wait_for_alignment_batch_window(app, bar_ts, settings)
+        except Exception:
+            pass
+
+        # 슬롯 롤 직후 schedule 폭주가 모두 들어오도록 짧게 대기
+        try:
+            settle = float(
+                settings.get("realtime_closed_15m_alignment_batch_settle_sec", 1.5)
+            )
+        except (TypeError, ValueError):
+            settle = 1.5
+        settle = max(0.3, min(settle, 5.0))
+        try:
+            time.sleep(settle)
+        except Exception:
+            pass
+
+        codes: List[str] = []
+        try:
+            with self._lock:
+                raw = self._align_batch_codes.get(slot_key) or set()
+                codes = sorted(str(c) for c in raw if c)
+        except Exception:
+            codes = []
+
+        if not codes:
+            try:
+                with self._lock:
+                    self._align_batch_started.pop(slot_key, None)
+                    self._align_batch_codes.pop(slot_key, None)
+            except Exception:
+                pass
+            return
+
+        try:
+            mon = bool(getattr(app, "is_monitoring", False)) or bool(
+                getattr(
+                    getattr(app, "trading_controller", None),
+                    "is_monitoring",
+                    False,
+                )
+            )
+        except Exception:
+            mon = False
+        if not mon:
+            for nk in codes:
+                try:
+                    k = self._key(nk, bar_ts)
+                    with self._lock:
+                        self._scheduled.pop(k, None)
+                    self._align_finish(nk, bar_ts, ok=None)
+                except Exception:
+                    pass
+            try:
+                with self._lock:
+                    self._align_batch_started.pop(slot_key, None)
+                    self._align_batch_codes.pop(slot_key, None)
+            except Exception:
+                pass
+            return
+
+        token = None
+        try:
+            token = app.auth_manager.get_auth_token()
+        except Exception:
+            token = None
+        if not token:
+            if self._log:
+                try:
+                    self._log(
+                        f"⚠️ [RT15m-Official] {slot_key} 정렬 배치 토큰 없음 — "
+                        f"{len(codes)}종 스킵"
+                    )
+                except Exception:
+                    pass
+            for nk in codes:
+                try:
+                    k = self._key(nk, bar_ts)
+                    with self._lock:
+                        self._scheduled.pop(k, None)
+                    self._align_finish(nk, bar_ts, ok=None)
+                except Exception:
+                    pass
+            try:
+                with self._lock:
+                    self._align_batch_started.pop(slot_key, None)
+                    self._align_batch_codes.pop(slot_key, None)
+            except Exception:
+                pass
+            return
+
+        dm = getattr(app, "data_manager", None)
+        if dm is None:
+            for nk in codes:
+                try:
+                    k = self._key(nk, bar_ts)
+                    with self._lock:
+                        self._scheduled.pop(k, None)
+                    self._align_finish(nk, bar_ts, ok=False)
+                except Exception:
+                    pass
+            try:
+                with self._lock:
+                    self._align_batch_started.pop(slot_key, None)
+                    self._align_batch_codes.pop(slot_key, None)
+            except Exception:
+                pass
+            return
+
+        try:
+            tic = str(
+                settings.get("realtime_closed_15m_official_replace_tic", "15")
+            ).strip() or "15"
+        except Exception:
+            tic = "15"
+        try:
+            mp = int(
+                float(settings.get("realtime_closed_15m_official_replace_max_pages", 8))
+            )
+        except (TypeError, ValueError):
+            mp = 8
+        mp = max(1, min(mp, 40))
+        try:
+            dmin = float(
+                settings.get(
+                    "realtime_closed_15m_official_replace_page_delay_min", 0.08
+                )
+            )
+            dmax = float(
+                settings.get(
+                    "realtime_closed_15m_official_replace_page_delay_max", 0.22
+                )
+            )
+        except (TypeError, ValueError):
+            dmin, dmax = 0.08, 0.22
+        try:
+            ir = float(
+                settings.get(
+                    "realtime_closed_15m_official_replace_inter_retry_sec", 0.6
+                )
+            )
+        except (TypeError, ValueError):
+            ir = 0.6
+        attempts, gap_sec = _alignment_retry_params(settings)
+        spacing = _alignment_batch_fetch_spacing_sec(settings)
+
+        if self._log:
+            try:
+                el = _elapsed_sec_since_slot(bar_ts)
+                self._log(
+                    f"ℹ️ [RT15m-Official] {slot_key} 정렬 배치 시작 "
+                    f"{len(codes)}종목 (슬롯 후 +{el:.1f}s)"
+                )
+            except Exception:
+                pass
+
+        # (code, hit|None)
+        fetched: List[Tuple[str, Optional[Official15mFetchHit]]] = []
+        for i, nk in enumerate(codes):
+            if i > 0:
+                try:
+                    time.sleep(spacing)
+                except Exception:
+                    pass
+            hit: Optional[Official15mFetchHit] = None
+            for ai in range(int(attempts)):
+                try:
+                    tok = token
+                    try:
+                        tok2 = app.auth_manager.get_auth_token()
+                        if tok2:
+                            tok = tok2
+                    except Exception:
+                        pass
+                    hit = fetch_official_15m_hit(
+                        dm,
+                        nk,
+                        tok,
+                        bar_ts,
+                        tic_scope=tic,
+                        max_pages=mp,
+                        page_delay_min=dmin,
+                        page_delay_max=dmax,
+                        max_retries=1,
+                        inter_retry_sec=ir,
+                        log=self._log,
+                        app=app,
+                    )
+                except Exception:
+                    hit = None
+                if hit is not None:
+                    break
+                if ai + 1 >= int(attempts):
+                    break
+                try:
+                    time.sleep(float(gap_sec))
+                except Exception:
+                    break
+            fetched.append((nk, hit))
+
+        apply_results: Dict[str, bool] = {}
+
+        def _apply_all() -> None:
+            for nk, hit in fetched:
+                if hit is None:
+                    apply_results[nk] = False
+                    continue
+                try:
+                    o, h, l_, c, v = hit.ohlcv
+                except Exception:
+                    o = h = l_ = c = v = 0.0
+                try:
+                    heal_bars = list(hit.completed_bars or [])
+                except Exception:
+                    heal_bars = []
+                if not heal_bars:
+                    try:
+                        heal_bars = [(_norm_bar_ts(bar_ts), o, h, l_, c, v)]
+                    except Exception:
+                        heal_bars = []
+                applied = False
+                try:
+                    if hasattr(app, "_apply_official_closed_15m_bars"):
+                        ret = app._apply_official_closed_15m_bars(  # type: ignore[attr-defined]
+                            nk, heal_bars, primary_ts=bar_ts
+                        )
+                    else:
+                        ret = app._apply_official_closed_15m_bar(  # type: ignore[attr-defined]
+                            nk, bar_ts, o, h, l_, c, v
+                        )
+                    applied = True if ret is None else bool(ret)
+                except Exception as ex:
+                    if self._log:
+                        try:
+                            self._log(
+                                f"⚠️ [RT15m-Official] 배치 반영 실패 ({nk}): {ex!r}"
+                            )
+                        except Exception:
+                            pass
+                    applied = False
+                apply_results[nk] = bool(applied)
+
+        try:
+            from core.rt_ui_responsiveness import run_official_15m_memory_apply
+
+            run_official_15m_memory_apply(_apply_all)
+        except Exception:
+            try:
+                _apply_all()
+            except Exception:
+                for nk, _hit in fetched:
+                    apply_results.setdefault(nk, False)
+
+        for nk, hit in fetched:
+            try:
+                k = self._key(nk, bar_ts)
+                with self._lock:
+                    self._scheduled.pop(k, None)
+                    if hit is None:
+                        cnt = int(self._fail_counts.get(k, 0) or 0) + 1
+                        self._fail_counts[k] = cnt
+                        delay = min(900.0, 60.0 * (2 ** max(0, cnt - 1)))
+                        self._fail_cooldown_until[k] = time.monotonic() + delay
+            except Exception:
+                pass
+            try:
+                if hit is None:
+                    self._align_finish(nk, bar_ts, ok=False)
+                else:
+                    self._align_finish(
+                        nk, bar_ts, ok=bool(apply_results.get(nk, False))
+                    )
+            except Exception:
+                pass
+
+        try:
+            with self._lock:
+                self._align_batch_started.pop(slot_key, None)
+                self._align_batch_codes.pop(slot_key, None)
         except Exception:
             pass
 
@@ -1236,6 +1632,18 @@ class RtClosed15mOfficialReplaceScheduler:
         try:
             if official_replace_alignment_mode(settings):
                 self._align_register_pending(code, bar_ts)
+        except Exception:
+            pass
+
+        # 정렬 모드: 슬롯당 배치 1워커 (종목별 스레드 + wait_out → 1분 간격 방지)
+        try:
+            if (
+                official_replace_alignment_mode(settings)
+                and (not force_halt_retry)
+                and (not backfill_after_ready)
+            ):
+                self._align_batch_offer(app, code, bar_ts)
+                return
         except Exception:
             pass
 
@@ -1709,11 +2117,14 @@ class RtClosed15mOfficialReplaceScheduler:
                             pass
 
                 try:
-                    from core.closed_15m_fast_path import wait_out_signal_eval_window
                     from core.rt_ui_responsiveness import run_official_15m_memory_apply
 
-                    # 틱말분 평가·주문 중이면 메모리 반영을 양보
-                    wait_out_signal_eval_window(app, max_wait_sec=45.0)
+                    # 정렬 모드: 평가 큐 대기(최대 45초/종)하면 1분 간격이 난다.
+                    # (배치 경로가 기본이며, 여기 폴백은 halt 재시도 등)
+                    if not alignment:
+                        from core.closed_15m_fast_path import wait_out_signal_eval_window
+
+                        wait_out_signal_eval_window(app, max_wait_sec=45.0)
                     run_official_15m_memory_apply(_apply_main)
                 except Exception:
                     try:

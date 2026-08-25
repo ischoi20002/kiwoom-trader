@@ -172,6 +172,33 @@ def test_alignment_mode_skips_official_indicator_recalc() -> None:
     assert ran == []
 
 
+def test_alignment_batch_coalesces_one_worker() -> None:
+    """정렬 schedule N회 → 배치 워커 1회만 기동."""
+    from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
+
+    sch = RtClosed15mOfficialReplaceScheduler(log=None)
+    started: list[str] = []
+
+    def _fake_worker(app: object, bar_ts: object) -> None:
+        started.append("one")
+
+    sch._align_batch_worker = _fake_worker  # type: ignore[method-assign]
+    app = SimpleNamespace(settings={})
+    bar_ts = "2026-08-25 13:15:00"
+    for code in ("097230", "028670", "020150"):
+        sch._align_batch_offer(app, code, bar_ts)
+    import time
+
+    time.sleep(0.05)
+    assert started == ["one"]
+    with sch._lock:
+        assert sch._align_batch_codes["2026-08-25 13:15:00"] == {
+            "097230",
+            "028670",
+            "020150",
+        }
+
+
 if __name__ == "__main__":
     test_eval_workers_capped_at_two()
     test_roll_workers_capped_at_two()
@@ -183,4 +210,5 @@ if __name__ == "__main__":
     test_delayed_callbacks_are_scheduled()
     test_official_indicator_recalc_does_not_block_enqueue()
     test_alignment_mode_skips_official_indicator_recalc()
+    test_alignment_batch_coalesces_one_worker()
     print("ok")
