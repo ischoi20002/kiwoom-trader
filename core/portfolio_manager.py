@@ -783,7 +783,10 @@ class PortfolioManager:
             except (TypeError, ValueError):
                 avg_f = 0.0
             mp, mph = self._extract_position_peaks(pos, avg_fallback=avg_f)
-            self._save_active_position(
+            dm = self.data_manager
+            if dm is None or not hasattr(dm, "save_active_position"):
+                return
+            dm.save_active_position(
                 code,
                 name,
                 avg_price,

@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.37 (2026-08-25)
+
+- **active_position 저장 실패**: Flash 고점 보존 때 `_save_active_position`이 자기 자신에게 `max_p`를 넘겨 TypeError가 났다. DataManager UPSERT로 고점을 넘기도록 수정 (`portfolio_manager`).
+
 ## 0.18.36 (2026-08-25)
 
 - **09:30봉 마감 후 평가·주문 지연**: `:00` 틱과 타임아웃이 같은 종목을 이중 제출하고, FIFO 2워커가 보유 청산을 미보유 S1 뒤에 수 분 세워 둠. (종목, 슬롯) 원자 점유, 보유 전용 평가 워커, 타임아웃은 보유 우선 (`rt_watchlist_m1_api_poller`, `closed_15m_fast_path`).
