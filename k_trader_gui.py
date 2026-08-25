@@ -3767,21 +3767,29 @@ class KiwoomApp:
                     except Exception:
                         pass
 
+                # 전체 지표 재계산은 교체를 막지 않음(1워커 후순위).
+                # 예전엔 워커에서 동기 계산 + 전역 락이라 26종이 종목당 ~1분씩 걸렸다.
                 try:
-                    on_main = (
-                        threading.current_thread() is threading.main_thread()
+                    from core.closed_15m_fast_path import (
+                        enqueue_official_indicator_recalc,
                     )
+
+                    enqueue_official_indicator_recalc(self, recalc_key)
                 except Exception:
-                    on_main = False
-                if on_main:
-                    # 메인에서 호출된 폴백만 별도 스레드 — 워커에서는 그대로 계산
-                    threading.Thread(
-                        target=_do_recalc,
-                        name="rt15m-ind-recalc",
-                        daemon=True,
-                    ).start()
-                else:
-                    _do_recalc()
+                    try:
+                        on_main = (
+                            threading.current_thread() is threading.main_thread()
+                        )
+                    except Exception:
+                        on_main = False
+                    if on_main:
+                        threading.Thread(
+                            target=_do_recalc,
+                            name="rt15m-ind-recalc",
+                            daemon=True,
+                        ).start()
+                    else:
+                        _do_recalc()
             if recalc_key:
                 try:
                     for ts, o, h, l_, c, v in upserts:

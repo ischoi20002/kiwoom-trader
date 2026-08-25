@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.38 (2026-08-25)
+
+- **공식 15분 정렬이 다음 슬롯 평가를 막던 문제**: 종목마다 전체 지표를 동기 재계산하며 전역 락을 잡아, 26종이 1분 간격으로 붙고 다음 봉 틱말분 평가가 밀렸다. OHLCV·MA만 먼저 반영하고 지표는 1워커 후순위, 완료 로그는 반영 후로 (`k_trader_gui`, `closed_15m_fast_path`, `rt_closed_15m_official_replace`).
+
 ## 0.18.37 (2026-08-25)
 
 - **active_position 저장 실패**: Flash 고점 보존 때 `_save_active_position`이 자기 자신에게 `max_p`를 넘겨 TypeError가 났다. DataManager UPSERT로 고점을 넘기도록 수정 (`portfolio_manager`).

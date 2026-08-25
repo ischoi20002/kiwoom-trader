@@ -1651,20 +1651,6 @@ class RtClosed15mOfficialReplaceScheduler:
                     except Exception:
                         heal_bars = []
 
-                try:
-                    if alignment:
-                        self._align_finish(code, bar_ts, ok=True)
-                    elif self._log:
-                        cc = canonical_stock_code(str(code).strip())
-                        el = _elapsed_sec_since_slot(bar_ts)
-                        role = "프로브" if is_probe else "백필"
-                        self._log(
-                            f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
-                            f"공식봉 확인({role}, 슬롯 후 +{el:.1f}s) — 교체·평가"
-                        )
-                except Exception:
-                    pass
-
                 if force_halt_retry:
                     try:
                         from core.krx_market_halt_slots import (
@@ -1678,6 +1664,8 @@ class RtClosed15mOfficialReplaceScheduler:
                             )
                     except Exception:
                         pass
+
+                apply_ok = [False]
 
                 def _apply_main() -> None:
                     applied = False
@@ -1705,6 +1693,7 @@ class RtClosed15mOfficialReplaceScheduler:
                                 pass
                         applied = False
                     finally:
+                        apply_ok[0] = bool(applied)
                         with self._lock:
                             self._scheduled.pop(k, None)
                             self._fail_cooldown_until.pop(k, None)
@@ -1729,6 +1718,20 @@ class RtClosed15mOfficialReplaceScheduler:
                     except Exception:
                         with self._lock:
                             self._scheduled.pop(k, None)
+
+                try:
+                    if alignment:
+                        self._align_finish(code, bar_ts, ok=bool(apply_ok[0]))
+                    elif self._log:
+                        cc = canonical_stock_code(str(code).strip())
+                        el = _elapsed_sec_since_slot(bar_ts)
+                        role = "프로브" if is_probe else "백필"
+                        self._log(
+                            f"✅ [RT15m-Official] {cc} {_norm_bar_ts(bar_ts)} "
+                            f"공식봉 확인({role}, 슬롯 후 +{el:.1f}s) — 교체·평가"
+                        )
+                except Exception:
+                    pass
             except Exception as e:
                 if self._log:
                     try:

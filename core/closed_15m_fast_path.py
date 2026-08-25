@@ -413,3 +413,70 @@ class Closed15mEvalPool:
                 self._inflight.clear()
             except Exception:
                 pass
+
+
+_official_recalc_lock = threading.Lock()
+_official_recalc_pending: Set[str] = set()
+_official_recalc_q: "queue.SimpleQueue[Optional[Tuple[Any, str]]]" = queue.SimpleQueue()
+_official_recalc_thread: Optional[threading.Thread] = None
+
+
+def _official_recalc_loop() -> None:
+    """공식 15분 교체 후 지표 재계산 — 1워커, 교체 경로를 막지 않음."""
+    while True:
+        try:
+            item = _official_recalc_q.get()
+        except Exception:
+            continue
+        if item is None:
+            continue
+        app, code = item
+        try:
+            se = getattr(app, "strategy_engine", None)
+            bd = getattr(app, "bars_data", None)
+            st = getattr(app, "settings", None) or {}
+            if se is not None and isinstance(bd, dict):
+                se.recalculate_indicators(code, bd, st)
+        except Exception:
+            pass
+        finally:
+            try:
+                with _official_recalc_lock:
+                    _official_recalc_pending.discard(str(code))
+            except Exception:
+                pass
+            yield_gil_for_ui()
+
+
+def enqueue_official_indicator_recalc(app: Any, code: Any) -> None:
+    """
+    공식봉 OHLCV 반영 후 전체 지표 재계산을 후순위로 넣습니다.
+
+    정렬교체 워커에서 동기 계산하면 종목당 수십 초가 걸려
+    26종이 20분 넘게 직렬로 붙습니다.
+    """
+    global _official_recalc_thread
+    try:
+        nk = str(code or "").strip()
+        if not nk:
+            return
+        with _official_recalc_lock:
+            if nk in _official_recalc_pending:
+                return
+            _official_recalc_pending.add(nk)
+            th = _official_recalc_thread
+            if th is None or (not th.is_alive()):
+                th = threading.Thread(
+                    target=_official_recalc_loop,
+                    name="rt15m-ind-recalc",
+                    daemon=True,
+                )
+                th.start()
+                _official_recalc_thread = th
+        try:
+            _official_recalc_q.put((app, nk))
+        except Exception:
+            with _official_recalc_lock:
+                _official_recalc_pending.discard(nk)
+    except Exception:
+        pass

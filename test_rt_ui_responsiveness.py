@@ -110,6 +110,39 @@ def test_delayed_callbacks_are_scheduled() -> None:
     assert remaining is False
 
 
+def test_official_indicator_recalc_does_not_block_enqueue() -> None:
+    import time
+
+    from core.closed_15m_fast_path import enqueue_official_indicator_recalc
+
+    started = threading.Event()
+    block = threading.Event()
+    ran: list = []
+
+    class _SE:
+        def recalculate_indicators(self, code: object, bars_data: object, settings: object) -> None:
+            started.set()
+            ran.append(str(code))
+            block.wait(timeout=2.0)
+
+    app = SimpleNamespace(
+        strategy_engine=_SE(),
+        bars_data={"A": object()},
+        settings={},
+    )
+    t0 = time.monotonic()
+    enqueue_official_indicator_recalc(app, "A")
+    enqueue_official_indicator_recalc(app, "A")  # 중복 생략
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.2, elapsed
+    assert started.wait(timeout=1.0)
+    block.set()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and ran != ["A"]:
+        time.sleep(0.01)
+    assert ran == ["A"]
+
+
 if __name__ == "__main__":
     test_eval_workers_capped_at_two()
     test_roll_workers_capped_at_two()
@@ -119,4 +152,5 @@ if __name__ == "__main__":
     test_drain_respects_time_budget()
     test_official_apply_runs_on_calling_thread()
     test_delayed_callbacks_are_scheduled()
+    test_official_indicator_recalc_does_not_block_enqueue()
     print("ok")
