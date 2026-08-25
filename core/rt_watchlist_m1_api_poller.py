@@ -245,15 +245,44 @@ class RtWatchlistM1ApiPoller:
             pd.Timestamp(slot).floor("min").strftime("%Y-%m-%d %H:%M:%S"),
         )
 
-    def _mark_tick_tail_eval_done(self, nk: str, slot: pd.Timestamp) -> None:
+    def _trim_tick_tail_eval_done_unlocked(self) -> None:
+        try:
+            if len(self._tick_tail_eval_done) > 4000:
+                keep = sorted(self._tick_tail_eval_done, key=lambda x: x[1])[-2000:]
+                self._tick_tail_eval_done = set(keep)
+        except Exception:
+            pass
+
+    def _claim_tick_tail_eval(self, nk: str, slot: pd.Timestamp) -> bool:
+        """
+        (종목, 슬롯) 평가 점유. :00틱과 타임아웃이 동시에 submit 하지 않게 한다.
+
+        Returns:
+            True 면 이 스레드가 평가를 진행. False 면 이미 점유·완료.
+        """
         try:
             key = self._slot_eval_key(nk, slot)
             with self._tick_tail_eval_lock:
+                if key in self._tick_tail_eval_done:
+                    return False
                 self._tick_tail_eval_done.add(key)
-                # 슬롯이 쌓이면 오래된 항목 정리
-                if len(self._tick_tail_eval_done) > 4000:
-                    keep = sorted(self._tick_tail_eval_done, key=lambda x: x[1])[-2000:]
-                    self._tick_tail_eval_done = set(keep)
+                self._trim_tick_tail_eval_done_unlocked()
+            return True
+        except Exception:
+            return True
+
+    def _release_tick_tail_eval(self, nk: str, slot: pd.Timestamp) -> None:
+        """합성 실패 시 점유를 풀어 타임아웃·다음 틱이 재시도하게 한다."""
+        try:
+            key = self._slot_eval_key(nk, slot)
+            with self._tick_tail_eval_lock:
+                self._tick_tail_eval_done.discard(key)
+        except Exception:
+            pass
+
+    def _mark_tick_tail_eval_done(self, nk: str, slot: pd.Timestamp) -> None:
+        try:
+            self._claim_tick_tail_eval(nk, slot)
         except Exception:
             pass
 
@@ -264,6 +293,64 @@ class RtWatchlistM1ApiPoller:
                 return key in self._tick_tail_eval_done
         except Exception:
             return False
+
+    def _order_codes_for_closed15_eval(self, codes: List[str]) -> List[str]:
+        """보유·고합치도 종목을 앞에 둔다."""
+        try:
+            from core.rt_closed_15m_official_replace import (
+                official_replace_priority_score,
+            )
+
+            uniq: List[str] = []
+            seen = set()
+            for raw in codes:
+                try:
+                    nk = canonical_stock_code(str(raw).strip())
+                except Exception:
+                    nk = str(raw or "").strip()
+                if not nk or nk in seen:
+                    continue
+                seen.add(nk)
+                uniq.append(nk)
+            return sorted(
+                uniq,
+                key=lambda c: (
+                    -float(official_replace_priority_score(self._app, c)),
+                    str(c),
+                ),
+            )
+        except Exception:
+            out: List[str] = []
+            seen = set()
+            for raw in codes:
+                try:
+                    nk = canonical_stock_code(str(raw).strip())
+                except Exception:
+                    nk = str(raw or "").strip()
+                if nk and nk not in seen:
+                    seen.add(nk)
+                    out.append(nk)
+            return out
+
+    def _count_leading_held_codes(self, ordered: List[str]) -> int:
+        """정렬된 목록 앞쪽 보유 종목 수."""
+        n = 0
+        try:
+            from core.rt_closed_15m_official_replace import (
+                official_replace_priority_score,
+            )
+
+            for c in ordered:
+                try:
+                    if float(official_replace_priority_score(self._app, c)) >= 0.999:
+                        n += 1
+                    else:
+                        break
+                except Exception:
+                    break
+        except Exception:
+            return 0
+        return n
 
     def _schedule_tick_tail_evals(
         self, codes: List[str], closed_lab: pd.Timestamp
@@ -315,19 +402,28 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             delay = wait
 
+        ordered = self._order_codes_for_closed15_eval(list(codes))
+        held_n = self._count_leading_held_codes(ordered)
         try:
             self._emit(
                 f"ℹ️ [M1Poll] 틱말분 타임아웃 예약 "
                 f"lab={closed_lab.strftime('%H:%M')} wait={wait:.1f}s "
-                f"delay={delay:.2f}s n={len(codes)} (:00틱 우선)"
+                f"delay={delay:.2f}s n={len(ordered)} held={held_n} "
+                f"(:00틱 우선, 보유 먼저)"
             )
         except Exception:
             pass
 
-        for nk in codes:
+        for i, nk in enumerate(ordered):
+            extra = 0.0
+            try:
+                if i >= int(held_n):
+                    extra = min(1.5, 0.05 * float(i - int(held_n)))
+            except Exception:
+                extra = 0.0
             try:
                 t = threading.Timer(
-                    delay,
+                    delay + extra,
                     self._job_tick_tail_eval,
                     args=(nk, closed_lab, "timeout"),
                 )
@@ -816,6 +912,7 @@ class RtWatchlistM1ApiPoller:
         reason: str = "timeout",
         *,
         record_compose_fail: bool = True,
+        retry: int = 0,
     ) -> bool:
         """
         틱 말분 seal·합성 15분 평가 (``:00`` 틱 또는 타임아웃).
@@ -825,6 +922,8 @@ class RtWatchlistM1ApiPoller:
         """
         if self._stop.is_set() or not self._monitoring():
             return False
+        claimed = False
+        slot: Optional[pd.Timestamp] = None
         try:
             slot = krx_15m_label_for_m1_open(closed_lab)
             if slot is None:
@@ -855,6 +954,11 @@ class RtWatchlistM1ApiPoller:
             if closed_15m_eval_after_official_enabled(st):
                 return False
 
+            # :00틱 vs 타임아웃 레이스 — 합성 전에 점유해야 이중 평가가 없다
+            if not self._claim_tick_tail_eval(nk, slot):
+                return True
+            claimed = True
+
             m1s = getattr(self._app, "rt_tick_m1_store", None)
             if m1s is not None:
                 try:
@@ -870,7 +974,32 @@ class RtWatchlistM1ApiPoller:
             maybe_roll_15m_slot_on_clock(self._app, nk)
             composed = apply_composed_closed_15m_from_m1(self._app, nk, slot)
             if composed is None:
-                # 중간 시도(재시도 예정)는 '실패'로 집계하지 않음 — 로그 오해 방지
+                try:
+                    self._release_tick_tail_eval(nk, slot)
+                except Exception:
+                    pass
+                claimed = False
+                # 합성 미준비(:00틱이 타임아웃보다 먼저 실패 등) — 짧게 재시도
+                try:
+                    att = int(retry or 0)
+                except (TypeError, ValueError):
+                    att = 0
+                if att < 6:
+                    try:
+                        t_r = threading.Timer(
+                            0.4,
+                            self._job_tick_tail_eval,
+                            args=(nk, closed_lab, reason),
+                            kwargs={
+                                "record_compose_fail": att >= 5,
+                                "retry": att + 1,
+                            },
+                        )
+                        t_r.daemon = True
+                        t_r.start()
+                    except Exception:
+                        pass
+                    return False
                 if record_compose_fail:
                     try:
                         self._note_closed15_eval_log(
@@ -883,8 +1012,6 @@ class RtWatchlistM1ApiPoller:
                         pass
                 return False
             o, h, l_, c, v = composed
-
-            self._mark_tick_tail_eval_done(nk, slot)
 
             try:
                 q = getattr(self._app, "_closed_15m_db_queue", None)
@@ -906,8 +1033,17 @@ class RtWatchlistM1ApiPoller:
                     return True
             except Exception as ex:
                 self._emit(f"⚠️ [M1Poll] {nk} 틱말분 submit_eval 실패: {ex!r}")
+            try:
+                self._release_tick_tail_eval(nk, slot)
+            except Exception:
+                pass
             return False
         except Exception as e:
+            try:
+                if claimed and slot is not None:
+                    self._release_tick_tail_eval(nk, slot)
+            except Exception:
+                pass
             try:
                 self._emit(f"⚠️ [M1Poll] 틱말분 평가 예외 ({nk}): {e!r}")
             except Exception:
@@ -2004,7 +2140,7 @@ class RtWatchlistM1ApiPoller:
         slot = krx_15m_label_for_m1_open(closed_lab)
         if slot is None:
             return
-        if self._is_tick_tail_eval_done(nk, slot):
+        if not self._claim_tick_tail_eval(nk, slot):
             return
 
         try:
@@ -2016,16 +2152,22 @@ class RtWatchlistM1ApiPoller:
             maybe_roll_15m_slot_on_clock(self._app, nk)
             composed = apply_composed_closed_15m_from_m1(self._app, nk, slot)
             if composed is None:
+                try:
+                    self._release_tick_tail_eval(nk, slot)
+                except Exception:
+                    pass
                 return
             o, h, l_, c, v = composed
         except Exception as ex:
+            try:
+                self._release_tick_tail_eval(nk, slot)
+            except Exception:
+                pass
             try:
                 self._emit(f"⚠️ [M1Poll] {nk} 15분 합성 실패: {ex!r}")
             except Exception:
                 pass
             return
-
-        self._mark_tick_tail_eval_done(nk, slot)
 
         # DB upsert (비동기)
         try:
@@ -2045,7 +2187,16 @@ class RtWatchlistM1ApiPoller:
                     )
                 except Exception:
                     pass
+                return
+            try:
+                self._release_tick_tail_eval(nk, slot)
+            except Exception:
+                pass
         except Exception as ex:
+            try:
+                self._release_tick_tail_eval(nk, slot)
+            except Exception:
+                pass
             try:
                 self._emit(f"⚠️ [M1Poll] {nk} submit_eval 실패: {ex!r}")
             except Exception:

@@ -11,8 +11,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Set, Tuple
 
 from core.rt_ui_responsiveness import (
     clamp_closed_15m_eval_workers,
@@ -213,14 +212,30 @@ class Closed15mDbUpsertQueue:
 
 
 class Closed15mEvalPool:
-    """로컬 15분 확정 후 ``eval_on_completed_15m`` 전용 워커 풀."""
+    """
+    로컬 15분 확정 후 ``eval_on_completed_15m`` 전용 워커 풀.
+
+    FIFO 가 아니라 **보유 전용 워커 1 + 나머지 우선순위 큐**.
+    청산(ATR_TRAIL 등)이 미보유 S1 평가 뒤에 수 분씩 밀리지 않게 한다.
+    같은 (종목, 슬롯) 은 큐/실행 중 중복 제출하지 않는다.
+    """
 
     def __init__(self, app: Any, log: Optional[Callable[[str], None]] = None) -> None:
         self._app = app
         self._log = log
-        self._executor: Optional[ThreadPoolExecutor] = None
         self._lock = threading.Lock()
         self._workers = 0
+        self._pq: "queue.PriorityQueue[Tuple[int, int, str, Any, str]]" = (
+            queue.PriorityQueue()
+        )
+        self._held_pq: "queue.PriorityQueue[Tuple[int, int, str, Any, str]]" = (
+            queue.PriorityQueue()
+        )
+        self._inflight: Set[Tuple[str, str]] = set()
+        self._seq = 0
+        self._stop = threading.Event()
+        self._worker_threads: list = []
+        self._held_thread: Optional[threading.Thread] = None
 
     def _desired_workers(self) -> int:
         try:
@@ -231,50 +246,140 @@ class Closed15mEvalPool:
         except Exception:
             return clamp_closed_15m_eval_workers(2)
 
-    def _ensure(self) -> ThreadPoolExecutor:
+    @staticmethod
+    def _slot_key(bar_ts: Any) -> str:
+        try:
+            import pandas as pd
+
+            return pd.Timestamp(bar_ts).floor("min").strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(bar_ts or "")
+
+    def _eval_priority(self, code: Any) -> int:
+        """낮을수록 먼저. 0=보유, 1=고합치도, 2=나머지."""
+        try:
+            from core.rt_closed_15m_official_replace import (
+                official_replace_priority_score,
+            )
+
+            sc = float(official_replace_priority_score(self._app, code))
+        except Exception:
+            sc = 0.0
+        if sc >= 0.999:
+            return 0
+        if sc >= 0.5:
+            return 1
+        return 2
+
+    def _ensure_workers(self) -> None:
         with self._lock:
             want = self._desired_workers()
-            if self._executor is not None and self._workers == want:
-                return self._executor
-            old = self._executor
-            self._executor = ThreadPoolExecutor(
-                max_workers=want, thread_name_prefix="closed15m_eval"
-            )
-            self._workers = want
-            if old is not None:
+            alive = [t for t in self._worker_threads if t.is_alive()]
+            self._worker_threads = alive
+            while len(self._worker_threads) < want:
+                t = threading.Thread(
+                    target=self._worker_loop,
+                    args=(self._pq,),
+                    name=f"closed15m_eval_{len(self._worker_threads)}",
+                    daemon=True,
+                )
                 try:
-                    old.shutdown(wait=False, cancel_futures=False)
-                except TypeError:
-                    try:
-                        old.shutdown(wait=False)
-                    except Exception:
-                        pass
+                    t.start()
+                except Exception:
+                    break
+                self._worker_threads.append(t)
+            self._workers = len(self._worker_threads)
+            ht = self._held_thread
+            if ht is None or (not ht.is_alive()):
+                try:
+                    ht = threading.Thread(
+                        target=self._worker_loop,
+                        args=(self._held_pq,),
+                        name="closed15m_eval_held",
+                        daemon=True,
+                    )
+                    ht.start()
+                    self._held_thread = ht
+                except Exception:
+                    self._held_thread = None
+
+    def _worker_loop(
+        self,
+        pq: "queue.PriorityQueue[Tuple[int, int, str, Any, str]]",
+    ) -> None:
+        while not self._stop.is_set():
+            try:
+                item = pq.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            nk = ""
+            slot_key = ""
+            bar_ts: Any = None
+            try:
+                _pri, _seq, nk, bar_ts, slot_key = item
+            except Exception:
+                try:
+                    pq.task_done()
                 except Exception:
                     pass
-            return self._executor
+                continue
+            try:
+                se = getattr(self._app, "signal_engine", None)
+                if se is not None:
+                    se.eval_on_completed_15m(nk, bar_ts)
+            except Exception:
+                pass
+            finally:
+                try:
+                    with self._lock:
+                        self._inflight.discard((str(nk), str(slot_key)))
+                except Exception:
+                    pass
+                yield_gil_for_ui()
+                try:
+                    pq.task_done()
+                except Exception:
+                    pass
 
     def submit_eval(self, code: Any, bar_ts: Any) -> None:
-        """종목별 확정 평가를 풀에 제출합니다."""
+        """종목별 확정 평가를 풀에 제출합니다(보유 전용 워커, 슬롯 중복 생략)."""
         try:
             # 평가·주문 동안 공식 M1/15분 REST 양보
             try:
                 mark_rt15_official_quiet(self._app)
             except Exception:
                 pass
-            ex = self._ensure()
+            try:
+                from utils.normalization import canonical_stock_code
 
-            def _run() -> None:
+                nk = canonical_stock_code(str(code).strip()) or str(code).strip()
+            except Exception:
+                nk = str(code or "").strip()
+            if not nk:
+                return
+            slot_key = self._slot_key(bar_ts)
+            job_key = (str(nk), str(slot_key))
+            pri = int(self._eval_priority(nk))
+            try:
+                with self._lock:
+                    if job_key in self._inflight:
+                        return
+                    self._inflight.add(job_key)
+                    self._seq += 1
+                    seq = int(self._seq)
+            except Exception:
+                seq = 0
+            target = self._held_pq if pri <= 0 else self._pq
+            try:
+                target.put((pri, seq, str(nk), bar_ts, slot_key))
+            except Exception:
                 try:
-                    se = getattr(self._app, "signal_engine", None)
-                    if se is not None:
-                        se.eval_on_completed_15m(code, bar_ts)
+                    with self._lock:
+                        self._inflight.discard(job_key)
                 except Exception:
                     pass
-                finally:
-                    # pandas 평가 후 GIL을 놓아 Tk after/렌더가 돌게 함
-                    yield_gil_for_ui()
-
-            ex.submit(_run)
+                raise
+            self._ensure_workers()
         except Exception:
             # 폴백: 단일 데몬 스레드
             try:
@@ -297,16 +402,14 @@ class Closed15mEvalPool:
                 pass
 
     def shutdown(self) -> None:
+        try:
+            self._stop.set()
+        except Exception:
+            pass
         with self._lock:
-            if self._executor is not None:
-                try:
-                    self._executor.shutdown(wait=False, cancel_futures=False)
-                except TypeError:
-                    try:
-                        self._executor.shutdown(wait=False)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-                self._executor = None
-                self._workers = 0
+            self._worker_threads = []
+            self._workers = 0
+            try:
+                self._inflight.clear()
+            except Exception:
+                pass
