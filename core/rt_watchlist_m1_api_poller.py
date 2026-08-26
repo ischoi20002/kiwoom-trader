@@ -198,6 +198,9 @@ class RtWatchlistM1ApiPoller:
                     f"ℹ️ [M1Poll] {label} 평가 완료 slot={hm} n={ok_n}{extra}"
                 )
             elif ok_n <= 0:
+                # 틱말분 보조 실패는 공식 경로 선행 후 흔함 — GUI 노이즈 제거
+                if "틱말분" in label:
+                    return
                 self._emit(
                     f"⚠️ [M1Poll] {label} 평가 실패 slot={hm} n={fail_n}"
                 )
