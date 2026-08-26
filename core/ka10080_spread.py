@@ -94,6 +94,55 @@ def effective_m1_head_catchup_spread_sec(
     return max(lo, min(hi, float(n) * per))
 
 
+def effective_m1_last_official_spread_sec(
+    settings: Dict[str, Any], n_codes: int
+) -> float:
+    """
+    슬롯 **말분 공식 1분** 조회 분산 창(초).
+
+    공식 우선 평가용 — 헤드 catchup과 같이 ``n × ~1.1s`` 로 조이고
+    레거시 M1 40초 바닥은 쓰지 않는다. 키가 없으면 헤드 설정을 재사용.
+    """
+    try:
+        n = max(1, int(n_codes))
+    except (TypeError, ValueError):
+        n = 1
+    try:
+        per = float(
+            settings.get(
+                "realtime_m1_last_official_per_code_sec",
+                settings.get(
+                    "realtime_m1_head_catchup_per_code_sec",
+                    settings.get("realtime_ka10080_global_min_interval_sec", 1.1),
+                ),
+            )
+        )
+    except (TypeError, ValueError):
+        per = 1.1
+    per = max(1.0, min(float(per), 2.0))
+    try:
+        lo = float(
+            settings.get(
+                "realtime_m1_last_official_spread_min_sec",
+                settings.get("realtime_m1_head_catchup_spread_min_sec", 3.0),
+            )
+        )
+    except (TypeError, ValueError):
+        lo = 3.0
+    try:
+        hi = float(
+            settings.get(
+                "realtime_m1_last_official_spread_max_sec",
+                settings.get("realtime_m1_head_catchup_spread_max_sec", 50.0),
+            )
+        )
+    except (TypeError, ValueError):
+        hi = 50.0
+    lo = max(1.0, min(lo, 55.0))
+    hi = max(lo, min(hi, 55.0))
+    return max(lo, min(hi, float(n) * per))
+
+
 def effective_rt15m_stagger_spread_sec(settings: Dict[str, Any], n_codes: int) -> float:
     """
     15분 확정 REST: ``min_delay`` 이후 ``[0, spread)`` 에 종목 분산.

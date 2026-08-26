@@ -490,23 +490,10 @@ def enqueue_official_indicator_recalc(app: Any, code: Any) -> None:
     """
     공식봉 OHLCV 반영 후 전체 지표 재계산을 후순위로 넣습니다.
 
-    정렬교체 워커에서 동기 계산하면 종목당 수십 초가 걸려
-    26종이 20분 넘게 직렬로 붙습니다.
+    (공식 15분 정렬교체는 비활성. M1 누락채움 등에서만 호출될 수 있음.)
     """
     global _official_recalc_thread
     try:
-        # M1 평가 + 공식 정렬 모드: 평가는 평가 경로에서 다시 계산하므로
-        # 여기서 돌리면 GIL만 잡아 다음 슬롯 주문을 늦춘다.
-        try:
-            from core.rt_closed_15m_official_replace import (
-                official_replace_alignment_mode,
-            )
-
-            st = getattr(app, "settings", None) or {}
-            if official_replace_alignment_mode(st):
-                return
-        except Exception:
-            pass
         nk = str(code or "").strip()
         if not nk:
             return

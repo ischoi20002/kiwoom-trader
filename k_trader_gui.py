@@ -68,7 +68,6 @@ from core.signal_callbacks_service import SignalCallbacksService
 from core.ui_trading_status_service import UiTradingStatusService
 from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
 from core.rt_ui_responsiveness import drain_ui_call_queue_once
-from core.rt_closed_15m_official_replace import RtClosed15mOfficialReplaceScheduler
 from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 from core.next_open_pending_action_service import NextOpenPendingActionService
 from core.nxt_eligibility_service import NxtEligibilityService
@@ -678,8 +677,9 @@ class KiwoomApp:
                 ) and bool(st.get("realtime_s1_eval_on_local_15m_close", True))
                 m1_on = bool(st.get("realtime_watchlist_m1_api_poller_enabled", True))
 
-            # M1 경로: 마지막 1분 프로브 후 평가 — 로컬 롤 직후 즉시 평가 금지
+            # M1 경로: 말분 공식/틱 보조로 평가 — 로컬 롤 직후 즉시 평가 금지
             # 레거시(M1 OFF + eval_after_official OFF): 로컬 확정 즉시 평가
+            # 공식 15분 정렬교체는 사용하지 않음(M1 합성·누락채움으로 대체).
             try:
                 if (
                     bool(st.get("realtime_s1_eval_on_local_15m_close", True))
@@ -690,60 +690,8 @@ class KiwoomApp:
             except Exception:
                 pass
 
-            # 공식 15분 교체: M1 경로 ON이면 기본 스킵(평가 게이트·REST 부하 완화)
-            skip_15m_replace = bool(m1_on) and not bool(
-                st.get("realtime_closed_15m_official_replace_with_m1", False)
-            )
-            if skip_15m_replace:
-                return
-
-            defer_sec = 0.0
-            if m1_on and not eval_after_official:
-                try:
-                    from core.closed_15m_fast_path import (
-                        closed_15m_defer_official_sec,
-                        mark_rt15_official_quiet,
-                    )
-
-                    mark_rt15_official_quiet(self)
-                    defer_sec = closed_15m_defer_official_sec(self)
-                except Exception:
-                    defer_sec = 4.0
-            try:
-                sched = getattr(self, "rt_closed_15m_official_scheduler", None)
-                if sched is not None:
-                    try:
-                        from core.krx_market_halt_slots import (
-                            should_skip_rt15m_official_replace,
-                        )
-
-                        if should_skip_rt15m_official_replace(self, ts):
-                            return
-                    except Exception:
-                        pass
-                    try:
-                        dly = float(
-                            st.get(
-                                "realtime_closed_15m_official_replace_delay_sec",
-                                2.5,
-                            )
-                        )
-                    except (TypeError, ValueError):
-                        dly = 2.5
-                    sched.schedule(
-                        app=self,
-                        code=code,
-                        bar_ts=ts,
-                        delay_sec=dly,
-                        prepend_delay_sec=float(defer_sec),
-                    )
-            except Exception:
-                pass
-
         self._rt15_bar_closed_cb = _on_rt15_bar_closed
-        self.rt_closed_15m_official_scheduler = RtClosed15mOfficialReplaceScheduler(
-            log=self.log
-        )
+        self.rt_closed_15m_official_scheduler = None
         self.rt_watchlist_m1_api_poller = RtWatchlistM1ApiPoller(self, log=self.log)
         try:
             from core.rt_closed_15m_official_replace import m1_api_poller_enabled as _m1_en_fn

@@ -1376,11 +1376,11 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
-            '틱 말분 합성 평가',
+            '틱 말분 보조',
             None,
             '',
-            'ON(권장)=매분 틱 1분 seal, 말분에 15분 합성 후 S1·S2·청산. '
-            '다음분 :00 틱 즉시, 무거래는 타임아웃(초)',
+            'ON(권장)=공식 말분 실패·타임아웃 시 틱 seal로 완성15 보조 평가. '
+            '공식 말분 평가 OFF(레거시)일 때만 :00 틱이 주경로',
             toggle_key='realtime_15m_last_minute_from_ticks',
         )
         add_param_row(
@@ -1431,18 +1431,9 @@ class SettingsTab:
             '공식 말분 1분 평가',
             None,
             '',
-            'OFF(권장)=말분은 틱. ON=틱 OFF일 때 말분 마감 후 ka10080 1회 더 조회해 평가'
-            '(슬롯당 head+말분 최대 2회)',
+            'ON(권장)=말분 완성15를 공식 1분 REST로 평가(분산 n×1.1s). '
+            '틱 말분은 실패·타임아웃 보조. OFF=레거시 틱 주경로',
             toggle_key='realtime_15m_eval_on_official_last_m1',
-        )
-        add_param_row(
-            strat_f,
-            'M1 ON시에도 공식15 교체',
-            None,
-            '',
-            'OFF(기본)=M1 경로에서 공식 15분 REST 스킵. '
-            'ON=슬롯 완성 후 ~2분 지연·단발 조회로 정합 교체(M1 평가/프로브와 경쟁하지 않음)',
-            toggle_key='realtime_closed_15m_official_replace_with_m1',
         )
         add_param_row(
             strat_f,

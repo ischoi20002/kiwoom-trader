@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-15분 슬롯이 바뀔 때 확정된 직전 봉을 키움 ka10080(15분)으로 조회해
-메모리 ``bars_data`` 및 RT15m DB에 덮어씁니다(틱 누락 시 OHLCV 정합성).
+공식 15분 정렬교체(ka10080 tic=15 REST)는 **비활성**입니다.
 
-- 완성 봉을 갱신(형성 중 현재 봉은 틱 경로 유지).
-- 같은 ka10080 페이지의 이전 완성봉도 값이 다르면 덮어 MA60 정합을 회복.
-- 종목·슬롯당 스케줄 1회(중복 타이머 방지).
-- 조회·``bars_data`` 반영은 데몬 워커. Tk 메인에 pandas 롤링을 올리지 않습니다.
+신호용 15분은 M1 합성·누락 채움 경로를 쓰고, 이 모듈은 공통 헬퍼만 유지합니다.
+예: ``official_replace_priority_score``, ``ts_to_slot_hhmm``,
+``m1_api_poller_enabled``, ``closed_15m_eval_after_official_enabled``.
 
-M1 평가 경로(정렬용 교체): 슬롯 완성 후 고정 지연(~120초) 뒤 **슬롯 단위 배치**로
-전 감시 종목을 짧은 REST 간격으로 조회·OHLCV/MA 반영합니다.
-종목별 quiet/평가큐 양보(최대 45초)로 1분 간격이 나던 경로를 쓰지 않습니다.
+``RtClosed15mOfficialReplaceScheduler.schedule`` 는 no-op 입니다
+(잔여 호출·테스트 import 호환용).
 """
 
 from __future__ import annotations
@@ -101,13 +98,11 @@ def m1_api_poller_enabled(settings: Any) -> bool:
 
 def official_replace_alignment_mode(settings: Any) -> bool:
     """
-    M1로 평가하고 공식 15분은 정합 교체만 하는 모드.
+    공식 15분 정렬교체 모드 — 항상 False(비활성).
 
-    이 모드에서는 슬롯 직후 폴링 대신 고정 지연 후 단발 조회합니다.
+    과거: M1 평가 + 공식 15분 정합 교체. 현재는 M1 합성만 사용.
     """
-    return m1_api_poller_enabled(settings) and (
-        not closed_15m_eval_after_official_enabled(settings)
-    )
+    return False
 
 
 def closed_15m_eval_after_official_enabled(settings: Any) -> bool:
@@ -932,15 +927,9 @@ def fetch_official_15m_row_for_timestamp(
 
 class RtClosed15mOfficialReplaceScheduler:
     """
-    슬롯 확정 콜백에서 ``schedule`` 만 호출합니다.
-    HTTP는 지연 후 데몬 스레드에서 수행하고, 결과는
-    ``KiwoomApp._apply_official_closed_15m_bars`` 로 전달합니다
-    (현재 슬롯 + 같은 응답의 이전 완성봉).
+    공식 15분 정렬교체 스케줄러 — **비활성(no-op)**.
 
-    공식교체 후 평가 모드:
-    - 1차: 보유·합치도(임박) 종목만 스케줄
-    - 슬롯당 1종(프로브)만 공식봉 등장까지 재시도
-    - 프로브 성공 후 나머지 감시 종목 백필 교체·평가(간격 분산, 1회 조회)
+    공통 헬퍼·테스트 호환을 위해 클래스는 유지하되 ``schedule`` 는 즉시 return 합니다.
     """
 
     def __init__(self, log: Optional[Callable[[str], None]] = None) -> None:
@@ -1707,7 +1696,10 @@ class RtClosed15mOfficialReplaceScheduler:
         backfill_after_ready: bool = False,
         backfill_extra_delay_sec: float = 0.0,
     ) -> None:
-        """이미 동일 종목·동일 봉 시각이 예약돼 있으면 무시합니다."""
+        """공식 15분 정렬교체는 비활성 — 예약하지 않습니다."""
+        return
+
+        # 아래는 레거시 정렬교체 본문(도달 불가). 헬퍼·테스트 import 호환용으로 유지.
         try:
             if not is_krx_15m_slot_end(bar_ts):
                 return

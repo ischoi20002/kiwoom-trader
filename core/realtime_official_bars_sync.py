@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-실시간 **신호용** 15분봉: 틱 1분 선적재 + 공식 soft replace 후 S1·S2·청산 평가.
+실시간 **신호용** 15분봉: 공식 1분(+틱 결측) 합성 후 S1·S2·청산 평가.
 
 - 완성봉 OHLCV: ``compose_local_15m_ohlcv`` (공식 우선, 결측은 틱).
-- 말분은 ``realtime_15m_last_minute_from_ticks`` 로 틱 우선 가능.
+- 말분: ``realtime_15m_eval_on_official_last_m1`` ON(기본)이면 공식 우선.
+  레거시로 ``realtime_15m_last_minute_from_ticks`` 만 ON·공식평가 OFF 이면 틱 우선.
 - 슬롯 앞구간(말분 제외)에 공식 1분이 없으면 틱만으로 완성15를 만들지 않음
   (장중 재시작 직후 틱전용봉 방지). 공식 catchup 후 재시도.
 - 말분 틱이 중간부터면 부분 틱으로 평가하지 않고 공식 말분 1분을 기다림.
@@ -287,7 +288,8 @@ def compose_local_15m_ohlcv(
     - 일반: ``[T, T+15)`` 의 완료 1분
     - ``15:15``: ``[15:15, 15:20)``
     - ``15:30``: 단일가 1분만
-    - ``realtime_15m_last_minute_from_ticks`` ON 이면 말분은 틱 우선
+    - ``realtime_15m_last_minute_from_ticks`` ON 이면(레거시) 말분은 틱 우선.
+      ``realtime_15m_eval_on_official_last_m1`` ON(기본)이면 말분은 공식 우선·틱은 결측 채움.
     - ``realtime_15m_compose_tick_fill_on_api_miss`` ON 이면 공식 결측 분을 틱으로 채움
     - ``realtime_15m_compose_require_official_head`` ON 이면 앞구간에 공식 1분이
       없을 때 None (틱만으로 완성15 금지). 폴러 catchup 후 재시도.
@@ -305,6 +307,13 @@ def compose_local_15m_ohlcv(
 
         use_tick_tail = _last_minute_from_ticks_enabled(app)
         allow_fill = _tick_fill_on_api_miss_enabled(app)
+        # 공식 말분 평가 우선이면 말분은 공식 우선(틱은 결측 채움만)
+        try:
+            st = getattr(app, "settings", None) or {}
+            if bool(st.get("realtime_15m_eval_on_official_last_m1", True)):
+                use_tick_tail = False
+        except Exception:
+            pass
 
         # 15:30 단일가 — 틱 우선, 없으면 공식.
         # 말분 틱이 중간부터면 공식 1분만 사용(없으면 None → 대기).
