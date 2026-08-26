@@ -2335,6 +2335,41 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
+    def _fill_missing_15m_after_head_catchup(self, code: str) -> None:
+        """헤드 1분 catchup 직후, 닫힌 15분 누락·스텁을 공식1분 합성으로 채웁니다."""
+        try:
+            st = self._settings()
+            if not bool(st.get("realtime_m1_head_fill_missing_15m_enabled", True)):
+                return
+            max_bars = int(st.get("realtime_m1_head_fill_missing_15m_max_bars", 4) or 4)
+        except Exception:
+            max_bars = 4
+        try:
+            from core.realtime_official_bars_sync import (
+                fill_missing_closed_15m_from_official_m1,
+            )
+
+            rep = fill_missing_closed_15m_from_official_m1(
+                self._app, code, max_bars=max_bars
+            )
+        except Exception:
+            return
+        try:
+            n_miss = len(rep.get("filled_missing") or [])
+            n_stub = len(rep.get("filled_stub") or [])
+            n_fail = len(rep.get("failed") or [])
+            if n_miss or n_stub or n_fail:
+                sl = getattr(self._app, "session_logger", None)
+                if sl is not None and hasattr(sl, "log"):
+                    sl.log("m1_head_15m_gap_fill", dict(rep))
+            if n_miss or n_stub:
+                self._emit(
+                    f"[M1Poll] 15m gap-fill {rep.get('code')} "
+                    f"missing={n_miss} stub={n_stub} fail={n_fail}"
+                )
+        except Exception:
+            pass
+
     def _job_fetch_slot_head(
         self,
         code: str,
@@ -2473,13 +2508,28 @@ class RtWatchlistM1ApiPoller:
                 build_m1_head_catchup_report,
             )
 
+            # 헤드 구간 + 직전 누락 15분 메우기용 1분을 같은 차트 페이지로 반영
+            catchup_from = head_start
+            try:
+                st = self._settings()
+                if bool(st.get("realtime_m1_head_fill_missing_15m_enabled", True)):
+                    heal_n = int(st.get("realtime_m1_head_fill_missing_15m_max_bars", 4) or 4)
+                    heal_n = max(1, min(heal_n, 16))
+                    heal_from = pd.Timestamp(head_start) - pd.Timedelta(
+                        minutes=15 * int(heal_n)
+                    )
+                    if heal_from < pd.Timestamp(head_start):
+                        catchup_from = heal_from
+            except Exception:
+                catchup_from = head_start
+
             applied = int(
                 apply_chart_catchup_to_m1_store(
                     self._app,
                     nk,
                     chart_df,
                     head_last_open,
-                    from_open=head_start,
+                    from_open=catchup_from,
                 )
                 or 0
             )
@@ -2500,6 +2550,11 @@ class RtWatchlistM1ApiPoller:
                 else:
                     rep["status"] = "incomplete"
                 self._log_m1_head_catchup(rep)
+            # 공식 15분 교체 보조: 최근 닫힌 슬롯의 누락·스텁을 1분 합성으로 채움
+            try:
+                self._fill_missing_15m_after_head_catchup(nk)
+            except Exception:
+                pass
         except Exception as ex:
             try:
                 self._emit(f"⚠️ [M1Poll] {nk} head soft catchup 실패: {ex!r}")

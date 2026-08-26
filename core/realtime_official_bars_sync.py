@@ -26,6 +26,7 @@ from utils.bars_data_keys import resolve_bars_data_frame
 from utils.krx_bars import (
     is_krx_15m_slot_end,
     is_krx_last_15m_slot,
+    iter_krx_15m_slot_ends_for_day,
     krx_stream_slot_end_datetime,
     m1_bar_open_label_for_just_completed_minute,
     m1_closing_auction_ts_for_15m_end,
@@ -828,6 +829,214 @@ def apply_composed_closed_15m_from_m1(
         return composed
     except Exception:
         return composed
+
+
+def _looks_like_stub_15m_row(row: Any) -> bool:
+    """롤 직후 스텁(거래량 0·OHLC 동일)으로 보이면 True."""
+    try:
+        v = float(row.get("Volume", row.get("volume", 0)) or 0)
+        if v <= 0:
+            return True
+        o = float(row["Open"])
+        h = float(row["High"])
+        l_ = float(row["Low"])
+        c = float(row["Close"])
+        if (
+            abs(o - h) < 0.5
+            and abs(h - l_) < 0.5
+            and abs(l_ - c) < 0.5
+            and v < 1.0
+        ):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def fill_missing_closed_15m_from_official_m1(
+    app: Any,
+    code: str,
+    *,
+    max_bars: int = 4,
+    as_of: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    이미 끝난 최근 15분 슬롯 중 **누락·스텁**을 공식 1분 합성으로 채웁니다.
+
+    공식 ka10080(15) 교체의 보조 경로입니다. 형성 중 슬롯은 건드리지 않습니다.
+    """
+    report: Dict[str, Any] = {
+        "code": "",
+        "checked": 0,
+        "filled_missing": [],
+        "filled_stub": [],
+        "skipped": [],
+        "failed": [],
+    }
+    try:
+        nk = canonical_stock_code(str(code).strip())
+    except Exception:
+        nk = ""
+    report["code"] = nk or str(code)
+    if not nk:
+        return report
+    try:
+        st = getattr(app, "settings", None) or {}
+        if not bool(st.get("realtime_m1_head_fill_missing_15m_enabled", True)):
+            report["skipped"].append("disabled")
+            return report
+    except Exception:
+        pass
+    try:
+        max_n = max(1, min(int(max_bars), 16))
+    except Exception:
+        max_n = 4
+    try:
+        wall = as_of if as_of is not None else datetime.now()
+        forming = stream_slot_end_datetime(wall)
+    except Exception:
+        return report
+    try:
+        day0 = pd.Timestamp(forming).normalize()
+        slots = [
+            pd.Timestamp(s).floor("min")
+            for s in iter_krx_15m_slot_ends_for_day(day0)
+        ]
+        done = [s for s in slots if s < pd.Timestamp(forming).floor("min")]
+        targets = done[-max_n:]
+    except Exception:
+        return report
+    report["checked"] = int(len(targets))
+    if not targets:
+        return report
+
+    lk = getattr(app, "_bars_data_lock", None)
+    bd = getattr(app, "bars_data", None)
+    if lk is None or not isinstance(bd, dict):
+        report["skipped"].append("no_bars_data")
+        return report
+
+    for slot in targets:
+        slot_s = slot.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            composed = compose_local_15m_ohlcv(app, nk, slot)
+        except Exception:
+            composed = None
+        if composed is None:
+            report["failed"].append(slot_s)
+            continue
+        o, h, l_, c, v = composed
+        if float(c) <= 0:
+            report["failed"].append(slot_s)
+            continue
+        try:
+            with lk:
+                _k, df = resolve_bars_data_frame(bd, nk, migrate_alias=True)
+                use_key = _k or nk
+                if df is None or getattr(df, "empty", True):
+                    report["skipped"].append(f"{slot_s}:empty_df")
+                    continue
+                # 인덱스 정규화 조회
+                hit = None
+                try:
+                    if slot in df.index:
+                        hit = slot
+                    else:
+                        for ix in df.index:
+                            if pd.Timestamp(ix).floor("min") == slot:
+                                hit = ix
+                                break
+                except Exception:
+                    hit = None
+
+                if hit is None:
+                    # 누락 행 삽입
+                    try:
+                        dt_str = slot.strftime("%Y-%m-%d %H:%M:%S")
+                        new_row = {
+                            "datetime": dt_str,
+                            "time": ts_to_slot_hhmm(slot),
+                            "Open": float(o),
+                            "High": float(h),
+                            "Low": float(l_),
+                            "Close": float(c),
+                            "Volume": float(v),
+                        }
+                        nrd = pd.DataFrame([new_row])
+                        nrd["datetime"] = pd.to_datetime(nrd["datetime"])
+                        nrd.set_index("datetime", inplace=True)
+                        df2 = pd.concat([df, nrd])
+                        try:
+                            df2 = df2[~df2.index.duplicated(keep="last")]
+                            df2 = df2.sort_index().tail(300)
+                        except Exception:
+                            pass
+                        try:
+                            df2["ma5"] = df2["Close"].rolling(window=5).mean()
+                            df2["ma20"] = df2["Close"].rolling(window=20).mean()
+                            df2["ma60"] = df2["Close"].rolling(window=60).mean()
+                        except Exception:
+                            pass
+                        bd[use_key] = df2
+                        report["filled_missing"].append(slot_s)
+                    except Exception:
+                        report["failed"].append(slot_s)
+                    continue
+
+                # 존재: 스텁만 공식1분 합성으로 교체 (이미 채워진 봉은 유지)
+                try:
+                    row = df.loc[hit]
+                    if not _looks_like_stub_15m_row(row):
+                        continue
+                    df.at[hit, "Open"] = float(o)
+                    df.at[hit, "High"] = float(h)
+                    df.at[hit, "Low"] = float(l_)
+                    df.at[hit, "Close"] = float(c)
+                    df.at[hit, "Volume"] = float(v)
+                    if "time" in df.columns:
+                        df.at[hit, "time"] = ts_to_slot_hhmm(slot)
+                    try:
+                        df["ma5"] = df["Close"].rolling(window=5).mean()
+                        df["ma20"] = df["Close"].rolling(window=20).mean()
+                        df["ma60"] = df["Close"].rolling(window=60).mean()
+                    except Exception:
+                        pass
+                    bd[use_key] = df
+                    report["filled_stub"].append(slot_s)
+                except Exception:
+                    report["failed"].append(slot_s)
+        except Exception:
+            report["failed"].append(slot_s)
+
+    # DB·지표 후처리(채운 경우만)
+    if report["filled_missing"] or report["filled_stub"]:
+        try:
+            store = getattr(app, "realtime_monitor_bars_store", None)
+            if store is not None:
+                for slot_s in list(report["filled_missing"]) + list(
+                    report["filled_stub"]
+                ):
+                    try:
+                        ts = pd.Timestamp(slot_s)
+                        composed2 = compose_local_15m_ohlcv(app, nk, ts)
+                        if composed2 is None:
+                            continue
+                        o2, h2, l2, c2, v2 = composed2
+                        if hasattr(store, "upsert_completed_bar"):
+                            store.upsert_completed_bar(
+                                nk, ts, o2, h2, l2, c2, v2
+                            )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        try:
+            from core.closed_15m_fast_path import enqueue_official_indicator_recalc
+
+            enqueue_official_indicator_recalc(app, nk)
+        except Exception:
+            pass
+    return report
 
 
 def _resolve_monitor_price(app: Any, nk: str, fallback: float) -> float:
