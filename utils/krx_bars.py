@@ -37,6 +37,7 @@ __all__ = [
     "krx_15m_slot_complete_ts",
     "m1_bar_open_label_for_just_completed_minute",
     "m1_bar_end_ts_for_closed_open",
+    "m1_ka10080_cntr_tm_for_closed_open",
     "chart_covers_m1_closed_minute",
     "is_last_m1_open_of_15m_slot",
     "krx_15m_label_for_m1_open",
@@ -767,9 +768,29 @@ def m1_bar_end_ts_for_closed_open(
     closed_open: Union[pd.Timestamp, datetime, str],
 ) -> pd.Timestamp:
     """
-    닫힌 1분봉 시작 라벨 → ka10080 인덱스(cntr_tm = **봉 종가 시각**).
+    닫힌 1분봉 시작 라벨 → ka10080 인덱스(cntr_tm).
+
+    연속매매: cntr_tm = 봉 종가 시각(open+1분).
+    종가 단일가(15:30): 키움이 cntr_tm=15:30 으로 주므로 open 라벨과 동일.
     """
-    return pd.Timestamp(closed_open).floor("min") + pd.Timedelta(minutes=1)
+    return m1_ka10080_cntr_tm_for_closed_open(closed_open)
+
+
+def m1_ka10080_cntr_tm_for_closed_open(
+    closed_open: Union[pd.Timestamp, datetime, str],
+) -> pd.Timestamp:
+    """
+    닫힌 1분 open 라벨 → ka10080 1분 차트에서 찾을 cntr_tm.
+    """
+    t = pd.Timestamp(closed_open).floor("min")
+    try:
+        h = _hours_for_ts(t)
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm == h.close_minutes:
+            return t
+    except Exception:
+        pass
+    return t + pd.Timedelta(minutes=1)
 
 
 def chart_covers_m1_closed_minute(
@@ -777,15 +798,15 @@ def chart_covers_m1_closed_minute(
     closed_open: Union[pd.Timestamp, datetime, str],
 ) -> bool:
     """
-    ka10080 1분 차트가 목표 닫힌 분(종료 시각)까지 데이터를 포함하는지.
+    ka10080 1분 차트가 목표 닫힌 분까지 데이터를 포함하는지.
 
-    ``max(cntr_tm) < 종료 시각`` 이면 아직 해당 분봉이 생성되지 않은 것(장전·개장 직후 지연).
+    ``max(cntr_tm) < 목표 cntr_tm`` 이면 아직 해당 분봉이 생성되지 않은 것.
     """
     try:
         if chart_df is None or getattr(chart_df, "empty", True):
             return False
-        end_ts = m1_bar_end_ts_for_closed_open(closed_open)
-        return pd.Timestamp(chart_df.index.max()).floor("s") >= end_ts.floor("s")
+        want = m1_ka10080_cntr_tm_for_closed_open(closed_open)
+        return pd.Timestamp(chart_df.index.max()).floor("s") >= want.floor("s")
     except Exception:
         return False
 

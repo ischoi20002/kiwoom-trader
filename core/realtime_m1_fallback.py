@@ -38,8 +38,10 @@ def chart_1m_open_labels_in_range(
     end_incl: pd.Timestamp,
 ) -> Set[pd.Timestamp]:
     """
-    ka10080 차트 인덱스는 봉 **종가 시각**(분 끝)이므로
-    open 라벨 = 종가 − 1분. 구간 내 open 집합을 반환.
+    ka10080 차트 인덱스 → open 라벨 집합.
+
+    연속매매: cntr_tm = 봉 종가 → open = 종가 − 1분.
+    종가 단일가(15:30): cntr_tm = 15:30 → open = 15:30.
     """
     found: Set[pd.Timestamp] = set()
     try:
@@ -47,10 +49,20 @@ def chart_1m_open_labels_in_range(
             return found
         lo = pd.Timestamp(start_incl).floor("min")
         hi = pd.Timestamp(end_incl).floor("min")
+        from utils.krx_session_hours import get_session_hours
+
         for end_ts in df_1m.index:
             try:
                 end_lab = pd.Timestamp(end_ts).floor("min")
-                open_lab = end_lab - pd.Timedelta(minutes=1)
+                try:
+                    h = get_session_hours(end_lab)
+                    hm = int(end_lab.hour) * 60 + int(end_lab.minute)
+                    if hm == int(h.close_minutes):
+                        open_lab = end_lab
+                    else:
+                        open_lab = end_lab - pd.Timedelta(minutes=1)
+                except Exception:
+                    open_lab = end_lab - pd.Timedelta(minutes=1)
                 if lo <= open_lab <= hi:
                     found.add(open_lab)
             except Exception:
@@ -329,10 +341,20 @@ def apply_chart_catchup_to_m1_store(
                 return False
 
         applied = 0
+        from utils.krx_session_hours import get_session_hours
+
         for end_ts, row in df_1m.sort_index().iterrows():
             try:
                 end_lab = pd.Timestamp(end_ts).floor("min")
-                open_lab = end_lab - pd.Timedelta(minutes=1)
+                try:
+                    h = get_session_hours(end_lab)
+                    hm = int(end_lab.hour) * 60 + int(end_lab.minute)
+                    if hm == int(h.close_minutes):
+                        open_lab = end_lab
+                    else:
+                        open_lab = end_lab - pd.Timedelta(minutes=1)
+                except Exception:
+                    open_lab = end_lab - pd.Timedelta(minutes=1)
                 if open_lab < from_open_ts or open_lab > upto:
                     continue
                 o = float(row["Open"])

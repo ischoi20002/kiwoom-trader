@@ -1807,13 +1807,17 @@ class RtWatchlistM1ApiPoller:
         self, df: pd.DataFrame, closed_open: pd.Timestamp
     ) -> Optional[pd.Series]:
         """
-        ka10080 1분 인덱스는 cntr_tm = **봉 종가 시각**(분 끝).
-        ``closed_open`` 은 ``m1_bar_open_label_for_just_completed_minute`` = 구간 시작 라벨.
+        ka10080 1분 인덱스 cntr_tm 조회.
+
+        연속매매: cntr_tm = 봉 종가(open+1분).
+        종가 단일가(15:30): 키움 cntr_tm = 15:30 (open과 동일).
         """
         try:
             if df is None or getattr(df, "empty", True):
                 return None
-            end_ts = pd.Timestamp(closed_open) + pd.Timedelta(minutes=1)
+            from utils.krx_bars import m1_ka10080_cntr_tm_for_closed_open
+
+            end_ts = m1_ka10080_cntr_tm_for_closed_open(closed_open)
             if end_ts in df.index:
                 return df.loc[end_ts]
             want = end_ts.floor("s")
