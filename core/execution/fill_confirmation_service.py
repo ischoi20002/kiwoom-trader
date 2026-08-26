@@ -371,13 +371,7 @@ class FillConfirmationService:
                 if hasattr(pm, "is_redundant_late_exchange_sell_fill") and pm.is_redundant_late_exchange_sell_fill(
                     nc, oid
                 ):
-                    try:
-                        self.log(
-                            f"ℹ️ [체결] 매도 증분 생략({nc}) — "
-                            f"동기화·주문로그 반영 완료(중복 방지)"
-                        )
-                    except Exception:
-                        pass
+                    # 정상 중복(이미 청산 반영) — 로그 없이 수량 마킹만
                     try:
                         dm = getattr(self.app, "data_manager", None)
                         if dm is not None:

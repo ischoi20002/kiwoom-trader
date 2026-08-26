@@ -3026,13 +3026,7 @@ class PortfolioManager:
                             self._discard_pending_exit_snapshot(oid)
 
         if skipped_sell_no_position:
-            try:
-                self.log(
-                    f"⚠️ [Portfolio] 매도 체결 무시({code}) — 보유 포지션 없음 "
-                    "(이미 청산·동기화됨, REST/CHE 이중 체결 가능성)."
-                )
-            except Exception:
-                pass
+            # 정상: CHE/동기화 선행 후 터치·REST 재통지 — 로그 없이 스킵
             return False
 
         self.save_db()

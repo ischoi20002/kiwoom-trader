@@ -82,17 +82,28 @@ class FillReconciliationService:
                 return
 
             side_kr = self._order_side_to_kr(row.get("side"))
+            def _esc(v: Any) -> str:
+                try:
+                    s = str(v if v is not None else "-")
+                except Exception:
+                    s = "-"
+                return (
+                    s.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
+
             msg = (
                 f"📌 <b>[매수/매도 체결]</b>\n"
-                f"매수/매도: {side_kr}\n"
-                f"종목명: {row.get('name') or '-'}\n"
+                f"매수/매도: {_esc(side_kr)}\n"
+                f"종목명: {_esc(row.get('name') or '-')}\n"
                 f"주문가: {self._fmt_price_comma(row.get('price'))}원\n"
                 f"체결가: {self._fmt_price_comma(row.get('filled_price'))}원\n"
                 f"체결수량: {self._fmt_int_comma(row.get('filled_qty'))}주\n"
                 f"VP: {self._fmt_vp_cell(row.get('snap_vol_power'))}\n"
-                f"호가: {self._fmt_ba_cell(row.get('snap_bid_ask'))}\n"
-                f"사유: {row.get('reason') or '-'}\n"
-                f"일시: {str(row.get('timestamp') or '').strip() or '-'}"
+                f"호가: {_esc(self._fmt_ba_cell(row.get('snap_bid_ask')))}\n"
+                f"사유: {_esc(row.get('reason') or '-')}\n"
+                f"일시: {_esc(str(row.get('timestamp') or '').strip() or '-')}"
             )
 
             import threading

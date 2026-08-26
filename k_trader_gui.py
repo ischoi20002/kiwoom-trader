@@ -3806,10 +3806,29 @@ class KiwoomApp:
             return False
 
     def send_telegram_message(self, message: str, parse_mode: Optional[str] = "HTML") -> None:
+        """텔레그램 전송. 실패 시에만 구체 사유를 남기고, 미설정 오탐 문구는 쓰지 않습니다."""
         try:
+            token = ""
+            cid = ""
+            try:
+                import config as _cfg
+
+                token = str(getattr(_cfg, "TELEGRAM_BOT_TOKEN", "") or "").strip()
+                cid = str(getattr(_cfg, "TELEGRAM_CHAT_ID", "") or "").strip()
+            except Exception:
+                pass
             ok = self.data_manager.send_telegram_message(message, parse_mode=parse_mode)
-            if not ok:
-                self.log("⚠️ [Telegram] 전송 실패 또는 미설정 — config.py 의 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 를 확인하세요.")
+            if ok:
+                return
+            if not token or not cid or "발급" in token:
+                self.log(
+                    "⚠️ [Telegram] 미설정 — config.py 의 "
+                    "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 를 확인하세요."
+                )
+            # 토큰이 있는데 실패한 경우: telegram_sender 가 이미 상세를 print —
+            # GUI 에는 일반 실패만 짧게 (오탐 '미설정' 제거)
+            else:
+                self.log("⚠️ [Telegram] 전송 실패(상세는 콘솔/로그 참고)")
         except Exception as e:
             self.log(f"⚠️ [Telegram] 예외: {e}")
 

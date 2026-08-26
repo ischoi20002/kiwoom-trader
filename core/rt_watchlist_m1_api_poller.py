@@ -500,15 +500,6 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             delay = backup_after
 
-        try:
-            self._emit(
-                f"ℹ️ [M1Poll] 틱말분 보조 예약(공식 우선) "
-                f"lab={closed_lab.strftime('%H:%M')} "
-                f"after={backup_after:.1f}s delay={delay:.2f}s n={len(ordered)}"
-            )
-        except Exception:
-            pass
-
         for i, nk in enumerate(ordered):
             extra = min(1.0, 0.04 * float(i))
             try:
