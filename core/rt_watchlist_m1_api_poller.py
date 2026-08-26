@@ -2256,24 +2256,38 @@ class RtWatchlistM1ApiPoller:
                     return
             if t0_mono is None:
                 t0_mono = time.monotonic()
+            # 공식 우선 말분 라운드는 quiet에 밀리지 않음(주경로 REST).
+            yield_to_quiet = True
             try:
-                from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
-
-                rem = float(rt15_official_quiet_remaining_sec(self._app))
+                if (
+                    str(kind or "") == "last"
+                    and is_last_m1_open_of_15m_slot(closed_lab)
+                    and self._eval_on_official_last_m1_enabled()
+                ):
+                    yield_to_quiet = False
             except Exception:
-                rem = 0.0
-            if rem > 0.05:
+                yield_to_quiet = True
+            if yield_to_quiet:
                 try:
-                    t = threading.Timer(
-                        rem,
-                        self._job_probe_round,
-                        args=(codes, closed_lab, sk, attempt, t0_mono, kind),
+                    from core.closed_15m_fast_path import (
+                        rt15_official_quiet_remaining_sec,
                     )
-                    t.daemon = True
-                    t.start()
+
+                    rem = float(rt15_official_quiet_remaining_sec(self._app))
                 except Exception:
-                    pass
-                return
+                    rem = 0.0
+                if rem > 0.05:
+                    try:
+                        t = threading.Timer(
+                            rem,
+                            self._job_probe_round,
+                            args=(codes, closed_lab, sk, attempt, t0_mono, kind),
+                        )
+                        t.daemon = True
+                        t.start()
+                    except Exception:
+                        pass
+                    return
 
             candidates = self._probe_candidate_codes(codes)
             saw_fetch_error = False
@@ -2667,10 +2681,26 @@ class RtWatchlistM1ApiPoller:
                 )
                 return
             if bool(report.get("complete")) and bool(report.get("fetch_ok")):
-                self._emit(
-                    f"ℹ️ [M1Poll] 말분 공식1분 OK {nk} lab={hm} "
-                    f"status={report.get('status')}"
-                )
+                # 틱 백업 등으로 이미 완성15 평가된 뒤의 공식 바 반영
+                post = False
+                try:
+                    slot = krx_15m_label_for_m1_open(closed_lab)
+                    post = bool(
+                        slot is not None
+                        and self._is_tick_tail_eval_done(nk, slot)
+                    )
+                except Exception:
+                    post = False
+                if post:
+                    self._emit(
+                        f"ℹ️ [M1Poll] 말분 공식1분 사후반영 {nk} lab={hm} "
+                        f"status={report.get('status')}"
+                    )
+                else:
+                    self._emit(
+                        f"ℹ️ [M1Poll] 말분 공식1분 OK {nk} lab={hm} "
+                        f"status={report.get('status')}"
+                    )
                 return
             self._emit(
                 f"⚠️ [M1Poll] 말분 공식1분 실패 {nk} lab={hm} "
@@ -2996,26 +3026,39 @@ class RtWatchlistM1ApiPoller:
                 return
             if t0_mono is None:
                 t0_mono = time.monotonic()
-            # 슬롯 확정 직후 조용 구간: 말분 공식 조회도 양보.
-            # (틱 말분이 신호·주문을 담당 — 공식 말분 REST가 ka10004/주문과 경합하지 않게)
+            # 레거시(틱말분 주경로): 조용 구간에 말분 공식 REST 양보.
+            # 공식 우선 모드에서는 말분 공식이 평가 주경로라 quiet에 밀리면
+            # 틱 백업이 먼저 평가되고 공식 OK만 늦게 찍히는 역전이 난다.
+            yield_to_quiet = True
             try:
-                from core.closed_15m_fast_path import rt15_official_quiet_remaining_sec
-
-                rem = float(rt15_official_quiet_remaining_sec(self._app))
+                if (
+                    is_last_m1_open_of_15m_slot(closed_lab)
+                    and self._eval_on_official_last_m1_enabled()
+                ):
+                    yield_to_quiet = False
             except Exception:
-                rem = 0.0
-            if rem > 0.05:
+                yield_to_quiet = True
+            if yield_to_quiet:
                 try:
-                    t = threading.Timer(
-                        rem,
-                        self._job_fetch_one,
-                        args=(code, closed_lab, sk, t0_mono),
+                    from core.closed_15m_fast_path import (
+                        rt15_official_quiet_remaining_sec,
                     )
-                    t.daemon = True
-                    t.start()
+
+                    rem = float(rt15_official_quiet_remaining_sec(self._app))
                 except Exception:
-                    pass
-                return
+                    rem = 0.0
+                if rem > 0.05:
+                    try:
+                        t = threading.Timer(
+                            rem,
+                            self._job_fetch_one,
+                            args=(code, closed_lab, sk, t0_mono),
+                        )
+                        t.daemon = True
+                        t.start()
+                    except Exception:
+                        pass
+                    return
             nk = canonical_stock_code(str(code).strip())
             if not nk:
                 return
