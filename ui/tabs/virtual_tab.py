@@ -104,6 +104,16 @@ class VirtualTab:
         self._virtual_sash_sync_job: Optional[Any] = None  # 세시 이동 직후 sashpos 동기화용(디바운스)
         self._virtual_main_paned: Optional[ttk.PanedWindow] = None
         self._virtual_saved_sash_rel: Optional[float] = None
+        self._virtual_active_frame: Optional[Any] = None
+        self._virtual_hold_wrap: Optional[Any] = None
+        self._virtual_hold_body: Optional[Any] = None
+        self._virtual_agg_outer: Optional[Any] = None
+        self._virtual_restoring_sash: bool = False
+        self._virtual_sash_initialized: bool = False
+        self._virtual_last_holdings_panel_rows: Optional[int] = None
+        self._virtual_holdings_panel_height_ok: bool = False
+        self._virtual_holdings_panel_height_job: Optional[Any] = None
+        self._virtual_holdings_panel_retry_job: Optional[Any] = None
         # 보유 합계(수수료 제외) 값 라벨 — 손익 부호에 따라 전경색 갱신
         self._hold_agg_lbl_pnl: Optional[tk.Label] = None
         self._hold_agg_lbl_pct: Optional[tk.Label] = None
@@ -290,6 +300,7 @@ class VirtualTab:
             text=f" 💰 실시간 보유 현황 · {_pm} ",
             padding="5",
         )
+        self._virtual_active_frame = active_f
         v_paned.add(active_f, weight=4)
         self._build_active_holdings_tree(active_f)
 
@@ -773,6 +784,8 @@ class VirtualTab:
         짧게 지연한 뒤 비율을 읽어 저장합니다. (<<PanedWindowMoved>> 누락·타이밍 이슈 완화)
         """
         try:
+            if bool(getattr(self, "_virtual_restoring_sash", False)):
+                return
             r = getattr(self.app, "root", None)
             if r is None:
                 return
@@ -790,6 +803,8 @@ class VirtualTab:
         """지연 후 메모리에 sash 비율을 반영하고 디스크 저장을 예약합니다."""
         self._virtual_sash_sync_job = None
         try:
+            if bool(getattr(self, "_virtual_restoring_sash", False)):
+                return
             rel = self._virtual_current_sash_rel()
             if rel is not None:
                 self._virtual_saved_sash_rel = rel
@@ -831,50 +846,346 @@ class VirtualTab:
 
     def _schedule_restore_virtual_sash(self) -> None:
         """
-        세로 Paned: 저장된 비율로 sash 복원.
-        높이가 아직 1~2px일 때 pos 를 크게 잡으면 상단(보유) 영역이 사실상 사라진 것처럼 보일 수 있어
-        최소 높이·클램프를 강화한다.
+        창 높이 확정 후 보유 수에 맞춰 상단 sash를 맞춥니다.
+        (저장 비율보다 스크롤 없는 표시를 우선 — 실시간감시 보유/대응과 동일)
         """
         try:
             root = getattr(self.app, "root", None)
             if root is None:
                 return
+            p = self._virtual_main_paned
+            if p is not None and bool(getattr(self, "_virtual_sash_initialized", False)):
+                try:
+                    if int(p.winfo_height()) >= 160 and int(p.sashpos(0)) >= 60:
+                        self._schedule_sync_virtual_holdings_panel_height()
+                        return
+                except (tk.TclError, TypeError, ValueError):
+                    pass
 
             def _try(attempt: int = 0) -> None:
                 try:
-                    rel = getattr(self, "_virtual_saved_sash_rel", None)
-                    if rel is None:
-                        rel = 0.42
-                    p = self._virtual_main_paned
-                    if p is None:
+                    p2 = self._virtual_main_paned
+                    if p2 is None:
                         return
                     try:
-                        p.update_idletasks()
+                        p2.update_idletasks()
                     except Exception:
                         pass
-                    h = int(p.winfo_height())
-                    # 레이아웃 미확정 시 대기 (너무 작은 h 에서 sashpos 하면 상단 패인이 0에 가깝게 붕괴)
-                    if h < 160 and attempt < 24:
-                        root.after(100, lambda: _try(attempt + 1))
+                    h = self._virtual_paned_usable_height(p2)
+                    if h < 30 and attempt < 24:
+                        root.after(100, lambda a=attempt + 1: _try(a))
                         return
-                    min_top = 100
-                    min_bot = 100
-                    if h < 300:
-                        min_top = 72
-                        min_bot = 72
-                    raw = float(rel) * float(h)
-                    pos = int(round(raw))
-                    pos = max(min_top, min(pos, h - min_bot))
-                    if pos >= h - 8:
-                        pos = max(min_top, h // 2)
-                    if pos < min_top:
-                        pos = min_top
-                    p.sashpos(0, pos)
+                    self._apply_virtual_holdings_panel_height(force=True)
+                    try:
+                        if int(p2.sashpos(0)) >= 60:
+                            self._virtual_sash_initialized = True
+                    except Exception:
+                        pass
                 except Exception:
                     if attempt < 24:
-                        root.after(100, lambda: _try(attempt + 1))
+                        root.after(100, lambda a=attempt + 1: _try(a))
 
             root.after(120, lambda: _try(0))
+        except Exception:
+            pass
+
+    def _count_virtual_holdings_rows(self) -> int:
+        """VP 고유 보유 종목 수."""
+        try:
+            holdings = self._sorted_active_holdings()
+            return int(len(holdings))
+        except Exception:
+            pass
+        try:
+            pm = getattr(self.app, "portfolio", None)
+            vp = getattr(pm, "virtual_positions", None) or {}
+            seen: set = set()
+            for k in vp.keys():
+                try:
+                    seen.add(str(k).split("_")[0].zfill(6))
+                except Exception:
+                    continue
+            return int(len(seen))
+        except Exception:
+            return 0
+
+    def _count_virtual_holdings_tree_rows(self) -> int:
+        try:
+            tr = getattr(self, "tree_active", None)
+            if tr is None:
+                return 0
+            return int(len(tr.get_children()))
+        except Exception:
+            return 0
+
+    def _desired_virtual_holdings_panel_rows(self) -> int:
+        """보유 패널 줄 수 — VP·트리 중 큰 쪽, 최소 3줄."""
+        try:
+            n_vp = int(self._count_virtual_holdings_rows())
+        except Exception:
+            n_vp = 0
+        try:
+            n_tree = int(self._count_virtual_holdings_tree_rows())
+        except Exception:
+            n_tree = 0
+        return max(3, n_vp, n_tree)
+
+    def _virtual_tree_rowheight_px(self) -> int:
+        row_h = 32
+        try:
+            tr = getattr(self, "tree_active", None)
+            if tr is not None:
+                try:
+                    tr.update_idletasks()
+                except Exception:
+                    pass
+                rh_raw = tr.tk.call(
+                    "ttk::style", "lookup", tr.cget("style"), "-rowheight"
+                )
+                if str(rh_raw).strip():
+                    row_h = int(float(rh_raw))
+        except Exception:
+            row_h = 32
+        return max(20, min(int(row_h), 48))
+
+    def _virtual_holdings_panel_chrome_px(self) -> int:
+        """
+        LabelFrame·합계카드·Treeview 헤딩 등 본문 행 밖 고정 높이.
+        """
+        fallback = 130
+        try:
+            af = getattr(self, "_virtual_active_frame", None)
+            wrap = getattr(self, "_virtual_hold_wrap", None)
+            body = getattr(self, "_virtual_hold_body", None)
+            agg = getattr(self, "_virtual_agg_outer", None)
+            tr = getattr(self, "tree_active", None)
+            if tr is None:
+                return int(fallback)
+            try:
+                tr.update_idletasks()
+            except Exception:
+                pass
+
+            lf_chrome = 32
+            try:
+                if af is not None and wrap is not None:
+                    ah = int(af.winfo_height())
+                    wh = int(wrap.winfo_height())
+                    if ah > wh >= 8:
+                        lf_chrome = max(24, ah - wh)
+            except Exception:
+                lf_chrome = 32
+
+            agg_h = 42
+            try:
+                if agg is not None:
+                    try:
+                        agg.update_idletasks()
+                    except Exception:
+                        pass
+                    req = int(agg.winfo_reqheight() or 0)
+                    win = int(agg.winfo_height() or 0)
+                    agg_h = max(36, req, win)
+            except Exception:
+                agg_h = 42
+
+            heading = 28
+            try:
+                kids = list(tr.get_children())
+                if kids:
+                    bbox = tr.bbox(kids[0])
+                    if bbox and len(bbox) >= 2:
+                        heading = max(22, int(bbox[1]))
+            except Exception:
+                heading = 28
+
+            # 합계카드 하단 pady·여유
+            return int(lf_chrome + agg_h + heading + 12)
+        except Exception:
+            return int(fallback)
+
+    def _virtual_holdings_panel_target_height_px(self, rows: int) -> int:
+        try:
+            rows_i = max(3, int(rows))
+        except Exception:
+            rows_i = 3
+        return int(
+            self._virtual_holdings_panel_chrome_px()
+            + (self._virtual_tree_rowheight_px() * rows_i)
+        )
+
+    def _virtual_paned_usable_height(self, p: Any) -> int:
+        h = 0
+        try:
+            h = int(p.winfo_height())
+        except Exception:
+            h = 0
+        if h < 8:
+            try:
+                h = max(h, int(p.winfo_reqheight()))
+            except Exception:
+                pass
+        if h < 8:
+            try:
+                par = getattr(p, "master", None)
+                if par is not None:
+                    h = max(h, int(par.winfo_height()))
+            except Exception:
+                pass
+        return int(h)
+
+    def _virtual_holdings_tree_needs_more_height(self) -> bool:
+        try:
+            tr = getattr(self, "tree_active", None)
+            if tr is None:
+                return False
+            if len(tr.get_children()) <= 0:
+                return False
+            try:
+                tr.update_idletasks()
+            except Exception:
+                pass
+            y0, y1 = tr.yview()
+            return float(y1) - float(y0) < 0.999
+        except Exception:
+            return False
+
+    def _retry_apply_virtual_holdings_panel_height(self, *, delay_ms: int = 120) -> None:
+        try:
+            root = getattr(self.app, "root", None)
+            if root is None:
+                return
+            jid = getattr(self, "_virtual_holdings_panel_retry_job", None)
+            if jid is not None:
+                try:
+                    root.after_cancel(jid)
+                except Exception:
+                    pass
+
+            def _run() -> None:
+                self._virtual_holdings_panel_retry_job = None
+                try:
+                    self._apply_virtual_holdings_panel_height(force=True)
+                except Exception:
+                    pass
+
+            self._virtual_holdings_panel_retry_job = root.after(int(delay_ms), _run)
+        except Exception:
+            pass
+
+    def _apply_virtual_holdings_panel_height(
+        self, *, force: bool = False, _bump_pass: int = 0
+    ) -> None:
+        """보유 행이 스크롤 없이 보이도록 상단 Paned sash·minsize를 맞춥니다."""
+        try:
+            rows = self._desired_virtual_holdings_panel_rows()
+            prev = getattr(self, "_virtual_last_holdings_panel_rows", None)
+            ok = bool(getattr(self, "_virtual_holdings_panel_height_ok", False))
+            if (
+                (not force)
+                and prev is not None
+                and int(prev) == int(rows)
+                and ok
+                and _bump_pass <= 0
+            ):
+                return
+
+            p = getattr(self, "_virtual_main_paned", None)
+            if p is None:
+                return
+            try:
+                p.update_idletasks()
+            except Exception:
+                pass
+            h = self._virtual_paned_usable_height(p)
+            if h < 30:
+                self._virtual_holdings_panel_height_ok = False
+                self._retry_apply_virtual_holdings_panel_height()
+                return
+
+            target_top = self._virtual_holdings_panel_target_height_px(rows)
+            if _bump_pass > 0:
+                target_top = int(
+                    target_top
+                    + (self._virtual_tree_rowheight_px() * int(_bump_pass))
+                )
+            min_top = self._virtual_holdings_panel_target_height_px(3)
+            min_bot = 120
+            pos = int(target_top)
+            pos = max(min_top, min(pos, h - min_bot))
+            if h - min_bot <= 0:
+                pos = min_top
+            if pos < min_top:
+                pos = min_top
+
+            pane_min = int(min(pos, max(min_top, min(target_top, h - min_bot))))
+            if pane_min < min_top:
+                pane_min = int(min_top)
+            try:
+                panes = p.panes()
+                if panes:
+                    p.paneconfigure(panes[0], minsize=int(pane_min))
+            except Exception:
+                pass
+
+            try:
+                self._virtual_restoring_sash = True
+                p.sashpos(0, int(pos))
+            finally:
+                self._virtual_restoring_sash = False
+
+            self._virtual_last_holdings_panel_rows = int(rows)
+            self._virtual_holdings_panel_height_ok = True
+            try:
+                rel = self._virtual_current_sash_rel()
+                if rel is not None:
+                    self._virtual_saved_sash_rel = float(rel)
+            except Exception:
+                pass
+
+            try:
+                if (
+                    _bump_pass < 3
+                    and pos < (h - min_bot)
+                    and self._virtual_holdings_tree_needs_more_height()
+                ):
+                    self._apply_virtual_holdings_panel_height(
+                        force=True, _bump_pass=int(_bump_pass) + 1
+                    )
+            except Exception:
+                pass
+        except Exception:
+            try:
+                self._virtual_holdings_panel_height_ok = False
+            except Exception:
+                pass
+
+    def _schedule_sync_virtual_holdings_panel_height(self) -> None:
+        """틱마다 sash를 두드리지 않도록 after_idle로 한 번만 맞춤."""
+        try:
+            rows = self._desired_virtual_holdings_panel_rows()
+            prev = getattr(self, "_virtual_last_holdings_panel_rows", None)
+            ok = bool(getattr(self, "_virtual_holdings_panel_height_ok", False))
+            if prev is not None and int(prev) == int(rows) and ok:
+                if not self._virtual_holdings_tree_needs_more_height():
+                    return
+                # 행 수는 같은데 스크롤만 남은 경우 강제 보정
+                self._apply_virtual_holdings_panel_height(force=True)
+                return
+
+            root = getattr(self.app, "root", None)
+            jid = getattr(self, "_virtual_holdings_panel_height_job", None)
+            if root is not None and jid is not None:
+                try:
+                    root.after_cancel(jid)
+                except Exception:
+                    pass
+            if root is not None:
+                self._virtual_holdings_panel_height_job = root.after_idle(
+                    lambda: self._apply_virtual_holdings_panel_height(force=False)
+                )
+            else:
+                self._apply_virtual_holdings_panel_height(force=False)
         except Exception:
             pass
 
@@ -926,6 +1237,7 @@ class VirtualTab:
             # Paned 상단 칸에서 LabelFrame 자식만 pack 할 때 세로 확장이 0에 가까워지는 경우 방지
             hold_wrap = ttk.Frame(parent)
             hold_wrap.pack(fill=tk.BOTH, expand=True)
+            self._virtual_hold_wrap = hold_wrap
             # --- 보유 전체 통계(수수료 제외): 종목 목록 위 · 컴팩트 한 줄 카드
             c = getattr(self.app, "colors", None) or {}
             card = str(c.get("card", "#3B4252"))
@@ -935,6 +1247,7 @@ class VirtualTab:
 
             agg_outer = ttk.Frame(hold_wrap)
             agg_outer.pack(side=tk.TOP, fill=tk.X, pady=(0, 6), padx=0)
+            self._virtual_agg_outer = agg_outer
             agg_card = tk.Frame(
                 agg_outer,
                 bg=card,
@@ -990,6 +1303,7 @@ class VirtualTab:
 
             body = ttk.Frame(hold_wrap)
             body.pack(fill=tk.BOTH, expand=True)
+            self._virtual_hold_body = body
             tree = ttk.Treeview(
                 body, columns=cols, show="headings", selectmode="browse"
             )
@@ -2697,6 +3011,10 @@ class VirtualTab:
                 print(f"[UI Error] _refresh_active_holdings_tree_rows: {e}")
             except Exception:
                 pass
+        try:
+            self._schedule_sync_virtual_holdings_panel_height()
+        except Exception:
+            pass
 
     def _active_tree_ready(self) -> bool:
         return self.tree_active is not None
@@ -2978,6 +3296,10 @@ class VirtualTab:
         self.vars["open_ur"].set(open_ur_txt)
         self.vars["day"].set(day_pnl_txt)
         self._update_holdings_aggregate_fee_excluded()
+        try:
+            self._schedule_sync_virtual_holdings_panel_height()
+        except Exception:
+            pass
 
     def _render_real_data(self):
         """실시간 틱·동기화 후 보유 트리 값만 갱신."""
@@ -3028,6 +3350,10 @@ class VirtualTab:
                 pass
 
         self._update_summary_after_tick()
+        try:
+            self._schedule_sync_virtual_holdings_panel_height()
+        except Exception:
+            pass
 
     def _update_summary_after_tick(self) -> None:
         """

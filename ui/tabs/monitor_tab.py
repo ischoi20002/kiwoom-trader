@@ -3397,6 +3397,68 @@ class MonitorTab:
             f"{vol_i:,}",
         )
 
+    @staticmethod
+    def _stripe_direction_from_tags(tags: Any) -> str:
+        """기존 행 태그에서 등락 방향(up/down/stable)만 추출."""
+        try:
+            for t in tags or ():
+                s = str(t)
+                if "up" in s:
+                    return "up"
+                if "down" in s:
+                    return "down"
+        except Exception:
+            pass
+        return "stable"
+
+    def _monitor_tree_stripe_type(self, tree: Any, iid: str) -> str:
+        """
+        트리 **화면 순서** 기준 짝/홀 줄무늬.
+
+        ``Treeview.index()`` 는 쓰지 않고 ``get_children()`` 리스트 인덱스를 사용합니다.
+        (캐시 길이 기반 배정은 삽입 순서와 화면 순서가 어긋나 2줄씩 같은 색이 될 수 있음)
+        """
+        try:
+            children = list(tree.get_children(""))
+        except Exception:
+            children = []
+        try:
+            idx = children.index(str(iid))
+        except Exception:
+            idx = len(children)
+        return "even" if (int(idx) % 2 == 0) else "odd"
+
+    def _restripe_monitor_tree(self, tree: Any, *, is_active: bool) -> None:
+        """행 추가/삭제/이동 후 화면 순서대로 even/odd 태그를 다시 맞춥니다."""
+        if tree is None:
+            return
+        try:
+            children = list(tree.get_children(""))
+        except Exception:
+            return
+        for idx, iid in enumerate(children):
+            row_type = "even" if (idx % 2 == 0) else "odd"
+            try:
+                tags = tree.item(iid, "tags")
+            except Exception:
+                tags = ()
+            direction = self._stripe_direction_from_tags(tags)
+            tag = (
+                f"active_{direction}_{row_type}"
+                if is_active
+                else f"{direction}_{row_type}"
+            )
+            try:
+                # 워밍업 전용 태그는 줄무늬로 덮지 않음
+                tag_l = [str(x) for x in (tags or ())]
+                if any(
+                    x.startswith("warmup_") for x in tag_l
+                ):
+                    continue
+                tree.item(iid, tags=(tag,))
+            except Exception:
+                pass
+
     def maybe_reconcile_monitor_trees(
         self,
         monitor_info: Optional[Dict[str, Any]],
@@ -3494,6 +3556,13 @@ class MonitorTab:
                     target.insert("", tk.END, iid=nk, values=values, tags=(tag,))
                 except Exception:
                     pass
+
+            # 구조 변경 후 화면 순서 줄무늬 재정렬
+            try:
+                self._restripe_monitor_tree(self.tree_active_monitor, is_active=True)
+                self._restripe_monitor_tree(self.tree_monitor, is_active=False)
+            except Exception:
+                pass
 
             # VP 에 없는데 보유 트리에만 남은 행; 감시 목록 복구는 감시 대상일 때만
             self._purge_stale_active_monitor_rows(vp, mi)
@@ -3645,6 +3714,11 @@ class MonitorTab:
                     self.tree_monitor.insert("", tk.END, iid=nk, values=values, tags=(tag,))
                 except Exception:
                     pass
+            try:
+                self._restripe_monitor_tree(self.tree_active_monitor, is_active=True)
+                self._restripe_monitor_tree(self.tree_monitor, is_active=False)
+            except Exception:
+                pass
         except Exception as e:
             try:
                 print(f"[UI Error] _purge_stale_active_monitor_rows: {e}")
@@ -3948,24 +4022,30 @@ class MonitorTab:
                     if other_tree.exists(iid):
                         _step_log("other_tree_delete_call")
                         other_tree.delete(iid)
+                        try:
+                            self._restripe_monitor_tree(
+                                other_tree,
+                                is_active=(other_tree is self.tree_active_monitor),
+                            )
+                        except Exception:
+                            pass
                         
                     # [v4.5.42] 행의 인덱스와 기본 태그 정의 (안전한 index 추출)
                     _step_log("target_tree_exists_check_start")
                     if not target_tree.exists(iid):
                         _step_log("target_tree_insert_call")
                         target_tree.insert("", tk.END, iid=iid, values=values)
+                        try:
+                            self._restripe_monitor_tree(
+                                target_tree, is_active=bool(is_active)
+                            )
+                        except Exception:
+                            pass
                     
                     # [Composite Tag Selection] v4.6.5
-                    # Treeview.index()는 행 수에 비례해 O(n)이며, Windows ttk에서 간헐적 멈춤을 유발할 수 있어 캐시 사용
+                    # 화면 순서(get_children 인덱스)로 짝/홀 — 캐시 길이 배정은 사용하지 않음
                     _step_log("target_tree_stripe_resolve")
-                    stripe_cache = getattr(self, "_monitor_row_stripe_cache", None)
-                    if not isinstance(stripe_cache, dict):
-                        stripe_cache = {}
-                        self._monitor_row_stripe_cache = stripe_cache
-                    row_type = stripe_cache.get(iid)
-                    if row_type not in ("even", "odd"):
-                        row_type = "even" if (len(stripe_cache) % 2 == 0) else "odd"
-                        stripe_cache[iid] = row_type
+                    row_type = self._monitor_tree_stripe_type(target_tree, iid)
                     
                     # 방향 결정
                     if "price_up" in str(tag): direction = "up"
@@ -4163,6 +4243,11 @@ class MonitorTab:
                 idx_watch += 1
                 tag = f"{direction}_{row_type}"
                 self.tree_monitor.insert("", tk.END, iid=nk, values=values, tags=(tag,))
+        try:
+            self._restripe_monitor_tree(self.tree_active_monitor, is_active=True)
+            self._restripe_monitor_tree(self.tree_monitor, is_active=False)
+        except Exception:
+            pass
         try:
             self._schedule_sync_active_panel_height(vp)
         except Exception:
