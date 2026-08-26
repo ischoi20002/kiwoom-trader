@@ -185,12 +185,15 @@ def build_m1_last_official_report(
         slot_s = ""
     st = str(status or "")
     # 조회 자체가 성공했는지는 status로, 반영 여부는 store_has_last로 본다.
+    # no_trade_skip/flat_no_trade: 증권사 무거래분 생략 — 실패가 아님.
     fetch_ok = st in (
         "ok",
         "cache_ok",
         "db_fallback",
         "flat_no_trade",
+        "no_trade_skip",
     )
+    is_no_trade = st in ("flat_no_trade", "no_trade_skip")
     return {
         "code": nk,
         "last_open": lab.strftime("%Y-%m-%d %H:%M:%S"),
@@ -201,7 +204,9 @@ def build_m1_last_official_report(
         "chart_has_last": bool(chart_has),
         "store_has_last": bool(store_has),
         "fetch_ok": bool(fetch_ok),
-        "complete": bool(store_has),
+        # 무거래 생략은 store에 말분이 없어도 의도된 정상 처리
+        "complete": bool(store_has) or bool(is_no_trade),
+        "no_trade": bool(is_no_trade),
     }
 
 

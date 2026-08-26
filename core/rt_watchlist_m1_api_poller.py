@@ -2119,6 +2119,8 @@ class RtWatchlistM1ApiPoller:
         공식 1분 행이 영구 부재(무거래 등)일 때 직전 종가 평봉(V=0)을 채운다.
 
         틱 1분이 이미 있으면 덮어쓰지 않는다(틱 선적재 · 공식 soft replace).
+        완성15 평가는 호출하지 않는다 — 구멍 스킵 합성은
+        ``_eval_closed_15m_skip_absent_last_m1`` 에서 수행.
 
         Returns:
             반영 성공 여부.
@@ -2147,14 +2149,70 @@ class RtWatchlistM1ApiPoller:
             except Exception:
                 pass
             self._schedule_signal_eval(nk, close_px=px, volume=0.0)
-            try:
-                if is_last_m1_open_of_15m_slot(closed_lab):
-                    self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
-            except Exception:
-                pass
             return True
         except Exception:
             return False
+
+    def _eval_closed_15m_skip_absent_last_m1(
+        self, nk: str, closed_lab: pd.Timestamp
+    ) -> None:
+        """
+        말분 공식 1분이 없어도(무거래 생략) 구멍 스킵 합성으로 완성15 평가.
+
+        증권사 공식 15분 = 존재하는 1분만 합산과 동일. 틱 말분이 있으면 seal 후 합성.
+        """
+        try:
+            if not is_last_m1_open_of_15m_slot(closed_lab):
+                return
+        except Exception:
+            return
+        try:
+            if self._tick_minute_has_bar(nk, closed_lab):
+                m1s = getattr(self._app, "rt_tick_m1_store", None)
+                if m1s is not None:
+                    try:
+                        m1s.seal_tick_tail_minute(nk, closed_lab)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
+        except Exception:
+            pass
+
+    def _handle_last_m1_no_trade(
+        self,
+        nk: str,
+        closed_lab: pd.Timestamp,
+        sk: str,
+        *,
+        chart_df: Any = None,
+        detail: str = "",
+    ) -> None:
+        """
+        말분 공식 행 부재(무거래 등): 선택적 평봉 + 구멍 스킵 합성 평가 + 무거래 로그.
+        """
+        flat_ok = False
+        try:
+            flat_ok = bool(self._apply_flat_no_trade_minute(nk, closed_lab, sk))
+        except Exception:
+            flat_ok = False
+        try:
+            self._eval_closed_15m_skip_absent_last_m1(nk, closed_lab)
+        except Exception:
+            pass
+        try:
+            self._log_m1_last_official(
+                nk,
+                closed_lab,
+                status="flat_no_trade" if flat_ok else "no_trade_skip",
+                detail=str(detail or "")[:200],
+                chart_df=chart_df,
+                source="flat" if flat_ok else "skip",
+            )
+        except Exception:
+            pass
 
     def _job_probe_round(
         self,
@@ -2503,11 +2561,23 @@ class RtWatchlistM1ApiPoller:
             exp = report.get("expected_n")
             stn = report.get("store_n")
             miss = report.get("missing") or []
-            status = report.get("status")
-            self._emit(
-                f"⚠️ [M1Poll] head catchup 불완전 {nk} "
-                f"store={stn}/{exp} status={status} missing={miss}"
-            )
+            status = str(report.get("status") or "")
+            # 증권사 무거래분 생략·부분 반영은 soft catchup — 오류가 아님
+            if status in ("incomplete", "minute_not_ready_partial"):
+                self._emit(
+                    f"ℹ️ [M1Poll] head catchup 1분생략 {nk} "
+                    f"store={stn}/{exp} missing={miss}"
+                )
+            elif "timeout" in status or status.startswith("minute_not_ready"):
+                self._emit(
+                    f"ℹ️ [M1Poll] head catchup 대기만료 {nk} "
+                    f"store={stn}/{exp} status={status} missing={miss}"
+                )
+            else:
+                self._emit(
+                    f"⚠️ [M1Poll] head catchup 미반영 {nk} "
+                    f"store={stn}/{exp} status={status} missing={miss}"
+                )
         except Exception:
             pass
 
@@ -2568,6 +2638,18 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             hm = "?"
         try:
+            st_s = str(report.get("status") or "")
+            # 증권사 무거래분 생략은 오류가 아님 — 구멍 스킵 합성으로 평가
+            if st_s in ("flat_no_trade", "no_trade_skip") or bool(
+                report.get("no_trade")
+            ):
+                self._emit(
+                    f"ℹ️ [M1Poll] 말분 공식1분 무거래 {nk} lab={hm} "
+                    f"status={st_s} "
+                    f"chart={report.get('chart_has_last')} "
+                    f"store={report.get('store_has_last')}"
+                )
+                return
             if bool(report.get("complete")) and bool(report.get("fetch_ok")):
                 self._emit(
                     f"ℹ️ [M1Poll] 말분 공식1분 OK {nk} lab={hm} "
@@ -3030,18 +3112,14 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     pass
                 return
-            self._apply_flat_no_trade_minute(nk, closed_lab, sk)
-            try:
-                self._log_m1_last_official(
-                    nk,
-                    closed_lab,
-                    status="flat_no_trade",
-                    detail="minute_not_ready_timeout",
-                    chart_df=chart_df,
-                    source="flat",
-                )
-            except Exception:
-                pass
+            # 공식 행 없음(무거래 생략) — 실패가 아님. 구멍 스킵 합성으로 평가
+            self._handle_last_m1_no_trade(
+                nk,
+                closed_lab,
+                sk,
+                chart_df=chart_df,
+                detail="minute_not_ready_timeout",
+            )
             return
 
         if status == "ok" and row is not None:
@@ -3070,33 +3148,15 @@ class RtWatchlistM1ApiPoller:
 
         if ohlcv is None:
             if status == "row_not_found":
-                # 차트는 다음 분까지 왔는데 해당 분 행만 없음 = 무거래 가능성 큼
-                if self._apply_flat_no_trade_minute(nk, closed_lab, sk):
-                    try:
-                        self._log_m1_last_official(
-                            nk,
-                            closed_lab,
-                            status="flat_no_trade",
-                            detail="row_not_found",
-                            chart_df=chart_df,
-                            source="flat",
-                        )
-                    except Exception:
-                        pass
-                    return
-                try:
-                    from core.ka10080_fetch_diag import ka10080_fetch_diag
-
-                    ka10080_fetch_diag.record_fail(
-                        nk,
-                        tic_scope="1",
-                        context="m1_poll",
-                        reason="row_not_found",
-                        closed_minute=sk,
-                        detail="closed_minute_not_in_chart",
-                    )
-                except Exception:
-                    pass
+                # 차트는 다음 분까지 왔는데 해당 분 행만 없음 = 무거래 — 구멍 스킵 평가
+                self._handle_last_m1_no_trade(
+                    nk,
+                    closed_lab,
+                    sk,
+                    chart_df=chart_df,
+                    detail="row_not_found",
+                )
+                return
             if eval_on_fail:
                 self._schedule_signal_eval(nk)
             # API miss(empty 등)여도 슬롯 말분이면 틱 누적 합성으로 완성15 평가.
