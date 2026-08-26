@@ -57,6 +57,43 @@ def effective_m1_poll_spread_sec(settings: Dict[str, Any], n_codes: int) -> floa
     return max(lo, min(hi, scaled))
 
 
+def effective_m1_head_catchup_spread_sec(
+    settings: Dict[str, Any], n_codes: int
+) -> float:
+    """
+    슬롯 **헤드 soft catchup** 전용 분산 창(초).
+
+    ``:13`` 라벨 마감(~ ``:14``) 이후 ~1분 안에 말분 평가(``:00``)가 오므로,
+    레거시 M1 40초 바닥을 쓰지 않고 전역 ka10080 간격(~1.05s)에 맞춰
+    ``n × per_code`` 로 잡되 상한 50초로 자른다.
+    """
+    try:
+        n = max(1, int(n_codes))
+    except (TypeError, ValueError):
+        n = 1
+    try:
+        per = float(
+            settings.get(
+                "realtime_m1_head_catchup_per_code_sec",
+                settings.get("realtime_ka10080_global_min_interval_sec", 1.1),
+            )
+        )
+    except (TypeError, ValueError):
+        per = 1.1
+    per = max(1.0, min(float(per), 2.0))
+    try:
+        lo = float(settings.get("realtime_m1_head_catchup_spread_min_sec", 3.0))
+    except (TypeError, ValueError):
+        lo = 3.0
+    try:
+        hi = float(settings.get("realtime_m1_head_catchup_spread_max_sec", 50.0))
+    except (TypeError, ValueError):
+        hi = 50.0
+    lo = max(1.0, min(lo, 55.0))
+    hi = max(lo, min(hi, 55.0))
+    return max(lo, min(hi, float(n) * per))
+
+
 def effective_rt15m_stagger_spread_sec(settings: Dict[str, Any], n_codes: int) -> float:
     """
     15분 확정 REST: ``min_delay`` 이후 ``[0, spread)`` 에 종목 분산.

@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.54 (2026-08-26)
+
+- **헤드 catchup 분산 단축**: `:13` 마감~`:00` 평가(~1분) 안에 끝나도록 헤드 전용 spread(`n×1.1s`, 상한 50s, 레거시 40s 바닥 미적용)와 우선순위 순 균등 간격을 적용 (`ka10080_spread`, `rt_watchlist_m1_api_poller`).
+
 ## 0.18.53 (2026-08-26)
 
 - **헤드 1분 catchup 커버리지 로그**: 슬롯 헤드 soft catchup 후 기대 분 수·차트 분·store 공식 분·누락 시각을 `m1_head_catchup_coverage`로 세션 JSONL에 남김. 불완전하면 UI 경고 (`rt_watchlist_m1_api_poller`, `realtime_m1_fallback`).

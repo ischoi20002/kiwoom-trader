@@ -26,7 +26,10 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import pandas as pd
 
 from core.bt_hp_signal_bridge import ka10080_raw_rows_to_1m_df
-from core.ka10080_spread import effective_m1_poll_spread_sec
+from core.ka10080_spread import (
+    effective_m1_head_catchup_spread_sec,
+    effective_m1_poll_spread_sec,
+)
 from utils.krx_bars import (
     chart_covers_m1_closed_minute,
     is_krx_last_15m_slot,
@@ -1410,25 +1413,24 @@ class RtWatchlistM1ApiPoller:
                 ordered = list(codes)
 
             if kind == "head":
-                # 말분 시작~완성 전에 head가 끝나도록 spread 상한
+                # :13 마감~:00 평가(~60s) 안에 끝나도록 헤드 전용 spread
+                # (레거시 M1 40s 바닥·해시 분산 대신 우선순위 순 균등 간격)
                 n_codes = len(ordered)
                 try:
-                    spread = effective_m1_poll_spread_sec(self._settings(), n_codes)
+                    spread = effective_m1_head_catchup_spread_sec(
+                        self._settings(), n_codes
+                    )
                 except Exception:
+                    spread = max(3.0, min(50.0, float(n_codes) * 1.1))
+                spread = max(1.0, min(float(spread), 55.0))
+                gap = (
+                    float(spread) / float(max(n_codes - 1, 1))
+                    if n_codes > 1
+                    else 0.0
+                )
+                for i, cc in enumerate(ordered):
                     try:
-                        spread = float(
-                            self._settings().get(
-                                "realtime_watchlist_m1_api_spread_sec", 40.0
-                            )
-                        )
-                    except (TypeError, ValueError):
-                        spread = 40.0
-                spread = max(8.0, min(float(spread), 45.0))
-                for cc in ordered:
-                    try:
-                        h = abs(hash((cc, sk, "head")))
-                        frac = (h % 1_000_003) / 1_000_003.0
-                        delay = spread * frac
+                        delay = min(float(spread), float(i) * gap)
                     except Exception:
                         delay = 0.0
                     t = threading.Timer(
