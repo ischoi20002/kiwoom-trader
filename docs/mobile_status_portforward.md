@@ -63,3 +63,4 @@ CGNAT(통신사 공유 공인 IP)이면 포트포워딩이 안 될 수 있습니
 - `GET /api/v1/orders/today`
 - `GET /api/v1/trades/recent?limit=30`
 - `GET /api/v1/equity/trend?days=30`
+- `GET /api/v1/logs?limit=100` (PC 대시보드와 동일 포맷의 최근 로그)

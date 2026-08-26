@@ -13,10 +13,13 @@
   var btnLogout = document.getElementById("btn-logout");
   var btnWatch = document.getElementById("btn-watchlist");
   var watchPanel = document.getElementById("watchlist-panel");
+  var btnLogs = document.getElementById("btn-logs");
+  var logsPanel = document.getElementById("logs-panel");
   var connState = document.getElementById("conn-state");
 
   var pollTimer = null;
   var lastOk = false;
+  var logsStickBottom = true;
 
   function getToken() {
     try {
@@ -311,6 +314,31 @@
     ctx.stroke();
   }
 
+  function renderLogs(data) {
+    var view = document.getElementById("logs-view");
+    var countEl = document.getElementById("logs-count");
+    if (!view) return;
+    var lines = (data && data.lines) || [];
+    if (countEl) countEl.textContent = lines.length + "줄";
+    if (!lines.length) {
+      view.textContent = "최근 로그 없음 (앱 재시작 후 새 로그만 표시)";
+      return;
+    }
+    var nearBottom = true;
+    try {
+      nearBottom =
+        view.scrollHeight - view.scrollTop - view.clientHeight < 48;
+    } catch (e) {
+      nearBottom = true;
+    }
+    view.textContent = lines.join("\n");
+    if (logsStickBottom || nearBottom) {
+      try {
+        view.scrollTop = view.scrollHeight;
+      } catch (e2) {}
+    }
+  }
+
   function escapeHtml(s) {
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;")
@@ -327,6 +355,7 @@
       apiGet("/api/v1/orders/today"),
       apiGet("/api/v1/watchlist"),
       apiGet("/api/v1/equity/trend?days=30"),
+      apiGet("/api/v1/logs?limit=120"),
     ])
       .then(function (all) {
         var status = all[0];
@@ -335,12 +364,14 @@
         var orders = all[3];
         var watch = all[4];
         var equity = all[5];
+        var logs = all[6];
         renderBadges(status);
         renderPortfolio(portfolio);
         renderHoldings(holdings);
         renderOrders(orders);
         renderWatchlist(watch);
         renderEquity(equity);
+        renderLogs(logs);
         document.getElementById("server-time").textContent =
           "갱신 " + (portfolio.server_time || status.server_time || "");
         setConn(true);
@@ -398,6 +429,37 @@
       btnWatch.setAttribute("aria-expanded", "false");
     }
   });
+
+  if (btnLogs && logsPanel) {
+    btnLogs.addEventListener("click", function () {
+      var open = logsPanel.classList.contains("collapsed");
+      if (open) {
+        logsPanel.classList.remove("collapsed");
+        btnLogs.setAttribute("aria-expanded", "true");
+        logsStickBottom = true;
+        try {
+          var view = document.getElementById("logs-view");
+          if (view) view.scrollTop = view.scrollHeight;
+        } catch (e) {}
+      } else {
+        logsPanel.classList.add("collapsed");
+        btnLogs.setAttribute("aria-expanded", "false");
+      }
+    });
+    try {
+      var logsView = document.getElementById("logs-view");
+      if (logsView) {
+        logsView.addEventListener("scroll", function () {
+          try {
+            logsStickBottom =
+              logsView.scrollHeight - logsView.scrollTop - logsView.clientHeight < 48;
+          } catch (e) {
+            logsStickBottom = true;
+          }
+        });
+      }
+    } catch (e2) {}
+  }
 
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) return;

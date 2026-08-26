@@ -4,8 +4,9 @@ import tkinter as tk
 import sys
 import threading
 import calendar
+from collections import deque
 from datetime import datetime
-from typing import Any, List, Optional, Union
+from typing import Any, Deque, List, Optional, Union
 
 class GuiUtils:
     """GUI 관련 유틸리티 및 전용 로깅 클래스"""
@@ -15,6 +16,8 @@ class GuiUtils:
     _LOG_DEBOUNCE_MS: int = 90
     # 꼬리 처리만 할 때 추가 스케줄 간격(ms)
     _LOG_TAIL_POLL_MS: int = 40
+    # 모바일 Status API용 최근 로그 줄 수
+    _RECENT_LOG_MAX: int = 400
 
     def __init__(self, log_area=None, root=None):
         self.log_area = log_area
@@ -23,6 +26,8 @@ class GuiUtils:
         self._log_msg_count = 0
         self._log_q: "queue.SimpleQueue[str]" = queue.SimpleQueue()
         self._log_flush_after_id: Optional[Union[str, int]] = None
+        self._recent_log_lock = threading.Lock()
+        self._recent_log_lines: Deque[str] = deque(maxlen=self._RECENT_LOG_MAX)
         self._icons_strip = (
             "🚀",
             "🔍",
@@ -172,16 +177,47 @@ class GuiUtils:
             pass
 
     def _drain_log_queue_sync(self) -> None:
-        """root 없음/종료 시: 큐를 콘솔로만 비웁니다."""
+        """root 없음/종료 시: 큐를 콘솔·링버퍼로 비웁니다."""
         while True:
             try:
                 m = self._log_q.get_nowait()
             except queue.Empty:
                 break
             try:
-                print(m)
+                line = self._format_log_line(m)
+                self._remember_log_line(line)
+                print(line.rstrip("\n"))
             except Exception:
-                pass
+                try:
+                    print(m)
+                except Exception:
+                    pass
+
+    def _remember_log_line(self, formatted: str) -> None:
+        """대시보드와 동일 포맷 줄을 링버퍼에 보관(모바일 API용)."""
+        try:
+            line = str(formatted).rstrip("\r\n")
+            if not line.strip():
+                return
+            with self._recent_log_lock:
+                self._recent_log_lines.append(line)
+        except Exception:
+            pass
+
+    def get_recent_log_lines(self, limit: int = 100) -> List[str]:
+        """최근 로그 줄(오래된 → 최신). 스레드 안전 복사."""
+        try:
+            lim = max(1, min(int(limit), int(self._RECENT_LOG_MAX)))
+        except (TypeError, ValueError):
+            lim = 100
+        try:
+            with self._recent_log_lock:
+                lines = list(self._recent_log_lines)
+            if len(lines) > lim:
+                return lines[-lim:]
+            return lines
+        except Exception:
+            return []
 
     def _format_log_line(self, message: str) -> str:
         """타임스탬프·이모지 제거 등 한 줄 포맷(위젯 삽입용)."""
@@ -214,19 +250,30 @@ class GuiUtils:
 
     def _apply_log_batch(self, raw_batch: List[str]) -> None:
         """포맷된 여러 줄을 한 번의 insert 로 반영하고, 길이 상한 시 상단 삭제."""
+        formatted: List[str] = []
+        for raw in raw_batch:
+            try:
+                line = self._format_log_line(raw)
+                self._remember_log_line(line)
+                formatted.append(line)
+            except Exception:
+                try:
+                    self._remember_log_line(str(raw))
+                except Exception:
+                    pass
+                formatted.append(str(raw) + ("\n" if not str(raw).endswith("\n") else ""))
+
         if not self.log_area or not self.log_area.winfo_exists():
             for raw in raw_batch:
                 self._maybe_mirror_to_console(raw)
+            for line in formatted:
                 try:
-                    print(self._format_log_line(raw).rstrip("\n"))
+                    print(line.rstrip("\n"))
                 except Exception:
-                    try:
-                        print(raw)
-                    except Exception:
-                        pass
+                    pass
             return
         try:
-            block = "".join(self._format_log_line(m) for m in raw_batch)
+            block = "".join(formatted)
             self.log_area.insert(tk.END, block)
             for raw in raw_batch:
                 self._maybe_mirror_to_console(raw)

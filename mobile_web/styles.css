@@ -119,6 +119,21 @@ h2 { margin: 0; font-size: 1rem; font-weight: 700; }
 .collapsed { display: none; }
 
 .list { display: flex; flex-direction: column; gap: 8px; }
+.log-view {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(46, 52, 64, 0.9);
+  color: #D8DEE9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-view .empty { color: var(--muted); }
 .row {
   display: flex;
   justify-content: space-between;

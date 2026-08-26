@@ -554,3 +554,25 @@ def build_equity_trend(app: Any, days: int = 30) -> Dict[str, Any]:
         "days": n,
         "points": points,
     }
+
+
+def build_logs(app: Any, limit: int = 100) -> Dict[str, Any]:
+    """GET /api/v1/logs — PC 대시보드와 동일 포맷의 최근 로그."""
+    now = datetime.now()
+    try:
+        lim = max(1, min(int(limit), 400))
+    except (TypeError, ValueError):
+        lim = 100
+    lines: List[str] = []
+    try:
+        gu = getattr(app, "gui_utils", None)
+        if gu is not None and hasattr(gu, "get_recent_log_lines"):
+            lines = list(gu.get_recent_log_lines(lim) or [])
+    except Exception:
+        lines = []
+    return {
+        "server_time": now.isoformat(timespec="seconds"),
+        "limit": lim,
+        "count": len(lines),
+        "lines": lines,
+    }

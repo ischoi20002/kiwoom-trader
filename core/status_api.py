@@ -454,6 +454,15 @@ class StatusApiServer:
                             days = 30
                         self._json(200, snap.build_equity_trend(app, days))
                         return
+                    if path == "/api/v1/logs":
+                        qs = parse_qs(parsed.query)
+                        lim = 100
+                        try:
+                            lim = int((qs.get("limit") or ["100"])[0])
+                        except (TypeError, ValueError):
+                            lim = 100
+                        self._json(200, snap.build_logs(app, lim))
+                        return
                     self._json(404, {"error": "not_found"})
                 except Exception as e:
                     self._json(500, {"error": "snapshot_failed", "message": str(e)})
