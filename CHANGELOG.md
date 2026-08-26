@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.53 (2026-08-26)
+
+- **헤드 1분 catchup 커버리지 로그**: 슬롯 헤드 soft catchup 후 기대 분 수·차트 분·store 공식 분·누락 시각을 `m1_head_catchup_coverage`로 세션 JSONL에 남김. 불완전하면 UI 경고 (`rt_watchlist_m1_api_poller`, `realtime_m1_fallback`).
+
 ## 0.18.52 (2026-08-26)
 
 - **보유/대응 패널 잘림**: 상단 높이 계산이 LabelFrame·헤딩·가로스크롤을 빼먹어 종목이 늘면 세로 스크롤이 생겼다. chrome 실측·적용 성공 후에만 스킵·부족 시 한두 줄 보정으로 보유 행이 보이도록 sash/minsize를 맞춤 (`monitor_tab`).

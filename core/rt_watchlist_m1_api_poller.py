@@ -2303,6 +2303,36 @@ class RtWatchlistM1ApiPoller:
                 pass
             return
 
+    def _log_m1_head_catchup(
+        self,
+        report: Dict[str, Any],
+        *,
+        emit_incomplete: bool = True,
+    ) -> None:
+        """헤드 catchup 커버리지를 세션 JSONL에 기록합니다."""
+        try:
+            sl = getattr(self._app, "session_logger", None)
+            if sl is not None and hasattr(sl, "log"):
+                sl.log("m1_head_catchup_coverage", dict(report))
+        except Exception:
+            pass
+        try:
+            if not emit_incomplete:
+                return
+            if bool(report.get("complete")):
+                return
+            nk = report.get("code")
+            exp = report.get("expected_n")
+            stn = report.get("store_n")
+            miss = report.get("missing") or []
+            status = report.get("status")
+            self._emit(
+                f"⚠️ [M1Poll] head catchup 불완전 {nk} "
+                f"store={stn}/{exp} status={status} missing={miss}"
+            )
+        except Exception:
+            pass
+
     def _job_fetch_slot_head(
         self,
         code: str,
@@ -2317,6 +2347,9 @@ class RtWatchlistM1ApiPoller:
         조회 실패 시 평봉으로 틱을 덮지 않으며, 말분 평가도 막지 않는다.
         ``head_last_open``: head의 마지막 1분 open (예: 09:13, 15:18).
         """
+        slot: Optional[pd.Timestamp] = None
+        head_start: Optional[pd.Timestamp] = None
+        nk = ""
         try:
             if not self._monitoring():
                 return
@@ -2382,6 +2415,25 @@ class RtWatchlistM1ApiPoller:
                     t.start()
                 except Exception:
                     pass
+                return
+            try:
+                from core.realtime_m1_fallback import build_m1_head_catchup_report
+
+                if head_start is not None and slot is not None:
+                    rep = build_m1_head_catchup_report(
+                        self._app,
+                        nk,
+                        slot=slot,
+                        head_start=head_start,
+                        head_last_open=head_last_open,
+                        chart_df=chart_df,
+                        applied=0,
+                        status="minute_not_ready_timeout",
+                        detail=str(last_err or "")[:200],
+                    )
+                    self._log_m1_head_catchup(rep)
+            except Exception:
+                pass
             return
 
         if chart_df is None or getattr(chart_df, "empty", True):
@@ -2392,21 +2444,81 @@ class RtWatchlistM1ApiPoller:
                         self._apply_flat_no_trade_minute(nk, head_last_open, sk)
                 except Exception:
                     pass
+            try:
+                from core.realtime_m1_fallback import build_m1_head_catchup_report
+
+                if head_start is not None and slot is not None:
+                    rep = build_m1_head_catchup_report(
+                        self._app,
+                        nk,
+                        slot=slot,
+                        head_start=head_start,
+                        head_last_open=head_last_open,
+                        chart_df=chart_df,
+                        applied=0,
+                        status=f"chart_empty:{status}",
+                        detail=str(last_err or "")[:200],
+                    )
+                    self._log_m1_head_catchup(rep)
+            except Exception:
+                pass
             return
 
+        applied = 0
         try:
-            from core.realtime_m1_fallback import apply_chart_catchup_to_m1_store
-
-            apply_chart_catchup_to_m1_store(
-                self._app,
-                nk,
-                chart_df,
-                head_last_open,
-                from_open=head_start,
+            from core.realtime_m1_fallback import (
+                apply_chart_catchup_to_m1_store,
+                build_m1_head_catchup_report,
             )
+
+            applied = int(
+                apply_chart_catchup_to_m1_store(
+                    self._app,
+                    nk,
+                    chart_df,
+                    head_last_open,
+                    from_open=head_start,
+                )
+                or 0
+            )
+            if head_start is not None and slot is not None:
+                rep = build_m1_head_catchup_report(
+                    self._app,
+                    nk,
+                    slot=slot,
+                    head_start=head_start,
+                    head_last_open=head_last_open,
+                    chart_df=chart_df,
+                    applied=applied,
+                    status="ok",
+                    detail="",
+                )
+                if bool(rep.get("complete")):
+                    rep["status"] = "ok"
+                else:
+                    rep["status"] = "incomplete"
+                self._log_m1_head_catchup(rep)
         except Exception as ex:
             try:
                 self._emit(f"⚠️ [M1Poll] {nk} head soft catchup 실패: {ex!r}")
+            except Exception:
+                pass
+            try:
+                from core.realtime_m1_fallback import build_m1_head_catchup_report
+
+                if head_start is not None and slot is not None:
+                    rep = build_m1_head_catchup_report(
+                        self._app,
+                        nk,
+                        slot=slot,
+                        head_start=head_start,
+                        head_last_open=head_last_open,
+                        chart_df=chart_df,
+                        applied=int(applied),
+                        status="exception",
+                        detail=repr(ex),
+                    )
+                    self._log_m1_head_catchup(rep)
             except Exception:
                 pass
             return

@@ -7,11 +7,145 @@ ka10080(REST) 실패·502 시 M1 저장소가 비어 ``evaluate_bt_hp_intrabar_u
 """
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
 from utils.normalization import canonical_stock_code
+
+
+def iter_m1_open_labels_inclusive(
+    start_incl: pd.Timestamp, end_incl: pd.Timestamp
+) -> List[pd.Timestamp]:
+    """``[start_incl, end_incl]`` 1분 open 라벨 목록(포함)."""
+    out: List[pd.Timestamp] = []
+    try:
+        cur = pd.Timestamp(start_incl).floor("min")
+        end = pd.Timestamp(end_incl).floor("min")
+        if end < cur:
+            return out
+        while cur <= end:
+            out.append(cur)
+            cur = cur + pd.Timedelta(minutes=1)
+    except Exception:
+        return []
+    return out
+
+
+def chart_1m_open_labels_in_range(
+    df_1m: Optional[pd.DataFrame],
+    start_incl: pd.Timestamp,
+    end_incl: pd.Timestamp,
+) -> Set[pd.Timestamp]:
+    """
+    ka10080 차트 인덱스는 봉 **종가 시각**(분 끝)이므로
+    open 라벨 = 종가 − 1분. 구간 내 open 집합을 반환.
+    """
+    found: Set[pd.Timestamp] = set()
+    try:
+        if df_1m is None or getattr(df_1m, "empty", True):
+            return found
+        lo = pd.Timestamp(start_incl).floor("min")
+        hi = pd.Timestamp(end_incl).floor("min")
+        for end_ts in df_1m.index:
+            try:
+                end_lab = pd.Timestamp(end_ts).floor("min")
+                open_lab = end_lab - pd.Timedelta(minutes=1)
+                if lo <= open_lab <= hi:
+                    found.add(open_lab)
+            except Exception:
+                continue
+    except Exception:
+        return found
+    return found
+
+
+def official_m1_open_labels_in_store(
+    app: Any,
+    code: str,
+    start_incl: pd.Timestamp,
+    end_incl: pd.Timestamp,
+) -> Set[pd.Timestamp]:
+    """RtTickM1Store 공식 completed 구간의 open 라벨 집합."""
+    found: Set[pd.Timestamp] = set()
+    try:
+        nk = canonical_stock_code(code)
+        if not nk:
+            return found
+        m1s = getattr(app, "rt_tick_m1_store", None)
+        if m1s is None:
+            return found
+        df = m1s.dataframe_for_window(
+            nk,
+            pd.Timestamp(start_incl).floor("min"),
+            pd.Timestamp(end_incl).floor("min"),
+            include_open_bucket=False,
+        )
+        if df is None or getattr(df, "empty", True):
+            return found
+        for ts in df.index:
+            try:
+                found.add(pd.Timestamp(ts).floor("min"))
+            except Exception:
+                continue
+    except Exception:
+        return found
+    return found
+
+
+def build_m1_head_catchup_report(
+    app: Any,
+    code: str,
+    *,
+    slot: Any,
+    head_start: pd.Timestamp,
+    head_last_open: pd.Timestamp,
+    chart_df: Optional[pd.DataFrame],
+    applied: int,
+    status: str,
+    detail: str = "",
+) -> Dict[str, Any]:
+    """
+    헤드 soft catchup 커버리지 리포트.
+
+    - ``expected_n``: 헤드 구간 기대 1분 수(일반 슬롯 14)
+    - ``chart_n``: 차트 페이지에 있던 헤드 분 수
+    - ``store_n``: catchup 후 store 공식 completed 수
+    - ``missing``: store에 없는 open 라벨(HH:MM, 최대 14)
+    """
+    nk = canonical_stock_code(code) or str(code)
+    expected = iter_m1_open_labels_inclusive(head_start, head_last_open)
+    exp_set = set(expected)
+    chart_set = chart_1m_open_labels_in_range(chart_df, head_start, head_last_open)
+    store_set = official_m1_open_labels_in_store(
+        app, nk, head_start, head_last_open
+    )
+    missing = sorted(exp_set - store_set)
+    missing_hm = [t.strftime("%H:%M") for t in missing[:14]]
+    chart_miss = sorted(exp_set - chart_set)
+    chart_miss_hm = [t.strftime("%H:%M") for t in chart_miss[:14]]
+    try:
+        slot_s = pd.Timestamp(slot).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        slot_s = str(slot)
+    complete = bool(expected) and len(missing) == 0
+    return {
+        "code": nk,
+        "slot": slot_s,
+        "head_start": pd.Timestamp(head_start).strftime("%Y-%m-%d %H:%M:%S"),
+        "head_last_open": pd.Timestamp(head_last_open).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "expected_n": int(len(expected)),
+        "chart_n": int(len(chart_set & exp_set)),
+        "store_n": int(len(store_set & exp_set)),
+        "applied_n": int(applied),
+        "complete": bool(complete),
+        "missing": missing_hm,
+        "chart_missing": chart_miss_hm,
+        "status": str(status),
+        "detail": str(detail or "")[:200],
+    }
 
 
 def _settings_bool(settings: Any, key: str, default: bool = True) -> bool:
