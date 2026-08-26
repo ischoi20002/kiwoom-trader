@@ -262,6 +262,18 @@ class WarmupStreamPrepService:
                     mark_tick_stream_ready(c.app)
                 except Exception:
                     pass
+                # 직전 슬롯 재평가 전: 보유·체결·미체결을 맞춰 중복 주문 방지
+                try:
+                    from core.restart_pre_catchup import (
+                        prepare_before_restart_slot_catchup,
+                    )
+
+                    prepare_before_restart_slot_catchup(c.app)
+                except Exception as ex:
+                    try:
+                        c.log(f"⚠️ [RestartGuard] catchup 전 가드 실패: {ex}")
+                    except Exception:
+                        pass
                 try:
                     poller = getattr(c.app, "rt_watchlist_m1_api_poller", None)
                     if poller is not None:

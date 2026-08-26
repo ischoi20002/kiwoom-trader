@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.59 (2026-08-26)
+
+- **재시작 catchup 전 체결·미체결 가드**: 직전 완성슬롯 재평가 전에 계좌 동기화·당일 kt00007 체결 병합·미체결 매수(S1 pending)/매도(exit_pending) 복구를 수행해 중복 주문을 줄임 (`restart_pre_catchup`, `warmup_stream_prep_service`).
+
 ## 0.18.58 (2026-08-26)
 
 - **공식 15분 정렬교체 제거**: 슬롯 완성 후 ka10080(15) REST로 bars를 덮어쓰던 경로를 비활성. GUI 스케줄 미연결·`schedule` no-op. 신호는 M1 합성·누락채움만 사용 (`k_trader_gui`, `rt_closed_15m_official_replace`).
