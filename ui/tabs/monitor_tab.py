@@ -223,7 +223,12 @@ class MonitorTab:
         # 보유/대응 종목 패널: 보유 수에 맞춰 줄 수 변동(최소 3줄)
         self._monitor_fix_active_rows: int = 3
         self._monitor_last_active_panel_rows: Optional[int] = None
+        # sash 적용이 실제로 성공했을 때만 True (레이아웃 미확정 early-return 후 재시도 방지용)
+        self._monitor_active_panel_height_ok: bool = False
         self._monitor_active_panel_height_job: Optional[Any] = None
+        self._monitor_active_panel_retry_job: Optional[Any] = None
+        self._monitor_active_frame: Optional[ttk.LabelFrame] = None
+        self._monitor_active_inner: Optional[ttk.Frame] = None
         self._monitor_tree_columns: Tuple[str, ...] = tuple()
         # 실시간 틱 경로: 계좌 동기화 1프레임 등으로 VP에만 없으면 보유→감시 트리로 잘못 옮기는 깜빡임 방지
         self._vp_ui_inactive_streak: Dict[str, int] = {}
@@ -721,23 +726,38 @@ class MonitorTab:
         except Exception:
             return 0
 
+    def _count_active_monitor_tree_rows(self) -> int:
+        """보유/대응 Treeview에 실제로 그려진 행 수."""
+        try:
+            tr = getattr(self, "tree_active_monitor", None)
+            if tr is None:
+                return 0
+            return int(len(tr.get_children()))
+        except Exception:
+            return 0
+
     def _desired_active_panel_rows(
         self, virtual_positions: Any = None
     ) -> int:
         """
         보유/대응 패널에 보일 줄 수.
 
-        보유 종목 수에 맞추되, 3개 이하면 최소 3줄 높이를 확보합니다.
+        VP·트리 행 중 더 큰 쪽에 맞추되, 3개 이하면 최소 3줄 높이를 확보합니다.
+        (동기화 직전 한쪽만 갱신돼도 스크롤이 생기지 않게)
         """
         try:
-            n = int(self._count_unique_virtual_holdings(virtual_positions))
+            n_vp = int(self._count_unique_virtual_holdings(virtual_positions))
         except Exception:
-            n = 0
-        return max(3, n)
+            n_vp = 0
+        try:
+            n_tree = int(self._count_active_monitor_tree_rows())
+        except Exception:
+            n_tree = 0
+        return max(3, n_vp, n_tree)
 
     def _monitor_tree_rowheight_px(self) -> int:
-        """보유 트리 ttk rowheight(px). 실패 시 22."""
-        row_h = 22
+        """보유 트리 ttk rowheight(px). 스타일 기본(32) 우선, 실패 시 32."""
+        row_h = 32
         try:
             tr = getattr(self, "tree_active_monitor", None)
             if tr is not None:
@@ -748,36 +768,180 @@ class MonitorTab:
                 rh_raw = tr.tk.call(
                     "ttk::style", "lookup", tr.cget("style"), "-rowheight"
                 )
-                row_h = int(float(rh_raw)) if str(rh_raw).strip() else 22
+                if str(rh_raw).strip():
+                    row_h = int(float(rh_raw))
         except Exception:
-            row_h = 22
-        return max(16, min(int(row_h), 48))
+            row_h = 32
+        return max(20, min(int(row_h), 48))
+
+    def _active_panel_chrome_px(self) -> int:
+        """
+        LabelFrame 제목·패딩 + Treeview 헤딩 + 가로 스크롤바 등
+        본문 행 밖의 고정 높이(px).
+        """
+        # 과거 header_pad=34 는 헤딩·가로스크롤을 빠져 종목이 잘림 → 여유 있는 기본값
+        fallback = 90
+        try:
+            af = getattr(self, "_monitor_active_frame", None)
+            inner = getattr(self, "_monitor_active_inner", None)
+            tr = getattr(self, "tree_active_monitor", None)
+            if tr is None:
+                return int(fallback)
+            try:
+                tr.update_idletasks()
+            except Exception:
+                pass
+
+            lf_chrome = 32
+            try:
+                if af is not None and inner is not None:
+                    ah = int(af.winfo_height())
+                    ih = int(inner.winfo_height())
+                    if ah > ih >= 8:
+                        lf_chrome = max(24, ah - ih)
+            except Exception:
+                lf_chrome = 32
+
+            heading = 28
+            try:
+                kids = list(tr.get_children())
+                if kids:
+                    bbox = tr.bbox(kids[0])
+                    if bbox and len(bbox) >= 2:
+                        # 첫 행 y 오프셋 ≈ 헤딩 높이
+                        heading = max(22, int(bbox[1]))
+            except Exception:
+                heading = 28
+
+            xscroll = 18
+            try:
+                if inner is not None:
+                    for child in inner.winfo_children():
+                        try:
+                            if str(child.cget("orient")).lower() == "horizontal":
+                                req_h = int(child.winfo_reqheight() or 0)
+                                win_h = int(child.winfo_height() or 0)
+                                xscroll = max(16, req_h, win_h, xscroll)
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                xscroll = 18
+
+            # sash/테마 오차 여유 6px
+            return int(lf_chrome + heading + xscroll + 6)
+        except Exception:
+            return int(fallback)
 
     def _active_panel_target_height_px(self, rows: int) -> int:
-        """LabelFrame 헤더·패딩 + 트리 N줄 높이."""
-        header_pad = 34
+        """LabelFrame·헤딩·가로스크롤 + 트리 N줄 높이."""
         try:
             rows_i = max(3, int(rows))
         except Exception:
             rows_i = 3
-        return int(header_pad + (self._monitor_tree_rowheight_px() * rows_i))
+        return int(
+            self._active_panel_chrome_px()
+            + (self._monitor_tree_rowheight_px() * rows_i)
+        )
+
+    def _paned_usable_height(self, p: Any) -> int:
+        """Paned 실제 사용 가능 높이(미확정이면 0에 가깝게)."""
+        h = 0
+        try:
+            h = int(p.winfo_height())
+        except Exception:
+            h = 0
+        if h < 8:
+            try:
+                h = max(h, int(p.winfo_reqheight()))
+            except Exception:
+                pass
+        if h < 8:
+            try:
+                par = getattr(p, "master", None)
+                if par is not None:
+                    h = max(h, int(par.winfo_height()))
+            except Exception:
+                pass
+        return int(h)
+
+    def _retry_apply_active_panel_height(
+        self, virtual_positions: Any = None, *, delay_ms: int = 120
+    ) -> None:
+        """레이아웃 미확정·클리핑 시 짧게 재적용 예약."""
+        try:
+            root = None
+            try:
+                root = self.mo_main_frame.winfo_toplevel()
+            except Exception:
+                root = getattr(self.app, "root", None)
+            if root is None:
+                return
+            jid = getattr(self, "_monitor_active_panel_retry_job", None)
+            if jid is not None:
+                try:
+                    root.after_cancel(jid)
+                except Exception:
+                    pass
+
+            def _run(vp: Any = virtual_positions) -> None:
+                self._monitor_active_panel_retry_job = None
+                try:
+                    self._apply_monitor_active_panel_height(
+                        force=True, virtual_positions=vp
+                    )
+                except Exception:
+                    pass
+
+            self._monitor_active_panel_retry_job = root.after(
+                int(delay_ms), lambda vp=virtual_positions: _run(vp)
+            )
+        except Exception:
+            pass
+
+    def _active_tree_needs_more_height(self) -> bool:
+        """세로 스크롤이 생기면(모든 행이 안 보이면) True."""
+        try:
+            tr = getattr(self, "tree_active_monitor", None)
+            if tr is None:
+                return False
+            if len(tr.get_children()) <= 0:
+                return False
+            try:
+                tr.update_idletasks()
+            except Exception:
+                pass
+            y0, y1 = tr.yview()
+            # 전체가 보이면 (0.0, 1.0)에 가깝다
+            return float(y1) - float(y0) < 0.999
+        except Exception:
+            return False
 
     def _apply_monitor_active_panel_height(
         self,
         *,
         force: bool = False,
         virtual_positions: Any = None,
+        _bump_pass: int = 0,
     ) -> None:
         """
-        보유 수에 맞춰 상단 Paned sash·minsize를 즉시 맞춥니다.
-        줄 수가 같으면(force 제외) 스킵합니다.
+        보유 행이 스크롤 없이 보이도록 상단 Paned sash·minsize를 맞춥니다.
+        줄 수가 같고 이전에 적용 성공했으면(force 제외) 스킵합니다.
         """
         try:
             rows = self._desired_active_panel_rows(virtual_positions)
             prev = getattr(self, "_monitor_last_active_panel_rows", None)
-            if (not force) and prev is not None and int(prev) == int(rows):
+            ok = bool(getattr(self, "_monitor_active_panel_height_ok", False))
+            if (
+                (not force)
+                and prev is not None
+                and int(prev) == int(rows)
+                and ok
+                and _bump_pass <= 0
+            ):
                 return
-            self._monitor_last_active_panel_rows = int(rows)
+
+            # 성공 전까지 ok/last 를 확정하지 않음(미확정 early-return 후 재시도 막힘 방지)
             self._monitor_fix_active_rows = int(rows)
 
             p = getattr(self, "_monitor_paned", None)
@@ -787,20 +951,18 @@ class MonitorTab:
                 p.update_idletasks()
             except Exception:
                 pass
-            try:
-                h = int(p.winfo_height())
-            except Exception:
-                h = 0
-            if h < 8:
-                try:
-                    h = max(h, int(p.winfo_reqheight()))
-                except Exception:
-                    pass
+            h = self._paned_usable_height(p)
             if h < 30:
-                # 레이아웃 미확정 — 복원 스케줄에 맡김
+                self._monitor_active_panel_height_ok = False
+                self._retry_apply_active_panel_height(virtual_positions)
                 return
 
             target_top = self._active_panel_target_height_px(rows)
+            # 클리핑 보정 패스: chrome 오차만큼 한 줄씩 가산
+            if _bump_pass > 0:
+                target_top = int(
+                    target_top + (self._monitor_tree_rowheight_px() * int(_bump_pass))
+                )
             min_top = self._active_panel_target_height_px(3)
             min_bot = 80
             pos = int(target_top)
@@ -810,11 +972,14 @@ class MonitorTab:
             if pos < min_top:
                 pos = min_top
 
+            # minsize도 목표(창이 허용하는 범위)로 올려 드래그로 다시 잘리지 않게 함
+            pane_min = int(min(pos, max(min_top, min(target_top, h - min_bot))))
+            if pane_min < min_top:
+                pane_min = int(min_top)
             try:
-                # 상단 패널 minsize도 최소 3줄 기준으로 유지
                 panes = p.panes()
                 if panes:
-                    p.paneconfigure(panes[0], minsize=int(min_top))
+                    p.paneconfigure(panes[0], minsize=int(pane_min))
             except Exception:
                 pass
 
@@ -827,8 +992,29 @@ class MonitorTab:
                 self._monitor_prev_sash_pixel = int(p.sashpos(0))
             except Exception:
                 pass
+
+            self._monitor_last_active_panel_rows = int(rows)
+            self._monitor_active_panel_height_ok = True
+
+            # chrome 오차로 한두 줄이 남으면 sash를 더 키움(창 여유 있을 때만)
+            try:
+                if (
+                    _bump_pass < 3
+                    and pos < (h - min_bot)
+                    and self._active_tree_needs_more_height()
+                ):
+                    self._apply_monitor_active_panel_height(
+                        force=True,
+                        virtual_positions=virtual_positions,
+                        _bump_pass=int(_bump_pass) + 1,
+                    )
+            except Exception:
+                pass
         except Exception:
-            pass
+            try:
+                self._monitor_active_panel_height_ok = False
+            except Exception:
+                pass
 
     def _schedule_sync_active_panel_height(
         self, virtual_positions: Any = None
@@ -837,7 +1023,9 @@ class MonitorTab:
         try:
             rows = self._desired_active_panel_rows(virtual_positions)
             prev = getattr(self, "_monitor_last_active_panel_rows", None)
-            if prev is not None and int(prev) == int(rows):
+            ok = bool(getattr(self, "_monitor_active_panel_height_ok", False))
+            # 창이 작아 전부 못 넣는 경우 yview가 계속 부족해 틱마다 sash를 두드리지 않음
+            if prev is not None and int(prev) == int(rows) and ok:
                 return
         except Exception:
             pass
@@ -875,24 +1063,20 @@ class MonitorTab:
 
     def _schedule_restore_monitor_sash(self) -> None:
         """
-        창 실제 높이가 잡힌 뒤 저장된 비율로 첫 sash 를 복원합니다.
+        창 실제 높이가 잡힌 뒤 보유 수에 맞춰 첫 sash 를 맞춥니다.
         Notebook 에서 숨겨진 탭은 winfo_height 가 매우 작게 나오므로,
-        포지션 탭과 같이 탭을 처음 열 때(k_trader_gui._on_tab_changed) 다시 호출하는 것이 안전합니다.
+        탭을 처음 열 때(k_trader_gui._on_tab_changed) 다시 호출하는 것이 안전합니다.
         """
         try:
             root = getattr(self.app, "root", None)
             if root is None:
                 return
             p = self._monitor_paned
+            # 이미 초기화된 뒤에도 탭 재진입 시 보유 행이 잘리지 않게 재적용
             if p is not None and self._monitor_sash_initialized:
-                # 이미 한 번 정상 복원되었으면, 탭 전환 재진입에서는 사용자가 드래그한 높이를 유지한다.
                 try:
-                    # "정상 복원"을 winfo_height만으로 판단하면,
-                    # 상단 pane이 0으로 접힌 상태에서도 True로 마킹될 수 있습니다.
-                    # 따라서 sashpos(0)가 어느 정도 이상인 경우에만 스킵합니다.
-                    sp = int(p.sashpos(0))
-                    if int(p.winfo_height()) >= 160 and sp >= 60:
-                        self._monitor_prev_sash_pixel = sp
+                    if int(p.winfo_height()) >= 160 and int(p.sashpos(0)) >= 60:
+                        self._schedule_sync_active_panel_height()
                         return
                 except (tk.TclError, TypeError, ValueError):
                     pass
@@ -906,66 +1090,12 @@ class MonitorTab:
                         p.update_idletasks()
                     except Exception:
                         pass
-                    h = int(p.winfo_height())
-                    # 저장 시와 동일: 미계산 높이 보완
-                    if h < 8:
-                        try:
-                            h = max(h, int(p.winfo_reqheight()))
-                        except (tk.TclError, TypeError, ValueError):
-                            pass
-                    if h < 8:
-                        try:
-                            par = p.master
-                            if par is not None:
-                                h = max(h, int(par.winfo_height()))
-                        except (tk.TclError, TypeError, ValueError):
-                            pass
-                    # 레이아웃 미확정 시 대기
-                    # 기존의 160 임계값은 탭 전환 직후/특정 플랫폼에서 h==0이 계속되는 경우,
-                    # 복원 시도가 너무 오래 지연되거나(혹은 마지막 시도에서 강제로 pos를 찍어) 레이아웃이 고정될 수 있습니다.
-                    # 여기서는 "정말 0에 가까운 경우"만 대기하고, 최소한의 높이가 잡히면 sashpos를 진행합니다.
+                    h = self._paned_usable_height(p)
                     if h < 30 and attempt < 24:
                         root.after(100, lambda a=attempt + 1: _try(a))
                         return
-                    # 보유 수에 맞춰 상단 높이(최소 3줄). 저장 sash 비율보다 보유 수 우선.
-                    try:
-                        rows = int(self._desired_active_panel_rows())
-                    except Exception:
-                        rows = max(
-                            3, int(getattr(self, "_monitor_fix_active_rows", 3))
-                        )
-                    self._monitor_fix_active_rows = int(rows)
-                    target_top = self._active_panel_target_height_px(rows)
-                    min_top = self._active_panel_target_height_px(3)
-                    min_bot = 80
-                    pos = int(target_top)
-                    # h - min_bot 을 상단 최대치로 보되, 상단이 최소 높이(min_top)보다 작아지지 않게 보정
-                    pos = max(min_top, min(pos, h - min_bot))
-                    # 창이 너무 작으면 하단이 소멸할 수 있으므로 하단 최소를 우선 확보
-                    if h - min_bot <= 0:
-                        pos = min_top
-                    if pos < min_top:
-                        pos = min_top
-                    try:
-                        panes = p.panes()
-                        if panes:
-                            p.paneconfigure(panes[0], minsize=int(min_top))
-                    except Exception:
-                        pass
-                    try:
-                        self._monitor_restoring_sash = True
-                        p.sashpos(0, pos)
-                    finally:
-                        self._monitor_restoring_sash = False
-                    try:
-                        self._monitor_prev_sash_pixel = int(p.sashpos(0))
-                    except (tk.TclError, TypeError, ValueError):
-                        pass
-                    try:
-                        self._monitor_last_active_panel_rows = int(rows)
-                    except Exception:
-                        pass
-                    # 실제로 높이가 잡힌 경우에만 초기화 완료로 마킹(높이 0 고정이면 다음 복원 시도도 허용)
+                    # 보유 수 우선(저장 sash 비율보다 스크롤 없는 표시가 우선)
+                    self._apply_monitor_active_panel_height(force=True)
                     try:
                         sp_now = int(p.sashpos(0))
                         if sp_now >= 60:
@@ -976,9 +1106,6 @@ class MonitorTab:
                     if attempt < 24:
                         root.after(100, lambda a=attempt + 1: _try(a))
 
-            # 탭 전환 직후에는 winfo_height 가 아직 0 으로 잡히는 경우가 있어,
-            # after_idle 로 레이아웃 계산이 끝난 뒤 1회 실행하고,
-            # 안전장치로 약간 뒤(클릭 직후 관찰 타이밍 보정) 추가 1회 실행합니다.
             root.after_idle(lambda: _try(0))
             root.after(350, lambda: _try(0))
         except Exception:
@@ -1239,6 +1366,7 @@ class MonitorTab:
         # weight=0 은 일부 Windows/ttk에서 상단 패널 높이가 0에 가깝게 붙어 트리가 안 보이는 사례가 있어
         # 양쪽 모두 weight>0 + 상단 minsize 로 최소 높이를 보장한다.
         active_frame = ttk.LabelFrame(paned, text=" 🔥 보유 및 대응 종목 (Active Positions) ", padding="5")
+        self._monitor_active_frame = active_frame
         paned.add(active_frame, weight=1)
 
         # [하단] 일반 감시 창 (확대)
@@ -1298,6 +1426,7 @@ class MonitorTab:
 
         # 1. 상단 트리뷰 (Active) - 높이 축소
         active_inner = ttk.Frame(active_frame)
+        self._monitor_active_inner = active_inner
         active_inner.pack(fill=tk.BOTH, expand=True)
         def _monitor_col_anchor(col_id: str) -> str:
             """
