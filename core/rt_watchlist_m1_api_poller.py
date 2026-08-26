@@ -489,10 +489,10 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             spread = max(3.0, min(50.0, float(len(ordered)) * 1.1))
         try:
-            max_w = float(self._fetch_not_ready_max_wait_sec())
+            max_w = float(self._last_not_ready_max_wait_sec())
         except Exception:
-            max_w = 12.0
-        # 마지막 종목 시작(spread) + not_ready 대기 + 여유
+            max_w = 4.0
+        # 마지막 종목 시작(spread) + 말분 not_ready 대기 + 여유
         backup_after = float(spread) + float(max_w) + 1.5
         try:
             end_wall = (
@@ -1969,7 +1969,7 @@ class RtWatchlistM1ApiPoller:
             return 2.5
 
     def _fetch_not_ready_max_wait_sec(self) -> float:
-        """종목별 1분 조회 대기."""
+        """일반(헤드 등) 종목별 1분 조회 대기."""
         try:
             v = float(
                 self._settings().get(
@@ -1979,6 +1979,22 @@ class RtWatchlistM1ApiPoller:
             return max(2.0, min(v, 60.0))
         except (TypeError, ValueError):
             return 12.0
+
+    def _last_not_ready_max_wait_sec(self) -> float:
+        """
+        말분 공식1분 not_ready 대기(초).
+
+        헤드(12s)보다 짧게 — 무거래·지연이면 빨리 구멍스킵 합성평가로 넘긴다.
+        """
+        try:
+            v = float(
+                self._settings().get(
+                    "realtime_m1_last_not_ready_max_wait_sec", 4.0
+                )
+            )
+            return max(1.5, min(v, 30.0))
+        except (TypeError, ValueError):
+            return 4.0
 
     def _head_catchup_wall_deadline(
         self, head_last_open: pd.Timestamp
@@ -3059,7 +3075,14 @@ class RtWatchlistM1ApiPoller:
         if status == "minute_not_ready":
             # 라운드 전체 dormant 금지 — 해당 종목만 재시도
             elapsed = time.monotonic() - float(t0_mono or time.monotonic())
-            max_w = self._fetch_not_ready_max_wait_sec()
+            # 말분은 짧게(기본 4s) → 구멍스킵 평가; 그 외는 헤드용 12s
+            try:
+                if is_last_m1_open_of_15m_slot(closed_lab):
+                    max_w = self._last_not_ready_max_wait_sec()
+                else:
+                    max_w = self._fetch_not_ready_max_wait_sec()
+            except Exception:
+                max_w = self._fetch_not_ready_max_wait_sec()
             if elapsed < max_w:
                 poll = self._not_ready_poll_sec()
                 try:
