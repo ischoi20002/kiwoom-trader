@@ -121,6 +121,7 @@ DEFAULT_SETTINGS = {
     "realtime_m1_probe_not_ready_max_wait_sec": 2.5,
     "realtime_m1_probe_candidate_codes": 3,
     "realtime_m1_fetch_not_ready_max_wait_sec": 12.0,
+    "realtime_m1_head_not_ready_deadline_after_close_sec": 55.0,
     "realtime_eval_position_on_m1_revision_only": True,
     "realtime_market_halt_m1_quiet_ratio": 0.7,
     "realtime_market_halt_m1_max_volume": 50.0,

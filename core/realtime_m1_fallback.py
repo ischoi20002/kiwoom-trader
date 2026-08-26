@@ -148,6 +148,63 @@ def build_m1_head_catchup_report(
     }
 
 
+def build_m1_last_official_report(
+    app: Any,
+    code: str,
+    *,
+    closed_lab: pd.Timestamp,
+    chart_df: Optional[pd.DataFrame],
+    status: str,
+    detail: str = "",
+    source: str = "official",
+) -> Dict[str, Any]:
+    """
+    신호평가용 슬롯 말분 공식 1분 조회 커버리지.
+
+    - ``chart_has_last``: ka10080 차트에 말분 open 존재
+    - ``store_has_last``: RtTickM1Store 공식 completed에 말분 존재
+    - ``complete``: store에 말분이 있으면 True (조회·DB·캐시 반영 성공)
+    """
+    nk = canonical_stock_code(code) or str(code)
+    try:
+        lab = pd.Timestamp(closed_lab).floor("min")
+    except Exception:
+        lab = pd.Timestamp(closed_lab)
+    chart_set = chart_1m_open_labels_in_range(chart_df, lab, lab)
+    store_set = official_m1_open_labels_in_store(app, nk, lab, lab)
+    chart_has = lab in chart_set
+    store_has = lab in store_set
+    slot_s = ""
+    try:
+        from utils.krx_bars import krx_15m_label_for_m1_open
+
+        slot = krx_15m_label_for_m1_open(lab)
+        if slot is not None:
+            slot_s = pd.Timestamp(slot).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        slot_s = ""
+    st = str(status or "")
+    # 조회 자체가 성공했는지는 status로, 반영 여부는 store_has_last로 본다.
+    fetch_ok = st in (
+        "ok",
+        "cache_ok",
+        "db_fallback",
+        "flat_no_trade",
+    )
+    return {
+        "code": nk,
+        "last_open": lab.strftime("%Y-%m-%d %H:%M:%S"),
+        "slot": slot_s,
+        "status": st,
+        "detail": str(detail or "")[:200],
+        "source": str(source or "official"),
+        "chart_has_last": bool(chart_has),
+        "store_has_last": bool(store_has),
+        "fetch_ok": bool(fetch_ok),
+        "complete": bool(store_has),
+    }
+
+
 def _settings_bool(settings: Any, key: str, default: bool = True) -> bool:
     try:
         if settings is None:

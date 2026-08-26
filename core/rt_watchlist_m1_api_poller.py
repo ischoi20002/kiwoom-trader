@@ -1980,6 +1980,46 @@ class RtWatchlistM1ApiPoller:
         except (TypeError, ValueError):
             return 12.0
 
+    def _head_catchup_wall_deadline(
+        self, head_last_open: pd.Timestamp
+    ) -> datetime:
+        """
+        헤드 catchup not_ready 재시도 벽시계 한도.
+
+        헤드 말분 마감(:xx:00) 이후 N초(기본 55)까지 — 종목별 지연이어도
+        다음 말분 평가 직전까지 성공을 기다린다.
+        """
+        try:
+            after = float(
+                self._settings().get(
+                    "realtime_m1_head_not_ready_deadline_after_close_sec", 55.0
+                )
+            )
+        except (TypeError, ValueError):
+            after = 55.0
+        after = max(20.0, min(float(after), 58.0))
+        try:
+            close_wall = pd.Timestamp(head_last_open).floor("min") + pd.Timedelta(
+                minutes=1
+            )
+            return (close_wall + pd.Timedelta(seconds=after)).to_pydatetime()
+        except Exception:
+            return datetime.now() + timedelta(seconds=self._fetch_not_ready_max_wait_sec())
+
+    def _head_not_ready_poll_sec(self) -> float:
+        """헤드 not_ready 재시도 간격 — ka10080 전역 최소간격 이상."""
+        poll = float(self._not_ready_poll_sec())
+        try:
+            gmin = float(
+                self._settings().get(
+                    "realtime_ka10080_global_min_interval_sec", 1.05
+                )
+            )
+        except (TypeError, ValueError):
+            gmin = 1.05
+        gmin = max(0.8, min(float(gmin), 3.0))
+        return max(poll, gmin, 1.0)
+
     def _not_ready_max_wait_sec(self) -> float:
         """하위 호환 — 종목별 대기와 동일."""
         return self._fetch_not_ready_max_wait_sec()
@@ -2471,6 +2511,78 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
+    def _log_m1_last_official(
+        self,
+        nk: str,
+        closed_lab: pd.Timestamp,
+        *,
+        status: str,
+        detail: str = "",
+        chart_df: Any = None,
+        source: str = "official",
+    ) -> None:
+        """
+        신호평가용 슬롯 말분 공식 1분 조회 결과 기록.
+
+        세션 JSONL(``m1_last_official_coverage``) + GUI(실패·미반영만).
+        """
+        try:
+            if not is_last_m1_open_of_15m_slot(closed_lab):
+                return
+        except Exception:
+            return
+        report: Dict[str, Any] = {}
+        try:
+            from core.realtime_m1_fallback import build_m1_last_official_report
+
+            report = build_m1_last_official_report(
+                self._app,
+                nk,
+                closed_lab=closed_lab,
+                chart_df=chart_df,
+                status=str(status),
+                detail=str(detail or ""),
+                source=str(source or "official"),
+            )
+        except Exception:
+            try:
+                lab = pd.Timestamp(closed_lab).floor("min")
+                report = {
+                    "code": nk,
+                    "last_open": lab.strftime("%Y-%m-%d %H:%M:%S"),
+                    "status": str(status),
+                    "detail": str(detail or "")[:200],
+                    "complete": False,
+                    "fetch_ok": False,
+                }
+            except Exception:
+                return
+        try:
+            sl = getattr(self._app, "session_logger", None)
+            if sl is not None and hasattr(sl, "log"):
+                sl.log("m1_last_official_coverage", dict(report))
+        except Exception:
+            pass
+        try:
+            hm = pd.Timestamp(closed_lab).strftime("%H:%M")
+        except Exception:
+            hm = "?"
+        try:
+            if bool(report.get("complete")) and bool(report.get("fetch_ok")):
+                self._emit(
+                    f"ℹ️ [M1Poll] 말분 공식1분 OK {nk} lab={hm} "
+                    f"status={report.get('status')}"
+                )
+                return
+            self._emit(
+                f"⚠️ [M1Poll] 말분 공식1분 실패 {nk} lab={hm} "
+                f"status={report.get('status')} "
+                f"chart={report.get('chart_has_last')} "
+                f"store={report.get('store_has_last')}"
+            )
+        except Exception:
+            pass
+
     def _ensure_missing_15m_filled_before_eval(self, code: str) -> None:
         """
         완성15 평가 직전: 이미 닫힌 최근 슬롯의 누락·스텁을 공식1분 합성으로 채웁니다.
@@ -2580,12 +2692,27 @@ class RtWatchlistM1ApiPoller:
         status = self._classify_fetch_result(
             row, chart_df, head_last_open, last_err
         )
+        partial_after_timeout = False
 
         if status == "minute_not_ready":
-            elapsed = time.monotonic() - float(t0_mono)
-            max_w = self._fetch_not_ready_max_wait_sec()
-            if elapsed < max_w:
-                poll = self._not_ready_poll_sec()
+            # 종목별 차트 지연: 벽시계 한도까지 재시도 (고정 12초 elapsed 아님)
+            try:
+                deadline = self._head_catchup_wall_deadline(head_last_open)
+                remain = float((deadline - datetime.now()).total_seconds())
+            except Exception:
+                try:
+                    elapsed = time.monotonic() - float(t0_mono or time.monotonic())
+                    remain = float(self._fetch_not_ready_max_wait_sec()) - float(
+                        elapsed
+                    )
+                except Exception:
+                    remain = 0.0
+            if remain > 0.25:
+                try:
+                    poll = min(float(self._head_not_ready_poll_sec()), remain - 0.05)
+                    poll = max(0.25, float(poll))
+                except Exception:
+                    poll = 1.05
                 try:
                     t = threading.Timer(
                         poll,
@@ -2597,25 +2724,29 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     pass
                 return
-            try:
-                from core.realtime_m1_fallback import build_m1_head_catchup_report
+            # 한도 초과: 확보된 차트분이라도 반영 (store=0 방지)
+            if chart_df is not None and not getattr(chart_df, "empty", True):
+                partial_after_timeout = True
+            else:
+                try:
+                    from core.realtime_m1_fallback import build_m1_head_catchup_report
 
-                if head_start is not None and slot is not None:
-                    rep = build_m1_head_catchup_report(
-                        self._app,
-                        nk,
-                        slot=slot,
-                        head_start=head_start,
-                        head_last_open=head_last_open,
-                        chart_df=chart_df,
-                        applied=0,
-                        status="minute_not_ready_timeout",
-                        detail=str(last_err or "")[:200],
-                    )
-                    self._log_m1_head_catchup(rep)
-            except Exception:
-                pass
-            return
+                    if head_start is not None and slot is not None:
+                        rep = build_m1_head_catchup_report(
+                            self._app,
+                            nk,
+                            slot=slot,
+                            head_start=head_start,
+                            head_last_open=head_last_open,
+                            chart_df=chart_df,
+                            applied=0,
+                            status="minute_not_ready_timeout",
+                            detail=str(last_err or "")[:200],
+                        )
+                        self._log_m1_head_catchup(rep)
+                except Exception:
+                    pass
+                return
 
         if chart_df is None or getattr(chart_df, "empty", True):
             # soft catchup 실패: 틱봉이 있으면 평봉 미적용(틱 유지)
@@ -2691,6 +2822,9 @@ class RtWatchlistM1ApiPoller:
                 )
                 if bool(rep.get("complete")):
                     rep["status"] = "ok"
+                elif partial_after_timeout:
+                    rep["status"] = "minute_not_ready_partial"
+                    rep["detail"] = str(last_err or "minute_not_ready")[:200]
                 else:
                     rep["status"] = "incomplete"
                 self._log_m1_head_catchup(rep)
@@ -2813,6 +2947,19 @@ class RtWatchlistM1ApiPoller:
                 self._schedule_signal_eval(nk, close_px=_c, volume=_v)
             except Exception:
                 pass
+            try:
+                if is_last_m1_open_of_15m_slot(closed_lab):
+                    # 캐시에 있으면 이미 공식 말분 반영된 것으로 보고 평가만 이어감
+                    self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
+                    self._log_m1_last_official(
+                        nk,
+                        closed_lab,
+                        status="cache_ok",
+                        detail="cache_hit",
+                        source="cache",
+                    )
+            except Exception:
+                pass
             return
 
         try:
@@ -2871,12 +3018,45 @@ class RtWatchlistM1ApiPoller:
                         self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
                 except Exception:
                     pass
+                try:
+                    self._log_m1_last_official(
+                        nk,
+                        closed_lab,
+                        status="db_fallback",
+                        detail="minute_not_ready_timeout",
+                        chart_df=chart_df,
+                        source="db",
+                    )
+                except Exception:
+                    pass
                 return
             self._apply_flat_no_trade_minute(nk, closed_lab, sk)
+            try:
+                self._log_m1_last_official(
+                    nk,
+                    closed_lab,
+                    status="flat_no_trade",
+                    detail="minute_not_ready_timeout",
+                    chart_df=chart_df,
+                    source="flat",
+                )
+            except Exception:
+                pass
             return
 
         if status == "ok" and row is not None:
             self._apply_fetch_success(nk, closed_lab, sk, key, row, chart_df)
+            try:
+                self._log_m1_last_official(
+                    nk,
+                    closed_lab,
+                    status="ok",
+                    detail="",
+                    chart_df=chart_df,
+                    source="official",
+                )
+            except Exception:
+                pass
             return
 
         ohlcv: Optional[CacheVal] = None
@@ -2892,6 +3072,17 @@ class RtWatchlistM1ApiPoller:
             if status == "row_not_found":
                 # 차트는 다음 분까지 왔는데 해당 분 행만 없음 = 무거래 가능성 큼
                 if self._apply_flat_no_trade_minute(nk, closed_lab, sk):
+                    try:
+                        self._log_m1_last_official(
+                            nk,
+                            closed_lab,
+                            status="flat_no_trade",
+                            detail="row_not_found",
+                            chart_df=chart_df,
+                            source="flat",
+                        )
+                    except Exception:
+                        pass
                     return
                 try:
                     from core.ka10080_fetch_diag import ka10080_fetch_diag
@@ -2935,6 +3126,17 @@ class RtWatchlistM1ApiPoller:
                         self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
             except Exception:
                 pass
+            try:
+                self._log_m1_last_official(
+                    nk,
+                    closed_lab,
+                    status=f"fetch_fail:{status}",
+                    detail=str(last_err or "")[:200],
+                    chart_df=chart_df,
+                    source="official",
+                )
+            except Exception:
+                pass
             return
 
         o, h, l_, c, v = ohlcv
@@ -2952,5 +3154,16 @@ class RtWatchlistM1ApiPoller:
         try:
             if is_last_m1_open_of_15m_slot(closed_lab):
                 self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
+        except Exception:
+            pass
+        try:
+            self._log_m1_last_official(
+                nk,
+                closed_lab,
+                status="db_fallback",
+                detail=str(status or last_err or "")[:200],
+                chart_df=chart_df,
+                source="db",
+            )
         except Exception:
             pass
