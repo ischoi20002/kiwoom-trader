@@ -168,6 +168,54 @@ def test_official_m1_poll_deadline_is_fixed_after_close() -> None:
     assert abs(delta - 40.0) < 0.01
 
 
+def test_pre_auction_last_m1_schedules_tick_first() -> None:
+    """15:19 NXT 즉시평가 예약(직접 호출) · 비NXT eod 한도 600초."""
+    from utils.krx_bars import is_pre_auction_last_m1_open
+
+    assert is_pre_auction_last_m1_open(pd.Timestamp("2026-08-27 15:19:00")) is True
+    assert is_pre_auction_last_m1_open(pd.Timestamp("2026-08-27 15:14:00")) is False
+
+    msgs: list[str] = []
+    app = SimpleNamespace(
+        settings={
+            "realtime_15m_last_minute_from_ticks": True,
+            "realtime_15m_eval_on_official_last_m1": True,
+            "realtime_eod_official_wait_max_sec": 600.0,
+        },
+        _active_stream_codes=["377300", "457190"],
+        virtual_positions={},
+        portfolio=None,
+        monitor_info={},
+        nxt_eligibility_service=None,
+    )
+    poller = RtWatchlistM1ApiPoller(app, log=msgs.append)
+    lab = pd.Timestamp("2026-08-27 15:19:00")
+    # eod 공식 한도 = 10분
+    deadline = poller._last_m1_official_poll_deadline(lab, 2)
+    close_wall = lab.floor("min") + pd.Timedelta(minutes=1)
+    delta = (pd.Timestamp(deadline) - close_wall).total_seconds()
+    assert abs(delta - 600.0) < 0.01
+
+    poller._schedule_tick_tail_immediate_pre_auction(["377300", "457190"], lab)
+    assert any("NXT 틱말분 즉시평가" in m for m in msgs)
+    msgs.clear()
+    poller._schedule_tick_tail_immediate_pre_auction(["377300"], lab)
+    assert msgs == []
+
+
+def test_eod_deadline_caps_at_10_minutes() -> None:
+    app = SimpleNamespace(
+        settings={"realtime_eod_official_wait_max_sec": 9999.0},
+        _active_stream_codes=[],
+    )
+    poller = RtWatchlistM1ApiPoller(app, log=None)
+    assert poller._eod_official_wait_max_sec() == 600.0
+    lab30 = pd.Timestamp("2026-08-27 15:30:00")
+    d = poller._last_m1_official_poll_deadline(lab30)
+    close_wall = lab30.floor("min") + pd.Timedelta(minutes=1)
+    assert abs((pd.Timestamp(d) - close_wall).total_seconds() - 600.0) < 0.01
+
+
 def test_official_m1_gui_log_ok_not_post_after_official_claim() -> None:
     """공식 경로 claim 직후 done=True 여도 already_eval_before=False 면 ok."""
     msgs: list[str] = []

@@ -40,6 +40,7 @@ __all__ = [
     "m1_ka10080_cntr_tm_for_closed_open",
     "chart_covers_m1_closed_minute",
     "is_last_m1_open_of_15m_slot",
+    "is_pre_auction_last_m1_open",
     "krx_15m_label_for_m1_open",
     "is_krx_m1_closed_open_label",
     "is_krx_last_15m_slot",
@@ -671,6 +672,26 @@ def is_last_m1_open_of_15m_slot(
         if hm >= h.pre_auction_slot_minutes:
             return False
         return (int(t.minute) % 15) == 14
+    except Exception:
+        return False
+
+
+def is_pre_auction_last_m1_open(
+    open_ts: Union[pd.Timestamp, datetime, str],
+) -> bool:
+    """
+    동시호가 직전 **연속매매 마지막 1분**인지 (기본 ``15:19``).
+
+    이 분은 ka10080 반영이 늦은 경우가 많아, 실시간 경로는 틱말분 즉시 평가 후
+    공식봉으로 15분을 대체하는 쪽이 안전하다.
+    """
+    try:
+        t = pd.Timestamp(open_ts).floor("min")
+        if t.weekday() >= 5:
+            return False
+        h = _hours_for_ts(t)
+        hm = int(t.hour) * 60 + int(t.minute)
+        return hm == int(h.continuous_end_minutes) - 1
     except Exception:
         return False
 

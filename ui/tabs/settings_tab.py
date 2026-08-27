@@ -1435,6 +1435,13 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
+            '장마감 공식대기 한도',
+            'realtime_eod_official_wait_max_sec',
+            '초',
+            '15:19·15:30 비NXT: 공식 1분 대기 상한(최대 600=10분). NXT는 틱 즉시',
+        )
+        add_param_row(
+            strat_f,
             '공식 말분 1분 평가',
             None,
             '',

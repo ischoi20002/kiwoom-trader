@@ -13,6 +13,14 @@
 
 ---
 
+## 0.18.81 (2026-08-27)
+
+- **장마감 NXT 분기**: 15:19·15:30에서 NXT 가능=틱 즉시 평가, 비NXT=공식 1분 우선(최대 10분 `realtime_eod_official_wait_max_sec`) 후 틱 폴백 (`rt_watchlist_m1_api_poller`).
+
+## 0.18.80 (2026-08-27)
+
+- **15:19 틱말분 우선**: 동시호가 직전 말분은 공식 40초 대기 없이 틱 즉시 평가, 이후 공식 1분 도착 시 합성 15분만 대체(재평가 스킵·사후반영) (`rt_watchlist_m1_api_poller`, `krx_bars.is_pre_auction_last_m1_open`).
+
 ## 0.18.79 (2026-08-27)
 
 - **S2 stage 키 정합**: `_coerce_position_stage`로 실효 단계(entry_n·BUY_S2) resolve — S2인데 S1 TP/Flash 키가 쓰이던 AtrExit·청산 오표시 수정 (`backtest_engine`).

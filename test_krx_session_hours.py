@@ -144,6 +144,11 @@ def test_default_15m_labels_regression() -> None:
     assert is_krx_pre_auction_15m_slot(pd.Timestamp("2026-03-10 15:15:00"))
     assert is_krx_auction_market_fill_slot(pd.Timestamp("2026-03-10 15:15:00"))
     assert is_krx_next_open_defer_15m_slot(labels[-1])
+    from utils.krx_bars import is_last_m1_open_of_15m_slot, is_pre_auction_last_m1_open
+
+    assert is_pre_auction_last_m1_open(pd.Timestamp("2026-03-10 15:19:00"))
+    assert is_last_m1_open_of_15m_slot(pd.Timestamp("2026-03-10 15:19:00"))
+    assert not is_pre_auction_last_m1_open(pd.Timestamp("2026-03-10 15:14:00"))
     assert krx_15m_slot_complete_ts(pd.Timestamp("2026-03-10 15:15:00")) == pd.Timestamp(
         "2026-03-10 15:20:00"
     )
