@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.84 (2026-08-28)
+
+- **운영 기동 오류 수정**: `strategy_engine.py` `evaluate_position_scoped` 종료 `}` 뒤 줄바꿈 누락으로 발생한 SyntaxError 수정.
+
 ## 0.18.83 (2026-08-27)
 
 - **보유 HOLD 청산 진단**: 완성15 보유 평가 HOLD 시 Flash/ATR/TP/SL 미충족 요약(`exit_hold_reason`)을 S2 사유와 함께 GUI·`signal_held_eval_diag`에 기록 (`TradingStrategy.explain_exit_hold`).

@@ -270,7 +270,9 @@ class StrategyEngine:
             "exit_hold_reason": exit_hold_reason,
             "stage": stage,
             "profit_ratio": profit_ratio,
-        }    def calculate_confluence_status(self, code, now_price, ind, vol_power, ask_bid_ratio):
+        }
+
+    def calculate_confluence_status(self, code, now_price, ind, vol_power, ask_bid_ratio):
         """[v22.0] 실시간 감시창의 '상태' 컬럼에 표시할 종합 지수 산출"""
         if code not in self.app.virtual_positions: return "-", 0.0
         pos = self.app.virtual_positions[code]
