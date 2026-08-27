@@ -173,6 +173,54 @@ def test_official_m1_poll_deadline_includes_spread_and_tail() -> None:
     assert 38.0 <= delta <= 45.0
 
 
+def test_official_m1_gui_log_ok_not_post_after_official_claim() -> None:
+    """공식 경로 claim 직후 done=True 여도 already_eval_before=False 면 ok."""
+    msgs: list[str] = []
+    poller = RtWatchlistM1ApiPoller(SimpleNamespace(settings={}), log=msgs.append)
+    lab = pd.Timestamp("2026-08-27 11:14:00")
+    slot = pd.Timestamp("2026-08-27 11:00:00")
+    assert poller._claim_tick_tail_eval("377300", slot) is True
+
+    import core.realtime_m1_fallback as fb
+
+    def _fake_report(*_a: object, **_k: object) -> dict:
+        return {
+            "code": "377300",
+            "status": "ok",
+            "complete": True,
+            "fetch_ok": True,
+            "no_trade": False,
+            "source": "official",
+        }
+
+    orig = fb.build_m1_last_official_report
+    fb.build_m1_last_official_report = _fake_report  # type: ignore[assignment]
+    try:
+        poller._log_m1_last_official(
+            "377300",
+            lab,
+            status="ok",
+            already_eval_before=False,
+        )
+        poller._flush_official_m1_gui_log(lab.strftime("%Y-%m-%d %H:%M:%S"))
+        assert len(msgs) == 1
+        assert "ok=1" in msgs[0]
+        assert "사후반영" not in msgs[0]
+
+        msgs.clear()
+        poller._log_m1_last_official(
+            "377300",
+            lab,
+            status="ok",
+            already_eval_before=True,
+        )
+        poller._flush_official_m1_gui_log(lab.strftime("%Y-%m-%d %H:%M:%S"))
+        assert len(msgs) == 1
+        assert "사후반영=1" in msgs[0]
+    finally:
+        fb.build_m1_last_official_report = orig  # type: ignore[assignment]
+
+
 if __name__ == "__main__":
     test_tick_tail_claim_is_atomic()
     test_eval_pool_skips_duplicate_slot()
@@ -181,4 +229,5 @@ if __name__ == "__main__":
     test_eval_priority_prefers_high_met_ratio()
     test_official_m1_gui_log_aggregates_by_slot()
     test_official_m1_poll_deadline_includes_spread_and_tail()
+    test_official_m1_gui_log_ok_not_post_after_official_claim()
     print("ok")

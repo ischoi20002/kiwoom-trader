@@ -2784,11 +2784,15 @@ class RtWatchlistM1ApiPoller:
         detail: str = "",
         chart_df: Any = None,
         source: str = "official",
+        already_eval_before: Optional[bool] = None,
     ) -> None:
         """
         신호평가용 슬롯 말분 공식 1분 조회 결과 기록.
 
-        세션 JSONL(``m1_last_official_coverage``) + GUI(실패·미반영만).
+        세션 JSONL(``m1_last_official_coverage``) + GUI 집계.
+        ``already_eval_before``: 공식 반영·평가 **전**에 이미 완성15 평가된 경우만
+        GUI ``사후반영``. (공식 경로가 claim 한 직후 ``_is_tick_tail_eval_done`` 을
+        보면 정상 ok 도 사후반영으로 오인됨)
         """
         try:
             if not is_last_m1_open_of_15m_slot(closed_lab):
@@ -2822,6 +2826,11 @@ class RtWatchlistM1ApiPoller:
             except Exception:
                 return
         try:
+            if already_eval_before is not None:
+                report["already_eval_before"] = bool(already_eval_before)
+        except Exception:
+            pass
+        try:
             sl = getattr(self._app, "session_logger", None)
             if sl is not None and hasattr(sl, "log"):
                 sl.log("m1_last_official_coverage", dict(report))
@@ -2836,15 +2845,13 @@ class RtWatchlistM1ApiPoller:
                 self._note_official_m1_gui_log(closed_lab, category="no_trade")
                 return
             if bool(report.get("complete")) and bool(report.get("fetch_ok")):
-                # 틱 백업 등으로 이미 완성15 평가된 뒤의 공식 바 반영
+                # 틱 백업 등으로 **이미** 평가된 뒤의 공식 바만 사후반영
                 post = False
-                try:
-                    slot = krx_15m_label_for_m1_open(closed_lab)
-                    post = bool(
-                        slot is not None
-                        and self._is_tick_tail_eval_done(nk, slot)
-                    )
-                except Exception:
+                if already_eval_before is not None:
+                    post = bool(already_eval_before)
+                else:
+                    # 호출부가 플래그를 안 넘긴 구경로: 현재 done 만으로는 오인 가능
+                    # → 공식 정상 반영은 ok 로 본다
                     post = False
                 if post:
                     self._note_official_m1_gui_log(closed_lab, category="post")
@@ -2854,6 +2861,16 @@ class RtWatchlistM1ApiPoller:
             self._note_official_m1_gui_log(closed_lab, category="fail")
         except Exception:
             pass
+
+    def _slot_already_eval_done(self, nk: str, closed_lab: pd.Timestamp) -> bool:
+        """완성15 평가 점유·완료 여부(공식 반영 전 스냅샷용)."""
+        try:
+            slot = krx_15m_label_for_m1_open(closed_lab)
+            if slot is None:
+                return False
+            return bool(self._is_tick_tail_eval_done(nk, slot))
+        except Exception:
+            return False
 
     def _ensure_missing_15m_filled_before_eval(self, code: str) -> None:
         """
@@ -3235,6 +3252,7 @@ class RtWatchlistM1ApiPoller:
             try:
                 if is_last_m1_open_of_15m_slot(closed_lab):
                     # 캐시에 있으면 이미 공식 말분 반영된 것으로 보고 평가만 이어감
+                    already = self._slot_already_eval_done(nk, closed_lab)
                     self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
                     self._log_m1_last_official(
                         nk,
@@ -3242,6 +3260,7 @@ class RtWatchlistM1ApiPoller:
                         status="cache_ok",
                         detail="cache_hit",
                         source="cache",
+                        already_eval_before=already,
                     )
             except Exception:
                 pass
@@ -3337,18 +3356,26 @@ class RtWatchlistM1ApiPoller:
                 self._schedule_signal_eval(nk, close_px=c, volume=v)
                 try:
                     if is_last_m1_open_of_15m_slot(closed_lab):
+                        already = self._slot_already_eval_done(nk, closed_lab)
                         self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
-                except Exception:
-                    pass
-                try:
-                    self._log_m1_last_official(
-                        nk,
-                        closed_lab,
-                        status="db_fallback",
-                        detail="minute_not_ready_timeout",
-                        chart_df=chart_df,
-                        source="db",
-                    )
+                        self._log_m1_last_official(
+                            nk,
+                            closed_lab,
+                            status="db_fallback",
+                            detail="minute_not_ready_timeout",
+                            chart_df=chart_df,
+                            source="db",
+                            already_eval_before=already,
+                        )
+                    else:
+                        self._log_m1_last_official(
+                            nk,
+                            closed_lab,
+                            status="db_fallback",
+                            detail="minute_not_ready_timeout",
+                            chart_df=chart_df,
+                            source="db",
+                        )
                 except Exception:
                     pass
                 return
@@ -3364,6 +3391,12 @@ class RtWatchlistM1ApiPoller:
             return
 
         if status == "ok" and row is not None:
+            already = False
+            try:
+                if is_last_m1_open_of_15m_slot(closed_lab):
+                    already = self._slot_already_eval_done(nk, closed_lab)
+            except Exception:
+                already = False
             self._apply_fetch_success(nk, closed_lab, sk, key, row, chart_df)
             try:
                 self._log_m1_last_official(
@@ -3373,6 +3406,7 @@ class RtWatchlistM1ApiPoller:
                     detail="",
                     chart_df=chart_df,
                     source="official",
+                    already_eval_before=already,
                 )
             except Exception:
                 pass
@@ -3444,6 +3478,12 @@ class RtWatchlistM1ApiPoller:
             return
 
         o, h, l_, c, v = ohlcv
+        already = False
+        try:
+            if is_last_m1_open_of_15m_slot(closed_lab):
+                already = self._slot_already_eval_done(nk, closed_lab)
+        except Exception:
+            already = False
         try:
             m1s = getattr(self._app, "rt_tick_m1_store", None)
             if m1s is not None:
@@ -3468,6 +3508,7 @@ class RtWatchlistM1ApiPoller:
                 detail=str(status or last_err or "")[:200],
                 chart_df=chart_df,
                 source="db",
+                already_eval_before=already,
             )
         except Exception:
             pass
