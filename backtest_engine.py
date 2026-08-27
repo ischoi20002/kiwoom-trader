@@ -1072,6 +1072,29 @@ class TradingStrategy:
             return False
 
     @staticmethod
+    def _coerce_position_stage(pos: dict | None) -> int:
+        """
+        entry_n·stage·BUY_S2 이벤트 기준 실효 단계(1 또는 2+).
+        portfolio_manager.position_effective_stage 와 동일 — DB/동기화 pos 에
+        stage 가 문자열이거나 entry_n 만 갱신된 경우에도 S2 키를 쓰도록 한다.
+        """
+        if not isinstance(pos, dict):
+            return 1
+        try:
+            st = max(
+                int(float(pos.get("entry_n", 0) or 0)),
+                int(float(pos.get("stage", 1) or 1)),
+            )
+            if st >= 2:
+                return st
+            for ev in pos.get("events") or []:
+                if isinstance(ev, dict) and str(ev.get("action", "")).upper() == "BUY_S2":
+                    return 2
+        except (TypeError, ValueError):
+            pass
+        return 1
+
+    @staticmethod
     def _atr_column_for_holdings(is_type_b: bool) -> str:
         """보유 종목 트랙에 맞는 ATR 시리즈 컬럼명."""
         return "ATR_B" if is_type_b else "ATR_A"
@@ -1415,7 +1438,7 @@ class TradingStrategy:
             if not pos or float(now_price) <= 0:
                 return "—"
             s = settings or {}
-            stage = pos.get("entry_n", pos.get("stage", 1))
+            stage = TradingStrategy._coerce_position_stage(pos)
             is_type_b = TradingStrategy._holding_sig_is_type_b(pos)
             if not is_type_b:
                 try:
@@ -1511,12 +1534,12 @@ class TradingStrategy:
                 return _finite_pos(_ir_get("ATR", 0.0))
 
             def _exit_key(a_key: str, b_key: str, s2_a_key: str, s2_b_key: str) -> str:
-                if stage == 2:
+                if stage >= 2:
                     return s2_b_key if is_type_b else s2_a_key
                 return b_key if is_type_b else a_key
 
             def _atr_track_suff() -> str:
-                if stage == 2:
+                if stage >= 2:
                     return "_s2_b" if is_type_b else "_s2"
                 return "_b" if is_type_b else "_a"
 
@@ -1573,7 +1596,7 @@ class TradingStrategy:
             def _fixed_sl_keys_for_display() -> tuple[bool, float]:
                 """고정 SL(% 기준) 토글/퍼센트(%)를 단계/타입별로 resolve합니다."""
                 try:
-                    if stage == 2:
+                    if stage >= 2:
                         if is_type_b:
                             return bool(s.get("use_s2_b_stop_loss", True)), float(
                                 s.get("s2_b_stop_loss", 2.0)
@@ -1713,7 +1736,7 @@ class TradingStrategy:
             return indicator_row.get(key, default) if indicator_row is not None else default
 
         # 1. 기본 정보 산출
-        stage = pos.get('entry_n', pos.get('stage', 1))
+        stage = TradingStrategy._coerce_position_stage(pos)
         avg_p = pos.get('avg_p', pos.get('avg_price', now_price))
         profit_ratio = (now_price / avg_p - 1) * 100
         
@@ -1905,13 +1928,13 @@ class TradingStrategy:
 
         # [Phase 2] S2 청산 키도 Type A/B 분리
         def _exit_key(a_key: str, b_key: str, s2_a_key: str, s2_b_key: str):
-            if stage == 2:
+            if stage >= 2:
                 return s2_b_key if is_type_b else s2_a_key
             return b_key if is_type_b else a_key
 
         def _atr_track_suff() -> str:
             """ATR SL/트레일용 접미사 (_a / _b / _s2 / _s2_b)"""
-            if stage == 2:
+            if stage >= 2:
                 return "_s2_b" if is_type_b else "_s2"
             return "_b" if is_type_b else "_a"
 

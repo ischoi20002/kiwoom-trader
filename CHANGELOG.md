@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.79 (2026-08-27)
+
+- **S2 stage 키 정합**: `_coerce_position_stage`로 실효 단계(entry_n·BUY_S2) resolve — S2인데 S1 TP/Flash 키가 쓰이던 AtrExit·청산 오표시 수정 (`backtest_engine`).
+
 ## 0.18.78 (2026-08-27)
 
 - **AtrExit 표시 정합**: TP 무장 후 Flash 제외·ATR Trail 무장 조건을 `evaluate_position`과 동일하게 맞춤 — S2 추매완료+TP 초과 시 화면이 FLASH 대신 ATR TRL 표시 (`backtest_engine.compute_atr_exit_display_text`).
