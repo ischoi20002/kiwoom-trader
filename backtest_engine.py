@@ -1543,25 +1543,32 @@ class TradingStrategy:
             sl_mult: float = 0.0
             trail_mult: float = 0.0
 
-            # TP 도달 여부로 TRL 후보를 결정(사용자 규칙: 미도달이면 후보에서 제외)
-            trail_armed = False
-            if use_trail_atr and avg_p > 0:
-                tp_arm_pct = float(
-                    s.get(
-                        _exit_key(
-                            "s1_a_take_profit",
-                            "s1_b_take_profit",
-                            "s2_take_profit",
-                            "s2_b_take_profit",
-                        ),
-                        5.0,
-                    )
+            # TP 도달 여부로 TRL 후보를 결정 — evaluate_position 과 동일 분기
+            _trail_only_after_tp = TradingStrategy._use_atr_trail_only_after_tp_for_stage(
+                s, is_type_b, stage
+            )
+            tp_arm_pct = float(
+                s.get(
+                    _exit_key(
+                        "s1_a_take_profit",
+                        "s1_b_take_profit",
+                        "s2_take_profit",
+                        "s2_b_take_profit",
+                    ),
+                    5.0,
                 )
-                try:
-                    peak_pct = (atr_peak / avg_p - 1.0) * 100.0 if avg_p > 0 else 0.0
-                except Exception:
-                    peak_pct = 0.0
+            )
+            try:
+                peak_pct = (atr_peak / avg_p - 1.0) * 100.0 if avg_p > 0 else 0.0
+            except Exception:
+                peak_pct = 0.0
+            trail_armed = bool(use_trail_atr)
+            if _trail_only_after_tp and use_trail_atr:
                 trail_armed = peak_pct >= tp_arm_pct
+            # 고정TP 연기 모드 + TP 무장 후 Flash 표시·청산 모두 제외(evaluate_position 정합)
+            skip_flash_for_atr_trail = False
+            if _trail_only_after_tp and use_trail_atr:
+                skip_flash_for_atr_trail = peak_pct >= tp_arm_pct
 
             def _fixed_sl_keys_for_display() -> tuple[bool, float]:
                 """고정 SL(% 기준) 토글/퍼센트(%)를 단계/타입별로 resolve합니다."""
@@ -1646,7 +1653,12 @@ class TradingStrategy:
                         3.0,
                     )
                 )
-                if use_flash and flash_pct > 0 and max_p > 0:
+                if (
+                    use_flash
+                    and not skip_flash_for_atr_trail
+                    and flash_pct > 0
+                    and max_p > 0
+                ):
                     flash_px = max_p * (1.0 - flash_pct / 100.0)
                     if np.isfinite(flash_px):
                         candidates.append(("FLASH", float(flash_px)))

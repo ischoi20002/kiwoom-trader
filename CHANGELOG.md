@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.78 (2026-08-27)
+
+- **AtrExit 표시 정합**: TP 무장 후 Flash 제외·ATR Trail 무장 조건을 `evaluate_position`과 동일하게 맞춤 — S2 추매완료+TP 초과 시 화면이 FLASH 대신 ATR TRL 표시 (`backtest_engine.compute_atr_exit_display_text`).
+
 ## 0.18.77 (2026-08-27)
 
 - **틱말분 백업 타이밍**: 공식 우선 모드에서 슬롯 마감+40초(`realtime_15m_tick_tail_backup_after_close_sec`)까지 공식 평가만 진행하고, 미완 종목만 이후 틱 합성 시작 (`rt_watchlist_m1_api_poller`).
