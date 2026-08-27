@@ -13,6 +13,14 @@
 
 ---
 
+## 0.18.83 (2026-08-27)
+
+- **보유 HOLD 청산 진단**: 완성15 보유 평가 HOLD 시 Flash/ATR/TP/SL 미충족 요약(`exit_hold_reason`)을 S2 사유와 함께 GUI·`signal_held_eval_diag`에 기록 (`TradingStrategy.explain_exit_hold`).
+
+## 0.18.82 (2026-08-27)
+
+- **보유 완성15 진단 로그**: S2/청산 평가가 HOLD·스킵일 때 사유를 GUI·`signal_held_eval_diag` 세션 JSONL에 기록 (`signal_engine`, `strategy_engine.hold_reason`, `TradingStrategy.explain_s2_approval_failure`).
+
 ## 0.18.81 (2026-08-27)
 
 - **장마감 NXT 분기**: 15:19·15:30에서 NXT 가능=틱 즉시 평가, 비NXT=공식 1분 우선(최대 10분 `realtime_eod_official_wait_max_sec`) 후 틱 폴백 (`rt_watchlist_m1_api_poller`).

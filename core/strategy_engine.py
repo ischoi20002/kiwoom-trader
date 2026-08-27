@@ -47,15 +47,17 @@ class StrategyEngine:
         - ``full``: 청산(``TradingStrategy.evaluate_position``) 후 S2 검토(기존과 동일).
         - ``exit_only``: 청산만.
         - ``s2_only``: S2만(청산 생략 — M1 주기 S2용).
+
+        HOLD 시 ``hold_reason`` 을 포함해 세션 진단 로그가 원인을 남길 수 있게 합니다.
         """
         if now_price <= 0:
-            return {"action": "HOLD"}
+            return {"action": "HOLD", "hold_reason": "now_price_le_0"}
         if code not in self.app.virtual_positions:
-            return {"action": "HOLD"}
+            return {"action": "HOLD", "hold_reason": "not_in_virtual_positions"}
 
         pos = self.app.virtual_positions[code]
         if pos.get("exit_pending", False):
-            return {"action": "HOLD"}
+            return {"action": "HOLD", "hold_reason": "exit_pending"}
 
         sc = str(scope or "full").strip().lower()
         if sc not in ("full", "exit_only", "s2_only"):
@@ -69,6 +71,21 @@ class StrategyEngine:
                 _bd = (self.app.bars_data or {}).get(code)
                 if _bd is not None and not getattr(_bd, "empty", True):
                     merged_kw["bars_df"] = _bd
+            except Exception:
+                pass
+            # sel_track 힌트를 evaluate_position kwargs 로 전달
+            try:
+                if kwargs.get("sel_track") is not None:
+                    merged_kw["sel_track"] = kwargs.get("sel_track")
+                elif kwargs.get("SelTrack") is not None:
+                    merged_kw["SelTrack"] = kwargs.get("SelTrack")
+            except Exception:
+                pass
+            try:
+                if kwargs.get("ask_bid_ratio") is not None:
+                    merged_kw["ask_bid_ratio"] = kwargs.get("ask_bid_ratio")
+                if kwargs.get("bid_ask_ratio") is not None:
+                    merged_kw["bid_ask_ratio"] = kwargs.get("bid_ask_ratio")
             except Exception:
                 pass
             res = TradingStrategy.evaluate_position(
@@ -95,8 +112,36 @@ class StrategyEngine:
                     "reason": res["reason"],
                     "profit_ratio": res.get("profit_ratio", 0),
                 }
+
+            exit_hold_reason = ""
+            try:
+                exit_hold_reason = str(
+                    TradingStrategy.explain_exit_hold(
+                        now_price,
+                        pos,
+                        self.app.settings,
+                        indicator_row=kwargs.get("ind"),
+                        kwargs=merged_kw,
+                        current_time=datetime.now(),
+                        is_realtime=True,
+                        eval_hold_reason=str(res.get("reason") or "") or None,
+                    )
+                    or ""
+                )
+            except Exception as e:
+                exit_hold_reason = f"exit:explain_error:{e}"
+
             if sc == "exit_only":
-                return {"action": "HOLD"}
+                return {
+                    "action": "HOLD",
+                    "hold_reason": "exit_only_scope",
+                    "exit_hold_reason": exit_hold_reason,
+                    "profit_ratio": res.get("profit_ratio", 0),
+                }
+            # full 스코프: S2 검토로 이어가며 exit 진단은 유지
+            kwargs = dict(kwargs)
+            kwargs["_exit_hold_reason"] = exit_hold_reason
+            kwargs["_exit_profit_ratio"] = res.get("profit_ratio", 0)
 
         # --- S2 (full 또는 s2_only) ---
         from backtest_engine import TradingStrategy
@@ -104,6 +149,11 @@ class StrategyEngine:
         page_avg_p = pos.get("avg_price", now_price)
         profit_ratio = (now_price / page_avg_p - 1) * 100
         pos["current_price"] = now_price
+        exit_hold_reason = ""
+        try:
+            exit_hold_reason = str(kwargs.get("_exit_hold_reason") or "")
+        except Exception:
+            exit_hold_reason = ""
 
         s = self.app.settings
         ind = kwargs.get("ind")
@@ -119,13 +169,27 @@ class StrategyEngine:
             stage = 1
         if stage == 1:
             if bool(s.get("transition_runtime_block_s2", False)):
-                return {"action": "HOLD"}
+                return {
+                    "action": "HOLD",
+                    "hold_reason": "transition_runtime_block_s2",
+                    "exit_hold_reason": exit_hold_reason,
+                    "stage": stage,
+                    "profit_ratio": profit_ratio,
+                }
             if pos.get("s2_limit_order_pending", False):
-                return {"action": "HOLD"}
+                return {
+                    "action": "HOLD",
+                    "hold_reason": "s2_limit_order_pending",
+                    "exit_hold_reason": exit_hold_reason,
+                    "stage": stage,
+                    "profit_ratio": profit_ratio,
+                }
             pos_s2 = dict(pos)
             try:
                 et = pos.get("entry_time") or pos.get("entry_date")
-                pos_s2["entry_date"] = pd.to_datetime(et) if et is not None else datetime.now()
+                pos_s2["entry_date"] = (
+                    pd.to_datetime(et) if et is not None else datetime.now()
+                )
             except Exception:
                 pos_s2["entry_date"] = datetime.now()
             pos_s2["avg_p"] = pos.get("avg_price", now_price)
@@ -140,9 +204,34 @@ class StrategyEngine:
                     market_trend="UP",
                     curr_dt=datetime.now(),
                 ):
-                    return {"action": "HOLD"}
-            except Exception:
-                return {"action": "HOLD"}
+                    detail = None
+                    try:
+                        detail = TradingStrategy.explain_s2_approval_failure(
+                            pos_s2,
+                            None,
+                            s,
+                            indicator_row=ind,
+                            market_trend="UP",
+                            curr_dt=datetime.now(),
+                        )
+                    except Exception as e:
+                        detail = f"explain_error:{e}"
+                    return {
+                        "action": "HOLD",
+                        "hold_reason": str(detail or "s2_approval_fail"),
+                        "exit_hold_reason": exit_hold_reason,
+                        "stage": stage,
+                        "sig_type": str(pos_s2.get("sig_type") or ""),
+                        "profit_ratio": profit_ratio,
+                    }
+            except Exception as e:
+                return {
+                    "action": "HOLD",
+                    "hold_reason": f"s2_approval_exception:{e}",
+                    "exit_hold_reason": exit_hold_reason,
+                    "stage": stage,
+                    "profit_ratio": profit_ratio,
+                }
 
             _is_b = TradingStrategy._holding_sig_is_type_b(pos)
             if not _is_b:
@@ -157,17 +246,31 @@ class StrategyEngine:
                 if vol_power < float(s.get("smart_buy_vp", 120.0)) or ask_bid_ratio < float(
                     s.get("smart_buy_ba_ratio", 1.5)
                 ):
-                    return {"action": "HOLD"}
+                    return {
+                        "action": "HOLD",
+                        "hold_reason": (
+                            f"smart_buy_s2:vp={float(vol_power):.1f},"
+                            f"ab={float(ask_bid_ratio):.2f}"
+                        ),
+                        "exit_hold_reason": exit_hold_reason,
+                        "stage": stage,
+                        "profit_ratio": profit_ratio,
+                    }
 
             return {
                 "action": "STAGE2",
                 "reason": "PROFIT_TRIGGER",
                 "profit_ratio": profit_ratio,
+                "exit_hold_reason": exit_hold_reason,
             }
 
-        return {"action": "HOLD"}
-
-    def calculate_confluence_status(self, code, now_price, ind, vol_power, ask_bid_ratio):
+        return {
+            "action": "HOLD",
+            "hold_reason": f"stage_ge_2:{stage}",
+            "exit_hold_reason": exit_hold_reason,
+            "stage": stage,
+            "profit_ratio": profit_ratio,
+        }    def calculate_confluence_status(self, code, now_price, ind, vol_power, ask_bid_ratio):
         """[v22.0] 실시간 감시창의 '상태' 컬럼에 표시할 종합 지수 산출"""
         if code not in self.app.virtual_positions: return "-", 0.0
         pos = self.app.virtual_positions[code]

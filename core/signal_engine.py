@@ -50,6 +50,8 @@ class SignalEngine:
         # wl_only(관심목록만) 종목은 기존에 UI 갱신이 제한되어 대비(vs_prev) 등이 고정될 수 있어
         # 최소 갱신을 위한 쿨다운 맵을 별도로 둔다.
         self._wl_only_ui_force_min_enqueue_last_ts: dict[str, float] = {}
+        # 보유 완성15 평가 skip/HOLD 진단 — (code, slot, reason) 1회만 세션·GUI 기록
+        self._held_eval_diag_once: set[str] = set()
 
         # RSI는 틱마다(특히 메인 스레드에서) 계산하면 Pandas rolling 비용으로 UI가 멈출 수 있어,
         # 최소 재계산 간격을 둬서 틱당 연산량을 줄인다.
@@ -1476,6 +1478,68 @@ class SignalEngine:
             except Exception:
                 pass
 
+    def _log_held_eval_diag(
+        self,
+        nk: str,
+        slot_key: str,
+        reason: str,
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+        to_gui: bool = True,
+    ) -> None:
+        """
+        보유 완성15 평가 skip/HOLD 사유를 세션 JSONL(+선택 GUI)에 남깁니다.
+        동일 (종목, 슬롯, 사유)는 1회만 기록해 재시도 폭주를 막습니다.
+        """
+        try:
+            key = f"{nk}|{slot_key}|{reason}"
+            seen = getattr(self, "_held_eval_diag_once", None)
+            if not isinstance(seen, set):
+                self._held_eval_diag_once = set()
+                seen = self._held_eval_diag_once
+            if key in seen:
+                return
+            seen.add(key)
+            # 메모리 상한
+            if len(seen) > 4000:
+                try:
+                    self._held_eval_diag_once = set(list(seen)[-2000:])
+                except Exception:
+                    self._held_eval_diag_once = set()
+        except Exception:
+            pass
+        payload: Dict[str, Any] = {
+            "code": nk,
+            "slot": slot_key,
+            "reason": str(reason),
+        }
+        try:
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    if k not in payload:
+                        payload[k] = v
+        except Exception:
+            pass
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl is not None and hasattr(sl, "log"):
+                sl.log("signal_held_eval_diag", payload)
+        except Exception:
+            pass
+        if to_gui:
+            try:
+                bits: list[str] = [f"ℹ️ [보유평가] {nk} @{slot_key} {reason}"]
+                if isinstance(extra, dict):
+                    hr = extra.get("hold_reason")
+                    er = extra.get("exit_hold_reason")
+                    if hr:
+                        bits.append(f"S2:{hr}")
+                    if er:
+                        bits.append(f"EXIT:{er}")
+                self.app.log(" | ".join(bits))
+            except Exception:
+                pass
+
     def eval_held_on_completed_15m(self, code: str, bar_ts: Any) -> None:
         """
         완성 15분 슬롯 확정 후 보유 종목 청산·S2 평가(저정밀 백테 정합).
@@ -1506,6 +1570,11 @@ class SignalEngine:
                 return
             try:
                 if not self._allow_closed_15m_eval_wall_now(bar_ts):
+                    # 보유만 진단(미보유 호출 폭주 방지)
+                    if self._code_in_virtual_positions(nk):
+                        self._log_held_eval_diag(
+                            nk, slot_key, "skip_wall_time_gate", to_gui=False
+                        )
                     return
             except Exception:
                 pass
@@ -1518,6 +1587,7 @@ class SignalEngine:
             lk = getattr(self.app, "_bars_data_lock", None)
             bd_root = getattr(self.app, "bars_data", None)
             if not isinstance(bd_root, dict):
+                self._log_held_eval_diag(nk, slot_key, "skip_no_bars_data")
                 return
             src_df = None
             try:
@@ -1533,6 +1603,7 @@ class SignalEngine:
             except Exception:
                 src_df = None
             if src_df is None or getattr(src_df, "empty", True):
+                self._log_held_eval_diag(nk, slot_key, "skip_empty_bars")
                 return
             try:
                 closed_df = src_df.loc[src_df.index <= slot_ts].copy()
@@ -1540,16 +1611,28 @@ class SignalEngine:
                 try:
                     closed_df = src_df[src_df.index <= slot_ts].copy()
                 except Exception:
+                    self._log_held_eval_diag(nk, slot_key, "skip_closed_slice_error")
                     return
             if closed_df is None or getattr(closed_df, "empty", True):
+                self._log_held_eval_diag(nk, slot_key, "skip_empty_closed")
                 return
             try:
-                if pd.Timestamp(closed_df.index[-1]) != slot_ts:
+                last_ix = pd.Timestamp(closed_df.index[-1])
+                if last_ix != slot_ts:
+                    self._log_held_eval_diag(
+                        nk,
+                        slot_key,
+                        "skip_slot_mismatch",
+                        extra={"last_bar": last_ix.strftime("%Y-%m-%d %H:%M:%S")},
+                    )
                     return
             except Exception:
                 pass
 
             if not self._mark_s1_closed_slot_done(nk, slot_key, prefix="held"):
+                self._log_held_eval_diag(
+                    nk, slot_key, "skip_already_done", to_gui=False
+                )
                 return
 
             settings = self._settings_for_s1_signals()
@@ -1563,6 +1646,12 @@ class SignalEngine:
                     self._unmark_s1_closed_slot_done(nk, slot_key, prefix="held")
                 except Exception:
                     pass
+                self._log_held_eval_diag(
+                    nk,
+                    slot_key,
+                    "skip_indicator_fail",
+                    extra={"error": str(e)},
+                )
                 try:
                     print(
                         f"[SignalEngine] eval_held_on_completed_15m 지표 실패 ({nk}): {e}"
@@ -1584,6 +1673,7 @@ class SignalEngine:
                     self._unmark_s1_closed_slot_done(nk, slot_key, prefix="held")
                 except Exception:
                     pass
+                self._log_held_eval_diag(nk, slot_key, "skip_close_px_invalid")
                 return
 
             # monitor_info 수급(없으면 중립)
@@ -1607,6 +1697,7 @@ class SignalEngine:
 
             se = getattr(self.app, "strategy_engine", None)
             if se is None:
+                self._log_held_eval_diag(nk, slot_key, "skip_no_strategy_engine")
                 return
             try:
                 res = se.evaluate_position_scoped(
@@ -1633,6 +1724,12 @@ class SignalEngine:
                         vol_power=vp,
                     )
                 except Exception as e:
+                    self._log_held_eval_diag(
+                        nk,
+                        slot_key,
+                        "skip_eval_exception",
+                        extra={"error": str(e)},
+                    )
                     try:
                         print(f"[SignalEngine] eval_held_on_completed_15m 평가 실패 ({nk}): {e}")
                     except Exception:
@@ -1640,9 +1737,24 @@ class SignalEngine:
                     return
 
             if not isinstance(res, dict):
+                self._log_held_eval_diag(nk, slot_key, "skip_eval_bad_result")
                 return
             act = str(res.get("action") or "HOLD")
             if act == "HOLD":
+                self._log_held_eval_diag(
+                    nk,
+                    slot_key,
+                    "hold",
+                    extra={
+                        "hold_reason": str(res.get("hold_reason") or "unspecified"),
+                        "exit_hold_reason": str(res.get("exit_hold_reason") or ""),
+                        "stage": res.get("stage"),
+                        "sig_type": res.get("sig_type"),
+                        "profit_ratio": res.get("profit_ratio"),
+                        "close": float(close_px),
+                        "vol": float(self._to_scalar(last_row.get("Volume"), 0.0)),
+                    },
+                )
                 return
 
             order_px = float(close_px)
@@ -1656,6 +1768,12 @@ class SignalEngine:
                     bar_ts=bar_ts,
                 )
                 if _routed == "queued":
+                    self._log_held_eval_diag(
+                        nk,
+                        slot_key,
+                        "queued_1530",
+                        extra={"action": act, "reason": str(res.get("reason") or "")},
+                    )
                     return
             except Exception:
                 pass

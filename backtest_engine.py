@@ -457,6 +457,474 @@ class TradingStrategy:
         return True
 
     @staticmethod
+    def explain_s2_approval_failure(
+        pos,
+        last_row,
+        settings,
+        indicator_row=None,
+        market_trend="UP",
+        curr_dt=None,
+        indicators_dict=None,
+        i=None,
+    ) -> str | None:
+        """
+        ``_check_s2_approval`` 가 False 인 첫 실패 사유(진단용).
+        통과하면 None. 승인 로직과 동일 분기를 따르되 부작용 없음.
+        """
+        try:
+            if TradingStrategy._check_s2_approval(
+                pos,
+                last_row,
+                settings,
+                indicator_row=indicator_row,
+                market_trend=market_trend,
+                curr_dt=curr_dt,
+                indicators_dict=indicators_dict,
+                i=i,
+            ):
+                return None
+        except Exception as e:
+            return f"s2_check_exception:{e}"
+
+        s = settings
+        ind = indicator_row
+        if ind is None and indicators_dict is not None and i is not None:
+            pass
+        elif ind is None:
+            ind = last_row
+
+        def _get_val(key, default=0):
+            if indicators_dict is not None and i is not None:
+                return (
+                    indicators_dict.get(key, {}).get(i, default)
+                    if hasattr(indicators_dict.get(key), "get")
+                    else indicators_dict[key][i]
+                    if key in indicators_dict
+                    else default
+                )
+            return ind.get(key, default) if ind is not None else default
+
+        _is_b = TradingStrategy._holding_sig_is_type_b(pos)
+        if not _is_b:
+            try:
+                _is_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+            except Exception:
+                _is_b = False
+
+        try:
+            if _is_b:
+                if not bool(s.get("use_s2_master_b", True)):
+                    return "s2_master_b_off"
+            else:
+                if not bool(s.get("use_s2_master_a", True)):
+                    return "s2_master_a_off"
+        except Exception:
+            pass
+
+        def _s2(a_key: str, b_key: str, default):
+            return s.get(b_key, default) if _is_b else s.get(a_key, default)
+
+        if _s2("use_s2_delay", "use_s2_b_delay", True):
+            try:
+                min_hours = float(_s2("s2_delay_hours", "s2_b_delay_hours", 24))
+                entry_dt = pd.to_datetime(pos["entry_date"])
+                _cdt = curr_dt
+                if _cdt is None and last_row is not None:
+                    _cdt = pd.to_datetime(last_row.name)
+                else:
+                    _cdt = pd.to_datetime(_cdt) if _cdt is not None else None
+                if _cdt is not None:
+                    elapsed_h = (_cdt - entry_dt).total_seconds() / 3600.0
+                    if elapsed_h < min_hours:
+                        return f"s2_delay:{elapsed_h:.2f}h<{min_hours:g}h"
+            except Exception as e:
+                return f"s2_delay_error:{e}"
+
+        curr_price = float(_get_val("Close", 0.0))
+
+        if _s2("use_s2_ma20", "use_s2_b_ma20", True):
+            ma20_val = _get_val("MA20", 0)
+            gap = float(_s2("s2_ma20_gap", "s2_b_ma20_gap", 0.0))
+            if ma20_val == 0 or curr_price < ma20_val * (1 + gap / 100.0):
+                return f"s2_ma20:px={curr_price:.0f}<ma20*{1+gap/100:.4g}({float(ma20_val):.0f})"
+
+        if _s2("use_s2_ma5", "use_s2_b_ma5", True):
+            ma5_val = _get_val("MA5", 0)
+            gap = float(_s2("s2_ma5_gap", "s2_b_ma5_gap", -0.5))
+            if curr_price < ma5_val * (1 + gap / 100.0):
+                return f"s2_ma5:px={curr_price:.0f}<ma5*{1+gap/100:.4g}({float(ma5_val):.0f})"
+
+        if _s2("use_s2_vol_surge", "use_s2_b_vol_surge", True):
+            if _is_b:
+                vol_target = _get_val(
+                    "Prev_Day_Vol_S2_B",
+                    _get_val("Prev_Day_Vol_B", _get_val("Vol_MA20", _get_val("Volume", 0))),
+                )
+            else:
+                vol_target = _get_val(
+                    "Prev_Day_Vol_S2_A",
+                    _get_val("Prev_Day_Vol", _get_val("Vol_MA20", _get_val("Volume", 0))),
+                )
+            ratio = float(_s2("s2_vol_ratio", "s2_b_vol_ratio", 1.5))
+            vol_now = float(_get_val("Volume", 0) or 0)
+            need = float(vol_target or 0) * ratio
+            if vol_now < need:
+                return f"s2_vol:vol={vol_now:.0f}<need={need:.0f}(x{ratio:g})"
+
+        rsi_ok = True
+        macd_ok = True
+        if _s2("use_s2_rsi_sig", "use_s2_b_rsi_sig", True):
+            rsi_sig = _get_val("RSI_Sig", 50)
+            rsi_val = _get_val("RSI", 0)
+            rsi_prev = _get_val("Prev_RSI", rsi_val)
+            gap = float(_s2("s2_rsi_gap", "s2_b_rsi_gap", 0.0))
+            rsi_ok = rsi_val >= rsi_sig * (1 + gap / 100.0) and rsi_val > rsi_prev
+        if _s2("use_s2_macd_gc", "use_s2_b_macd_gc", True):
+            macd_val = _get_val("MACD", 0)
+            macd_sig_val = _get_val("MACD_Sig", 0)
+            osc_val = _get_val("OSC", 1)
+            osc_prev = _get_val("Prev_OSC", osc_val)
+            gap = float(_s2("s2_macd_gap", "s2_b_macd_gap", 0.0))
+            macd_ok = macd_val >= macd_sig_val + gap and osc_val > 0 and osc_val > osc_prev
+        use_rsi = _s2("use_s2_rsi_sig", "use_s2_b_rsi_sig", True)
+        use_macd = _s2("use_s2_macd_gc", "use_s2_b_macd_gc", True)
+        if use_rsi and use_macd:
+            if not (rsi_ok or macd_ok):
+                return "s2_momentum:rsi_and_macd_fail"
+        elif use_rsi and not rsi_ok:
+            return "s2_momentum:rsi_fail"
+        elif use_macd and not macd_ok:
+            return "s2_momentum:macd_fail"
+
+        if _s2("use_s2_profit", "use_s2_b_profit", True):
+            profit_limit = float(_s2("s2_profit_limit", "s2_b_profit_limit", 1.0))
+            avg_price = pos.get("avg_price", pos.get("avg_p", curr_price))
+            if avg_price and float(avg_price) > 0:
+                current_profit_pct = (curr_price / float(avg_price) - 1) * 100
+                if current_profit_pct < profit_limit:
+                    return (
+                        f"s2_profit:{current_profit_pct:.2f}%<{profit_limit:g}%"
+                    )
+
+        return "s2_unknown_fail"
+
+    @staticmethod
+    def explain_exit_hold(
+        now_price: float,
+        pos: dict | None,
+        settings: dict | None,
+        indicator_row=None,
+        *,
+        kwargs: dict | None = None,
+        current_time=None,
+        is_realtime: bool = False,
+        time_is_bar_label: bool = False,
+        eval_hold_reason: str | None = None,
+    ) -> str:
+        """
+        ``evaluate_position`` 이 HOLD 일 때 청산이 안 난 이유를 짧게 요약(진단용).
+        실제 청산 판정은 바꾸지 않으며, Flash/ATR/TP/SL/갭 게이트를 관측만 한다.
+        """
+        try:
+            if eval_hold_reason and str(eval_hold_reason).startswith("GRACE"):
+                return str(eval_hold_reason)
+        except Exception:
+            pass
+        try:
+            px = float(now_price or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px <= 0:
+            return "exit:bad_price"
+        if not isinstance(pos, dict):
+            return "exit:no_pos"
+        s = settings or {}
+        parts: list[str] = []
+
+        def _gv(key: str, default: float = 0.0) -> float:
+            try:
+                if indicator_row is None:
+                    return float(default)
+                v = indicator_row.get(key, default)
+                return float(v if v is not None else default)
+            except Exception:
+                return float(default)
+
+        try:
+            stage = int(TradingStrategy._coerce_position_stage(pos))
+        except Exception:
+            stage = 1
+        is_type_b = TradingStrategy._holding_sig_is_type_b(pos)
+        if not is_type_b:
+            try:
+                is_type_b = "TYPE_B" in str(pos.get("reason", "")).upper()
+            except Exception:
+                is_type_b = False
+        if not is_type_b and kwargs:
+            try:
+                sth = kwargs.get("sel_track") or kwargs.get("SelTrack")
+                if sth is not None and str(sth).strip().upper() == "B":
+                    is_type_b = True
+            except Exception:
+                pass
+
+        try:
+            avg_p = float(pos.get("avg_p", pos.get("avg_price", px)) or px)
+        except (TypeError, ValueError):
+            avg_p = px
+        profit_ratio = (px / avg_p - 1.0) * 100.0 if avg_p > 0 else 0.0
+
+        try:
+            max_p = float(
+                pos.get("max_p", pos.get("max_price", pos.get("max_now", px))) or px
+            )
+        except (TypeError, ValueError):
+            max_p = px
+        try:
+            atr_peak = float(pos.get("max_p_atr", max_p) or max_p)
+        except (TypeError, ValueError):
+            atr_peak = max_p
+
+        def _exit_key(a_key: str, b_key: str, s2_a_key: str, s2_b_key: str) -> str:
+            if stage >= 2:
+                return s2_b_key if is_type_b else s2_a_key
+            return b_key if is_type_b else a_key
+
+        def _atr_suff() -> str:
+            if stage >= 2:
+                return "_s2_b" if is_type_b else "_s2"
+            return "_b" if is_type_b else "_a"
+
+        try:
+            _rx = TradingStrategy._exit_track_risk_bundle(s, is_type_b)
+        except Exception:
+            _rx = {
+                "use_gap_down_exit": False,
+                "gap_down_limit": -5.0,
+                "use_atr_exit": True,
+                "use_gap_grace": False,
+                "gap_grace_mins": 0,
+            }
+
+        # Gap
+        try:
+            if bool(_rx.get("use_gap_down_exit")):
+                gl = float(_rx.get("gap_down_limit", -5.0))
+                if profit_ratio > gl:
+                    parts.append(f"gap:pnl={profit_ratio:.2f}%>{gl:g}%")
+                else:
+                    parts.append(f"gap:HIT({profit_ratio:.2f}%)")
+        except Exception:
+            pass
+
+        # TP / trail-only-after-TP / flash suppress
+        _trail_only = False
+        try:
+            _trail_only = bool(
+                TradingStrategy._use_atr_trail_only_after_tp_for_stage(
+                    s, is_type_b, stage
+                )
+            )
+        except Exception:
+            _trail_only = False
+        tp_key = _exit_key(
+            "s1_a_take_profit",
+            "s1_b_take_profit",
+            "s2_take_profit",
+            "s2_b_take_profit",
+        )
+        try:
+            tp_pct = float(s.get(tp_key, 5.0))
+        except (TypeError, ValueError):
+            tp_pct = 5.0
+        try:
+            peak_pnl = (
+                (atr_peak / avg_p - 1.0) * 100.0 if avg_p > 0 else profit_ratio
+            )
+        except Exception:
+            peak_pnl = profit_ratio
+        defer_tp = False
+        if _trail_only:
+            try:
+                sfx = _atr_suff()
+                raw_tr = bool(s.get(f"use_atr_trailing_stop{sfx}", True))
+                defer_tp = bool(
+                    TradingStrategy._effective_use_atr_trailing_for_stage(
+                        s, _rx, stage, raw_tr
+                    )
+                )
+            except Exception:
+                defer_tp = False
+        skip_flash = bool(defer_tp and peak_pnl >= tp_pct)
+        if defer_tp:
+            parts.append(
+                f"tp:defer_trail(peak={peak_pnl:.2f}%/arm={tp_pct:g}%)"
+            )
+        else:
+            use_tp = bool(
+                s.get(
+                    _exit_key("use_s1_a_tp", "use_s1_b_tp", "use_s2_tp", "use_s2_b_tp"),
+                    True,
+                )
+            )
+            if use_tp:
+                if profit_ratio < tp_pct:
+                    parts.append(f"tp:pnl={profit_ratio:.2f}%<{tp_pct:g}%")
+                else:
+                    parts.append(f"tp:would_hit({profit_ratio:.2f}%)")
+
+        # Flash
+        use_flash = bool(
+            s.get(
+                _exit_key(
+                    "use_s1_a_flash_exit",
+                    "use_s1_b_flash_exit",
+                    "use_s2_flash_exit",
+                    "use_s2_b_flash_exit",
+                ),
+                True,
+            )
+        )
+        try:
+            f_pct = float(
+                s.get(
+                    _exit_key(
+                        "s1_a_flash_exit_pct",
+                        "s1_b_flash_exit_pct",
+                        "s2_flash_exit_pct",
+                        "s2_b_flash_exit_pct",
+                    ),
+                    3.0,
+                )
+            )
+        except (TypeError, ValueError):
+            f_pct = 3.0
+        if not use_flash:
+            parts.append("flash:off")
+        elif skip_flash:
+            parts.append(
+                f"flash:suppressed(trail_arm peak={peak_pnl:.2f}%>=TP{tp_pct:g}%)"
+            )
+        elif profit_ratio < 0:
+            parts.append(f"flash:skip_loss(pnl={profit_ratio:.2f}%)")
+        else:
+            try:
+                flash_px = max_p * (1.0 - f_pct / 100.0)
+                drop = ((max_p - px) / max_p * 100.0) if max_p > 0 else 0.0
+                if px > flash_px:
+                    parts.append(
+                        f"flash:drop={drop:.2f}%<{f_pct:g}%(trig<={flash_px:.0f})"
+                    )
+                else:
+                    parts.append(f"flash:would_hit(drop={drop:.2f}%)")
+            except Exception:
+                parts.append("flash:calc_error")
+
+        # ATR SL / Trail
+        sfx = _atr_suff()
+        atr_col = TradingStrategy._atr_column_for_holdings(is_type_b)
+        curr_atr = _gv(atr_col, 0.0)
+        if curr_atr <= 0:
+            curr_atr = _gv("ATR", 0.0)
+        try:
+            use_sl_atr = bool(
+                s.get(
+                    f"use_atr_stop_loss{sfx}",
+                    TradingStrategy._default_use_atr_stop_loss(sfx),
+                )
+            )
+        except Exception:
+            use_sl_atr = False
+        try:
+            use_trail = bool(s.get(f"use_atr_trailing_stop{sfx}", True))
+            use_trail = bool(
+                TradingStrategy._effective_use_atr_trailing_for_stage(
+                    s, _rx, stage, use_trail
+                )
+            )
+        except Exception:
+            use_trail = False
+        if curr_atr <= 0:
+            parts.append("atr:0")
+        else:
+            try:
+                entry_atr = float(
+                    TradingStrategy._entry_atr_for_atr_sl(pos, curr_atr)
+                )
+            except Exception:
+                entry_atr = curr_atr
+            try:
+                sl_mult = float(s.get(f"atr_multiplier_sl{sfx}", 2.5))
+            except (TypeError, ValueError):
+                sl_mult = 2.5
+            try:
+                tr_mult = float(s.get(f"atr_multiplier_trail{sfx}", 4.0))
+            except (TypeError, ValueError):
+                tr_mult = 4.0
+            if use_sl_atr:
+                sl_px = avg_p - sl_mult * entry_atr
+                if px > sl_px:
+                    parts.append(f"atr_sl:px>{sl_px:.0f}")
+                else:
+                    parts.append(f"atr_sl:would_hit(<={sl_px:.0f})")
+            else:
+                parts.append("atr_sl:off")
+            trail_armed = True
+            if _trail_only and use_trail:
+                trail_armed = peak_pnl >= tp_pct
+            if use_trail:
+                if not trail_armed:
+                    parts.append(
+                        f"atr_trl:not_armed(peak={peak_pnl:.2f}%<TP{tp_pct:g}%)"
+                    )
+                else:
+                    tr_px = atr_peak - tr_mult * curr_atr
+                    if px > tr_px:
+                        parts.append(f"atr_trl:armed_px>{tr_px:.0f}")
+                    else:
+                        parts.append(f"atr_trl:would_hit(<={tr_px:.0f})")
+            else:
+                parts.append("atr_trl:off")
+
+        # % SL skipped note
+        try:
+            use_pct_sl = bool(
+                s.get(
+                    _exit_key(
+                        "use_s1_a_stop_loss",
+                        "use_s1_b_stop_loss",
+                        "use_s2_stop_loss",
+                        "use_s2_b_stop_loss",
+                    ),
+                    True,
+                )
+            )
+            if use_pct_sl and use_sl_atr and curr_atr > 0:
+                parts.append("pct_sl:skipped_by_atr_sl")
+            elif use_pct_sl:
+                sl_pct = float(
+                    s.get(
+                        _exit_key(
+                            "s1_a_stop_loss",
+                            "s1_b_stop_loss",
+                            "s2_stop_loss",
+                            "s2_b_stop_loss",
+                        ),
+                        3.0,
+                    )
+                )
+                if profit_ratio > -sl_pct:
+                    parts.append(f"pct_sl:pnl={profit_ratio:.2f}%>{-sl_pct:g}%")
+        except Exception:
+            pass
+
+        typ = "B" if is_type_b else "A"
+        head = f"exit:S{stage}{typ} pnl={profit_ratio:.2f}%"
+        if not parts:
+            return head + "|no_detail"
+        return head + "|" + ";".join(parts[:8])
+
+    @staticmethod
     def s2_delay_elapsed_for_position(
         pos: dict,
         settings: dict,
