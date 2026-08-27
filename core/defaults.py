@@ -109,6 +109,7 @@ DEFAULT_SETTINGS = {
     "realtime_m1_head_fill_missing_15m_enabled": True,
     "realtime_m1_head_fill_missing_15m_max_bars": 4,
     "realtime_15m_tick_tail_wait_sec": 1.5,
+    "realtime_15m_tick_tail_backup_grace_sec": 2.5,
     "realtime_auction_1530_tick_wait_sec": 5.0,
     # 15:30 단일가: 틱/공식1분 미준비 시 재시도(전 종목 평가 보장)
     "realtime_auction_1530_eval_max_attempts": 12,
@@ -121,8 +122,8 @@ DEFAULT_SETTINGS = {
     "realtime_m1_probe_not_ready_max_wait_sec": 2.5,
     "realtime_m1_probe_candidate_codes": 3,
     "realtime_m1_fetch_not_ready_max_wait_sec": 12.0,
-    # 말분 공식1분: not_ready 짧게 끊고 구멍스킵 합성평가(헤드 12s와 분리)
-    "realtime_m1_last_not_ready_max_wait_sec": 4.0,
+    # 말분 공식1분: 공식 우선 모드에서 spread 이후 API 준비 여유(벽시계 데드라인 tail)
+    "realtime_m1_last_not_ready_max_wait_sec": 8.0,
     "realtime_m1_head_not_ready_deadline_after_close_sec": 55.0,
     "realtime_eval_position_on_m1_revision_only": True,
     "realtime_market_halt_m1_quiet_ratio": 0.7,

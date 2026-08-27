@@ -1428,6 +1428,13 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
+            '틱말분 백업 여유',
+            'realtime_15m_tick_tail_backup_grace_sec',
+            '초',
+            '공식 말분 분산·not_ready 대기 후 틱 백업까지 추가 여유. 기본 2.5',
+        )
+        add_param_row(
+            strat_f,
             '공식 말분 1분 평가',
             None,
             '',

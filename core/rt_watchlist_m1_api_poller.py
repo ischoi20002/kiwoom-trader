@@ -350,6 +350,47 @@ class RtWatchlistM1ApiPoller:
         except (TypeError, ValueError):
             return 1.5
 
+    def _tick_tail_backup_grace_sec(self) -> float:
+        """공식 말분 분산·not_ready 대기 후 틱 백업까지 추가 여유(초)."""
+        try:
+            v = float(
+                self._settings().get("realtime_15m_tick_tail_backup_grace_sec", 2.5)
+            )
+            return max(0.0, min(v, 15.0))
+        except (TypeError, ValueError):
+            return 2.5
+
+    def _last_m1_official_poll_deadline(
+        self, closed_lab: pd.Timestamp, n_codes: Optional[int] = None
+    ) -> datetime:
+        """
+        공식 말분 우선: not_ready 재시도·틱 백업 전 벽시계 한도.
+
+        분산(spread)으로 맨 뒤 종목 fetch가 늦게 시작되므로, 종목별 4s가 아니라
+        ``분 마감 + spread + tail_wait + grace`` 까지 공식 1분을 기다린다.
+        """
+        try:
+            n = max(1, int(n_codes if n_codes is not None else len(self._active_codes()) or 1))
+        except (TypeError, ValueError):
+            n = 1
+        try:
+            spread = float(
+                effective_m1_last_official_spread_sec(self._settings(), n)
+            )
+        except Exception:
+            spread = max(3.0, min(50.0, float(n) * 1.1))
+        tail_wait = float(self._last_not_ready_max_wait_sec())
+        grace = float(self._tick_tail_backup_grace_sec())
+        total_after = float(spread) + tail_wait + grace
+        total_after = max(float(spread) + 2.0, min(total_after, 58.0))
+        try:
+            close_wall = pd.Timestamp(closed_lab).floor("min") + pd.Timedelta(
+                minutes=1
+            )
+            return (close_wall + pd.Timedelta(seconds=total_after)).to_pydatetime()
+        except Exception:
+            return datetime.now() + timedelta(seconds=total_after)
+
     def _eval_on_official_last_m1_enabled(self) -> bool:
         """말분 완성15를 공식 1분 우선으로 평가할지(기본 ON)."""
         return self._settings_bool(
@@ -591,25 +632,30 @@ class RtWatchlistM1ApiPoller:
 
         ordered = self._order_codes_for_closed15_eval(list(codes))
         try:
-            spread = float(
-                effective_m1_last_official_spread_sec(self._settings(), len(ordered))
+            deadline = self._last_m1_official_poll_deadline(
+                closed_lab, len(ordered)
             )
+            delay = max(0.05, (deadline - datetime.now()).total_seconds() + 0.12)
         except Exception:
-            spread = max(3.0, min(50.0, float(len(ordered)) * 1.1))
-        try:
-            max_w = float(self._last_not_ready_max_wait_sec())
-        except Exception:
-            max_w = 4.0
-        # 마지막 종목 시작(spread) + 말분 not_ready 대기 + 여유
-        backup_after = float(spread) + float(max_w) + 1.5
-        try:
-            end_wall = (
-                pd.Timestamp(closed_lab).floor("min") + pd.Timedelta(minutes=1)
-            ).to_pydatetime()
-            due = end_wall + timedelta(seconds=backup_after)
-            delay = max(0.05, (due - datetime.now()).total_seconds())
-        except Exception:
-            delay = backup_after
+            try:
+                spread = float(
+                    effective_m1_last_official_spread_sec(self._settings(), len(ordered))
+                )
+            except Exception:
+                spread = max(3.0, min(50.0, float(len(ordered)) * 1.1))
+            try:
+                max_w = float(self._last_not_ready_max_wait_sec())
+            except Exception:
+                max_w = 4.0
+            backup_after = float(spread) + max_w + float(self._tick_tail_backup_grace_sec())
+            try:
+                end_wall = (
+                    pd.Timestamp(closed_lab).floor("min") + pd.Timedelta(minutes=1)
+                ).to_pydatetime()
+                due = end_wall + timedelta(seconds=backup_after)
+                delay = max(0.05, (due - datetime.now()).total_seconds())
+            except Exception:
+                delay = backup_after
 
         for i, nk in enumerate(ordered):
             extra = min(1.0, 0.04 * float(i))
@@ -2094,19 +2140,20 @@ class RtWatchlistM1ApiPoller:
 
     def _last_not_ready_max_wait_sec(self) -> float:
         """
-        말분 공식1분 not_ready 대기(초).
+        말분 공식1분 not_ready 추가 대기(초).
 
-        헤드(12s)보다 짧게 — 무거래·지연이면 빨리 구멍스킵 합성평가로 넘긴다.
+        공식 우선 모드에서는 ``_last_m1_official_poll_deadline`` 의 tail 구간으로
+        쓰인다(분산 창 이후 API 준비 여유). 레거시 틱 주경로만 종목별 elapsed 로 사용.
         """
         try:
             v = float(
                 self._settings().get(
-                    "realtime_m1_last_not_ready_max_wait_sec", 4.0
+                    "realtime_m1_last_not_ready_max_wait_sec", 8.0
                 )
             )
             return max(1.5, min(v, 30.0))
         except (TypeError, ValueError):
-            return 4.0
+            return 8.0
 
     def _head_catchup_wall_deadline(
         self, head_last_open: pd.Timestamp
@@ -2317,19 +2364,24 @@ class RtWatchlistM1ApiPoller:
         *,
         chart_df: Any = None,
         detail: str = "",
+        defer_tick_eval: bool = False,
     ) -> None:
         """
         말분 공식 행 부재(무거래 등): 선택적 평봉 + 구멍 스킵 합성 평가 + 무거래 로그.
+
+        ``defer_tick_eval=True`` (공식 우선·데드라인 경과): 틱 합성 평가는
+        ``_schedule_tick_tail_backup_after_official`` 백업 타이머에 맡긴다.
         """
         flat_ok = False
         try:
             flat_ok = bool(self._apply_flat_no_trade_minute(nk, closed_lab, sk))
         except Exception:
             flat_ok = False
-        try:
-            self._eval_closed_15m_skip_absent_last_m1(nk, closed_lab)
-        except Exception:
-            pass
+        if not defer_tick_eval:
+            try:
+                self._eval_closed_15m_skip_absent_last_m1(nk, closed_lab)
+            except Exception:
+                pass
         try:
             self._log_m1_last_official(
                 nk,
@@ -3210,27 +3262,57 @@ class RtWatchlistM1ApiPoller:
         if status == "minute_not_ready":
             # 라운드 전체 dormant 금지 — 해당 종목만 재시도
             elapsed = time.monotonic() - float(t0_mono or time.monotonic())
-            # 말분은 짧게(기본 4s) → 구멍스킵 평가; 그 외는 헤드용 12s
+            use_official_last = False
+            is_last_m1 = False
             try:
-                if is_last_m1_open_of_15m_slot(closed_lab):
-                    max_w = self._last_not_ready_max_wait_sec()
-                else:
-                    max_w = self._fetch_not_ready_max_wait_sec()
+                is_last_m1 = bool(is_last_m1_open_of_15m_slot(closed_lab))
+                use_official_last = bool(
+                    is_last_m1 and self._eval_on_official_last_m1_enabled()
+                )
             except Exception:
-                max_w = self._fetch_not_ready_max_wait_sec()
-            if elapsed < max_w:
-                poll = self._not_ready_poll_sec()
+                use_official_last = False
+                is_last_m1 = False
+            if use_official_last:
                 try:
-                    t = threading.Timer(
-                        poll,
-                        self._job_fetch_one,
-                        args=(code, closed_lab, sk, t0_mono),
-                    )
-                    t.daemon = True
-                    t.start()
+                    if datetime.now() < self._last_m1_official_poll_deadline(
+                        closed_lab
+                    ):
+                        poll = self._not_ready_poll_sec()
+                        try:
+                            t = threading.Timer(
+                                poll,
+                                self._job_fetch_one,
+                                args=(code, closed_lab, sk, t0_mono),
+                            )
+                            t.daemon = True
+                            t.start()
+                        except Exception:
+                            pass
+                        return
                 except Exception:
                     pass
-                return
+            else:
+                # 말분(레거시) / 헤드: 종목별 elapsed 한도
+                try:
+                    if is_last_m1:
+                        max_w = self._last_not_ready_max_wait_sec()
+                    else:
+                        max_w = self._fetch_not_ready_max_wait_sec()
+                except Exception:
+                    max_w = self._fetch_not_ready_max_wait_sec()
+                if elapsed < max_w:
+                    poll = self._not_ready_poll_sec()
+                    try:
+                        t = threading.Timer(
+                            poll,
+                            self._job_fetch_one,
+                            args=(code, closed_lab, sk, t0_mono),
+                        )
+                        t.daemon = True
+                        t.start()
+                    except Exception:
+                        pass
+                    return
             # 타임아웃: DB → 무거래 평봉
             ohlcv_to: Optional[CacheVal] = None
             if db_fb_on:
@@ -3277,6 +3359,7 @@ class RtWatchlistM1ApiPoller:
                 sk,
                 chart_df=chart_df,
                 detail="minute_not_ready_timeout",
+                defer_tick_eval=bool(use_official_last),
             )
             return
 
@@ -3334,7 +3417,10 @@ class RtWatchlistM1ApiPoller:
                         )
                     except Exception:
                         tick_ok = False
-                    if tick_ok:
+                    if tick_ok and not (
+                        is_last_m1_open_of_15m_slot(closed_lab)
+                        and self._eval_on_official_last_m1_enabled()
+                    ):
                         try:
                             m1s = getattr(self._app, "rt_tick_m1_store", None)
                             if m1s is not None:
