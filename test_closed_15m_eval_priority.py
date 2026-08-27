@@ -153,14 +153,10 @@ def test_official_m1_gui_log_aggregates_by_slot() -> None:
     assert "무거래=1" in msgs[0]
 
 
-def test_official_m1_poll_deadline_includes_spread_and_tail() -> None:
+def test_official_m1_poll_deadline_is_fixed_after_close() -> None:
     app = SimpleNamespace(
         settings={
-            "realtime_m1_last_official_per_code_sec": 1.1,
-            "realtime_m1_last_official_spread_min_sec": 1.5,
-            "realtime_m1_last_official_spread_max_sec": 50.0,
-            "realtime_m1_last_not_ready_max_wait_sec": 8.0,
-            "realtime_15m_tick_tail_backup_grace_sec": 2.5,
+            "realtime_15m_tick_tail_backup_after_close_sec": 40.0,
         },
         _active_stream_codes=["000001"] * 28,
     )
@@ -169,8 +165,7 @@ def test_official_m1_poll_deadline_includes_spread_and_tail() -> None:
     deadline = poller._last_m1_official_poll_deadline(lab, 28)
     close_wall = lab.floor("min") + pd.Timedelta(minutes=1)
     delta = (pd.Timestamp(deadline) - close_wall).total_seconds()
-    # spread(28*1.1=30.8) + tail(8) + grace(2.5) ≈ 41.3
-    assert 38.0 <= delta <= 45.0
+    assert abs(delta - 40.0) < 0.01
 
 
 def test_official_m1_gui_log_ok_not_post_after_official_claim() -> None:
@@ -228,6 +223,6 @@ if __name__ == "__main__":
     test_timeout_codes_held_first()
     test_eval_priority_prefers_high_met_ratio()
     test_official_m1_gui_log_aggregates_by_slot()
-    test_official_m1_poll_deadline_includes_spread_and_tail()
+    test_official_m1_poll_deadline_is_fixed_after_close()
     test_official_m1_gui_log_ok_not_post_after_official_claim()
     print("ok")

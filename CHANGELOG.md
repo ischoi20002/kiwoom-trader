@@ -13,6 +13,10 @@
 
 ---
 
+## 0.18.77 (2026-08-27)
+
+- **틱말분 백업 타이밍**: 공식 우선 모드에서 슬롯 마감+40초(`realtime_15m_tick_tail_backup_after_close_sec`)까지 공식 평가만 진행하고, 미완 종목만 이후 틱 합성 시작 (`rt_watchlist_m1_api_poller`).
+
 ## 0.18.76 (2026-08-27)
 
 - **M1Poll 말분 GUI 라벨**: 공식 경로가 평가 claim 한 직후를 `사후반영`으로 오인하던 버그 수정. 실제 틱 선평가만 `사후반영`, 공식 정상은 `ok` (`rt_watchlist_m1_api_poller`).

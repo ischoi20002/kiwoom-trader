@@ -350,46 +350,41 @@ class RtWatchlistM1ApiPoller:
         except (TypeError, ValueError):
             return 1.5
 
-    def _tick_tail_backup_grace_sec(self) -> float:
-        """공식 말분 분산·not_ready 대기 후 틱 백업까지 추가 여유(초)."""
+    def _tick_tail_backup_after_close_sec(self) -> float:
+        """
+        공식 말분 우선: 슬롯(말분) 마감 후 틱 백업 시작까지 대기(초).
+
+        이 시각까지 공식 완성15가 안 끝난 종목만 틱 합성 평가를 시작한다.
+        구키 ``realtime_15m_tick_tail_backup_grace_sec`` 는 무시(호환용 잔존).
+        """
         try:
             v = float(
-                self._settings().get("realtime_15m_tick_tail_backup_grace_sec", 2.5)
+                self._settings().get(
+                    "realtime_15m_tick_tail_backup_after_close_sec", 40.0
+                )
             )
-            return max(0.0, min(v, 15.0))
+            return max(5.0, min(v, 58.0))
         except (TypeError, ValueError):
-            return 2.5
+            return 40.0
 
     def _last_m1_official_poll_deadline(
         self, closed_lab: pd.Timestamp, n_codes: Optional[int] = None
     ) -> datetime:
         """
-        공식 말분 우선: not_ready 재시도·틱 백업 전 벽시계 한도.
+        공식 말분 우선: not_ready 재시도·틱 백업 공통 벽시계 한도.
 
-        분산(spread)으로 맨 뒤 종목 fetch가 늦게 시작되므로, 종목별 4s가 아니라
-        ``분 마감 + spread + tail_wait + grace`` 까지 공식 1분을 기다린다.
+        ``분 마감 + realtime_15m_tick_tail_backup_after_close_sec`` (기본 40초).
+        분산(spread)과 무관하게 고정 — 그 시각까지 공식 평가를 기다리고,
+        미완 종목만 틱말분 합성을 시작한다.
         """
-        try:
-            n = max(1, int(n_codes if n_codes is not None else len(self._active_codes()) or 1))
-        except (TypeError, ValueError):
-            n = 1
-        try:
-            spread = float(
-                effective_m1_last_official_spread_sec(self._settings(), n)
-            )
-        except Exception:
-            spread = max(3.0, min(50.0, float(n) * 1.1))
-        tail_wait = float(self._last_not_ready_max_wait_sec())
-        grace = float(self._tick_tail_backup_grace_sec())
-        total_after = float(spread) + tail_wait + grace
-        total_after = max(float(spread) + 2.0, min(total_after, 58.0))
+        after = float(self._tick_tail_backup_after_close_sec())
         try:
             close_wall = pd.Timestamp(closed_lab).floor("min") + pd.Timedelta(
                 minutes=1
             )
-            return (close_wall + pd.Timedelta(seconds=total_after)).to_pydatetime()
+            return (close_wall + pd.Timedelta(seconds=after)).to_pydatetime()
         except Exception:
-            return datetime.now() + timedelta(seconds=total_after)
+            return datetime.now() + timedelta(seconds=after)
 
     def _eval_on_official_last_m1_enabled(self) -> bool:
         """말분 완성15를 공식 1분 우선으로 평가할지(기본 ON)."""
@@ -601,9 +596,10 @@ class RtWatchlistM1ApiPoller:
         self, codes: List[str], closed_lab: pd.Timestamp
     ) -> None:
         """
-        공식 말분 우선 모드: 공식 조회·재시도 창이 지난 뒤 미평가 종목만 틱 보조.
+        공식 말분 우선 모드: 슬롯 마감+N초(기본 40) 후 미평가 종목만 틱 보조.
 
         quiet를 걸지 않아 공식 조회가 ``:00`` 직후 바로 시작된다.
+        이미 공식으로 평가된 종목은 ``_job_tick_tail_eval`` claim 에서 스킵.
         """
         try:
             if is_krx_last_15m_slot(closed_lab):
@@ -632,30 +628,28 @@ class RtWatchlistM1ApiPoller:
 
         ordered = self._order_codes_for_closed15_eval(list(codes))
         try:
-            deadline = self._last_m1_official_poll_deadline(
-                closed_lab, len(ordered)
-            )
-            delay = max(0.05, (deadline - datetime.now()).total_seconds() + 0.12)
+            deadline = self._last_m1_official_poll_deadline(closed_lab, len(ordered))
+            delay = max(0.05, (deadline - datetime.now()).total_seconds() + 0.05)
         except Exception:
-            try:
-                spread = float(
-                    effective_m1_last_official_spread_sec(self._settings(), len(ordered))
-                )
-            except Exception:
-                spread = max(3.0, min(50.0, float(len(ordered)) * 1.1))
-            try:
-                max_w = float(self._last_not_ready_max_wait_sec())
-            except Exception:
-                max_w = 4.0
-            backup_after = float(spread) + max_w + float(self._tick_tail_backup_grace_sec())
+            after = float(self._tick_tail_backup_after_close_sec())
             try:
                 end_wall = (
                     pd.Timestamp(closed_lab).floor("min") + pd.Timedelta(minutes=1)
                 ).to_pydatetime()
-                due = end_wall + timedelta(seconds=backup_after)
+                due = end_wall + timedelta(seconds=after)
                 delay = max(0.05, (due - datetime.now()).total_seconds())
             except Exception:
-                delay = backup_after
+                delay = after
+
+        try:
+            after_s = float(self._tick_tail_backup_after_close_sec())
+            self._emit(
+                f"ℹ️ [M1Poll] 틱말분 백업 예약 "
+                f"lab={closed_lab.strftime('%H:%M')} "
+                f"after_close={after_s:.0f}s delay={delay:.1f}s n={len(ordered)}"
+            )
+        except Exception:
+            pass
 
         for i, nk in enumerate(ordered):
             extra = min(1.0, 0.04 * float(i))
@@ -2140,10 +2134,9 @@ class RtWatchlistM1ApiPoller:
 
     def _last_not_ready_max_wait_sec(self) -> float:
         """
-        말분 공식1분 not_ready 추가 대기(초).
+        말분 공식1분 not_ready 종목별 추가 대기(초) — 레거시 틱 주경로용.
 
-        공식 우선 모드에서는 ``_last_m1_official_poll_deadline`` 의 tail 구간으로
-        쓰인다(분산 창 이후 API 준비 여유). 레거시 틱 주경로만 종목별 elapsed 로 사용.
+        공식 우선 모드는 ``_last_m1_official_poll_deadline``(마감+40초)만 사용한다.
         """
         try:
             v = float(
