@@ -82,6 +82,9 @@ class RtWatchlistM1ApiPoller:
         # 완성15 평가 로그 집계(슬롯별) — 종목별 반복 방지
         self._closed15_eval_log_agg: Dict[str, Dict[str, Any]] = {}
         self._closed15_eval_log_lock = threading.Lock()
+        # 말분 공식1분 GUI 로그 집계(슬롯별) — 종목별 반복 방지
+        self._official_m1_log_agg: Dict[str, Dict[str, Any]] = {}
+        self._official_m1_log_lock = threading.Lock()
 
     def _emit(self, msg: str) -> None:
         if self._log is None:
@@ -208,6 +211,111 @@ class RtWatchlistM1ApiPoller:
                 self._emit(
                     f"ℹ️ [M1Poll] {label} 평가 완료 slot={hm} n={ok_n} "
                     f"(실패 {fail_n}){extra}"
+                )
+        except Exception:
+            pass
+
+    def _note_official_m1_gui_log(
+        self,
+        closed_lab: Any,
+        *,
+        category: str,
+    ) -> None:
+        """말분 공식1분 GUI 로그를 슬롯 단위로 모아 디바운스 후 1회 출력."""
+        if self._log is None:
+            return
+        cat = str(category or "").strip().lower()
+        if cat not in ("ok", "post", "no_trade", "fail"):
+            return
+        try:
+            slot_key = pd.Timestamp(closed_lab).floor("min").strftime("%Y-%m-%d %H:%M:%S")
+            slot_hm = pd.Timestamp(closed_lab).strftime("%H:%M")
+        except Exception:
+            return
+        timer_to_cancel: Any = None
+        new_timer: Any = None
+        try:
+            with self._official_m1_log_lock:
+                st = self._official_m1_log_agg.get(slot_key)
+                if st is None:
+                    st = {
+                        "ok": 0,
+                        "post": 0,
+                        "no_trade": 0,
+                        "fail": 0,
+                        "timer": None,
+                        "slot_hm": slot_hm,
+                    }
+                    self._official_m1_log_agg[slot_key] = st
+                st[cat] = int(st.get(cat, 0) or 0) + 1
+                timer_to_cancel = st.get("timer")
+                st["timer"] = None
+
+                def _flush(sk: str = slot_key) -> None:
+                    self._flush_official_m1_gui_log(sk)
+
+                try:
+                    new_timer = threading.Timer(2.5, _flush)
+                    new_timer.daemon = True
+                    st["timer"] = new_timer
+                except Exception:
+                    new_timer = None
+        except Exception:
+            return
+        if timer_to_cancel is not None:
+            try:
+                timer_to_cancel.cancel()
+            except Exception:
+                pass
+        if new_timer is not None:
+            try:
+                new_timer.start()
+            except Exception:
+                try:
+                    self._flush_official_m1_gui_log(slot_key)
+                except Exception:
+                    pass
+
+    def _flush_official_m1_gui_log(self, slot_key: str) -> None:
+        """슬롯 말분 공식1분 GUI 집계 로그 1회 출력."""
+        st: Optional[Dict[str, Any]] = None
+        try:
+            with self._official_m1_log_lock:
+                st = self._official_m1_log_agg.pop(slot_key, None)
+        except Exception:
+            st = None
+        if not st:
+            return
+        try:
+            ok_n = int(st.get("ok", 0) or 0)
+            post_n = int(st.get("post", 0) or 0)
+            no_trade_n = int(st.get("no_trade", 0) or 0)
+            fail_n = int(st.get("fail", 0) or 0)
+            hm = str(st.get("slot_hm") or "")
+        except Exception:
+            return
+        total = ok_n + post_n + no_trade_n + fail_n
+        if total <= 0:
+            return
+        parts: List[str] = []
+        try:
+            if ok_n > 0:
+                parts.append(f"ok={ok_n}")
+            if post_n > 0:
+                parts.append(f"사후반영={post_n}")
+            if no_trade_n > 0:
+                parts.append(f"무거래={no_trade_n}")
+            if fail_n > 0:
+                parts.append(f"fail={fail_n}")
+            detail = ", ".join(parts)
+        except Exception:
+            detail = ""
+        try:
+            if fail_n > 0 and ok_n + post_n + no_trade_n <= 0:
+                self._emit(f"⚠️ [M1Poll] 말분 공식1분 lab={hm} {detail or f'fail={fail_n}'}")
+            else:
+                self._emit(
+                    f"ℹ️ [M1Poll] 말분 공식1분 lab={hm} n={total} ({detail})"
                 )
         except Exception:
             pass
@@ -2668,21 +2776,12 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
         try:
-            hm = pd.Timestamp(closed_lab).strftime("%H:%M")
-        except Exception:
-            hm = "?"
-        try:
             st_s = str(report.get("status") or "")
             # 증권사 무거래분 생략은 오류가 아님 — 구멍 스킵 합성으로 평가
             if st_s in ("flat_no_trade", "no_trade_skip") or bool(
                 report.get("no_trade")
             ):
-                self._emit(
-                    f"ℹ️ [M1Poll] 말분 공식1분 무거래 {nk} lab={hm} "
-                    f"status={st_s} "
-                    f"chart={report.get('chart_has_last')} "
-                    f"store={report.get('store_has_last')}"
-                )
+                self._note_official_m1_gui_log(closed_lab, category="no_trade")
                 return
             if bool(report.get("complete")) and bool(report.get("fetch_ok")):
                 # 틱 백업 등으로 이미 완성15 평가된 뒤의 공식 바 반영
@@ -2696,22 +2795,11 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     post = False
                 if post:
-                    self._emit(
-                        f"ℹ️ [M1Poll] 말분 공식1분 사후반영 {nk} lab={hm} "
-                        f"status={report.get('status')}"
-                    )
+                    self._note_official_m1_gui_log(closed_lab, category="post")
                 else:
-                    self._emit(
-                        f"ℹ️ [M1Poll] 말분 공식1분 OK {nk} lab={hm} "
-                        f"status={report.get('status')}"
-                    )
+                    self._note_official_m1_gui_log(closed_lab, category="ok")
                 return
-            self._emit(
-                f"⚠️ [M1Poll] 말분 공식1분 실패 {nk} lab={hm} "
-                f"status={report.get('status')} "
-                f"chart={report.get('chart_has_last')} "
-                f"store={report.get('store_has_last')}"
-            )
+            self._note_official_m1_gui_log(closed_lab, category="fail")
         except Exception:
             pass
 

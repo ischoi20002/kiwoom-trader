@@ -138,10 +138,26 @@ def test_eval_priority_prefers_high_met_ratio() -> None:
     assert pool._eval_priority("112610") == 0
 
 
+def test_official_m1_gui_log_aggregates_by_slot() -> None:
+    msgs: list[str] = []
+    poller = RtWatchlistM1ApiPoller(SimpleNamespace(settings={}), log=msgs.append)
+    lab = pd.Timestamp("2026-08-27 09:14:00")
+    poller._note_official_m1_gui_log(lab, category="post")
+    poller._note_official_m1_gui_log(lab, category="post")
+    poller._note_official_m1_gui_log(lab, category="no_trade")
+    poller._flush_official_m1_gui_log(lab.strftime("%Y-%m-%d %H:%M:%S"))
+    assert len(msgs) == 1
+    assert "lab=09:14" in msgs[0]
+    assert "n=3" in msgs[0]
+    assert "사후반영=2" in msgs[0]
+    assert "무거래=1" in msgs[0]
+
+
 if __name__ == "__main__":
     test_tick_tail_claim_is_atomic()
     test_eval_pool_skips_duplicate_slot()
     test_eval_pool_held_does_not_wait_behind_s1()
     test_timeout_codes_held_first()
     test_eval_priority_prefers_high_met_ratio()
+    test_official_m1_gui_log_aggregates_by_slot()
     print("ok")
