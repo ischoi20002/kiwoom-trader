@@ -241,7 +241,9 @@ def closed_minute_ohlcv_from_db(
 ) -> Optional[Tuple[float, float, float, float, float]]:
     """
     ``bars_1m`` 에서 닫힌 1분(오픈 라벨 = ``closed_open``) OHLCV 를 읽습니다.
-  live 당일 분은 하베스팅 전엔 없을 수 있으나, API 실패·장후 정합에 사용합니다.
+
+    **실시간 감시 경로에서는 사용하지 않습니다.** 장중 당일 분은 하베스팅 전 DB에
+    없으며, 오프라인 진단·도구 전용입니다.
     """
     try:
         nk = canonical_stock_code(code)
@@ -385,8 +387,7 @@ def load_intrabar_m1_window(
     include_open_bucket: bool = False,
 ) -> pd.DataFrame:
     """
-    인트라바 미러용 ``[t0, t_hi]`` 1분 DataFrame.
-    1) RtTickM1Store  2) 부족 시 bars_1m DB 병합.
+    인트라바 미러용 ``[t0, t_hi]`` 1분 DataFrame (RtTickM1Store 만).
     """
     out_empty = pd.DataFrame()
     try:
@@ -399,58 +400,14 @@ def load_intrabar_m1_window(
             return out_empty
 
         m1s = getattr(app, "rt_tick_m1_store", None)
-        df_store = out_empty
-        if m1s is not None:
-            try:
-                df_store = m1s.dataframe_for_window(
-                    nk, t0s, this, include_open_bucket=include_open_bucket
-                )
-            except TypeError:
-                df_store = m1s.dataframe_for_window(nk, t0s, this)
-
-        st = getattr(app, "settings", None) or {}
-        if not _settings_bool(st, "realtime_intrabar_m1_db_fallback", True):
-            return df_store if df_store is not None else out_empty
-
-        dm = getattr(app, "data_manager", None)
-        if dm is None:
-            return df_store if df_store is not None else out_empty
-
-        start_s = t0s.strftime("%Y-%m-%d %H:%M:%S")
-        end_s = this.strftime("%Y-%m-%d %H:%M:%S")
-        df_db = dm.get_bars(nk, start_dt=start_s, end_dt=end_s, interval="1m")
-        if df_db is None or getattr(df_db, "empty", True):
-            return df_store if df_store is not None else out_empty
-
+        if m1s is None:
+            return out_empty
         try:
-            df_db = df_db.copy()
-            if "time" in df_db.columns:
-                df_db = df_db.set_index("time")
-            elif "datetime" in df_db.columns:
-                df_db = df_db.set_index("datetime")
-            df_db.index = pd.to_datetime(df_db.index)
-            df_db = df_db.rename(
-                columns={
-                    "open": "Open",
-                    "high": "High",
-                    "low": "Low",
-                    "close": "Close",
-                    "volume": "Volume",
-                }
+            df_store = m1s.dataframe_for_window(
+                nk, t0s, this, include_open_bucket=include_open_bucket
             )
-            keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df_db.columns]
-            df_db = df_db[keep]
-        except Exception:
-            return df_store if df_store is not None else out_empty
-
-        if df_store is None or getattr(df_store, "empty", True):
-            return df_db.sort_index()
-
-        try:
-            merged = pd.concat([df_store, df_db])
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-            return merged.loc[t0s:this]
-        except Exception:
-            return df_store
+        except TypeError:
+            df_store = m1s.dataframe_for_window(nk, t0s, this)
+        return df_store if df_store is not None else out_empty
     except Exception:
         return out_empty

@@ -3204,9 +3204,14 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             return False
 
-    def _ensure_missing_15m_filled_before_eval(self, code: str) -> None:
+    def _ensure_missing_15m_filled_before_eval(
+        self,
+        code: str,
+        *,
+        include_slots: Optional[List[Any]] = None,
+    ) -> None:
         """
-        완성15 평가 직전: 이미 닫힌 최근 슬롯의 누락·스텁을 공식1분 합성으로 채웁니다.
+        완성15 평가 직전: 닫힌 최근 슬롯을 M1 합성으로 채우거나 교정합니다.
 
         헤드 catchup·말분 공식·틱 보조 평가 공통. 실패해도 평가는 계속 진행합니다.
         """
@@ -3214,38 +3219,45 @@ class RtWatchlistM1ApiPoller:
             st = self._settings()
             if not bool(st.get("realtime_m1_head_fill_missing_15m_enabled", True)):
                 return
-            max_bars = int(st.get("realtime_m1_head_fill_missing_15m_max_bars", 4) or 4)
+            max_bars = int(st.get("realtime_m1_head_fill_missing_15m_max_bars", 8) or 8)
         except Exception:
-            max_bars = 4
+            max_bars = 8
         try:
             from core.realtime_official_bars_sync import (
                 fill_missing_closed_15m_from_official_m1,
             )
 
             rep = fill_missing_closed_15m_from_official_m1(
-                self._app, code, max_bars=max_bars
+                self._app,
+                code,
+                max_bars=max_bars,
+                include_slots=include_slots,
             )
         except Exception:
             return
         try:
             n_miss = len(rep.get("filled_missing") or [])
             n_stub = len(rep.get("filled_stub") or [])
+            n_ow = len(rep.get("filled_overwrite") or [])
             n_fail = len(rep.get("failed") or [])
-            if n_miss or n_stub or n_fail:
+            if n_miss or n_stub or n_ow or n_fail:
                 sl = getattr(self._app, "session_logger", None)
                 if sl is not None and hasattr(sl, "log"):
                     sl.log("m1_15m_gap_fill", dict(rep))
-            if n_miss or n_stub:
+            if n_miss or n_stub or n_ow:
                 self._emit(
                     f"[M1Poll] 15m gap-fill {rep.get('code')} "
-                    f"missing={n_miss} stub={n_stub} fail={n_fail}"
+                    f"missing={n_miss} stub={n_stub} ow={n_ow} fail={n_fail}"
                 )
         except Exception:
             pass
 
-    def _fill_missing_15m_after_head_catchup(self, code: str) -> None:
-        """헤드 catchup 직후 누락 채움(평가 직전 채움과 동일)."""
-        self._ensure_missing_15m_filled_before_eval(code)
+    def _fill_missing_15m_after_head_catchup(
+        self, code: str, slot: Optional[Any] = None
+    ) -> None:
+        """헤드 catchup 직후 M1 재합성·교정(평가 직전 채움과 동일)."""
+        inc = [slot] if slot is not None else None
+        self._ensure_missing_15m_filled_before_eval(code, include_slots=inc)
 
     def _job_fetch_slot_head(
         self,
@@ -3429,6 +3441,26 @@ class RtWatchlistM1ApiPoller:
                 )
                 or 0
             )
+            # 차트에 없는 무거래 분(t0 포함) 평봉 채움
+            try:
+                from core.realtime_official_bars_sync import (
+                    flat_fill_chart_missing_m1_minutes,
+                )
+
+                flat_n = int(
+                    flat_fill_chart_missing_m1_minutes(
+                        self._app,
+                        nk,
+                        chart_df,
+                        catchup_from,
+                        head_last_open,
+                    )
+                    or 0
+                )
+                if flat_n > 0:
+                    applied += int(flat_n)
+            except Exception:
+                pass
             if head_start is not None and slot is not None:
                 rep = build_m1_head_catchup_report(
                     self._app,
@@ -3449,9 +3481,14 @@ class RtWatchlistM1ApiPoller:
                 else:
                     rep["status"] = "incomplete"
                 self._log_m1_head_catchup(rep)
-            # 공식 15분 교체 보조: 최근 닫힌 슬롯의 누락·스텁을 1분 합성으로 채움
+            # catchup 완료 후 M1 재합성으로 잘못된 15m 교정
             try:
-                self._fill_missing_15m_after_head_catchup(nk)
+                heal_slot = (
+                    slot
+                    if (bool(rep.get("complete")) or int(applied) > 0)
+                    else None
+                )
+                self._fill_missing_15m_after_head_catchup(nk, slot=heal_slot)
             except Exception:
                 pass
         except Exception as ex:
@@ -3566,7 +3603,6 @@ class RtWatchlistM1ApiPoller:
         eval_on_cache = self._settings_bool(
             st, "realtime_m1_poller_eval_on_cache_hit", True
         )
-        db_fb_on = self._settings_bool(st, "realtime_intrabar_m1_db_fallback", True)
 
         cached_ohlcv: Optional[CacheVal] = None
         try:
@@ -3664,54 +3700,7 @@ class RtWatchlistM1ApiPoller:
                     except Exception:
                         pass
                     return
-            # 타임아웃: DB → 무거래 평봉
-            ohlcv_to: Optional[CacheVal] = None
-            if db_fb_on:
-                try:
-                    from core.realtime_m1_fallback import closed_minute_ohlcv_from_db
-
-                    ohlcv_to = closed_minute_ohlcv_from_db(
-                        self._app, nk, closed_lab
-                    )
-                except Exception:
-                    ohlcv_to = None
-            if ohlcv_to is not None:
-                o, h, l_, c, v = ohlcv_to
-                try:
-                    m1s = getattr(self._app, "rt_tick_m1_store", None)
-                    if m1s is not None:
-                        m1s.apply_official_closed_minute(
-                            nk, closed_lab, o, h, l_, c, v
-                        )
-                except Exception:
-                    pass
-                self._schedule_signal_eval(nk, close_px=c, volume=v)
-                try:
-                    if is_last_m1_open_of_15m_slot(closed_lab):
-                        already = self._slot_already_eval_done(nk, closed_lab)
-                        self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
-                        self._log_m1_last_official(
-                            nk,
-                            closed_lab,
-                            status="db_fallback",
-                            detail="minute_not_ready_timeout",
-                            chart_df=chart_df,
-                            source="db",
-                            already_eval_before=already,
-                        )
-                    else:
-                        self._log_m1_last_official(
-                            nk,
-                            closed_lab,
-                            status="db_fallback",
-                            detail="minute_not_ready_timeout",
-                            chart_df=chart_df,
-                            source="db",
-                        )
-                except Exception:
-                    pass
-                return
-            # 공식 행 없음(무거래 생략) — 실패가 아님. 구멍 스킵 합성으로 평가
+            # 타임아웃: 공식 행 없음(무거래 생략) — 실패가 아님. 구멍 스킵 합성으로 평가
             defer = bool(use_official_last)
             try:
                 # 15:19 NXT는 틱 선평가 — 미평가면 타임아웃에서 평가
@@ -3756,103 +3745,57 @@ class RtWatchlistM1ApiPoller:
                 pass
             return
 
-        ohlcv: Optional[CacheVal] = None
-        if db_fb_on:
-            try:
-                from core.realtime_m1_fallback import closed_minute_ohlcv_from_db
-
-                ohlcv = closed_minute_ohlcv_from_db(self._app, nk, closed_lab)
-            except Exception:
-                ohlcv = None
-
-        if ohlcv is None:
-            if status == "row_not_found":
-                # 차트는 다음 분까지 왔는데 해당 분 행만 없음 = 무거래 — 구멍 스킵 평가
-                self._handle_last_m1_no_trade(
-                    nk,
-                    closed_lab,
-                    sk,
-                    chart_df=chart_df,
-                    detail="row_not_found",
-                )
-                return
-            if eval_on_fail:
-                self._schedule_signal_eval(nk)
-            # API miss(empty 등)여도 슬롯 말분이면 틱 누적 합성으로 완성15 평가.
-            # 말분 틱이 불완전하면 부분 틱으로 평가하지 않고 공식 재시도를 기다린다.
-            try:
-                if is_last_m1_open_of_15m_slot(closed_lab):
-                    tick_ok = True
-                    try:
-                        from core.realtime_official_bars_sync import (
-                            last_minute_ticks_complete_for_eval,
-                        )
-
-                        tick_ok = bool(
-                            last_minute_ticks_complete_for_eval(
-                                self._app, nk, closed_lab
-                            )
-                        )
-                    except Exception:
-                        tick_ok = False
-                    if tick_ok and not (
-                        is_last_m1_open_of_15m_slot(closed_lab)
-                        and self._eval_on_official_last_m1_enabled()
-                    ):
-                        try:
-                            m1s = getattr(self._app, "rt_tick_m1_store", None)
-                            if m1s is not None:
-                                m1s.seal_tick_tail_minute(nk, closed_lab)
-                        except Exception:
-                            pass
-                        self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
-            except Exception:
-                pass
-            try:
-                self._log_m1_last_official(
-                    nk,
-                    closed_lab,
-                    status=f"fetch_fail:{status}",
-                    detail=str(last_err or "")[:200],
-                    chart_df=chart_df,
-                    source="official",
-                )
-            except Exception:
-                pass
+        if status == "row_not_found":
+            # 차트는 다음 분까지 왔는데 해당 분 행만 없음 = 무거래 — 구멍 스킵 평가
+            self._handle_last_m1_no_trade(
+                nk,
+                closed_lab,
+                sk,
+                chart_df=chart_df,
+                detail="row_not_found",
+            )
             return
+        if eval_on_fail:
+            self._schedule_signal_eval(nk)
+        # API miss(empty 등)여도 슬롯 말분이면 틱 누적 합성으로 완성15 평가.
+        # 말분 틱이 불완전하면 부분 틱으로 평가하지 않고 공식 재시도를 기다린다.
+        try:
+            if is_last_m1_open_of_15m_slot(closed_lab):
+                tick_ok = True
+                try:
+                    from core.realtime_official_bars_sync import (
+                        last_minute_ticks_complete_for_eval,
+                    )
 
-        o, h, l_, c, v = ohlcv
-        already = False
-        try:
-            if is_last_m1_open_of_15m_slot(closed_lab):
-                already = self._slot_already_eval_done(nk, closed_lab)
-        except Exception:
-            already = False
-        try:
-            m1s = getattr(self._app, "rt_tick_m1_store", None)
-            if m1s is not None:
-                m1s.apply_official_closed_minute(nk, closed_lab, o, h, l_, c, v)
-        except Exception:
-            pass
-        try:
-            self._remember_cache(key, (o, h, l_, c, v))
-        except Exception:
-            pass
-        self._schedule_signal_eval(nk, close_px=c, volume=v)
-        try:
-            if is_last_m1_open_of_15m_slot(closed_lab):
-                self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
+                    tick_ok = bool(
+                        last_minute_ticks_complete_for_eval(
+                            self._app, nk, closed_lab
+                        )
+                    )
+                except Exception:
+                    tick_ok = False
+                if tick_ok and not (
+                    is_last_m1_open_of_15m_slot(closed_lab)
+                    and self._eval_on_official_last_m1_enabled()
+                ):
+                    try:
+                        m1s = getattr(self._app, "rt_tick_m1_store", None)
+                        if m1s is not None:
+                            m1s.seal_tick_tail_minute(nk, closed_lab)
+                    except Exception:
+                        pass
+                    self._maybe_eval_closed_15m_from_m1(nk, closed_lab)
         except Exception:
             pass
         try:
             self._log_m1_last_official(
                 nk,
                 closed_lab,
-                status="db_fallback",
-                detail=str(status or last_err or "")[:200],
+                status=f"fetch_fail:{status}",
+                detail=str(last_err or "")[:200],
                 chart_df=chart_df,
-                source="db",
-                already_eval_before=already,
+                source="official",
             )
         except Exception:
             pass
+        return

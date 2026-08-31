@@ -13,6 +13,13 @@
 
 ---
 
+## 0.18.86 (2026-08-31)
+
+- **RT 15분 M1 라벨 합성**: 슬롯 1분 open 라벨 전체 순회, t0·말분 누락 시 조용 스킵 금지·catchup 재시도 (`realtime_official_bars_sync`).
+- **catchup 후 15m 교정**: M1 재합성으로 기존 오염 15m 덮어쓰기(`realtime_m1_compose_overwrite_existing_15m`, gap-fill `filled_overwrite`).
+- **무거래 평봉 통합**: t0·말분·중간 무거래 분 직전종가 V=0 평봉(`realtime_15m_compose_flat_no_trade`), head catchup 차트 생략분 일괄 채움.
+- **장중 DB 폴백 제거**: 실시간 1분은 store·틱만 사용(`realtime_m1_fallback`, poller).
+
 ## 0.18.85 (2026-08-31)
 
 - **동시호가 직전 head catchup**: 15:15 슬롯 head는 15:18 분봉 닫힘(벽 15:19:00)에 실행, 말분(15:19)은 15:20:00에 분리 (`krx_bars`, `rt_watchlist_m1_api_poller`).

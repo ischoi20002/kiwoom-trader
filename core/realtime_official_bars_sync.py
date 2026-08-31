@@ -187,26 +187,353 @@ def has_official_minute(m1s: Any, nk: str, open_lab: pd.Timestamp) -> bool:
         return False
 
 
-def slot_has_official_head_m1(
+def _expected_m1_open_labels_for_slot(
+    t0: pd.Timestamp,
+    last_open: pd.Timestamp,
+) -> List[pd.Timestamp]:
+    """15분 슬롯에 속하는 1분 open 라벨 목록(포함)."""
+    try:
+        from core.realtime_m1_fallback import iter_m1_open_labels_inclusive
+
+        return iter_m1_open_labels_inclusive(
+            pd.Timestamp(t0).floor("min"),
+            pd.Timestamp(last_open).floor("min"),
+        )
+    except Exception:
+        return []
+
+
+def _prev_close_for_compose_flat(
+    app: Any,
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+) -> float:
+    """무거래 평봉용 직전 종가: 직전 완료 분 → M1 store → bars_data → monitor."""
+    try:
+        prev = pd.Timestamp(open_lab).floor("min") - pd.Timedelta(minutes=1)
+        bar = _minute_ohlcv_official_or_tick(
+            m1s,
+            nk,
+            prev,
+            prefer_tick=False,
+            allow_tick_fill=True,
+        )
+        if bar is not None and float(bar[3]) > 0:
+            return float(bar[3])
+    except Exception:
+        pass
+    try:
+        if m1s is not None:
+            px = float(m1s.last_completed_close(nk) or 0.0)
+            if px > 0:
+                return px
+    except Exception:
+        pass
+    try:
+        lk = getattr(app, "_bars_data_lock", None)
+        bd = getattr(app, "bars_data", None)
+        if isinstance(bd, dict):
+
+            def _read() -> float:
+                _k, df = resolve_bars_data_frame(bd, nk, migrate_alias=True)
+                if df is None or getattr(df, "empty", True):
+                    return 0.0
+                return float(df["Close"].iloc[-1])
+
+            if lk is not None:
+                with lk:
+                    px = _read()
+            else:
+                px = _read()
+            if px > 0:
+                return px
+    except Exception:
+        pass
+    try:
+        mi = getattr(app, "monitor_info", None) or {}
+        info = mi.get(nk) if isinstance(mi, dict) else None
+        if isinstance(info, dict):
+            for fld in ("price", "last_price", "Close"):
+                v = info.get(fld)
+                if v is not None and float(v) > 0:
+                    return float(v)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _resolve_compose_minute_ohlcv(
+    app: Any,
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+    *,
+    prefer_tick: bool = False,
+    allow_tick_fill: bool = True,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """
+    합성용 1분 OHLCV: store(공식) → 틱 순.
+
+    실시간 감시는 ``bars_1m`` 하베스팅 DB를 쓰지 않는다(장중 당일 분 없음).
+    """
+    try:
+        ol = pd.Timestamp(open_lab).floor("min")
+    except Exception:
+        return None
+
+    return _minute_ohlcv_official_or_tick(
+        m1s,
+        nk,
+        ol,
+        prefer_tick=prefer_tick,
+        allow_tick_fill=allow_tick_fill,
+    )
+
+
+def _minute_resolvable_for_compose(
+    app: Any,
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+) -> bool:
+    """슬롯 합성 전 해당 open 라벨 분봉 확보 가능 여부(store·틱)."""
+    try:
+        bar = _resolve_compose_minute_ohlcv(
+            app,
+            m1s,
+            nk,
+            open_lab,
+            prefer_tick=False,
+            allow_tick_fill=True,
+        )
+        return bar is not None
+    except Exception:
+        return False
+
+
+def _compose_flat_no_trade_enabled(app: Any) -> bool:
+    """무거래 1분을 직전 종가 평봉(V=0)으로 채울지."""
+    try:
+        st = getattr(app, "settings", None) or {}
+        if "realtime_15m_compose_flat_no_trade" in st:
+            v = st.get("realtime_15m_compose_flat_no_trade", True)
+        else:
+            v = st.get("realtime_15m_compose_flat_middle_no_trade", True)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return True
+
+
+def _apply_flat_no_trade_minute_to_store(
+    app: Any,
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """무거래 분: 직전 종가 평봉(V=0)을 store에 반영."""
+    try:
+        px = float(_prev_close_for_compose_flat(app, m1s, nk, open_lab))
+        if px <= 0:
+            return None
+        m1s.apply_official_closed_minute(nk, open_lab, px, px, px, px, 0.0)
+        return (px, px, px, px, 0.0)
+    except Exception:
+        return None
+
+
+def _can_flat_no_trade_at_label(
+    app: Any,
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+    labels: List[pd.Timestamp],
+    *,
+    slot_closed: bool,
+) -> bool:
+    """
+    미수신과 무거래 구분: 인접 분 데이터가 있을 때만 엣지 평봉 허용.
+
+    - t0: 이후 분 중 하나라도 확보되면 t0 무거래로 간주.
+    - 말분: 슬롯이 닫혔고 이전 분 중 하나라도 확보되면 말분 무거래로 간주.
+    - 중간: 항상 허용(설정 ON 시).
+    """
+    try:
+        lab = pd.Timestamp(open_lab).floor("min")
+        if not labels:
+            return False
+        t0s = pd.Timestamp(labels[0]).floor("min")
+        last_s = pd.Timestamp(labels[-1]).floor("min")
+        if lab != t0s and lab != last_s:
+            return True
+        if lab == t0s:
+            for later in labels[1:]:
+                if _minute_resolvable_for_compose(app, m1s, nk, later):
+                    return True
+            return False
+        if not slot_closed:
+            return False
+        for earlier in labels[:-1]:
+            if _minute_resolvable_for_compose(app, m1s, nk, earlier):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def flat_fill_chart_missing_m1_minutes(
+    app: Any,
+    code: str,
+    chart_df: Optional[pd.DataFrame],
+    start_incl: pd.Timestamp,
+    end_incl: pd.Timestamp,
+) -> int:
+    """
+    ka10080 차트에 없는(증권사 무거래 생략) open 라벨을 평봉으로 store에 채운다.
+
+    틱 1분이 이미 있으면 덮어쓰지 않는다.
+    """
+    if not _compose_flat_no_trade_enabled(app):
+        return 0
+    try:
+        from core.realtime_m1_fallback import (
+            chart_1m_open_labels_in_range,
+            iter_m1_open_labels_inclusive,
+        )
+
+        nk = canonical_stock_code(str(code).strip())
+        if not nk:
+            return 0
+        m1s = getattr(app, "rt_tick_m1_store", None)
+        if m1s is None:
+            return 0
+        lo = pd.Timestamp(start_incl).floor("min")
+        hi = pd.Timestamp(end_incl).floor("min")
+        expected = iter_m1_open_labels_inclusive(lo, hi)
+        chart_set = chart_1m_open_labels_in_range(chart_df, lo, hi)
+        missing = [t for t in expected if t not in chart_set]
+        if not missing:
+            return 0
+        applied = 0
+        for lab in missing:
+            try:
+                if _minute_resolvable_for_compose(app, m1s, nk, lab):
+                    continue
+                try:
+                    tick_bar = m1s.tick_minute_ohlcv(nk, lab)
+                    if tick_bar is not None and float(tick_bar[3]) > 0:
+                        continue
+                except Exception:
+                    pass
+                if _apply_flat_no_trade_minute_to_store(app, m1s, nk, lab):
+                    applied += 1
+            except Exception:
+                continue
+        return int(applied)
+    except Exception:
+        return 0
+
+
+def _compose_ohlcv_from_slot_m1_labels(
+    app: Any,
     m1s: Any,
     nk: str,
     t0: pd.Timestamp,
     last_open: pd.Timestamp,
+    *,
+    use_tick_tail: bool,
+    allow_flat_no_trade: bool,
+    slot_closed: bool = True,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """
+    슬롯 1분 open 라벨별로 OHLCV를 모아 15분봉을 합성한다.
+
+    - 미수신(인접 분도 없음): None → 폴러 catchup·말분 조회 재시도.
+    - 무거래(인접 분 있음·차트 생략): 직전 종가 평봉(V=0) 삽입(설정 ON).
+    """
+    labels = _expected_m1_open_labels_for_slot(t0, last_open)
+    if not labels:
+        return None
+
+    t0s = pd.Timestamp(t0).floor("min")
+    last_s = pd.Timestamp(last_open).floor("min")
+    opens: List[float] = []
+    highs: List[float] = []
+    lows: List[float] = []
+    closes: List[float] = []
+    vols: List[float] = []
+
+    for lab in labels:
+        is_tail = lab == last_s
+        bar = _resolve_compose_minute_ohlcv(
+            app,
+            m1s,
+            nk,
+            lab,
+            prefer_tick=bool(use_tick_tail and is_tail),
+            allow_tick_fill=True,
+        )
+        if bar is None and allow_flat_no_trade:
+            if _can_flat_no_trade_at_label(
+                app, m1s, nk, lab, labels, slot_closed=slot_closed
+            ):
+                bar = _apply_flat_no_trade_minute_to_store(app, m1s, nk, lab)
+        if bar is None:
+            return None
+
+        o, h, l_, c, v = bar
+        opens.append(float(o))
+        highs.append(float(h))
+        lows.append(float(l_))
+        closes.append(float(c))
+        vols.append(max(0.0, float(v)))
+
+    if not closes:
+        return None
+
+    o0 = float(opens[0])
+    h0 = float(max(highs)) if highs else o0
+    l0 = (
+        float(min(x for x in lows if x > 0))
+        if any(x > 0 for x in lows)
+        else o0
+    )
+    c0 = float(closes[-1])
+    v0 = float(sum(max(0.0, x) for x in vols))
+    if c0 <= 0:
+        return None
+    return o0, h0, l0, c0, v0
+
+
+def slot_has_official_head_m1(
+    app: Any,
+    m1s: Any,
+    nk: str,
+    t0: pd.Timestamp,
+    last_open: pd.Timestamp,
+    *,
+    slot_closed: bool = True,
 ) -> bool:
     """
-    슬롯 앞구간 ``[t0, last_open)`` 에 공식 completed 1분이 하나라도 있는지.
+    슬롯 합성 게이트: **첫 분 라벨(t0)** 이 store·틱으로 확보 가능한지.
 
-    말분은 틱 우선이므로 검사에서 제외한다. 앞구간이 없는 1분 슬롯은 True.
+    t0 무거래(이후 분은 있음)이면 평봉을 store에 넣고 통과한다.
     """
     try:
-        head_hi = pd.Timestamp(last_open).floor("min") - pd.Timedelta(minutes=1)
+        last_s = pd.Timestamp(last_open).floor("min")
         t0s = pd.Timestamp(t0).floor("min")
-        if head_hi < t0s:
+        if _minute_resolvable_for_compose(app, m1s, nk, t0s):
             return True
-        head = m1s.dataframe_for_window(
-            nk, t0s, head_hi, include_open_bucket=False
-        )
-        return head is not None and not getattr(head, "empty", True)
+        if not _compose_flat_no_trade_enabled(app):
+            return False
+        labels = _expected_m1_open_labels_for_slot(t0s, last_s)
+        if not _can_flat_no_trade_at_label(
+            app, m1s, nk, t0s, labels, slot_closed=slot_closed
+        ):
+            return False
+        return _apply_flat_no_trade_minute_to_store(app, m1s, nk, t0s) is not None
     except Exception:
         return False
 
@@ -291,8 +618,10 @@ def compose_local_15m_ohlcv(
     - ``realtime_15m_last_minute_from_ticks`` ON 이면(레거시) 말분은 틱 우선.
       ``realtime_15m_eval_on_official_last_m1`` ON(기본)이면 말분은 공식 우선·틱은 결측 채움.
     - ``realtime_15m_compose_tick_fill_on_api_miss`` ON 이면 공식 결측 분을 틱으로 채움
-    - ``realtime_15m_compose_require_official_head`` ON 이면 앞구간에 공식 1분이
-      없을 때 None (틱만으로 완성15 금지). 폴러 catchup 후 재시도.
+    - ``realtime_15m_compose_require_official_head`` ON 이면 **슬롯 첫 분 라벨(t0)**
+      이 store·틱으로 확보 불가 시 None. 폴러 catchup 후 재시도.
+    - 합성은 슬롯 1분 open 라벨 전체를 순회하며, 첫·말분 누락 시 조용히
+      스킵하지 않는다. 무거래(인접 분 확보·슬롯 닫힘)는 평봉(V=0) 허용(설정).
     - 말분 틱이 중간부터(장중 재시작)이면 공식 말분 1분이 올 때까지 None.
       도착 후에는 공식 1분만으로 합성한다.
     """
@@ -347,6 +676,15 @@ def compose_local_15m_ohlcv(
             return None
 
         # 말분 틱 불완전(재시작 등): 공식 말분 1분이 올 때까지 합성 거부, 오면 공식 1분만.
+        slot_closed = True
+        try:
+            forming = stream_slot_end_datetime(datetime.now())
+            slot_closed = pd.Timestamp(slot).floor("min") < pd.Timestamp(
+                forming
+            ).floor("min")
+        except Exception:
+            slot_closed = True
+
         incomplete_tail = not last_minute_ticks_complete_for_eval(
             app, nk, last_open
         )
@@ -355,141 +693,35 @@ def compose_local_15m_ohlcv(
             allow_fill = False
             try:
                 if not has_official_minute(m1s, nk, last_open):
-                    return None
+                    if not (
+                        slot_closed and _compose_flat_no_trade_enabled(app)
+                    ):
+                        return None
             except Exception:
                 return None
 
-        # 장중 재시작: 앞구간 공식 1분이 없으면 틱전용 합성 거부
+        # 슬롯 첫 분(t0) 확보 가능 여부 — 틱만으로 Open 밀림 방지
         try:
             if _require_official_head_enabled(app) and not slot_has_official_head_m1(
-                m1s, nk, t0, last_open
+                app, m1s, nk, t0, last_open, slot_closed=slot_closed
             ):
                 return None
         except Exception:
             return None
 
-        # API miss 틱 채움: 슬롯 전 분을 공식우선(+틱결측)으로 순회
-        if allow_fill:
-            opens: list[float] = []
-            highs: list[float] = []
-            lows: list[float] = []
-            closes: list[float] = []
-            vols: list[float] = []
-            cur = pd.Timestamp(t0).floor("min")
-            end_last = pd.Timestamp(last_open).floor("min")
-            while cur <= end_last:
-                is_tail = cur == end_last
-                bar = _minute_ohlcv_official_or_tick(
-                    m1s,
-                    nk,
-                    cur,
-                    prefer_tick=bool(use_tick_tail and is_tail),
-                    allow_tick_fill=True,
-                )
-                if bar is not None:
-                    o, h, l_, c, v = bar
-                    opens.append(float(o))
-                    highs.append(float(h))
-                    lows.append(float(l_))
-                    closes.append(float(c))
-                    vols.append(max(0.0, float(v)))
-                cur = cur + pd.Timedelta(minutes=1)
-            if not closes:
-                return None
-            o0 = float(opens[0])
-            h0 = float(max(highs)) if highs else o0
-            l0 = (
-                float(min(x for x in lows if x > 0))
-                if any(x > 0 for x in lows)
-                else o0
-            )
-            c0 = float(closes[-1])
-            v0 = float(sum(max(0.0, x) for x in vols))
-            if c0 <= 0:
-                return None
-            return o0, h0, l0, c0, v0
+        allow_flat = _compose_flat_no_trade_enabled(app)
 
-        # fill OFF: 기존 동작 — head는 공식만, 말분만 틱 우선
-        tick_bar = None
-        if use_tick_tail:
-            try:
-                tick_bar = m1s.tick_minute_ohlcv(nk, last_open)
-            except Exception:
-                tick_bar = None
-
-        head_hi = last_open - pd.Timedelta(minutes=1)
-        try:
-            if head_hi >= t0:
-                head = m1s.dataframe_for_window(
-                    nk, t0, head_hi, include_open_bucket=False
-                )
-            else:
-                head = None
-        except Exception:
-            head = None
-
-        opens2: list[float] = []
-        highs2: list[float] = []
-        lows2: list[float] = []
-        closes2: list[float] = []
-        vols2: list[float] = []
-        if head is not None and not getattr(head, "empty", True):
-            try:
-                opens2.extend([float(x) for x in head["Open"].tolist()])
-                highs2.extend([float(x) for x in head["High"].tolist()])
-                lows2.extend([float(x) for x in head["Low"].tolist()])
-                closes2.extend([float(x) for x in head["Close"].tolist()])
-                vols2.extend([float(x) for x in head["Volume"].tolist()])
-            except Exception:
-                pass
-
-        if tick_bar is not None:
-            to, th, tl, tc, tv = tick_bar
-            opens2.append(float(to))
-            highs2.append(float(th))
-            lows2.append(float(tl))
-            closes2.append(float(tc))
-            vols2.append(max(0.0, float(tv)))
-        else:
-            try:
-                tail = m1s.dataframe_for_window(
-                    nk, last_open, last_open, include_open_bucket=False
-                )
-                if tail is not None and not getattr(tail, "empty", True):
-                    opens2.append(float(tail["Open"].iloc[-1]))
-                    highs2.append(float(tail["High"].iloc[-1]))
-                    lows2.append(float(tail["Low"].iloc[-1]))
-                    closes2.append(float(tail["Close"].iloc[-1]))
-                    vols2.append(max(0.0, float(tail["Volume"].iloc[-1])))
-            except Exception:
-                pass
-
-        if not closes2:
-            try:
-                full = m1s.dataframe_for_window(
-                    nk, t0, last_open, include_open_bucket=False
-                )
-                if full is None or getattr(full, "empty", True):
-                    return None
-                o = float(full["Open"].iloc[0])
-                h = float(full["High"].max())
-                l_ = float(full["Low"].min())
-                c = float(full["Close"].iloc[-1])
-                v = float(full["Volume"].sum())
-                if c <= 0:
-                    return None
-                return o, h, l_, c, max(0.0, v)
-            except Exception:
-                return None
-
-        o = float(opens2[0])
-        h = float(max(highs2)) if highs2 else o
-        l_ = float(min(x for x in lows2 if x > 0)) if any(x > 0 for x in lows2) else o
-        c = float(closes2[-1])
-        v = float(sum(max(0.0, x) for x in vols2))
-        if c <= 0:
-            return None
-        return o, h, l_, c, v
+        # 1분 open 라벨별 합성 (fill ON/OFF 공통)
+        return _compose_ohlcv_from_slot_m1_labels(
+            app,
+            m1s,
+            nk,
+            t0,
+            last_open,
+            use_tick_tail=use_tick_tail,
+            allow_flat_no_trade=allow_flat,
+            slot_closed=slot_closed,
+        )
     except Exception:
         return None
 
@@ -862,23 +1094,115 @@ def _looks_like_stub_15m_row(row: Any) -> bool:
     return False
 
 
+def _compose_overwrite_existing_enabled(app: Any) -> bool:
+    """catchup 후 잘못 합성된 완성 15분봉을 M1 재합성으로 덮어쓸지."""
+    try:
+        st = getattr(app, "settings", None) or {}
+        v = st.get("realtime_m1_compose_overwrite_existing_15m", True)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return True
+
+
+def _row_ohlcv_differs_from_composed(
+    row: Any,
+    o: float,
+    h: float,
+    l_: float,
+    c: float,
+    v: float,
+    *,
+    tol: float = 0.5,
+) -> bool:
+    """기존 15분 행이 M1 합성 결과와 다른지(O/H/L/C/V)."""
+    try:
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[-1]
+        ro = float(row.get("Open", row.get("open", 0)) or 0)
+        rh = float(row.get("High", row.get("high", 0)) or 0)
+        rl = float(row.get("Low", row.get("low", 0)) or 0)
+        rc = float(row.get("Close", row.get("close", 0)) or 0)
+        rv = float(row.get("Volume", row.get("volume", 0)) or 0)
+        want = (float(o), float(h), float(l_), float(c), max(0.0, float(v)))
+        have = (ro, rh, rl, rc, max(0.0, rv))
+        return any(abs(a - b) > tol for a, b in zip(have, want))
+    except Exception:
+        return True
+
+
+def _rolling_ma_on_df(df: pd.DataFrame) -> None:
+    try:
+        df["ma5"] = df["Close"].rolling(window=5).mean()
+        df["ma20"] = df["Close"].rolling(window=20).mean()
+        df["ma60"] = df["Close"].rolling(window=60).mean()
+    except Exception:
+        pass
+
+
+def _find_slot_index(df: pd.DataFrame, slot: pd.Timestamp) -> Optional[Any]:
+    try:
+        slot_f = pd.Timestamp(slot).floor("min")
+        if slot_f in df.index:
+            return slot_f
+        for ix in df.index:
+            if pd.Timestamp(ix).floor("min") == slot_f:
+                return ix
+    except Exception:
+        return None
+    return None
+
+
+def _gap_fill_target_slots(
+    done_slots: List[pd.Timestamp],
+    max_n: int,
+    include_slots: Optional[List[Any]],
+) -> List[pd.Timestamp]:
+    """최근 N슬롯 + catchup 슬롯(윈도 밖이면 추가) 합집합."""
+    try:
+        done = [pd.Timestamp(s).floor("min") for s in done_slots]
+    except Exception:
+        done = []
+    targets: Dict[pd.Timestamp, None] = {}
+    for ts in done[-max(1, max_n) :]:
+        targets[ts] = None
+    if include_slots:
+        done_set = set(done)
+        for raw in include_slots:
+            try:
+                ts = pd.Timestamp(raw).floor("min")
+            except Exception:
+                continue
+            if ts in done_set:
+                targets[ts] = None
+    return sorted(targets.keys())
+
+
 def fill_missing_closed_15m_from_official_m1(
     app: Any,
     code: str,
     *,
     max_bars: int = 4,
     as_of: Optional[datetime] = None,
+    include_slots: Optional[List[Any]] = None,
+    force_overwrite_existing: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    이미 끝난 최근 15분 슬롯 중 **누락·스텁**을 공식 1분 합성으로 채웁니다.
+    이미 끝난 최근 15분 슬롯을 공식 1분 합성으로 채우거나 교정합니다.
 
-    공식 ka10080(15) 교체의 보조 경로입니다. 형성 중 슬롯은 건드리지 않습니다.
+    - 누락 행: 삽입
+    - 스텁: 항상 교체
+    - ``realtime_m1_compose_overwrite_existing_15m`` ON 이면 기존 행도
+      M1 합성과 다를 때 덮어씀(catchup 후 skip-first 등 오염 복구).
+    형성 중 슬롯은 건드리지 않습니다.
     """
     report: Dict[str, Any] = {
         "code": "",
         "checked": 0,
         "filled_missing": [],
         "filled_stub": [],
+        "filled_overwrite": [],
         "skipped": [],
         "failed": [],
     }
@@ -912,7 +1236,12 @@ def fill_missing_closed_15m_from_official_m1(
             for s in iter_krx_15m_slot_ends_for_day(day0)
         ]
         done = [s for s in slots if s < pd.Timestamp(forming).floor("min")]
-        targets = done[-max_n:]
+        overwrite_on = (
+            bool(force_overwrite_existing)
+            if force_overwrite_existing is not None
+            else _compose_overwrite_existing_enabled(app)
+        )
+        targets = _gap_fill_target_slots(done, max_n, include_slots)
     except Exception:
         return report
     report["checked"] = int(len(targets))
@@ -945,21 +1274,9 @@ def fill_missing_closed_15m_from_official_m1(
                 if df is None or getattr(df, "empty", True):
                     report["skipped"].append(f"{slot_s}:empty_df")
                     continue
-                # 인덱스 정규화 조회
-                hit = None
-                try:
-                    if slot in df.index:
-                        hit = slot
-                    else:
-                        for ix in df.index:
-                            if pd.Timestamp(ix).floor("min") == slot:
-                                hit = ix
-                                break
-                except Exception:
-                    hit = None
+                hit = _find_slot_index(df, slot)
 
                 if hit is None:
-                    # 누락 행 삽입
                     try:
                         dt_str = slot.strftime("%Y-%m-%d %H:%M:%S")
                         new_row = {
@@ -980,22 +1297,18 @@ def fill_missing_closed_15m_from_official_m1(
                             df2 = df2.sort_index().tail(300)
                         except Exception:
                             pass
-                        try:
-                            df2["ma5"] = df2["Close"].rolling(window=5).mean()
-                            df2["ma20"] = df2["Close"].rolling(window=20).mean()
-                            df2["ma60"] = df2["Close"].rolling(window=60).mean()
-                        except Exception:
-                            pass
+                        _rolling_ma_on_df(df2)
                         bd[use_key] = df2
                         report["filled_missing"].append(slot_s)
                     except Exception:
                         report["failed"].append(slot_s)
                     continue
 
-                # 존재: 스텁만 공식1분 합성으로 교체 (이미 채워진 봉은 유지)
                 try:
                     row = df.loc[hit]
-                    if not _looks_like_stub_15m_row(row):
+                    is_stub = _looks_like_stub_15m_row(row)
+                    differs = _row_ohlcv_differs_from_composed(row, o, h, l_, c, v)
+                    if not is_stub and not (overwrite_on and differs):
                         continue
                     df.at[hit, "Open"] = float(o)
                     df.at[hit, "High"] = float(h)
@@ -1004,27 +1317,27 @@ def fill_missing_closed_15m_from_official_m1(
                     df.at[hit, "Volume"] = float(v)
                     if "time" in df.columns:
                         df.at[hit, "time"] = ts_to_slot_hhmm(slot)
-                    try:
-                        df["ma5"] = df["Close"].rolling(window=5).mean()
-                        df["ma20"] = df["Close"].rolling(window=20).mean()
-                        df["ma60"] = df["Close"].rolling(window=60).mean()
-                    except Exception:
-                        pass
+                    _rolling_ma_on_df(df)
                     bd[use_key] = df
-                    report["filled_stub"].append(slot_s)
+                    if is_stub:
+                        report["filled_stub"].append(slot_s)
+                    else:
+                        report["filled_overwrite"].append(slot_s)
                 except Exception:
                     report["failed"].append(slot_s)
         except Exception:
             report["failed"].append(slot_s)
 
-    # DB·지표 후처리(채운 경우만)
-    if report["filled_missing"] or report["filled_stub"]:
+    changed_slots = (
+        list(report.get("filled_missing") or [])
+        + list(report.get("filled_stub") or [])
+        + list(report.get("filled_overwrite") or [])
+    )
+    if changed_slots:
         try:
             store = getattr(app, "realtime_monitor_bars_store", None)
             if store is not None:
-                for slot_s in list(report["filled_missing"]) + list(
-                    report["filled_stub"]
-                ):
+                for slot_s in changed_slots:
                     try:
                         ts = pd.Timestamp(slot_s)
                         composed2 = compose_local_15m_ohlcv(app, nk, ts)
