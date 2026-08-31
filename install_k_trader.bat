@@ -35,7 +35,7 @@ if not defined PY_EXE (
 )
 
 echo [1/4] Python: !PY_EXE!
-"!PY_EXE!" -c "import sys; print('       버전:', sys.version.split()[0], '|', '64bit' if sys.maxsize^>2**32 else '32bit')" 2>nul
+"!PY_EXE!" -c "import sys; print('       version:', sys.version.split()[0])" >nul 2>&1
 if errorlevel 1 (
   echo [오류] Python 실행 확인 실패
   goto :fail
