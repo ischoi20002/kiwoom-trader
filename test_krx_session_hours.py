@@ -144,7 +144,12 @@ def test_default_15m_labels_regression() -> None:
     assert is_krx_pre_auction_15m_slot(pd.Timestamp("2026-03-10 15:15:00"))
     assert is_krx_auction_market_fill_slot(pd.Timestamp("2026-03-10 15:15:00"))
     assert is_krx_next_open_defer_15m_slot(labels[-1])
-    from utils.krx_bars import is_last_m1_open_of_15m_slot, is_pre_auction_last_m1_open
+    from utils.krx_bars import (
+        is_last_m1_open_of_15m_slot,
+        is_pre_auction_last_m1_open,
+        is_slot_head_complete_m1_open,
+        slot_head_m1_range,
+    )
 
     assert is_pre_auction_last_m1_open(pd.Timestamp("2026-03-10 15:19:00"))
     assert is_last_m1_open_of_15m_slot(pd.Timestamp("2026-03-10 15:19:00"))
@@ -152,6 +157,15 @@ def test_default_15m_labels_regression() -> None:
     assert krx_15m_slot_complete_ts(pd.Timestamp("2026-03-10 15:15:00")) == pd.Timestamp(
         "2026-03-10 15:20:00"
     )
+    # head catchup: 15:18 닫힘 → 벽 15:19:00 (말분 15:19는 15:20:00)
+    assert is_slot_head_complete_m1_open(pd.Timestamp("2026-03-10 15:18:00"))
+    assert not is_slot_head_complete_m1_open(pd.Timestamp("2026-03-10 15:19:00"))
+    assert is_slot_head_complete_m1_open(pd.Timestamp("2026-03-10 09:13:00"))
+    assert not is_slot_head_complete_m1_open(pd.Timestamp("2026-03-10 09:14:00"))
+    pa_rng = slot_head_m1_range(pd.Timestamp("2026-03-10 15:15:00"))
+    assert pa_rng is not None
+    assert pa_rng[0] == pd.Timestamp("2026-03-10 15:15:00")
+    assert pa_rng[1] == pd.Timestamp("2026-03-10 15:19:00")
 
 
 def test_stream_slot_rolls_to_close_after_continuous_end() -> None:

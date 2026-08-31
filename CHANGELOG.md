@@ -13,6 +13,12 @@
 
 ---
 
+## 0.18.85 (2026-08-31)
+
+- **동시호가 직전 head catchup**: 15:15 슬롯 head는 15:18 분봉 닫힘(벽 15:19:00)에 실행, 말분(15:19)은 15:20:00에 분리 (`krx_bars`, `rt_watchlist_m1_api_poller`).
+- **장마감 말분 공식 대기 단축**: 15:19·15:30 비NXT 공식 1분 대기 상한을 10분→**5분**으로 변경, 초과 시 틱말분 합성 평가 (`realtime_pre_auction_official_wait_max_sec`, `realtime_eod_official_wait_max_sec`).
+- **NXT 분기 수정**: ka10100 `nxtenable` 파싱·캐시 스키마 v2, 조회 실패 시 캐시 오염 방지 (`nxt_eligibility_service`, `data_manager_v2`).
+
 ## 0.18.84 (2026-08-28)
 
 - **운영 기동 오류 수정**: `strategy_engine.py` `evaluate_position_scoped` 종료 `}` 뒤 줄바꿈 누락으로 발생한 SyntaxError 수정.

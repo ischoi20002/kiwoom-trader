@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""NXT 거래가능 캐시 스모크 테스트."""
+"""NXT 거래가능 캐시·ka10100 파싱 테스트."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,36 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core.nxt_eligibility_service import NxtEligibilityService
+from core.nxt_eligibility_service import (
+    NxtEligibilityService,
+    parse_nxt_enable_from_ka10100_payload,
+)
+
+
+def test_parse_nxtenable_lowercase_field() -> None:
+    """키움 REST ka10100 — nxtenable(소문자) 파싱."""
+    assert parse_nxt_enable_from_ka10100_payload({"nxtenable": "Y"}) is True
+    assert parse_nxt_enable_from_ka10100_payload({"nxtenable": "N"}) is False
+    assert parse_nxt_enable_from_ka10100_payload({"nxtEnable": "Y"}) is True
+    assert parse_nxt_enable_from_ka10100_payload({"return_code": 0, "stk_cd": "005930"}) is None
+
+
+def test_fetch_failure_not_cached_as_disabled() -> None:
+    app = SimpleNamespace(
+        auth_manager=SimpleNamespace(get_auth_token=lambda: "tok"),
+        data_manager=SimpleNamespace(
+            fetch_nxt_status=lambda _c, _t: None,
+        ),
+        monitor_codes=[],
+        portfolio=SimpleNamespace(virtual_positions={}),
+        trading_controller=None,
+    )
+    svc = NxtEligibilityService(app, log_func=lambda *_: None)
+    assert svc._fetch_one("005930") is None
+    assert svc.is_nxt_tradable("005930", fetch_if_unknown=False) is False
+    snap = svc.snapshot()
+    assert "005930" not in (snap.get("disabled") or [])
+    assert "005930" not in (snap.get("enabled") or [])
 
 
 def test_nxt_cache_roundtrip_same_day() -> None:
@@ -58,6 +87,8 @@ def test_collect_codes_includes_holdings() -> None:
 
 
 if __name__ == "__main__":
+    test_parse_nxtenable_lowercase_field()
+    test_fetch_failure_not_cached_as_disabled()
     test_nxt_cache_roundtrip_same_day()
     test_collect_codes_includes_holdings()
     print("ok")

@@ -12,14 +12,15 @@
 
 **동시호가 직전·종가 말분(15:19 / 15:30)**
 - **NXT 가능**: 틱말분(·단일가 틱) 즉시 평가 → 주문 속도 우선. 공식은 오면 15분 대체.
-- **NXT 불가·모의**: 공식 1분 우선, 마감 후 최대 10분(``realtime_eod_official_wait_max_sec``)
-  대기 후 미완만 틱 폴백. 동시호가 시장가/익일 next_open 여유에 맞춤.
+- **NXT 불가·모의**: 공식 1분 우선. 15:19·15:30 말분 모두 마감 후 최대 5분
+  (``realtime_pre_auction_official_wait_max_sec`` / ``realtime_eod_official_wait_max_sec``)
+  대기 후 미완만 틱 합성 평가.
 
 **헤드 soft catchup**
 - head 구간 닫힌 뒤 ka10080 1페이지로 공식 1분을 store에 덮어씀.
   실패해도 평가를 막지 않음.
 
-**15:30 단일가**: NXT는 틱 확인 즉시, 비NXT는 공식 대기(최대 10분) 후 폴백.
+**15:30 단일가**: NXT는 틱 확인 즉시, 비NXT는 공식 대기(최대 5분) 후 틱 합성 폴백.
 """
 
 from __future__ import annotations
@@ -373,17 +374,42 @@ class RtWatchlistM1ApiPoller:
         except (TypeError, ValueError):
             return 40.0
 
-    def _eod_official_wait_max_sec(self) -> float:
+    def _pre_auction_official_wait_max_sec(self) -> float:
         """
-        15:19·15:30 비NXT 공식 1분 대기 상한(초). 기본·최대 600(10분).
+        15:19(동시호가 직전) 비NXT 공식 1분 대기 상한(초). 기본 300(5분).
         """
         try:
             v = float(
-                self._settings().get("realtime_eod_official_wait_max_sec", 600.0)
+                self._settings().get(
+                    "realtime_pre_auction_official_wait_max_sec", 300.0
+                )
             )
         except (TypeError, ValueError):
-            v = 600.0
+            v = 300.0
         return max(60.0, min(v, 600.0))
+
+    def _eod_official_wait_max_sec(self) -> float:
+        """
+        15:30 종가 단일가 비NXT 공식 1분 대기 상한(초). 기본 300(5분).
+        """
+        try:
+            v = float(
+                self._settings().get("realtime_eod_official_wait_max_sec", 300.0)
+            )
+        except (TypeError, ValueError):
+            v = 300.0
+        return max(60.0, min(v, 600.0))
+
+    def _official_wait_max_sec_for_lab(self, closed_lab: pd.Timestamp) -> float:
+        """말분 라벨별 공식 대기 상한(초)."""
+        try:
+            if is_pre_auction_last_m1_open(closed_lab):
+                return float(self._pre_auction_official_wait_max_sec())
+            if is_krx_last_15m_slot(closed_lab):
+                return float(self._eod_official_wait_max_sec())
+        except Exception:
+            pass
+        return float(self._tick_tail_backup_after_close_sec())
 
     def _is_eod_extended_official_wait_lab(self, closed_lab: pd.Timestamp) -> bool:
         """동시호가 직전 말분(15:19) 또는 종가 단일가(15:30)."""
@@ -400,23 +426,18 @@ class RtWatchlistM1ApiPoller:
         """
         실전 + 종목 NXT 거래가능이면 True.
 
-        ``signal_engine._code_uses_nxt_touch`` 와 동일 기준.
+        ``NxtEligibilityService.code_uses_nxt_touch`` 와 동일 기준.
         모의·미조회·불가는 False → 공식 대기·동시호가/next_open 경로.
         """
-        try:
-            import config
-
-            if bool(getattr(config, "USE_MOCK", False)):
-                return False
-        except Exception:
-            return False
         try:
             svc = getattr(self._app, "nxt_eligibility_service", None)
             if svc is None:
                 return False
-            return bool(svc.is_nxt_tradable(code, fetch_if_unknown=True))
+            if hasattr(svc, "code_uses_nxt_touch"):
+                return bool(svc.code_uses_nxt_touch(code, fetch_if_unknown=True))
         except Exception:
             return False
+        return False
 
     def _partition_codes_by_nxt(
         self, codes: List[str]
@@ -424,10 +445,12 @@ class RtWatchlistM1ApiPoller:
         """(NXT 가능, NXT 불가)로 분리. 순서는 입력·우선순위 정렬 유지."""
         nxt: List[str] = []
         non: List[str] = []
+        unknown_n = 0
         try:
             ordered = self._order_codes_for_closed15_eval(list(codes))
         except Exception:
             ordered = [str(c) for c in codes if c]
+        svc = getattr(self._app, "nxt_eligibility_service", None)
         for raw in ordered:
             try:
                 nk = canonical_stock_code(str(raw).strip())
@@ -440,8 +463,43 @@ class RtWatchlistM1ApiPoller:
                     nxt.append(nk)
                 else:
                     non.append(nk)
+                    if svc is not None:
+                        try:
+                            if not svc.is_nxt_tradable(
+                                nk, fetch_if_unknown=False
+                            ):
+                                snap = svc.snapshot()
+                                known = nk in set(
+                                    snap.get("enabled") or []
+                                ) or nk in set(snap.get("disabled") or [])
+                                if not known:
+                                    unknown_n += 1
+                        except Exception:
+                            pass
             except Exception:
                 non.append(nk)
+        try:
+            if ordered and not nxt:
+                en_n = dis_n = 0
+                mock = False
+                if svc is not None:
+                    try:
+                        en_n = len(svc.snapshot().get("enabled") or [])
+                        dis_n = len(svc.snapshot().get("disabled") or [])
+                    except Exception:
+                        pass
+                    try:
+                        mock = not bool(svc.live_nxt_touch_orders_enabled())
+                    except Exception:
+                        mock = False
+                if mock or unknown_n > 0 or (en_n == 0 and dis_n > 0):
+                    self._emit(
+                        f"⚠️ [M1Poll] NXT 분기 0건 — "
+                        f"mock={mock} 캐시가능={en_n} 불가={dis_n} "
+                        f"미조회={unknown_n} (ka10100 nxtenable·아침갱신 확인)"
+                    )
+        except Exception:
+            pass
         return nxt, non
 
     def _last_m1_official_poll_deadline(
@@ -451,10 +509,11 @@ class RtWatchlistM1ApiPoller:
         공식 말분 우선: not_ready 재시도·틱 백업 공통 벽시계 한도.
 
         - 일반 말분: ``분 마감 + realtime_15m_tick_tail_backup_after_close_sec`` (기본 40초)
-        - 15:19·15:30: ``분 마감 + realtime_eod_official_wait_max_sec`` (기본·최대 10분)
+        - 15:19: ``분 마감 + realtime_pre_auction_official_wait_max_sec`` (기본 5분)
+        - 15:30: ``분 마감 + realtime_eod_official_wait_max_sec`` (기본 5분)
         """
         if self._is_eod_extended_official_wait_lab(closed_lab):
-            after = float(self._eod_official_wait_max_sec())
+            after = float(self._official_wait_max_sec_for_lab(closed_lab))
         else:
             after = float(self._tick_tail_backup_after_close_sec())
         try:
@@ -713,7 +772,7 @@ class RtWatchlistM1ApiPoller:
             after = float(self._tick_tail_backup_after_close_sec())
             try:
                 if self._is_eod_extended_official_wait_lab(closed_lab):
-                    after = float(self._eod_official_wait_max_sec())
+                    after = float(self._official_wait_max_sec_for_lab(closed_lab))
             except Exception:
                 pass
             try:
@@ -728,7 +787,7 @@ class RtWatchlistM1ApiPoller:
         try:
             try:
                 if self._is_eod_extended_official_wait_lab(closed_lab):
-                    after_s = float(self._eod_official_wait_max_sec())
+                    after_s = float(self._official_wait_max_sec_for_lab(closed_lab))
                 else:
                     after_s = float(self._tick_tail_backup_after_close_sec())
             except Exception:
@@ -916,7 +975,7 @@ class RtWatchlistM1ApiPoller:
         self, codes: List[str], auction_lab: pd.Timestamp
     ) -> None:
         """
-        15:30 단일가: NXT=틱 즉시, 비NXT=공식 최대 10분 대기 후 폴백.
+        15:30 단일가: NXT=틱 즉시, 비NXT=공식 최대 5분 대기 후 틱 합성 평가.
 
         벽시계 15:30분대에 1회 기동.
         """
@@ -951,10 +1010,18 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             delay_nxt = wait_nxt
         try:
-            due_non = lab.to_pydatetime() + timedelta(seconds=wait_non)
-            delay_non = max(0.05, (due_non - datetime.now()).total_seconds())
+            deadline = self._last_m1_official_poll_deadline(lab, len(non_c))
+            delay_non = max(0.05, (deadline - datetime.now()).total_seconds() + 0.05)
         except Exception:
-            delay_non = wait_non
+            try:
+                due_non = (
+                    pd.Timestamp(lab).floor("min")
+                    + pd.Timedelta(minutes=1)
+                    + pd.Timedelta(seconds=wait_non)
+                ).to_pydatetime()
+                delay_non = max(0.05, (due_non - datetime.now()).total_seconds())
+            except Exception:
+                delay_non = wait_non
 
         try:
             self._emit(
@@ -1055,7 +1122,7 @@ class RtWatchlistM1ApiPoller:
         """
         15:30 단일가 체결 틱 → **NXT 종목만** 즉시 완성15 평가.
 
-        비NXT는 공식 1분 대기(최대 10분) 경로를 쓴다.
+        비NXT는 공식 1분 대기(최대 5분) 후 틱 합성 경로를 쓴다.
         """
         try:
             if not self._last_minute_from_ticks_enabled():
@@ -2099,7 +2166,7 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     pass
 
-                # 말분: 15:19는 NXT=틱 즉시 / 비NXT=공식 최대10분 후 틱 백업.
+                # 말분: 15:19·15:30 비NXT=공식 최대5분 후 틱 합성 백업.
                 # 그 외 공식 우선이면 공식 REST 주경로 + 틱 보조(quiet 없음).
                 # 레거시(공식 OFF)만 :00 틱말분 주경로(+quiet).
                 try:
@@ -2123,7 +2190,7 @@ class RtWatchlistM1ApiPoller:
                                     f"ℹ️ [M1Poll] 15:19 분기 "
                                     f"NXT틱즉시={len(nxt_c)} "
                                     f"비NXT공식대기={len(non_c)} "
-                                    f"(한도 {self._eod_official_wait_max_sec():.0f}s)"
+                                    f"(한도 {self._official_wait_max_sec_for_lab(closed_lab):.0f}s)"
                                 )
                             except Exception:
                                 pass
@@ -2177,7 +2244,7 @@ class RtWatchlistM1ApiPoller:
                     continue
 
                 kind: RoundKind = "head" if need_head else "last"
-                # head와 last가 같은 분에 겹치지 않음(13 vs 14). 동시 True면 head 우선.
+                # head(:13 / 동시호가직전 :18)와 last(:14 / :19)는 서로 다른 분 — 겹치지 않음
                 if need_head and need_last_official:
                     kind = "head"
 
@@ -3652,7 +3719,7 @@ class RtWatchlistM1ApiPoller:
                     nk
                 ):
                     defer = False
-                # 15:19·15:30 비NXT: 공식 대기 백업 타이머에 맡김(최대 10분)
+                # 15:19·15:30 비NXT: 공식 대기 백업 타이머에 맡김(최대 5분)
                 elif self._is_eod_extended_official_wait_lab(closed_lab):
                     defer = True
             except Exception:

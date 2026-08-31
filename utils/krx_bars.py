@@ -700,11 +700,11 @@ def is_slot_head_complete_m1_open(
     open_ts: Union[pd.Timestamp, datetime, str],
 ) -> bool:
     """
-    닫힌 1분봉이 슬롯 **앞구간(공식 head)의 마지막 분**인지.
+    닫힌 1분봉이 슬롯 **head catchup** 을 시작할 시각인지.
 
-    이 시점에 head 전 구간이 닫혀 일괄 ka10080 조회를 시작한다.
-    - 일반: ``minute % 15 == 13``
-    - 동시호가 직전: ``continuous_end - 2분``
+    벽시계 :00 직후 head soft catchup (슬롯 완성 **1분 전**).
+    - 일반: ``minute % 15 == 13`` (09:13 닫힘 → 09:14:00)
+    - 동시호가 직전(15:15 등): ``continuous_end - 2분`` (15:18 닫힘 → **15:19:00**)
     - 종가 단일가: False
     """
     try:
@@ -713,12 +713,13 @@ def is_slot_head_complete_m1_open(
             return False
         h = _hours_for_ts(t)
         hm = int(t.hour) * 60 + int(t.minute)
-        if hm == h.continuous_end_minutes - 2:
-            return True
         if hm == h.close_minutes:
             return False
         if hm < h.open_minutes or hm > h.continuous_end_minutes - 1:
             return False
+        # 동시호가 직전 잔여봉: 15:18 닫힘(벽 15:19)에 head — 말분(15:19)과 분리
+        if hm == h.continuous_end_minutes - 2 and hm >= h.pre_auction_slot_minutes:
+            return True
         if hm >= h.pre_auction_slot_minutes:
             return False
         return (int(t.minute) % 15) == 13

@@ -3698,9 +3698,15 @@ class DataManagerV2:
         except: return pd.DataFrame()
 
     def fetch_nxt_status(self, code, token):
-        """ka10100으로 NXT 거래가능 여부(``nxtEnable == 'Y'``)를 조회합니다."""
+        """
+        ka10100으로 NXT 거래가능 여부를 조회합니다.
+
+        Returns:
+            True/False — 응답에서 명시적으로 판별된 경우
+            None — HTTP·파싱 실패 또는 필드 부재(캐시에 '불가'로 넣지 말 것)
+        """
         if not token:
-            return False
+            return None
         try:
             from utils.normalization import canonical_stock_code
 
@@ -3709,9 +3715,9 @@ class DataManagerV2:
             try:
                 nk = str(code or "").split("_")[0].zfill(6)
             except Exception:
-                return False
+                return None
         if len(nk) != 6:
-            return False
+            return None
         try:
             res = requests.post(
                 f"{config.URL}/api/dostk/stkinfo",
@@ -3724,19 +3730,13 @@ class DataManagerV2:
                 timeout=5,
             )
             if res.status_code != 200:
-                return False
+                return None
             data = res.json() if res is not None else {}
-            if not isinstance(data, dict):
-                return False
-            # 필드명 변형 대비
-            for key in ("nxtEnable", "nxt_enable", "nxtYn", "nxt_yn"):
-                v = data.get(key)
-                if v is None:
-                    continue
-                return str(v).strip().upper() in ("Y", "1", "TRUE")
+            from core.nxt_eligibility_service import parse_nxt_enable_from_ka10100_payload
+
+            return parse_nxt_enable_from_ka10100_payload(data)
         except Exception:
-            pass
-        return False
+            return None
 
     def prepare_volume_profiles(self, monitor_codes, token, bars_data, volume_profiles, min_volume_profiles):
         """

@@ -169,7 +169,7 @@ def test_official_m1_poll_deadline_is_fixed_after_close() -> None:
 
 
 def test_pre_auction_last_m1_schedules_tick_first() -> None:
-    """15:19 NXT 즉시평가 예약(직접 호출) · 비NXT eod 한도 600초."""
+    """15:19 NXT 즉시평가 예약(직접 호출) · 비NXT 동시호가 직전 한도 300초(5분)."""
     from utils.krx_bars import is_pre_auction_last_m1_open
 
     assert is_pre_auction_last_m1_open(pd.Timestamp("2026-08-27 15:19:00")) is True
@@ -180,6 +180,7 @@ def test_pre_auction_last_m1_schedules_tick_first() -> None:
         settings={
             "realtime_15m_last_minute_from_ticks": True,
             "realtime_15m_eval_on_official_last_m1": True,
+            "realtime_pre_auction_official_wait_max_sec": 300.0,
             "realtime_eod_official_wait_max_sec": 600.0,
         },
         _active_stream_codes=["377300", "457190"],
@@ -190,11 +191,12 @@ def test_pre_auction_last_m1_schedules_tick_first() -> None:
     )
     poller = RtWatchlistM1ApiPoller(app, log=msgs.append)
     lab = pd.Timestamp("2026-08-27 15:19:00")
-    # eod 공식 한도 = 10분
+    # 15:19 비NXT 공식 한도 = 5분
     deadline = poller._last_m1_official_poll_deadline(lab, 2)
     close_wall = lab.floor("min") + pd.Timedelta(minutes=1)
     delta = (pd.Timestamp(deadline) - close_wall).total_seconds()
-    assert abs(delta - 600.0) < 0.01
+    assert abs(delta - 300.0) < 0.01
+    assert poller._pre_auction_official_wait_max_sec() == 300.0
 
     poller._schedule_tick_tail_immediate_pre_auction(["377300", "457190"], lab)
     assert any("NXT 틱말분 즉시평가" in m for m in msgs)
@@ -203,17 +205,26 @@ def test_pre_auction_last_m1_schedules_tick_first() -> None:
     assert msgs == []
 
 
-def test_eod_deadline_caps_at_10_minutes() -> None:
+def test_eod_deadline_defaults_to_five_minutes() -> None:
+    app = SimpleNamespace(
+        settings={},
+        _active_stream_codes=[],
+    )
+    poller = RtWatchlistM1ApiPoller(app, log=None)
+    assert poller._eod_official_wait_max_sec() == 300.0
+    lab30 = pd.Timestamp("2026-08-27 15:30:00")
+    d = poller._last_m1_official_poll_deadline(lab30)
+    close_wall = lab30.floor("min") + pd.Timedelta(minutes=1)
+    assert abs((pd.Timestamp(d) - close_wall).total_seconds() - 300.0) < 0.01
+
+
+def test_eod_deadline_caps_at_ten_minutes() -> None:
     app = SimpleNamespace(
         settings={"realtime_eod_official_wait_max_sec": 9999.0},
         _active_stream_codes=[],
     )
     poller = RtWatchlistM1ApiPoller(app, log=None)
     assert poller._eod_official_wait_max_sec() == 600.0
-    lab30 = pd.Timestamp("2026-08-27 15:30:00")
-    d = poller._last_m1_official_poll_deadline(lab30)
-    close_wall = lab30.floor("min") + pd.Timedelta(minutes=1)
-    assert abs((pd.Timestamp(d) - close_wall).total_seconds() - 600.0) < 0.01
 
 
 def test_official_m1_gui_log_ok_not_post_after_official_claim() -> None:

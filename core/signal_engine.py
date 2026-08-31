@@ -597,11 +597,13 @@ class SignalEngine:
 
         불가·미조회는 False → 15:30은 next_open, 15:15는 동시호가 시장가(모의와 동일).
         """
-        if not self._use_nxt_sor_touch_orders():
-            return False
         try:
             svc = getattr(self.app, "nxt_eligibility_service", None)
             if svc is None:
+                return False
+            if hasattr(svc, "code_uses_nxt_touch"):
+                return bool(svc.code_uses_nxt_touch(code, fetch_if_unknown=True))
+            if not self._use_nxt_sor_touch_orders():
                 return False
             return bool(svc.is_nxt_tradable(code, fetch_if_unknown=True))
         except Exception:

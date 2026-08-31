@@ -1435,10 +1435,17 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
-            '장마감 공식대기 한도',
+            '15:19 공식대기 한도',
+            'realtime_pre_auction_official_wait_max_sec',
+            '초',
+            '15:19 비NXT: 공식 1분 대기 상한(기본 300=5분). 초과 시 틱말분 합성 평가',
+        )
+        add_param_row(
+            strat_f,
+            '15:30 공식대기 한도',
             'realtime_eod_official_wait_max_sec',
             '초',
-            '15:19·15:30 비NXT: 공식 1분 대기 상한(최대 600=10분). NXT는 틱 즉시',
+            '15:30 비NXT: 공식 1분 대기 상한(기본 300=5분). 초과 시 틱말분 합성 평가',
         )
         add_param_row(
             strat_f,
