@@ -241,12 +241,24 @@ class RestAuthRetryService:
                 except Exception:
                     pass
 
+            def _resume_monitoring_after_restart() -> None:
+                try:
+                    fn = getattr(self.app, "try_resume_monitoring_after_restart", None)
+                    if callable(fn):
+                        fn()
+                except Exception:
+                    pass
+
             try:
                 run_ui = getattr(self.app, "run_on_ui_thread", None)
                 if callable(run_ui):
                     run_ui(_schedule_first_sync, 2000)
+                    if bool(getattr(self.app, "_restart_resume_monitoring", False)):
+                        run_ui(_resume_monitoring_after_restart, 3500)
                 else:
                     self.app.root.after(2000, _schedule_first_sync)
+                    if bool(getattr(self.app, "_restart_resume_monitoring", False)):
+                        self.app.root.after(3500, _resume_monitoring_after_restart)
             except Exception:
                 pass
 

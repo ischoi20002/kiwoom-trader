@@ -1310,34 +1310,13 @@ class MonitorTab:
             command=lambda: self._manual_selected_order("sell"),
         ).pack(side=tk.LEFT, padx=0)
 
-        # 실시간 감시 시작/중단과 동일 폭(폰트 기준 문자 단위). 한글·이모지 여유.
-        _monitor_ctrl_btn_w = 20
-        self.btn_select = ttk.Button(
-            self.ctrl_frame,
-            text="일일 감시목록 선정",
-            width=_monitor_ctrl_btn_w,
-            style="Action.TButton",
-            command=self.start_selection_thread,
-            state=tk.DISABLED,
-        )
-        self.btn_monitor_toggle = ttk.Button(
-            self.ctrl_frame,
-            text="▶️ 실시간 감시 시작",
-            width=_monitor_ctrl_btn_w,
-            command=self.app.toggle_monitoring,
-            style="Accent.TButton",
-        )
         self.lbl_monitor_status = ttk.Label(
             self.ctrl_frame,
             text="상태: 대기 중",
             font=("Malgun Gothic", 10),
             foreground=self.app.colors["primary"],
         )
-        # 오른쪽 묶음: 읽기 순서(왼→오) = 상태 | 실시간 감시 | 일일 감시목록 선정
-        # side=RIGHT 는 먼저 pack 한 위젯이 부모의 오른쪽에 붙고, 다음은 그 왼쪽에 이어 붙음.
-        # 실시간 감시 ON 시 장마감 후 연속전환(중단→선정→재시작)은 ContinuousMonitorService 가 자동 수행.
-        self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
-        self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 8))
+        # 감시 시작·일일 선정 버튼은 대시보드 탭으로 이전. 상태만 실시간 감시 탭에 표시.
         self.lbl_monitor_status.pack(side=tk.RIGHT, padx=(4, 0))
 
         self.lbl_headwind_caution = ttk.Label(self.ctrl_frame, text="⚠️ 시장 역풍 - 매수 신호가 일시 정지되었습니다", 
@@ -1558,11 +1537,22 @@ class MonitorTab:
         except Exception:
             pass
 
+    def _selection_button(self):
+        """일일 선정 버튼(대시보드 탭에 위치)."""
+        try:
+            dt = getattr(self.app, "dashboard_tab", None)
+            if dt is not None:
+                return getattr(dt, "btn_select", None)
+        except Exception:
+            pass
+        return None
+
     def start_selection_thread(self, auto_confirm: bool = False) -> None:
         """일일 감시 목록 선정을 백그라운드에서 실행합니다."""
         try:
-            if getattr(self, "btn_select", None) is not None:
-                self.btn_select.config(state=tk.DISABLED)
+            btn = self._selection_button()
+            if btn is not None:
+                btn.config(state=tk.DISABLED)
         except Exception:
             pass
         threading.Thread(
@@ -1682,8 +1672,9 @@ class MonitorTab:
                 except Exception:
                     pass
                 try:
-                    if getattr(self, "btn_select", None) is not None:
-                        self.btn_select.config(state=tk.NORMAL)
+                    btn = self._selection_button()
+                    if btn is not None:
+                        btn.config(state=tk.NORMAL)
                 except Exception:
                     pass
             try:

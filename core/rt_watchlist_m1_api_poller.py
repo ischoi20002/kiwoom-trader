@@ -473,12 +473,12 @@ class RtWatchlistM1ApiPoller:
         try:
             v = float(
                 self._settings().get(
-                    "realtime_15m_tick_tail_backup_after_close_sec", 40.0
+                    "realtime_15m_tick_tail_backup_after_close_sec", 50.0
                 )
             )
             return max(5.0, min(v, 58.0))
         except (TypeError, ValueError):
-            return 40.0
+            return 50.0
 
     def _pre_auction_official_wait_max_sec(self) -> float:
         """
@@ -614,7 +614,7 @@ class RtWatchlistM1ApiPoller:
         """
         공식 말분 우선: not_ready 재시도·틱 백업 공통 벽시계 한도.
 
-        - 일반 말분: ``분 마감 + realtime_15m_tick_tail_backup_after_close_sec`` (기본 40초)
+        - 일반 말분: ``분 마감 + realtime_15m_tick_tail_backup_after_close_sec`` (기본 50초)
         - 15:19: ``분 마감 + realtime_pre_auction_official_wait_max_sec`` (기본 5분)
         - 15:30: ``분 마감 + realtime_eod_official_wait_max_sec`` (기본 5분)
         """
@@ -840,7 +840,7 @@ class RtWatchlistM1ApiPoller:
         self, codes: List[str], closed_lab: pd.Timestamp
     ) -> None:
         """
-        공식 말분 우선 모드: 슬롯 마감+N초(기본 40) 후 미평가 종목만 틱 보조.
+        공식 말분 우선 모드: 슬롯 마감+N초(기본 50) 후 미평가 종목만 틱 보조.
 
         quiet를 걸지 않아 공식 조회가 ``:00`` 직후 바로 시작된다.
         이미 공식으로 평가된 종목은 ``_job_tick_tail_eval`` claim 에서 스킵.
@@ -2557,7 +2557,7 @@ class RtWatchlistM1ApiPoller:
         """
         말분 공식1분 not_ready 종목별 추가 대기(초) — 레거시 틱 주경로용.
 
-        공식 우선 모드는 ``_last_m1_official_poll_deadline``(마감+40초)만 사용한다.
+        공식 우선 모드는 ``_last_m1_official_poll_deadline``(마감+50초)만 사용한다.
         """
         try:
             v = float(

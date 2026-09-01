@@ -12,6 +12,8 @@ class DashboardTab:
         self.btn_sync: Optional[ttk.Button] = None
         self.btn_watchlist: Optional[ttk.Button] = None
         self.btn_server_switch: Optional[ttk.Button] = None
+        self.btn_select: Optional[ttk.Button] = None
+        self.btn_monitor_toggle: Optional[ttk.Button] = None
         self.lbl_mobile_api: Optional[ttk.Label] = None
         self.lbl_mobile_warn: Optional[ttk.Label] = None
         self.ent_mobile_public_url: Optional[ttk.Entry] = None
@@ -102,6 +104,46 @@ class DashboardTab:
             command=lambda: self._call_virtual_tab("_toggle_environment"),
         )
         self.btn_server_switch.pack(side=tk.LEFT, padx=(4, 0))
+
+        self.btn_restart = ttk.Button(
+            ops_btns,
+            text="재시작",
+            width=11,
+            command=self._on_restart_clicked,
+        )
+        self.btn_restart.pack(side=tk.LEFT, padx=(8, 0))
+
+        # --- 실시간 감시 제어 (실시간 감시 탭에서 이전) ---
+        ops_monitor = ttk.Frame(ops)
+        ops_monitor.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(
+            ops_monitor,
+            text="실시간 감시 · 일일 선정",
+            font=("Malgun Gothic", 9),
+            foreground=self.app.colors.get("secondary", "#787c99"),
+        ).pack(side=tk.LEFT, padx=(0, 14))
+
+        monitor_btns = ttk.Frame(ops_monitor)
+        monitor_btns.pack(side=tk.RIGHT)
+        _monitor_ctrl_btn_w = 20
+        self.btn_select = ttk.Button(
+            monitor_btns,
+            text="일일 감시목록 선정",
+            width=_monitor_ctrl_btn_w,
+            style="Action.TButton",
+            command=self._start_daily_selection,
+            state=tk.DISABLED,
+        )
+        self.btn_monitor_toggle = ttk.Button(
+            monitor_btns,
+            text="▶️ 실시간 감시 시작",
+            width=_monitor_ctrl_btn_w,
+            command=self.app.toggle_monitoring,
+            style="Accent.TButton",
+        )
+        # 오른쪽 정렬: 읽기 순서(왼→오) = 실시간 감시 | 일일 감시목록 선정
+        self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
+        self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 0))
 
         # --- 모바일 읽기 전용 현황 API ---
         mobile = ttk.LabelFrame(
@@ -254,6 +296,36 @@ class DashboardTab:
                 pass
         except Exception:
             pass
+
+    def _start_daily_selection(self) -> None:
+        """일일 감시목록 선정 — monitor_tab 선정 로직을 호출합니다."""
+        try:
+            mt = getattr(self.app, "monitor_tab", None)
+            if mt is None or not hasattr(mt, "start_selection_thread"):
+                messagebox.showerror(
+                    "오류",
+                    "실시간 감시 탭이 아직 초기화되지 않았습니다.",
+                    parent=self.parent,
+                )
+                return
+            mt.start_selection_thread()
+        except Exception as e:
+            try:
+                messagebox.showerror("오류", str(e), parent=self.parent)
+            except Exception:
+                pass
+
+    def _on_restart_clicked(self) -> None:
+        """대시보드 재시작 버튼 — 감시 상태를 유지한 채 GUI만 재기동."""
+        try:
+            if hasattr(self.app, "restart_gui"):
+                self.app.restart_gui()
+                return
+        except Exception as e:
+            try:
+                messagebox.showerror("재시작", str(e), parent=self.parent)
+            except Exception:
+                pass
 
     def _copy_mobile_public_url(self) -> None:
         """공개 URL을 클립보드에 복사하고 settings에 저장합니다."""

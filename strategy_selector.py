@@ -2016,6 +2016,19 @@ def resolve_transition_gate_for_live(
         except Exception:
             pass
         end_s = as_of_dt.strftime("%Y-%m-%d")
+        try:
+            from utils.regime_gate_cache import load_regime_gate_cache, save_regime_gate_cache
+
+            cached = load_regime_gate_cache(as_of=end_s, settings=settings)
+            if cached:
+                result.update(cached)
+                log(
+                    f"ℹ️ [Transition] {end_s} 레짐 캐시 재사용 "
+                    f"(regime={cached.get('regime', 'OFF')}, FDR 재조회 생략)"
+                )
+                return result
+        except Exception:
+            pass
         start_s = (as_of_dt - timedelta(days=30)).strftime("%Y-%m-%d")
         codes = resolve_universe_codes(settings, logger_callback=log)
         if not codes:
@@ -2113,6 +2126,12 @@ def resolve_transition_gate_for_live(
                 "as_of": end_s,
             }
         )
+        try:
+            from utils.regime_gate_cache import save_regime_gate_cache
+
+            save_regime_gate_cache(as_of=end_s, settings=settings, payload=result)
+        except Exception:
+            pass
         return result
     except Exception as ex:
         try:

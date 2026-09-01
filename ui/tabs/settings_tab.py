@@ -1431,7 +1431,7 @@ class SettingsTab:
             '틱말분 백업(마감후)',
             'realtime_15m_tick_tail_backup_after_close_sec',
             '초',
-            '공식 우선: 슬롯 마감+N초까지 공식 평가 대기. 미완 종목만 틱 합성 시작. 기본 40',
+            '공식 우선: 슬롯 마감+N초까지 공식 평가 대기. 미완 종목만 틱 합성 시작. 기본 50',
         )
         add_param_row(
             strat_f,

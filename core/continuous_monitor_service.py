@@ -584,6 +584,18 @@ class ContinuousMonitorService:
             return True
         return False
 
+    def mark_eod_cycle_consumed(self, day_d: Optional[date] = None) -> None:
+        """
+        당일 장마감 선정 사이클을 이미 수행한 것으로 표시한다.
+
+        GUI 재시작으로 감시만 복원할 때, 장마감 이후 tick 이 선정을 재실행하지 않게 한다.
+        """
+        try:
+            d = day_d if day_d is not None else date.today()
+            self._last_cycle_trading_day = self._trading_day_key(d)
+        except Exception:
+            pass
+
     def ms_until_auto_start(self, now: Optional[datetime] = None) -> int:
         """
         다음 자동 감시 시작까지 밀리초.

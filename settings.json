@@ -98,7 +98,7 @@
     "realtime_m1_head_fill_missing_15m_max_bars": 8,
     "realtime_m1_compose_overwrite_existing_15m": true,
     "realtime_15m_tick_tail_wait_sec": 1.5,
-    "realtime_15m_tick_tail_backup_after_close_sec": 40.0,
+    "realtime_15m_tick_tail_backup_after_close_sec": 50.0,
     "realtime_15m_tick_tail_backup_grace_sec": 2.5,
     "realtime_pre_auction_official_wait_max_sec": 300.0,
     "realtime_eod_official_wait_max_sec": 300.0,

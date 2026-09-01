@@ -76,9 +76,65 @@ class RegimeDisplayService:
         try:
             root = getattr(self.app, "root", None)
             if root is not None:
-                root.after(2500, lambda: self.refresh_async(reason="startup"))
+                root.after(2500, self._startup_refresh)
         except Exception:
             pass
+
+    def _startup_refresh(self) -> None:
+        """기동 시 캐시가 있으면 즉시 표시하고, 없을 때만 FDR 재계산."""
+        try:
+            if self._try_apply_disk_cache(reason="startup"):
+                return
+        except Exception:
+            pass
+        self.refresh_async(reason="startup")
+
+    def _try_apply_disk_cache(self, *, reason: str) -> bool:
+        """
+        디스크 캐시가 현재 완료 거래일과 맞으면 라벨만 즉시 반영한다.
+
+        Returns
+        -------
+        bool
+            캐시를 적용했으면 True (재계산 생략).
+        """
+        st = dict(getattr(self.app, "settings", None) or {})
+        if not bool(st.get("use_transition_gate", False)):
+            return False
+
+        as_of = self._completed_asof_date()
+        as_of_s = as_of.strftime("%Y-%m-%d")
+        try:
+            from utils.regime_gate_cache import load_regime_gate_cache
+
+            cached = load_regime_gate_cache(as_of=as_of_s, settings=st)
+        except Exception:
+            return False
+        if not cached:
+            return False
+
+        reg = str(cached.get("regime", "OFF")).strip().upper()
+        if reg not in ("OFF", "TRANSITION", "HARD"):
+            return False
+
+        slots_a = int(cached.get("slots_a", 0) or 0)
+        slots_b = int(cached.get("slots_b", 0) or 0)
+        detail = ""
+        if reg == "TRANSITION":
+            detail = f"감시 {slots_a}/{slots_b}"
+        elif reg == "HARD":
+            detail = "신규 차단"
+
+        apply_on = self._apply_on_from_data_asof(as_of_s)
+        payload = {
+            "regime_key": reg,
+            "as_of": as_of_s,
+            "apply_on": apply_on,
+            "detail": detail,
+            "reason": "startup_cache",
+        }
+        self._on_refresh_done(payload)
+        return True
 
     def _eod_buffer_minutes(self) -> int:
         try:
@@ -318,12 +374,14 @@ class RegimeDisplayService:
 
             self._apply_label(key, as_of, apply_on, detail)
 
-            if reason == "startup":
+            if reason in ("startup", "startup_cache"):
                 try:
                     show_d = apply_on or as_of
+                    suffix = " — 캐시 재사용" if reason == "startup_cache" else ""
                     self.log(
                         f"📊 [레짐표시] B 추세 레짐={self._REGIME_LABELS.get(key, key)}"
                         + (f" (적용 {show_d})" if show_d else "")
+                        + suffix
                     )
                 except Exception:
                     pass

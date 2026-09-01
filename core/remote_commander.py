@@ -95,15 +95,20 @@ class RemoteCommander:
             self.log(f"[Error] [Remote] 업데이트 중 치명적 오류: {e}")
 
     def _handle_remote_restart(self):
-        """단순 재시작 실행"""
+        """단순 재시작 실행 (현재 감시 상태 유지)."""
         self.log("[Remote] 프로그램 재시작 시퀀스 시작...")
         try:
-            restart_script = self._resolve_restart_script()
-            if restart_script:
-                subprocess.Popen(
-                    ["cmd", "/c", restart_script, "--auto-start"], shell=True
+            from utils.gui_restart import is_monitoring_active, spawn_gui_restart
+
+            monitoring = is_monitoring_active(self.app)
+            if spawn_gui_restart(resume_monitoring=monitoring):
+                self.log(
+                    f"[Ok] [Remote] 재시작 예약 (감시: {'ON' if monitoring else 'OFF'})"
                 )
-                sys.exit(0)
+                try:
+                    self.app.root.after(500, self.app.on_close)
+                except Exception:
+                    sys.exit(0)
             else:
                 self.log(
                     "[Error] [Remote] run_k_trader.bat(c:\\k-trader)를 찾을 수 없습니다."

@@ -112,7 +112,7 @@ DEFAULT_SETTINGS = {
     "realtime_m1_compose_overwrite_existing_15m": True,
     "realtime_15m_tick_tail_wait_sec": 1.5,
     # 공식 우선: 슬롯 마감 후 이 초까지 공식 평가 대기, 미완만 틱말분 백업
-    "realtime_15m_tick_tail_backup_after_close_sec": 40.0,
+    "realtime_15m_tick_tail_backup_after_close_sec": 50.0,
     "realtime_15m_tick_tail_backup_grace_sec": 2.5,  # 구키(미사용, 호환 잔존)
     # 15:19 비NXT: 공식 1분 대기 상한(초). 기본 300=5분
     "realtime_pre_auction_official_wait_max_sec": 300.0,

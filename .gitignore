@@ -41,6 +41,8 @@ data/universe_marcap_daily/
 !kodex_200.csv
 !settings.json
 bars_cache.json
+regime_gate_cache.json
+gui_restart_state.json
 *.png
 
 # 로컬 임시·디버그·SQLite WAL

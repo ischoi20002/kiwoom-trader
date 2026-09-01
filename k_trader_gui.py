@@ -484,7 +484,21 @@ class KiwoomApp:
         # 비메인 스레드 → 메인 Tk 루프 작업 큐 (root.after 를 워커에서 직접 호출하지 않음)
         self._ui_call_queue: queue.Queue = queue.Queue()
         self._ui_call_drain_after_id: Optional[Any] = None
-        self.auto_start = auto_start
+        try:
+            from utils.gui_restart import read_and_clear_restart_state
+
+            _restart_state = read_and_clear_restart_state()
+        except Exception:
+            _restart_state = None
+        if _restart_state is not None:
+            auto_start = bool(_restart_state.get("resume_monitoring", False))
+            self._suppress_auto_monitor_start = not auto_start
+            self._restart_resume_monitoring = auto_start
+        else:
+            self._suppress_auto_monitor_start = False
+            self._restart_resume_monitoring = False
+        self._restart_resume_started = False
+        self.auto_start = bool(auto_start)
         self.root.title(f"K-Trader v{APP_VERSION} [Remote Monitoring]")
         self.root.geometry("1400x900")
         try:
@@ -938,61 +952,83 @@ class KiwoomApp:
         # RemoteCommander는 인증 성공 후 RestAuthRetryService에서 1회만 기동합니다.
         # 앱이 켜져 있으면 거래일마다 개장 N분 전(기본 25분)에 감시를 자동 시작.
         try:
-            cms = getattr(self, "continuous_monitor_service", None)
-            if cms is not None:
-                cms.arm()
-                ms = int(cms.ms_until_auto_start())
-                hm = cms._auto_start_hhmm_str()
-                in_morning_window = ms <= 0
-                mid_day_catchup = False
-                try:
-                    mid_day_catchup = bool(
-                        self.auto_start
-                        and (not in_morning_window)
-                        and cms.is_before_eod_on_trading_day()
-                    )
-                except Exception:
-                    mid_day_catchup = bool(self.auto_start)
-                if in_morning_window or mid_day_catchup:
-                    self.log(
-                        f"[Auto] 장전 시작 시각({hm}) 경과 — "
-                        "실시간 감시를 곧 시작합니다..."
-                    )
-                    if in_morning_window:
-                        self.root.after(1000, cms.request_morning_start)
-                    else:
-                        self.root.after(
-                            1000, self.ensure_fresh_selection_then_start
+            if bool(getattr(self, "_suppress_auto_monitor_start", False)):
+                self.log(
+                    "[Auto] 재시작(감시 OFF) — 장전·자동 감시 시작을 건너뜁니다."
+                )
+            else:
+                cms = getattr(self, "continuous_monitor_service", None)
+                resume_after_restart = bool(
+                    getattr(self, "_restart_resume_monitoring", False)
+                )
+                monitor_scheduled = False
+                if cms is not None:
+                    cms.arm()
+                    if resume_after_restart:
+                        self.log(
+                            "[Auto] 재시작(감시 ON) — 인증 완료 후 실시간 감시를 복원합니다."
                         )
-                else:
-                    try:
-                        mins = int(cms._minutes_before_open())
-                    except Exception:
-                        mins = 25
-                    self.log(
-                        f"[Auto] 연속 스케줄 활성화 — "
-                        f"감시 시작 {hm} (개장 {mins}분 전, 약 {ms // 1000}초 후), "
-                        f"장마감 선정 {cms._format_eod_hhmm()}"
-                    )
-                    try:
-                        wait_txt = f"상태: 대기 중 (감시 시작 {hm})"
-                        if getattr(self, "lbl_monitor_status", None) is not None:
-                            self.lbl_monitor_status.config(
-                                text=wait_txt,
-                                foreground=self.colors.get("primary", "#88C0D0"),
+                    else:
+                        ms = int(cms.ms_until_auto_start())
+                        hm = cms._auto_start_hhmm_str()
+                        in_morning_window = ms <= 0
+                        mid_day_catchup = False
+                        try:
+                            mid_day_catchup = bool(
+                                self.auto_start
+                                and (not in_morning_window)
+                                and cms.is_before_eod_on_trading_day()
                             )
-                        if getattr(self, "status_label", None) is not None:
-                            self.status_label.config(
-                                text=wait_txt,
-                                foreground=self.colors.get("primary", "#88C0D0"),
+                        except Exception:
+                            mid_day_catchup = bool(self.auto_start)
+                        if in_morning_window or mid_day_catchup:
+                            monitor_scheduled = True
+                            self.log(
+                                f"[Auto] 장전 시작 시각({hm}) 경과 — "
+                                "실시간 감시를 곧 시작합니다..."
                             )
-                    except Exception:
-                        pass
-            elif self.auto_start:
-                self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
-                self.root.after(8000, self.ensure_fresh_selection_then_start)
+                            if in_morning_window:
+                                self.root.after(1000, cms.request_morning_start)
+                            else:
+                                self.root.after(
+                                    1000, self.ensure_fresh_selection_then_start
+                                )
+                        else:
+                            try:
+                                mins = int(cms._minutes_before_open())
+                            except Exception:
+                                mins = 25
+                            self.log(
+                                f"[Auto] 연속 스케줄 활성화 — "
+                                f"감시 시작 {hm} (개장 {mins}분 전, 약 {ms // 1000}초 후), "
+                                f"장마감 선정 {cms._format_eod_hhmm()}"
+                            )
+                            try:
+                                wait_txt = f"상태: 대기 중 (감시 시작 {hm})"
+                                if getattr(self, "lbl_monitor_status", None) is not None:
+                                    self.lbl_monitor_status.config(
+                                        text=wait_txt,
+                                        foreground=self.colors.get("primary", "#88C0D0"),
+                                    )
+                                if getattr(self, "status_label", None) is not None:
+                                    self.status_label.config(
+                                        text=wait_txt,
+                                        foreground=self.colors.get("primary", "#88C0D0"),
+                                    )
+                            except Exception:
+                                pass
+                if (
+                    self.auto_start
+                    and not monitor_scheduled
+                    and not resume_after_restart
+                ):
+                    monitor_scheduled = True
+                    self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
+                    self.root.after(8000, self.ensure_fresh_selection_then_start)
         except Exception:
-            if self.auto_start:
+            if self.auto_start and not bool(
+                getattr(self, "_suppress_auto_monitor_start", False)
+            ) and not bool(getattr(self, "_restart_resume_monitoring", False)):
                 self.log("[Auto] 8초 후 실시간 감시를 자동으로 시작합니다...")
                 self.root.after(8000, self.ensure_fresh_selection_then_start)
         
@@ -1121,7 +1157,8 @@ class KiwoomApp:
 
         # Compatibility links
         self.tree_monitor = self.monitor_tab.tree_monitor
-        self.btn_monitor_toggle = self.monitor_tab.btn_monitor_toggle
+        self.btn_monitor_toggle = self.dashboard_tab.btn_monitor_toggle
+        self.btn_select = self.dashboard_tab.btn_select
         self.lbl_monitor_status = self.monitor_tab.lbl_monitor_status
         
         self.log("[System] 화면 구성 및 GUI 모듈 초기화 완료")
@@ -1503,8 +1540,8 @@ class KiwoomApp:
         if df_200 is not None: 
             self.log(f"[Data] 감시 대상 {len(df_200)}개 종목 로드 완료")
             # [v4.5.2] 종목 선정 버튼 활성화
-            if hasattr(self, "monitor_tab") and hasattr(self.monitor_tab, "btn_select"):
-                self.root.after(0, lambda: self.monitor_tab.btn_select.config(state=tk.NORMAL))
+            if getattr(self, "btn_select", None) is not None:
+                self.root.after(0, lambda: self.btn_select.config(state=tk.NORMAL))
 
     def _on_realtime_data_received(self, code, now_price, volume, trde_val, **kwargs):
         """
@@ -3366,6 +3403,82 @@ class KiwoomApp:
                     self.status_label.config(
                         text=wait_txt, foreground=self.colors["primary"]
                     )
+
+    def try_resume_monitoring_after_restart(self) -> None:
+        """재시작(감시 ON) 직후 — 인증 완료 뒤 실시간 감시를 복원한다."""
+        if not bool(getattr(self, "_restart_resume_monitoring", False)):
+            return
+        if bool(getattr(self, "_restart_resume_started", False)):
+            return
+        tc = getattr(self, "trading_controller", None)
+        if tc is not None and bool(getattr(tc, "is_monitoring", False)):
+            self._restart_resume_monitoring = False
+            return
+        self._restart_resume_started = True
+        self._restart_resume_monitoring = False
+        try:
+            cms = getattr(self, "continuous_monitor_service", None)
+            if cms is not None:
+                trade_day = cms._resolve_eod_trading_day(datetime.now())
+                if trade_day is not None:
+                    cms.mark_eod_cycle_consumed(trade_day)
+                    self.log(
+                        f"ℹ️ [재시작] {trade_day.strftime('%Y-%m-%d')} "
+                        "장마감 선정 재실행 방지 — 감시만 복원합니다."
+                    )
+        except Exception:
+            pass
+        try:
+            self.log("🔄 [재시작] 인증 완료 — 실시간 감시 복원을 시작합니다.")
+        except Exception:
+            pass
+        try:
+            self.ensure_fresh_selection_then_start()
+        except Exception as ex:
+            try:
+                self.log(f"⚠️ [재시작] 감시 복원 실패: {ex}")
+            except Exception:
+                pass
+
+    def restart_gui(self, *, confirm: bool = True) -> None:
+        """GUI를 재시작한다. 감시 중이었으면 감시 ON, 아니면 OFF 상태로 기동."""
+        from tkinter import messagebox
+
+        from utils.gui_restart import is_monitoring_active, spawn_gui_restart
+
+        monitoring = is_monitoring_active(self)
+        if confirm:
+            state_txt = "감시 ON" if monitoring else "감시 OFF"
+            if not messagebox.askyesno(
+                "프로그램 재시작",
+                f"K-Trader를 다시 시작합니다.\n\n"
+                f"현재 상태: {state_txt}\n"
+                f"재시작 후에도 {state_txt} 상태로 복원됩니다.\n\n"
+                "계속하시겠습니까?",
+                parent=self.root,
+            ):
+                return
+        if not spawn_gui_restart(resume_monitoring=monitoring):
+            try:
+                messagebox.showerror(
+                    "재시작 실패",
+                    "run_k_trader.bat 을 찾을 수 없습니다.",
+                    parent=self.root,
+                )
+            except Exception:
+                pass
+            return
+        try:
+            self.log(
+                "🔄 [재시작] 프로그램을 다시 시작합니다... "
+                f"(감시: {'ON' if monitoring else 'OFF'})"
+            )
+        except Exception:
+            pass
+        try:
+            self.root.after(500, self.on_close)
+        except Exception:
+            pass
 
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")
