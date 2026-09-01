@@ -90,13 +90,9 @@ class GuiUtils:
             is_main_thread = True
 
         if not is_main_thread:
-            # Tk 위젯 갱신은 메인 루프에서만 — 배출 예약만 넘깁니다.
-            try:
-                r = self.root
-                if r is not None:
-                    r.after(0, self._request_log_flush)
-            except Exception:
-                pass
+            # 백그라운드에서는 Tk를 전혀 호출하지 않습니다.
+            # 메인 스레드의 주기 폴러가 큐를 배출하므로, 여기서 root.after를
+            # 호출하면 메인 스레드가 portfolio.lock을 기다릴 때 교착될 수 있습니다.
             return
 
         self._request_log_flush()
