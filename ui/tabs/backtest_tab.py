@@ -603,6 +603,14 @@ class BacktestTab:
         """harvest_service.py 를 별도 콘솔에서 실행해 로컬 시세 DB를 갱신합니다."""
         try:
             import subprocess
+            import sys
+
+            from utils.server_mode_paths import project_root
+
+            root = project_root()
+            harvest_script = os.path.join(root, "harvest_service.py")
+            if not os.path.isfile(harvest_script):
+                raise FileNotFoundError(f"harvest_service.py 를 찾을 수 없습니다: {harvest_script}")
 
             creationflags = (
                 int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
@@ -610,7 +618,8 @@ class BacktestTab:
                 else 0
             )
             subprocess.Popen(
-                ["python", "harvest_service.py"],
+                [sys.executable, "-u", harvest_script],
+                cwd=root,
                 creationflags=creationflags,
             )
             try:
