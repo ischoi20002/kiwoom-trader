@@ -26,6 +26,21 @@ _MAX_TICK_SEALED_PER_CODE = 64
 _SealedTup = Tuple[Any, ...]
 
 
+def official_m1_retention_for_gap_fill(max_bars: Any) -> int:
+    """
+    최근 15분봉 보정 범위를 모두 재합성할 수 있는 공식 1분봉 보존량입니다.
+
+    슬롯당 15분에 경계·말분 재확인용 8분을 더하며, 설정 오류나 과도한
+    메모리 사용을 막기 위해 32~256분 범위로 제한합니다.
+    """
+    try:
+        bars = int(float(max_bars))
+    except (TypeError, ValueError):
+        bars = 8
+    bars = max(1, min(bars, 16))
+    return max(32, min((bars * 15) + 8, 256))
+
+
 def _floor_minute(ts: datetime) -> pd.Timestamp:
     """현재 분의 시작 시각(초·마이크로 0)."""
     try:
@@ -48,7 +63,7 @@ class RtTickM1Store:
         max_tick_sealed_per_code: int = _MAX_TICK_SEALED_PER_CODE,
     ) -> None:
         self._lock = RLock()
-        self._max_c = max(8, min(int(max_completed_per_code), 64))
+        self._max_c = max(8, min(int(max_completed_per_code), 256))
         self._max_tick_sealed = max(16, min(int(max_tick_sealed_per_code), 128))
         self._log = logger_callback
         # code -> {"completed": Deque[Tuple[pd.Timestamp, float, float, float, float, float]], ...}

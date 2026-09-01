@@ -92,12 +92,118 @@ class RtWatchlistM1ApiPoller:
         # 말분 공식1분 GUI 로그 집계(슬롯별) — 종목별 반복 방지
         self._official_m1_log_agg: Dict[str, Dict[str, Any]] = {}
         self._official_m1_log_lock = threading.Lock()
+        # 15분 gap-fill GUI 로그 집계 — 성공 종목별 로그 대신 라운드 요약 1회
+        self._gap_fill_log_agg: Dict[str, Dict[str, Any]] = {}
+        self._gap_fill_log_lock = threading.Lock()
 
     def _emit(self, msg: str) -> None:
         if self._log is None:
             return
         try:
             self._log(msg)
+        except Exception:
+            pass
+
+    def _note_gap_fill_gui_log(self, report: Dict[str, Any]) -> None:
+        """gap-fill 결과를 현재 15분 라운드로 모으고 실패 종목만 즉시 표시합니다."""
+        if self._log is None or not isinstance(report, dict):
+            return
+        try:
+            code = str(report.get("code") or "").zfill(6)
+            counts = {
+                "missing": len(report.get("filled_missing") or []),
+                "stub": len(report.get("filled_stub") or []),
+                "ow": len(report.get("filled_overwrite") or []),
+                "fail": len(report.get("failed") or []),
+            }
+            if sum(counts.values()) <= 0:
+                return
+            now = datetime.now()
+            slot_minute = (int(now.minute) // 15) * 15
+            round_key = now.replace(
+                minute=slot_minute, second=0, microsecond=0
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            slot_hm = round_key[11:16]
+        except Exception:
+            return
+
+        timer_to_cancel: Any = None
+        new_timer: Any = None
+        try:
+            with self._gap_fill_log_lock:
+                state = self._gap_fill_log_agg.get(round_key)
+                if state is None:
+                    state = {"codes": {}, "timer": None, "slot_hm": slot_hm}
+                    self._gap_fill_log_agg[round_key] = state
+                by_code = state.get("codes")
+                if not isinstance(by_code, dict):
+                    by_code = {}
+                    state["codes"] = by_code
+                # 같은 라운드에서 동일 종목이 재시도되면 최신 결과로 교체합니다.
+                by_code[code] = counts
+                timer_to_cancel = state.get("timer")
+                state["timer"] = None
+
+                def _flush(key: str = round_key) -> None:
+                    self._flush_gap_fill_gui_log(key)
+
+                new_timer = threading.Timer(6.0, _flush)
+                new_timer.daemon = True
+                state["timer"] = new_timer
+        except Exception:
+            return
+
+        if timer_to_cancel is not None:
+            try:
+                timer_to_cancel.cancel()
+            except Exception:
+                pass
+        if new_timer is not None:
+            try:
+                new_timer.start()
+            except Exception:
+                self._flush_gap_fill_gui_log(round_key)
+
+        if counts["fail"] > 0:
+            try:
+                failed_slots = ",".join(
+                    str(v)[11:16] for v in (report.get("failed") or [])
+                )
+                suffix = f" slots={failed_slots}" if failed_slots else ""
+                self._emit(
+                    f"⚠️ [M1Poll] 15m gap-fill 실패 {code} "
+                    f"fail={counts['fail']}{suffix}"
+                )
+            except Exception:
+                pass
+
+    def _flush_gap_fill_gui_log(self, round_key: str) -> None:
+        """대시보드에 gap-fill 라운드 합계를 한 줄로 출력합니다."""
+        state: Optional[Dict[str, Any]] = None
+        try:
+            with self._gap_fill_log_lock:
+                state = self._gap_fill_log_agg.pop(round_key, None)
+        except Exception:
+            state = None
+        if not state:
+            return
+        try:
+            by_code = state.get("codes")
+            if not isinstance(by_code, dict) or not by_code:
+                return
+            totals = {"missing": 0, "stub": 0, "ow": 0, "fail": 0}
+            for counts in by_code.values():
+                if not isinstance(counts, dict):
+                    continue
+                for key in totals:
+                    totals[key] += int(counts.get(key, 0) or 0)
+            prefix = "⚠️" if totals["fail"] > 0 else "ℹ️"
+            self._emit(
+                f"{prefix} [M1Poll] 15m gap-fill summary "
+                f"slot={state.get('slot_hm', '')} n={len(by_code)} "
+                f"missing={totals['missing']} stub={totals['stub']} "
+                f"ow={totals['ow']} fail={totals['fail']}"
+            )
         except Exception:
             pass
 
@@ -3244,11 +3350,7 @@ class RtWatchlistM1ApiPoller:
                 sl = getattr(self._app, "session_logger", None)
                 if sl is not None and hasattr(sl, "log"):
                     sl.log("m1_15m_gap_fill", dict(rep))
-            if n_miss or n_stub or n_ow:
-                self._emit(
-                    f"[M1Poll] 15m gap-fill {rep.get('code')} "
-                    f"missing={n_miss} stub={n_stub} ow={n_ow} fail={n_fail}"
-                )
+                self._note_gap_fill_gui_log(rep)
         except Exception:
             pass
 

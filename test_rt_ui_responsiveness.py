@@ -38,6 +38,65 @@ def test_slot_roll_ignores_settings_eight() -> None:
     assert _slot_roll_parallel_workers(app) == 2
 
 
+def test_official_m1_retention_covers_gap_fill_horizon() -> None:
+    """8개 15분 슬롯 보정에는 여유분을 포함해 공식 1분봉 128개를 유지합니다."""
+    from core.rt_tick_m1_store import (
+        RtTickM1Store,
+        official_m1_retention_for_gap_fill,
+    )
+
+    retention = official_m1_retention_for_gap_fill(8)
+    store = RtTickM1Store(max_completed_per_code=retention)
+
+    assert retention == 128
+    assert store._max_c == 128
+    assert official_m1_retention_for_gap_fill("bad") == 128
+    assert official_m1_retention_for_gap_fill(16) == 248
+
+
+def test_gap_fill_dashboard_logs_summary_and_failures_only() -> None:
+    """성공 종목별 로그는 숨기고 실패 즉시 알림과 라운드 요약만 출력합니다."""
+    from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
+
+    logs: list[str] = []
+    poller = RtWatchlistM1ApiPoller(SimpleNamespace(), log=logs.append)
+    poller._note_gap_fill_gui_log(
+        {
+            "code": "005930",
+            "filled_missing": [],
+            "filled_stub": [],
+            "filled_overwrite": ["a", "b", "c", "d"],
+            "failed": [],
+        }
+    )
+    assert logs == []
+
+    poller._note_gap_fill_gui_log(
+        {
+            "code": "006400",
+            "filled_missing": [],
+            "filled_stub": [],
+            "filled_overwrite": [],
+            "failed": ["2026-09-01 09:15:00"],
+        }
+    )
+    assert len(logs) == 1
+    assert "gap-fill 실패 006400" in logs[0]
+
+    with poller._gap_fill_log_lock:
+        round_key = next(iter(poller._gap_fill_log_agg))
+        timer = poller._gap_fill_log_agg[round_key].get("timer")
+        if timer is not None:
+            timer.cancel()
+    poller._flush_gap_fill_gui_log(round_key)
+
+    assert len(logs) == 2
+    assert "gap-fill summary" in logs[1]
+    assert "n=2" in logs[1]
+    assert "ow=4" in logs[1]
+    assert "fail=1" in logs[1]
+
+
 def test_drain_respects_max_n() -> None:
     q: queue.Queue = queue.Queue()
     ran: list = []
@@ -93,6 +152,43 @@ def test_official_apply_runs_on_calling_thread() -> None:
 
     assert run_official_15m_memory_apply(_fn) == "ok"
     assert ran == [threading.get_ident()]
+
+
+def test_holdings_clear_uses_nonblocking_ui_queue() -> None:
+    """체결 워커가 portfolio.lock 안에서 Tk를 직접 호출해 교착하지 않아야 합니다."""
+    from core.portfolio_manager import PortfolioManager
+
+    queued: list[tuple[object, int]] = []
+    cleared: list[str] = []
+    refreshed: list[bool] = []
+
+    class _Root:
+        def after(self, *_args: object) -> None:
+            raise AssertionError("백그라운드 스레드에서 root.after를 직접 호출하면 안 됩니다.")
+
+    app = SimpleNamespace(
+        root=_Root(),
+        monitor_tab=SimpleNamespace(
+            clear_holdings_ui_debounce=lambda code: cleared.append(code)
+        ),
+        request_virtual_tab_sync_light_refresh=lambda: refreshed.append(True),
+        run_on_ui_thread=lambda callback, delay: queued.append((callback, delay)),
+    )
+    portfolio = SimpleNamespace(
+        app=app,
+        _normalize_stock_code=lambda code: str(code).zfill(6),
+    )
+
+    PortfolioManager._notify_holdings_ui_cleared(portfolio, "66570")
+
+    assert len(queued) == 1
+    assert queued[0][1] == 0
+    assert cleared == []
+    callback = queued[0][0]
+    assert callable(callback)
+    callback()
+    assert cleared == ["066570"]
+    assert refreshed == [True]
 
 
 def test_delayed_callbacks_are_scheduled() -> None:
@@ -204,9 +300,12 @@ if __name__ == "__main__":
     test_roll_workers_capped_at_two()
     test_eval_pool_ignores_settings_eight()
     test_slot_roll_ignores_settings_eight()
+    test_official_m1_retention_covers_gap_fill_horizon()
+    test_gap_fill_dashboard_logs_summary_and_failures_only()
     test_drain_respects_max_n()
     test_drain_respects_time_budget()
     test_official_apply_runs_on_calling_thread()
+    test_holdings_clear_uses_nonblocking_ui_queue()
     test_delayed_callbacks_are_scheduled()
     test_official_indicator_recalc_does_not_block_enqueue()
     test_alignment_mode_skips_official_indicator_recalc()

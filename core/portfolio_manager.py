@@ -2489,7 +2489,14 @@ class PortfolioManager:
         # 매수/매도 1회 전송 정책에 맞춰 발송됩니다.
 
     def _notify_holdings_ui_cleared(self, code: str) -> None:
-        """전량 매도 후 모니터 보유 디바운스·유령 행을 즉시 정리합니다."""
+        """
+        전량 매도 후 모니터 보유 디바운스·유령 행을 즉시 정리합니다.
+
+        이 메서드는 ``portfolio.lock``을 보유한 체결 워커에서 호출될 수 있으므로
+        백그라운드 스레드에서 ``root.after``를 직접 호출하면 안 됩니다. Tk가 메인
+        스레드의 포트폴리오 잠금 해제를 기다리는 동안 워커도 Tk 호출 반환을 기다려
+        교착될 수 있어, 애플리케이션의 비차단 UI 큐를 통해서만 전달합니다.
+        """
         try:
             nc = self._normalize_stock_code(code)
         except Exception:
@@ -2515,16 +2522,19 @@ class PortfolioManager:
                 pass
 
         try:
-            root = getattr(self.app, "root", None)
-            if root is not None:
-                root.after(0, _job)
-            else:
+            run_on_ui_thread = getattr(self.app, "run_on_ui_thread", None)
+            if callable(run_on_ui_thread):
+                run_on_ui_thread(_job, 0)
+                return
+        except Exception:
+            pass
+
+        # Tk가 없는 테스트·헤드리스 환경에서만 동기 폴백을 허용합니다.
+        try:
+            if getattr(self.app, "root", None) is None:
                 _job()
         except Exception:
-            try:
-                _job()
-            except Exception:
-                pass
+            pass
 
     def on_fill(
         self,

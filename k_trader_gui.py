@@ -598,11 +598,21 @@ class KiwoomApp:
             logger_callback=self.log,
             retention_calendar_days=_rt15_ret,
         )
-        from core.rt_tick_m1_store import RtTickM1Store
+        from core.rt_tick_m1_store import (
+            RtTickM1Store,
+            official_m1_retention_for_gap_fill,
+        )
         from core.stream_processor import StreamProcessor
 
+        try:
+            _m1_heal_bars = (self.settings or {}).get(
+                "realtime_m1_head_fill_missing_15m_max_bars", 8
+            )
+            _official_m1_keep = official_m1_retention_for_gap_fill(_m1_heal_bars)
+        except Exception:
+            _official_m1_keep = 128
         self.rt_tick_m1_store = RtTickM1Store(
-            max_completed_per_code=24,
+            max_completed_per_code=_official_m1_keep,
             logger_callback=self.log,
         )
         from core.rt_tick_m1_accumulator import RtTickM1Accumulator
