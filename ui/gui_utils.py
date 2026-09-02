@@ -72,8 +72,9 @@ class GuiUtils:
         탭 전환·클릭이 한동안 먹지 않는 현상 발생.
         개선: 메시지는 큐에 쌓고, 메인 스레드에서 일정 간격으로 묶어서 insert (see 1회).
 
-        비메인 스레드는 큐 적재 후 ``root.after(0, ...)`` 로 배출만 예약합니다.
-        (예전 구현은 폴러가 빈 큐 1회 소비 뒤 멈추면 백그라운드 로그가 영구히 큐에만 남는 버그가 있었음)
+        비메인 스레드는 큐에만 적재합니다. 메인 스레드 폴러(90ms)가 배출하며,
+        빈 큐에서도 폴러를 유지해 M1Poll 말분 요약 등 백그라운드 로그가
+        대시보드에 남도록 합니다.
         """
         try:
             self._log_q.put(str(message))
@@ -148,6 +149,11 @@ class GuiUtils:
                 except queue.Empty:
                     break
             if not raw_batch:
+                # 빈 큐에서 조기 return 시 폴러가 끊기면 백그라운드 로그가 영구히 큐에만 남음
+                try:
+                    self._ensure_log_poller()
+                except Exception:
+                    pass
                 return
             self._apply_log_batch(raw_batch)
         except Exception as e:

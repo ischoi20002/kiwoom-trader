@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from types import SimpleNamespace
 
 from core.closed_15m_fast_path import Closed15mEvalPool
@@ -95,6 +96,51 @@ def test_gap_fill_dashboard_logs_summary_and_failures_only() -> None:
     assert "n=2" in logs[1]
     assert "ow=4" in logs[1]
     assert "fail=1" in logs[1]
+
+
+def test_background_log_reaches_widget_after_empty_poller_tick() -> None:
+    """빈 큐 폴러 틱 후에도 백그라운드 log()가 대시보드 배치에 반영되는지."""
+    import tkinter as tk
+
+    from ui.gui_utils import GuiUtils
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        gu = GuiUtils(root=root)
+        gu.log_area = None  # insert 생략, 링버퍼만 검증
+
+        # 폴러 1회: 빈 큐 → 조기 return (폴러 재예약 포함)
+        gu._drain_log_queue_on_main()
+        assert gu._log_flush_after_id is not None
+
+        done = threading.Event()
+
+        def _bg_log() -> None:
+            try:
+                gu.log("ℹ️ [M1Poll] 말분 공식1분 lab=09:14 n=1 (ok=1)")
+            finally:
+                done.set()
+
+        threading.Thread(target=_bg_log, daemon=True).start()
+        assert done.wait(timeout=2.0)
+
+        # 폴러가 큐를 비울 때까지 이벤트 루프 처리
+        deadline = time.time() + 2.0
+        found = False
+        while time.time() < deadline:
+            root.update()
+            lines = gu.get_recent_log_lines(limit=20)
+            if any("말분 공식1분" in ln for ln in lines):
+                found = True
+                break
+            time.sleep(0.05)
+        assert found, f"백그라운드 로그 미배출: {gu.get_recent_log_lines()}"
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 
 def test_drain_respects_max_n() -> None:
@@ -302,6 +348,7 @@ if __name__ == "__main__":
     test_slot_roll_ignores_settings_eight()
     test_official_m1_retention_covers_gap_fill_horizon()
     test_gap_fill_dashboard_logs_summary_and_failures_only()
+    test_background_log_reaches_widget_after_empty_poller_tick()
     test_drain_respects_max_n()
     test_drain_respects_time_budget()
     test_official_apply_runs_on_calling_thread()
