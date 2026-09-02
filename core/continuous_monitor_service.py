@@ -576,6 +576,16 @@ class ContinuousMonitorService:
                     _ui()
             except Exception:
                 pass
+        try:
+            apply_si = getattr(self.app, "_apply_sleep_inhibit_from_settings", None)
+            if callable(apply_si):
+                root = getattr(self.app, "root", None)
+                if root is not None:
+                    root.after(0, apply_si)
+                else:
+                    apply_si()
+        except Exception:
+            pass
 
     def consume_eod_stop_flag(self) -> bool:
         """STOPPED 콜백에서 EOD 중단 여부를 한 번만 소비."""

@@ -935,6 +935,10 @@ class KiwoomApp:
 
         self._setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        try:
+            self._start_sleep_inhibit()
+        except Exception:
+            pass
         # EOD 스냅샷 자동 저장 시작(15:30 + buffer 분)
         try:
             self._start_eod_equity_snapshot_scheduler()
@@ -1057,6 +1061,10 @@ class KiwoomApp:
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         self._sync_ka10080_rest_pacing_from_settings()
         self._configure_ka10080_fetch_diag()
+        try:
+            self._apply_sleep_inhibit_from_settings()
+        except Exception:
+            pass
         if hasattr(self, 'notebook'):
             curr_tab = self.notebook.index("current")
             for child in self.notebook.winfo_children(): child.destroy()
@@ -3480,8 +3488,89 @@ class KiwoomApp:
         except Exception:
             pass
 
+    def _start_sleep_inhibit(self) -> None:
+        """GUI 기동 시 Windows 유휴 절전 억제를 시작한다."""
+        try:
+            from utils.sleep_inhibit import SleepInhibitor
+
+            if getattr(self, "_sleep_inhibitor", None) is None:
+                self._sleep_inhibitor = SleepInhibitor(logger=self.log)
+            self._apply_sleep_inhibit_from_settings()
+            self._schedule_sleep_inhibit_refresh()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [절전방지] 초기화 실패: {e}")
+            except Exception:
+                pass
+
+    def _apply_sleep_inhibit_from_settings(self) -> None:
+        """settings.json 의 절전방지 토글을 즉시 반영한다."""
+        try:
+            si = getattr(self, "_sleep_inhibitor", None)
+            if si is None:
+                return
+            from utils.sleep_inhibit_policy import should_prevent_sleep
+
+            st = getattr(self, "settings", None) or {}
+            keep_display = bool(st.get("prevent_sleep_keep_display", False))
+            if should_prevent_sleep(self):
+                si.acquire(keep_display=keep_display)
+            else:
+                si.release()
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [절전방지] 설정 반영 실패: {e}")
+            except Exception:
+                pass
+
+    def _schedule_sleep_inhibit_refresh(self) -> None:
+        """약 50초마다 절전 억제를 갱신한다 (일부 전원 정책 대비)."""
+        try:
+            after_id = getattr(self, "_sleep_inhibit_after_id", None)
+            if after_id is not None:
+                self.root.after_cancel(after_id)
+        except Exception:
+            pass
+        self._sleep_inhibit_after_id = None
+
+        def _tick() -> None:
+            self._sleep_inhibit_after_id = None
+            try:
+                self._apply_sleep_inhibit_from_settings()
+            except Exception:
+                pass
+            try:
+                self._sleep_inhibit_after_id = self.root.after(50_000, _tick)
+            except Exception:
+                pass
+
+        try:
+            self._sleep_inhibit_after_id = self.root.after(50_000, _tick)
+        except Exception:
+            pass
+
+    def _stop_sleep_inhibit(self) -> None:
+        """종료 시 절전 억제와 갱신 타이머를 해제한다."""
+        try:
+            after_id = getattr(self, "_sleep_inhibit_after_id", None)
+            if after_id is not None:
+                self.root.after_cancel(after_id)
+        except Exception:
+            pass
+        self._sleep_inhibit_after_id = None
+        try:
+            si = getattr(self, "_sleep_inhibitor", None)
+            if si is not None:
+                si.release()
+        except Exception:
+            pass
+
     def on_close(self):
         self.log("⏹️ [System] 프로그램을 종료합니다.")
+        try:
+            self._stop_sleep_inhibit()
+        except Exception:
+            pass
         try:
             self._equity_snapshot_cancelled = True
             try:

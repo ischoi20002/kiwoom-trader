@@ -548,6 +548,38 @@ class SettingsTab:
             toggle_key='exclude_trading_halt_on_selection',
         )
 
+        # ── 시스템 전원 (절전 방지) ──
+        power_f = ttk.LabelFrame(
+            _sec_parent('fund'),
+            text=' 🔆 시스템 전원 (절전 방지) ',
+            padding='15',
+        )
+        power_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            power_f,
+            '실행 중 절전 방지',
+            None,
+            '',
+            'PC 유휴 절전만 억제 — 장전 자동시작·실시간 감시가 잠들지 않도록. 덮개 닫힘은 전원옵션 따름',
+            toggle_key='prevent_sleep_while_running',
+        )
+        add_param_row(
+            power_f,
+            '화면 꺼짐도 방지',
+            None,
+            '',
+            '체크 시 모니터도 켜 둠. 기본은 화면만 꺼지고 PC는 깨어 있음',
+            toggle_key='prevent_sleep_keep_display',
+        )
+        add_param_row(
+            power_f,
+            '장마감 선정 후 절전 허용',
+            None,
+            '',
+            '16:00 전후 일일 선정·감시 중단 후에는 유휴 절전 허용. 장전 08:35 전·감시 중에는 다시 막음',
+            toggle_key='prevent_sleep_allow_after_eod',
+        )
+
         # ── 모바일 읽기 전용 현황 API ──
         mobile_f = ttk.LabelFrame(
             _sec_parent('fund'),
@@ -2331,6 +2363,11 @@ class SettingsTab:
                 try:
                     if hasattr(self.app, 'restart_status_api_from_settings'):
                         self.app.restart_status_api_from_settings()
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self.app, '_apply_sleep_inhibit_from_settings'):
+                        self.app._apply_sleep_inhibit_from_settings()
                 except Exception:
                     pass
                 self.status_label.config(text="✅ 설정이 저장되었습니다.", foreground="#A3BE8C")

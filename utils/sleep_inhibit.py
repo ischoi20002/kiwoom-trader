@@ -1,0 +1,223 @@
+# -*- coding: utf-8 -*-
+"""Windows 유휴 절전 억제 (GUI 실행 중 자동매매·장전 스케줄 유지용).
+
+노트북 덮개를 닫으면 전원 옵션(덮개 동작)이 우선하므로 이 API로는 막지 못한다.
+모니터만 꺼지는 것은 기본 허용하고, 시스템 절전만 막는다.
+"""
+from __future__ import annotations
+
+import atexit
+import ctypes
+import sys
+from typing import Callable, Optional
+
+# SetThreadExecutionState 플래그
+_ES_SYSTEM_REQUIRED = 0x00000001
+_ES_DISPLAY_REQUIRED = 0x00000002
+_ES_AWAYMODE_REQUIRED = 0x00000040
+_ES_CONTINUOUS = 0x80000000
+
+# PowerRequestType
+_POWER_REQUEST_DISPLAY_REQUIRED = 0
+_POWER_REQUEST_SYSTEM_REQUIRED = 1
+_POWER_REQUEST_AWAYMODE_REQUIRED = 2
+
+_POWER_REQUEST_CONTEXT_VERSION = 0
+_POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x1
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+_REASON_TEXT = "K-Trader 자동매매 실행 중"
+
+
+class _REASON_CONTEXT(ctypes.Structure):
+    """REASON_CONTEXT — SIMPLE_STRING 경로만 사용 (유니온을 문자열 포인터로 축약)."""
+
+    _fields_ = [
+        ("Version", ctypes.c_ulong),
+        ("Flags", ctypes.c_ulong),
+        ("SimpleReasonString", ctypes.c_wchar_p),
+    ]
+
+
+class SleepInhibitor:
+    """메인 스레드에서 acquire/refresh/release 를 호출해야 한다 (스레드별 요청)."""
+
+    def __init__(self, logger: Optional[Callable[[str], None]] = None) -> None:
+        self._log = logger
+        self._active: bool = False
+        self._keep_display: bool = False
+        self._power_handle: Optional[int] = None
+        self._reason_keep: Optional[str] = None
+        self._atexit_registered: bool = False
+        self._used_power_request: bool = False
+
+    def _emit(self, msg: str) -> None:
+        try:
+            if self._log is not None:
+                self._log(msg)
+        except Exception:
+            pass
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def acquire(self, keep_display: bool = False) -> bool:
+        """절전 억제를 켠다. 이미 켜져 있고 옵션이 같으면 재적용만 한다."""
+        try:
+            keep_display = bool(keep_display)
+            if self._active and self._keep_display == keep_display:
+                self.refresh()
+                return True
+            if self._active:
+                self.release()
+            if sys.platform != "win32":
+                self._emit("⚠️ [절전방지] Windows 가 아니라 적용하지 않습니다.")
+                return False
+            self._keep_display = keep_display
+            ok_power = self._acquire_power_request(keep_display)
+            ok_exec = self._set_execution_state(keep_display)
+            if not ok_power and not ok_exec:
+                self._emit("⚠️ [절전방지] Windows API 호출 실패 — 절전이 그대로일 수 있습니다.")
+                return False
+            self._active = True
+            self._used_power_request = ok_power
+            if not self._atexit_registered:
+                try:
+                    atexit.register(self.release)
+                    self._atexit_registered = True
+                except Exception:
+                    pass
+            disp = "화면 유지" if keep_display else "화면 꺼짐 허용"
+            via = []
+            if ok_power:
+                via.append("PowerRequest")
+            if ok_exec:
+                via.append("ExecutionState")
+            self._emit(f"🔆 [절전방지] 유휴 절전 억제 시작 ({disp}, {', '.join(via)})")
+            return True
+        except Exception as e:
+            self._emit(f"⚠️ [절전방지] 시작 실패: {e}")
+            return False
+
+    def refresh(self) -> None:
+        """유휴 타이머를 다시 리셋한다 (일부 전원 정책이 CONTINUOUS 를 무시할 때 대비)."""
+        if not self._active:
+            return
+        try:
+            if sys.platform != "win32":
+                return
+            self._set_execution_state(self._keep_display)
+        except Exception:
+            pass
+
+    def release(self) -> None:
+        """절전 억제를 해제한다. 프로그램 종료 시 반드시 호출."""
+        if not self._active and self._power_handle is None:
+            return
+        try:
+            self._release_power_request()
+        except Exception:
+            pass
+        try:
+            if sys.platform == "win32":
+                k32 = ctypes.windll.kernel32
+                k32.SetThreadExecutionState(_ES_CONTINUOUS)
+        except Exception:
+            pass
+        was_active = self._active
+        self._active = False
+        self._keep_display = False
+        self._used_power_request = False
+        if was_active:
+            self._emit("🌙 [절전방지] 유휴 절전 억제를 해제했습니다.")
+
+    def _set_execution_state(self, keep_display: bool) -> bool:
+        try:
+            flags = _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_AWAYMODE_REQUIRED
+            if keep_display:
+                flags |= _ES_DISPLAY_REQUIRED
+            k32 = ctypes.windll.kernel32
+            prev = k32.SetThreadExecutionState(flags)
+            if prev == 0:
+                flags = _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED
+                if keep_display:
+                    flags |= _ES_DISPLAY_REQUIRED
+                prev = k32.SetThreadExecutionState(flags)
+            return prev != 0
+        except Exception:
+            return False
+
+    def _acquire_power_request(self, keep_display: bool) -> bool:
+        """Modern Standby 대응용 PowerRequest. 실패해도 ExecutionState 폴백이 있다."""
+        handle: Optional[int] = None
+        try:
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.PowerCreateRequest.argtypes = [ctypes.POINTER(_REASON_CONTEXT)]
+            k32.PowerCreateRequest.restype = ctypes.c_void_p
+            k32.PowerSetRequest.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            k32.PowerSetRequest.restype = ctypes.c_bool
+            k32.PowerClearRequest.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            k32.PowerClearRequest.restype = ctypes.c_bool
+            k32.CloseHandle.argtypes = [ctypes.c_void_p]
+            k32.CloseHandle.restype = ctypes.c_bool
+
+            self._reason_keep = _REASON_TEXT
+            ctx = _REASON_CONTEXT()
+            ctx.Version = _POWER_REQUEST_CONTEXT_VERSION
+            ctx.Flags = _POWER_REQUEST_CONTEXT_SIMPLE_STRING
+            ctx.SimpleReasonString = self._reason_keep
+
+            raw = k32.PowerCreateRequest(ctypes.byref(ctx))
+            if not raw or raw == _INVALID_HANDLE_VALUE:
+                return False
+            handle = int(raw)
+
+            if not k32.PowerSetRequest(handle, _POWER_REQUEST_SYSTEM_REQUIRED):
+                k32.CloseHandle(handle)
+                return False
+            try:
+                k32.PowerSetRequest(handle, _POWER_REQUEST_AWAYMODE_REQUIRED)
+            except Exception:
+                pass
+            if keep_display:
+                try:
+                    k32.PowerSetRequest(handle, _POWER_REQUEST_DISPLAY_REQUIRED)
+                except Exception:
+                    pass
+            self._power_handle = handle
+            return True
+        except Exception:
+            if handle:
+                try:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+                except Exception:
+                    pass
+            self._power_handle = None
+            return False
+
+    def _release_power_request(self) -> None:
+        handle = self._power_handle
+        self._power_handle = None
+        if not handle:
+            return
+        try:
+            k32 = ctypes.windll.kernel32
+            try:
+                k32.PowerClearRequest(handle, _POWER_REQUEST_SYSTEM_REQUIRED)
+            except Exception:
+                pass
+            try:
+                k32.PowerClearRequest(handle, _POWER_REQUEST_AWAYMODE_REQUIRED)
+            except Exception:
+                pass
+            try:
+                k32.PowerClearRequest(handle, _POWER_REQUEST_DISPLAY_REQUIRED)
+            except Exception:
+                pass
+            try:
+                k32.CloseHandle(handle)
+            except Exception:
+                pass
+        except Exception:
+            pass
