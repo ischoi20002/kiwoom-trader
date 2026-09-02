@@ -1438,7 +1438,7 @@ class SettingsTab:
             '15:19 공식대기 한도',
             'realtime_pre_auction_official_wait_max_sec',
             '초',
-            '15:19 비NXT: 공식 1분 대기 상한(기본 300=5분). 초과 시 틱말분 합성 평가',
+            '15:19 비NXT: 공식 1분 대기 상한(기본 540=9분, 15:29까지). 초과 시 틱말분 합성',
         )
         add_param_row(
             strat_f,

@@ -100,7 +100,7 @@
     "realtime_15m_tick_tail_wait_sec": 1.5,
     "realtime_15m_tick_tail_backup_after_close_sec": 50.0,
     "realtime_15m_tick_tail_backup_grace_sec": 2.5,
-    "realtime_pre_auction_official_wait_max_sec": 300.0,
+    "realtime_pre_auction_official_wait_max_sec": 540.0,
     "realtime_eod_official_wait_max_sec": 300.0,
     "realtime_auction_1530_tick_wait_sec": 5.0,
     "realtime_auction_1530_eval_max_attempts": 12,

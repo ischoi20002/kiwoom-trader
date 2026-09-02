@@ -169,7 +169,7 @@ def test_official_m1_poll_deadline_is_fixed_after_close() -> None:
 
 
 def test_pre_auction_last_m1_schedules_tick_first() -> None:
-    """15:19 NXT 즉시평가 예약(직접 호출) · 비NXT 동시호가 직전 한도 300초(5분)."""
+    """15:19 NXT 즉시평가 예약(직접 호출) · 비NXT 동시호가 직전 한도 540초(9분)."""
     from utils.krx_bars import is_pre_auction_last_m1_open
 
     assert is_pre_auction_last_m1_open(pd.Timestamp("2026-08-27 15:19:00")) is True
@@ -180,7 +180,7 @@ def test_pre_auction_last_m1_schedules_tick_first() -> None:
         settings={
             "realtime_15m_last_minute_from_ticks": True,
             "realtime_15m_eval_on_official_last_m1": True,
-            "realtime_pre_auction_official_wait_max_sec": 300.0,
+            "realtime_pre_auction_official_wait_max_sec": 540.0,
             "realtime_eod_official_wait_max_sec": 600.0,
         },
         _active_stream_codes=["377300", "457190"],
@@ -191,12 +191,12 @@ def test_pre_auction_last_m1_schedules_tick_first() -> None:
     )
     poller = RtWatchlistM1ApiPoller(app, log=msgs.append)
     lab = pd.Timestamp("2026-08-27 15:19:00")
-    # 15:19 비NXT 공식 한도 = 5분
+    # 15:19 비NXT 공식 한도 = 9분(15:29까지)
     deadline = poller._last_m1_official_poll_deadline(lab, 2)
     close_wall = lab.floor("min") + pd.Timedelta(minutes=1)
     delta = (pd.Timestamp(deadline) - close_wall).total_seconds()
-    assert abs(delta - 300.0) < 0.01
-    assert poller._pre_auction_official_wait_max_sec() == 300.0
+    assert abs(delta - 540.0) < 0.01
+    assert poller._pre_auction_official_wait_max_sec() == 540.0
 
     poller._schedule_tick_tail_immediate_pre_auction(["377300", "457190"], lab)
     assert any("NXT 틱말분 즉시평가" in m for m in msgs)
@@ -275,6 +275,44 @@ def test_official_m1_gui_log_ok_not_post_after_official_claim() -> None:
         fb.build_m1_last_official_report = orig  # type: ignore[assignment]
 
 
+def test_eod_m1_batch_diag_detects_same_chart() -> None:
+    """15:30 조회 차트에 15:19·15:30 open이 함께 있으면 batch_same_chart."""
+    from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
+
+    day = pd.Timestamp("2026-09-02")
+    # ka10080 cntr_tm = 봉 종가: 15:19 open → 15:20, 15:30 단일가 → 15:30
+    idx = pd.DatetimeIndex(
+        [
+            day + pd.Timedelta(hours=15, minutes=20),
+            day + pd.Timedelta(hours=15, minutes=30),
+        ]
+    )
+    chart = pd.DataFrame(
+        {
+            "Open": [100.0, 101.0],
+            "High": [100.0, 101.0],
+            "Low": [100.0, 101.0],
+            "Close": [100.0, 101.0],
+            "Volume": [1000.0, 2000.0],
+        },
+        index=idx,
+    )
+    poller = RtWatchlistM1ApiPoller(SimpleNamespace(settings={}), log=None)
+    lab30 = day + pd.Timedelta(hours=15, minutes=30)
+    row = chart.iloc[-1]
+    diag = poller._build_eod_m1_batch_diag(
+        "093370",
+        lab30,
+        chart,
+        status="ok",
+        row=row,
+    )
+    assert diag["has_1519"] is True
+    assert diag["has_1530"] is True
+    assert diag["batch_same_chart"] is True
+    assert diag["query_lab"] == "15:30"
+
+
 if __name__ == "__main__":
     test_tick_tail_claim_is_atomic()
     test_eval_pool_skips_duplicate_slot()
@@ -284,4 +322,5 @@ if __name__ == "__main__":
     test_official_m1_gui_log_aggregates_by_slot()
     test_official_m1_poll_deadline_is_fixed_after_close()
     test_official_m1_gui_log_ok_not_post_after_official_claim()
+    test_eod_m1_batch_diag_detects_same_chart()
     print("ok")

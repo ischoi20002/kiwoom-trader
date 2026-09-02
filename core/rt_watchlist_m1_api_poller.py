@@ -12,7 +12,8 @@
 
 **동시호가 직전·종가 말분(15:19 / 15:30)**
 - **NXT 가능**: 틱말분(·단일가 틱) 즉시 평가 → 주문 속도 우선. 공식은 오면 15분 대체.
-- **NXT 불가·모의**: 공식 1분 우선. 15:19·15:30 말분 모두 마감 후 최대 5분
+- **NXT 불가·모의**: 공식 1분 우선. 15:19는 마감 후 최대 9분(15:29까지),
+  15:30 말분은 최대 5분
   (``realtime_pre_auction_official_wait_max_sec`` / ``realtime_eod_official_wait_max_sec``)
   대기 후 미완만 틱 합성 평가.
 
@@ -21,6 +22,9 @@
   실패해도 평가를 막지 않음.
 
 **15:30 단일가**: NXT는 틱 확인 즉시, 비NXT는 공식 대기(최대 5분) 후 틱 합성 폴백.
+
+**EOD1m배치 진단 로그**: 15:19·15:30 공식 조회 시 ka10080 차트에 두 라벨이
+동시에 있는지 ``EOD1m배치`` GUI·JSONL(``eod_m1_batch_diag``)로 기록.
 """
 
 from __future__ import annotations
@@ -95,6 +99,10 @@ class RtWatchlistM1ApiPoller:
         # 15분 gap-fill GUI 로그 집계 — 성공 종목별 로그 대신 라운드 요약 1회
         self._gap_fill_log_agg: Dict[str, Dict[str, Any]] = {}
         self._gap_fill_log_lock = threading.Lock()
+        # 15:19·15:30 공식1분 배치 배포 진단(같은 ka10080 차트에 동시 존재 여부)
+        self._eod_m1_batch_log_agg: Dict[str, Dict[str, Any]] = {}
+        self._eod_m1_batch_log_lock = threading.Lock()
+        self._eod_m1_batch_simul_logged: Set[str] = set()
 
     def _emit(self, msg: str) -> None:
         if self._log is None:
@@ -433,6 +441,260 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             pass
 
+    @staticmethod
+    def _eod_m1_day_labels(
+        closed_lab: pd.Timestamp,
+    ) -> Tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]:
+        """당일 15:15·15:19·15:30 open 라벨."""
+        day0 = pd.Timestamp(closed_lab).normalize()
+        return (
+            day0 + pd.Timedelta(hours=15, minutes=15),
+            day0 + pd.Timedelta(hours=15, minutes=19),
+            day0 + pd.Timedelta(hours=15, minutes=30),
+        )
+
+    def _build_eod_m1_batch_diag(
+        self,
+        nk: str,
+        closed_lab: pd.Timestamp,
+        chart_df: Optional[pd.DataFrame],
+        *,
+        status: str,
+        row: Optional[pd.Series] = None,
+    ) -> Dict[str, Any]:
+        """
+        15:19·15:30 말분 ka10080 차트 동시 포함 여부 진단.
+
+        - ``has_1519`` / ``has_1530``: open 라벨 기준(차트_1m_open_labels 규칙)
+        - ``batch_same_chart``: 두 라벨이 같은 chart_df 페이지에 함께 있음
+        - ``chart_max_hm`` / ``chart_min_hm``: 15:10~15:35 구간 인덱스 범위
+        """
+        out: Dict[str, Any] = {
+            "code": str(nk).zfill(6),
+            "query_lab": "",
+            "status": str(status or ""),
+            "has_1519": False,
+            "has_1530": False,
+            "target_ok": bool(row is not None),
+            "batch_same_chart": False,
+            "chart_max_hm": "",
+            "chart_min_hm": "",
+            "late_1519_on_1530_query": False,
+        }
+        try:
+            lab = pd.Timestamp(closed_lab).floor("min")
+            out["query_lab"] = lab.strftime("%H:%M")
+        except Exception:
+            return out
+        try:
+            _, t1519, t1530 = self._eod_m1_day_labels(lab)
+        except Exception:
+            return out
+        try:
+            from core.realtime_m1_fallback import chart_1m_open_labels_in_range
+
+            if chart_df is not None and not getattr(chart_df, "empty", True):
+                lo = lab.normalize() + pd.Timedelta(hours=15, minutes=10)
+                hi = lab.normalize() + pd.Timedelta(hours=15, minutes=35)
+                sub = chart_df[(chart_df.index >= lo) & (chart_df.index <= hi)]
+                if sub is not None and not getattr(sub, "empty", True):
+                    try:
+                        out["chart_min_hm"] = pd.Timestamp(sub.index.min()).strftime(
+                            "%H:%M"
+                        )
+                        out["chart_max_hm"] = pd.Timestamp(sub.index.max()).strftime(
+                            "%H:%M"
+                        )
+                    except Exception:
+                        pass
+                open_set = chart_1m_open_labels_in_range(chart_df, t1519, t1530)
+                out["has_1519"] = t1519 in open_set
+                out["has_1530"] = t1530 in open_set
+                out["batch_same_chart"] = bool(out["has_1519"] and out["has_1530"])
+                if is_krx_last_15m_slot(lab):
+                    out["late_1519_on_1530_query"] = bool(
+                        out["has_1519"] and not out["target_ok"]
+                    )
+        except Exception:
+            pass
+        return out
+
+    def _note_eod_m1_batch_diag(
+        self,
+        nk: str,
+        closed_lab: pd.Timestamp,
+        chart_df: Optional[pd.DataFrame],
+        *,
+        status: str,
+        row: Optional[pd.Series] = None,
+        context: str = "",
+    ) -> None:
+        """
+        15:19·15:30 공식1분 배치 진단 — GUI 집계 + 핵심 이벤트 즉시 1줄.
+
+        ``context``: timeout / row_not_found / ok / minute_not_ready 등
+        """
+        if self._log is None:
+            return
+        try:
+            lab = pd.Timestamp(closed_lab).floor("min")
+            if not (
+                is_pre_auction_last_m1_open(lab) or is_krx_last_15m_slot(lab)
+            ):
+                return
+        except Exception:
+            return
+        try:
+            diag = self._build_eod_m1_batch_diag(
+                nk, closed_lab, chart_df, status=status, row=row
+            )
+        except Exception:
+            return
+
+        # 15:30 조회 차트에 15:19가 같이 있으면 즉시 1줄(종목당 1회)
+        try:
+            if (
+                bool(diag.get("batch_same_chart"))
+                and is_krx_last_15m_slot(lab)
+                and str(diag.get("query_lab") or "") == "15:30"
+            ):
+                day_key = lab.strftime("%Y-%m-%d")
+                sim_key = f"{day_key}:{diag.get('code')}"
+                with self._eod_m1_batch_log_lock:
+                    first = sim_key not in self._eod_m1_batch_simul_logged
+                    if first:
+                        self._eod_m1_batch_simul_logged.add(sim_key)
+                        if len(self._eod_m1_batch_simul_logged) > 512:
+                            self._eod_m1_batch_simul_logged = set(
+                                sorted(self._eod_m1_batch_simul_logged)[-256:]
+                            )
+                if first:
+                    ctx = str(context or status or "")[:40]
+                    self._emit(
+                        f"ℹ️ [M1Poll] EOD1m배치 동시도착 "
+                        f"{diag.get('code')} lab=15:30 "
+                        f"chart={diag.get('chart_min_hm') or '?'}"
+                        f"~{diag.get('chart_max_hm') or '?'} "
+                        f"has19=Y has30=Y ctx={ctx}"
+                    )
+        except Exception:
+            pass
+
+        # 15:19 deadline 타임아웃 — 차트에 15:30만 있고 15:19 없음 등 즉시 표시
+        try:
+            ctx_l = str(context or "").strip().lower()
+            if (
+                is_pre_auction_last_m1_open(lab)
+                and ctx_l in ("minute_not_ready_timeout", "row_not_found")
+            ):
+                h19 = "Y" if diag.get("has_1519") else "N"
+                h30 = "Y" if diag.get("has_1530") else "N"
+                self._emit(
+                    f"ℹ️ [M1Poll] EOD1m배치 15:19미도착 "
+                    f"{diag.get('code')} ctx={ctx_l} "
+                    f"chart={diag.get('chart_min_hm') or '?'}"
+                    f"~{diag.get('chart_max_hm') or '?'} "
+                    f"has19={h19} has30={h30}"
+                )
+        except Exception:
+            pass
+
+        # query 라벨(15:19/15:30)별 집계 — 디바운스 요약 1줄
+        try:
+            slot_key = lab.strftime("%Y-%m-%d %H:%M:%S")
+            slot_hm = lab.strftime("%H:%M")
+        except Exception:
+            return
+        timer_to_cancel: Any = None
+        new_timer: Any = None
+        try:
+            with self._eod_m1_batch_log_lock:
+                st = self._eod_m1_batch_log_agg.get(slot_key)
+                if st is None:
+                    st = {
+                        "n": 0,
+                        "has19": 0,
+                        "has30": 0,
+                        "both": 0,
+                        "target_ok": 0,
+                        "timeout": 0,
+                        "timer": None,
+                        "slot_hm": slot_hm,
+                    }
+                    self._eod_m1_batch_log_agg[slot_key] = st
+                st["n"] = int(st.get("n", 0) or 0) + 1
+                if bool(diag.get("has_1519")):
+                    st["has19"] = int(st.get("has19", 0) or 0) + 1
+                if bool(diag.get("has_1530")):
+                    st["has30"] = int(st.get("has30", 0) or 0) + 1
+                if bool(diag.get("batch_same_chart")):
+                    st["both"] = int(st.get("both", 0) or 0) + 1
+                if bool(diag.get("target_ok")):
+                    st["target_ok"] = int(st.get("target_ok", 0) or 0) + 1
+                if str(context or "").strip().lower() == "minute_not_ready_timeout":
+                    st["timeout"] = int(st.get("timeout", 0) or 0) + 1
+                timer_to_cancel = st.get("timer")
+                st["timer"] = None
+
+                def _flush(sk: str = slot_key) -> None:
+                    self._flush_eod_m1_batch_gui_log(sk)
+
+                new_timer = threading.Timer(8.0, _flush)
+                new_timer.daemon = True
+                st["timer"] = new_timer
+        except Exception:
+            return
+        if timer_to_cancel is not None:
+            try:
+                timer_to_cancel.cancel()
+            except Exception:
+                pass
+        if new_timer is not None:
+            try:
+                new_timer.start()
+            except Exception:
+                pass
+        try:
+            sl = getattr(self._app, "session_logger", None)
+            if sl is not None and hasattr(sl, "log"):
+                sl.log(
+                    "eod_m1_batch_diag",
+                    {
+                        **diag,
+                        "context": str(context or status or "")[:80],
+                    },
+                )
+        except Exception:
+            pass
+
+    def _flush_eod_m1_batch_gui_log(self, slot_key: str) -> None:
+        """EOD 15:19·15:30 배치 진단 라운드 요약 1줄."""
+        st: Optional[Dict[str, Any]] = None
+        try:
+            with self._eod_m1_batch_log_lock:
+                st = self._eod_m1_batch_log_agg.pop(slot_key, None)
+        except Exception:
+            st = None
+        if not st:
+            return
+        try:
+            n = int(st.get("n", 0) or 0)
+            if n <= 0:
+                return
+            hm = str(st.get("slot_hm") or "")
+            has19 = int(st.get("has19", 0) or 0)
+            has30 = int(st.get("has30", 0) or 0)
+            both = int(st.get("both", 0) or 0)
+            tok = int(st.get("target_ok", 0) or 0)
+            tmo = int(st.get("timeout", 0) or 0)
+            self._emit(
+                f"ℹ️ [M1Poll] EOD1m배치 요약 query={hm} n={n} "
+                f"차트has19={has19} has30={has30} 동시={both} "
+                f"target_ok={tok} timeout={tmo}"
+            )
+        except Exception:
+            pass
+
     def _settings(self) -> Dict[str, Any]:
         try:
             return getattr(self._app, "settings", None) or {}
@@ -482,16 +744,16 @@ class RtWatchlistM1ApiPoller:
 
     def _pre_auction_official_wait_max_sec(self) -> float:
         """
-        15:19(동시호가 직전) 비NXT 공식 1분 대기 상한(초). 기본 300(5분).
+        15:19(동시호가 직전) 비NXT 공식 1분 대기 상한(초). 기본 540(9분, 15:29까지).
         """
         try:
             v = float(
                 self._settings().get(
-                    "realtime_pre_auction_official_wait_max_sec", 300.0
+                    "realtime_pre_auction_official_wait_max_sec", 540.0
                 )
             )
         except (TypeError, ValueError):
-            v = 300.0
+            v = 540.0
         return max(60.0, min(v, 600.0))
 
     def _eod_official_wait_max_sec(self) -> float:
@@ -615,7 +877,7 @@ class RtWatchlistM1ApiPoller:
         공식 말분 우선: not_ready 재시도·틱 백업 공통 벽시계 한도.
 
         - 일반 말분: ``분 마감 + realtime_15m_tick_tail_backup_after_close_sec`` (기본 50초)
-        - 15:19: ``분 마감 + realtime_pre_auction_official_wait_max_sec`` (기본 5분)
+        - 15:19: ``분 마감 + realtime_pre_auction_official_wait_max_sec`` (기본 9분→15:29)
         - 15:30: ``분 마감 + realtime_eod_official_wait_max_sec`` (기본 5분)
         """
         if self._is_eod_extended_official_wait_lab(closed_lab):
@@ -1795,6 +2057,8 @@ class RtWatchlistM1ApiPoller:
             with self._round_lock:
                 self._dormant_rounds.clear()
                 self._active_rounds.clear()
+            with self._eod_m1_batch_log_lock:
+                self._eod_m1_batch_simul_logged.clear()
         except Exception:
             pass
 
@@ -2827,6 +3091,17 @@ class RtWatchlistM1ApiPoller:
             )
         except Exception:
             pass
+        try:
+            self._note_eod_m1_batch_diag(
+                nk,
+                closed_lab,
+                chart_df,
+                status="no_trade",
+                row=None,
+                context=str(detail or "")[:80],
+            )
+        except Exception:
+            pass
 
     def _job_probe_round(
         self,
@@ -3833,6 +4108,17 @@ class RtWatchlistM1ApiPoller:
             except Exception:
                 already = False
             self._apply_fetch_success(nk, closed_lab, sk, key, row, chart_df)
+            try:
+                self._note_eod_m1_batch_diag(
+                    nk,
+                    closed_lab,
+                    chart_df,
+                    status="ok",
+                    row=row,
+                    context="ok",
+                )
+            except Exception:
+                pass
             try:
                 self._log_m1_last_official(
                     nk,
