@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Windows 절전 억제 유틸 단위 테스트."""
+"""Windows 최대절전 억제 유틸 단위 테스트."""
 from __future__ import annotations
 
 import sys

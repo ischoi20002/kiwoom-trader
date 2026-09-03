@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""절전 억제 정책 단위 테스트."""
+"""최대절전 억제 정책 단위 테스트."""
 from __future__ import annotations
 
 import unittest

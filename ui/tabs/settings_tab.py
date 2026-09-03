@@ -548,19 +548,20 @@ class SettingsTab:
             toggle_key='exclude_trading_halt_on_selection',
         )
 
-        # ── 시스템 전원 (절전 방지) ──
+        # ── 시스템 전원 (최대절전 방지) ──
         power_f = ttk.LabelFrame(
             _sec_parent('fund'),
-            text=' 🔆 시스템 전원 (절전 방지) ',
+            text=' 🔆 시스템 전원 (최대절전 방지) ',
             padding='15',
         )
         power_f.pack(fill=tk.X, pady=10)
         add_param_row(
             power_f,
-            '실행 중 절전 방지',
+            '실행 중 최대절전 방지',
             None,
             '',
-            'PC 유휴 절전만 억제 — 장전 자동시작·실시간 감시가 잠들지 않도록. 덮개 닫힘은 전원옵션 따름',
+            '유휴 최대절전(하이버네이트) 억제 — 장전 자동시작·실시간 감시가 꺼지지 않도록. '
+            '전원옵션은 절전 대신 최대절전 사용 권장. 덮개 닫힘은 전원옵션 따름',
             toggle_key='prevent_sleep_while_running',
         )
         add_param_row(
@@ -573,10 +574,11 @@ class SettingsTab:
         )
         add_param_row(
             power_f,
-            '장마감 선정 후 절전 허용',
+            '장마감 선정 후 최대절전 허용',
             None,
             '',
-            '16:00 전후 일일 선정·감시 중단 후에는 유휴 절전 허용. 장전 08:35 전·감시 중에는 다시 막음',
+            '16:00 전후 일일 선정·감시 중단 후에는 유휴 최대절전 허용. '
+            '장전 08:35 전·감시 중에는 다시 막음',
             toggle_key='prevent_sleep_allow_after_eod',
         )
 

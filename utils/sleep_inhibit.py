@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Windows 유휴 절전 억제 (GUI 실행 중 자동매매·장전 스케줄 유지용).
+"""Windows 유휴 최대절전(하이버네이트) 억제.
+
+장중·장전 자동시작이 깨지지 않도록 시스템 유휴 타이머를 리셋한다.
+전원 옵션이 「최대 절전」이든 「절전」이든, 유휴로 꺼지는 것을 막는다
+(운영은 최대절전 사용을 전제로 한다).
 
 노트북 덮개를 닫으면 전원 옵션(덮개 동작)이 우선하므로 이 API로는 막지 못한다.
-모니터만 꺼지는 것은 기본 허용하고, 시스템 절전만 막는다.
+모니터만 꺼지는 것은 기본 허용한다.
 """
 from __future__ import annotations
 
@@ -26,7 +30,7 @@ _POWER_REQUEST_CONTEXT_VERSION = 0
 _POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x1
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-_REASON_TEXT = "K-Trader 자동매매 실행 중"
+_REASON_TEXT = "K-Trader 자동매매 — 최대절전 억제"
 
 
 class _REASON_CONTEXT(ctypes.Structure):
@@ -63,7 +67,7 @@ class SleepInhibitor:
         return self._active
 
     def acquire(self, keep_display: bool = False) -> bool:
-        """절전 억제를 켠다. 이미 켜져 있고 옵션이 같으면 재적용만 한다."""
+        """최대절전(유휴 전원) 억제를 켠다. 이미 켜져 있고 옵션이 같으면 재적용만 한다."""
         try:
             keep_display = bool(keep_display)
             if self._active and self._keep_display == keep_display:
@@ -72,13 +76,16 @@ class SleepInhibitor:
             if self._active:
                 self.release()
             if sys.platform != "win32":
-                self._emit("⚠️ [절전방지] Windows 가 아니라 적용하지 않습니다.")
+                self._emit("⚠️ [최대절전방지] Windows 가 아니라 적용하지 않습니다.")
                 return False
             self._keep_display = keep_display
             ok_power = self._acquire_power_request(keep_display)
             ok_exec = self._set_execution_state(keep_display)
             if not ok_power and not ok_exec:
-                self._emit("⚠️ [절전방지] Windows API 호출 실패 — 절전이 그대로일 수 있습니다.")
+                self._emit(
+                    "⚠️ [최대절전방지] Windows API 호출 실패 — "
+                    "유휴 최대절전이 그대로일 수 있습니다."
+                )
                 return False
             self._active = True
             self._used_power_request = ok_power
@@ -94,10 +101,12 @@ class SleepInhibitor:
                 via.append("PowerRequest")
             if ok_exec:
                 via.append("ExecutionState")
-            self._emit(f"🔆 [절전방지] 유휴 절전 억제 시작 ({disp}, {', '.join(via)})")
+            self._emit(
+                f"🔆 [최대절전방지] 유휴 최대절전 억제 시작 ({disp}, {', '.join(via)})"
+            )
             return True
         except Exception as e:
-            self._emit(f"⚠️ [절전방지] 시작 실패: {e}")
+            self._emit(f"⚠️ [최대절전방지] 시작 실패: {e}")
             return False
 
     def refresh(self) -> None:
@@ -112,7 +121,7 @@ class SleepInhibitor:
             pass
 
     def release(self) -> None:
-        """절전 억제를 해제한다. 프로그램 종료 시 반드시 호출."""
+        """최대절전 억제를 해제한다. 프로그램 종료 시 반드시 호출."""
         if not self._active and self._power_handle is None:
             return
         try:
@@ -130,7 +139,7 @@ class SleepInhibitor:
         self._keep_display = False
         self._used_power_request = False
         if was_active:
-            self._emit("🌙 [절전방지] 유휴 절전 억제를 해제했습니다.")
+            self._emit("🌙 [최대절전방지] 유휴 최대절전 억제를 해제했습니다.")
 
     def _set_execution_state(self, keep_display: bool) -> bool:
         try:

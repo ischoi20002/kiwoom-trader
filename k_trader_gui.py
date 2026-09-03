@@ -3489,7 +3489,7 @@ class KiwoomApp:
             pass
 
     def _start_sleep_inhibit(self) -> None:
-        """GUI 기동 시 Windows 유휴 절전 억제를 시작한다."""
+        """GUI 기동 시 Windows 유휴 최대절전 억제를 시작한다."""
         try:
             from utils.sleep_inhibit import SleepInhibitor
 
@@ -3499,12 +3499,12 @@ class KiwoomApp:
             self._schedule_sleep_inhibit_refresh()
         except Exception as e:
             try:
-                self.log(f"⚠️ [절전방지] 초기화 실패: {e}")
+                self.log(f"⚠️ [최대절전방지] 초기화 실패: {e}")
             except Exception:
                 pass
 
     def _apply_sleep_inhibit_from_settings(self) -> None:
-        """settings.json 의 절전방지 토글을 즉시 반영한다."""
+        """settings.json 의 최대절전 방지 토글을 즉시 반영한다."""
         try:
             si = getattr(self, "_sleep_inhibitor", None)
             if si is None:
@@ -3519,12 +3519,12 @@ class KiwoomApp:
                 si.release()
         except Exception as e:
             try:
-                self.log(f"⚠️ [절전방지] 설정 반영 실패: {e}")
+                self.log(f"⚠️ [최대절전방지] 설정 반영 실패: {e}")
             except Exception:
                 pass
 
     def _schedule_sleep_inhibit_refresh(self) -> None:
-        """약 50초마다 절전 억제를 갱신한다 (일부 전원 정책 대비)."""
+        """약 50초마다 최대절전 억제를 갱신한다 (일부 전원 정책 대비)."""
         try:
             after_id = getattr(self, "_sleep_inhibit_after_id", None)
             if after_id is not None:
@@ -3550,7 +3550,7 @@ class KiwoomApp:
             pass
 
     def _stop_sleep_inhibit(self) -> None:
-        """종료 시 절전 억제와 갱신 타이머를 해제한다."""
+        """종료 시 최대절전 억제와 갱신 타이머를 해제한다."""
         try:
             after_id = getattr(self, "_sleep_inhibit_after_id", None)
             if after_id is not None:
