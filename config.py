@@ -24,8 +24,8 @@ URL = MOCK_URL if USE_MOCK else REAL_URL
 # KiwoomApp 기동 시 settings 의 realtime_ka10080_global_min_interval_sec 로 덮어씁니다.
 KA10080_GLOBAL_MIN_INTERVAL_SEC = 1.05
 
-MOCK_APP_KEY = "3Z8lR7-KdASRK013UStJk2GfpHmT8YiN3sHZB9yq1sY"                     # 모의투자용 App Key 
-MOCK_APP_SECRET = "ucLGu97i-ZvfrXSLGpOnemgzjfVCb7CxmDjElkxHgl8"                  # 모의투자용 Secret Key
+MOCK_APP_KEY = "RIiFPemy5HD9jYU171gNSPhKmNhg-u87xcBNQCqu8EI"                     # 모의투자용 App Key 
+MOCK_APP_SECRET = "USCs4XVEe_olJC7sANMM3ytoflN93eI1xVtQZNp9_UE"                  # 모의투자용 Secret Key
 ALLOW_MOCK_ORDER = True # 모의투자 주문 허용 여부
 ALLOW_REAL_ORDER = False # 실전투자 주문 허용 여부 (매우 주의!)
 
