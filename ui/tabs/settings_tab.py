@@ -1472,7 +1472,8 @@ class SettingsTab:
             '15:19 공식대기 한도',
             'realtime_pre_auction_official_wait_max_sec',
             '초',
-            '15:19 비NXT: 공식 1분 대기 상한(기본 540=9분, 15:29까지). 초과 시 틱말분 합성',
+            '레거시(미사용). 15:19(15:15슬롯)는 틱말분 즉시평가. '
+            '백업 한도는 「틱말분 백업(마감후)」와 동일',
         )
         add_param_row(
             strat_f,

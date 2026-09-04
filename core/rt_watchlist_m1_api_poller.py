@@ -11,11 +11,10 @@
 - ``realtime_15m_last_minute_from_ticks`` OFF 이면 틱 보조도 끔.
 
 **동시호가 직전·종가 말분(15:19 / 15:30)**
-- **NXT 가능**: 틱말분(·단일가 틱) 즉시 평가 → 주문 속도 우선. 공식은 오면 15분 대체.
-- **NXT 불가·모의**: 공식 1분 우선. 15:19는 마감 후 최대 9분(15:29까지),
-  15:30 말분은 최대 5분
-  (``realtime_pre_auction_official_wait_max_sec`` / ``realtime_eod_official_wait_max_sec``)
-  대기 후 미완만 틱 합성 평가.
+- **15:19 (15:15 슬롯)**: 전 종목 틱말분 즉시 평가(모의·비NXT 포함).
+  공식 ka10080은 오면 합성 15분만 대체(재평가 없음). 공식 장대기는 쓰지 않음.
+- **15:30**: NXT는 단일가 틱 즉시, 비NXT·모의는 공식 1분 우선
+  (``realtime_eod_official_wait_max_sec``, 기본 5분) 후 미완만 틱 합성.
 
 **헤드 soft catchup**
 - head 구간 닫힌 뒤 ka10080 1페이지로 공식 1분을 store에 덮어씀.
@@ -744,7 +743,9 @@ class RtWatchlistM1ApiPoller:
 
     def _pre_auction_official_wait_max_sec(self) -> float:
         """
-        15:19(동시호가 직전) 비NXT 공식 1분 대기 상한(초). 기본 540(9분, 15:29까지).
+        (레거시) 15:19 공식 대기 설정값. 평가 경로에서는 더 이상 쓰지 않음.
+
+        15:19는 틱말분 즉시 평가 + 일반 슬롯과 동일한 짧은 백업 한도를 사용한다.
         """
         try:
             v = float(
@@ -769,10 +770,8 @@ class RtWatchlistM1ApiPoller:
         return max(60.0, min(v, 600.0))
 
     def _official_wait_max_sec_for_lab(self, closed_lab: pd.Timestamp) -> float:
-        """말분 라벨별 공식 대기 상한(초)."""
+        """말분 라벨별 공식 대기 상한(초). 15:19는 일반 슬롯과 동일(짧은 백업)."""
         try:
-            if is_pre_auction_last_m1_open(closed_lab):
-                return float(self._pre_auction_official_wait_max_sec())
             if is_krx_last_15m_slot(closed_lab):
                 return float(self._eod_official_wait_max_sec())
         except Exception:
@@ -780,10 +779,8 @@ class RtWatchlistM1ApiPoller:
         return float(self._tick_tail_backup_after_close_sec())
 
     def _is_eod_extended_official_wait_lab(self, closed_lab: pd.Timestamp) -> bool:
-        """동시호가 직전 말분(15:19) 또는 종가 단일가(15:30)."""
+        """종가 단일가(15:30)만 공식 대기 연장. 15:19는 틱말분 즉시."""
         try:
-            if is_pre_auction_last_m1_open(closed_lab):
-                return True
             if is_krx_last_15m_slot(closed_lab):
                 return True
         except Exception:
@@ -876,8 +873,7 @@ class RtWatchlistM1ApiPoller:
         """
         공식 말분 우선: not_ready 재시도·틱 백업 공통 벽시계 한도.
 
-        - 일반 말분: ``분 마감 + realtime_15m_tick_tail_backup_after_close_sec`` (기본 50초)
-        - 15:19: ``분 마감 + realtime_pre_auction_official_wait_max_sec`` (기본 9분→15:29)
+        - 일반 말분·15:19: ``분 마감 + realtime_15m_tick_tail_backup_after_close_sec`` (기본 50초)
         - 15:30: ``분 마감 + realtime_eod_official_wait_max_sec`` (기본 5분)
         """
         if self._is_eod_extended_official_wait_lab(closed_lab):
@@ -1185,10 +1181,10 @@ class RtWatchlistM1ApiPoller:
         self, codes: List[str], closed_lab: pd.Timestamp
     ) -> None:
         """
-        동시호가 직전 말분(15:19) **NXT 종목**: 공식 대기 없이 틱말분 즉시 평가.
+        동시호가 직전 말분(15:19 / 15:15 슬롯): 전 종목 틱말분 즉시 평가.
 
-        quiet를 걸지 않아 공식 ka10080 조회는 병행되고, 도착 시 M1·15분 대체.
-        호출 측에서 NXT 가능 종목만 넘긴다.
+        공식 ka10080 장대기는 하지 않는다. quiet를 걸지 않아 공식 조회는
+        병행되고, 도착 시 합성 15분만 대체(재평가 없음).
         """
         try:
             if not is_pre_auction_last_m1_open(closed_lab):
@@ -1200,19 +1196,21 @@ class RtWatchlistM1ApiPoller:
         except Exception:
             return
 
-        ordered = [canonical_stock_code(str(c).strip()) for c in codes]
+        ordered = self._order_codes_for_closed15_eval(
+            [canonical_stock_code(str(c).strip()) for c in codes]
+        )
         ordered = [c for c in ordered if c]
         if not ordered:
             return
 
         sk = pd.Timestamp(closed_lab).floor("min").strftime("%Y-%m-%d %H:%M:%S")
-        # NXT 전용 라운드 키 — 비NXT 백업 예약과 충돌하지 않게 접미사
-        sk_nxt = f"{sk}|nxt_tick"
+        # 즉시평가 라운드 키 — 짧은 백업 예약(sk)과 충돌하지 않게 접미사
+        sk_imm = f"{sk}|pre_auction_tick"
         try:
             with self._tick_tail_eval_lock:
-                if sk_nxt in self._tick_tail_scheduled_rounds:
+                if sk_imm in self._tick_tail_scheduled_rounds:
                     return
-                self._tick_tail_scheduled_rounds.add(sk_nxt)
+                self._tick_tail_scheduled_rounds.add(sk_imm)
                 if len(self._tick_tail_scheduled_rounds) > 64:
                     self._tick_tail_scheduled_rounds = set(
                         sorted(self._tick_tail_scheduled_rounds)[-32:]
@@ -1231,7 +1229,7 @@ class RtWatchlistM1ApiPoller:
 
         try:
             self._emit(
-                f"ℹ️ [M1Poll] 15:19 NXT 틱말분 즉시평가 예약 "
+                f"ℹ️ [M1Poll] 15:19 틱말분 즉시평가 예약 "
                 f"lab={closed_lab.strftime('%H:%M')} "
                 f"delay={delay:.2f}s n={len(ordered)}"
             )
@@ -1244,7 +1242,7 @@ class RtWatchlistM1ApiPoller:
                 t = threading.Timer(
                     delay + extra,
                     self._job_tick_tail_eval,
-                    args=(nk, closed_lab, "nxt_tick_first"),
+                    args=(nk, closed_lab, "pre_auction_tick_first"),
                 )
                 t.daemon = True
                 t.start()
@@ -1754,7 +1752,7 @@ class RtWatchlistM1ApiPoller:
         다음 분(:00) 체결로 말분이 seal된 직후 — 틱 즉시 평가 트리거.
 
         공식 말분 우선 모드에서는 일반적으로 여기서 평가하지 않지만,
-        **15:19 NXT** 는 예외적으로 즉시 평가한다.
+        **15:19(15:15 슬롯)** 는 전 종목 예외적으로 즉시 평가한다.
         ``15:30`` 은 ``on_auction_1530_tick`` 경로를 사용한다.
         """
         try:
@@ -1765,15 +1763,12 @@ class RtWatchlistM1ApiPoller:
             if not nk:
                 return
             # 공식 우선: 일반 말분은 :00 틱 선평가 금지.
-            # 15:30 → auction, 15:19 NXT만 틱 즉시.
+            # 15:30 → auction, 15:19는 전 종목 틱 즉시.
             if self._eval_on_official_last_m1_enabled():
                 if is_krx_last_15m_slot(lab):
                     self.on_auction_1530_tick(nk, lab)
                     return
-                if is_pre_auction_last_m1_open(lab):
-                    if not self._code_uses_nxt_touch(nk):
-                        return
-                else:
+                if not is_pre_auction_last_m1_open(lab):
                     return
             if not is_last_m1_open_of_15m_slot(lab):
                 return
@@ -2536,31 +2531,26 @@ class RtWatchlistM1ApiPoller:
                 except Exception:
                     pass
 
-                # 말분: 15:19·15:30 비NXT=공식 최대5분 후 틱 합성 백업.
+                # 말분: 15:19=전 종목 틱말분 즉시(+짧은 백업). 15:30은 auction 경로.
                 # 그 외 공식 우선이면 공식 REST 주경로 + 틱 보조(quiet 없음).
                 # 레거시(공식 OFF)만 :00 틱말분 주경로(+quiet).
                 try:
                     if is_last and (not is_auc) and use_tick:
                         pre_auc_last = bool(is_pre_auction_last_m1_open(closed_lab))
                         if pre_auc_last and (not tick_last_incomplete):
-                            nxt_c, non_c = self._partition_codes_by_nxt(codes)
-                            if nxt_c:
-                                self._schedule_tick_tail_immediate_pre_auction(
-                                    nxt_c, closed_lab
+                            self._schedule_tick_tail_immediate_pre_auction(
+                                codes, closed_lab
+                            )
+                            # 즉시 실패·무틱 종목용 — 일반 슬롯과 동일한 짧은 백업
+                            if use_official_last:
+                                self._schedule_tick_tail_backup_after_official(
+                                    codes, closed_lab
                                 )
-                            if non_c:
-                                if use_official_last:
-                                    self._schedule_tick_tail_backup_after_official(
-                                        non_c, closed_lab
-                                    )
-                                else:
-                                    self._schedule_tick_tail_evals(non_c, closed_lab)
                             try:
                                 self._emit(
-                                    f"ℹ️ [M1Poll] 15:19 분기 "
-                                    f"NXT틱즉시={len(nxt_c)} "
-                                    f"비NXT공식대기={len(non_c)} "
-                                    f"(한도 {self._official_wait_max_sec_for_lab(closed_lab):.0f}s)"
+                                    f"ℹ️ [M1Poll] 15:19 틱말분 즉시 "
+                                    f"n={len(codes)} "
+                                    f"(백업 {self._tick_tail_backup_after_close_sec():.0f}s)"
                                 )
                             except Exception:
                                 pass
@@ -4080,12 +4070,10 @@ class RtWatchlistM1ApiPoller:
             # 타임아웃: 공식 행 없음(무거래 생략) — 실패가 아님. 구멍 스킵 합성으로 평가
             defer = bool(use_official_last)
             try:
-                # 15:19 NXT는 틱 선평가 — 미평가면 타임아웃에서 평가
-                if is_pre_auction_last_m1_open(closed_lab) and self._code_uses_nxt_touch(
-                    nk
-                ):
+                # 15:19: 틱 선평가 — 미평가면 타임아웃에서 바로 평가
+                if is_pre_auction_last_m1_open(closed_lab):
                     defer = False
-                # 15:19·15:30 비NXT: 공식 대기 백업 타이머에 맡김(최대 5분)
+                # 15:30 비NXT: 공식 대기 백업 타이머에 맡김
                 elif self._is_eod_extended_official_wait_lab(closed_lab):
                     defer = True
             except Exception:

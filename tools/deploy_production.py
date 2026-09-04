@@ -8,13 +8,20 @@
 """
 from __future__ import annotations
 
+import argparse
 import re
 import shutil
 from pathlib import Path
-from typing import Iterable, List, Set
+from typing import Iterable, List, Optional, Set
 
 SOURCE = Path(r"c:\vibe")
 DEST = Path(r"c:\k-trader")
+
+# 운영 업데이트 시 덮어쓰지 않을 런타임 설정 (이미 DEST에 있을 때만)
+PRESERVE_RUNTIME_FILES: Set[str] = {
+    "settings.json",
+    "config.py",
+}
 
 # 루트 필수 파일
 ROOT_FILES: List[str] = [
@@ -203,14 +210,22 @@ def _verify_op_venv(dest: Path) -> None:
         print(f"\n[경고] [운영] .venv 검사 생략: {ex}")
 
 
-def deploy() -> None:
+def deploy(*, preserve_runtime: bool = False) -> None:
     if not SOURCE.is_dir():
         raise FileNotFoundError(f"소스 없음: {SOURCE}")
 
     DEST.mkdir(parents=True, exist_ok=True)
     copied: List[str] = []
+    skipped_preserve: List[str] = []
 
     for name in ROOT_FILES + ROOT_OPTIONAL:
+        if (
+            preserve_runtime
+            and name in PRESERVE_RUNTIME_FILES
+            and (DEST / name).is_file()
+        ):
+            skipped_preserve.append(name)
+            continue
         src = SOURCE / name
         if _copy_file(src, DEST / name):
             copied.append(name)
@@ -242,6 +257,8 @@ def deploy() -> None:
 
     print(f"[배포 완료] {SOURCE} -> {DEST}")
     print(f"  루트 파일: {len(copied)}개")
+    if skipped_preserve:
+        print(f"  런타임 유지(미복사): {', '.join(skipped_preserve)}")
     print(f"  Python 모듈: {py_count}개")
     print(f"  mobile_web 파일: {mobile_n}개")
     print("  백테스트 탭 제거 패치 적용됨 (k_trader_gui.py)")
@@ -251,9 +268,20 @@ def deploy() -> None:
     _verify_op_venv(DEST)
 
 
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="개발→운영 최소 파일 배포")
+    p.add_argument(
+        "--preserve-runtime",
+        action="store_true",
+        help="DEST에 이미 있는 settings.json·config.py 는 덮어쓰지 않음",
+    )
+    return p.parse_args(argv)
+
+
 if __name__ == "__main__":
     try:
-        deploy()
+        args = _parse_args()
+        deploy(preserve_runtime=bool(args.preserve_runtime))
     except Exception as ex:
         print(f"[오류] {ex}")
         raise

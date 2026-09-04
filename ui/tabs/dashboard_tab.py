@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from typing import Any, Optional
+import threading
 
 import config
 
@@ -10,6 +11,8 @@ class DashboardTab:
         self.app = app
         self.lbl_mode_badge: Optional[tk.Label] = None
         self.btn_sync: Optional[ttk.Button] = None
+        self.btn_restart: Optional[ttk.Button] = None
+        self.btn_check_update: Optional[ttk.Button] = None
         self.btn_watchlist: Optional[ttk.Button] = None
         self.btn_server_switch: Optional[ttk.Button] = None
         self.btn_select: Optional[ttk.Button] = None
@@ -112,6 +115,15 @@ class DashboardTab:
             command=self._on_restart_clicked,
         )
         self.btn_restart.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.btn_check_update = ttk.Button(
+            ops_btns,
+            text="업데이트 확인",
+            width=14,
+            command=self._on_check_update_clicked,
+        )
+        self.btn_check_update.pack(side=tk.LEFT, padx=(8, 0))
+        self._update_check_busy = False
 
         # --- 실시간 감시 제어 (실시간 감시 탭에서 이전) ---
         ops_monitor = ttk.Frame(ops)
@@ -324,6 +336,169 @@ class DashboardTab:
         except Exception as e:
             try:
                 messagebox.showerror("재시작", str(e), parent=self.parent)
+            except Exception:
+                pass
+
+    def _on_check_update_clicked(self) -> None:
+        """GitHub(origin/main) 대비 업데이트 확인 → 선택 시 운영 배포·재시작."""
+        if bool(getattr(self, "_update_check_busy", False)):
+            return
+        self._update_check_busy = True
+        try:
+            if self.btn_check_update is not None:
+                self.btn_check_update.configure(state=tk.DISABLED, text="확인 중…")
+        except Exception:
+            pass
+
+        def _work() -> None:
+            result = None
+            err_msg = ""
+            try:
+                from core.app_updater import check_for_update, format_check_summary
+
+                log_fn = getattr(self.app, "log", None)
+                result = check_for_update(
+                    log=log_fn if callable(log_fn) else None,
+                )
+            except Exception as e:
+                err_msg = repr(e)
+
+            def _done() -> None:
+                self._update_check_busy = False
+                try:
+                    if self.btn_check_update is not None:
+                        self.btn_check_update.configure(
+                            state=tk.NORMAL, text="업데이트 확인"
+                        )
+                except Exception:
+                    pass
+                if err_msg:
+                    try:
+                        messagebox.showerror(
+                            "업데이트 확인",
+                            f"확인 중 오류:\n{err_msg}",
+                            parent=self.parent,
+                        )
+                    except Exception:
+                        pass
+                    return
+                self._show_update_check_result(result)
+
+            try:
+                self.app.root.after(0, _done)
+            except Exception:
+                _done()
+
+        try:
+            threading.Thread(target=_work, daemon=True).start()
+        except Exception as e:
+            self._update_check_busy = False
+            try:
+                if self.btn_check_update is not None:
+                    self.btn_check_update.configure(
+                        state=tk.NORMAL, text="업데이트 확인"
+                    )
+            except Exception:
+                pass
+            try:
+                messagebox.showerror("업데이트 확인", str(e), parent=self.parent)
+            except Exception:
+                pass
+
+    def _show_update_check_result(self, result: Any) -> None:
+        """확인 결과 다이얼로그 — 새 버전이면 적용 여부 확인."""
+        try:
+            from core.app_updater import format_check_summary, start_update_process
+            from utils.gui_restart import is_monitoring_active
+        except Exception as e:
+            try:
+                messagebox.showerror("업데이트 확인", repr(e), parent=self.parent)
+            except Exception:
+                pass
+            return
+
+        try:
+            summary = format_check_summary(result)
+        except Exception:
+            summary = str(result)
+
+        if result is None or not getattr(result, "ok", False):
+            try:
+                messagebox.showerror(
+                    "업데이트 확인",
+                    summary or "확인 실패",
+                    parent=self.parent,
+                )
+            except Exception:
+                pass
+            return
+
+        if not bool(getattr(result, "update_available", False)):
+            try:
+                messagebox.showinfo("업데이트 확인", summary, parent=self.parent)
+            except Exception:
+                pass
+            return
+
+        monitoring = False
+        try:
+            monitoring = bool(is_monitoring_active(self.app))
+        except Exception:
+            monitoring = False
+
+        warn = ""
+        if monitoring:
+            warn = (
+                "\n\n⚠️ 현재 실시간 감시 중입니다.\n"
+                "업데이트하면 감시가 중단되고 프로그램이 재시작됩니다."
+            )
+
+        apply = False
+        try:
+            apply = bool(
+                messagebox.askyesno(
+                    "업데이트 적용",
+                    f"{summary}{warn}\n\n지금 적용하고 재시작할까요?",
+                    parent=self.parent,
+                )
+            )
+        except Exception:
+            apply = False
+        if not apply:
+            return
+
+        ok, msg = False, ""
+        log_fn = getattr(self.app, "log", None)
+        try:
+            ok, msg = start_update_process(
+                log=log_fn if callable(log_fn) else None,
+            )
+        except Exception as e:
+            ok, msg = False, repr(e)
+
+        if not ok:
+            try:
+                messagebox.showerror(
+                    "업데이트 적용",
+                    f"시작 실패:\n{msg}",
+                    parent=self.parent,
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            if callable(log_fn):
+                log_fn("📦 [Update] 원격 업데이트 시작 — 잠시 후 종료합니다.")
+        except Exception:
+            pass
+
+        # 배치가 pull·배포·재기동하는 동안 현재 GUI 종료
+        try:
+            self.app.root.after(800, self.app.on_close)
+        except Exception:
+            try:
+                self.app.on_close()
             except Exception:
                 pass
 

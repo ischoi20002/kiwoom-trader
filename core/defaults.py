@@ -117,7 +117,7 @@ DEFAULT_SETTINGS = {
     # 공식 우선: 슬롯 마감 후 이 초까지 공식 평가 대기, 미완만 틱말분 백업
     "realtime_15m_tick_tail_backup_after_close_sec": 50.0,
     "realtime_15m_tick_tail_backup_grace_sec": 2.5,  # 구키(미사용, 호환 잔존)
-    # 15:19 비NXT: 공식 1분 대기 상한(초). 기본 540=9분(15:20 마감→15:29 틱 백업)
+    # 레거시(미사용): 15:19는 틱말분 즉시평가. 백업은 tick_tail_backup_after_close 사용
     "realtime_pre_auction_official_wait_max_sec": 540.0,
     # 15:30 비NXT: 공식 1분 대기 상한(초). 기본 300=5분
     "realtime_eod_official_wait_max_sec": 300.0,

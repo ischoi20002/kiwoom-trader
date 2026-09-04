@@ -4375,21 +4375,29 @@ class KiwoomApp:
             self.portfolio.sell_all()
 
     def _handle_remote_update(self):
-        self.send_telegram_message("📦 [원격 배포 시작]")
-        candidates = (
-            os.path.join(r"c:\vibe", "remote_update.bat"),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "remote_update.bat"),
-        )
-        update_script = next((p for p in candidates if os.path.isfile(p)), None)
-        if update_script:
-            subprocess.Popen(
-                ["cmd", "/c", update_script],
-                cwd=os.path.dirname(update_script),
-                creationflags=0x10,
-            )
-            self.root.after(1000, self.on_close)
-        else:
-            self.send_telegram_message("❌ remote_update.bat(c:\\vibe) 없음")
+        """원격/텔레그램 업데이트 — app_updater 경로로 통일."""
+        try:
+            self.send_telegram_message("📦 [원격 배포 시작]")
+        except Exception:
+            pass
+        try:
+            from core.app_updater import start_update_process
+
+            ok, msg = start_update_process(log=self.log)
+            if ok:
+                self.root.after(1000, self.on_close)
+            else:
+                try:
+                    self.send_telegram_message(f"❌ 업데이트 실패: {msg}")
+                except Exception:
+                    pass
+                self.log(f"[Error] [Remote] {msg}")
+        except Exception as e:
+            try:
+                self.send_telegram_message(f"❌ 업데이트 예외: {e!r}")
+            except Exception:
+                pass
+            self.log(f"[Error] [Remote] 업데이트 예외: {e!r}")
 
 if __name__ == "__main__":
     import sys
