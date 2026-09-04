@@ -190,7 +190,7 @@ class VirtualTab:
         # 동기화·서버 전환 등은 대시보드 「운영 · 계좌」, 종합리포트·일일결산은 전략검증 탭으로 두었습니다.
         ttk.Label(
             header_f,
-            text="동기화·관심목록·서버 전환 → 대시보드 · 종합리포트·일일결산 → 전략검증 탭",
+            text="동기화·서버 전환 → 대시보드 · 종합리포트·일일결산 → 전략검증 탭",
             font=("Malgun Gothic", 8),
             foreground="#787c99",
         ).pack(side=tk.RIGHT, padx=(8, 0), pady=(12, 0))

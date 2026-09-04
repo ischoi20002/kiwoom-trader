@@ -13,7 +13,6 @@ class DashboardTab:
         self.btn_sync: Optional[ttk.Button] = None
         self.btn_restart: Optional[ttk.Button] = None
         self.btn_check_update: Optional[ttk.Button] = None
-        self.btn_watchlist: Optional[ttk.Button] = None
         self.btn_server_switch: Optional[ttk.Button] = None
         self.btn_select: Optional[ttk.Button] = None
         self.btn_monitor_toggle: Optional[ttk.Button] = None
@@ -108,13 +107,6 @@ class DashboardTab:
             command=self.app._sync_account_deposit,
         )
         self.btn_sync.pack(side=tk.LEFT, padx=(0, btn_gap))
-        self.btn_watchlist = ttk.Button(
-            left_acct,
-            text="관심목록",
-            width=btn_w,
-            command=lambda: self._call_virtual_tab("_open_watchlist_dialog"),
-        )
-        self.btn_watchlist.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_server_switch = ttk.Button(
             left_acct,
             text="서버 전환",
