@@ -46,140 +46,175 @@ class DashboardTab:
 
     def _setup_ui(self):
         """대시보드: 운영 메뉴 + 로그 (시세·가상 리포트는 전략검증 탭)"""
-        db_main_frame = ttk.Frame(self.parent, padding="20")
+        colors = getattr(self.app, "colors", {}) or {}
+        secondary = colors.get("secondary", "#81A1C1")
+        primary = colors.get("primary", "#88C0D0")
+        btn_gap = 6
+        btn_w = 12
+
+        db_main_frame = ttk.Frame(self.parent, padding=(20, 16))
         db_main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # --- [0] 운영 · 계좌 (기존 포지션 탭 상단 버튼 이전) ---
+        # ── 운영 · 계좌 ───────────────────────────────────────────
         ops = ttk.LabelFrame(
             db_main_frame,
-            text=" ⚡ 운영 · 계좌 ",
-            padding=(14, 12),
+            text=" 운영 · 계좌 ",
+            padding=(16, 14),
         )
-        ops.pack(fill=tk.X, pady=(0, 16))
+        ops.pack(fill=tk.X, pady=(0, 12))
 
-        ops_top = ttk.Frame(ops)
-        ops_top.pack(fill=tk.X)
+        # 헤더: 모드 배지 + 짧은 안내
+        hdr = ttk.Frame(ops)
+        hdr.pack(fill=tk.X, pady=(0, 12))
 
         use_mock = bool(getattr(config, "USE_MOCK", False))
         mode_text = " 모의투자 " if use_mock else " 실전 "
         mode_bg = "#5E81AC" if use_mock else "#BF616A"
         self.lbl_mode_badge = tk.Label(
-            ops_top,
+            hdr,
             text=mode_text,
             font=("Malgun Gothic", 9, "bold"),
             foreground="white",
             background=mode_bg,
-            padx=12,
-            pady=4,
+            padx=10,
+            pady=3,
         )
         self.lbl_mode_badge.pack(side=tk.LEFT)
-
         ttk.Label(
-            ops_top,
-            text="동기화 · 관심목록 · 서버(모의/실전) 전환",
+            hdr,
+            text="계좌 · 감시 · 시스템",
             font=("Malgun Gothic", 9),
-            foreground=self.app.colors.get("secondary", "#787c99"),
-        ).pack(side=tk.LEFT, padx=(14, 8))
+            foreground=secondary,
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
-        ops_btns = ttk.Frame(ops_top)
-        ops_btns.pack(side=tk.RIGHT)
+        # 1행: 계좌 | 시스템 (균등 폭)
+        row_acct = ttk.Frame(ops)
+        row_acct.pack(fill=tk.X, pady=(0, 8))
+
+        left_acct = ttk.Frame(row_acct)
+        left_acct.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(
+            left_acct,
+            text="계좌",
+            font=("Malgun Gothic", 8),
+            foreground=secondary,
+            width=6,
+        ).pack(side=tk.LEFT, padx=(0, 8))
 
         self.btn_sync = ttk.Button(
-            ops_btns,
+            left_acct,
             text="동기화",
-            width=11,
+            width=btn_w,
             command=self.app._sync_account_deposit,
         )
-        self.btn_sync.pack(side=tk.LEFT, padx=(0, 4))
-
+        self.btn_sync.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_watchlist = ttk.Button(
-            ops_btns,
+            left_acct,
             text="관심목록",
-            width=11,
+            width=btn_w,
             command=lambda: self._call_virtual_tab("_open_watchlist_dialog"),
         )
-        self.btn_watchlist.pack(side=tk.LEFT, padx=4)
-
+        self.btn_watchlist.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_server_switch = ttk.Button(
-            ops_btns,
+            left_acct,
             text="서버 전환",
-            width=11,
+            width=btn_w,
             command=lambda: self._call_virtual_tab("_toggle_environment"),
         )
-        self.btn_server_switch.pack(side=tk.LEFT, padx=(4, 0))
+        self.btn_server_switch.pack(side=tk.LEFT)
 
+        right_sys = ttk.Frame(row_acct)
+        right_sys.pack(side=tk.RIGHT)
+        ttk.Label(
+            right_sys,
+            text="시스템",
+            font=("Malgun Gothic", 8),
+            foreground=secondary,
+            width=6,
+        ).pack(side=tk.LEFT, padx=(16, 8))
         self.btn_restart = ttk.Button(
-            ops_btns,
+            right_sys,
             text="재시작",
-            width=11,
+            width=btn_w,
             command=self._on_restart_clicked,
         )
-        self.btn_restart.pack(side=tk.LEFT, padx=(8, 0))
-
+        self.btn_restart.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_check_update = ttk.Button(
-            ops_btns,
+            right_sys,
             text="업데이트 확인",
-            width=14,
+            width=btn_w,
             command=self._on_check_update_clicked,
         )
-        self.btn_check_update.pack(side=tk.LEFT, padx=(8, 0))
+        self.btn_check_update.pack(side=tk.LEFT)
         self._update_check_busy = False
 
-        # --- 실시간 감시 제어 (실시간 감시 탭에서 이전) ---
-        ops_monitor = ttk.Frame(ops)
-        ops_monitor.pack(fill=tk.X, pady=(12, 0))
-        ttk.Label(
-            ops_monitor,
-            text="실시간 감시 · 일일 선정",
-            font=("Malgun Gothic", 9),
-            foreground=self.app.colors.get("secondary", "#787c99"),
-        ).pack(side=tk.LEFT, padx=(0, 14))
+        # 구분선
+        ttk.Separator(ops, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(4, 10))
 
-        monitor_btns = ttk.Frame(ops_monitor)
-        monitor_btns.pack(side=tk.RIGHT)
-        _monitor_ctrl_btn_w = 20
+        # 2행: 감시 (주요 액션 — 왼쪽부터 읽기 순서)
+        row_mon = ttk.Frame(ops)
+        row_mon.pack(fill=tk.X)
+        ttk.Label(
+            row_mon,
+            text="감시",
+            font=("Malgun Gothic", 8),
+            foreground=secondary,
+            width=6,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        mon_w = 18
+        self.btn_monitor_toggle = ttk.Button(
+            row_mon,
+            text="실시간 감시 시작",
+            width=mon_w,
+            command=self.app.toggle_monitoring,
+            style="Accent.TButton",
+        )
+        self.btn_monitor_toggle.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_select = ttk.Button(
-            monitor_btns,
+            row_mon,
             text="일일 감시목록 선정",
-            width=_monitor_ctrl_btn_w,
+            width=mon_w,
             style="Action.TButton",
             command=self._start_daily_selection,
             state=tk.DISABLED,
         )
-        self.btn_monitor_toggle = ttk.Button(
-            monitor_btns,
-            text="▶️ 실시간 감시 시작",
-            width=_monitor_ctrl_btn_w,
-            command=self.app.toggle_monitoring,
-            style="Accent.TButton",
-        )
-        # 오른쪽 정렬: 읽기 순서(왼→오) = 실시간 감시 | 일일 감시목록 선정
-        self.btn_select.pack(side=tk.RIGHT, padx=(0, 4))
-        self.btn_monitor_toggle.pack(side=tk.RIGHT, padx=(4, 0))
+        self.btn_select.pack(side=tk.LEFT)
 
-        # --- 모바일 읽기 전용 현황 API ---
+        # ── 모바일 현황 ───────────────────────────────────────────
         mobile = ttk.LabelFrame(
             db_main_frame,
-            text=" 📱 모바일 현황 (읽기 전용) ",
-            padding=(14, 10),
+            text=" 모바일 현황 ",
+            padding=(16, 12),
         )
         mobile.pack(fill=tk.X, pady=(0, 12))
+
+        mob_hdr = ttk.Frame(mobile)
+        mob_hdr.pack(fill=tk.X, pady=(0, 6))
         self.lbl_mobile_api = ttk.Label(
-            mobile,
+            mob_hdr,
             text="API: 꺼짐",
             font=("Malgun Gothic", 9),
-            foreground=self.app.colors.get("secondary", "#787c99"),
+            foreground=secondary,
         )
-        self.lbl_mobile_api.pack(anchor=tk.W)
+        self.lbl_mobile_api.pack(side=tk.LEFT)
         self.lbl_mobile_warn = ttk.Label(
-            mobile,
+            mob_hdr,
             text="",
             font=("Malgun Gothic", 8),
             foreground="#D08770",
         )
-        self.lbl_mobile_warn.pack(anchor=tk.W, pady=(2, 6))
+        self.lbl_mobile_warn.pack(side=tk.LEFT, padx=(12, 0))
+
         mob_row = ttk.Frame(mobile)
         mob_row.pack(fill=tk.X)
+        ttk.Label(
+            mob_row,
+            text="공개 URL",
+            font=("Malgun Gothic", 8),
+            foreground=secondary,
+            width=8,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         self.ent_mobile_public_url = ttk.Entry(mob_row)
         try:
             self.ent_mobile_public_url.insert(
@@ -187,19 +222,21 @@ class DashboardTab:
             )
         except Exception:
             pass
-        self.ent_mobile_public_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self.ent_mobile_public_url.pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, btn_gap)
+        )
         ttk.Button(
             mob_row,
             text="URL 복사",
             width=10,
             command=self._copy_mobile_public_url,
-        ).pack(side=tk.LEFT, padx=(0, 4))
+        ).pack(side=tk.LEFT, padx=(0, btn_gap))
         ttk.Button(
             mob_row,
             text="설정 링크",
             width=10,
             command=self._copy_mobile_setup_link,
-        ).pack(side=tk.LEFT, padx=(0, 4))
+        ).pack(side=tk.LEFT, padx=(0, btn_gap))
         ttk.Button(
             mob_row,
             text="상태 갱신",
@@ -208,16 +245,20 @@ class DashboardTab:
         ).pack(side=tk.LEFT)
         ttk.Label(
             mobile,
-            text="PIN 8자리 · 「설정 링크」= URL+#t=PIN (폰에서 붙여넣기만) · docs/mobile_status_portforward.md",
+            text="PIN 8자리 · 설정 링크 = URL+#t=PIN (폰에 붙여넣기)",
             font=("Malgun Gothic", 8),
-            foreground=self.app.colors.get("secondary", "#787c99"),
-        ).pack(anchor=tk.W, pady=(6, 0))
+            foreground=secondary,
+        ).pack(anchor=tk.W, pady=(8, 0))
 
-        # 상태 요약 라인 (아이콘 추가)
+        # 상태 요약
         status_info_frame = ttk.Frame(db_main_frame)
-        status_info_frame.pack(fill=tk.X, pady=(0, 12))
-        self.app.status_label = ttk.Label(status_info_frame, text="⚡ 시스템 엔진 가동 중...", 
-                                        font=("Malgun Gothic", 10), foreground=self.app.colors['primary'])
+        status_info_frame.pack(fill=tk.X, pady=(0, 10))
+        self.app.status_label = ttk.Label(
+            status_info_frame,
+            text="시스템 엔진 가동 중…",
+            font=("Malgun Gothic", 10),
+            foreground=primary,
+        )
         self.app.status_label.pack(side=tk.LEFT)
 
         # 첫 기동: REST 인증 대기 동안 인디터미네이트 바 (완료 후 자동 숨김)
