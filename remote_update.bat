@@ -45,21 +45,23 @@ if errorlevel 1 (
 )
 
 call :log "[4/4] 운영 GUI 재시작 (%OP%)..."
-if not exist "%OP%\run_k_trader.bat" (
-  call :fail "run_k_trader.bat 없음: %OP%"
-  exit /b 1
-)
-
-REM NOTE: cmd /c "call \"...\"" 따옴표 이스케이프는 실패하기 쉬움.
-REM START ["title"] /D path bat args 형태가 안정적.
 cd /d "%OP%"
-start "K-Trader" /D "%OP%" "%OP%\run_k_trader.bat" --auto-start
-if errorlevel 1 (
-  call :fail "운영 GUI start 실패 — %LOG% 확인"
+
+REM 콘솔 창 없이 pythonw 로 기동 (재시작 시 cmd 잔류 방지)
+set "PYW=%OP%\.venv\Scripts\pythonw.exe"
+set "PY=%OP%\.venv\Scripts\python.exe"
+if exist "%PYW%" (
+  start "" /D "%OP%" "%PYW%" -u k_trader_gui.py --auto-start
+) else if exist "%PY%" (
+  start "" /D "%OP%" "%PY%" -u k_trader_gui.py --auto-start
+) else if exist "%OP%\run_k_trader.bat" (
+  start "K-Trader" /D "%OP%" "%OP%\run_k_trader.bat" --auto-start
+) else (
+  call :fail "pythonw/python/run_k_trader.bat 없음: %OP%"
   exit /b 1
 )
 
-REM 기동 확인(최대 ~10초) — PowerShell로 프로세스 존재 확인
+REM 기동 확인(최대 ~10초)
 set "STARTED=0"
 for /L %%i in (1,1,10) do (
   timeout /t 1 /nobreak >nul
@@ -75,10 +77,10 @@ if "!STARTED!"=="0" (
   exit /b 1
 )
 
-call :log "Remote Update Sequence Completed. (GUI process detected)"
+call :log "Remote Update Sequence Completed. (GUI process detected, no console)"
 echo.
 echo [완료] 운영 GUI를 다시 띄웠습니다. 문제가 있으면 %LOG% 를 확인하세요.
-timeout /t 3 /nobreak >nul
+timeout /t 2 /nobreak >nul
 exit /b 0
 
 :log

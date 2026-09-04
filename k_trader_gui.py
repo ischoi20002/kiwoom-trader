@@ -3638,7 +3638,20 @@ class KiwoomApp:
         except Exception:
             pass
         if hasattr(self, 'trading_controller'): self.trading_controller.stop()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        # 백그라운드 스레드가 남아 부모 cmd 창이 안 닫히는 경우 방지
+        try:
+            os._exit(0)
+        except Exception:
+            try:
+                import sys as _sys
+
+                _sys.exit(0)
+            except Exception:
+                pass
 
     def _on_regime_history_clicked(self) -> None:
         """헤더 「30일」 — 적용일(다음 장) 기준 레짐 이력 창."""

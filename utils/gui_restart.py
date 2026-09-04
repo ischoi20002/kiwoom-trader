@@ -3,14 +3,16 @@
 GUI 재시작 상태 저장·복원.
 
 재시작 직전 감시 여부를 기록하고, 새 프로세스가 같은 상태로 기동하도록 한다.
+재기동은 콘솔 창 없이 ``pythonw`` 를 우선 사용한다.
 """
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from utils.server_mode_paths import project_root
 
@@ -124,57 +126,101 @@ def resolve_run_script() -> Optional[str]:
     return None
 
 
+def resolve_gui_workdir() -> Optional[str]:
+    """GUI 기동 작업 디렉터리 (운영 k-trader 우선)."""
+    script = resolve_run_script()
+    if script:
+        return os.path.dirname(script)
+    try:
+        prod = r"c:\k-trader"
+        if os.path.isfile(os.path.join(prod, "k_trader_gui.py")):
+            return prod
+    except Exception:
+        pass
+    return None
+
+
+def resolve_gui_python(*, prefer_windowed: bool = True) -> Optional[str]:
+    """
+    GUI 실행용 파이썬 경로.
+
+    prefer_windowed=True 이면 콘솔 없는 pythonw 를 우선한다.
+    """
+    cwd = resolve_gui_workdir()
+    if not cwd:
+        return None
+    if prefer_windowed:
+        names: Sequence[str] = (
+            os.path.join(".venv", "Scripts", "pythonw.exe"),
+            os.path.join(".venv", "Scripts", "python.exe"),
+        )
+    else:
+        names = (
+            os.path.join(".venv", "Scripts", "python.exe"),
+            os.path.join(".venv", "Scripts", "pythonw.exe"),
+        )
+    for rel in names:
+        try:
+            cand = os.path.join(cwd, rel)
+            if os.path.isfile(cand):
+                return os.path.abspath(cand)
+        except Exception:
+            continue
+    return None
+
+
 def spawn_gui_restart(*, resume_monitoring: bool) -> bool:
     """
-    새 GUI 프로세스를 띄운다.
-
-    Windows 에서 ``cmd /c bat`` 만 쓰면 콘솔이 바로 닫히거나
-    인자 전달이 깨지는 경우가 있어, ``start "title" /D ... bat`` 을 사용한다.
+    새 GUI 프로세스를 콘솔 없이 띄운다 (pythonw 우선).
 
     Returns
     -------
     bool
         성공 여부.
     """
-    script = resolve_run_script()
-    if not script:
+    cwd = resolve_gui_workdir()
+    if not cwd:
         return False
-    cwd = os.path.dirname(script)
     try:
         write_restart_state(resume_monitoring=resume_monitoring)
-        # START ["title"] [/D path] command [args]
-        # title 은 인용 경로와 구분하기 위해 필수.
-        cmd = f'start "K-Trader" /D "{cwd}" "{script}"'
-        if resume_monitoring:
-            cmd += " --auto-start"
-        subprocess.Popen(
-            cmd,
-            shell=True,
-            cwd=cwd,
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10),
-        )
-        return True
     except Exception:
-        # 폴백: venv pythonw 직접 기동
+        pass
+
+    exe = resolve_gui_python(prefer_windowed=True)
+    if exe:
         try:
-            pyw = os.path.join(cwd, ".venv", "Scripts", "pythonw.exe")
-            py = os.path.join(cwd, ".venv", "Scripts", "python.exe")
-            exe = pyw if os.path.isfile(pyw) else (py if os.path.isfile(py) else None)
-            if not exe:
-                return False
-            args = [exe, "-u", "k_trader_gui.py"]
+            args: List[str] = [exe, "-u", "k_trader_gui.py"]
             if resume_monitoring:
                 args.append("--auto-start")
-            flags = int(
-                getattr(subprocess, "DETACHED_PROCESS", 0x8)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
-            )
+            flags = 0
+            if sys.platform == "win32":
+                flags = int(
+                    getattr(subprocess, "DETACHED_PROCESS", 0x8)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                )
             subprocess.Popen(
                 args,
                 cwd=cwd,
                 creationflags=flags,
                 close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             return True
         except Exception:
-            return False
+            pass
+
+    # 최후 폴백: bat (콘솔이 뜰 수 있음)
+    script = resolve_run_script()
+    if not script:
+        return False
+    try:
+        cmd = f'start "K-Trader" /D "{cwd}" "{script}"'
+        if resume_monitoring:
+            cmd += " --auto-start"
+        subprocess.Popen(cmd, shell=True, cwd=cwd)
+        return True
+    except Exception:
+        return False
