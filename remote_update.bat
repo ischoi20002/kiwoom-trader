@@ -50,12 +50,34 @@ if not exist "%OP%\run_k_trader.bat" (
   exit /b 1
 )
 
-REM start 인자/작업폴더를 명시해 재기동 누락을 막음
-start "K-Trader" /D "%OP%" cmd /c "call \"%OP%\run_k_trader.bat\" --auto-start"
+REM NOTE: cmd /c "call \"...\"" 따옴표 이스케이프는 실패하기 쉬움.
+REM START ["title"] /D path bat args 형태가 안정적.
+cd /d "%OP%"
+start "K-Trader" /D "%OP%" "%OP%\run_k_trader.bat" --auto-start
+if errorlevel 1 (
+  call :fail "운영 GUI start 실패 — %LOG% 확인"
+  exit /b 1
+)
 
-call :log "Remote Update Sequence Completed."
+REM 기동 확인(최대 ~10초) — PowerShell로 프로세스 존재 확인
+set "STARTED=0"
+for /L %%i in (1,1,10) do (
+  timeout /t 1 /nobreak >nul
+  powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*k_trader_gui.py*' } | Select-Object -First 1) { exit 0 } else { exit 1 }" >nul 2>&1
+  if not errorlevel 1 (
+    set "STARTED=1"
+    goto :started_ok
+  )
+)
+:started_ok
+if "!STARTED!"=="0" (
+  call :fail "재시작 후 k_trader_gui 프로세스가 보이지 않음 — %OP%\run_k_trader.bat 직접 실행 확인"
+  exit /b 1
+)
+
+call :log "Remote Update Sequence Completed. (GUI process detected)"
 echo.
-echo [완료] 운영 GUI를 다시 띄웠습니다. 창이 안 보이면 %LOG% 를 확인하세요.
+echo [완료] 운영 GUI를 다시 띄웠습니다. 문제가 있으면 %LOG% 를 확인하세요.
 timeout /t 3 /nobreak >nul
 exit /b 0
 

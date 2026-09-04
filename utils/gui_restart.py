@@ -128,6 +128,9 @@ def spawn_gui_restart(*, resume_monitoring: bool) -> bool:
     """
     새 GUI 프로세스를 띄운다.
 
+    Windows 에서 ``cmd /c bat`` 만 쓰면 콘솔이 바로 닫히거나
+    인자 전달이 깨지는 경우가 있어, ``start "title" /D ... bat`` 을 사용한다.
+
     Returns
     -------
     bool
@@ -136,17 +139,42 @@ def spawn_gui_restart(*, resume_monitoring: bool) -> bool:
     script = resolve_run_script()
     if not script:
         return False
+    cwd = os.path.dirname(script)
     try:
         write_restart_state(resume_monitoring=resume_monitoring)
-        cwd = os.path.dirname(script)
-        args = ["cmd", "/c", script]
+        # START ["title"] [/D path] command [args]
+        # title 은 인용 경로와 구분하기 위해 필수.
+        cmd = f'start "K-Trader" /D "{cwd}" "{script}"'
         if resume_monitoring:
-            args.append("--auto-start")
+            cmd += " --auto-start"
         subprocess.Popen(
-            args,
+            cmd,
+            shell=True,
             cwd=cwd,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10),
         )
         return True
     except Exception:
-        return False
+        # 폴백: venv pythonw 직접 기동
+        try:
+            pyw = os.path.join(cwd, ".venv", "Scripts", "pythonw.exe")
+            py = os.path.join(cwd, ".venv", "Scripts", "python.exe")
+            exe = pyw if os.path.isfile(pyw) else (py if os.path.isfile(py) else None)
+            if not exe:
+                return False
+            args = [exe, "-u", "k_trader_gui.py"]
+            if resume_monitoring:
+                args.append("--auto-start")
+            flags = int(
+                getattr(subprocess, "DETACHED_PROCESS", 0x8)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+            )
+            subprocess.Popen(
+                args,
+                cwd=cwd,
+                creationflags=flags,
+                close_fds=True,
+            )
+            return True
+        except Exception:
+            return False

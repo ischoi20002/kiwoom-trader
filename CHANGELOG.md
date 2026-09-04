@@ -13,6 +13,10 @@
 
 ---
 
+## 0.19.3 (2026-09-04)
+
+- **업데이트/재시작 기동 수정**: `remote_update.bat`의 깨진 `start … cmd /c call \"…\"` 구문을 `start "K-Trader" /D … bat` 으로 교체하고, 기동 후 프로세스 확인. 대시보드「재시작」도 동일 방식(+ pythonw 폴백).
+
 ## 0.19.2 (2026-09-04)
 
 - **원격 업데이트 재기동 보강**: `remote_update.bat`에 로그(`c:\k-trader\last_remote_update.log`)·실패 시 창 유지·재시작 `start` 경로 명시로, 업데이트 후 운영 GUI가 안 뜨는 경우를 줄임.
