@@ -4,82 +4,57 @@ setlocal EnableDelayedExpansion
 
 title K-Trader - Remote Updating...
 
-set "REPO=c:\vibe"
+REM 운영 폴더 기준 (bat 위치). 개발 PC에서 vibe 의 bat 을 실행해도
+REM 기본 적용 대상은 c:\k-trader.
 set "OP=c:\k-trader"
-set "BRANCH=main"
+set "HERE=%~dp0"
+if exist "%HERE%k_trader_gui.py" set "OP=%HERE:~0,-1%"
 set "LOG=%OP%\last_remote_update.log"
 
 echo --------------------------------------------------
-echo [K-Trader] Remote Update  %DATE% %TIME%
+echo [K-Trader] Release Update  %DATE% %TIME%
+echo 대상: %OP%
 echo 로그: %LOG%
 echo --------------------------------------------------
 (
-  echo ==== Remote Update %DATE% %TIME% ====
+  echo ==== Release Update %DATE% %TIME% ====
+  echo OP=%OP%
 ) > "%LOG%" 2>&1
 
-call :log "[1/4] 파일 잠금 해제 대기 (5초)..."
+call :log "[1/3] 파일 잠금 해제 대기 (5초)..."
 timeout /t 5 /nobreak >nul
 
-call :log "[2/4] Git pull (%REPO% %BRANCH%)..."
-if not exist "%REPO%\.git" (
-  call :fail "Git 저장소 없음: %REPO%"
-  exit /b 1
-)
-cd /d "%REPO%"
-git fetch origin %BRANCH% --prune >> "%LOG%" 2>&1
-if errorlevel 1 (
-  call :fail "git fetch 실패 — %LOG% 확인"
-  exit /b 1
-)
-git pull --ff-only origin %BRANCH% >> "%LOG%" 2>&1
-if errorlevel 1 (
-  call :fail "git pull --ff-only 실패 (로컬 커밋/충돌) — %LOG% 확인"
-  exit /b 1
-)
-
-call :log "[3/4] 운영 배포 (deploy_production.py --preserve-runtime)..."
-py -3 -u "%REPO%\tools\deploy_production.py" --preserve-runtime >> "%LOG%" 2>&1
-if errorlevel 1 (
-  call :fail "배포 실패 — %LOG% 확인"
-  exit /b 1
-)
-
-call :log "[4/4] 운영 GUI 재시작 (%OP%)..."
+call :log "[2/3] GitHub Release zip 적용..."
 cd /d "%OP%"
 
-REM 콘솔 창 없이 pythonw 로 기동 (재시작 시 cmd 잔류 방지)
-set "PYW=%OP%\.venv\Scripts\pythonw.exe"
-set "PY=%OP%\.venv\Scripts\python.exe"
-if exist "%PYW%" (
-  start "" /D "%OP%" "%PYW%" -u k_trader_gui.py --auto-start
-) else if exist "%PY%" (
-  start "" /D "%OP%" "%PY%" -u k_trader_gui.py --auto-start
-) else if exist "%OP%\run_k_trader.bat" (
-  start "K-Trader" /D "%OP%" "%OP%\run_k_trader.bat" --auto-start
+set "PY="
+if exist "%OP%\.venv\Scripts\python.exe" set "PY=%OP%\.venv\Scripts\python.exe"
+if not defined PY (
+  where py >nul 2>&1
+  if not errorlevel 1 set "PY=py -3"
+)
+if not defined PY (
+  where python >nul 2>&1
+  if not errorlevel 1 set "PY=python"
+)
+if not defined PY (
+  call :fail "Python 없음 — %OP%\.venv 또는 py/python PATH"
+  exit /b 1
+)
+
+if exist "%OP%\apply_release_update.py" (
+  %PY% -u "%OP%\apply_release_update.py" >> "%LOG%" 2>&1
 ) else (
-  call :fail "pythonw/python/run_k_trader.bat 없음: %OP%"
+  %PY% -u -c "from core.app_updater import apply_latest_release_update; import sys; ok,m=apply_latest_release_update(restart=True); print(m); sys.exit(0 if ok else 1)" >> "%LOG%" 2>&1
+)
+if errorlevel 1 (
+  call :fail "Release 업데이트 실패 — %LOG% 확인"
   exit /b 1
 )
 
-REM 기동 확인(최대 ~10초)
-set "STARTED=0"
-for /L %%i in (1,1,10) do (
-  timeout /t 1 /nobreak >nul
-  powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*k_trader_gui.py*' } | Select-Object -First 1) { exit 0 } else { exit 1 }" >nul 2>&1
-  if not errorlevel 1 (
-    set "STARTED=1"
-    goto :started_ok
-  )
-)
-:started_ok
-if "!STARTED!"=="0" (
-  call :fail "재시작 후 k_trader_gui 프로세스가 보이지 않음 — %OP%\run_k_trader.bat 직접 실행 확인"
-  exit /b 1
-)
-
-call :log "Remote Update Sequence Completed. (GUI process detected, no console)"
+call :log "[3/3] 완료 (GUI 재시작은 apply 스크립트가 수행)"
 echo.
-echo [완료] 운영 GUI를 다시 띄웠습니다. 문제가 있으면 %LOG% 를 확인하세요.
+echo [완료] 문제가 있으면 %LOG% 를 확인하세요.
 timeout /t 2 /nobreak >nul
 exit /b 0
 

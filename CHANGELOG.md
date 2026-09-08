@@ -13,6 +13,10 @@
 
 ---
 
+## 0.19.9 (2026-09-08)
+
+- **운영 zip Release 업데이트**: 「업데이트 확인」이 `c:\vibe` git pull 대신 GitHub Release의 `k-trader-{version}.zip`을 받아 `c:\k-trader`에 적용( settings/config 유지 ). 게시: `tools/publish_production_release.py`. 운영만 배포해도 업데이트 가능(비공개 저장소는 `GH_TOKEN` 또는 `settings.github_releases_token`).
+
 ## 0.19.8 (2026-09-08)
 
 - **실전 예수금상세 API ID 수정**: `/api/dostk/acnt`에 잘못 쓰이던 `ka10001`을 모의·실전 공통 `kt00001`로 통일. D+1/D+2·출금가능 조회 실패(1504) 해소.

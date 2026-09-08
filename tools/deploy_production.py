@@ -5,12 +5,15 @@
 - 실시간 매매 GUI 실행에 필요한 파일만 복사
 - 백테스트/도구/백업/로그 산출물 제외
 - 운영용 k_trader_gui.py 에서 전략검증 탭 import 제거
+- GitHub Release 용 zip 패키징·적용 지원
 """
 from __future__ import annotations
 
 import argparse
 import re
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
@@ -19,6 +22,12 @@ DEST = Path(r"c:\k-trader")
 
 # 운영 업데이트 시 덮어쓰지 않을 런타임 설정 (이미 DEST에 있을 때만)
 PRESERVE_RUNTIME_FILES: Set[str] = {
+    "settings.json",
+    "config.py",
+}
+
+# Release zip 에도 넣지 않음 (비밀키·개인 설정 유출 방지, 수신측 유지)
+ZIP_EXCLUDE_FILES: Set[str] = {
     "settings.json",
     "config.py",
 }
@@ -40,6 +49,8 @@ ROOT_FILES: List[str] = [
     "requirements-lock.txt",
     "run_k_trader.bat",
     "install_k_trader.bat",
+    "remote_update.bat",
+    "apply_release_update.py",
     "CHANGELOG.md",
 ]
 
@@ -47,6 +58,7 @@ ROOT_FILES: List[str] = [
 ROOT_OPTIONAL: List[str] = [
     "monitor_column_widths.json",
     "watchlist_favorites.json",
+    "config.example.py",
 ]
 
 # 디렉터리별 제외 (백테스트·개발 전용)
@@ -210,24 +222,42 @@ def _verify_op_venv(dest: Path) -> None:
         print(f"\n[경고] [운영] .venv 검사 생략: {ex}")
 
 
-def deploy(*, preserve_runtime: bool = False) -> None:
-    if not SOURCE.is_dir():
-        raise FileNotFoundError(f"소스 없음: {SOURCE}")
+def stage_production(
+    dest: Path,
+    *,
+    source: Optional[Path] = None,
+    preserve_runtime: bool = False,
+    exclude_files: Optional[Set[str]] = None,
+    quiet: bool = False,
+) -> dict:
+    """
+    운영 트리를 ``dest`` 에 구성한다.
 
-    DEST.mkdir(parents=True, exist_ok=True)
+    Returns:
+        복사 요약 dict
+    """
+    src_root = Path(source) if source is not None else SOURCE
+    if not src_root.is_dir():
+        raise FileNotFoundError(f"소스 없음: {src_root}")
+
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    skip_names = set(exclude_files or ())
     copied: List[str] = []
     skipped_preserve: List[str] = []
 
     for name in ROOT_FILES + ROOT_OPTIONAL:
+        if name in skip_names:
+            continue
         if (
             preserve_runtime
             and name in PRESERVE_RUNTIME_FILES
-            and (DEST / name).is_file()
+            and (dest / name).is_file()
         ):
             skipped_preserve.append(name)
             continue
-        src = SOURCE / name
-        if _copy_file(src, DEST / name):
+        src = src_root / name
+        if _copy_file(src, dest / name):
             copied.append(name)
 
     dirs_plan: Iterable[tuple[str, Set[str]]] = [
@@ -241,31 +271,180 @@ def deploy(*, preserve_runtime: bool = False) -> None:
     ]
     py_count = 0
     for rel, exc in dirs_plan:
-        n = _copy_tree(SOURCE / rel, DEST / rel, exc)
+        n = _copy_tree(src_root / rel, dest / rel, exc)
         py_count += n
 
-    # 모바일 읽기 전용 PWA (html/js/css — .py 트리 복사와 별도)
-    mobile_n = _copy_mobile_web(SOURCE / "mobile_web", DEST / "mobile_web")
+    mobile_n = _copy_mobile_web(src_root / "mobile_web", dest / "mobile_web")
 
-    gui_path = DEST / "k_trader_gui.py"
+    gui_path = dest / "k_trader_gui.py"
     if gui_path.is_file():
         _patch_k_trader_gui_for_production(gui_path)
 
-    # 런타임 출력 폴더(빈 디렉터리)
     for sub in ("realtime_session_logs", "equity_snapshots_mock", "equity_snapshots_live"):
-        (DEST / sub).mkdir(parents=True, exist_ok=True)
+        (dest / sub).mkdir(parents=True, exist_ok=True)
 
-    print(f"[배포 완료] {SOURCE} -> {DEST}")
-    print(f"  루트 파일: {len(copied)}개")
-    if skipped_preserve:
-        print(f"  런타임 유지(미복사): {', '.join(skipped_preserve)}")
-    print(f"  Python 모듈: {py_count}개")
-    print(f"  mobile_web 파일: {mobile_n}개")
-    print("  백테스트 탭 제거 패치 적용됨 (k_trader_gui.py)")
+    summary = {
+        "copied": copied,
+        "skipped_preserve": skipped_preserve,
+        "py_count": py_count,
+        "mobile_n": mobile_n,
+        "dest": str(dest),
+    }
+    if not quiet:
+        print(f"[배포 완료] {src_root} -> {dest}")
+        print(f"  루트 파일: {len(copied)}개")
+        if skipped_preserve:
+            print(f"  런타임 유지(미복사): {', '.join(skipped_preserve)}")
+        print(f"  Python 모듈: {py_count}개")
+        print(f"  mobile_web 파일: {mobile_n}개")
+        print("  백테스트 탭 제거 패치 적용됨 (k_trader_gui.py)")
+    return summary
+
+
+def deploy(*, preserve_runtime: bool = False) -> None:
+    """개발 소스 → ``c:\\k-trader`` 배포."""
+    stage_production(DEST, preserve_runtime=preserve_runtime, quiet=False)
     print(f"\n실행: cd {DEST} && run_k_trader.bat")
     print(f"  (최초/패키지 오류: {DEST}\\install_k_trader.bat)")
     print(f"  (다음 배포: {SOURCE}\\deploy_production.bat)")
     _verify_op_venv(DEST)
+
+
+def build_production_zip(
+    zip_path: Path,
+    *,
+    source: Optional[Path] = None,
+    version: str = "",
+) -> Path:
+    """
+    운영 배포 트리를 임시 폴더에 만들고 zip 으로 묶는다.
+
+    ``config.py`` / ``settings.json`` 은 zip 에 포함하지 않는다.
+    """
+    zip_path = Path(zip_path)
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="k-trader-stage-") as td:
+        stage = Path(td) / "k-trader"
+        stage_production(
+            stage,
+            source=source,
+            preserve_runtime=False,
+            exclude_files=ZIP_EXCLUDE_FILES,
+            quiet=True,
+        )
+        # 수신측 안내
+        readme = stage / "README_UPDATE.txt"
+        try:
+            ver_line = f"버전: {version}\n" if version else ""
+            readme.write_text(
+                (
+                    "K-Trader 운영 패키지\n"
+                    f"{ver_line}"
+                    "\n"
+                    "1) 이 폴더를 c:\\k-trader 로 두거나 zip 을 그 위치에 푸세요.\n"
+                    "2) config.py / settings.json 은 패키지에 없습니다.\n"
+                    "   - 최초: config.example.py 를 config.py 로 복사 후 키·계좌를 채우세요.\n"
+                    "   - 업데이트: 기존 config.py·settings.json 은 유지됩니다.\n"
+                    "3) 최초 1회 install_k_trader.bat 실행 후 run_k_trader.bat.\n"
+                    "4) 이후 대시보드「업데이트 확인」으로 GitHub Release zip 을 받습니다.\n"
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        if zip_path.exists():
+            zip_path.unlink()
+        with zipfile.ZipFile(
+            zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as zf:
+            for item in sorted(stage.rglob("*")):
+                if not item.is_file():
+                    continue
+                arc = item.relative_to(stage).as_posix()
+                zf.write(item, arcname=arc)
+    return zip_path
+
+
+def apply_production_tree(
+    staged: Path,
+    dest: Path,
+    *,
+    preserve_runtime: bool = True,
+) -> None:
+    """
+    스테이징(또는 zip 해제) 트리를 ``dest`` 에 병합 복사한다.
+
+    ``preserve_runtime=True`` 이면 dest 의 settings.json·config.py 를 유지한다.
+    """
+    staged = Path(staged)
+    dest = Path(dest)
+    if not staged.is_dir():
+        raise FileNotFoundError(f"스테이징 없음: {staged}")
+    dest.mkdir(parents=True, exist_ok=True)
+
+    preserved: dict[str, bytes] = {}
+    if preserve_runtime:
+        for name in PRESERVE_RUNTIME_FILES:
+            p = dest / name
+            if p.is_file():
+                try:
+                    preserved[name] = p.read_bytes()
+                except Exception:
+                    pass
+
+    # staged 파일을 dest 로 복사 (.venv 등은 staged 에 없으므로 유지)
+    for item in staged.rglob("*"):
+        if not item.is_file():
+            continue
+        if any(p in SKIP_DIR_NAMES for p in item.parts):
+            continue
+        rel = item.relative_to(staged)
+        # 루트 런타임 파일은 zip/stage 에 있어도 덮지 않음
+        if preserve_runtime and rel.parts == (rel.name,) and rel.name in PRESERVE_RUNTIME_FILES:
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, target)
+
+    for name, data in preserved.items():
+        try:
+            (dest / name).write_bytes(data)
+        except Exception:
+            pass
+
+
+def apply_production_zip(
+    zip_path: Path,
+    dest: Path,
+    *,
+    preserve_runtime: bool = True,
+) -> None:
+    """운영 zip 을 ``dest`` 에 적용 (settings/config 유지)."""
+    zip_path = Path(zip_path)
+    if not zip_path.is_file():
+        raise FileNotFoundError(f"zip 없음: {zip_path}")
+    with tempfile.TemporaryDirectory(prefix="k-trader-unzip-") as td:
+        extract_root = Path(td)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_root)
+        # zip 루트가 곧 파일이거나 k-trader/ 한 단계일 수 있음
+        staged = extract_root
+        candidates = [
+            p for p in extract_root.iterdir() if p.is_dir() and (p / "k_trader_gui.py").is_file()
+        ]
+        if (extract_root / "k_trader_gui.py").is_file():
+            staged = extract_root
+        elif len(candidates) == 1:
+            staged = candidates[0]
+        elif (extract_root / "k-trader" / "k_trader_gui.py").is_file():
+            staged = extract_root / "k-trader"
+        else:
+            # gui 탐색
+            found = list(extract_root.rglob("k_trader_gui.py"))
+            if not found:
+                raise FileNotFoundError("zip 안에 k_trader_gui.py 없음")
+            staged = found[0].parent
+        apply_production_tree(staged, dest, preserve_runtime=preserve_runtime)
 
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -275,13 +454,32 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="DEST에 이미 있는 settings.json·config.py 는 덮어쓰지 않음",
     )
+    p.add_argument(
+        "--zip",
+        type=str,
+        default="",
+        help="운영 zip 경로로 패키징만 수행 (c:\\k-trader 배포 안 함)",
+    )
+    p.add_argument(
+        "--version",
+        type=str,
+        default="",
+        help="--zip 시 README 에 기록할 버전",
+    )
     return p.parse_args(argv)
 
 
 if __name__ == "__main__":
     try:
         args = _parse_args()
-        deploy(preserve_runtime=bool(args.preserve_runtime))
+        if str(args.zip or "").strip():
+            out = build_production_zip(
+                Path(str(args.zip).strip()),
+                version=str(args.version or "").strip(),
+            )
+            print(f"[OK] 운영 zip: {out} ({out.stat().st_size} bytes)")
+        else:
+            deploy(preserve_runtime=bool(args.preserve_runtime))
     except Exception as ex:
         print(f"[오류] {ex}")
         raise
