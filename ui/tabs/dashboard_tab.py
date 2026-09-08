@@ -62,9 +62,9 @@ class DashboardTab:
         )
         ops.pack(fill=tk.X, pady=(0, 12))
 
-        # 헤더: 모드 배지 + 짧은 안내
+        # 1행: 모드 배지(왼쪽) + 감시·선정·서버전환(오른쪽)
         hdr = ttk.Frame(ops)
-        hdr.pack(fill=tk.X, pady=(0, 12))
+        hdr.pack(fill=tk.X, pady=(0, 8))
 
         use_mock = bool(getattr(config, "USE_MOCK", False))
         mode_text = " 모의투자 " if use_mock else " 실전 "
@@ -86,92 +86,61 @@ class DashboardTab:
             foreground=secondary,
         ).pack(side=tk.LEFT, padx=(12, 0))
 
-        # 1행: 계좌 | 시스템 (균등 폭)
-        row_acct = ttk.Frame(ops)
-        row_acct.pack(fill=tk.X, pady=(0, 8))
-
-        left_acct = ttk.Frame(row_acct)
-        left_acct.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Label(
-            left_acct,
-            text="계좌",
-            font=("Malgun Gothic", 8),
-            foreground=secondary,
-            width=6,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-
-        self.btn_sync = ttk.Button(
-            left_acct,
-            text="동기화",
+        hdr_right = ttk.Frame(hdr)
+        hdr_right.pack(side=tk.RIGHT)
+        self.btn_monitor_toggle = ttk.Button(
+            hdr_right,
+            text="감시 시작",
             width=btn_w,
-            command=self.app._sync_account_deposit,
+            command=self.app.toggle_monitoring,
+            style="Accent.TButton",
         )
-        self.btn_sync.pack(side=tk.LEFT, padx=(0, btn_gap))
+        self.btn_monitor_toggle.pack(side=tk.LEFT, padx=(0, btn_gap))
+        self.btn_select = ttk.Button(
+            hdr_right,
+            text="목록 선정",
+            width=btn_w,
+            style="Action.TButton",
+            command=self._start_daily_selection,
+            state=tk.DISABLED,
+        )
+        self.btn_select.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_server_switch = ttk.Button(
-            left_acct,
+            hdr_right,
             text="서버 전환",
             width=btn_w,
             command=lambda: self._call_virtual_tab("_toggle_environment"),
         )
         self.btn_server_switch.pack(side=tk.LEFT)
 
-        right_sys = ttk.Frame(row_acct)
-        right_sys.pack(side=tk.RIGHT)
-        ttk.Label(
-            right_sys,
-            text="시스템",
-            font=("Malgun Gothic", 8),
-            foreground=secondary,
-            width=6,
-        ).pack(side=tk.LEFT, padx=(16, 8))
+        # 2행: 동기화 · 재시작 · 업데이트 확인 (오른쪽 정렬)
+        row_sys = ttk.Frame(ops)
+        row_sys.pack(fill=tk.X)
+        sys_right = ttk.Frame(row_sys)
+        sys_right.pack(side=tk.RIGHT)
+
+        self.btn_sync = ttk.Button(
+            sys_right,
+            text="동기화",
+            width=btn_w,
+            command=self.app._sync_account_deposit,
+        )
+        self.btn_sync.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_restart = ttk.Button(
-            right_sys,
+            sys_right,
             text="재시작",
             width=btn_w,
             command=self._on_restart_clicked,
         )
         self.btn_restart.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_check_update = ttk.Button(
-            right_sys,
+            sys_right,
             text="업데이트 확인",
             width=btn_w,
             command=self._on_check_update_clicked,
         )
         self.btn_check_update.pack(side=tk.LEFT)
         self._update_check_busy = False
-
-        # 구분선
-        ttk.Separator(ops, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(4, 10))
-
-        # 2행: 감시 (주요 액션 — 왼쪽부터 읽기 순서)
-        row_mon = ttk.Frame(ops)
-        row_mon.pack(fill=tk.X)
-        ttk.Label(
-            row_mon,
-            text="감시",
-            font=("Malgun Gothic", 8),
-            foreground=secondary,
-            width=6,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-
-        mon_w = 18
-        self.btn_monitor_toggle = ttk.Button(
-            row_mon,
-            text="실시간 감시 시작",
-            width=mon_w,
-            command=self.app.toggle_monitoring,
-            style="Accent.TButton",
-        )
-        self.btn_monitor_toggle.pack(side=tk.LEFT, padx=(0, btn_gap))
-        self.btn_select = ttk.Button(
-            row_mon,
-            text="일일 감시목록 선정",
-            width=mon_w,
-            style="Action.TButton",
-            command=self._start_daily_selection,
-            state=tk.DISABLED,
-        )
-        self.btn_select.pack(side=tk.LEFT)
 
         # ── 모바일 현황 ───────────────────────────────────────────
         mobile = ttk.LabelFrame(

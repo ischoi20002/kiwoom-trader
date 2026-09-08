@@ -147,7 +147,7 @@ class UiTradingStatusService:
                 if getattr(self.app, "btn_monitor_toggle", None):
                     try:
                         self.app.btn_monitor_toggle.config(
-                            text="⏹️ 감시 중단",
+                            text="감시 중단",
                             style="Warning.TButton",
                         )
                     except Exception:
@@ -192,7 +192,7 @@ class UiTradingStatusService:
                 if getattr(self.app, "btn_monitor_toggle", None):
                     try:
                         self.app.btn_monitor_toggle.config(
-                            text="▶️ 실시간 감시 시작",
+                            text="감시 시작",
                             style="Accent.TButton",
                         )
                     except Exception:

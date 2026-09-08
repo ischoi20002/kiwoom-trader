@@ -3332,7 +3332,7 @@ class KiwoomApp:
                         pass
             except Exception:
                 pass
-            if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="⏹️ 감시 중단", style="Warning.TButton")
+            if self.btn_monitor_toggle: self.btn_monitor_toggle.config(text="감시 중단", style="Warning.TButton")
             try:
                 from core.monitor_started_display import format_monitor_started_status_text
 
@@ -3372,7 +3372,7 @@ class KiwoomApp:
             self._telegram_sent_on_monitor_start = False
             if self.btn_monitor_toggle:
                 self.btn_monitor_toggle.config(
-                    text="▶️ 실시간 감시 시작", style="Accent.TButton"
+                    text="감시 시작", style="Accent.TButton"
                 )
             if eod_cycle_stop and cms is not None and cms.armed:
                 try:
