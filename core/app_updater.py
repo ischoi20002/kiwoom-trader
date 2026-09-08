@@ -250,7 +250,63 @@ def resolve_github_token() -> str:
             return v
     except Exception:
         pass
+    # Windows: git credential manager (push 에 쓰는 것과 동일, 토큰 출력 없음)
+    try:
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            creationflags=creationflags,
+        )
+        if proc.returncode == 0:
+            for line in (proc.stdout or "").splitlines():
+                if line.startswith("password="):
+                    tok = line.split("=", 1)[1].strip()
+                    if tok:
+                        return tok
+    except Exception:
+        pass
+    # gh CLI 로그인 토큰
+    try:
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            creationflags=creationflags,
+        )
+        if proc.returncode == 0:
+            tok = str(proc.stdout or "").strip()
+            if tok:
+                return tok
+    except Exception:
+        pass
     return ""
+
+
+def _safe_emit(log: Optional[Callable[[str], None]], msg: str) -> None:
+    """로그 콜백 실패(콘솔 cp949 등)가 업데이트 확인을 막지 않게 함."""
+    if not callable(log):
+        return
+    try:
+        log(msg)
+    except Exception:
+        try:
+            log(msg.encode("ascii", errors="replace").decode("ascii"))
+        except Exception:
+            pass
 
 
 def _github_request(
@@ -332,7 +388,7 @@ def download_release_asset(
     log: Optional[Callable[[str], None]] = None,
 ) -> Path:
     """Release 자산을 ``dest_zip`` 으로 저장."""
-    emit = log or (lambda _m: None)
+    emit = lambda m: _safe_emit(log, m)
     tok = token if token is not None else resolve_github_token()
     slug = (repo or resolve_github_repo()).strip()
     asset_id = asset.get("id")
@@ -343,7 +399,7 @@ def download_release_asset(
     # 비공개: API asset 엔드포인트 + octet-stream
     if asset_id is not None and tok:
         url = f"https://api.github.com/repos/{slug}/releases/assets/{int(asset_id)}"
-        emit(f"ℹ️ [Update] 자산 다운로드(API): {name}")
+        emit(f"[Update] 자산 다운로드(API): {name}")
         code, body, _ = _github_request(
             url,
             token=tok,
@@ -359,7 +415,7 @@ def download_release_asset(
     url = str(asset.get("browser_download_url") or "").strip()
     if not url:
         raise RuntimeError("다운로드 URL 없음 (비공개면 github_releases_token/GH_TOKEN 필요)")
-    emit(f"ℹ️ [Update] 자산 다운로드: {name}")
+    emit(f"[Update] 자산 다운로드: {name}")
     code, body, _ = _github_request(
         url,
         token=tok,
@@ -385,18 +441,20 @@ def check_for_update(
     ``remote``/``branch``/``fetch`` 는 하위 호환용(무시).
     """
     del remote, branch, fetch  # 구 API 호환
-    emit = log or (lambda _m: None)
+    emit = lambda m: _safe_emit(log, m)
     local_ver = get_local_version()
     repo = resolve_github_repo()
     token = resolve_github_token()
 
     try:
-        emit(f"ℹ️ [Update] GitHub Release 확인: {repo} …")
+        emit(f"[Update] GitHub Release 확인: {repo} ...")
         data = fetch_latest_release(repo=repo, token=token)
     except Exception as e:
         hint = ""
         if not token:
-            hint = " (비공개 저장소면 GH_TOKEN 또는 settings.github_releases_token 필요)"
+            hint = (
+                " (비공개 저장소면 GH_TOKEN 또는 settings.github_releases_token 필요)"
+            )
         return UpdateCheckResult(
             ok=False,
             local_version=local_ver,
@@ -487,7 +545,7 @@ def start_update_process(
     Returns:
         (성공 여부, 메시지)
     """
-    emit = log or (lambda _m: None)
+    emit = lambda m: _safe_emit(log, m)
     script = resolve_update_script()
     if script is None:
         return False, f"remote_update.bat 없음 ({resolve_prod_root()})"
@@ -500,7 +558,7 @@ def start_update_process(
             cwd=str(script.parent),
             creationflags=creationflags,
         )
-        emit(f"ℹ️ [Update] 업데이트 스크립트 기동: {script}")
+        emit(f"[Update] 업데이트 스크립트 기동: {script}")
         return True, str(script)
     except Exception as e:
         return False, f"스크립트 기동 실패: {e!r}"
@@ -519,7 +577,7 @@ def _restart_production_gui(prod: Path, log: Callable[[str], None]) -> bool:
                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x8)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200),
             )
-            log("ℹ️ [Update] pythonw 로 GUI 재시작")
+            log("[Update] pythonw 로 GUI 재시작")
             return True
         if py.is_file():
             subprocess.Popen(
@@ -529,7 +587,7 @@ def _restart_production_gui(prod: Path, log: Callable[[str], None]) -> bool:
                 if sys.platform == "win32"
                 else 0,
             )
-            log("ℹ️ [Update] python 로 GUI 재시작")
+            log("[Update] python 로 GUI 재시작")
             return True
         if bat.is_file():
             subprocess.Popen(
@@ -539,12 +597,12 @@ def _restart_production_gui(prod: Path, log: Callable[[str], None]) -> bool:
                 if sys.platform == "win32"
                 else 0,
             )
-            log("ℹ️ [Update] run_k_trader.bat 로 GUI 재시작")
+            log("[Update] run_k_trader.bat 로 GUI 재시작")
             return True
     except Exception as e:
-        log(f"⚠️ [Update] 재시작 실패: {e!r}")
+        log(f"[Update] 재시작 실패: {e!r}")
         return False
-    log("⚠️ [Update] pythonw/python/run_k_trader.bat 없음")
+    log("[Update] pythonw/python/run_k_trader.bat 없음")
     return False
 
 
@@ -560,7 +618,7 @@ def apply_latest_release_update(
     Returns:
         (성공, 메시지)
     """
-    emit = log or (lambda _m: None)
+    emit = lambda m: _safe_emit(log, m)
     prod = Path(prod_root) if prod_root is not None else resolve_prod_root()
 
     result = check_for_update(log=emit)
@@ -605,7 +663,7 @@ def apply_latest_release_update(
         except Exception as e:
             return False, f"다운로드 실패: {e}"
 
-        emit(f"ℹ️ [Update] zip 적용 → {prod} (settings/config 유지)")
+        emit(f"[Update] zip 적용 -> {prod} (settings/config 유지)")
         try:
             if apply_production_zip is not None:
                 apply_production_zip(zip_path, prod, preserve_runtime=True)

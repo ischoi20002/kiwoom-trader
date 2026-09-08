@@ -13,6 +13,10 @@
 
 ---
 
+## 0.19.10 (2026-09-08)
+
+- **업데이트 확인 실패 수정**: 비공개 Release 조회 시 git credential/`gh` 토큰 자동 사용. 로그 이모지(cp949)로 확인이 깨지던 문제 완화.
+
 ## 0.19.9 (2026-09-08)
 
 - **운영 zip Release 업데이트**: 「업데이트 확인」이 `c:\vibe` git pull 대신 GitHub Release의 `k-trader-{version}.zip`을 받아 `c:\k-trader`에 적용( settings/config 유지 ). 게시: `tools/publish_production_release.py`. 운영만 배포해도 업데이트 가능(비공개 저장소는 `GH_TOKEN` 또는 `settings.github_releases_token`).
