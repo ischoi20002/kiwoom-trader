@@ -1396,9 +1396,10 @@ class OrderManager:
             return None
 
     def _fetch_deposit_detail_payload(self, qry_tp: str) -> Optional[dict]:
-        """예수금상세 TR 1회 호출 — 모의는 공식 Account SDK 우선."""
+        """예수금상세(kt00001) TR 1회 호출 — SDK 우선, 실패 시 REST(/api/dostk/acnt)."""
         use_mock = getattr(config, "USE_MOCK", False)
-        if use_mock and self.account_api is not None:
+        # 모의·실전 모두 예수금상세 API ID는 kt00001 (ka10001은 stkinfo용)
+        if self.account_api is not None:
             try:
                 fn = getattr(
                     self.account_api,
@@ -1415,7 +1416,7 @@ class OrderManager:
                 except Exception:
                     pass
 
-        api_id = "kt00001" if use_mock else "ka10001"
+        api_id = "kt00001"
         host = config.MOCK_URL if use_mock else config.URL
         token = self.app.auth_manager.get_auth_token()
         if not token:
@@ -1492,7 +1493,7 @@ class OrderManager:
         실시간 계좌 잔고 동기화 (ka10085 규격).
 
         refresh_cash_deposit=False 인 경우: 보유 목록(ka10085)만 사용하고
-        예수금상세(ka10001)·별도 예수 TR(get_deposit) 호출을 생략합니다.
+        예수금상세(kt00001)·별도 예수 TR(get_deposit) 호출을 생략합니다.
         log_summary=False: 요약 로그 생략(체결 후 silent 동기화 등).
         sync_context: 로그 접두 구분 (예: post_fill_holdings, post_fill_full).
         """
@@ -1558,7 +1559,7 @@ class OrderManager:
                     if dep_detail:
                         d1d = float(dep_detail.get("d1") or 0)
                         d2d = float(dep_detail.get("d2") or 0)
-                        # 예수금상세(ka10001/kt00001)가 D+1/D+2 권위 — d2d>0 만 쓰면 음수(D+2 부족)가 무시되어 동기화 표시가 틀어짐
+                        # 예수금상세(kt00001)가 D+1/D+2 권위 — d2d>0 만 쓰면 음수(D+2 부족)가 무시되어 동기화 표시가 틀어짐
                         d1_deposit = d1d
                         d2_deposit = d2d
                         try:
@@ -1678,12 +1679,11 @@ class OrderManager:
 
     def get_deposit_detail(self) -> Optional[Dict[str, Any]]:
         """
-        예수금상세(ka10001/kt00001). ka10085의 d1_samt/d2_samt와 달리
+        예수금상세(kt00001, 모의·실전 동일). ka10085의 d1_samt/d2_samt와 달리
         D+1/D+2 추정예수금(d1_entra/d2_entra)·주문가능금액(ord_alow_amt)이 분리되어 옵니다.
         qry_tp: 3=추정조회(추정 예수 우선), 2=일반조회.
         """
-        use_mock = getattr(config, "USE_MOCK", False)
-        mode = "kt00001" if use_mock else "ka10001"
+        mode = "kt00001"
         last_msg = ""
         for qry_tp in ("3", "2"):
             try:
@@ -1742,7 +1742,8 @@ class OrderManager:
         except Exception:
             pass
         use_mock = getattr(config, 'USE_MOCK', False)
-        api_id = 'kt00001' if use_mock else 'ka10001'
+        # 모의·실전 동일: 예수금상세는 kt00001 (/api/dostk/acnt)
+        api_id = 'kt00001'
         host = config.MOCK_URL if use_mock else config.URL
 
         token = self.app.auth_manager.get_auth_token()
@@ -1780,7 +1781,7 @@ class OrderManager:
         except Exception:
             pass
         use_mock = getattr(config, 'USE_MOCK', False)
-        api_id = 'kt00001' if use_mock else 'ka10001'
+        api_id = 'kt00001'
         host = config.MOCK_URL if use_mock else config.URL
 
         token = self.app.auth_manager.get_auth_token()
@@ -1800,7 +1801,7 @@ class OrderManager:
             data = res.json()
             out_body = data.get('output', data.get('data', data))
 
-            # ka10001(실전): nstd_re_ib_amt(주문가능현금), kt00001(모의): entr(예수금)
+            # kt00001: entr(예수금) 우선, 없으면 nstd_re_ib_amt(주문가능현금)
             deposit_str = out_body.get('entr', out_body.get('nstd_re_ib_amt', '0'))
             return int(float(str(deposit_str).replace(',', '')))
         except Exception as e:
