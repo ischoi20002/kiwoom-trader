@@ -579,9 +579,10 @@ class SignalEngine:
 
     def _use_nxt_sor_touch_orders(self) -> bool:
         """
-        실전 서버: KRX 마감 직후(15:15·15:30 슬롯) NXT 1호가 터치 + SOR.
+        실전 서버: 15:30 슬롯 NXT 1호가 터치 + SOR.
 
-        모의 서버는 False — 기존 동시호가 시장가·익일 예약 유지.
+        15:15는 NXT와 무관하게 전 종목 동시호가 시장가.
+        모의 서버는 False — 익일 09:00 예약 유지.
         종목별 가능 여부는 ``_code_uses_nxt_touch`` 를 사용한다.
         """
         try:
@@ -595,7 +596,8 @@ class SignalEngine:
         """
         실전 + 해당 종목 NXT 거래가능일 때만 True.
 
-        불가·미조회는 False → 15:30은 next_open, 15:15는 동시호가 시장가(모의와 동일).
+        불가·미조회는 False → 15:30은 next_open.
+        15:15는 이 판정과 무관하게 동시호가 시장가.
         """
         try:
             svc = getattr(self.app, "nxt_eligibility_service", None)
@@ -649,6 +651,27 @@ class SignalEngine:
                 return int(t.hour) == 15 and int(t.minute) == 30
             except Exception:
                 return False
+
+    def _mark_1515_auction_market_order(self, code: Any, bar_ts: Any) -> bool:
+        """
+        15:15 슬롯이면 전 종목 동시호가 시장가(03) 플래그를 건다.
+
+        NXT 가능 여부와 무관. True면 해당 슬롯(라이브가 게이트 생략용).
+        """
+        try:
+            from utils.krx_bars import is_krx_auction_market_fill_slot
+
+            if not bool(is_krx_auction_market_fill_slot(bar_ts)):
+                return False
+        except Exception:
+            return False
+        try:
+            oes = self._order_execution_service()
+            if oes is not None and hasattr(oes, "mark_auction_market_order"):
+                oes.mark_auction_market_order(code)
+        except Exception:
+            pass
+        return True
 
     def _route_1530_strategy_execution(
         self,
@@ -1366,27 +1389,11 @@ class SignalEngine:
             except Exception:
                 pass
 
-            # 15:15: NXT 가능→터치+SOR / 불가·모의→동시호가 시장가
-            _auction_1515 = False
-            try:
-                from utils.krx_bars import is_krx_auction_market_fill_slot
-
-                _auction_1515 = bool(is_krx_auction_market_fill_slot(bar_ts))
-            except Exception:
-                _auction_1515 = False
-            if _auction_1515:
-                try:
-                    oes = self._order_execution_service()
-                    if oes is not None:
-                        if _use_nxt and hasattr(oes, "mark_nxt_touch_order"):
-                            oes.mark_nxt_touch_order(nk, src="15:15")
-                        elif hasattr(oes, "mark_auction_market_order"):
-                            oes.mark_auction_market_order(nk)
-                except Exception:
-                    pass
+            # 15:15: 전 종목 동시호가 시장가 (NXT 분기 없음)
+            _auction_1515 = self._mark_1515_auction_market_order(nk, bar_ts)
 
             # 완성봉 신호 유지 + 주문 직전 라이브가 게이트 (추격/이탈·MA20)
-            # 15:15·15:30(NXT) 은 NXT/동시호가 호가 경로라 게이트 생략
+            # 15:15(동시호가)·15:30(NXT) 은 호가 경로라 게이트 생략
             try:
                 bar_close = float(closed_df["Close"].iloc[-1])
             except Exception:
@@ -1781,24 +1788,8 @@ class SignalEngine:
                 pass
             _is_1530 = self._is_1530_bar_slot(bar_ts)
             _use_nxt = self._code_uses_nxt_touch(nk)
-            # 15:15: NXT 가능→터치+SOR / 불가·모의→동시호가 시장가
-            _auction_1515 = False
-            try:
-                from utils.krx_bars import is_krx_auction_market_fill_slot
-
-                _auction_1515 = bool(is_krx_auction_market_fill_slot(bar_ts))
-            except Exception:
-                _auction_1515 = False
-            if _auction_1515:
-                try:
-                    oes = self._order_execution_service()
-                    if oes is not None:
-                        if _use_nxt and hasattr(oes, "mark_nxt_touch_order"):
-                            oes.mark_nxt_touch_order(nk, src="15:15")
-                        elif hasattr(oes, "mark_auction_market_order"):
-                            oes.mark_auction_market_order(nk)
-                except Exception:
-                    pass
+            # 15:15: 전 종목 동시호가 시장가 (NXT 분기 없음)
+            _auction_1515 = self._mark_1515_auction_market_order(nk, bar_ts)
 
             # EXIT/STAGE2: S1과 동일 — 주문 직전 라이브가 게이트, 통과 시 라이브가 주문
             _skip_live_gate = bool(_auction_1515 or (_is_1530 and _use_nxt))

@@ -4,7 +4,8 @@
 
 - 키움 ``ka10100`` 응답 ``nxtenable`` / ``nxtEnable == 'Y'`` 기준
 - 당일 감시 종목·보유 종목을 아침/감시시작 시 일괄 갱신
-- 15:30·15:15 실전 주문 경로에서 NXT 불가 시 next_open/동시호가 폴백에 사용
+- 15:30 실전 주문 경로에서 NXT 불가 시 next_open 폴백에 사용
+  (15:15는 NXT와 무관하게 동시호가 시장가)
 """
 from __future__ import annotations
 
@@ -252,7 +253,8 @@ class NxtEligibilityService:
         """
         실전 + 해당 종목 NXT 거래가능일 때만 True.
 
-        모의·미조회·조회 실패는 False (15:30 next_open / 15:19 공식대기 폴백).
+        모의·미조회·조회 실패는 False (15:30 next_open 폴백).
+        15:15 주문은 NXT 판정을 쓰지 않는다.
         """
         if not self.live_nxt_touch_orders_enabled():
             return False

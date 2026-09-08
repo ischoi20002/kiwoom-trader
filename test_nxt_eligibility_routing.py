@@ -86,9 +86,41 @@ def test_collect_codes_includes_holdings() -> None:
     assert "005380" in got
 
 
+def test_1515_always_auction_market_not_nxt_touch() -> None:
+    """15:15 슬롯은 NXT 가능 여부와 무관하게 동시호가 시장가만 표시한다."""
+    from datetime import datetime
+
+    from core.signal_engine import SignalEngine
+
+    marked_auction: list[str] = []
+    marked_nxt: list[tuple[str, str]] = []
+
+    oes = SimpleNamespace(
+        mark_auction_market_order=lambda c: marked_auction.append(str(c)),
+        mark_nxt_touch_order=lambda c, src="15:30": marked_nxt.append((str(c), str(src))),
+    )
+    app = SimpleNamespace(order_execution_service=oes, settings={})
+    se = SignalEngine(app)
+
+    ts_1515 = datetime(2026, 3, 10, 15, 15, 0)
+    assert se._mark_1515_auction_market_order("005930", ts_1515) is True
+    assert marked_auction == ["005930"]
+    assert marked_nxt == []
+
+    ts_1530 = datetime(2026, 3, 10, 15, 30, 0)
+    assert se._mark_1515_auction_market_order("000660", ts_1530) is False
+    assert marked_auction == ["005930"]
+    assert marked_nxt == []
+
+    ts_mid = datetime(2026, 3, 10, 14, 0, 0)
+    assert se._mark_1515_auction_market_order("035420", ts_mid) is False
+    assert marked_nxt == []
+
+
 if __name__ == "__main__":
     test_parse_nxtenable_lowercase_field()
     test_fetch_failure_not_cached_as_disabled()
     test_nxt_cache_roundtrip_same_day()
     test_collect_codes_includes_holdings()
+    test_1515_always_auction_market_not_nxt_touch()
     print("ok")

@@ -28,9 +28,9 @@ class OrderExecutionService:
         self._exit_retry_not_before: Dict[str, float] = {}
         self._exit_retry_skip_log_at: Dict[str, float] = {}
         self._exit_stale_pending_probe_at: Dict[str, float] = {}
-        # 15:15 완성봉 → 동시호가 시장가 주문 플래그(종목코드)
+        # 15:15 완성봉 → 동시호가 시장가 주문 플래그(종목코드, NXT 무관)
         self._auction_mkt_codes: Set[str] = set()
-        # 실전: 15:15·15:30 슬롯 → NXT 1호가 터치+SOR (src=15:15|15:30)
+        # 실전: 15:30 슬롯 → NXT 1호가 터치+SOR (src=15:30)
         self._nxt_touch_src: Dict[str, str] = {}
         # 15:30 완성봉 → 익일 09:00 지정가 주문 플래그(종목코드 -> 메타)
         self._next_open_limit_orders: Dict[str, Dict[str, Any]] = {}
@@ -62,15 +62,16 @@ class OrderExecutionService:
             pass
         return False
 
-    def mark_nxt_touch_order(self, code: Any, *, src: str = "15:15") -> None:
+    def mark_nxt_touch_order(self, code: Any, *, src: str = "15:30") -> None:
         """
-        실전 서버: KRX 마감 후 NXT 1호가 터치 주문 플래그.
+        실전 서버: 15:30 슬롯 NXT 1호가 터치 주문 플래그.
 
         주문은 ``dmst_stex_tp=SOR`` 로 내고, ka10004 ``{code}_NX`` 호가로 가격을 잡습니다.
+        15:15는 이 경로를 쓰지 않고 동시호가 시장가(``mark_auction_market_order``)를 씁니다.
         """
         try:
             nc = str(canonical_stock_code(code) or code).zfill(6)
-            tag = str(src or "15:15").strip() or "15:15"
+            tag = str(src or "15:30").strip() or "15:30"
             if len(nc) == 6:
                 self._nxt_touch_src[nc] = tag
                 try:
@@ -84,7 +85,7 @@ class OrderExecutionService:
             pass
 
     def _consume_nxt_touch(self, code: Any) -> Optional[str]:
-        """NXT 터치 플래그 소모 — src(15:15|15:30) 또는 None."""
+        """NXT 터치 플래그 소모 — src(15:30) 또는 None."""
         try:
             nc = str(canonical_stock_code(code) or code).zfill(6)
             return self._nxt_touch_src.pop(nc, None)
