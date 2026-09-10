@@ -282,10 +282,10 @@ def test_eod_m1_batch_diag_detects_same_chart() -> None:
     from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 
     day = pd.Timestamp("2026-09-02")
-    # ka10080 cntr_tm = 봉 종가: 15:19 open → 15:20, 15:30 단일가 → 15:30
+    # ka10080 tic=1 cntr_tm = 봉 시작(좌측 라벨): 15:19 open → 15:19, 15:30 → 15:30
     idx = pd.DatetimeIndex(
         [
-            day + pd.Timedelta(hours=15, minutes=20),
+            day + pd.Timedelta(hours=15, minutes=19),
             day + pd.Timedelta(hours=15, minutes=30),
         ]
     )

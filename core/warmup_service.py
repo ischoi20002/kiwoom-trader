@@ -236,47 +236,16 @@ class WarmupService:
     def _warmup_ohlcv_source(self) -> str:
         """
         워밍업 시 가격 봉의 출처.
-        api_only — DB 미사용.
-        realtime_15m_db_then_api — 실시간 전용 15분 DB(realtime_15m_*.db) 우선, 부족 시 API.
-        db_then_api — 하베스팅 trading_data.db 의 bars_15m/1m 우선 후 API.
-        db_then_api 이고 메인 DB에 분봉이 없으면 api_only 로 강등(무DB 배포본).
+
+        실시간 워밍업은 저장된 15분 DB(realtime_15m_*.db, trading_data.db)를
+        읽지 않고 ka10080 API만 사용한다. 설정값과 무관하게 ``api_only``.
         """
-        try:
-            s = str(
-                self.app.settings.get("realtime_warmup_ohlcv_source", "api_only")
-            ).strip().lower()
-        except Exception:
-            s = "api_only"
-        if s in ("api_only", "api", "rest_only"):
-            return "api_only"
-        if s in ("realtime_15m_db_then_api", "rt_15m_db", "monitor_15m_then_api"):
-            return "realtime_15m_db_then_api"
-        try:
-            dm = self.data_manager
-            if dm is not None and hasattr(dm, "main_db_has_any_intraday_rows"):
-                if not dm.main_db_has_any_intraday_rows():
-                    if not getattr(self, "_logged_intraday_db_empty_fallback", False):
-                        self._logged_intraday_db_empty_fallback = True
-                        self.log(
-                            "ℹ️ [Warmup] bars_15m/bars_1m 이 비어 있어 "
-                            "realtime_warmup_ohlcv_source 를 api_only 로 전환합니다. "
-                            "(trading_data.db 미포함 배포·미하베스팅)"
-                        )
-                    return "api_only"
-        except Exception:
-            if not getattr(self, "_logged_intraday_db_empty_fallback", False):
-                self._logged_intraday_db_empty_fallback = True
-                try:
-                    self.log("ℹ️ [Warmup] DB 분봉 유무 확인 실패 → api_only 로 진행합니다.")
-                except Exception:
-                    pass
-            return "api_only"
-        return "db_then_api"
+        return "api_only"
 
     def _persist_warmup_base_to_rt15m_db(self, code: str, base: pd.DataFrame) -> None:
         """
-        워밍업 검증 통과 직후: 병합된 15분 OHLCV를 realtime_15m_*.db 에 배치 저장합니다.
-        다음 실행 시 로컬 우선 로드가 가능해집니다.
+        워밍업 검증 통과 직후: API로 받은 15분 OHLCV를 realtime_15m_*.db 에 저장합니다.
+        장중 롤·진단용이며, 다음 워밍업의 입력으로는 쓰지 않습니다.
         """
         try:
             if not bool(
@@ -792,10 +761,9 @@ class WarmupService:
         suppress_prep_tree_progress: bool = False,
     ) -> pd.DataFrame:
         """
-        (1) 15m 봉 수 < 신호 기준 이거나
-        (2) 장중인데 당일·최근 15분 구간이 DB 에 비어 있는 경우
-        (3) ``realtime_warmup_force_api_refresh``(기본 True) — DB만으로 검증되어도 매번 ka10080 조회
-        → 키움 분봉 API 로 보충 후 병합.
+        워밍업 15분봉을 ka10080 으로 채운다.
+
+        ``api_only`` 이면 인자 ``base``(저장된 DB)는 버리고 API 응답만 사용한다.
         """
         try:
             if self._warmup_ohlcv_source() == "api_only":
@@ -804,7 +772,8 @@ class WarmupService:
                         f"❌ [Warmup] {name}({code}) realtime_warmup_ohlcv_source=api_only 인데 "
                         f"use_api_warmup_backfill=OFF — 워밍업 불가"
                     )
-                    return base
+                    return pd.DataFrame()
+                base = pd.DataFrame()
             if not bool(self.app.settings.get("use_api_warmup_backfill", True)):
                 return base
             if not token:
@@ -812,7 +781,7 @@ class WarmupService:
             need = self._min_bars_for_signal()
             short = base.empty or len(base) < need
             gap = self._needs_intraday_api_backfill(base)
-            force = self._warmup_force_api_refresh()
+            force = True if self._warmup_ohlcv_source() == "api_only" else self._warmup_force_api_refresh()
             if not force and not short and not gap:
                 return base
             reason: List[str] = []
@@ -849,96 +818,17 @@ class WarmupService:
 
     def _load_15m_ohlcv_frame(self, code: str) -> pd.DataFrame:
         """
-        realtime_15m_db_then_api: realtime_15m_*.db 우선 (하베스팅 DB 미사용).
-        db_then_api: trading_data.db bars_15m 우선. 비어 있으면 bars_1m 을 15분봉으로 리샘플.
-        api_only: 빈 프레임 반환 — 이후 _maybe_api_backfill_15m 가 API 전량으로 채움.
-        반환: DatetimeIndex, 열 Open/High/Low/Close/Volume
+        워밍업 시작 프레임.
+
+        저장된 DB는 사용하지 않는다. 빈 프레임을 반환하고
+        ``_maybe_api_backfill_15m`` 가 ka10080 전량으로 채운다.
+        ``code`` 는 호출 시그니처 호환용.
         """
-        if self._warmup_ohlcv_source() == "api_only":
-            return pd.DataFrame()
-        if self._warmup_ohlcv_source() == "realtime_15m_db_then_api":
-            base_rt = self._load_from_realtime_monitor_db(code)
-            return base_rt if base_rt is not None and not base_rt.empty else pd.DataFrame()
-
-        lim = self._warmup_query_limit()
         try:
-            raw = self.data_manager.get_bars(code, interval="15m", limit=lim)
-        except Exception as e:
-            self.log(f"⚠️ [Warmup-15m] {code} 조회 오류: {e}")
-            raw = pd.DataFrame()
-
-        if raw is not None and not raw.empty:
-            try:
-                d = raw.copy()
-                if "time" not in d.columns:
-                    return pd.DataFrame()
-                d["time"] = pd.to_datetime(d["time"], errors="coerce")
-                d = d.dropna(subset=["time"])
-                d = d.set_index("time").sort_index()
-                for c in ("Open", "High", "Low", "Close", "Volume"):
-                    if c not in d.columns:
-                        return pd.DataFrame()
-                return d[["Open", "High", "Low", "Close", "Volume"]].copy()
-            except Exception as e:
-                self.log(f"⚠️ [Warmup-15m] {code} 정규화 실패: {e}")
-
-        # 폴백: 1분 → 15분 리샘플
-        try:
-            m1 = self.data_manager.get_bars(code, interval="1m", limit=max(lim * 4, 8000))
-        except Exception as e:
-            self.log(f"⚠️ [Warmup-1m] {code} 조회 오류: {e}")
-            return pd.DataFrame()
-
-        if m1 is None or m1.empty or "time" not in m1.columns:
-            return pd.DataFrame()
-
-        try:
-            from utils.krx_bars import resample_1m_ohlcv_to_15m_krx
-
-            d1 = m1.copy()
-            d1["time"] = pd.to_datetime(d1["time"], errors="coerce")
-            d1 = d1.dropna(subset=["time"])
-            d1 = d1.set_index("time").sort_index()
-            rename_l = {
-                c: c.lower()
-                for c in ("Open", "High", "Low", "Close", "Volume")
-                if c in d1.columns
-            }
-            if rename_l:
-                d1 = d1.rename(columns=rename_l)
-            need = ("open", "high", "low", "close", "volume")
-            if any(c not in d1.columns for c in need):
-                return pd.DataFrame()
-            df15 = resample_1m_ohlcv_to_15m_krx(d1[list(need)], code)
-            if df15 is None or df15.empty:
-                return pd.DataFrame()
-            out = df15.copy()
-            out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
-            out = out.dropna(subset=["datetime"]).set_index("datetime").sort_index()
-            out = out.rename(
-                columns={
-                    "open": "Open",
-                    "high": "High",
-                    "low": "Low",
-                    "close": "Close",
-                    "volume": "Volume",
-                }
-            )
-            out = out[["Open", "High", "Low", "Close", "Volume"]]
-            if out.empty:
-                return pd.DataFrame()
-            try:
-                if self._warmup_resample_hint_count < 3:
-                    self._warmup_resample_hint_count += 1
-                    self.log(
-                        f"ℹ️ [Warmup] {code}: bars_15m 비어 1m→15m 리샘플 ({len(out)}봉)"
-                    )
-            except Exception:
-                pass
-            return out
-        except Exception as e:
-            self.log(f"⚠️ [Warmup] {code} 1m→15m 리샘플 실패: {e}")
-            return pd.DataFrame()
+            _ = str(code or "")
+        except Exception:
+            pass
+        return pd.DataFrame()
 
     def _execute_warmup_one_code(
         self,
@@ -958,7 +848,7 @@ class WarmupService:
             self._tt(
                 f"_execute_one begin code={code} name={name!r} token_present={bool(token)}"
             )
-            # DB 로드 후 ka10080 병합(기본: 매 감시 시작마다 강제 API 갱신).
+            # 저장된 15분 DB는 읽지 않는다. 빈 프레임에서 ka10080만으로 채운다.
             base = self._load_15m_ohlcv_frame(code)
             try:
                 n0 = len(base) if base is not None and not base.empty else 0

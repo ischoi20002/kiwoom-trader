@@ -2,7 +2,7 @@
 """
 KRX 장중 15분봉·1분 창의 시간 정의.
 
-키움 ka10080(tic_scope=15) 과 동일하게 **좌측(시작) 라벨**을 쓴다.
+키움 ka10080(tic_scope=15·1) 과 동일하게 **좌측(시작) 라벨**을 쓴다.
 일자별 개장·마감은 ``utils.krx_session_hours.SessionHours`` 를 따른다
 (기본 09:00~15:30, 수능·신년 등은 ``krx_special_sessions.json``).
 
@@ -38,6 +38,7 @@ __all__ = [
     "m1_bar_open_label_for_just_completed_minute",
     "m1_bar_end_ts_for_closed_open",
     "m1_ka10080_cntr_tm_for_closed_open",
+    "m1_open_label_from_ka10080_cntr_tm",
     "chart_covers_m1_closed_minute",
     "is_last_m1_open_of_15m_slot",
     "is_pre_auction_last_m1_open",
@@ -790,10 +791,10 @@ def m1_bar_end_ts_for_closed_open(
     closed_open: Union[pd.Timestamp, datetime, str],
 ) -> pd.Timestamp:
     """
-    닫힌 1분봉 시작 라벨 → ka10080 인덱스(cntr_tm).
+    닫힌 1분봉 시작 라벨 → ka10080 1분 차트 인덱스(cntr_tm).
 
-    연속매매: cntr_tm = 봉 종가 시각(open+1분).
-    종가 단일가(15:30): 키움이 cntr_tm=15:30 으로 주므로 open 라벨과 동일.
+    ``m1_ka10080_cntr_tm_for_closed_open`` 과 동일. 이름은 과거 종가시각(+1)
+    오인에서 왔지만, tic=1 ``cntr_tm`` 은 봉 시작 시각이다.
     """
     return m1_ka10080_cntr_tm_for_closed_open(closed_open)
 
@@ -803,16 +804,23 @@ def m1_ka10080_cntr_tm_for_closed_open(
 ) -> pd.Timestamp:
     """
     닫힌 1분 open 라벨 → ka10080 1분 차트에서 찾을 cntr_tm.
+
+    harvest ``bars_1m`` 과 같이 **좌측 라벨**(cntr_tm = 봉 시작).
+    ``09:14`` 조회는 ``09:14`` 행이다. ``+1분`` 하면 다음 1분이 말분에 들어간다.
+    종가 단일가(15:30)도 cntr_tm=15:30.
     """
-    t = pd.Timestamp(closed_open).floor("min")
-    try:
-        h = _hours_for_ts(t)
-        hm = int(t.hour) * 60 + int(t.minute)
-        if hm == h.close_minutes:
-            return t
-    except Exception:
-        pass
-    return t + pd.Timedelta(minutes=1)
+    return pd.Timestamp(closed_open).floor("min")
+
+
+def m1_open_label_from_ka10080_cntr_tm(
+    cntr_tm: Union[pd.Timestamp, datetime, str],
+) -> pd.Timestamp:
+    """
+    ka10080 1분 차트 인덱스(cntr_tm) → RtTickM1Store open 라벨.
+
+    tic=1 은 좌측 라벨이므로 변환 없이 ``floor('min')``.
+    """
+    return pd.Timestamp(cntr_tm).floor("min")
 
 
 def chart_covers_m1_closed_minute(

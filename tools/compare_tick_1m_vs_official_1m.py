@@ -3,8 +3,8 @@
 틱 누적 1분봉(realtime_1m_tick_*.db) vs 공식 ka10080(1분) 비교.
 
 - 틱 DB: 시작 라벨(open) — 09:14 = 09:14:00~09:14:59
-- 공식 API: cntr_tm = 봉 종가 시각 — 같은 봉은 09:15
-- 비교 키: 틱 open_lab ↔ 공식 (end - 1분)
+- 공식 API: cntr_tm = 봉 시작 시각 — 같은 봉은 09:14
+- 비교 키: 틱 open_lab ↔ 공식 인덱스(동일 시각)
 
 사용:
   python tools/compare_tick_1m_vs_official_1m.py
@@ -140,13 +140,12 @@ def _fetch_official_1m(code: str, token: str, dm: Any, max_pages: int = 6) -> pd
 
 
 def _row_at_open(off: pd.DataFrame, open_lab: pd.Timestamp) -> Optional[pd.Series]:
-    """공식 close-index에서 open 라벨에 해당하는 행."""
+    """공식 1분 인덱스에서 open 라벨(동일 시각) 행."""
     if off is None or off.empty:
         return None
-    end_ts = pd.Timestamp(open_lab).floor("min") + pd.Timedelta(minutes=1)
-    if end_ts in off.index:
-        return off.loc[end_ts]
-    want = end_ts.floor("s")
+    want = pd.Timestamp(open_lab).floor("min").floor("s")
+    if want in off.index:
+        return off.loc[want]
     for ix in off.index:
         try:
             if pd.Timestamp(ix).floor("s") == want:

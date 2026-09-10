@@ -2632,8 +2632,8 @@ class RtWatchlistM1ApiPoller:
         """
         ka10080 1분 인덱스 cntr_tm 조회.
 
-        연속매매: cntr_tm = 봉 종가(open+1분).
-        종가 단일가(15:30): 키움 cntr_tm = 15:30 (open과 동일).
+        tic=1 cntr_tm = 봉 시작(open 라벨). harvest ``bars_1m`` 과 동일.
+        종가 단일가(15:30)도 cntr_tm = 15:30.
         """
         try:
             if df is None or getattr(df, "empty", True):

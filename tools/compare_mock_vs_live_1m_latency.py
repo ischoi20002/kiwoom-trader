@@ -96,10 +96,9 @@ def next_minute_boundary(now: Optional[datetime] = None) -> datetime:
 def pick_1m_row(df: pd.DataFrame, closed_open: pd.Timestamp) -> Optional[pd.Series]:
     if df is None or getattr(df, "empty", True):
         return None
-    end_ts = pd.Timestamp(closed_open) + pd.Timedelta(minutes=1)
-    want = end_ts.floor("s")
-    if end_ts in df.index:
-        return df.loc[end_ts]
+    want = pd.Timestamp(closed_open).floor("min").floor("s")
+    if want in df.index:
+        return df.loc[want]
     for ix in df.index:
         try:
             if pd.Timestamp(ix).floor("s") == want:

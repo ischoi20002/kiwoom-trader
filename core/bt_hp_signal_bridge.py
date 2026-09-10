@@ -640,7 +640,7 @@ def api_minute_row_key(item: Any) -> str:
 def ka10080_raw_rows_to_1m_df(raw_api: Any) -> pd.DataFrame:
     """
     ka10080(tic_scope='1') 응답 행들 → DatetimeIndex OHLCV.
-    `WarmupService._minute_api_raw_to_1m_ohlcv` 와 동일 규약(cntr_tm = 봉 종가 시각).
+    `WarmupService._minute_api_raw_to_1m_ohlcv` 와 동일 규약(cntr_tm = 봉 시작 시각).
     """
     if not raw_api:
         return pd.DataFrame()

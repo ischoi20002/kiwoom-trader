@@ -52,7 +52,7 @@ DEFAULT_SETTINGS = {
     "bt_rt_parity_fast_osc_delta": 0.08,
     "bt_rt_parity_fast_osc_abs_max": 0.0,
     "s1_buy_signal_cooldown_sec": 14400.0,
-    "realtime_warmup_ohlcv_source": "realtime_15m_db_then_api",
+    "realtime_warmup_ohlcv_source": "api_only",
     "realtime_warmup_15m_query_limit": 7000,
     "realtime_15m_calendar_retention_days": 365,
     "realtime_warmup_persist_to_rt15m_db": True,
