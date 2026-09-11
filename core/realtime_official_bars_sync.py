@@ -277,18 +277,15 @@ def _resolve_compose_minute_ohlcv(
 
     실시간 감시는 ``bars_1m`` 하베스팅 DB를 쓰지 않는다(장중 당일 분 없음).
     """
-    try:
-        ol = pd.Timestamp(open_lab).floor("min")
-    except Exception:
-        return None
-
-    return _minute_ohlcv_official_or_tick(
+    bar, _src = _resolve_compose_minute_ohlcv_with_source(
+        app,
         m1s,
         nk,
-        ol,
+        open_lab,
         prefer_tick=prefer_tick,
         allow_tick_fill=allow_tick_fill,
     )
+    return bar
 
 
 def _minute_resolvable_for_compose(
@@ -446,12 +443,14 @@ def _compose_ohlcv_from_slot_m1_labels(
     use_tick_tail: bool,
     allow_flat_no_trade: bool,
     slot_closed: bool = True,
+    slot_for_persist: Optional[pd.Timestamp] = None,
 ) -> Optional[Tuple[float, float, float, float, float]]:
     """
     슬롯 1분 open 라벨별로 OHLCV를 모아 15분봉을 합성한다.
 
     - 미수신(인접 분도 없음): None → 폴러 catchup·말분 조회 재시도.
     - 무거래(인접 분 있음·차트 생략): 직전 종가 평봉(V=0) 삽입(설정 ON).
+    - 성공 시 ``slot_for_persist`` 가 있으면 합성 1분·출처를 RT DB에 저장.
     """
     labels = _expected_m1_open_labels_for_slot(t0, last_open)
     if not labels:
@@ -464,10 +463,13 @@ def _compose_ohlcv_from_slot_m1_labels(
     lows: List[float] = []
     closes: List[float] = []
     vols: List[float] = []
+    persist_rows: List[
+        Tuple[pd.Timestamp, float, float, float, float, float, str]
+    ] = []
 
     for lab in labels:
         is_tail = lab == last_s
-        bar = _resolve_compose_minute_ohlcv(
+        bar, src = _resolve_compose_minute_ohlcv_with_source(
             app,
             m1s,
             nk,
@@ -480,6 +482,8 @@ def _compose_ohlcv_from_slot_m1_labels(
                 app, m1s, nk, lab, labels, slot_closed=slot_closed
             ):
                 bar = _apply_flat_no_trade_minute_to_store(app, m1s, nk, lab)
+                if bar is not None:
+                    src = "flat"
         if bar is None:
             return None
 
@@ -489,6 +493,21 @@ def _compose_ohlcv_from_slot_m1_labels(
         lows.append(float(l_))
         closes.append(float(c))
         vols.append(max(0.0, float(v)))
+        try:
+            lab_ts = pd.Timestamp(lab).floor("min")
+            persist_rows.append(
+                (
+                    lab_ts,
+                    float(o),
+                    float(h),
+                    float(l_),
+                    float(c),
+                    max(0.0, float(v)),
+                    str(src or "tick"),
+                )
+            )
+        except Exception:
+            pass
 
     if not closes:
         return None
@@ -504,6 +523,11 @@ def _compose_ohlcv_from_slot_m1_labels(
     v0 = float(sum(max(0.0, x) for x in vols))
     if c0 <= 0:
         return None
+    if slot_for_persist is not None:
+        try:
+            _persist_compose_m1_bars(app, nk, slot_for_persist, persist_rows)
+        except Exception:
+            pass
     return o0, h0, l0, c0, v0
 
 
@@ -538,19 +562,50 @@ def slot_has_official_head_m1(
         return False
 
 
-def _minute_ohlcv_official_or_tick(
+def _compose_m1_persist_enabled(app: Any) -> bool:
+    """15분 합성에 쓴 1분봉·출처를 realtime_15m DB에 남길지(기본 ON)."""
+    try:
+        st = getattr(app, "settings", None) or {}
+        v = st.get("realtime_compose_m1_persist_enabled", True)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return True
+
+
+def _persist_compose_m1_bars(
+    app: Any,
+    code: str,
+    slot: pd.Timestamp,
+    rows: List[Tuple[pd.Timestamp, float, float, float, float, float, str]],
+) -> None:
+    """합성에 사용된 1분 OHLCV+출처를 RT DB에 저장(실패해도 합성 결과는 유지)."""
+    if not rows:
+        return
+    try:
+        if not _compose_m1_persist_enabled(app):
+            return
+        store = getattr(app, "realtime_monitor_bars_store", None)
+        if store is None or not hasattr(store, "upsert_compose_m1_bars"):
+            return
+        store.upsert_compose_m1_bars(code, slot, rows)
+    except Exception:
+        pass
+
+
+def _minute_ohlcv_official_or_tick_with_source(
     m1s: Any,
     nk: str,
     open_lab: pd.Timestamp,
     *,
     prefer_tick: bool = False,
     allow_tick_fill: bool = True,
-) -> Optional[Tuple[float, float, float, float, float]]:
+) -> Tuple[Optional[Tuple[float, float, float, float, float]], str]:
     """
-    단일 1분 OHLCV.
+    단일 1분 OHLCV + 출처.
 
-    - ``prefer_tick``: 틱 우선(말분·15:30).
-    - 그 외: 공식 completed 우선, 없으면 틱(``allow_tick_fill``).
+    반환: ((o,h,l,c,v)|None, ``official``|``tick``|``\"\"``)
     """
     tick_bar: Optional[Tuple[float, float, float, float, float]] = None
     if prefer_tick or allow_tick_fill:
@@ -563,11 +618,14 @@ def _minute_ohlcv_official_or_tick(
         to, th, tl, tc, tv = tick_bar
         if float(tc) > 0:
             return (
-                float(to),
-                float(th),
-                float(tl),
-                float(tc),
-                max(0.0, float(tv)),
+                (
+                    float(to),
+                    float(th),
+                    float(tl),
+                    float(tc),
+                    max(0.0, float(tv)),
+                ),
+                "tick",
             )
 
     try:
@@ -589,7 +647,7 @@ def _minute_ohlcv_official_or_tick(
             c = float(off["Close"].iloc[-1])
             v = max(0.0, float(off["Volume"].iloc[-1]))
             if c > 0:
-                return o, h, l_, c, v
+                return (o, h, l_, c, v), "official"
         except Exception:
             pass
 
@@ -597,13 +655,63 @@ def _minute_ohlcv_official_or_tick(
         to, th, tl, tc, tv = tick_bar
         if float(tc) > 0:
             return (
-                float(to),
-                float(th),
-                float(tl),
-                float(tc),
-                max(0.0, float(tv)),
+                (
+                    float(to),
+                    float(th),
+                    float(tl),
+                    float(tc),
+                    max(0.0, float(tv)),
+                ),
+                "tick",
             )
-    return None
+    return None, ""
+
+
+def _minute_ohlcv_official_or_tick(
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+    *,
+    prefer_tick: bool = False,
+    allow_tick_fill: bool = True,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """
+    단일 1분 OHLCV.
+
+    - ``prefer_tick``: 틱 우선(말분·15:30).
+    - 그 외: 공식 completed 우선, 없으면 틱(``allow_tick_fill``).
+    """
+    bar, _src = _minute_ohlcv_official_or_tick_with_source(
+        m1s,
+        nk,
+        open_lab,
+        prefer_tick=prefer_tick,
+        allow_tick_fill=allow_tick_fill,
+    )
+    return bar
+
+
+def _resolve_compose_minute_ohlcv_with_source(
+    app: Any,
+    m1s: Any,
+    nk: str,
+    open_lab: pd.Timestamp,
+    *,
+    prefer_tick: bool = False,
+    allow_tick_fill: bool = True,
+) -> Tuple[Optional[Tuple[float, float, float, float, float]], str]:
+    """합성용 1분 OHLCV + 출처(실시간은 bars_1m 미사용)."""
+    try:
+        ol = pd.Timestamp(open_lab).floor("min")
+    except Exception:
+        return None, ""
+    return _minute_ohlcv_official_or_tick_with_source(
+        m1s,
+        nk,
+        ol,
+        prefer_tick=prefer_tick,
+        allow_tick_fill=allow_tick_fill,
+    )
 
 
 def compose_local_15m_ohlcv(
@@ -652,21 +760,63 @@ def compose_local_15m_ohlcv(
                 return None
             incomplete_tail = not last_minute_ticks_complete_for_eval(app, nk, auc)
             if incomplete_tail:
-                bar = _minute_ohlcv_official_or_tick(
+                bar, src = _minute_ohlcv_official_or_tick_with_source(
                     m1s,
                     nk,
                     auc,
                     prefer_tick=False,
                     allow_tick_fill=False,
                 )
+                if bar is not None:
+                    try:
+                        o, h, l_, c, v = bar
+                        _persist_compose_m1_bars(
+                            app,
+                            nk,
+                            slot,
+                            [
+                                (
+                                    pd.Timestamp(auc).floor("min"),
+                                    float(o),
+                                    float(h),
+                                    float(l_),
+                                    float(c),
+                                    max(0.0, float(v)),
+                                    str(src or "official"),
+                                )
+                            ],
+                        )
+                    except Exception:
+                        pass
                 return bar
-            bar = _minute_ohlcv_official_or_tick(
+            bar, src = _minute_ohlcv_official_or_tick_with_source(
                 m1s,
                 nk,
                 auc,
                 prefer_tick=bool(use_tick_tail),
                 allow_tick_fill=bool(use_tick_tail or allow_fill),
             )
+            if bar is not None:
+                try:
+                    o, h, l_, c, v = bar
+                    _persist_compose_m1_bars(
+                        app,
+                        nk,
+                        slot,
+                        [
+                            (
+                                pd.Timestamp(auc).floor("min"),
+                                float(o),
+                                float(h),
+                                float(l_),
+                                float(c),
+                                max(0.0, float(v)),
+                                str(src or "official"),
+                            )
+                        ],
+                    )
+                except Exception:
+                    pass
             return bar
 
         t0 = m1_window_start_for_15m_end(slot)
@@ -721,6 +871,7 @@ def compose_local_15m_ohlcv(
             use_tick_tail=use_tick_tail,
             allow_flat_no_trade=allow_flat,
             slot_closed=slot_closed,
+            slot_for_persist=slot,
         )
     except Exception:
         return None

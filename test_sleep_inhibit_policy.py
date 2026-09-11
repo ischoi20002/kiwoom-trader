@@ -39,6 +39,7 @@ def _app(
     prevent: bool = True,
     allow_after_eod: bool = True,
     monitoring: bool = False,
+    app_monitoring: bool = False,
     cms: _FakeCms | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -48,6 +49,7 @@ def _app(
         },
         trading_controller=SimpleNamespace(is_monitoring=monitoring),
         continuous_monitor_service=cms if cms is not None else _FakeCms(),
+        is_monitoring=app_monitoring,
     )
 
 
@@ -62,9 +64,20 @@ class TestSleepInhibitPolicy(unittest.TestCase):
             should_prevent_sleep(app, now=datetime(2026, 9, 2, 20, 0, 0))
         )
 
-    def test_monitoring_on(self) -> None:
-        app = _app(monitoring=True)
-        self.assertTrue(should_prevent_sleep(app, now=datetime(2026, 9, 2, 20, 0, 0)))
+    def test_monitoring_on_before_eod(self) -> None:
+        cms = _FakeCms(eod_due=datetime(2026, 9, 2, 16, 0, 0))
+        app = _app(monitoring=True, cms=cms)
+        self.assertTrue(
+            should_prevent_sleep(app, now=datetime(2026, 9, 2, 14, 0, 0))
+        )
+
+    def test_monitoring_on_after_eod_allows_sleep(self) -> None:
+        """EOD 이후에는 is_monitoring 잔존과 무관하게 최대절전 허용."""
+        cms = _FakeCms(eod_due=datetime(2026, 9, 2, 16, 0, 0))
+        app = _app(monitoring=True, cms=cms)
+        self.assertFalse(
+            should_prevent_sleep(app, now=datetime(2026, 9, 2, 20, 0, 0))
+        )
 
     def test_after_eod_when_idle(self) -> None:
         cms = _FakeCms(eod_due=datetime(2026, 9, 2, 16, 0, 0))
@@ -94,6 +107,14 @@ class TestSleepInhibitPolicy(unittest.TestCase):
             self.assertFalse(
                 should_prevent_sleep(app, now=datetime(2026, 9, 5, 12, 0, 0))
             )
+
+    def test_string_true_allow_after_eod(self) -> None:
+        cms = _FakeCms(eod_due=datetime(2026, 9, 2, 16, 0, 0))
+        app = _app(cms=cms)
+        app.settings["prevent_sleep_allow_after_eod"] = "true"
+        self.assertFalse(
+            should_prevent_sleep(app, now=datetime(2026, 9, 2, 20, 0, 0))
+        )
 
 
 if __name__ == "__main__":

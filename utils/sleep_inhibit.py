@@ -7,6 +7,9 @@
 
 노트북 덮개를 닫으면 전원 옵션(덮개 동작)이 우선하므로 이 API로는 막지 못한다.
 모니터만 꺼지는 것은 기본 허용한다.
+
+Away Mode 는 쓰지 않는다 — 미디어용으로 절전 진입 자체를 막아
+해제 누락 시 최대절전이 영구 지연되는 사례가 있다.
 """
 from __future__ import annotations
 
@@ -18,13 +21,11 @@ from typing import Callable, Optional
 # SetThreadExecutionState 플래그
 _ES_SYSTEM_REQUIRED = 0x00000001
 _ES_DISPLAY_REQUIRED = 0x00000002
-_ES_AWAYMODE_REQUIRED = 0x00000040
 _ES_CONTINUOUS = 0x80000000
 
 # PowerRequestType
 _POWER_REQUEST_DISPLAY_REQUIRED = 0
 _POWER_REQUEST_SYSTEM_REQUIRED = 1
-_POWER_REQUEST_AWAYMODE_REQUIRED = 2
 
 _POWER_REQUEST_CONTEXT_VERSION = 0
 _POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x1
@@ -43,6 +44,22 @@ class _REASON_CONTEXT(ctypes.Structure):
     ]
 
 
+def _kernel32() -> ctypes.WinDLL:
+    """64bit HANDLE 마샬링을 위해 동일 WinDLL 인스턴스·argtypes 를 쓴다."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.SetThreadExecutionState.argtypes = [ctypes.c_uint]
+    k32.SetThreadExecutionState.restype = ctypes.c_uint
+    k32.PowerCreateRequest.argtypes = [ctypes.POINTER(_REASON_CONTEXT)]
+    k32.PowerCreateRequest.restype = ctypes.c_void_p
+    k32.PowerSetRequest.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    k32.PowerSetRequest.restype = ctypes.c_bool
+    k32.PowerClearRequest.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    k32.PowerClearRequest.restype = ctypes.c_bool
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    k32.CloseHandle.restype = ctypes.c_bool
+    return k32
+
+
 class SleepInhibitor:
     """메인 스레드에서 acquire/refresh/release 를 호출해야 한다 (스레드별 요청)."""
 
@@ -54,6 +71,7 @@ class SleepInhibitor:
         self._reason_keep: Optional[str] = None
         self._atexit_registered: bool = False
         self._used_power_request: bool = False
+        self._k32: Optional[ctypes.WinDLL] = None
 
     def _emit(self, msg: str) -> None:
         try:
@@ -61,6 +79,16 @@ class SleepInhibitor:
                 self._log(msg)
         except Exception:
             pass
+
+    def _k32_api(self) -> Optional[ctypes.WinDLL]:
+        if sys.platform != "win32":
+            return None
+        if self._k32 is None:
+            try:
+                self._k32 = _kernel32()
+            except Exception:
+                return None
+        return self._k32
 
     @property
     def active(self) -> bool:
@@ -124,14 +152,17 @@ class SleepInhibitor:
         """최대절전 억제를 해제한다. 프로그램 종료 시 반드시 호출."""
         if not self._active and self._power_handle is None:
             return
+        clear_ok = True
         try:
-            self._release_power_request()
+            clear_ok = self._release_power_request()
         except Exception:
-            pass
+            clear_ok = False
         try:
             if sys.platform == "win32":
-                k32 = ctypes.windll.kernel32
-                k32.SetThreadExecutionState(_ES_CONTINUOUS)
+                k32 = self._k32_api()
+                if k32 is not None:
+                    # CONTINUOUS 단독 = 이 스레드의 이전 SYSTEM/DISPLAY 요구 해제
+                    k32.SetThreadExecutionState(_ES_CONTINUOUS)
         except Exception:
             pass
         was_active = self._active
@@ -139,20 +170,23 @@ class SleepInhibitor:
         self._keep_display = False
         self._used_power_request = False
         if was_active:
-            self._emit("🌙 [최대절전방지] 유휴 최대절전 억제를 해제했습니다.")
+            if clear_ok:
+                self._emit("🌙 [최대절전방지] 유휴 최대절전 억제를 해제했습니다.")
+            else:
+                self._emit(
+                    "⚠️ [최대절전방지] 억제 해제 시도 — PowerRequest 해제 실패 가능. "
+                    "관리자 전원 요청(powercfg /requests)을 확인하세요."
+                )
 
     def _set_execution_state(self, keep_display: bool) -> bool:
         try:
-            flags = _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_AWAYMODE_REQUIRED
+            k32 = self._k32_api()
+            if k32 is None:
+                return False
+            flags = _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED
             if keep_display:
                 flags |= _ES_DISPLAY_REQUIRED
-            k32 = ctypes.windll.kernel32
-            prev = k32.SetThreadExecutionState(flags)
-            if prev == 0:
-                flags = _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED
-                if keep_display:
-                    flags |= _ES_DISPLAY_REQUIRED
-                prev = k32.SetThreadExecutionState(flags)
+            prev = int(k32.SetThreadExecutionState(flags) or 0)
             return prev != 0
         except Exception:
             return False
@@ -161,15 +195,9 @@ class SleepInhibitor:
         """Modern Standby 대응용 PowerRequest. 실패해도 ExecutionState 폴백이 있다."""
         handle: Optional[int] = None
         try:
-            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            k32.PowerCreateRequest.argtypes = [ctypes.POINTER(_REASON_CONTEXT)]
-            k32.PowerCreateRequest.restype = ctypes.c_void_p
-            k32.PowerSetRequest.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            k32.PowerSetRequest.restype = ctypes.c_bool
-            k32.PowerClearRequest.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            k32.PowerClearRequest.restype = ctypes.c_bool
-            k32.CloseHandle.argtypes = [ctypes.c_void_p]
-            k32.CloseHandle.restype = ctypes.c_bool
+            k32 = self._k32_api()
+            if k32 is None:
+                return False
 
             self._reason_keep = _REASON_TEXT
             ctx = _REASON_CONTEXT()
@@ -182,16 +210,14 @@ class SleepInhibitor:
                 return False
             handle = int(raw)
 
-            if not k32.PowerSetRequest(handle, _POWER_REQUEST_SYSTEM_REQUIRED):
-                k32.CloseHandle(handle)
+            if not k32.PowerSetRequest(ctypes.c_void_p(handle), _POWER_REQUEST_SYSTEM_REQUIRED):
+                k32.CloseHandle(ctypes.c_void_p(handle))
                 return False
-            try:
-                k32.PowerSetRequest(handle, _POWER_REQUEST_AWAYMODE_REQUIRED)
-            except Exception:
-                pass
             if keep_display:
                 try:
-                    k32.PowerSetRequest(handle, _POWER_REQUEST_DISPLAY_REQUIRED)
+                    k32.PowerSetRequest(
+                        ctypes.c_void_p(handle), _POWER_REQUEST_DISPLAY_REQUIRED
+                    )
                 except Exception:
                     pass
             self._power_handle = handle
@@ -199,34 +225,42 @@ class SleepInhibitor:
         except Exception:
             if handle:
                 try:
-                    ctypes.windll.kernel32.CloseHandle(handle)
+                    k32 = self._k32_api()
+                    if k32 is not None:
+                        k32.CloseHandle(ctypes.c_void_p(handle))
                 except Exception:
                     pass
             self._power_handle = None
             return False
 
-    def _release_power_request(self) -> None:
+    def _release_power_request(self) -> bool:
+        """PowerRequest 를 모두 Clear 후 Close. 성공 시 True."""
         handle = self._power_handle
         self._power_handle = None
         if not handle:
-            return
+            return True
+        ok = True
         try:
-            k32 = ctypes.windll.kernel32
+            k32 = self._k32_api()
+            if k32 is None:
+                return False
+            h = ctypes.c_void_p(handle)
+            for req in (
+                _POWER_REQUEST_SYSTEM_REQUIRED,
+                _POWER_REQUEST_DISPLAY_REQUIRED,
+            ):
+                try:
+                    if not bool(k32.PowerClearRequest(h, req)):
+                        # DISPLAY 는 Set 안 했을 수 있음 — SYSTEM 실패만 치명
+                        if req == _POWER_REQUEST_SYSTEM_REQUIRED:
+                            ok = False
+                except Exception:
+                    if req == _POWER_REQUEST_SYSTEM_REQUIRED:
+                        ok = False
             try:
-                k32.PowerClearRequest(handle, _POWER_REQUEST_SYSTEM_REQUIRED)
+                k32.CloseHandle(h)
             except Exception:
-                pass
-            try:
-                k32.PowerClearRequest(handle, _POWER_REQUEST_AWAYMODE_REQUIRED)
-            except Exception:
-                pass
-            try:
-                k32.PowerClearRequest(handle, _POWER_REQUEST_DISPLAY_REQUIRED)
-            except Exception:
-                pass
-            try:
-                k32.CloseHandle(handle)
-            except Exception:
-                pass
+                ok = False
+            return ok
         except Exception:
-            pass
+            return False

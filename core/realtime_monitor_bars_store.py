@@ -6,6 +6,7 @@
 - 워밍업 시 로컬 우선 조회, 검증 통과 후 병합 OHLCV 일괄 저장(bulk_upsert_ohlcv_index_frame)
 - 장중에는 슬롯이 바뀔 때 확정 15분봉 1행씩 INSERT OR REPLACE
 - ``bars_15m_rt``: 공식/워밍업·신호용 15분봉
+- ``bars_1m_compose_rt``: 15분 합성에 쓰인 1분봉 + 출처(official/tick/flat)
 - ``realtime_15m_calendar_retention_days``(기본 365)일보다 오래된 봉은 종목별 DELETE
   (워밍업이 과거를 채우는 목적이 아니라 **디스크 롤링**용)
 """
@@ -14,11 +15,16 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
 from utils.server_mode_paths import realtime_monitor_15m_db_path
+
+# 합성 1분 출처 라벨
+COMPOSE_M1_SOURCE_OFFICIAL = "official"
+COMPOSE_M1_SOURCE_TICK = "tick"
+COMPOSE_M1_SOURCE_FLAT = "flat"
 
 
 def _norm_code(raw: Any) -> str:
@@ -72,6 +78,10 @@ class RealtimeMonitorBarsStore:
             cs = self._retention_cutoff_str(days)
             conn.execute(
                 "DELETE FROM bars_15m_rt WHERE code = ? AND datetime < ?",
+                (code, cs),
+            )
+            conn.execute(
+                "DELETE FROM bars_1m_compose_rt WHERE code = ? AND slot_datetime < ?",
                 (code, cs),
             )
         except sqlite3.Error as e:
@@ -173,6 +183,31 @@ class RealtimeMonitorBarsStore:
                         "CREATE INDEX IF NOT EXISTS idx_bars_15m_rt_code_dt "
                         "ON bars_15m_rt (code, datetime)"
                     )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS bars_1m_compose_rt (
+                            code TEXT NOT NULL,
+                            slot_datetime TEXT NOT NULL,
+                            datetime TEXT NOT NULL,
+                            open INTEGER NOT NULL,
+                            high INTEGER NOT NULL,
+                            low INTEGER NOT NULL,
+                            close INTEGER NOT NULL,
+                            volume INTEGER NOT NULL,
+                            source TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            PRIMARY KEY (code, slot_datetime, datetime)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_bars_1m_compose_rt_code_dt "
+                        "ON bars_1m_compose_rt (code, datetime)"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_bars_1m_compose_rt_slot "
+                        "ON bars_1m_compose_rt (code, slot_datetime)"
+                    )
                     self._migrate_symbol_meta_rt_columns(conn)
                     conn.commit()
         except sqlite3.Error as e:
@@ -238,6 +273,81 @@ class RealtimeMonitorBarsStore:
             log_tag="RT15mDB",
             purge=purge,
         )
+
+    def upsert_compose_m1_bars(
+        self,
+        code: str,
+        slot_ts: Any,
+        rows: Sequence[Tuple[Any, float, float, float, float, float, str]],
+        *,
+        purge: bool = True,
+    ) -> int:
+        """
+        15분 합성에 사용된 1분봉을 출처와 함께 저장한다.
+
+        rows: (m1_ts, o, h, l, c, v, source)
+        source: ``official`` | ``tick`` | ``flat``
+        반환: 저장 시도 행 수.
+        """
+        nc = _norm_code(code)
+        if not nc or not rows:
+            return 0
+        try:
+            slot = pd.Timestamp(slot_ts).floor("min")
+            slot_s = slot.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return 0
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        prepared: List[Tuple[Any, ...]] = []
+        for item in rows:
+            try:
+                m1_ts = pd.Timestamp(item[0]).floor("min")
+                dt_s = m1_ts.strftime("%Y-%m-%d %H:%M:%S")
+                o = int(round(float(item[1])))
+                h = int(round(float(item[2])))
+                l_ = int(round(float(item[3])))
+                c = int(round(float(item[4])))
+                v = int(round(max(0.0, float(item[5]))))
+                src = str(item[6] or "").strip().lower() or COMPOSE_M1_SOURCE_TICK
+                if src not in (
+                    COMPOSE_M1_SOURCE_OFFICIAL,
+                    COMPOSE_M1_SOURCE_TICK,
+                    COMPOSE_M1_SOURCE_FLAT,
+                ):
+                    src = COMPOSE_M1_SOURCE_TICK
+                prepared.append((nc, slot_s, dt_s, o, h, l_, c, v, src, now_s))
+            except Exception:
+                continue
+        if not prepared:
+            return 0
+        try:
+            with self._lock:
+                with sqlite3.connect(self._db_path) as conn:
+                    # 같은 슬롯 재합성 시 이전 1분 구성이 남지 않게 교체
+                    conn.execute(
+                        "DELETE FROM bars_1m_compose_rt "
+                        "WHERE code = ? AND slot_datetime = ?",
+                        (nc, slot_s),
+                    )
+                    conn.executemany(
+                        """
+                        INSERT OR REPLACE INTO bars_1m_compose_rt
+                        (code, slot_datetime, datetime, open, high, low, close,
+                         volume, source, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        prepared,
+                    )
+                    if purge:
+                        self._purge_old_bars_for_code(conn, nc)
+                    conn.commit()
+            return len(prepared)
+        except sqlite3.Error as e:
+            try:
+                self._log(f"⚠️ [RT15mDB] 합성1분 저장 실패 ({nc} {slot_s}): {e}")
+            except Exception:
+                pass
+            return 0
 
     def upsert_completed_bars_batch(
         self,

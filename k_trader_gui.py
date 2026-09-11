@@ -3370,6 +3370,11 @@ class KiwoomApp:
             self._maybe_stop_account_sync_timer()
             # 다음 감시 시작 시 다시 1회 발송되도록 리셋
             self._telegram_sent_on_monitor_start = False
+            # 감시 중단 직후 최대절전 억제 재평가(EOD 후 즉시 해제)
+            try:
+                self._apply_sleep_inhibit_from_settings()
+            except Exception:
+                pass
             if self.btn_monitor_toggle:
                 self.btn_monitor_toggle.config(
                     text="감시 시작", style="Accent.TButton"
@@ -3509,14 +3514,33 @@ class KiwoomApp:
             si = getattr(self, "_sleep_inhibitor", None)
             if si is None:
                 return
-            from utils.sleep_inhibit_policy import should_prevent_sleep
+            from utils.sleep_inhibit_policy import sleep_inhibit_decision
 
             st = getattr(self, "settings", None) or {}
             keep_display = bool(st.get("prevent_sleep_keep_display", False))
-            if should_prevent_sleep(self):
+            want, reason = sleep_inhibit_decision(self)
+            was_active = bool(getattr(si, "active", False))
+            if want:
                 si.acquire(keep_display=keep_display)
             else:
                 si.release()
+            # 상태 전이 시에만 사유 로그 (50초 주기 스팸 방지)
+            now_active = bool(getattr(si, "active", False))
+            if was_active != now_active or getattr(
+                self, "_sleep_inhibit_last_reason", None
+            ) != reason:
+                self._sleep_inhibit_last_reason = reason
+                try:
+                    if now_active:
+                        self.log(
+                            f"🔆 [최대절전방지] 억제 유지 (사유: {reason})"
+                        )
+                    else:
+                        self.log(
+                            f"🌙 [최대절전방지] 억제 해제 상태 (사유: {reason})"
+                        )
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 self.log(f"⚠️ [최대절전방지] 설정 반영 실패: {e}")

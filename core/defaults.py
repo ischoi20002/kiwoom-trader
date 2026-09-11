@@ -56,6 +56,7 @@ DEFAULT_SETTINGS = {
     "realtime_warmup_15m_query_limit": 7000,
     "realtime_15m_calendar_retention_days": 365,
     "realtime_warmup_persist_to_rt15m_db": True,
+    "realtime_compose_m1_persist_enabled": True,
     "realtime_bars_max_keep": 300,
     "realtime_closed_15m_official_replace_delay_sec": 0.5,
     "realtime_closed_15m_official_replace_stagger": True,
