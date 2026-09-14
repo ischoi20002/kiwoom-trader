@@ -263,11 +263,12 @@ def completed_trading_day_asof_local(
     eod_buffer_minutes: int = 30,
 ) -> date:
     """
-    레짐·전환 게이트용: 마지막으로 **완료된** 거래일.
+    레짐·전환 게이트·연속감시 EOD용: 마지막으로 **완료된** 거래일.
 
     - 비거래일: 직전 거래일
-    - 거래일 · 장마감(close)+버퍼 이전(장전·장중·직후): 직전 거래일
-    - 거래일 · close+버퍼 이후: 당일
+    - 거래일 · 모니터 EOD(애프터 시행일=20:00+버퍼, 그 외=정규 close+버퍼) 이전:
+      직전 거래일
+    - 거래일 · 모니터 EOD 이후: 당일
     """
     t = now or datetime.now()
     d = t.date()
@@ -279,10 +280,7 @@ def completed_trading_day_asof_local(
         if not is_trading_day(d):
             prev = previous_trading_day(d)
             return prev if prev is not None else d
-        from utils.krx_session_hours import get_session_hours
-
-        close_dt = get_session_hours(d).close_datetime()
-        due = close_dt + timedelta(minutes=buf)
+        due = monitor_eod_due_datetime(d, eod_buffer_minutes=buf)
         if t >= due:
             return d
         prev = previous_trading_day(d)
@@ -293,6 +291,37 @@ def completed_trading_day_asof_local(
             return prev if prev is not None else d
         except Exception:
             return d
+
+
+def monitor_eod_due_datetime(
+    day: date | datetime | str,
+    *,
+    eod_buffer_minutes: int = 30,
+) -> datetime:
+    """
+    연속감시 중단·일일 선정·레짐 EOD 공통 due 시각.
+
+    애프터마켓 시행일: 애프터 종료(20:00)+버퍼(기본 20:30).
+    그 외: 정규장 close+버퍼(기본 16:00).
+    """
+    try:
+        buf = max(0, min(int(eod_buffer_minutes), 180))
+    except (TypeError, ValueError):
+        buf = 30
+    if isinstance(day, datetime):
+        d = day.date()
+    elif isinstance(day, date):
+        d = day
+    else:
+        d = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+    try:
+        if has_krx_aftermarket(d):
+            return aftermarket_end_datetime(d) + timedelta(minutes=buf)
+        from utils.krx_session_hours import get_session_hours
+
+        return get_session_hours(d).close_datetime() + timedelta(minutes=buf)
+    except Exception:
+        return datetime.combine(d, time(15, 30, 0)) + timedelta(minutes=buf)
 
 
 def required_eod_bar_datetime_asof_local(now: Optional[datetime] = None) -> Optional[datetime]:

@@ -1405,8 +1405,26 @@ class SettingsTab:
             '15:30 신호 익일 시초 이월',
             None,
             '',
-            'ON=15:30 완성봉 S1·S2·EXIT 신호를 즉시 주문하지 않고, 익일 09:00 동시호가 지정가로 이월(BT·RT 공통)',
+            'ON=15:30 완성봉 S1·S2·EXIT 신호를 즉시 주문하지 않고, 익일 09:00 동시호가 지정가로 이월(BT·RT 공통). '
+            '실주문은 아래 「15:30 주문 허용」이 ON일 때만',
             toggle_key='next_open_1530_enabled',
+        )
+        add_param_row(
+            strat_f,
+            '15:30 주문 허용',
+            None,
+            '',
+            'OFF(당분간 권장)=15:30 슬롯은 신호 평가만 하고 NXT 터치·익일시초 예약·당일 주문을 모두 생략. '
+            'ON=실전 NXT 또는 next_open 경로로 주문',
+            toggle_key='order_1530_enabled',
+        )
+        add_param_row(
+            strat_f,
+            '19:45 익일 시초 이월',
+            None,
+            '',
+            'ON(권장)=애프터 말봉(19:45)을 20:00 직후 평가하고, 당일 주문 없이 익일 09:00 동시호가 지정가로 이월',
+            toggle_key='next_open_1945_enabled',
         )
         add_param_row(
             strat_f,

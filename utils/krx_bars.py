@@ -45,6 +45,7 @@ __all__ = [
     "krx_15m_label_for_m1_open",
     "is_krx_m1_closed_open_label",
     "is_krx_last_15m_slot",
+    "is_krx_aftermarket_last_15m_slot",
     "is_krx_first_15m_slot",
     "is_krx_pre_auction_15m_slot",
     "is_krx_no_signal_eval_15m_slot",
@@ -241,6 +242,25 @@ def is_krx_last_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
         return False
 
 
+def is_krx_aftermarket_last_15m_slot(
+    ts: Union[pd.Timestamp, datetime, str],
+) -> bool:
+    """
+    애프터마켓 마지막 15분 라벨(기본 19:45)인지.
+
+    정규 종가 단일가(15:30)와 별개. 완성 시각은 20:00.
+    """
+    try:
+        t = pd.Timestamp(ts)
+        if not _is_krx_session_day(t):
+            return False
+        if not _ah_enabled(t.normalize()):
+            return False
+        return bool(t == _krx_day_aftermarket_last_slot(t.normalize()))
+    except Exception:
+        return False
+
+
 def is_krx_first_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """라벨이 당일 첫 15분봉(개장)인지."""
     try:
@@ -287,10 +307,12 @@ def is_krx_auction_market_fill_slot(ts: Union[pd.Timestamp, datetime, str]) -> b
 
 def is_krx_next_open_defer_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """
-    종가 단일가 완성봉 신호를 익일 시가 체결 판정으로 이월할 슬롯인지.
+    완성봉 신호를 익일 시가(동시호가 지정가)로 이월할 슬롯인지.
+
+    정규 종가 단일가(15:30) 또는 애프터 마지막(19:45).
     """
     try:
-        return bool(is_krx_last_15m_slot(ts))
+        return bool(is_krx_last_15m_slot(ts) or is_krx_aftermarket_last_15m_slot(ts))
     except Exception:
         return False
 

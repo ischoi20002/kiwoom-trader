@@ -195,28 +195,30 @@ class RegimeDisplayService:
             self._after_id = None
 
     def _resolve_eod_trading_day(self, now: datetime) -> Optional[date]:
-        """오늘이 거래일이고 close+버퍼 이후면 당일, 아니면 None."""
+        """오늘이 거래일이고 모니터 EOD(애프터면 20:00+버퍼) 이후면 당일, 아니면 None."""
         try:
-            from reporting.krx_trading_calendar import is_trading_day
-            from utils.krx_session_hours import get_session_hours
+            from reporting.krx_trading_calendar import (
+                is_trading_day,
+                monitor_eod_due_datetime,
+            )
 
             today_d = now.date()
             if not is_trading_day(today_d):
                 return None
-            due = get_session_hours(today_d).close_datetime() + timedelta(
-                minutes=self._eod_buffer_minutes()
+            due = monitor_eod_due_datetime(
+                today_d, eod_buffer_minutes=self._eod_buffer_minutes()
             )
             if now >= due:
                 return today_d
         except Exception:
             try:
-                from utils.krx_session_hours import get_session_hours
+                from reporting.krx_trading_calendar import monitor_eod_due_datetime
 
                 today_d = now.date()
                 if today_d.weekday() >= 5:
                     return None
-                due = get_session_hours(today_d).close_datetime() + timedelta(
-                    minutes=self._eod_buffer_minutes()
+                due = monitor_eod_due_datetime(
+                    today_d, eod_buffer_minutes=self._eod_buffer_minutes()
                 )
                 if now >= due:
                     return today_d
@@ -225,7 +227,7 @@ class RegimeDisplayService:
         return None
 
     def tick(self) -> None:
-        """30초마다 장마감+버퍼 시점 갱신 여부 확인."""
+        """30초마다 모니터 EOD(선정과 동일) 시점 갱신 여부 확인."""
         try:
             if self._cancelled:
                 return

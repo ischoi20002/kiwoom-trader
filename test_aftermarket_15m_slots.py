@@ -75,6 +75,68 @@ def test_1530_still_no_signal_eval_but_1945_is_eval() -> None:
     assert not is_krx_no_signal_eval_15m_slot("2026-09-14 19:45:00")
 
 
+def test_aftermarket_last_slot_helper() -> None:
+    from utils.krx_bars import (
+        is_krx_aftermarket_last_15m_slot,
+        is_krx_next_open_defer_15m_slot,
+        krx_15m_slot_complete_ts,
+    )
+
+    assert is_krx_aftermarket_last_15m_slot("2026-09-14 19:45:00")
+    assert not is_krx_aftermarket_last_15m_slot("2026-09-14 15:30:00")
+    assert not is_krx_aftermarket_last_15m_slot("2026-09-14 19:30:00")
+    assert is_krx_next_open_defer_15m_slot("2026-09-14 19:45:00")
+    assert krx_15m_slot_complete_ts("2026-09-14 19:45:00") == pd.Timestamp(
+        "2026-09-14 20:00:00"
+    )
+
+
+def test_1945_wall_grace_and_next_open_route() -> None:
+    """20:00~20:10 에 19:45 평가 허용, S2/EXIT 는 next_open queued."""
+    from unittest.mock import patch
+
+    from core.signal_engine import SignalEngine
+
+    queued: list[str] = []
+
+    class _Nop:
+        def queue_buy_signal(self, **kwargs):  # type: ignore[no-untyped-def]
+            queued.append("buy")
+            return True
+
+        def queue_strategy_action(self, **kwargs):  # type: ignore[no-untyped-def]
+            queued.append(str(kwargs.get("action") or ""))
+            return True
+
+    app = SimpleNamespace(
+        settings={"next_open_1945_enabled": True, "order_1530_enabled": False},
+        next_open_pending_action_service=_Nop(),
+        order_execution_service=None,
+        log=lambda *_: None,
+    )
+    se = SignalEngine(app)
+    slot = datetime(2026, 9, 14, 19, 45, 0)
+    assert se._is_1945_bar_slot(slot) is True
+
+    with patch(
+        "core.signal_engine.datetime"
+    ) as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 9, 14, 20, 0, 5)
+        mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
+        with patch(
+            "core.signal_engine.is_krx_tradable_session", return_value=False
+        ):
+            assert se._allow_closed_15m_eval_wall_now(slot) is True
+
+    assert (
+        se._route_1945_strategy_execution(
+            "005930", "EXIT", reason="TP", limit_price=70000.0, bar_ts=slot
+        )
+        == "queued"
+    )
+    assert "EXIT" in queued
+
+
 def test_tradable_session_covers_aftermarket() -> None:
     assert is_krx_regular_session(datetime(2026, 9, 14, 14, 0))
     assert not is_krx_aftermarket_session(datetime(2026, 9, 14, 14, 0))
@@ -91,14 +153,27 @@ def test_tradable_session_covers_aftermarket() -> None:
 
 def test_cms_eod_due_uses_aftermarket_end() -> None:
     from core.continuous_monitor_service import ContinuousMonitorService
+    from reporting.krx_trading_calendar import (
+        completed_trading_day_asof_local,
+        monitor_eod_due_datetime,
+    )
 
     app = SimpleNamespace(settings={"continuous_monitor_eod_buffer_minutes": 30})
     cms = ContinuousMonitorService(app)
     due = cms._eod_due_datetime(date(2026, 9, 14))
     assert due == datetime(2026, 9, 14, 20, 30, 0)
+    assert monitor_eod_due_datetime(date(2026, 9, 14), eod_buffer_minutes=30) == due
     # 애프터 이전일(시행 전)
     due2 = cms._eod_due_datetime(date(2026, 9, 11))
     assert due2 == datetime(2026, 9, 11, 16, 0, 0)
+
+    # 레짐 as_of: 20:30 전에는 전일, 이후면 당일
+    assert completed_trading_day_asof_local(
+        datetime(2026, 9, 14, 16, 0), eod_buffer_minutes=30
+    ) == date(2026, 9, 11)  # 금요일이면 직전 거래일 — 9/14 월이면 9/11
+    assert completed_trading_day_asof_local(
+        datetime(2026, 9, 14, 20, 30), eod_buffer_minutes=30
+    ) == date(2026, 9, 14)
 
 
 def test_aftermarket_forces_limit_order() -> None:
@@ -118,6 +193,8 @@ if __name__ == "__main__":
     test_next_prev_jumps_around_aftermarket()
     test_aftermarket_head_and_last_m1()
     test_1530_still_no_signal_eval_but_1945_is_eval()
+    test_aftermarket_last_slot_helper()
+    test_1945_wall_grace_and_next_open_route()
     test_tradable_session_covers_aftermarket()
     test_cms_eod_due_uses_aftermarket_end()
     test_aftermarket_forces_limit_order()

@@ -117,10 +117,34 @@ def test_1515_always_auction_market_not_nxt_touch() -> None:
     assert marked_nxt == []
 
 
+def test_order_1530_disabled_skips_route() -> None:
+    """order_1530_enabled OFF면 15:30 EXIT/S2 경로가 skipped."""
+    from datetime import datetime
+
+    from core.signal_engine import SignalEngine
+
+    app = SimpleNamespace(
+        order_execution_service=None,
+        settings={"order_1530_enabled": False, "next_open_1530_enabled": True},
+        next_open_pending_action_service=None,
+        log=lambda *_: None,
+    )
+    se = SignalEngine(app)
+    ts = datetime(2026, 3, 10, 15, 30, 0)
+    assert se._order_1530_enabled() is False
+    assert se._route_1530_strategy_execution(
+        "005930", "EXIT", reason="TP", limit_price=100.0, bar_ts=ts
+    ) == "skipped"
+    assert se._route_1530_strategy_execution(
+        "005930", "STAGE2", reason="S2", limit_price=100.0, bar_ts=ts
+    ) == "skipped"
+
+
 if __name__ == "__main__":
     test_parse_nxtenable_lowercase_field()
     test_fetch_failure_not_cached_as_disabled()
     test_nxt_cache_roundtrip_same_day()
     test_collect_codes_includes_holdings()
     test_1515_always_auction_market_not_nxt_touch()
+    test_order_1530_disabled_skips_route()
     print("ok")

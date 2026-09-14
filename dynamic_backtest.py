@@ -25,6 +25,7 @@ from backtest_engine import (
 )
 from utils.fee_rates import fee_decimal_rates_backtest
 from utils.krx_bars import (
+    is_krx_aftermarket_last_15m_slot,
     is_krx_auction_market_fill_slot,
     is_krx_first_15m_slot,
     is_krx_last_15m_slot,
@@ -128,6 +129,9 @@ class DynamicBacktester:
         self.settings = settings_for_backtest(settings)
         self.bt_1530_signal_next_open_fill = bool(
             self.settings.get("next_open_1530_enabled", False)
+        )
+        self.bt_1945_signal_next_open_fill = bool(
+            self.settings.get("next_open_1945_enabled", True)
         )
         # BT 전용: 09:00 슬롯에서 첫 1분봉으로 조기 평가 후, 같은 슬롯 완성 15분 평가 이어감
         self.bt_open_auction_pass_enabled = bool(
@@ -1154,15 +1158,20 @@ class DynamicBacktester:
             return r
         return f"AUCTION_MKT|src=15:15|{r}"
 
-    def _tag_next_open_reason(self, reason: Any) -> str:
-        """15:30 신호를 익일 09:00 시가 체결로 이월할 때의 reason 접두사."""
+    def _tag_next_open_reason(self, reason: Any, *, src: str = "15:30") -> str:
+        """말봉 신호를 익일 시가 체결로 이월할 때의 reason 접두사."""
         try:
             r = str(reason or "")
         except Exception:
             r = ""
-        if r.startswith("NEXT_OPEN_0900|src=15:30|"):
+        try:
+            tag = str(src or "15:30").strip() or "15:30"
+        except Exception:
+            tag = "15:30"
+        pfx = f"NEXT_OPEN_0900|src={tag}|"
+        if r.startswith(pfx):
             return r
-        return f"NEXT_OPEN_0900|src=15:30|{r}"
+        return f"{pfx}{r}"
 
     def _lookup_next_day_0900_open(
         self,
@@ -1279,7 +1288,15 @@ class DynamicBacktester:
                 if got is None:
                     return None
                 fill_ts, open_px = got
-                return float(open_px), fill_ts, self._tag_next_open_reason(rsn)
+                return float(open_px), fill_ts, self._tag_next_open_reason(rsn, src="15:30")
+            if bool(self.bt_1945_signal_next_open_fill) and bool(
+                is_krx_aftermarket_last_15m_slot(curr_time)
+            ):
+                got = self._lookup_next_day_0900_open(code, curr_time, day_df)
+                if got is None:
+                    return None
+                fill_ts, open_px = got
+                return float(open_px), fill_ts, self._tag_next_open_reason(rsn, src="19:45")
         except Exception:
             pass
         try:

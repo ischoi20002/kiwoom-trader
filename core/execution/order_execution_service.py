@@ -1725,7 +1725,7 @@ class OrderExecutionService:
         auction_watch: bool = False,
     ) -> None:
         """지정가: 미체결 타임아웃 시 취소 API. 시장가: 플래그만. 터치: 체결 확인+정정 루프.
-        auction_watch: 동시호가 시장가 — 15:30~15:40 kt00007 폴링(취소·정정 없음).
+        auction_watch: 동시호가 시장가 — 15:30~15:33 kt00007 폴링(취소·정정 없음).
         """
         try:
             self.limit_order_watch_service.register(

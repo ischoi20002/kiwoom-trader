@@ -126,16 +126,11 @@ class ContinuousMonitorService:
         그 외: 정규장 close+버퍼(기본 16:00).
         """
         try:
-            from reporting.krx_trading_calendar import (
-                aftermarket_end_datetime,
-                has_krx_aftermarket,
-            )
-            from utils.krx_session_hours import get_session_hours
+            from reporting.krx_trading_calendar import monitor_eod_due_datetime
 
-            buf = self._eod_buffer_minutes()
-            if has_krx_aftermarket(day_d):
-                return aftermarket_end_datetime(day_d) + timedelta(minutes=buf)
-            return get_session_hours(day_d).close_datetime() + timedelta(minutes=buf)
+            return monitor_eod_due_datetime(
+                day_d, eod_buffer_minutes=self._eod_buffer_minutes()
+            )
         except Exception:
             return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(
                 minutes=self._eod_buffer_minutes()

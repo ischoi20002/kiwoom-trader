@@ -167,17 +167,17 @@ class LimitOrderWatchService:
             return True
 
     def _auction_watch_deadline_passed(self) -> bool:
-        """로컬 시각 기준 close+10분 이후면 폴링 종료."""
+        """로컬 시각 기준 close+3분(기본 15:33) 이후면 폴링 종료."""
         try:
             from utils.krx_session_hours import get_session_hours
 
             now = datetime.now()
             close_dt = get_session_hours(now.date()).close_datetime()
-            return now >= (close_dt + timedelta(minutes=10))
+            return now >= (close_dt + timedelta(minutes=3))
         except Exception:
             try:
                 now = datetime.now()
-                return (now.hour > 15) or (now.hour == 15 and now.minute >= 40)
+                return (now.hour > 15) or (now.hour == 15 and now.minute >= 33)
             except Exception:
                 return False
 
@@ -232,7 +232,7 @@ class LimitOrderWatchService:
             pass
 
     def _on_auction_poll(self, order_no: str) -> None:
-        """동시호가 시장가: 15:30~15:40 kt00007 체결 확인만(취소·정정 없음)."""
+        """동시호가 시장가: 15:30~15:33 kt00007 체결 확인만(취소·정정 없음)."""
         oid = str(order_no or "").strip()
         if not oid:
             return
@@ -272,7 +272,7 @@ class LimitOrderWatchService:
         if self._auction_watch_deadline_passed():
             try:
                 self.log(
-                    f"ℹ️ [동시호가] 폴링 종료(15:40+) ord={oid} {meta.code} — "
+                    f"ℹ️ [동시호가] 폴링 종료(15:33+) ord={oid} {meta.code} — "
                     f"미확정 시 WS/잔고 동기화로 정리"
                 )
             except Exception:
@@ -963,7 +963,7 @@ class LimitOrderWatchService:
           미반영이면 ``touch_quote_order_poll_sec``마다 재확인,
           미체결이면 즉시 정정(최대 ``touch_quote_order_max_amends``),
           정정 직후 다시 첫 확인 간격으로 루프.
-        - auction_watch: 동시호가 시장가 — 15:30~15:40 kt00007 폴링(그 전·취소·정정 없음).
+        - auction_watch: 동시호가 시장가 — 15:30~15:33 kt00007 폴링(그 전·취소·정정 없음).
         """
         oid = str(order_no or "").strip()
         nc = str(code).zfill(6)
@@ -1011,14 +1011,14 @@ class LimitOrderWatchService:
                     if wait_start > 0:
                         self.log(
                             f"⏱️ [동시호가] 시장가 감시 등록 ({kind}) {nc} ord={oid} "
-                            f"(취소·정정 없음 · 체결확인 15:30~15:40 · "
+                            f"(취소·정정 없음 · 체결확인 15:30~15:33 · "
                             f"{poll_ms // 1000}초 간격 · "
                             f"첫조회까지 약 {wait_start // 1000}초)"
                         )
                     else:
                         self.log(
                             f"⏱️ [동시호가] 시장가 감시 등록 ({kind}) {nc} ord={oid} "
-                            f"(취소·정정 없음 · 체결확인 15:30~15:40 · "
+                            f"(취소·정정 없음 · 체결확인 15:30~15:33 · "
                             f"{poll_ms // 1000}초 간격)"
                         )
                 except Exception:

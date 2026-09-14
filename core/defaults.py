@@ -45,6 +45,8 @@ DEFAULT_SETTINGS = {
     "prevent_sleep_keep_display": False,
     "prevent_sleep_allow_after_eod": False,
     "next_open_1530_enabled": True,
+    "order_1530_enabled": False,
+    "next_open_1945_enabled": True,
     "bt_open_auction_pass_enabled": False,
     "bt_universe_schedule_warmup_trading_days": 20,
     "bt_universe_indicator_lookback_days": 280,

@@ -18,7 +18,7 @@ from reporting.krx_trading_calendar import next_trading_day
 
 
 class NextOpenPendingActionService:
-    """15:30 신호의 익일 시초 동시호가 이월 액션 저장·복구·제출 서비스."""
+    """종가·애프터 말봉 신호를 익일 시초 동시호가 지정가로 이월하는 서비스."""
 
     def __init__(self, app: Any, *, log_func: Optional[Any] = None) -> None:
         self.app = app
@@ -35,6 +35,31 @@ class NextOpenPendingActionService:
     @staticmethod
     def _today() -> date:
         return datetime.now().date()
+
+    @staticmethod
+    def reason_prefix_from_slot(source_slot: Any) -> str:
+        """``NEXT_OPEN_0900|src=HH:MM`` (슬롯 라벨 시각)."""
+        try:
+            s = str(source_slot or "").strip()
+            if len(s) >= 16 and s[11:13].isdigit() and s[14:16].isdigit():
+                return f"NEXT_OPEN_0900|src={s[11:16]}"
+        except Exception:
+            pass
+        try:
+            t = datetime.fromisoformat(str(source_slot)[:19].replace(" ", "T"))
+            return f"NEXT_OPEN_0900|src={t.strftime('%H:%M')}"
+        except Exception:
+            return "NEXT_OPEN_0900|src=15:30"
+
+    @staticmethod
+    def _slot_label_hm(source_slot: Any) -> str:
+        try:
+            pfx = NextOpenPendingActionService.reason_prefix_from_slot(source_slot)
+            if "|src=" in pfx:
+                return pfx.split("|src=", 1)[1]
+        except Exception:
+            pass
+        return "??:??"
 
     @staticmethod
     def _next_target_day_from(slot_ts: Any) -> Optional[str]:
@@ -144,10 +169,12 @@ class NextOpenPendingActionService:
         source_slot: Any,
     ) -> bool:
         target_date = self._next_target_day_from(source_slot)
+        src_hm = self._slot_label_hm(source_slot)
+        reason_pfx = self.reason_prefix_from_slot(source_slot)
         if not target_date:
             try:
                 self.log(
-                    f"⚠️ [NextOpen] 15:30 매수 예약 실패 {name}({str(code).zfill(6)}) "
+                    f"⚠️ [NextOpen] {src_hm} 매수 예약 실패 {name}({str(code).zfill(6)}) "
                     f"— 익일 거래일 산출 불가 (slot={source_slot})"
                 )
             except Exception:
@@ -159,7 +186,8 @@ class NextOpenPendingActionService:
             "name": str(name or ""),
             "sig_type": str(sig_type or "TYPE_A"),
             "limit_price": float(limit_price),
-            "reason": "NEXT_OPEN_0900|src=15:30",
+            "reason": reason_pfx,
+            "reason_prefix": reason_pfx,
             "source_slot": str(source_slot),
             "target_date": target_date,
             "submitted_at": "",
@@ -168,7 +196,7 @@ class NextOpenPendingActionService:
         self._upsert_action(row)
         try:
             self.log(
-                f"📌 [NextOpen] 15:30→익일09:00 매수 예약 "
+                f"📌 [NextOpen] {src_hm}→익일시초 매수 예약 "
                 f"{row['name']}({row['code']}) {row['sig_type']} "
                 f"지정가 {int(round(float(limit_price))):,}원 "
                 f"· 제출일 {target_date} · slot={source_slot}"
@@ -187,6 +215,7 @@ class NextOpenPendingActionService:
                         "limit_price": float(row["limit_price"]),
                         "target_date": target_date,
                         "source_slot": str(source_slot),
+                        "reason_prefix": reason_pfx,
                     },
                 )
         except Exception:
@@ -204,10 +233,12 @@ class NextOpenPendingActionService:
         source_slot: Any,
     ) -> bool:
         target_date = self._next_target_day_from(source_slot)
+        src_hm = self._slot_label_hm(source_slot)
+        reason_pfx = self.reason_prefix_from_slot(source_slot)
         if not target_date:
             try:
                 self.log(
-                    f"⚠️ [NextOpen] 15:30 {action} 예약 실패 ({str(code).zfill(6)}) "
+                    f"⚠️ [NextOpen] {src_hm} {action} 예약 실패 ({str(code).zfill(6)}) "
                     f"— 익일 거래일 산출 불가 (slot={source_slot})"
                 )
             except Exception:
@@ -218,6 +249,7 @@ class NextOpenPendingActionService:
             "code": str(code).zfill(6),
             "action": str(action or ""),
             "reason": str(reason or ""),
+            "reason_prefix": reason_pfx,
             "limit_price": float(limit_price),
             "profit_ratio": float(profit_ratio),
             "source_slot": str(source_slot),
@@ -230,7 +262,7 @@ class NextOpenPendingActionService:
             act = str(action or "").upper()
             act_lbl = "청산" if act == "EXIT" else ("추매(S2)" if act == "STAGE2" else act)
             self.log(
-                f"📌 [NextOpen] 15:30→익일09:00 {act_lbl} 예약 "
+                f"📌 [NextOpen] {src_hm}→익일시초 {act_lbl} 예약 "
                 f"({row['code']}) {reason or '-'} "
                 f"지정가 {int(round(float(limit_price))):,}원 "
                 f"· 수익률 {float(profit_ratio):+.2f}% "
@@ -356,10 +388,17 @@ class NextOpenPendingActionService:
             oes = getattr(self.app, "order_execution_service", None)
             if oes is None or not hasattr(oes, "mark_next_open_limit_order"):
                 return False
+            pfx = str(row.get("reason_prefix") or "").strip()
+            if not pfx:
+                r0 = str(row.get("reason") or "").strip()
+                if r0.startswith("NEXT_OPEN_"):
+                    pfx = r0
+                else:
+                    pfx = self.reason_prefix_from_slot(row.get("source_slot"))
             oes.mark_next_open_limit_order(
                 code,
                 limit_price,
-                reason_prefix="NEXT_OPEN_0900|src=15:30",
+                reason_prefix=pfx,
             )
         except Exception:
             return False

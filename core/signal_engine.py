@@ -577,6 +577,26 @@ class SignalEngine:
         except Exception:
             return False
 
+    def _next_open_1945_enabled(self) -> bool:
+        """19:45(애프터 말봉) 신호를 익일 시초 동시호가 지정가로 이월할지."""
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return bool(st.get("next_open_1945_enabled", True))
+        except Exception:
+            return True
+
+    def _order_1530_enabled(self) -> bool:
+        """
+        15:30 슬롯 실주문 허용(NXT 터치·익일시초 예약·당일 즉시).
+
+        기본 False — 평가는 하되 주문은 당분간 생략.
+        """
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return bool(st.get("order_1530_enabled", False))
+        except Exception:
+            return False
+
     def _use_nxt_sor_touch_orders(self) -> bool:
         """
         실전 서버: 15:30 슬롯 NXT 1호가 터치 + SOR.
@@ -652,6 +672,20 @@ class SignalEngine:
             except Exception:
                 return False
 
+    @staticmethod
+    def _is_1945_bar_slot(bar_ts: Any) -> bool:
+        """애프터 마지막 15분 라벨(기본 19:45)."""
+        try:
+            from utils.krx_bars import is_krx_aftermarket_last_15m_slot
+
+            return bool(is_krx_aftermarket_last_15m_slot(bar_ts))
+        except Exception:
+            try:
+                t = pd.Timestamp(bar_ts)
+                return int(t.hour) == 19 and int(t.minute) == 45
+            except Exception:
+                return False
+
     def _mark_1515_auction_market_order(self, code: Any, bar_ts: Any) -> bool:
         """
         15:15 슬롯이면 전 종목 동시호가 시장가(03) 플래그를 건다.
@@ -691,6 +725,8 @@ class SignalEngine:
         ``queued``
             next_open 예약 완료 → 즉시 주문 금지.
             (모의 또는 실전 NXT 불가 종목)
+        ``skipped``
+            ``order_1530_enabled`` OFF → 주문·예약 모두 생략.
         ``nxt``
             실전 NXT 가능 종목 플래그 설정 → 호출측이 바로 주문.
         ``none``
@@ -710,6 +746,8 @@ class SignalEngine:
                     ts = None
             if not self._is_1530_bar_slot(ts):
                 return "none"
+            if not self._order_1530_enabled():
+                return "skipped"
             nk = str(canonical_stock_code(code) or code).zfill(6)
             if self._code_uses_nxt_touch(nk):
                 oes = self._order_execution_service()
@@ -740,6 +778,53 @@ class SignalEngine:
             return "none"
         return "none"
 
+    def _route_1945_strategy_execution(
+        self,
+        code: str,
+        action: str,
+        *,
+        reason: str = "",
+        limit_price: float = 0.0,
+        profit_ratio: float = 0.0,
+        bar_ts: Any = None,
+    ) -> str:
+        """
+        19:45(애프터 말봉) S2/청산 → 익일 시초 지정가 예약.
+
+        Returns
+        -------
+        ``queued`` / ``skipped`` / ``none``
+        """
+        try:
+            act = str(action or "").upper()
+            if act not in ("EXIT", "STAGE2"):
+                return "none"
+            ts = bar_ts
+            if ts is None:
+                try:
+                    from utils.krx_bars import krx_stream_slot_end_datetime
+
+                    ts = krx_stream_slot_end_datetime()
+                except Exception:
+                    ts = None
+            if not self._is_1945_bar_slot(ts):
+                return "none"
+            if not self._next_open_1945_enabled():
+                return "skipped"
+            nk = str(canonical_stock_code(code) or code).zfill(6)
+            ok = self._queue_next_open_strategy_action(
+                code=nk,
+                action=act,
+                reason=str(reason or ""),
+                limit_price=float(limit_price or 0.0),
+                profit_ratio=float(profit_ratio or 0.0),
+                bar_ts=ts,
+            )
+            return "queued" if ok else "none"
+        except Exception:
+            return "none"
+        return "none"
+
     def _order_execution_service(self) -> Any:
         try:
             oes = getattr(self.app, "order_execution_service", None)
@@ -755,22 +840,23 @@ class SignalEngine:
         완성15 평가를 허용하는 벽시계 구간인지.
 
         정규장·애프터마켓(tradable)은 허용.
-        ``15:30`` 슬롯 + (next_open 또는 실전 NXT 즉시) 은 단일가 틱확인·주문이
-        15:30 직후에도 이뤄지므로 당일 15:40까지 허용한다.
+        ``15:30`` 슬롯은 단일가 확인용으로 당일 15:40까지.
+        ``19:45`` 슬롯은 20:00 완성 직후 평가용으로 당일 20:10까지.
         """
         try:
             now = datetime.now()
             if is_krx_tradable_session(now):
                 return True
-            if not self._eval_1530_slot_enabled():
-                return False
-            slot = pd.Timestamp(bar_ts)
-            if int(slot.hour) != 15 or int(slot.minute) != 30:
-                return False
             if int(now.weekday()) >= 5:
                 return False
             hm = int(now.hour) * 60 + int(now.minute)
-            return (15 * 60 + 30) <= hm <= (15 * 60 + 40)
+            # 15:30 종가 단일가 그레이스
+            if self._eval_1530_slot_enabled() and self._is_1530_bar_slot(bar_ts):
+                return (15 * 60 + 30) <= hm <= (15 * 60 + 40)
+            # 19:45 애프터 말봉 — 20:00 직후 평가
+            if self._next_open_1945_enabled() and self._is_1945_bar_slot(bar_ts):
+                return (20 * 60) <= hm <= (20 * 60 + 10)
+            return False
         except Exception:
             return True
 
@@ -1359,11 +1445,39 @@ class SignalEngine:
             ):
                 return
 
-            # 15:30: NXT 가능→터치+SOR / 불가·모의→익일09:00 예약
+            # 15:30: 주문 OFF면 신호만 / ON이면 NXT 터치 또는 익일09:00 예약
+            # 19:45: 익일 시초 지정가 예약(당일 애프터 종료 후 즉시 주문 없음)
             _is_1530 = self._is_1530_bar_slot(bar_ts)
+            _is_1945 = self._is_1945_bar_slot(bar_ts)
             _use_nxt = self._code_uses_nxt_touch(nk)
             try:
+                if _is_1945:
+                    if self._next_open_1945_enabled():
+                        ok_next = self._queue_next_open_buy_signal(
+                            code=nk,
+                            name=str(info.get("name", "")),
+                            sig_type=str(sig_type),
+                            limit_price=float(now_price),
+                            bar_ts=bar_ts,
+                        )
+                        if ok_next:
+                            return
+                    try:
+                        self.app.log(
+                            f"ℹ️ [19:45] NextOpen 비활성/실패 — S1 당일 주문 생략 ({nk})"
+                        )
+                    except Exception:
+                        pass
+                    return
                 if _is_1530:
+                    if not self._order_1530_enabled():
+                        try:
+                            self.app.log(
+                                f"ℹ️ [15:30] 주문 비활성 — S1 신호만 기록 ({nk})"
+                            )
+                        except Exception:
+                            pass
+                        return
                     if _use_nxt:
                         oes = self._order_execution_service()
                         if oes is not None and hasattr(oes, "mark_nxt_touch_order"):
@@ -1776,13 +1890,42 @@ class SignalEngine:
                     profit_ratio=float(res.get("profit_ratio", 0) or 0),
                     bar_ts=bar_ts,
                 )
-                if _routed == "queued":
+                if _routed == "none":
+                    _routed = self._route_1945_strategy_execution(
+                        nk,
+                        act,
+                        reason=str(res.get("reason") or ""),
+                        limit_price=float(order_px),
+                        profit_ratio=float(res.get("profit_ratio", 0) or 0),
+                        bar_ts=bar_ts,
+                    )
+                if _routed in ("queued", "skipped"):
                     self._log_held_eval_diag(
                         nk,
                         slot_key,
-                        "queued_1530",
+                        (
+                            "skipped_1530"
+                            if _routed == "skipped" and self._is_1530_bar_slot(bar_ts)
+                            else (
+                                "skipped_1945"
+                                if _routed == "skipped"
+                                else (
+                                    "queued_1945"
+                                    if self._is_1945_bar_slot(bar_ts)
+                                    else "queued_1530"
+                                )
+                            )
+                        ),
                         extra={"action": act, "reason": str(res.get("reason") or "")},
                     )
+                    if _routed == "skipped":
+                        try:
+                            tag = "19:45" if self._is_1945_bar_slot(bar_ts) else "15:30"
+                            self.app.log(
+                                f"ℹ️ [{tag}] 주문 비활성 — {act} 신호만 기록 ({nk})"
+                            )
+                        except Exception:
+                            pass
                     return
             except Exception:
                 pass
@@ -4059,6 +4202,7 @@ class SignalEngine:
                             except Exception:
                                 pass
                         # 15:30: 모의→익일예약 / 실전→NXT (완성봉 held 경로와 동일)
+                        # 19:45: 익일 시초 지정가 예약
                         _skip_immediate_order = False
                         try:
                             _r1530 = self._route_1530_strategy_execution(
@@ -4071,7 +4215,18 @@ class SignalEngine:
                                 ),
                                 bar_ts=None,
                             )
-                            if _r1530 == "queued":
+                            if _r1530 == "none":
+                                _r1530 = self._route_1945_strategy_execution(
+                                    str(code).zfill(6),
+                                    str(res.get("action") or ""),
+                                    reason=str(res.get("reason") or ""),
+                                    limit_price=float(_eff_np),
+                                    profit_ratio=float(
+                                        res.get("profit_ratio", 0) or 0
+                                    ),
+                                    bar_ts=None,
+                                )
+                            if _r1530 in ("queued", "skipped"):
                                 _skip_immediate_order = True
                         except Exception:
                             _skip_immediate_order = False
