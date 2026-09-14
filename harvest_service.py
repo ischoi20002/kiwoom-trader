@@ -54,7 +54,8 @@ class HarvestService:
         self._sync_meta_cache: dict[str, dict[str, str]] = {}
         # 성능 최적화: 1분봉 상한(cap)도 run()에서 1회만 계산합니다.
         self._cap_dt_once: Optional[str] = None
-        # KRX 캘린더 기준 '반드시 포함되어야 할 마지막 1분봉(15:30)' — run()에서 1회 계산
+        # KRX 캘린더 기준 '반드시 포함되어야 할 마지막 1분봉'(애프터 19:59 / 정규 15:30)
+        # — run()에서 1회 계산
         self._required_close_dt_once: Optional[datetime] = None
 
         self.log(f"🔍 [Info] 하베스팅 모드: 실전투자 서버 (데이터 무결성 우선)")
@@ -496,7 +497,7 @@ class HarvestService:
             self._sync_meta_cache = {}
 
     def is_data_complete(self, code: str) -> bool:
-        """데이터의 충분성 및 구멍 유무를 판단 (KRX 캘린더 기준 마지막 완결 1분봉 15:30)."""
+        """데이터의 충분성 및 구멍 유무를 판단 (KRX 분봉 완결 시각: 애프터 19:59 / 그 외 15:30)."""
         try:
             # 1. DB의 수집 범위 및 상태 확인 (캐시 사용)
             meta = self._sync_meta_cache.get(normalize_code(code))
@@ -697,8 +698,13 @@ class HarvestService:
             if req_close:
                 self._required_close_dt_once = req_close
                 self.log(
-                    f"📅 [완결 기준] KRX 캘린더 마지막 완결 1분봉: "
+                    f"📅 [완결 기준] KRX 분봉 마지막 완결 1분봉: "
                     f"{req_close.strftime('%Y-%m-%d %H:%M:%S')}"
+                    + (
+                        " (애프터마켓 포함)"
+                        if req_close.hour >= 16
+                        else " (정규장)"
+                    )
                 )
         except Exception:
             pass

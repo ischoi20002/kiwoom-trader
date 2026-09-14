@@ -209,7 +209,9 @@ def test_csat_15m_labels() -> None:
     def _run() -> None:
         labels = iter_krx_15m_slot_ends_for_day("2026-11-12")
         assert labels[0] == pd.Timestamp("2026-11-12 10:00:00")
-        assert labels[-1] == pd.Timestamp("2026-11-12 16:30:00")
+        assert pd.Timestamp("2026-11-12 16:30:00") in labels
+        # 애프터 시행일: 종가(16:30) 이후 애프터 슬롯이 이어짐
+        assert labels[-1] == pd.Timestamp("2026-11-12 19:45:00")
         assert pd.Timestamp("2026-11-12 16:15:00") in labels
         assert is_krx_15m_slot_end(pd.Timestamp("2026-11-12 10:00:00"))
         assert is_krx_first_15m_slot(pd.Timestamp("2026-11-12 10:00:00"))
@@ -222,8 +224,10 @@ def test_csat_15m_labels() -> None:
         assert krx_15m_slot_complete_ts(pd.Timestamp("2026-11-12 16:15:00")) == pd.Timestamp(
             "2026-11-12 16:20:00"
         )
-        # 슬롯 수: 기본일과 동일(27)
-        assert len(labels) == len(iter_krx_15m_slot_ends_for_day("2026-03-10"))
+        # 정규 격자 27 + 종가 이후 애프터(16:45…19:45)
+        base = len(iter_krx_15m_slot_ends_for_day("2026-03-10"))
+        assert len(labels) > base
+        assert pd.Timestamp("2026-11-12 16:45:00") in labels
 
     _with_special(mapping, _run)
 

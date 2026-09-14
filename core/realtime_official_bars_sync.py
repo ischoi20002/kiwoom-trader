@@ -40,7 +40,7 @@ from utils.normalization import canonical_stock_code
 
 
 def stream_slot_end_datetime(now: datetime) -> pd.Timestamp:
-    """KRX 장중 15분봉 **좌측 라벨**(야간·장외 슬롯 생성 없음)."""
+    """KRX 장중·애프터 15분봉 **좌측 라벨**(그 외 야간 슬롯 생성 없음)."""
     return krx_stream_slot_end_datetime(now)
 
 

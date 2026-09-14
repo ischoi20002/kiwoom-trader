@@ -119,13 +119,23 @@ class ContinuousMonitorService:
             return 30
 
     def _eod_due_datetime(self, day_d: date) -> datetime:
-        """해당일 장마감+버퍼 시각."""
+        """
+        해당일 감시 EOD(선정·중단) 시각.
+
+        애프터마켓 시행일: 애프터 종료(20:00)+버퍼(기본 → 20:30).
+        그 외: 정규장 close+버퍼(기본 16:00).
+        """
         try:
+            from reporting.krx_trading_calendar import (
+                aftermarket_end_datetime,
+                has_krx_aftermarket,
+            )
             from utils.krx_session_hours import get_session_hours
 
-            return get_session_hours(day_d).close_datetime() + timedelta(
-                minutes=self._eod_buffer_minutes()
-            )
+            buf = self._eod_buffer_minutes()
+            if has_krx_aftermarket(day_d):
+                return aftermarket_end_datetime(day_d) + timedelta(minutes=buf)
+            return get_session_hours(day_d).close_datetime() + timedelta(minutes=buf)
         except Exception:
             return datetime.combine(day_d, dtime(15, 30, 0)) + timedelta(
                 minutes=self._eod_buffer_minutes()

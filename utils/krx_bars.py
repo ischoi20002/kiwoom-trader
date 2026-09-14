@@ -127,11 +127,88 @@ def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
     return _next_trading_day_first_slot_after(t)
 
 
+def _ah_enabled(day0: pd.Timestamp) -> bool:
+    try:
+        from reporting.krx_trading_calendar import has_krx_aftermarket
+
+        return bool(has_krx_aftermarket(day0.date()))
+    except Exception:
+        return False
+
+
+def _ah_open_minutes() -> int:
+    return 16 * 60
+
+
+def _ah_end_minutes() -> int:
+    return 20 * 60
+
+
+def _ah_last_15m_minutes() -> int:
+    return 19 * 60 + 45
+
+
+def _is_aftermarket_15m_label(t: pd.Timestamp) -> bool:
+    """애프터 15분 좌측 라벨(정규 close 이후 · 16:00…19:45) 여부."""
+    try:
+        if not _ah_enabled(t.normalize()):
+            return False
+        h = _hours_for_ts(t)
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm <= h.close_minutes:
+            return False
+        if hm < _ah_open_minutes() or hm > _ah_last_15m_minutes():
+            return False
+        return ((hm - _ah_open_minutes()) % 15) == 0
+    except Exception:
+        return False
+
+
+def _is_aftermarket_m1_label(t: pd.Timestamp) -> bool:
+    """애프터 연속매매 1분 라벨(정규 close 이후 · ~19:59) 여부."""
+    try:
+        if not _ah_enabled(t.normalize()):
+            return False
+        h = _hours_for_ts(t)
+        hm = int(t.hour) * 60 + int(t.minute)
+        if hm <= h.close_minutes:
+            return False
+        return max(_ah_open_minutes(), h.close_minutes + 1) <= hm <= (
+            _ah_end_minutes() - 1
+        )
+    except Exception:
+        return False
+
+
+def _krx_day_aftermarket_first_slot(day0: pd.Timestamp) -> pd.Timestamp:
+    """당일 첫 애프터 15분 라벨(없으면 16:00 — 호출부에서 AH 여부 확인)."""
+    try:
+        from utils.krx_session_hours import iter_aftermarket_15m_slot_labels
+
+        labs = iter_aftermarket_15m_slot_labels(day0.date())
+        if labs:
+            return pd.Timestamp(labs[0])
+    except Exception:
+        pass
+    return day0.normalize() + pd.Timedelta(hours=16, minutes=0)
+
+
+def _krx_day_aftermarket_last_slot(day0: pd.Timestamp) -> pd.Timestamp:
+    return day0.normalize() + pd.Timedelta(hours=19, minutes=45)
+
+
+def _krx_day_last_tradable_slot_end(day0: pd.Timestamp) -> pd.Timestamp:
+    """당일 마지막 평가 가능 15분 라벨(애프터일이면 19:45, 아니면 종가)."""
+    if _ah_enabled(day0):
+        return _krx_day_aftermarket_last_slot(day0)
+    return _krx_day_last_slot_end(day0)
+
+
 def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
     """
-    KRX/키움 공식 15분봉 **라벨**(당일 SessionHours 격자, 거래일) 여부.
+    KRX/키움 공식 15분봉 **라벨**(정규장 SessionHours 격자 + 애프터 16슬롯) 여부.
 
-    주말·휴장(대체공휴일 포함)과 장외·야간 슬롯은 False.
+    주말·휴장(대체공휴일 포함)과 그 외 장외·야간 슬롯은 False.
     """
     try:
         t = pd.Timestamp(ts).floor("s")
@@ -139,6 +216,8 @@ def is_krx_15m_slot_end(ts: Union[pd.Timestamp, datetime, str]) -> bool:
             return False
         if t.second != 0 or t.microsecond != 0:
             return False
+        if _is_aftermarket_15m_label(t):
+            return True
         h = _hours_for_ts(t)
         hm = int(t.hour) * 60 + int(t.minute)
         if hm == h.close_minutes:
@@ -228,11 +307,19 @@ def krx_same_day_1530_label(
 
 
 def iter_krx_15m_slot_ends_for_day(day: Union[pd.Timestamp, datetime, str]) -> List[pd.Timestamp]:
-    """해당 캘린더일의 KRX/키움 15분 라벨 목록(개장 … 종가)."""
+    """해당 캘린더일의 KRX/키움 15분 라벨 목록(개장 … 종가 [+ 애프터 16슬롯])."""
     try:
         day0 = pd.Timestamp(day).normalize()
         h = get_session_hours(day0.date())
-        return [pd.Timestamp(x) for x in h.iter_15m_slot_labels()]
+        out = [pd.Timestamp(x) for x in h.iter_15m_slot_labels()]
+        try:
+            from utils.krx_session_hours import iter_aftermarket_15m_slot_labels
+
+            for x in iter_aftermarket_15m_slot_labels(day0.date()):
+                out.append(pd.Timestamp(x))
+        except Exception:
+            pass
+        return out
     except Exception:
         return []
 
@@ -259,13 +346,9 @@ def krx_15m_slot_complete_ts(
 
 def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp:
     """
-    벽시계 기준 **현재 형성 중** 15분봉의 **좌측 라벨**(KRX 장중만).
+    벽시계 기준 **현재 형성 중** 15분봉의 **좌측 라벨**.
 
-    개장 전·장중·동시호가·마감 후는 당일 SessionHours 기준.
-
-    - ``[pre_auction, continuous_end)`` (기본 15:15~15:20): 잔여 연속봉 라벨
-    - ``continuous_end`` 이후(기본 15:20~): 종가 단일가 라벨(15:30) —
-      15:15 봉을 일반 슬롯처럼 완성 직후 롤·공식 정렬교체(+~270s) 가능하게 함
+    정규장 SessionHours + (시행일) 애프터 16:00~19:45.
     """
     try:
         raw = now if now is not None else datetime.now()
@@ -276,14 +359,34 @@ def krx_stream_slot_end_datetime(now: Optional[datetime] = None) -> pd.Timestamp
             for _ in range(16):
                 d = d - pd.Timedelta(days=1)
                 if _is_krx_session_day(d):
-                    return _krx_day_last_slot_end(d)
-            return _krx_day_last_slot_end(day0 - pd.Timedelta(days=1))
+                    return _krx_day_last_tradable_slot_end(d)
+            return _krx_day_last_tradable_slot_end(day0 - pd.Timedelta(days=1))
 
         h = get_session_hours(day0.date())
         hm = int(t.hour) * 60 + int(t.minute)
+
+        # 애프터 구간(정규 종가 슬롯 이후만)
+        if (
+            _ah_enabled(day0)
+            and hm > h.close_minutes
+            and hm >= _ah_open_minutes()
+        ):
+            if hm >= _ah_end_minutes():
+                return _krx_day_aftermarket_last_slot(day0)
+            offset = hm - _ah_open_minutes()
+            slot_min = _ah_open_minutes() + (offset // 15) * 15
+            if slot_min <= h.close_minutes:
+                slot_min = (
+                    ((h.close_minutes // 15) + 1) * 15
+                )
+            if slot_min > _ah_last_15m_minutes():
+                return _krx_day_aftermarket_last_slot(day0)
+            return day0 + pd.Timedelta(minutes=int(slot_min))
+
         if hm < h.open_minutes:
             return _krx_day_first_slot_end(day0)
         if hm >= h.close_minutes:
+            # 종가 후 ~ 애프터 개장 전: 종가 슬롯 유지
             return _krx_day_last_slot_end(day0)
         # 연속매매 종료 후 ~ 종가: 단일가 슬롯 형성 (15:15는 이미 완성)
         if hm >= h.continuous_end_minutes:
@@ -307,7 +410,8 @@ def next_krx_15m_slot_end(
     """
     ``ts`` **이후** 첫 KRX 15분봉 라벨.
 
-    장마감(종가 슬롯) 다음은 **다음 거래일 개장** 으로 점프합니다.
+    종가(15:30) 다음은 애프터일이면 당일 ``16:00``, 아니면 다음 거래일 개장.
+    애프터 마지막(19:45) 다음은 다음 거래일 개장.
     """
     try:
         t = pd.Timestamp(ts).floor("s")
@@ -320,8 +424,33 @@ def next_krx_15m_slot_end(
         hm = int(t.hour) * 60 + int(t.minute)
         last_end = _krx_day_last_slot_end(day0)
         first_end = _krx_day_first_slot_end(day0)
+        ah_on = _ah_enabled(day0)
+        ah_first = _krx_day_aftermarket_first_slot(day0) if ah_on else None
+        ah_last = _krx_day_aftermarket_last_slot(day0) if ah_on else None
 
+        # 애프터 구간 이후 → 익일 개장
+        if ah_on and hm >= _ah_end_minutes():
+            return _next_trading_day_first_slot_after(t)
+        if ah_on and is_krx_15m_slot_end(t) and _is_aftermarket_15m_label(t):
+            if t.floor("min") >= ah_last.floor("min"):
+                return _next_trading_day_first_slot_after(t)
+            nxt = t + pd.Timedelta(minutes=15)
+            if _is_aftermarket_15m_label(nxt):
+                return nxt
+            return _next_trading_day_first_slot_after(t)
+        if ah_on and hm >= _ah_open_minutes():
+            # 애프터 중간(슬롯 경계가 아닌 시각)
+            forming = krx_stream_slot_end_datetime(t.to_pydatetime())
+            if forming > t:
+                return forming
+            return next_krx_15m_slot_end(forming)
+
+        # 종가 슬롯 시각 이상 ~ 애프터 개장 전
         if hm >= h.close_minutes:
+            if ah_on and ah_first is not None and t < ah_first:
+                return ah_first
+            if ah_on and ah_first is not None and t.floor("min") == last_end.floor("min"):
+                return ah_first
             return _next_trading_day_first_slot_after(t)
 
         if hm < h.open_minutes:
@@ -333,11 +462,17 @@ def next_krx_15m_slot_end(
             # 직전 슬롯 다음은 종가 단일가(15분 격자 밖일 수 있음)
             if is_krx_pre_auction_15m_slot(t):
                 return last_end
+            if is_krx_last_15m_slot(t):
+                if ah_on and ah_first is not None:
+                    return ah_first
+                return _next_trading_day_first_slot_after(t)
             nxt = t + pd.Timedelta(minutes=15)
             if is_krx_15m_slot_end(nxt) and not is_krx_last_15m_slot(nxt):
                 return nxt
             if t < last_end:
                 return last_end
+            if ah_on and ah_first is not None:
+                return ah_first
             return _next_trading_day_first_slot_after(t)
 
         up = krx_stream_slot_end_datetime(t.to_pydatetime())
@@ -355,6 +490,7 @@ def prev_krx_15m_slot_end(
     ``label_ts``(15분 좌측 라벨) **직전** KRX 15분봉 라벨.
 
     당일 첫 슬롯이면 ``None`` (전일 종가 슬롯으로 넘기지 않음).
+    애프터 첫 슬롯(16:00)의 직전은 당일 종가(15:30).
     """
     try:
         t = pd.Timestamp(label_ts).floor("min")
@@ -364,6 +500,14 @@ def prev_krx_15m_slot_end(
         first_end = _krx_day_first_slot_end(day0)
         if t <= first_end:
             return None
+        if _is_aftermarket_15m_label(t):
+            ah_first = _krx_day_aftermarket_first_slot(day0)
+            if t <= ah_first:
+                return _krx_day_last_slot_end(day0)
+            prev = t - pd.Timedelta(minutes=15)
+            if _is_aftermarket_15m_label(prev):
+                return prev.floor("min")
+            return _krx_day_last_slot_end(day0)
         if is_krx_last_15m_slot(t):
             h = get_session_hours(day0.date())
             return _pd_at(day0, h.pre_auction_slot)
@@ -656,11 +800,14 @@ def is_last_m1_open_of_15m_slot(
     - 일반: ``minute % 15 == 14`` (예: 09:14, 09:29)
     - 동시호가 직전 슬롯: ``continuous_end - 1분``
     - 종가 단일가 슬롯: ``close``
+    - 애프터: ``16:00~19:59`` 중 ``minute % 15 == 14`` (예: 16:14, 19:59)
     """
     try:
         t = pd.Timestamp(open_ts).floor("min")
         if t.weekday() >= 5:
             return False
+        if _is_aftermarket_m1_label(t):
+            return (int(t.minute) % 15) == 14
         h = _hours_for_ts(t)
         hm = int(t.hour) * 60 + int(t.minute)
         if hm == h.continuous_end_minutes - 1:
@@ -707,11 +854,14 @@ def is_slot_head_complete_m1_open(
     - 일반: ``minute % 15 == 13`` (09:13 닫힘 → 09:14:00)
     - 동시호가 직전(15:15 등): ``continuous_end - 2분`` (15:18 닫힘 → **15:19:00**)
     - 종가 단일가: False
+    - 애프터: ``minute % 15 == 13`` (16:13, 19:58 등)
     """
     try:
         t = pd.Timestamp(open_ts).floor("min")
         if t.weekday() >= 5:
             return False
+        if _is_aftermarket_m1_label(t):
+            return (int(t.minute) % 15) == 13
         h = _hours_for_ts(t)
         hm = int(t.hour) * 60 + int(t.minute)
         if hm == h.close_minutes:
@@ -766,9 +916,16 @@ def krx_15m_label_for_m1_open(
     """
     try:
         t = pd.Timestamp(open_ts).floor("min")
-        h = _hours_for_ts(t)
         day0 = t.normalize()
         hm = int(t.hour) * 60 + int(t.minute)
+        if _is_aftermarket_m1_label(t):
+            offset = hm - _ah_open_minutes()
+            slot_min = _ah_open_minutes() + (offset // 15) * 15
+            if slot_min > _ah_last_15m_minutes():
+                return None
+            lab = day0 + pd.Timedelta(minutes=int(slot_min))
+            return lab if is_krx_15m_slot_end(lab) else None
+        h = _hours_for_ts(t)
         if hm == h.continuous_end_minutes - 1:
             return _pd_at(day0, h.pre_auction_slot)
         if hm == h.close_minutes:
@@ -846,12 +1003,14 @@ def is_krx_m1_closed_open_label(
 ) -> bool:
     """
     ``m1_bar_open_label_for_just_completed_minute`` 로 구한 **닫힌 1분봉 시작 라벨**이
-    KRX 연속매매 1분 격자(개장~continuous_end-1) 또는 종가 단일가에 속하는지.
+    KRX 연속매매 1분 격자(개장~continuous_end-1)·종가 단일가·애프터(16:00~19:59)에 속하는지.
     """
     try:
         t = pd.Timestamp(closed_open).floor("min")
         if t.weekday() >= 5:
             return False
+        if _is_aftermarket_m1_label(t):
+            return True
         h = _hours_for_ts(t)
         hm = int(t.hour) * 60 + int(t.minute)
         if hm == h.close_minutes:

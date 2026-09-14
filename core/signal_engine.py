@@ -16,7 +16,7 @@ from core.defaults import effective_min_15m_bars_for_monitoring
 from core.monitor_code_sets import watchlist_only_codes_set
 from core.monitor_signal_status_display import monitor_signal_status_display_text
 from ui.tabs.monitor_tab import format_entry_signal_type_label
-from utils.krx_session import is_krx_regular_session
+from utils.krx_session import is_krx_regular_session, is_krx_tradable_session
 from utils.bars_data_keys import resolve_bars_data_frame
 from utils.normalization import canonical_stock_code
 from utils.monitor_vp_stub import clear_vp_price_stub_if_expired
@@ -754,13 +754,13 @@ class SignalEngine:
         """
         완성15 평가를 허용하는 벽시계 구간인지.
 
-        정규장(09:00~15:30)은 그대로 허용.
+        정규장·애프터마켓(tradable)은 허용.
         ``15:30`` 슬롯 + (next_open 또는 실전 NXT 즉시) 은 단일가 틱확인·주문이
         15:30 직후에도 이뤄지므로 당일 15:40까지 허용한다.
         """
         try:
             now = datetime.now()
-            if is_krx_regular_session(now):
+            if is_krx_tradable_session(now):
                 return True
             if not self._eval_1530_slot_enabled():
                 return False
@@ -3195,7 +3195,7 @@ class SignalEngine:
             last_rsi_f = float(s_state.get('last_rsi', 0.0))
             now_dt = datetime.now()
             try:
-                _session_ok = is_krx_regular_session(now_dt)
+                _session_ok = is_krx_tradable_session(now_dt)
             except Exception:
                 _session_ok = True
 

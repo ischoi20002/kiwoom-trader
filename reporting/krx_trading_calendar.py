@@ -297,16 +297,84 @@ def completed_trading_day_asof_local(
 
 def required_eod_bar_datetime_asof_local(now: Optional[datetime] = None) -> Optional[datetime]:
     """
-    하베스팅·DB 완결성 판정용: 반드시 포함되어야 할 마지막 **1분봉** 시각
-    (해당 영업일 SessionHours.close).
+    하베스팅·DB 완결성 판정용: 반드시 포함되어야 할 마지막 **1분봉** 시각.
+
+    - 애프터마켓 시행일(2026-09-14~): 해당일 애프터 종료 직전 1분(19:59)
+    - 그 이전: 정규장 SessionHours.close(기본 15:30)
     """
     try:
-        from utils.krx_session_hours import get_session_hours
-
         req_d = required_eod_bar_date_asof_local(now)
-        return get_session_hours(req_d).close_datetime()
+        return minute_bar_complete_datetime_for_day(req_d)
     except Exception:
         return None
+
+
+# KRX 애프터마켓(접속매매) 시행일 — 정규장 후 16:00~20:00
+KRX_AFTERMARKET_START_DATE: date = date(2026, 9, 14)
+# 애프터 종료 시각(벽시계). 1분봉 좌측 라벨 마지막은 직전 분(19:59).
+KRX_AFTERMARKET_END: time = time(20, 0)
+KRX_AFTERMARKET_LAST_M1: time = time(19, 59)
+KRX_AFTERMARKET_OPEN: time = time(16, 0)
+KRX_AFTERMARKET_LAST_15M: time = time(19, 45)
+
+
+def has_krx_aftermarket(day: date | datetime | str) -> bool:
+    """해당 영업일에 KRX 애프터마켓(20:00까지)이 적용되는지."""
+    try:
+        if isinstance(day, datetime):
+            d = day.date()
+        elif isinstance(day, date):
+            d = day
+        else:
+            d = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+        return d >= KRX_AFTERMARKET_START_DATE
+    except Exception:
+        return False
+
+
+def aftermarket_end_datetime(day: date | datetime | str) -> datetime:
+    """애프터마켓 종료 벽시계(당일 20:00)."""
+    if isinstance(day, datetime):
+        d = day.date()
+    elif isinstance(day, date):
+        d = day
+    else:
+        d = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+    return datetime.combine(d, KRX_AFTERMARKET_END)
+
+
+def aftermarket_last_m1_datetime(day: date | datetime | str) -> datetime:
+    """
+    애프터마켓 구간 마지막 1분봉 **좌측 라벨**(당일 19:59).
+
+    20:00 종료이므로 마지막 분은 19:59~20:00.
+    """
+    if isinstance(day, datetime):
+        d = day.date()
+    elif isinstance(day, date):
+        d = day
+    else:
+        d = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+    return datetime.combine(d, KRX_AFTERMARKET_LAST_M1)
+
+
+def minute_bar_complete_datetime_for_day(day: date | datetime | str) -> datetime:
+    """
+    해당 거래일 분봉 하베스트 완결에 필요한 마지막 1분봉 시각.
+
+    애프터마켓일: 19:59 / 그 외: 정규장 close(15:30 등).
+    """
+    from utils.krx_session_hours import get_session_hours
+
+    if isinstance(day, datetime):
+        d = day.date()
+    elif isinstance(day, date):
+        d = day
+    else:
+        d = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+    if has_krx_aftermarket(d):
+        return aftermarket_last_m1_datetime(d)
+    return get_session_hours(d).close_datetime()
 
 
 def is_krx_regular_session_local(now: Optional[datetime] = None) -> bool:
@@ -325,11 +393,10 @@ def is_krx_regular_session_local(now: Optional[datetime] = None) -> bool:
 def minute_harvest_datetime_cap_iso(now: Optional[datetime] = None) -> Optional[str]:
     """
     하베스팅용: 장중(정규장)이고 오늘이 거래일이면, DB에 넣을 수 있는 1분봉의 최대 시각(포함).
-    직전 거래일 close — 당일 장중 봉은 저장하지 않기 위함. 그 외 None(제한 없음).
+    직전 거래일 분봉 완결 시각(애프터마켓일이면 19:59) — 당일 장중 봉은 저장하지 않기 위함.
+    그 외 None(제한 없음).
     """
     try:
-        from utils.krx_session_hours import get_session_hours
-
         t = now or datetime.now()
         today_d = t.date()
         if not is_trading_day(today_d):
@@ -339,7 +406,7 @@ def minute_harvest_datetime_cap_iso(now: Optional[datetime] = None) -> Optional[
         prev = previous_trading_day(today_d)
         if prev is None:
             return None
-        close_dt = get_session_hours(prev).close_datetime()
+        close_dt = minute_bar_complete_datetime_for_day(prev)
         return close_dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return None

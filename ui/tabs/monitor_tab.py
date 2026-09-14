@@ -283,26 +283,21 @@ class MonitorTab:
         """
         0B/0D 실시간 처리 허용 여부.
         - fid215 로 정규장(3/4)이면 True.
-        - fid215 가 아직 없거나 빈 값만 온 경우: PC 시각 기준 KRX 정규장이면 True(폴백).
-        - fid215 가 비어 있지 않은데 3/4(및 03/04)가 아니면 장외로 보고 False.
-        - fid215 가 '0'/'00' 등 플레이스홀더면 비어 있음과 동일(로컬 시각 폴백).
+        - PC 시각이 정규장 또는 애프터마켓(tradable)이면 True(fid215 오탐보다 우선).
+        - fid215 가 비어 있지 않은데 3/4가 아니고 PC도 tradable이 아니면 False.
         """
         try:
             if bool(getattr(self, "_is_regular_session_active", False)):
                 return True
-            from utils.krx_session import is_krx_regular_session
+            from utils.krx_session import is_krx_tradable_session
 
-            pc_regular = bool(is_krx_regular_session())
-            # [버그픽스] PC 시각 기준 KRX 정규장(평일 09:00~15:30)이면, fid215 가
-            # 명시적 비정규(또는 모의/브로커가 보내는 비정상 코드)여도 틱을 차단하지 않는다.
-            # fid215 가 's'/'2'/'8' 등 신뢰할 수 없는 값으로 와서 정규장 내내 0B/0D 틱이
-            # 전량 스킵되면 실시간 신호·매매가 0건이 된다(BT-RT 불일치의 1차 원인).
-            # fid215 의 명시적 OFF 는 '정규장 시간 외'를 거를 때만 사용한다.
-            if pc_regular:
+            pc_tradable = bool(is_krx_tradable_session())
+            # PC 시각이 정규장·애프터면 fid215 비정상 코드여도 틱을 차단하지 않는다.
+            if pc_tradable:
                 return True
             if bool(getattr(self, "_ws_has_explicit_fid215", False)):
                 return False
-            return pc_regular
+            return pc_tradable
         except Exception:
             return bool(getattr(self, "_is_regular_session_active", False))
 

@@ -503,6 +503,96 @@ def is_in_regular_session(
         return True
 
 
+# KRX 애프터마켓(접속매매) — 정규장과 별도 구간(SessionHours.close 를 바꾸지 않음)
+AFTERMARKET_OPEN: time = time(16, 0)
+AFTERMARKET_END: time = time(20, 0)
+AFTERMARKET_LAST_15M: time = time(19, 45)
+
+
+def _aftermarket_enabled_for_day(day: Union[str, date, datetime]) -> bool:
+    try:
+        from reporting.krx_trading_calendar import has_krx_aftermarket
+
+        return bool(has_krx_aftermarket(day))
+    except Exception:
+        try:
+            d = _parse_day(day)
+            return d >= date(2026, 9, 14)
+        except Exception:
+            return False
+
+
+def iter_aftermarket_15m_slot_labels(
+    day: Union[str, date, datetime],
+) -> List[datetime]:
+    """
+    애프터마켓 15분 좌측 라벨 (기본 16:00 … 19:45).
+
+    정규 SessionHours.close **이후** 라벨만 포함(수능일 종가 16:30 등과 겹치지 않음).
+    애프터 미시행일이면 빈 목록.
+    """
+    d = _parse_day(day)
+    if not _aftermarket_enabled_for_day(d):
+        return []
+    try:
+        close_m = get_session_hours(d).close_minutes
+    except Exception:
+        close_m = 15 * 60 + 30
+    out: List[datetime] = []
+    cur = _combine(d, AFTERMARKET_OPEN)
+    last = _combine(d, AFTERMARKET_LAST_15M)
+    while cur <= last:
+        hm = cur.hour * 60 + cur.minute
+        if hm > close_m:
+            out.append(cur)
+        cur = cur + timedelta(minutes=15)
+    return out
+
+
+def is_in_aftermarket_session(
+    now: Optional[datetime] = None,
+    *,
+    require_trading_day: bool = False,
+) -> bool:
+    """애프터마켓 접속매매 구간(정규 close 이후 · 20:00 미만)이면 True."""
+    try:
+        t = now if now is not None else datetime.now()
+        if t.weekday() >= 5:
+            return False
+        try:
+            from reporting.krx_trading_calendar import is_trading_day
+
+            if not is_trading_day(t.date()):
+                return False
+        except Exception:
+            if require_trading_day:
+                return False
+        if not _aftermarket_enabled_for_day(t.date()):
+            return False
+        h = get_session_hours(t.date())
+        hm = t.hour * 60 + t.minute
+        open_m = max(_time_to_minutes(AFTERMARKET_OPEN), h.close_minutes + 1)
+        end_m = _time_to_minutes(AFTERMARKET_END)
+        return open_m <= hm < end_m
+    except Exception:
+        return False
+
+
+def is_in_tradable_session(
+    now: Optional[datetime] = None,
+    *,
+    require_trading_day: bool = False,
+) -> bool:
+    """정규장 또는 애프터마켓이면 True (신호·틱·주문 게이트용)."""
+    try:
+        return bool(
+            is_in_regular_session(now, require_trading_day=require_trading_day)
+            or is_in_aftermarket_session(now, require_trading_day=require_trading_day)
+        )
+    except Exception:
+        return True
+
+
 def session_close_datetime(day: Union[str, date, datetime]) -> datetime:
     """해당일 정규장 종가(단일가) datetime."""
     return get_session_hours(day).close_datetime()

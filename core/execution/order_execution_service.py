@@ -242,10 +242,48 @@ class OrderExecutionService:
 
         기본: 터치호가(매수=매도1·매도=매수1 + 정정 루프).
         15:15 동시호가 경로: 시장가(03) — 터치 정정·미체결 취소 없음.
+        애프터마켓: 시장가 불가 → 호출부에서 지정가로 강제.
         """
         if auction_market:
             return ("03", "market")
         return ("00", "touch")
+
+    def _is_aftermarket_now(self) -> bool:
+        try:
+            from utils.krx_session import is_krx_aftermarket_session
+
+            return bool(is_krx_aftermarket_session())
+        except Exception:
+            return False
+
+    def _coerce_aftermarket_limit(
+        self,
+        ot: str,
+        ex_style: str,
+        *,
+        auction: bool = False,
+    ) -> Tuple[str, str, bool]:
+        """
+        애프터마켓(16:00~20:00)에서는 시장가·동시호가 시장가 금지 → 지정가.
+
+        Returns:
+            (order_type, exec_style, auction_flag)
+        """
+        try:
+            if not self._is_aftermarket_now():
+                return str(ot), str(ex_style), bool(auction)
+            need = bool(auction) or str(ot).strip() == "03" or str(ex_style) == "market"
+            if need:
+                try:
+                    self.log(
+                        "📌 [Aftermarket] 시장가/동시호가 시장가 차단 → 지정가(00)로 전환"
+                    )
+                except Exception:
+                    pass
+                return "00", "limit", False
+            return str(ot), str(ex_style), False
+        except Exception:
+            return str(ot), str(ex_style), bool(auction)
 
     def _realtime_order_type(self) -> str:
         """하위 호환: 주문 유형 문자열만 필요할 때."""
@@ -655,11 +693,24 @@ class OrderExecutionService:
                 reason = self._tag_auction_reason(reason)
             elif nxt_src:
                 reason = self._tag_nxt_touch_reason(reason, nxt_src)
+        ot, ex_style, auction = self._coerce_aftermarket_limit(
+            ot, ex_style, auction=auction
+        )
+        if auction is False and nxt_src and self._is_aftermarket_now():
+            # 애프터에서는 NXT 15:30 터치 경로도 일반 지정/터치로
+            nxt_src = None
         adj_price = 0
         fresh_ask: float = 0.0
         try:
             if ex_style == "limit" and next_open is not None:
                 adj_price = int(round(float(next_open.get("limit_price", 0) or 0)))
+            elif ex_style == "limit":
+                # 애프터 강제 지정가: 참고가 기준 조정
+                adj_price = int(
+                    self.app.order_manager.get_adjusted_price(
+                        float(order_ref), "buy"
+                    )
+                )
             elif ex_style == "touch":
                 _nc = str(code).zfill(6)
                 _bid, _ask = self._fetch_touch_bid_ask(_nc, nxt=bool(nxt_src))
@@ -1002,6 +1053,11 @@ class OrderExecutionService:
                 reason = self._tag_auction_reason(reason)
             elif nxt_src:
                 reason = self._tag_nxt_touch_reason(reason, nxt_src)
+        ot, ex_style, auction = self._coerce_aftermarket_limit(
+            ot, ex_style, auction=auction
+        )
+        if auction is False and nxt_src and self._is_aftermarket_now():
+            nxt_src = None
 
         if action == "EXIT":
             # 매도: 터치(매수1호가), 지정가(참고가−1틱), 시장가(03)
@@ -1010,6 +1066,15 @@ class OrderExecutionService:
                     exit_ord_price = int(round(float(next_open.get("limit_price", 0) or 0)))
                 except Exception:
                     exit_ord_price = 0
+            elif ex_style == "limit":
+                try:
+                    exit_ord_price = int(
+                        self.app.order_manager.get_adjusted_price(
+                            float(order_ref_px), "sell"
+                        )
+                    )
+                except Exception:
+                    exit_ord_price = int(round(float(order_ref_px or 0)))
             elif ex_style == "touch":
                 try:
                     _nk = str(code).zfill(6)

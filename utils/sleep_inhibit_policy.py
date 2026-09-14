@@ -84,7 +84,8 @@ def should_prevent_sleep(app: Any, now: Optional[datetime] = None) -> bool:
     - ``prevent_sleep_while_running`` 이 꺼져 있으면 항상 False.
     - ``prevent_sleep_allow_after_eod`` 가 꺼져 있으면 GUI 실행 중 항상 True.
     - 켜져 있으면: 장전 자동시작 구간·실시간 감시 중만 True,
-      거래일 장마감+버퍼(기본 16:00) 이후에는 감시 잔존과 무관하게 False.
+      거래일 EOD(애프터 시행일=20:00+버퍼, 그 외=정규 close+버퍼) 이후에는
+      감시 잔존과 무관하게 False.
     """
     want, _reason = sleep_inhibit_decision(app, now=now)
     return want
