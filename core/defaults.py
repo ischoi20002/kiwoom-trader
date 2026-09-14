@@ -114,6 +114,9 @@ DEFAULT_SETTINGS = {
     "realtime_m1_head_fill_missing_15m_enabled": True,
     "realtime_m1_head_fill_missing_15m_max_bars": 8,
     "realtime_m1_compose_overwrite_existing_15m": True,
+    # 동일 OHLCV 합성 N회(기본 2)면 해당 슬롯 재합성 중단(스토어 축출 후 평봉 오염 방지)
+    "realtime_m1_compose_stable_freeze_enabled": True,
+    "realtime_m1_compose_stable_match_count": 2,
     "realtime_15m_tick_tail_wait_sec": 1.5,
     # 공식 우선: 슬롯 마감 후 이 초까지 공식 평가 대기, 미완만 틱말분 백업
     "realtime_15m_tick_tail_backup_after_close_sec": 50.0,

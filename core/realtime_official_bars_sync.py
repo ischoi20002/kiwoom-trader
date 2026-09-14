@@ -1257,6 +1257,125 @@ def _compose_overwrite_existing_enabled(app: Any) -> bool:
         return True
 
 
+def _compose_stable_freeze_enabled(app: Any) -> bool:
+    """동일 OHLCV 합성이 N회면 해당 슬롯 재합성을 멈출지(기본 ON)."""
+    try:
+        st = getattr(app, "settings", None) or {}
+        v = st.get("realtime_m1_compose_stable_freeze_enabled", True)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return True
+
+
+def _compose_stable_match_needed(app: Any) -> int:
+    """동결에 필요한 동일 합성 횟수(기본 2)."""
+    try:
+        st = getattr(app, "settings", None) or {}
+        n = int(float(st.get("realtime_m1_compose_stable_match_count", 2)))
+        return max(2, min(n, 8))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _ohlcv_fingerprint(
+    o: float, h: float, l_: float, c: float, v: float, *, tol: float = 0.5
+) -> Tuple[int, int, int, int, int]:
+    """동일성 비교용 정수 지문(가격·거래량 tol 반올림)."""
+    try:
+        t = max(0.1, float(tol))
+        return (
+            int(round(float(o) / t)),
+            int(round(float(h) / t)),
+            int(round(float(l_) / t)),
+            int(round(float(c) / t)),
+            int(round(max(0.0, float(v)) / t)),
+        )
+    except Exception:
+        return (0, 0, 0, 0, 0)
+
+
+def _stable_compose_state_map(app: Any) -> Dict[str, Dict[str, Any]]:
+    """
+    종목·슬롯별 합성 안정화 상태.
+
+    key: ``{code}|{slot_datetime}``
+    value: ``{"fp": fingerprint, "hits": int, "frozen": bool}``
+    """
+    try:
+        m = getattr(app, "_rt15_compose_stable", None)
+        if not isinstance(m, dict):
+            m = {}
+            setattr(app, "_rt15_compose_stable", m)
+        return m
+    except Exception:
+        return {}
+
+
+def _stable_compose_key(code: str, slot: pd.Timestamp) -> str:
+    try:
+        nk = canonical_stock_code(str(code).strip()) or str(code).strip()
+        ss = pd.Timestamp(slot).floor("min").strftime("%Y-%m-%d %H:%M:%S")
+        return f"{nk}|{ss}"
+    except Exception:
+        return f"{code}|{slot}"
+
+
+def _is_compose_slot_frozen(app: Any, code: str, slot: pd.Timestamp) -> bool:
+    if not _compose_stable_freeze_enabled(app):
+        return False
+    try:
+        st = _stable_compose_state_map(app).get(_stable_compose_key(code, slot))
+        return bool(st and st.get("frozen"))
+    except Exception:
+        return False
+
+
+def _note_compose_stable_result(
+    app: Any,
+    code: str,
+    slot: pd.Timestamp,
+    o: float,
+    h: float,
+    l_: float,
+    c: float,
+    v: float,
+    *,
+    matched_existing: bool,
+) -> None:
+    """
+    합성 결과를 안정화 카운터에 반영한다.
+
+    - 기존 행과 동일(matched_existing): hits+1, 필요 횟수 도달 시 frozen
+    - 신규/덮어쓰기(다른 값): hits=1 로 리셋(새 후보)
+    """
+    if not _compose_stable_freeze_enabled(app):
+        return
+    try:
+        key = _stable_compose_key(code, slot)
+        m = _stable_compose_state_map(app)
+        fp = _ohlcv_fingerprint(o, h, l_, c, v)
+        need = _compose_stable_match_needed(app)
+        cur = m.get(key)
+        if matched_existing and isinstance(cur, dict) and cur.get("fp") == fp:
+            hits = int(cur.get("hits") or 1) + 1
+        elif matched_existing and (
+            not isinstance(cur, dict) or cur.get("fp") != fp
+        ):
+            # 기존 bars 와 같지만 카운터 없음/지문 불일치 → 2회차로 간주
+            hits = 2
+        else:
+            hits = 1
+        m[key] = {
+            "fp": fp,
+            "hits": int(hits),
+            "frozen": bool(hits >= need),
+        }
+    except Exception:
+        pass
+
+
 def _row_ohlcv_differs_from_composed(
     row: Any,
     o: float,
@@ -1346,6 +1465,9 @@ def fill_missing_closed_15m_from_official_m1(
     - 스텁: 항상 교체
     - ``realtime_m1_compose_overwrite_existing_15m`` ON 이면 기존 행도
       M1 합성과 다를 때 덮어씀(catchup 후 skip-first 등 오염 복구).
+    - ``realtime_m1_compose_stable_freeze_enabled`` ON(기본)이면 동일 OHLCV
+      합성이 N회(기본 2) 확인된 슬롯은 이후 재합성·덮어쓰기를 하지 않음.
+      (스토어 128분 축출 후 평봉 재합성이 정상 봉을 오염시키는 것 방지)
     형성 중 슬롯은 건드리지 않습니다.
     """
     report: Dict[str, Any] = {
@@ -1355,6 +1477,7 @@ def fill_missing_closed_15m_from_official_m1(
         "filled_stub": [],
         "filled_overwrite": [],
         "skipped": [],
+        "skipped_stable": [],
         "failed": [],
     }
     try:
@@ -1407,6 +1530,13 @@ def fill_missing_closed_15m_from_official_m1(
 
     for slot in targets:
         slot_s = slot.strftime("%Y-%m-%d %H:%M:%S")
+        # 동일 합성 N회 확인된 슬롯: 재합성 자체를 생략(평봉 오염·compose_m1 덮어쓰기 방지)
+        try:
+            if _is_compose_slot_frozen(app, nk, slot):
+                report["skipped_stable"].append(slot_s)
+                continue
+        except Exception:
+            pass
         try:
             composed = compose_local_15m_ohlcv(app, nk, slot)
         except Exception:
@@ -1451,6 +1581,17 @@ def fill_missing_closed_15m_from_official_m1(
                         _rolling_ma_on_df(df2)
                         bd[use_key] = df2
                         report["filled_missing"].append(slot_s)
+                        _note_compose_stable_result(
+                            app,
+                            nk,
+                            slot,
+                            o,
+                            h,
+                            l_,
+                            c,
+                            v,
+                            matched_existing=False,
+                        )
                     except Exception:
                         report["failed"].append(slot_s)
                     continue
@@ -1459,6 +1600,20 @@ def fill_missing_closed_15m_from_official_m1(
                     row = df.loc[hit]
                     is_stub = _looks_like_stub_15m_row(row)
                     differs = _row_ohlcv_differs_from_composed(row, o, h, l_, c, v)
+                    if not is_stub and not differs:
+                        # 기존과 동일 → 안정화 카운트만 올리고 종료
+                        _note_compose_stable_result(
+                            app,
+                            nk,
+                            slot,
+                            o,
+                            h,
+                            l_,
+                            c,
+                            v,
+                            matched_existing=True,
+                        )
+                        continue
                     if not is_stub and not (overwrite_on and differs):
                         continue
                     df.at[hit, "Open"] = float(o)
@@ -1470,6 +1625,17 @@ def fill_missing_closed_15m_from_official_m1(
                         df.at[hit, "time"] = ts_to_slot_hhmm(slot)
                     _rolling_ma_on_df(df)
                     bd[use_key] = df
+                    _note_compose_stable_result(
+                        app,
+                        nk,
+                        slot,
+                        o,
+                        h,
+                        l_,
+                        c,
+                        v,
+                        matched_existing=False,
+                    )
                     if is_stub:
                         report["filled_stub"].append(slot_s)
                     else:
