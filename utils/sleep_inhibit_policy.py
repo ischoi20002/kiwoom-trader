@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from typing import Any, Optional, Tuple
 
 
@@ -27,6 +27,62 @@ def _truthy_setting(st: Any, key: str, default: bool) -> bool:
     return bool(default)
 
 
+def _eod_buffer_minutes(app: Any) -> int:
+    """연속감시 EOD 버퍼(분). CMS·settings 순으로 읽고 5~120으로 클램프."""
+    try:
+        cms = getattr(app, "continuous_monitor_service", None)
+        if cms is not None and hasattr(cms, "_eod_buffer_minutes"):
+            return int(cms._eod_buffer_minutes())
+    except Exception:
+        pass
+    try:
+        st = getattr(app, "settings", None) or {}
+        v = int(float(st.get("continuous_monitor_eod_buffer_minutes", 30)))
+        return max(5, min(v, 120))
+    except Exception:
+        return 30
+
+
+def _monitor_eod_due(app: Any, day_d: date) -> datetime:
+    """
+    감시 EOD due 시각.
+
+    CMS 메서드에만 의존하지 않는다 — CMS 부재·예외 시에도 달력으로 산출해
+    after_eod 판정이 monitoring 잔존에 가로채이지 않게 한다.
+    """
+    buf = _eod_buffer_minutes(app)
+    cms = getattr(app, "continuous_monitor_service", None)
+    if cms is not None:
+        try:
+            due = cms._eod_due_datetime(day_d)
+            if isinstance(due, datetime):
+                return due
+        except Exception:
+            pass
+    try:
+        from reporting.krx_trading_calendar import monitor_eod_due_datetime
+
+        return monitor_eod_due_datetime(day_d, eod_buffer_minutes=buf)
+    except Exception:
+        return datetime.combine(day_d, time(15, 30, 0)) + timedelta(minutes=buf)
+
+
+def _is_trading_day(app: Any, day_d: date) -> bool:
+    """거래일 여부 — CMS 우선, 실패 시 달력/평일 폴백."""
+    cms = getattr(app, "continuous_monitor_service", None)
+    if cms is not None:
+        try:
+            return bool(cms._is_trading_day(day_d))
+        except Exception:
+            pass
+    try:
+        from reporting.krx_trading_calendar import is_trading_day
+
+        return bool(is_trading_day(day_d))
+    except Exception:
+        return day_d.weekday() < 5
+
+
 def sleep_inhibit_decision(
     app: Any, now: Optional[datetime] = None
 ) -> Tuple[bool, str]:
@@ -43,6 +99,7 @@ def sleep_inhibit_decision(
             return True, "always_while_running"
 
         t = now if now is not None else datetime.now()
+        today_d = t.date()
 
         cms = getattr(app, "continuous_monitor_service", None)
         if cms is not None:
@@ -50,16 +107,17 @@ def sleep_inhibit_decision(
                 # 장전 자동시작 윈도우: 억제 유지
                 if bool(getattr(cms, "armed", False)) and cms._should_morning_start(t):
                     return True, "morning_window"
-
-                # 장마감+버퍼 이후: 감시 플래그와 무관하게 허용
-                # (EOD 후 is_monitoring 잔존·해제 API 누락 시에도 최대절전이 막히지 않게)
-                today_d = t.date()
-                if cms._is_trading_day(today_d):
-                    due = cms._eod_due_datetime(today_d)
-                    if t >= due:
-                        return False, "after_eod"
             except Exception:
                 pass
+
+        # 장마감+버퍼 이후: 감시 플래그·CMS 유무와 무관하게 허용
+        try:
+            if _is_trading_day(app, today_d):
+                due = _monitor_eod_due(app, today_d)
+                if t >= due:
+                    return False, f"after_eod@{due.strftime('%H:%M')}"
+        except Exception:
+            pass
 
         tc = getattr(app, "trading_controller", None)
         if tc is not None and bool(getattr(tc, "is_monitoring", False)):

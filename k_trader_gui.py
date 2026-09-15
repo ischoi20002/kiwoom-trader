@@ -3519,21 +3519,27 @@ class KiwoomApp:
             st = getattr(self, "settings", None) or {}
             keep_display = bool(st.get("prevent_sleep_keep_display", False))
             want, reason = sleep_inhibit_decision(self)
-            was_active = bool(getattr(si, "active", False))
             if want:
                 si.acquire(keep_display=keep_display)
             else:
+                # want=False 여도 Clear 실패 핸들이 있으면 매 tick 재시도
                 si.release()
             # 상태 전이 시에만 사유 로그 (50초 주기 스팸 방지)
             now_active = bool(getattr(si, "active", False))
-            if was_active != now_active or getattr(
-                self, "_sleep_inhibit_last_reason", None
-            ) != reason:
+            handle_stuck = getattr(si, "_power_handle", None) is not None
+            log_key = (reason, now_active, handle_stuck)
+            if getattr(self, "_sleep_inhibit_last_key", None) != log_key:
+                self._sleep_inhibit_last_key = log_key
                 self._sleep_inhibit_last_reason = reason
                 try:
                     if now_active:
                         self.log(
                             f"🔆 [최대절전방지] 억제 유지 (사유: {reason})"
+                        )
+                    elif handle_stuck:
+                        self.log(
+                            f"⚠️ [최대절전방지] 해제 재시도 중 (사유: {reason}, "
+                            "PowerRequest 잔존)"
                         )
                     else:
                         self.log(

@@ -116,6 +116,29 @@ class TestSleepInhibitPolicy(unittest.TestCase):
             should_prevent_sleep(app, now=datetime(2026, 9, 2, 20, 0, 0))
         )
 
+    def test_after_eod_without_cms_ignores_monitoring(self) -> None:
+        """CMS 없어도 달력 EOD 이후면 monitoring 잔존을 무시한다."""
+        app = _app(monitoring=True, cms=None)
+        app.continuous_monitor_service = None
+        # 애프터 시행일(2026-09-14~) EOD = 20:30
+        self.assertFalse(
+            should_prevent_sleep(app, now=datetime(2026, 9, 15, 20, 31, 0))
+        )
+        self.assertTrue(
+            should_prevent_sleep(app, now=datetime(2026, 9, 15, 19, 0, 0))
+        )
+
+    def test_after_eod_reason_includes_due_time(self) -> None:
+        from utils.sleep_inhibit_policy import sleep_inhibit_decision
+
+        cms = _FakeCms(eod_due=datetime(2026, 9, 15, 20, 30, 0))
+        app = _app(monitoring=True, cms=cms)
+        want, reason = sleep_inhibit_decision(
+            app, now=datetime(2026, 9, 15, 21, 0, 0)
+        )
+        self.assertFalse(want)
+        self.assertTrue(reason.startswith("after_eod@"))
+
 
 if __name__ == "__main__":
     unittest.main()

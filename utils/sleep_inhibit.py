@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """Windows 유휴 최대절전(하이버네이트) 억제.
 
-장중·장전 자동시작이 깨지지 않도록 시스템 유휴 타이머를 리셋한다.
+장중·장전 자동시작이 깨지지 않도록 시스템 유휴 타이머를 막는다.
 전원 옵션이 「최대 절전」이든 「절전」이든, 유휴로 꺼지는 것을 막는다
 (운영은 최대절전 사용을 전제로 한다).
 
 노트북 덮개를 닫으면 전원 옵션(덮개 동작)이 우선하므로 이 API로는 막지 못한다.
 모니터만 꺼지는 것은 기본 허용한다.
 
-Away Mode 는 쓰지 않는다 — 미디어용으로 절전 진입 자체를 막아
-해제 누락 시 최대절전이 영구 지연되는 사례가 있다.
+Away Mode 는 쓰지 않는다 — 해제 누락 시 최대절전이 영구 지연되는 사례가 있다.
+
+중요: PowerRequest 와 SetThreadExecutionState 를 **동시에** 걸지 않는다.
+둘 다 걸면 한쪽만 해제돼도 Windows 유휴 타이머가 계속 리셋되어
+(최대절전 30분 설정이어도) 몇 시간이 지나도 진입하지 않을 수 있다.
 """
 from __future__ import annotations
 
@@ -70,7 +73,8 @@ class SleepInhibitor:
         self._power_handle: Optional[int] = None
         self._reason_keep: Optional[str] = None
         self._atexit_registered: bool = False
-        self._used_power_request: bool = False
+        # "power" | "exec" | None — 한 가지만 사용
+        self._mode: Optional[str] = None
         self._k32: Optional[ctypes.WinDLL] = None
 
     def _emit(self, msg: str) -> None:
@@ -95,28 +99,38 @@ class SleepInhibitor:
         return self._active
 
     def acquire(self, keep_display: bool = False) -> bool:
-        """최대절전(유휴 전원) 억제를 켠다. 이미 켜져 있고 옵션이 같으면 재적용만 한다."""
+        """최대절전(유휴 전원) 억제를 켠다. 이미 켜져 있고 옵션이 같으면 유지."""
         try:
             keep_display = bool(keep_display)
             if self._active and self._keep_display == keep_display:
-                self.refresh()
+                # PowerRequest 는 유지형 — 주기 ExecutionState 재적용 불필요
+                # (재적용하면 유휴 타이머만 리셋되어 해제 후에도 관측이 헷갈림)
+                if self._mode == "exec":
+                    self.refresh()
                 return True
-            if self._active:
+            # 잔존 핸들·이전 모드 정리 후 재획득
+            if self._active or self._power_handle is not None or self._mode is not None:
                 self.release()
             if sys.platform != "win32":
                 self._emit("⚠️ [최대절전방지] Windows 가 아니라 적용하지 않습니다.")
                 return False
             self._keep_display = keep_display
+
+            # 단일 경로: PowerRequest 우선, 실패 시에만 ExecutionState
             ok_power = self._acquire_power_request(keep_display)
-            ok_exec = self._set_execution_state(keep_display)
-            if not ok_power and not ok_exec:
-                self._emit(
-                    "⚠️ [최대절전방지] Windows API 호출 실패 — "
-                    "유휴 최대절전이 그대로일 수 있습니다."
-                )
-                return False
+            if ok_power:
+                self._mode = "power"
+            else:
+                ok_exec = self._set_execution_state(keep_display)
+                if not ok_exec:
+                    self._emit(
+                        "⚠️ [최대절전방지] Windows API 호출 실패 — "
+                        "유휴 최대절전이 그대로일 수 있습니다."
+                    )
+                    return False
+                self._mode = "exec"
+
             self._active = True
-            self._used_power_request = ok_power
             if not self._atexit_registered:
                 try:
                     atexit.register(self.release)
@@ -124,13 +138,9 @@ class SleepInhibitor:
                 except Exception:
                     pass
             disp = "화면 유지" if keep_display else "화면 꺼짐 허용"
-            via = []
-            if ok_power:
-                via.append("PowerRequest")
-            if ok_exec:
-                via.append("ExecutionState")
+            via = "PowerRequest" if self._mode == "power" else "ExecutionState"
             self._emit(
-                f"🔆 [최대절전방지] 유휴 최대절전 억제 시작 ({disp}, {', '.join(via)})"
+                f"🔆 [최대절전방지] 유휴 최대절전 억제 시작 ({disp}, {via})"
             )
             return True
         except Exception as e:
@@ -138,8 +148,8 @@ class SleepInhibitor:
             return False
 
     def refresh(self) -> None:
-        """유휴 타이머를 다시 리셋한다 (일부 전원 정책이 CONTINUOUS 를 무시할 때 대비)."""
-        if not self._active:
+        """ExecutionState 폴백 모드에서만 유휴 타이머를 다시 리셋한다."""
+        if not self._active or self._mode != "exec":
             return
         try:
             if sys.platform != "win32":
@@ -150,7 +160,11 @@ class SleepInhibitor:
 
     def release(self) -> None:
         """최대절전 억제를 해제한다. 프로그램 종료 시 반드시 호출."""
-        if not self._active and self._power_handle is None:
+        if (
+            not self._active
+            and self._power_handle is None
+            and self._mode is None
+        ):
             return
         clear_ok = True
         try:
@@ -162,14 +176,22 @@ class SleepInhibitor:
                 k32 = self._k32_api()
                 if k32 is not None:
                     # CONTINUOUS 단독 = 이 스레드의 이전 SYSTEM/DISPLAY 요구 해제
+                    # (과거 이중 적용·폴백 모드 잔여분까지 항상 정리)
+                    k32.SetThreadExecutionState(_ES_CONTINUOUS)
                     k32.SetThreadExecutionState(_ES_CONTINUOUS)
         except Exception:
             pass
         was_active = self._active
-        self._active = False
-        self._keep_display = False
-        self._used_power_request = False
-        if was_active:
+        if clear_ok:
+            self._active = False
+            self._keep_display = False
+            self._mode = None
+        else:
+            # PowerRequest Clear 실패 — 핸들 유지, 다음 tick 재시도
+            self._active = False
+            self._keep_display = False
+            self._mode = "power" if self._power_handle is not None else None
+        if was_active or not clear_ok:
             if clear_ok:
                 self._emit("🌙 [최대절전방지] 유휴 최대절전 억제를 해제했습니다.")
             else:
@@ -192,7 +214,7 @@ class SleepInhibitor:
             return False
 
     def _acquire_power_request(self, keep_display: bool) -> bool:
-        """Modern Standby 대응용 PowerRequest. 실패해도 ExecutionState 폴백이 있다."""
+        """Modern Standby 대응용 PowerRequest."""
         handle: Optional[int] = None
         try:
             k32 = self._k32_api()
@@ -210,7 +232,9 @@ class SleepInhibitor:
                 return False
             handle = int(raw)
 
-            if not k32.PowerSetRequest(ctypes.c_void_p(handle), _POWER_REQUEST_SYSTEM_REQUIRED):
+            if not k32.PowerSetRequest(
+                ctypes.c_void_p(handle), _POWER_REQUEST_SYSTEM_REQUIRED
+            ):
                 k32.CloseHandle(ctypes.c_void_p(handle))
                 return False
             if keep_display:
@@ -234,33 +258,43 @@ class SleepInhibitor:
             return False
 
     def _release_power_request(self) -> bool:
-        """PowerRequest 를 모두 Clear 후 Close. 성공 시 True."""
+        """PowerRequest 를 Clear 후 Close.
+
+        SYSTEM Clear 가 실패하면 핸들을 남겨 다음 release/재시도가 가능하게 한다.
+        """
         handle = self._power_handle
-        self._power_handle = None
         if not handle:
             return True
-        ok = True
         try:
             k32 = self._k32_api()
             if k32 is None:
                 return False
-            h = ctypes.c_void_p(handle)
-            for req in (
-                _POWER_REQUEST_SYSTEM_REQUIRED,
-                _POWER_REQUEST_DISPLAY_REQUIRED,
-            ):
+            h = ctypes.c_void_p(int(handle))
+            system_cleared = False
+            try:
+                system_cleared = bool(
+                    k32.PowerClearRequest(h, _POWER_REQUEST_SYSTEM_REQUIRED)
+                )
+            except Exception:
+                system_cleared = False
+            try:
+                k32.PowerClearRequest(h, _POWER_REQUEST_DISPLAY_REQUIRED)
+            except Exception:
+                pass
+            if not system_cleared:
                 try:
-                    if not bool(k32.PowerClearRequest(h, req)):
-                        # DISPLAY 는 Set 안 했을 수 있음 — SYSTEM 실패만 치명
-                        if req == _POWER_REQUEST_SYSTEM_REQUIRED:
-                            ok = False
+                    system_cleared = bool(
+                        k32.PowerClearRequest(h, _POWER_REQUEST_SYSTEM_REQUIRED)
+                    )
                 except Exception:
-                    if req == _POWER_REQUEST_SYSTEM_REQUIRED:
-                        ok = False
+                    system_cleared = False
+            if not system_cleared:
+                return False
             try:
                 k32.CloseHandle(h)
             except Exception:
-                ok = False
-            return ok
+                pass
+            self._power_handle = None
+            return True
         except Exception:
             return False
