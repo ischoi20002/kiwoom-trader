@@ -6,10 +6,18 @@
 
 from __future__ import annotations
 
+import random
+import time
 from datetime import date
 from typing import Any, Dict, List, Set
 
 from utils.normalization import canonical_stock_code
+
+# 계좌·체결 REST 직후 ka10075 연속 호출로 HTTP 429가 나기 쉬움 → 간격·재시도
+_KA10075_MAX_ATTEMPTS: int = 4
+_KA10075_BASE_DELAY_SEC: float = 1.5
+_KA10075_GAP_AFTER_SYNC_SEC: float = 1.2
+_KA10075_GAP_BETWEEN_TRDE_SEC: float = 1.2
 
 
 def _log(app: Any, msg: str) -> None:
@@ -17,6 +25,23 @@ def _log(app: Any, msg: str) -> None:
         fn = getattr(app, "log", None)
         if callable(fn):
             fn(msg)
+    except Exception:
+        pass
+
+
+def _is_http_429(exc: BaseException) -> bool:
+    """키움 REST 유량 제한(HTTP 429) 여부."""
+    try:
+        s = str(exc or "")
+    except Exception:
+        return False
+    return "429" in s
+
+
+def _interruptible_sleep(sec: float) -> None:
+    """짧은 대기(재시작 가드용)."""
+    try:
+        time.sleep(max(0.0, float(sec)))
     except Exception:
         pass
 
@@ -121,6 +146,54 @@ def _sync_today_exchange_fills(app: Any) -> int:
         return 0
 
 
+def _parse_ka10075_oso_rows(res: Any) -> List[Dict[str, Any]]:
+    """ka10075 응답 dict → 미체결 행 목록."""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(res, dict):
+        return out
+    try:
+        rc = res.get("return_code", 0)
+        if rc is not None and int(str(rc).strip()) != 0:
+            return out
+    except (TypeError, ValueError):
+        pass
+    oso = res.get("oso") or []
+    if not isinstance(oso, list):
+        return out
+    for row in oso:
+        if not isinstance(row, dict):
+            continue
+        try:
+            nk = canonical_stock_code(
+                str(row.get("stk_cd") or row.get("pdno") or "")
+            )
+        except Exception:
+            nk = ""
+        if not nk:
+            continue
+        try:
+            oq = int(
+                float(
+                    str(row.get("oso_qty") or row.get("ord_qty") or 0)
+                    .replace(",", "")
+                    .strip()
+                    or 0
+                )
+            )
+        except (TypeError, ValueError):
+            oq = 0
+        if oq <= 0:
+            continue
+        out.append(
+            {
+                "code": nk,
+                "order_no": str(row.get("ord_no") or "").strip(),
+                "oso_qty": oq,
+            }
+        )
+    return out
+
+
 def _fetch_ka10075_unfilled(
     app: Any, *, trde_tp: str
 ) -> List[Dict[str, Any]]:
@@ -128,66 +201,52 @@ def _fetch_ka10075_unfilled(
     ka10075 미체결 목록.
 
     trde_tp: ``0`` 전체, ``1`` 매도, ``2`` 매수.
+    HTTP 429 시 지수 백오프로 재시도(미체결 복구 누락 완화).
     """
     out: List[Dict[str, Any]] = []
+    om = getattr(app, "order_manager", None)
+    api = getattr(om, "account_api", None) if om is not None else None
+    if api is None or not hasattr(api, "unfilled_orders_request_ka10075"):
+        return out
     try:
-        om = getattr(app, "order_manager", None)
-        api = getattr(om, "account_api", None) if om is not None else None
-        if api is None or not hasattr(api, "unfilled_orders_request_ka10075"):
-            return out
         import config
 
         use_mock = bool(getattr(config, "USE_MOCK", False))
         stex = "1" if use_mock else "0"
-        res = api.unfilled_orders_request_ka10075(
-            all_stk_tp="0",
-            trde_tp=str(trde_tp),
-            stex_tp=stex,
-        )
-        if not isinstance(res, dict):
-            return out
+    except Exception:
+        stex = "0"
+
+    last_err: BaseException | None = None
+    for attempt in range(int(_KA10075_MAX_ATTEMPTS)):
         try:
-            rc = res.get("return_code", 0)
-            if rc is not None and int(str(rc).strip()) != 0:
-                return out
-        except (TypeError, ValueError):
-            pass
-        oso = res.get("oso") or []
-        if not isinstance(oso, list):
-            return out
-        for row in oso:
-            if not isinstance(row, dict):
-                continue
-            try:
-                nk = canonical_stock_code(
-                    str(row.get("stk_cd") or row.get("pdno") or "")
-                )
-            except Exception:
-                nk = ""
-            if not nk:
-                continue
-            try:
-                oq = int(
-                    float(
-                        str(row.get("oso_qty") or row.get("ord_qty") or 0)
-                        .replace(",", "")
-                        .strip()
-                        or 0
-                    )
-                )
-            except (TypeError, ValueError):
-                oq = 0
-            if oq <= 0:
-                continue
-            out.append(
-                {
-                    "code": nk,
-                    "order_no": str(row.get("ord_no") or "").strip(),
-                    "oso_qty": oq,
-                }
+            res = api.unfilled_orders_request_ka10075(
+                all_stk_tp="0",
+                trde_tp=str(trde_tp),
+                stex_tp=stex,
             )
-    except Exception as e:
-        _log(app, f"⚠️ [RestartGuard] ka10075(trde={trde_tp}) 실패: {e}")
+            return _parse_ka10075_oso_rows(res)
+        except Exception as e:
+            last_err = e
+            if _is_http_429(e) and attempt + 1 < int(_KA10075_MAX_ATTEMPTS):
+                delay = float(_KA10075_BASE_DELAY_SEC) * float(attempt + 1)
+                try:
+                    delay += random.uniform(0.0, 0.35)
+                except Exception:
+                    pass
+                _log(
+                    app,
+                    f"⏳ [RestartGuard] ka10075(trde={trde_tp}) HTTP 429 — "
+                    f"{delay:.1f}s 후 재시도 ({attempt + 1}/{_KA10075_MAX_ATTEMPTS})",
+                )
+                _interruptible_sleep(delay)
+                continue
+            _log(app, f"⚠️ [RestartGuard] ka10075(trde={trde_tp}) 실패: {e}")
+            return out
+    if last_err is not None:
+        _log(
+            app,
+            f"⚠️ [RestartGuard] ka10075(trde={trde_tp}) 재시도 Exhausted: {last_err}",
+        )
     return out
 
 
@@ -283,12 +342,15 @@ def prepare_before_restart_slot_catchup(app: Any) -> Dict[str, Any]:
             report["account_synced"] = True
         except Exception:
             pass
+    # 계좌·체결 REST 직후 유량 여유를 두고 미체결 조회
+    _interruptible_sleep(float(_KA10075_GAP_AFTER_SYNC_SEC))
     try:
         buy_rows = _fetch_ka10075_unfilled(app, trde_tp="2")
         restored = _restore_s1_buy_pending(app, buy_rows)
         report["s1_pending"] = sorted(restored)
     except Exception:
         report["s1_pending"] = []
+    _interruptible_sleep(float(_KA10075_GAP_BETWEEN_TRDE_SEC))
     try:
         sell_rows = _fetch_ka10075_unfilled(app, trde_tp="1")
         marked = _mark_exit_pending_for_unfilled_sells(app, sell_rows)
