@@ -347,6 +347,15 @@ class Closed15mEvalPool:
             except Exception:
                 pass
             finally:
+                # 평가 직후: 슬롯+2분에 합성 vs API 15분 비교 예약
+                try:
+                    from core.rt_compose_vs_api15_diag import (
+                        note_after_closed_15m_eval,
+                    )
+
+                    note_after_closed_15m_eval(self._app, nk, bar_ts)
+                except Exception:
+                    pass
                 try:
                     with self._lock:
                         self._inflight.discard((str(nk), str(slot_key)))
@@ -413,6 +422,14 @@ class Closed15mEvalPool:
                     except Exception:
                         pass
                     finally:
+                        try:
+                            from core.rt_compose_vs_api15_diag import (
+                                note_after_closed_15m_eval,
+                            )
+
+                            note_after_closed_15m_eval(self._app, code, bar_ts)
+                        except Exception:
+                            pass
                         yield_gil_for_ui()
 
                 threading.Thread(
