@@ -235,24 +235,106 @@ def _win_creationflags() -> int:
     return 0
 
 
-def _subprocess_env() -> Dict[str, str]:
-    """git/gh 비대화형 실행용 환경변수."""
+def _subprocess_env(*, interactive: bool = False) -> Dict[str, str]:
+    """git/gh 실행용 환경변수."""
     env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GCM_INTERACTIVE"] = "Never"
+    if not interactive:
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        # 일부 PC에서 Never 가 캐시 조회까지 막아 빈 토큰이 되므로 기본은 두지 않음
     return env
 
 
+def _token_file_candidates() -> List[Path]:
+    """로컬 토큰 파일 후보 (gitignore 대상, 값 로그 금지)."""
+    names = (".ktrader_github_token",)
+    roots: List[Path] = []
+    for r in (resolve_prod_root(), PROD_ROOT, DEV_ROOT, Path.cwd()):
+        try:
+            roots.append(Path(r))
+        except Exception:
+            continue
+    try:
+        roots.append(Path.home())
+    except Exception:
+        pass
+    out: List[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        for name in names:
+            p = root / name
+            key = str(p).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _read_token_file() -> str:
+    for p in _token_file_candidates():
+        try:
+            if not p.is_file():
+                continue
+            tok = p.read_text(encoding="utf-8", errors="replace").strip()
+            # 첫 줄만 (주석/개행 방지)
+            tok = tok.splitlines()[0].strip() if tok else ""
+            if tok:
+                return tok
+        except Exception:
+            continue
+    return ""
+
+
+def _persist_token_file(tok: str) -> None:
+    """성공한 토큰을 운영 폴더에 저장 — 다음 GUI 실행에서 git 없이 사용."""
+    if not tok:
+        return
+    targets = []
+    try:
+        targets.append(resolve_prod_root() / ".ktrader_github_token")
+    except Exception:
+        pass
+    try:
+        targets.append(PROD_ROOT / ".ktrader_github_token")
+    except Exception:
+        pass
+    seen: set[str] = set()
+    for p in targets:
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(tok + "\n", encoding="utf-8")
+            if sys.platform == "win32":
+                try:
+                    # 간단 ACL: 숨김 속성
+                    subprocess.run(
+                        ["attrib", "+H", str(p)],
+                        capture_output=True,
+                        timeout=5,
+                        creationflags=_win_creationflags(),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+
 def _candidate_tool_paths(names: Tuple[str, ...]) -> List[Path]:
-    """PATH·고정 설치 경로에서 실행 파일 후보를 모은다."""
+    """PATH·고정 설치 경로에서 요청한 실행 파일만 모은다."""
     found: List[Path] = []
     seen: set[str] = set()
+    want = {n.lower() for n in names}
 
     def _add(p: Path) -> None:
         try:
+            if p.name.lower() not in want:
+                return
             rp = str(p.resolve()).lower()
         except Exception:
-            rp = str(p).lower()
+            return
         if rp in seen:
             return
         if p.is_file():
@@ -289,51 +371,61 @@ def _candidate_tool_paths(names: Tuple[str, ...]) -> List[Path]:
 
 def _token_from_git_credential() -> str:
     """git credential fill 로 github.com 비밀번호(토큰) 조회."""
-    for git_exe in _candidate_tool_paths(("git", "git.exe")):
-        try:
-            proc = subprocess.run(
-                [str(git_exe), "credential", "fill"],
-                input="protocol=https\nhost=github.com\n\n",
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=12,
-                creationflags=_win_creationflags(),
-                env=_subprocess_env(),
-            )
-            if proc.returncode != 0:
+    gits = _candidate_tool_paths(("git", "git.exe"))
+    if not gits:
+        return ""
+    attempts = (
+        {"creationflags": _win_creationflags(), "env": _subprocess_env(interactive=False)},
+        {"creationflags": _win_creationflags(), "env": _subprocess_env(interactive=True)},
+        {"creationflags": 0, "env": _subprocess_env(interactive=True)},
+    )
+    for git_exe in gits:
+        for opts in attempts:
+            try:
+                proc = subprocess.run(
+                    [str(git_exe), "credential", "fill"],
+                    input="protocol=https\nhost=github.com\n\n",
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=12,
+                    creationflags=int(opts["creationflags"]),
+                    env=opts["env"],  # type: ignore[arg-type]
+                )
+                if proc.returncode != 0:
+                    continue
+                for line in (proc.stdout or "").splitlines():
+                    if line.startswith("password="):
+                        tok = line.split("=", 1)[1].strip()
+                        if tok:
+                            return tok
+            except Exception:
                 continue
-            for line in (proc.stdout or "").splitlines():
-                if line.startswith("password="):
-                    tok = line.split("=", 1)[1].strip()
-                    if tok:
-                        return tok
-        except Exception:
-            continue
     return ""
 
 
 def _token_from_gh_cli() -> str:
     """gh auth token 조회."""
     for gh_exe in _candidate_tool_paths(("gh", "gh.exe")):
-        try:
-            proc = subprocess.run(
-                [str(gh_exe), "auth", "token"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=12,
-                creationflags=_win_creationflags(),
-                env=_subprocess_env(),
-            )
-            if proc.returncode == 0:
-                tok = str(proc.stdout or "").strip()
-                if tok:
-                    return tok
-        except Exception:
-            continue
+        for creationflags in (_win_creationflags(), 0):
+            try:
+                proc = subprocess.run(
+                    [str(gh_exe), "auth", "token"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=12,
+                    creationflags=creationflags,
+                    env=_subprocess_env(interactive=False),
+                )
+                if proc.returncode == 0:
+                    tok = str(proc.stdout or "").strip()
+                    if tok:
+                        return tok
+            except Exception:
+                continue
     return ""
 
 
@@ -353,6 +445,8 @@ def resolve_github_token() -> str:
         if v:
             tok = v
             break
+    if not tok:
+        tok = _read_token_file()
     if not tok:
         try:
             s = _settings_dict()
@@ -379,6 +473,12 @@ def resolve_github_token() -> str:
     _TOKEN_RESOLVE_TRIED = True
     if tok:
         _CACHED_GITHUB_TOKEN = tok
+        # git/gh 로 얻은 토큰은 파일에 남겨 GUI(pythonw)에서도 쓰게 함
+        try:
+            if not _read_token_file():
+                _persist_token_file(tok)
+        except Exception:
+            pass
     return tok
 
 
@@ -578,8 +678,9 @@ def check_for_update(
         low = err.lower()
         if not token:
             hint = (
-                "\n(비공개 저장소: GH_TOKEN / settings.github_releases_token 필요."
-                " git credential·gh 로그인 토큰도 사용합니다.)"
+                "\n(비공개 저장소: c:\\k-trader\\.ktrader_github_token 또는 "
+                "GH_TOKEN / settings.github_releases_token 필요."
+                " git credential·gh 로그인도 사용합니다.)"
             )
         elif "404" in err or "not found" in low:
             hint = (

@@ -1,5 +1,7 @@
 venv/
 .venv/
+# 비공개 Release용 로컬 토큰 (절대 커밋 금지)
+.ktrader_github_token
 USB 드라이브/
 __pycache__/
 *.db
