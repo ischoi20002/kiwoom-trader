@@ -201,6 +201,25 @@ def _diff_fields(a: ComposeOhlcv, b: ComposeOhlcv) -> List[str]:
     return out
 
 
+def _slot_wall_close_ts(slot_label: pd.Timestamp) -> pd.Timestamp:
+    """
+    좌측 라벨 15분봉의 **벽시계 종료 시각**.
+
+    예: 09:00 라벨 → 09:15, 일반 슬롯은 ``T+15``.
+    (15:15·15:30 등 특수 슬롯은 ``m1_continuous_end_exclusive_for_15m_end`` 규칙)
+    """
+    try:
+        from utils.krx_bars import m1_continuous_end_exclusive_for_15m_end
+
+        end = m1_continuous_end_exclusive_for_15m_end(slot_label)
+        return pd.Timestamp(end).floor("min")
+    except Exception:
+        try:
+            return pd.Timestamp(slot_label).floor("min") + pd.Timedelta(minutes=15)
+        except Exception:
+            return pd.Timestamp(slot_label).floor("min")
+
+
 def note_after_closed_15m_eval(
     app: Any,
     code: Any,
@@ -211,7 +230,8 @@ def note_after_closed_15m_eval(
     """
     완성 15분 신호평가가 끝난 뒤 호출.
 
-    슬롯 시각 + delay(기본 120초)에 해당 종목들의 합성 vs API 15분 비교를 예약합니다.
+    **슬롯 종료(벽시계) + delay**(기본 120초)에 합성 vs API 15분 비교를 예약합니다.
+    예: 09:00 라벨 봉 → 종료 09:15 → 비교 09:17.
     """
     try:
         if not _enabled(app):
@@ -228,7 +248,8 @@ def note_after_closed_15m_eval(
             return
 
         delay = _delay_sec(app)
-        fire_at = slot.to_pydatetime() + pd.Timedelta(seconds=delay)
+        close_ts = _slot_wall_close_ts(slot)
+        fire_at = close_ts.to_pydatetime() + pd.Timedelta(seconds=delay)
         try:
             now = datetime.now()
         except Exception:
@@ -259,10 +280,13 @@ def note_after_closed_15m_eval(
                     batch.timer = None
                     return
                 try:
+                    close_s = close_ts.strftime("%H:%M:%S")
+                    fire_s = pd.Timestamp(fire_at).strftime("%H:%M:%S")
                     _log(
                         app,
                         f"ℹ️ [ComposeVsAPI15] {sk} 비교 예약 "
-                        f"(+{delay:.0f}s, 현재등록 {len(batch.composed)}종목)",
+                        f"(슬롯종료 {close_s}+{delay:.0f}s → {fire_s}, "
+                        f"현재등록 {len(batch.composed)}종목)",
                     )
                 except Exception:
                     pass

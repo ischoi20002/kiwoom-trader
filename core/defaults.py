@@ -216,7 +216,8 @@ DEFAULT_SETTINGS = {
     "realtime_s1_full_calc_min_interval_sec": 5.0,
     "realtime_s1_full_calc_fallback_sec": 120.0,
     "realtime_s1_eval_on_local_15m_close": True,
-    # 완성15 평가 후 슬롯+N초에 ka10080(15분) vs 합성봉 차이 로그(차이 종목만)
+    # 완성15 평가 후 **슬롯종료**+N초에 ka10080(15분) vs 합성봉 차이 로그(차이 종목만)
+    # 예: 09:00 라벨 → 종료 09:15 → 09:17에 비교
     "realtime_compose_vs_api15_diag_enabled": True,
     "realtime_compose_vs_api15_diag_delay_sec": 120.0,
     "realtime_compose_vs_api15_diag_gap_sec": 1.1,
