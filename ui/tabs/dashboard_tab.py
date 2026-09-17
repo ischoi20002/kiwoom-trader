@@ -410,7 +410,11 @@ class DashboardTab:
     def _show_update_check_result(self, result: Any) -> None:
         """확인 결과 다이얼로그 — 새 버전이면 적용 여부 확인."""
         try:
-            from core.app_updater import format_check_summary, start_update_process
+            from core.app_updater import (
+                format_check_summary,
+                sanitize_for_messagebox,
+                start_update_process,
+            )
             from utils.gui_restart import is_monitoring_active
         except Exception as e:
             try:
@@ -423,23 +427,32 @@ class DashboardTab:
             summary = format_check_summary(result)
         except Exception:
             summary = str(result)
+        summary_ui = sanitize_for_messagebox(summary)
 
         if result is None or not getattr(result, "ok", False):
             try:
                 messagebox.showerror(
                     "업데이트 확인",
-                    summary or "확인 실패",
+                    summary_ui or "확인 실패\n(자세한 내용: c:\\k-trader\\last_update_check.log)",
                     parent=self.parent,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    if callable(getattr(self.app, "log", None)):
+                        self.app.log(f"[Update] 확인 실패 다이얼로그 오류: {e!r} / {summary_ui}")
+                except Exception:
+                    pass
             return
 
         if not bool(getattr(result, "update_available", False)):
             try:
-                messagebox.showinfo("업데이트 확인", summary, parent=self.parent)
-            except Exception:
-                pass
+                messagebox.showinfo("업데이트 확인", summary_ui, parent=self.parent)
+            except Exception as e:
+                try:
+                    if callable(getattr(self.app, "log", None)):
+                        self.app.log(f"[Update] 최신 안내 다이얼로그 오류: {e!r}")
+                except Exception:
+                    pass
             return
 
         monitoring = False
@@ -451,7 +464,7 @@ class DashboardTab:
         warn = ""
         if monitoring:
             warn = (
-                "\n\n⚠️ 현재 실시간 감시 중입니다.\n"
+                "\n\n[주의] 현재 실시간 감시 중입니다.\n"
                 "업데이트하면 감시가 중단되고 프로그램이 재시작됩니다."
             )
 
@@ -460,11 +473,21 @@ class DashboardTab:
             apply = bool(
                 messagebox.askyesno(
                     "업데이트 적용",
-                    f"{summary}{warn}\n\n지금 적용하고 재시작할까요?",
+                    f"{summary_ui}{warn}\n\n지금 적용하고 재시작할까요?",
                     parent=self.parent,
                 )
             )
-        except Exception:
+        except Exception as e:
+            try:
+                messagebox.showerror(
+                    "업데이트 확인",
+                    sanitize_for_messagebox(
+                        f"확인 창 표시 실패: {e!r}\n\n{summary_ui}"
+                    ),
+                    parent=self.parent,
+                )
+            except Exception:
+                pass
             apply = False
         if not apply:
             return
@@ -482,7 +505,7 @@ class DashboardTab:
             try:
                 messagebox.showerror(
                     "업데이트 적용",
-                    f"시작 실패:\n{msg}",
+                    sanitize_for_messagebox(f"시작 실패:\n{msg}"),
                     parent=self.parent,
                 )
             except Exception:
@@ -491,7 +514,7 @@ class DashboardTab:
 
         try:
             if callable(log_fn):
-                log_fn("📦 [Update] 원격 업데이트 시작 — 잠시 후 종료합니다.")
+                log_fn("[Update] 원격 업데이트 시작 — 잠시 후 종료합니다.")
         except Exception:
             pass
 

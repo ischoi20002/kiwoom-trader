@@ -29,6 +29,9 @@ _VERSION_RE = re.compile(
     r"""APP_VERSION\s*:\s*str\s*=\s*["']([0-9]+(?:\.[0-9]+)*)["']"""
 )
 _TAG_VERSION_RE = re.compile(r"^v?(?P<ver>[0-9]+(?:\.[0-9]+)*)$", re.I)
+# 프로세스 내 토큰 캐시 (값 자체는 로그에 남기지 않음)
+_CACHED_GITHUB_TOKEN: Optional[str] = None
+_TOKEN_RESOLVE_TRIED: bool = False
 
 
 @dataclass(frozen=True)
@@ -225,8 +228,122 @@ def resolve_github_repo() -> str:
     return DEFAULT_REPO
 
 
+def _win_creationflags() -> int:
+    """콘솔 창 없이 서브프로세스 실행 (Windows)."""
+    if sys.platform == "win32":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+    return 0
+
+
+def _subprocess_env() -> Dict[str, str]:
+    """git/gh 비대화형 실행용 환경변수."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+    return env
+
+
+def _candidate_tool_paths(names: Tuple[str, ...]) -> List[Path]:
+    """PATH·고정 설치 경로에서 실행 파일 후보를 모은다."""
+    found: List[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        try:
+            rp = str(p.resolve()).lower()
+        except Exception:
+            rp = str(p).lower()
+        if rp in seen:
+            return
+        if p.is_file():
+            seen.add(rp)
+            found.append(p)
+
+    for name in names:
+        try:
+            import shutil
+
+            which = shutil.which(name)
+            if which:
+                _add(Path(which))
+        except Exception:
+            pass
+
+    if sys.platform == "win32":
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        local = os.environ.get("LOCALAPPDATA", "")
+        extras = [
+            Path(pf) / "Git" / "cmd" / "git.exe",
+            Path(pf) / "Git" / "bin" / "git.exe",
+            Path(pf86) / "Git" / "cmd" / "git.exe",
+            Path(pf) / "GitHub CLI" / "gh.exe",
+            Path(local) / "Programs" / "Git" / "cmd" / "git.exe" if local else None,
+            Path(local) / "Programs" / "GitHub CLI" / "gh.exe" if local else None,
+        ]
+        for p in extras:
+            if p is not None:
+                _add(p)
+    return found
+
+
+def _token_from_git_credential() -> str:
+    """git credential fill 로 github.com 비밀번호(토큰) 조회."""
+    for git_exe in _candidate_tool_paths(("git", "git.exe")):
+        try:
+            proc = subprocess.run(
+                [str(git_exe), "credential", "fill"],
+                input="protocol=https\nhost=github.com\n\n",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=12,
+                creationflags=_win_creationflags(),
+                env=_subprocess_env(),
+            )
+            if proc.returncode != 0:
+                continue
+            for line in (proc.stdout or "").splitlines():
+                if line.startswith("password="):
+                    tok = line.split("=", 1)[1].strip()
+                    if tok:
+                        return tok
+        except Exception:
+            continue
+    return ""
+
+
+def _token_from_gh_cli() -> str:
+    """gh auth token 조회."""
+    for gh_exe in _candidate_tool_paths(("gh", "gh.exe")):
+        try:
+            proc = subprocess.run(
+                [str(gh_exe), "auth", "token"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=12,
+                creationflags=_win_creationflags(),
+                env=_subprocess_env(),
+            )
+            if proc.returncode == 0:
+                tok = str(proc.stdout or "").strip()
+                if tok:
+                    return tok
+        except Exception:
+            continue
+    return ""
+
+
 def resolve_github_token() -> str:
     """비공개 Release 다운로드용 토큰."""
+    global _CACHED_GITHUB_TOKEN, _TOKEN_RESOLVE_TRIED
+    if _CACHED_GITHUB_TOKEN:
+        return _CACHED_GITHUB_TOKEN
+
+    tok = ""
     for key in (
         "KTRADER_GITHUB_TOKEN",
         "GH_TOKEN",
@@ -234,66 +351,72 @@ def resolve_github_token() -> str:
     ):
         v = str(os.environ.get(key) or "").strip()
         if v:
-            return v
-    try:
-        s = _settings_dict()
-        v = str(s.get("github_releases_token") or "").strip()
-        if v:
-            return v
-    except Exception:
-        pass
-    try:
-        import config as _cfg  # type: ignore
+            tok = v
+            break
+    if not tok:
+        try:
+            s = _settings_dict()
+            v = str(s.get("github_releases_token") or "").strip()
+            if v:
+                tok = v
+        except Exception:
+            pass
+    if not tok:
+        try:
+            import config as _cfg  # type: ignore
 
-        v = str(getattr(_cfg, "GITHUB_RELEASES_TOKEN", "") or "").strip()
-        if v:
-            return v
-    except Exception:
-        pass
-    # Windows: git credential manager (push 에 쓰는 것과 동일, 토큰 출력 없음)
+            v = str(getattr(_cfg, "GITHUB_RELEASES_TOKEN", "") or "").strip()
+            if v:
+                tok = v
+        except Exception:
+            pass
+    if not tok:
+        # Windows: git credential manager (push 에 쓰는 것과 동일, 토큰 출력 없음)
+        tok = _token_from_git_credential()
+    if not tok:
+        tok = _token_from_gh_cli()
+
+    _TOKEN_RESOLVE_TRIED = True
+    if tok:
+        _CACHED_GITHUB_TOKEN = tok
+    return tok
+
+
+def _write_last_update_check(result: "UpdateCheckResult") -> None:
+    """확인 결과를 운영 폴더에 남겨 GUI 다이얼로그 실패 시에도 원인을 볼 수 있게 함."""
     try:
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        proc = subprocess.run(
-            ["git", "credential", "fill"],
-            input="protocol=https\nhost=github.com\n\n",
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15,
-            creationflags=creationflags,
-        )
-        if proc.returncode == 0:
-            for line in (proc.stdout or "").splitlines():
-                if line.startswith("password="):
-                    tok = line.split("=", 1)[1].strip()
-                    if tok:
-                        return tok
+        root = resolve_prod_root()
+        path = root / "last_update_check.log"
+        lines = [
+            f"time={time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"ok={result.ok}",
+            f"local={result.local_version}",
+            f"remote={result.remote_version}",
+            f"update_available={result.update_available}",
+            f"repo={result.remote_ref}",
+            f"tag={result.release_tag}",
+            f"asset={result.asset_name}",
+            f"token_present={bool(resolve_github_token())}",
+            f"message={result.message}",
+            f"error={result.error}",
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except Exception:
         pass
-    # gh CLI 로그인 토큰
+
+
+def sanitize_for_messagebox(text: str) -> str:
+    """Tk messagebox 가 깨질 수 있는 문자를 제거·치환."""
     try:
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        proc = subprocess.run(
-            ["gh", "auth", "token"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15,
-            creationflags=creationflags,
-        )
-        if proc.returncode == 0:
-            tok = str(proc.stdout or "").strip()
-            if tok:
-                return tok
+        s = str(text or "")
+        # NULL·제어문자 제거 (Tk TclError 예방)
+        s = "".join(ch if (ord(ch) >= 32 or ch in "\n\r\t") else "?" for ch in s)
+        # 이모지·특수기호는 안내 문구에서 빼도 의미 유지
+        for bad in ("⚠️", "⚠", "✅", "❌", "📦", "🚀"):
+            s = s.replace(bad, "")
+        return s.strip() or "(메시지 없음)"
     except Exception:
-        pass
-    return ""
+        return "(메시지 변환 실패)"
 
 
 def _safe_emit(log: Optional[Callable[[str], None]], msg: str) -> None:
@@ -450,24 +573,35 @@ def check_for_update(
         emit(f"[Update] GitHub Release 확인: {repo} ...")
         data = fetch_latest_release(repo=repo, token=token)
     except Exception as e:
+        err = str(e)
         hint = ""
+        low = err.lower()
         if not token:
             hint = (
-                " (비공개 저장소면 GH_TOKEN 또는 settings.github_releases_token 필요)"
+                "\n(비공개 저장소: GH_TOKEN / settings.github_releases_token 필요."
+                " git credential·gh 로그인 토큰도 사용합니다.)"
             )
-        return UpdateCheckResult(
+        elif "404" in err or "not found" in low:
+            hint = (
+                "\n(토큰은 있으나 404 — repo 권한/토큰 스코프(Contents·Releases)를 확인하세요)"
+            )
+        elif "401" in err or "403" in err:
+            hint = "\n(인증 실패 — 토큰 만료·권한을 확인하세요)"
+        result = UpdateCheckResult(
             ok=False,
             local_version=local_ver,
             remote_version="",
             update_available=False,
             remote_ref=f"github:{repo}",
-            error=f"{e}{hint}",
+            error=f"{err}{hint}",
         )
+        _write_last_update_check(result)
+        return result
 
     tag = str(data.get("tag_name") or "").strip()
     remote_ver = version_from_release_tag(tag)
     if not remote_ver:
-        return UpdateCheckResult(
+        result = UpdateCheckResult(
             ok=False,
             local_version=local_ver,
             remote_version="",
@@ -476,11 +610,13 @@ def check_for_update(
             release_tag=tag,
             error=f"Release 태그에서 버전 파싱 실패: {tag!r}",
         )
+        _write_last_update_check(result)
+        return result
 
     assets = data.get("assets") if isinstance(data.get("assets"), list) else []
     asset = _pick_release_asset(assets, remote_ver)
     if asset is None:
-        return UpdateCheckResult(
+        result = UpdateCheckResult(
             ok=False,
             local_version=local_ver,
             remote_version=remote_ver,
@@ -489,6 +625,8 @@ def check_for_update(
             release_tag=tag,
             error=f"Release {tag} 에 k-trader-*.zip 자산 없음",
         )
+        _write_last_update_check(result)
+        return result
 
     newer = version_is_newer(remote_ver, local_ver)
     # 동일 버전이어도 자산이 있고 로컬과 태그가 다르면(재게시) 갱신 제안하지 않음 — 버전만
@@ -499,7 +637,7 @@ def check_for_update(
     else:
         msg = f"최신입니다 (v{local_ver})"
 
-    return UpdateCheckResult(
+    result = UpdateCheckResult(
         ok=True,
         local_version=local_ver,
         remote_version=remote_ver,
@@ -511,6 +649,8 @@ def check_for_update(
         asset_url=str(asset.get("browser_download_url") or ""),
         message=msg,
     )
+    _write_last_update_check(result)
+    return result
 
 
 def format_check_summary(result: UpdateCheckResult) -> str:
