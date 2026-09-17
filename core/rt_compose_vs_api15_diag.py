@@ -255,12 +255,17 @@ def note_after_closed_15m_eval(
         except Exception:
             now = datetime.now()
         wait = (fire_at - now).total_seconds()
-        if wait < 0.5:
+        # 비교 시각이 지난 뒤 도착한 늦은 평가는 새 즉시-배치를 만들지 않음
+        # (완료 후 _BATCHES.pop 되면 1종목씩 재예약되던 문제)
+        past_due = wait < 0.5
+        if past_due:
             wait = 0.5
 
         with _LOCK:
             batch = _BATCHES.get(sk)
             if batch is None:
+                if past_due:
+                    return
                 batch = SlotBatch(slot_ts=slot, slot_key=sk)
                 _BATCHES[sk] = batch
             if batch.fired:
