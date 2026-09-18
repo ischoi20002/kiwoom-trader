@@ -24,6 +24,10 @@
 
 **EOD1m배치 진단 로그**: 15:19·15:30 공식 조회 시 ka10080 차트에 두 라벨이
 동시에 있는지 ``EOD1m배치`` GUI·JSONL(``eod_m1_batch_diag``)로 기록.
+
+**공식1분 도착 프로브**: 15:14·15:19·15:30 마감 후 ka10080를 주기 조회해
+해당 라벨이 차트에 처음 등장하는 시각을 GUI·JSONL(``m1_official_arrival_probe``)에 기록.
+평가 경로와 무관한 진단 전용입니다.
 """
 
 from __future__ import annotations
@@ -102,6 +106,9 @@ class RtWatchlistM1ApiPoller:
         self._eod_m1_batch_log_agg: Dict[str, Dict[str, Any]] = {}
         self._eod_m1_batch_log_lock = threading.Lock()
         self._eod_m1_batch_simul_logged: Set[str] = set()
+        # 15:14·15:19·15:30 공식1분 최초 도착 시각 프로브(당일 라벨당 1회)
+        self._official_arrival_probe_started: Set[str] = set()
+        self._official_arrival_probe_lock = threading.Lock()
 
     def _emit(self, msg: str) -> None:
         if self._log is None:
@@ -693,6 +700,262 @@ class RtWatchlistM1ApiPoller:
             )
         except Exception:
             pass
+
+    def _official_arrival_probe_enabled(self) -> bool:
+        """15:14·15:19·15:30 공식1분 최초 도착 시각 프로브."""
+        try:
+            return self._settings_bool(
+                self._settings(), "realtime_m1_official_arrival_probe_enabled", True
+            )
+        except Exception:
+            return True
+
+    def _official_arrival_probe_interval_sec(self) -> float:
+        try:
+            v = float(
+                self._settings().get(
+                    "realtime_m1_official_arrival_probe_interval_sec", 15.0
+                )
+            )
+        except (TypeError, ValueError):
+            v = 15.0
+        return max(5.0, min(v, 60.0))
+
+    def _official_arrival_probe_max_sec(self) -> float:
+        try:
+            v = float(
+                self._settings().get(
+                    "realtime_m1_official_arrival_probe_max_sec", 600.0
+                )
+            )
+        except (TypeError, ValueError):
+            v = 600.0
+        return max(60.0, min(v, 1200.0))
+
+    @staticmethod
+    def _is_official_arrival_probe_label(closed_lab: pd.Timestamp) -> bool:
+        """
+        도착 시각을 측정할 말분 라벨.
+
+        - 15:14: 15:00 슬롯 말분 (일반 말분 대조군)
+        - 15:19: 동시호가 직전 말분 (과거 15:29 대기 이슈)
+        - 15:30: 종가 단일가
+        """
+        try:
+            t = pd.Timestamp(closed_lab).floor("min")
+            if int(t.hour) == 15 and int(t.minute) == 14:
+                return True
+            if bool(is_pre_auction_last_m1_open(t)):
+                return True
+            if bool(is_krx_last_15m_slot(t)):
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _maybe_start_official_arrival_probe(
+        self, codes: List[str], closed_lab: pd.Timestamp
+    ) -> None:
+        """대상 말분이 닫히면 당일 1회 도착 프로브를 예약합니다."""
+        try:
+            if not self._official_arrival_probe_enabled():
+                return
+            if not self._is_official_arrival_probe_label(closed_lab):
+                return
+            lab = pd.Timestamp(closed_lab).floor("min")
+            day_key = lab.strftime("%Y-%m-%d")
+            hm = lab.strftime("%H:%M")
+            key = f"{day_key}|{hm}"
+            with self._official_arrival_probe_lock:
+                if key in self._official_arrival_probe_started:
+                    return
+                self._official_arrival_probe_started.add(key)
+                if len(self._official_arrival_probe_started) > 32:
+                    self._official_arrival_probe_started = set(
+                        sorted(self._official_arrival_probe_started)[-16:]
+                    )
+            probe_code = ""
+            try:
+                cands = self._probe_candidate_codes(list(codes or []))
+                if cands:
+                    probe_code = canonical_stock_code(str(cands[0]).strip())
+            except Exception:
+                probe_code = ""
+            if not probe_code:
+                try:
+                    ac = self._active_codes()
+                    if ac:
+                        probe_code = canonical_stock_code(str(ac[0]).strip())
+                except Exception:
+                    probe_code = ""
+            if not probe_code:
+                try:
+                    self._emit(
+                        f"ℹ️ [M1Poll] 공식1분도착프로브 lab={hm} "
+                        f"감시종목 없음 — 생략"
+                    )
+                except Exception:
+                    pass
+                return
+            close_wall = lab + pd.Timedelta(minutes=1)
+            sk = lab.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                self._emit(
+                    f"ℹ️ [M1Poll] 공식1분도착프로브 시작 lab={hm} "
+                    f"code={probe_code} "
+                    f"interval={self._official_arrival_probe_interval_sec():.0f}s "
+                    f"max={self._official_arrival_probe_max_sec():.0f}s"
+                )
+            except Exception:
+                pass
+            # 마감 직후 2초부터 첫 조회
+            t = threading.Timer(
+                2.0,
+                self._job_official_arrival_probe,
+                args=(probe_code, lab, sk, close_wall, 0),
+            )
+            t.daemon = True
+            t.start()
+        except Exception as e:
+            try:
+                self._emit(f"⚠️ [M1Poll] 공식1분도착프로브 예약 실패: {e!r}")
+            except Exception:
+                pass
+
+    def _job_official_arrival_probe(
+        self,
+        code: str,
+        closed_lab: pd.Timestamp,
+        sk: str,
+        close_wall: pd.Timestamp,
+        attempt: int,
+    ) -> None:
+        """
+        ka10080로 대상 1분 라벨이 차트에 등장하는 최초 시각을 기록합니다.
+
+        평가·합성 경로와 분리된 진단 전용 폴링입니다.
+        """
+        try:
+            if not self._monitoring():
+                return
+            if not self._official_arrival_probe_enabled():
+                return
+            nk = canonical_stock_code(str(code or "").strip())
+            lab = pd.Timestamp(closed_lab).floor("min")
+            hm = lab.strftime("%H:%M")
+            if not nk:
+                return
+            try:
+                now = datetime.now()
+                elapsed = (
+                    pd.Timestamp(now) - pd.Timestamp(close_wall)
+                ).total_seconds()
+            except Exception:
+                elapsed = float(attempt) * self._official_arrival_probe_interval_sec()
+            max_w = self._official_arrival_probe_max_sec()
+            if elapsed > float(max_w) + 1.0:
+                try:
+                    self._emit(
+                        f"⚠️ [M1Poll] 공식1분도착프로브 lab={hm} "
+                        f"미도착 타임아웃 elapsed={elapsed:.0f}s "
+                        f"code={nk} (한도 {max_w:.0f}s)"
+                    )
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self._app, "session_logger", None)
+                    if sl is not None and hasattr(sl, "log"):
+                        sl.log(
+                            "m1_official_arrival_probe",
+                            {
+                                "lab": hm,
+                                "code": nk,
+                                "status": "timeout",
+                                "elapsed_sec": round(float(elapsed), 1),
+                                "attempt": int(attempt),
+                            },
+                        )
+                except Exception:
+                    pass
+                return
+
+            row, chart_df, last_err = self._fetch_closed_minute_row(
+                nk, lab, sk, max_retries=1
+            )
+            status = self._classify_fetch_result(row, chart_df, lab, last_err)
+            chart_max = ""
+            try:
+                if chart_df is not None and not getattr(chart_df, "empty", True):
+                    chart_max = pd.Timestamp(chart_df.index.max()).strftime("%H:%M:%S")
+            except Exception:
+                chart_max = ""
+
+            arrived = status in ("ok", "row_not_found")
+            if arrived:
+                try:
+                    wall_s = datetime.now().strftime("%H:%M:%S")
+                    detail = (
+                        "행있음"
+                        if status == "ok"
+                        else "차트통과·행없음(무거래가능)"
+                    )
+                    self._emit(
+                        f"✅ [M1Poll] 공식1분도착프로브 lab={hm} 도착 "
+                        f"code={nk} elapsed={elapsed:.0f}s wall={wall_s} "
+                        f"status={status}({detail}) "
+                        f"chart_max={chart_max or '-'}"
+                    )
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self._app, "session_logger", None)
+                    if sl is not None and hasattr(sl, "log"):
+                        sl.log(
+                            "m1_official_arrival_probe",
+                            {
+                                "lab": hm,
+                                "code": nk,
+                                "status": str(status),
+                                "elapsed_sec": round(float(elapsed), 1),
+                                "attempt": int(attempt),
+                                "chart_max": chart_max,
+                                "wall": datetime.now().strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                ),
+                            },
+                        )
+                except Exception:
+                    pass
+                return
+
+            # 미도착: 첫회·이후 4회마다 대기 로그
+            if int(attempt) == 0 or (int(attempt) % 4) == 0:
+                try:
+                    self._emit(
+                        f"⏳ [M1Poll] 공식1분도착프로브 lab={hm} 대기 "
+                        f"elapsed={elapsed:.0f}s code={nk} "
+                        f"status={status} chart_max={chart_max or '-'} "
+                        f"err={str(last_err or '')[:40]}"
+                    )
+                except Exception:
+                    pass
+
+            gap = self._official_arrival_probe_interval_sec()
+            try:
+                t = threading.Timer(
+                    float(gap),
+                    self._job_official_arrival_probe,
+                    args=(nk, lab, sk, close_wall, int(attempt) + 1),
+                )
+                t.daemon = True
+                t.start()
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self._emit(f"⚠️ [M1Poll] 공식1분도착프로브 예외: {e!r}")
+            except Exception:
+                pass
 
     def _settings(self) -> Dict[str, Any]:
         try:
@@ -2054,6 +2317,8 @@ class RtWatchlistM1ApiPoller:
                 self._active_rounds.clear()
             with self._eod_m1_batch_log_lock:
                 self._eod_m1_batch_simul_logged.clear()
+            with self._official_arrival_probe_lock:
+                self._official_arrival_probe_started.clear()
         except Exception:
             pass
 
@@ -2474,6 +2739,13 @@ class RtWatchlistM1ApiPoller:
                         codes_a = self._active_codes()
                         if codes_a:
                             self._schedule_auction_1530_tick_path(codes_a, wf)
+                            try:
+                                # 15:30은 just-completed가 15:31이므로 벽시계 15:30에 프로브 기동
+                                self._maybe_start_official_arrival_probe(
+                                    codes_a, wf
+                                )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
@@ -2486,6 +2758,11 @@ class RtWatchlistM1ApiPoller:
                 if not codes:
                     continue
                 self._last_scheduled_round = sk
+                try:
+                    # 15:14·15:19·15:30 공식1분 최초 도착 시각(평가와 무관한 진단)
+                    self._maybe_start_official_arrival_probe(codes, closed_lab)
+                except Exception:
+                    pass
                 with self._round_lock:
                     self._dormant_rounds = {
                         x for x in self._dormant_rounds if x == sk

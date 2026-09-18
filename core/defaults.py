@@ -127,6 +127,10 @@ DEFAULT_SETTINGS = {
     "realtime_pre_auction_official_wait_max_sec": 540.0,
     # 15:30 비NXT: 공식 1분 대기 상한(초). 기본 300=5분
     "realtime_eod_official_wait_max_sec": 300.0,
+    # 15:14·15:19·15:30 공식1분 최초 도착 시각 프로브(진단 로그)
+    "realtime_m1_official_arrival_probe_enabled": True,
+    "realtime_m1_official_arrival_probe_interval_sec": 15.0,
+    "realtime_m1_official_arrival_probe_max_sec": 600.0,
     "realtime_auction_1530_tick_wait_sec": 5.0,
     # 15:30 단일가: 틱/공식1분 미준비 시 재시도(전 종목 평가 보장)
     "realtime_auction_1530_eval_max_attempts": 12,
