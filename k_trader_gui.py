@@ -763,11 +763,18 @@ class KiwoomApp:
         from core.watchlist_store import WatchlistStore
         from core.signal_engine import SignalEngine
         self.watchlist_store = WatchlistStore(logger_callback=self.log)
-        # [옵션 A] 실시간 감시 시작 직후 종목명 표시를 위해 kodex200.csv에서 Code/Name 선적재
+        # 선택한 유니버스 인덱스 CSV만 종목명 캐시로 선적재 (미선택 kodex200 강제 로드 방지)
         try:
-            _added = self.watchlist_store.preload_from_kodex200_csv(logger_callback=self.log)
-            if _added > 0:
-                self.log(f"[Watchlist] kodex200.csv 이름 캐시 선적재 완료: { _added }개")
+            _idx = "KODEX200"
+            try:
+                _idx = str(
+                    (self.settings or {}).get("universe_index_choice", "KODEX200")
+                ).strip().upper()
+            except Exception:
+                _idx = "KODEX200"
+            self.watchlist_store.preload_from_universe_index(
+                _idx, logger_callback=self.log
+            )
         except Exception:
             pass
         self.watchlist_synth_state = {}
@@ -4127,7 +4134,7 @@ class KiwoomApp:
 
     def _start_account_summary_telegram_worker(self, *, header: str, seq: int) -> None:
         """
-        계좌 동기화(REST 포함) 후, UI 요약을 다시 읽어 텔레그램을 발송합니다.
+        계좌 동기화(REST 포함, force) 후 UI 요약을 다시 읽어 텔레그램을 발송합니다.
 
         seq는 타이머 중복 실행 시 최신 요청만 처리하기 위한 용도입니다.
         """
@@ -4142,14 +4149,13 @@ class KiwoomApp:
             acquired = False
             try:
                 acquired = self._portfolio_sync_thread_lock.acquire(timeout=120.0)
-                if not acquired:
-                    return
-                # silent=True: UI/터미널 로그 스팸 방지
-                self.portfolio.sync_with_actual_account(
-                    silent=True,
-                    force=False,
-                    refresh_cash_deposit=True,
-                )
+                if acquired:
+                    # 체결 반영 직후 스로틀로 스킵되면 요약이 틀어지므로 force=True
+                    self.portfolio.sync_with_actual_account(
+                        silent=True,
+                        force=True,
+                        refresh_cash_deposit=True,
+                    )
             except Exception:
                 pass
             finally:
@@ -4161,7 +4167,12 @@ class KiwoomApp:
 
             def _after() -> None:
                 try:
-                    # 상단 요약 값 갱신 후 읽기
+                    # 최신 seq만 처리 (연속 체결 시 이전 워커 결과 폐기)
+                    if seq != self._account_summary_after_trade_seq:
+                        return
+                except Exception:
+                    pass
+                try:
                     if hasattr(self, "virtual_tab"):
                         self.virtual_tab.refresh_portfolio_light()
                 except Exception:
@@ -4183,12 +4194,12 @@ class KiwoomApp:
         except Exception:
             pass
 
-    def schedule_account_summary_telegram_after_trade(self, *, delay_sec: int = 40) -> None:
+    def schedule_account_summary_telegram_after_trade(self, *, delay_sec: int = 12) -> None:
         """
-        매수/매도 발송 이후 delay_sec(기본 약 40초) 지연 후
-        계좌 동기화 완료 결과로 계좌요약 텔레그램을 1회 추가 전송합니다.
+        체결 확정 이후 delay_sec(기본 12초) 지연 후
+        force 계좌 동기화 결과로 계좌요약 텔레그램을 발송합니다.
 
-        연속 주문이 들어오면 최신 주문 기준으로 이전 타이머는 취소(최종 1회만 발송).
+        연속 체결이 들어오면 최신 기준으로 이전 타이머는 취소(최종 1회만 발송).
         """
         try:
             root = getattr(self, "root", None)
@@ -4200,7 +4211,7 @@ class KiwoomApp:
         try:
             delay_ms = max(0, int(delay_sec * 1000))
         except Exception:
-            delay_ms = 1800 * 1000
+            delay_ms = 12 * 1000
 
         self._account_summary_after_trade_seq += 1
         seq = self._account_summary_after_trade_seq
@@ -4216,11 +4227,10 @@ class KiwoomApp:
 
         def _job() -> None:
             try:
-                # 최신 seq만 처리
                 if seq != self._account_summary_after_trade_seq:
                     return
                 self._start_account_summary_telegram_worker(
-                    header="주문 후 계좌정보 동기화 완료 +",
+                    header="체결 후 계좌정보 동기화",
                     seq=seq,
                 )
             except Exception:

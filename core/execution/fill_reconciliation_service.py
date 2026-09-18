@@ -16,6 +16,9 @@ class FillReconciliationService:
     def __init__(self, app: Any, *, log_func: Optional[Any] = None) -> None:
         self.app = app
         self.log = log_func or print
+        # 주문번호당 체결 텔레그램 1회 (RC4033·kt00007 중복 호출 방지)
+        self._telegram_fill_sent: Set[str] = set()
+        self._telegram_fill_lock = threading.Lock()
 
     def _fcs(self) -> Any:
         return getattr(self.app, "fill_confirmation_service", None)
@@ -65,10 +68,22 @@ class FillReconciliationService:
         except Exception:
             return "-"
 
-    def _maybe_send_buy_sell_telegram(self, code: str, order_no: str, side: str) -> None:
+    def _maybe_send_buy_sell_telegram(
+        self,
+        code: str,
+        order_no: str,
+        side: str,
+        *,
+        fallback_qty: Optional[int] = None,
+        fallback_price: Optional[float] = None,
+        fallback_name: str = "",
+        fallback_reason: str = "",
+    ) -> None:
         """
-        체결 DB(row) 기준으로 '매수/매도' 텔레그램을 1회만 보냅니다.
-        (주문번호 + 중복 방지 set을 이미 처리하고 있는 호출부만 이 함수를 호출)
+        체결 확정 시 '매수/매도 체결' 텔레그램을 주문번호당 1회만 보냅니다.
+
+        DB row가 없거나 filled_qty=0(kt00007 지연·RC4033)이어도
+        fallback 수량/가격으로 발송해 체결 알림 누락을 막습니다.
         """
         try:
             if not getattr(self.app, "send_telegram_message", None):
@@ -76,12 +91,71 @@ class FillReconciliationService:
         except Exception:
             return
 
+        oid = str(order_no or "").strip()
+        if not oid:
+            return
         try:
-            row = self.app.data_manager.get_order_history_row_for_telegram(code, order_no)
-            if not row:
+            with self._telegram_fill_lock:
+                if oid in self._telegram_fill_sent:
+                    return
+        except Exception:
+            pass
+
+        try:
+            row: Optional[Dict[str, Any]] = None
+            try:
+                row = self.app.data_manager.get_order_history_row_for_telegram(
+                    code, order_no
+                )
+            except Exception:
+                row = None
+            if not isinstance(row, dict):
+                row = {}
+
+            side_src = row.get("side") or side
+            side_kr = self._order_side_to_kr(side_src)
+
+            try:
+                fq = int(row.get("filled_qty") or 0)
+            except (TypeError, ValueError):
+                fq = 0
+            if fq <= 0 and fallback_qty is not None:
+                try:
+                    fq = int(fallback_qty or 0)
+                except (TypeError, ValueError):
+                    fq = 0
+
+            try:
+                fp = float(row.get("filled_price") or 0)
+            except (TypeError, ValueError):
+                fp = 0.0
+            if fp <= 0 and fallback_price is not None:
+                try:
+                    fp = float(fallback_price or 0)
+                except (TypeError, ValueError):
+                    fp = 0.0
+
+            name = str(row.get("name") or fallback_name or "").strip() or "-"
+            reason = str(row.get("reason") or fallback_reason or "").strip() or "-"
+            ts = str(row.get("timestamp") or "").strip()
+            if not ts:
+                try:
+                    from datetime import datetime as _dt
+
+                    ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    ts = "-"
+
+            # 체결수량이 없으면 오발송 방지 (dedup 미등록 → 이후 재시도 가능)
+            if fq <= 0:
+                try:
+                    self.log(
+                        f"⚠️ [Telegram] 체결 알림 대기(수량 없음) ord={oid}"
+                    )
+                except Exception:
+                    pass
                 return
 
-            side_kr = self._order_side_to_kr(row.get("side"))
             def _esc(v: Any) -> str:
                 try:
                     s = str(v if v is not None else "-")
@@ -96,22 +170,32 @@ class FillReconciliationService:
             msg = (
                 f"📌 <b>[매수/매도 체결]</b>\n"
                 f"매수/매도: {_esc(side_kr)}\n"
-                f"종목명: {_esc(row.get('name') or '-')}\n"
-                f"주문가: {self._fmt_price_comma(row.get('price'))}원\n"
-                f"체결가: {self._fmt_price_comma(row.get('filled_price'))}원\n"
-                f"체결수량: {self._fmt_int_comma(row.get('filled_qty'))}주\n"
+                f"종목명: {_esc(name)}\n"
+                f"주문가: {self._fmt_price_comma(row.get('price') or fp)}원\n"
+                f"체결가: {self._fmt_price_comma(fp)}원\n"
+                f"체결수량: {self._fmt_int_comma(fq)}주\n"
                 f"VP: {self._fmt_vp_cell(row.get('snap_vol_power'))}\n"
                 f"호가: {_esc(self._fmt_ba_cell(row.get('snap_bid_ask')))}\n"
-                f"사유: {_esc(row.get('reason') or '-')}\n"
-                f"일시: {_esc(str(row.get('timestamp') or '').strip() or '-')}"
+                f"사유: {_esc(reason)}\n"
+                f"일시: {_esc(ts)}"
             )
 
-            import threading
+            try:
+                with self._telegram_fill_lock:
+                    if oid in self._telegram_fill_sent:
+                        return
+                    self._telegram_fill_sent.add(oid)
+                    if len(self._telegram_fill_sent) > 500:
+                        self._telegram_fill_sent.clear()
+                        self._telegram_fill_sent.add(oid)
+            except Exception:
+                pass
 
             threading.Thread(
                 target=self.app.send_telegram_message,
                 args=(msg,),
                 daemon=True,
+                name=f"TgFill-{oid}",
             ).start()
         except Exception as e:
             try:

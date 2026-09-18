@@ -410,10 +410,37 @@ class FillConfirmationService:
 
             if oid and side_l in ("buy", "sell"):
                 try:
-                    frs = getattr(self.app, "fill_reconciliation_service", None)
-                    if frs is not None and hasattr(frs, "_maybe_send_buy_sell_telegram"):
-                        if self.is_fully_applied(oid):
-                            frs._maybe_send_buy_sell_telegram(nc, oid, side_l)
+                    if self.is_fully_applied(oid):
+                        frs = getattr(self.app, "fill_reconciliation_service", None)
+                        if frs is not None and hasattr(
+                            frs, "_maybe_send_buy_sell_telegram"
+                        ):
+                            # DB filled_qty 지연 시에도 힌트로 체결 알림 1회 보장
+                            frs._maybe_send_buy_sell_telegram(
+                                nc,
+                                oid,
+                                side_l,
+                                fallback_qty=int(
+                                    cumulative_filled_qty
+                                    if cumulative_filled_qty is not None
+                                    else self.get_applied_qty(oid) or dq
+                                ),
+                                fallback_price=float(fp),
+                                fallback_name=str(name or ""),
+                                fallback_reason=str(reason or ""),
+                            )
+                        # 접수+40초가 아니라 체결 확정 후 계좌요약 (force 동기화)
+                        try:
+                            sched = getattr(
+                                self.app,
+                                "schedule_account_summary_telegram_after_trade",
+                                None,
+                            )
+                            if callable(sched):
+                                # post-fill 1차 동기화(~4s) 반영 여유
+                                sched(delay_sec=12)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 

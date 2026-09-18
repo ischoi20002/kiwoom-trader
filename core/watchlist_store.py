@@ -90,37 +90,35 @@ class WatchlistStore:
         with self._lock:
             return [x["code"] for x in self._items]
 
-    def preload_from_kodex200_csv(
+    def preload_name_cache_from_csv(
         self,
-        csv_path: Optional[str] = None,
+        csv_path: str,
         *,
+        label: str = "",
         logger_callback: Optional[Callable[[str], None]] = None,
     ) -> int:
         """
-        `kodex200.csv`에서 Code/Name을 읽어 watchlist_store에 선적재합니다.
+        CSV에서 Code/Name을 읽어 ``_name_cache`` 에만 선적재합니다.
 
-        목적:
-        실시간 감시에서 종목명 표시를 위해 `pykrx`를 호출하지 않게 하여
-        (특히) `KRX_ID/KRX_PW` 환경변수가 없을 때의 인증 실패 로그를 줄입니다.
+        ``_items``(관심목록)에는 넣지 않습니다. pykrx 이름 조회를 줄이기 위한 캐시입니다.
         """
         log = logger_callback or self._log
-        path = csv_path or os.path.join(os.getcwd(), "kodex200.csv")
+        path = str(csv_path or "").strip()
+        tag = (label or os.path.basename(path) or "universe.csv").strip()
 
         import csv
 
         try:
-            if not os.path.isfile(path):
+            if not path or not os.path.isfile(path):
                 return 0
         except Exception:
             return 0
 
         added = 0
         try:
-            # 파일 인코딩이 환경마다 달라, utf-8-sig + errors='ignore'로 최대 호환.
             with open(path, "r", encoding="utf-8-sig", errors="ignore", newline="") as f:
                 reader = csv.reader(f)
                 for row in reader:
-                    # 최소: [Code, Name, ...]
                     if not row or len(row) < 2:
                         continue
                     raw_code = row[0]
@@ -129,7 +127,6 @@ class WatchlistStore:
                         continue
 
                     c = str(raw_code).strip()
-                    # 헤더가 들어오면 skip (code가 숫자가 아니면 제외)
                     if not c or not c.isdigit():
                         continue
                     c = c.zfill(6)
@@ -144,17 +141,102 @@ class WatchlistStore:
                     added += 1
         except Exception as e:
             try:
-                log(f"[Watchlist] kodex200.csv 이름 캐시 선적재 처리 실패: {e}")
+                log(f"[Watchlist] {tag} 이름 캐시 선적재 처리 실패: {e}")
             except Exception:
                 pass
             return 0
 
         if added > 0:
             try:
-                log(f"[Watchlist] kodex200.csv 이름 캐시 선적재: {added}개")
+                log(f"[Watchlist] {tag} 이름 캐시 선적재: {added}개")
             except Exception:
                 pass
         return added
+
+    def preload_from_universe_index(
+        self,
+        universe_index_choice: Any = "KODEX200",
+        *,
+        logger_callback: Optional[Callable[[str], None]] = None,
+        base_dir: Optional[str] = None,
+    ) -> int:
+        """
+        ``universe_index_choice`` 에 맞는 유니버스 CSV만 이름 캐시로 선적재합니다.
+
+        - KODEX200 → ``kodex200.csv``
+        - KOSPI200/KOSPI → ``kospi_universe.csv`` (없으면 kospi200*.csv 등)
+        """
+        log = logger_callback or self._log
+        try:
+            choice = str(universe_index_choice or "").strip().upper()
+        except Exception:
+            choice = "KODEX200"
+        if choice in ("KOSPI", "KOSPI200"):
+            choice = "KOSPI200"
+        else:
+            choice = "KODEX200"
+
+        root = base_dir or os.getcwd()
+        try:
+            root = str(root)
+        except Exception:
+            root = os.getcwd()
+
+        if choice == "KOSPI200":
+            candidates = [
+                os.path.join(root, "kospi_universe.csv"),
+                os.path.join(root, "kospi200.csv"),
+            ]
+            try:
+                import glob
+
+                candidates.extend(sorted(glob.glob(os.path.join(root, "kospi_universe*.csv"))))
+                candidates.extend(sorted(glob.glob(os.path.join(root, "kospi200*.csv"))))
+            except Exception:
+                pass
+            label = "kospi_universe.csv"
+        else:
+            candidates = [
+                os.path.join(root, "kodex200.csv"),
+                os.path.join(root, "kodex_200.csv"),
+            ]
+            label = "kodex200.csv"
+
+        seen: set[str] = set()
+        for path in candidates:
+            try:
+                key = os.path.normcase(os.path.abspath(path))
+            except Exception:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if not os.path.isfile(path):
+                    continue
+            except Exception:
+                continue
+            return self.preload_name_cache_from_csv(
+                path, label=os.path.basename(path) or label, logger_callback=log
+            )
+        return 0
+
+    def preload_from_kodex200_csv(
+        self,
+        csv_path: Optional[str] = None,
+        *,
+        logger_callback: Optional[Callable[[str], None]] = None,
+    ) -> int:
+        """
+        (호환) ``kodex200.csv`` 이름 캐시 선적재.
+
+        유니버스가 KODEX200일 때만 호출하는 것을 권장합니다.
+        일반 경로: ``preload_from_universe_index``.
+        """
+        path = csv_path or os.path.join(os.getcwd(), "kodex200.csv")
+        return self.preload_name_cache_from_csv(
+            path, label="kodex200.csv", logger_callback=logger_callback
+        )
 
     def codes_set(self) -> set:
         """정규화된 6자리 코드 집합 (감시 화면·포지션 관리 탭에서 숨길 때 사용)."""
@@ -182,7 +264,7 @@ class WatchlistStore:
             for it in self._items:
                 if it["code"] == c:
                     return it.get("name", c)
-        # 2) kodex200.csv 기반 이름 캐시
+        # 2) 유니버스 CSV 기반 이름 캐시
         try:
             nm = self._name_cache.get(c)
             if nm:
