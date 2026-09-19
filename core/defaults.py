@@ -34,7 +34,7 @@ DEFAULT_SETTINGS = {
     "bt_high_precision": False,
     "bt_rt_parity_intrabar": False,
     "bt_rt_parity_fast": False,
-    "mobile_status_api_enabled": False,
+    "mobile_status_api_enabled": True,
     "mobile_status_api_host": "0.0.0.0",
     "mobile_status_api_port": 8765,
     "mobile_status_api_token": "",
@@ -43,7 +43,7 @@ DEFAULT_SETTINGS = {
     "mobile_status_tls_key": "",
     "prevent_sleep_while_running": True,
     "prevent_sleep_keep_display": False,
-    "prevent_sleep_allow_after_eod": False,
+    "prevent_sleep_allow_after_eod": True,
     "next_open_1530_enabled": True,
     "order_1530_enabled": False,
     "next_open_1945_enabled": True,
@@ -116,23 +116,17 @@ DEFAULT_SETTINGS = {
     "realtime_m1_head_fill_missing_15m_enabled": True,
     "realtime_m1_head_fill_missing_15m_max_bars": 8,
     "realtime_m1_compose_overwrite_existing_15m": True,
-    # 동일 OHLCV 합성 N회(기본 2)면 해당 슬롯 재합성 중단(스토어 축출 후 평봉 오염 방지)
     "realtime_m1_compose_stable_freeze_enabled": True,
     "realtime_m1_compose_stable_match_count": 2,
     "realtime_15m_tick_tail_wait_sec": 1.5,
-    # 공식 우선: 슬롯 마감 후 이 초까지 공식 평가 대기, 미완만 틱말분 백업
     "realtime_15m_tick_tail_backup_after_close_sec": 50.0,
-    "realtime_15m_tick_tail_backup_grace_sec": 2.5,  # 구키(미사용, 호환 잔존)
-    # 레거시(미사용): 15:19는 틱말분 즉시평가. 백업은 tick_tail_backup_after_close 사용
+    "realtime_15m_tick_tail_backup_grace_sec": 2.5,
     "realtime_pre_auction_official_wait_max_sec": 540.0,
-    # 15:30 비NXT: 공식 1분 대기 상한(초). 기본 300=5분
     "realtime_eod_official_wait_max_sec": 300.0,
-    # 15:14·15:19·15:30 공식1분 최초 도착 시각 프로브(진단 로그)
     "realtime_m1_official_arrival_probe_enabled": True,
     "realtime_m1_official_arrival_probe_interval_sec": 15.0,
     "realtime_m1_official_arrival_probe_max_sec": 600.0,
     "realtime_auction_1530_tick_wait_sec": 5.0,
-    # 15:30 단일가: 틱/공식1분 미준비 시 재시도(전 종목 평가 보장)
     "realtime_auction_1530_eval_max_attempts": 12,
     "realtime_auction_1530_eval_retry_gap_sec": 2.0,
     "realtime_15m_eval_on_official_last_m1": True,
@@ -143,7 +137,6 @@ DEFAULT_SETTINGS = {
     "realtime_m1_probe_not_ready_max_wait_sec": 2.5,
     "realtime_m1_probe_candidate_codes": 3,
     "realtime_m1_fetch_not_ready_max_wait_sec": 12.0,
-    # 말분 공식1분: 공식 우선 모드에서 spread 이후 API 준비 여유(벽시계 데드라인 tail)
     "realtime_m1_last_not_ready_max_wait_sec": 8.0,
     "realtime_m1_head_not_ready_deadline_after_close_sec": 55.0,
     "realtime_eval_position_on_m1_revision_only": True,
@@ -220,8 +213,6 @@ DEFAULT_SETTINGS = {
     "realtime_s1_full_calc_min_interval_sec": 5.0,
     "realtime_s1_full_calc_fallback_sec": 120.0,
     "realtime_s1_eval_on_local_15m_close": True,
-    # 완성15 평가 후 **슬롯종료**+N초에 ka10080(15분) vs 합성봉 차이 로그(차이 종목만)
-    # 예: 09:00 라벨 → 종료 09:15 → 09:17에 비교
     "realtime_compose_vs_api15_diag_enabled": True,
     "realtime_compose_vs_api15_diag_delay_sec": 120.0,
     "realtime_compose_vs_api15_diag_gap_sec": 1.1,
@@ -375,7 +366,7 @@ DEFAULT_SETTINGS = {
     "use_gap_down_exit_a": True,
     "gap_down_limit_a": -4.0,
     "use_gap_grace_a": True,
-    "gap_grace_mins_a": 30,
+    "gap_grace_mins_a": 45,
     "use_atr_exit_a": True,
     "atr_period_a": 130,
     "use_atr_trail_only_after_tp_a": False,
@@ -384,7 +375,7 @@ DEFAULT_SETTINGS = {
     "use_gap_down_exit_b": True,
     "gap_down_limit_b": -2.5,
     "use_gap_grace_b": True,
-    "gap_grace_mins_b": 30,
+    "gap_grace_mins_b": 45,
     "use_atr_exit_b": True,
     "atr_period_b": 100,
     "use_atr_trail_only_after_tp_b": True,
@@ -408,9 +399,7 @@ DEFAULT_SETTINGS = {
     "s1_b_flash_exit_pct": 2.0,
     "use_s2_flash_exit": True,
     "s2_flash_exit_pct": 2.5,
-    # Flash/ATR 고점: False=종가·평가가만(BT·RT 통일), True=봉 High 시드
     "use_flash_peak_bar_high": False,
-    # ATR 트레일 고점만 봉 High (Flash는 use_flash_peak_bar_high)
     "use_atr_peak_bar_high": False,
     "use_s2_b_tp": True,
     "s2_b_take_profit": 5.0,
@@ -538,11 +527,16 @@ DEFAULT_SETTINGS = {
     "post_fill_sync_enable_followup": True,
     "post_fill_sync_skip_while_pending": True,
     "sync_run_kt00007_on_silent_sync": False,
-    "bt_start_date": "2024-06-03",
-    "bt_end_date": "2026-07-27",
+    "bt_start_date": "2026-01-01",
+    "bt_end_date": "2026-09-18",
     "mock_account_id": "81220142",
     "debug_terminal_trace": False,
     "realtime_warmup_pre_validate_pause_max_sec": 0.0,
+    "realtime_intrabar_m1_db_fallback": True,
+    "realtime_warmup_seed_m1_store_from_1m": False,
+    "transition_runtime_block_s1": False,
+    "transition_runtime_block_s2": False,
+    "transition_runtime_regime": "OFF",
 }
 
 # [Zombie Parameter Prevention] 유효 키 목록

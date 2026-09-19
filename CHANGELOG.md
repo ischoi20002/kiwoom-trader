@@ -13,6 +13,10 @@
 
 ---
 
+## 0.19.27 (2026-09-19)
+
+- **DEFAULT_SETTINGS 동기화**: 현재 주력 운영값을 공장 기본값에 반영 (`gap_grace_mins_a/b` 45, `prevent_sleep_allow_after_eod` True, 모바일 API 기본 사용 등). 토큰·공인 URL은 default에 비움.
+
 ## 0.19.26 (2026-09-18)
 
 - **공식1분 도착 프로브**: 15:14·15:19·15:30 마감 후 ka10080를 주기 조회해 해당 라벨이 차트에 처음 등장하는 시각을 GUI·JSONL(`m1_official_arrival_probe`)에 기록(평가와 무관한 진단).
