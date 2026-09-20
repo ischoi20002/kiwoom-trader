@@ -1965,6 +1965,226 @@ def resolve_transition_runtime_blocks(
         return False, False
 
 
+def _load_kodex200_daily_close(
+    data_manager: Any,
+    fetch_start: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """
+    KODEX200(069500) 일봉 종가. DB ``bars_1d`` + FDR 병합(최근 구간 보강).
+    반환 컬럼: ``d``(YYYY-MM-DD), ``close``.
+    """
+    frames: List[pd.DataFrame] = []
+    try:
+        if data_manager is not None and hasattr(data_manager, "_get_connection"):
+            with data_manager._get_connection() as conn:
+                df = pd.read_sql_query(
+                    """
+                    SELECT datetime as time, close
+                    FROM bars_1d
+                    WHERE code = '069500' AND datetime BETWEEN ? AND ?
+                    ORDER BY datetime
+                    """,
+                    conn,
+                    params=[fetch_start, str(end_date) + " 23:59:59"],
+                )
+            if df is not None and not df.empty:
+                tmp = df.copy()
+                tmp["time"] = pd.to_datetime(tmp["time"], errors="coerce")
+                tmp["close"] = pd.to_numeric(tmp["close"], errors="coerce")
+                tmp = tmp.dropna(subset=["time", "close"])
+                if not tmp.empty:
+                    tmp["d"] = tmp["time"].dt.strftime("%Y-%m-%d")
+                    frames.append(
+                        tmp.groupby("d", as_index=False).last()[["d", "close"]]
+                    )
+    except Exception:
+        pass
+    try:
+        fdr = _fdr_index_daily_close_df(data_manager, "069500", fetch_start, end_date)
+        if fdr is not None and not fdr.empty:
+            tmp = fdr.copy()
+            tmp["d"] = pd.to_datetime(tmp["time"], errors="coerce").dt.strftime(
+                "%Y-%m-%d"
+            )
+            tmp["close"] = pd.to_numeric(tmp["close"], errors="coerce")
+            tmp = tmp.dropna(subset=["d", "close"])
+            if not tmp.empty:
+                frames.append(tmp.groupby("d", as_index=False).last()[["d", "close"]])
+    except Exception:
+        pass
+    if not frames:
+        return pd.DataFrame(columns=["d", "close"])
+    merged = pd.concat(frames, ignore_index=True)
+    # 같은 날은 FDR(뒤쪽) 우선
+    merged = merged.drop_duplicates(subset=["d"], keep="last").sort_values("d")
+    return merged.reset_index(drop=True)
+
+
+def build_index_dd_s1_block_by_day(
+    settings: Optional[dict],
+    data_manager: Any,
+    start_date: str,
+    end_date: str,
+    logger_callback: Optional[Callable[..., None]] = None,
+) -> Dict[str, bool]:
+    """
+    지수 드로우다운+쿨다운 게이트: 일별 S1 차단 맵.
+
+    규칙 (기본 DD5_5_CD5):
+      KODEX200 N일 수익률(%) <= thr 인 **데이터일** D 종가 확정 후,
+      다음 영업일부터 ``cooldown`` 영업일 동안 S1 신규 차단.
+      S2·보유 청산은 막지 않는다.
+
+    반환: ``{ 'YYYY-MM-DD': True/False }`` (적용일 기준, BT ``current_day`` 키).
+    """
+    log = logger_callback or (lambda *_a, **_k: None)
+    out: Dict[str, bool] = {}
+    s = settings or {}
+    try:
+        if not bool(s.get("use_index_dd_gate", False)):
+            return out
+        try:
+            n = max(1, int(float(s.get("index_dd_lookback_days", 5) or 5)))
+        except (TypeError, ValueError):
+            n = 5
+        try:
+            thr = float(s.get("index_dd_ret_threshold_pct", -5.0) or -5.0)
+        except (TypeError, ValueError):
+            thr = -4.0
+        try:
+            cooldown = max(1, int(float(s.get("index_dd_cooldown_days", 5) or 5)))
+        except (TypeError, ValueError):
+            cooldown = 5
+
+        start_s = pd.to_datetime(start_date).strftime("%Y-%m-%d")
+        end_s = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+        fetch_start = (pd.to_datetime(start_s) - timedelta(days=max(40, n * 3))).strftime(
+            "%Y-%m-%d"
+        )
+        idx = _load_kodex200_daily_close(data_manager, fetch_start, end_s)
+        if idx is None or idx.empty:
+            try:
+                log("⚠️ [IndexDD] KODEX200 일봉 없음 — 게이트 미적용")
+            except Exception:
+                pass
+            return out
+
+        close = pd.to_numeric(idx["close"], errors="coerce")
+        idx = idx.copy()
+        idx["ret_nd"] = (close / close.shift(n) - 1.0) * 100.0
+        days = idx["d"].astype(str).tolist()
+        rets = idx["ret_nd"].tolist()
+
+        block_until_i = -1
+        for i, d in enumerate(days):
+            blocked = i <= block_until_i
+            if start_s <= d <= end_s:
+                out[d] = bool(blocked)
+            try:
+                v = rets[i]
+                if v is not None and np.isfinite(float(v)) and float(v) <= thr:
+                    block_until_i = max(block_until_i, i + cooldown)
+            except Exception:
+                pass
+
+        n_on = sum(1 for v in out.values() if v)
+        try:
+            log(
+                f"[IndexDD] N={n} thr={thr}% cd={cooldown} → "
+                f"차단일 {n_on}/{len(out)} ({start_s}~{end_s})"
+            )
+        except Exception:
+            pass
+    except Exception as ex:
+        try:
+            log(f"⚠️ [IndexDD] 맵 생성 실패: {ex}")
+        except Exception:
+            pass
+        return {}
+    return out
+
+
+def resolve_index_dd_gate_for_live(
+    settings: dict,
+    data_manager: Any,
+    as_of: Optional[datetime] = None,
+    logger_callback: Optional[Callable[..., None]] = None,
+) -> Dict[str, Any]:
+    """
+    실시간용 지수 DD 게이트. 완료 거래일 기준 맵을 만들고 당일(또는 다음 적용일) 차단 여부 반환.
+    """
+    log = logger_callback or (lambda *_a, **_k: None)
+    result: Dict[str, Any] = {
+        "block_s1": False,
+        "active": False,
+        "as_of": None,
+        "lookback": None,
+        "thr": None,
+        "cooldown": None,
+    }
+    try:
+        if not bool(settings.get("use_index_dd_gate", False)):
+            return result
+        end_dt = as_of or datetime.now()
+        try:
+            from reporting.krx_trading_calendar import completed_trading_day_asof_local
+
+            try:
+                buf = int(
+                    float(settings.get("regime_display_eod_buffer_minutes", 30) or 30)
+                )
+            except (TypeError, ValueError):
+                buf = 30
+            end_s = completed_trading_day_asof_local(
+                end_dt, eod_buffer_minutes=buf
+            ).strftime("%Y-%m-%d")
+        except Exception:
+            end_s = pd.to_datetime(end_dt).strftime("%Y-%m-%d")
+
+        start_s = (pd.to_datetime(end_s) - timedelta(days=90)).strftime("%Y-%m-%d")
+        block_map = build_index_dd_s1_block_by_day(
+            settings, data_manager, start_s, end_s, log
+        )
+        # 적용일: 완료일 다음 영업일(장중에는 전일 확정 레짐 사용과 동일하게 end_s 자체도 조회)
+        apply_on = end_s
+        try:
+            from reporting.krx_trading_calendar import next_trading_day
+
+            nxt = next_trading_day(end_s)
+            if nxt is not None:
+                apply_on = nxt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+        # 장중: 오늘이 apply_on 이거나, 맵에 오늘 키가 있으면 오늘 기준
+        today_s = pd.to_datetime(end_dt).strftime("%Y-%m-%d")
+        blocked = bool(block_map.get(today_s) or block_map.get(apply_on) or False)
+        result.update(
+            {
+                "block_s1": blocked,
+                "active": blocked,
+                "as_of": end_s,
+                "apply_on": apply_on,
+                "lookback": settings.get("index_dd_lookback_days", 5),
+                "thr": settings.get("index_dd_ret_threshold_pct", -5.0),
+                "cooldown": settings.get("index_dd_cooldown_days", 5),
+            }
+        )
+        try:
+            if blocked:
+                log(
+                    f"ℹ️ [IndexDD] S1 차단 활성 (as_of={end_s}, apply≈{apply_on})"
+                )
+        except Exception:
+            pass
+    except Exception as ex:
+        try:
+            log(f"⚠️ [IndexDD] 실시간 판정 실패: {ex}")
+        except Exception:
+            pass
+    return result
+
+
 def resolve_transition_gate_for_live(
     settings: dict,
     data_manager: Any,
@@ -2752,6 +2972,31 @@ def select_monitoring_targets(
         settings.pop("transition_runtime_regime", None)
         settings.pop("transition_runtime_block_s1", None)
         settings.pop("transition_runtime_block_s2", None)
+
+    # [IndexDD] KODEX 급락 쿨다운 — S1만 OR
+    settings.pop("index_dd_runtime_block_s1", None)
+    if _settings_bool_sel(settings, "use_index_dd_gate", False):
+        try:
+            _idd = resolve_index_dd_gate_for_live(
+                settings,
+                data_manager,
+                target_date,
+                logger_callback,
+            )
+            _idd_block = bool(_idd.get("block_s1", False))
+            settings["index_dd_runtime_block_s1"] = _idd_block
+            if _idd_block:
+                settings["transition_runtime_block_s1"] = True
+                try:
+                    logger_callback("[IndexDD] S1 신규 차단 (급락 쿨다운)")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                logger_callback(f"⚠️ [IndexDD] 정책 적용 실패: {e}")
+            except Exception:
+                pass
+            settings.pop("index_dd_runtime_block_s1", None)
 
     merged_rows = _merge_dual_track_picks(
         selected,

@@ -175,57 +175,81 @@ class TradingController:
                 st.pop("transition_runtime_regime", None)
                 st.pop("transition_runtime_block_s1", None)
                 st.pop("transition_runtime_block_s2", None)
-                return
-        except Exception:
-            return
-        # 일일 선정 직후 등: 같은 프로세스에서 방금 FDR 레짐을 이미 넣었으면 재조회 생략
-        if not force:
-            try:
-                import time as _time
-
-                ts = float(getattr(self, "_transition_flags_mono_ts", 0.0) or 0.0)
-                age = _time.monotonic() - ts if ts > 0 else 1e9
-                if age < 900.0 and "transition_runtime_regime" in st:
+            else:
+                # 일일 선정 직후 등: 같은 프로세스에서 방금 FDR 레짐을 이미 넣었으면 재조회 생략
+                _skip_transition_fetch = False
+                if not force:
                     try:
-                        self.log(
-                            "ℹ️ [Transition] 최근 레짐 결과 재사용 "
-                            f"(약 {age:.0f}초 전, FDR 재조회 생략)"
-                        )
+                        import time as _time
+
+                        ts = float(getattr(self, "_transition_flags_mono_ts", 0.0) or 0.0)
+                        age = _time.monotonic() - ts if ts > 0 else 1e9
+                        if age < 900.0 and "transition_runtime_regime" in st:
+                            try:
+                                self.log(
+                                    "ℹ️ [Transition] 최근 레짐 결과 재사용 "
+                                    f"(약 {age:.0f}초 전, FDR 재조회 생략)"
+                                )
+                            except Exception:
+                                pass
+                            _skip_transition_fetch = True
                     except Exception:
                         pass
-                    return
-            except Exception:
-                pass
+                if not _skip_transition_fetch:
+                    try:
+                        import strategy_selector
+
+                        tg = strategy_selector.resolve_transition_gate_for_live(
+                            st,
+                            getattr(self.app, "data_manager", None),
+                            None,
+                            self.log,
+                        )
+                        reg = str(tg.get("regime", "OFF"))
+                        st["transition_runtime_regime"] = reg
+                        st["transition_runtime_block_s1"] = bool(tg.get("block_s1", False))
+                        st["transition_runtime_block_s2"] = bool(tg.get("block_s2", False))
+                        try:
+                            import time as _time
+
+                            self._transition_flags_mono_ts = float(_time.monotonic())
+                        except Exception:
+                            pass
+                        try:
+                            if reg == "HARD":
+                                self.log(
+                                    "ℹ️ [Transition] HARD(붕괴) — 신규 S1·추매 S2 차단, "
+                                    "보유 청산(EXIT)은 계속 평가"
+                                )
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            self.log(f"⚠️ [Transition] 시작 시 레짐 갱신 실패: {e}")
+                        except Exception:
+                            pass
+        except Exception:
+            return
+
+        # [IndexDD] KODEX 급락 쿨다운 — S1만 OR 차단
         try:
             import strategy_selector
 
-            tg = strategy_selector.resolve_transition_gate_for_live(
-                st,
-                getattr(self.app, "data_manager", None),
-                None,
-                self.log,
-            )
-            reg = str(tg.get("regime", "OFF"))
-            st["transition_runtime_regime"] = reg
-            st["transition_runtime_block_s1"] = bool(tg.get("block_s1", False))
-            st["transition_runtime_block_s2"] = bool(tg.get("block_s2", False))
-            try:
-                import time as _time
-
-                self._transition_flags_mono_ts = float(_time.monotonic())
-            except Exception:
-                pass
-            try:
-                if reg == "HARD":
-                    self.log(
-                        "ℹ️ [Transition] HARD(붕괴) — 신규 S1·추매 S2 차단, "
-                        "보유 청산(EXIT)은 계속 평가"
-                    )
-            except Exception:
-                pass
+            if bool(st.get("use_index_dd_gate", False)):
+                idd = strategy_selector.resolve_index_dd_gate_for_live(
+                    st,
+                    getattr(self.app, "data_manager", None),
+                    None,
+                    self.log,
+                )
+                st["index_dd_runtime_block_s1"] = bool(idd.get("block_s1", False))
+                if bool(idd.get("block_s1", False)):
+                    st["transition_runtime_block_s1"] = True
+            else:
+                st.pop("index_dd_runtime_block_s1", None)
         except Exception as e:
             try:
-                self.log(f"⚠️ [Transition] 시작 시 레짐 갱신 실패: {e}")
+                self.log(f"⚠️ [IndexDD] 시작 시 갱신 실패: {e}")
             except Exception:
                 pass
 

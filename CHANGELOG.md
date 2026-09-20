@@ -13,6 +13,12 @@
 
 ---
 
+## 0.19.28 (2026-09-21)
+
+- **지수 급락 쿨다운 게이트 (Index DD)**: KODEX200(`069500`) N일 수익률이 임계 이하이면 다음 영업일부터 쿨다운 동안 **S1만** 차단(S2·청산 유지). Transition HARD와 OR.
+- **권장 파라미터 DD5_5_CD5**: lookback 5일, 임계 −5%, 쿨다운 5일. `use_index_dd_gate` 기본 OFF.
+- **설정/GUI**: 유니버스 탭에 게이트 ON·N·임계·쿨다운 항목 추가. Dynamic BT·실시간 선정·시작 시 레짐 갱신에 연결.
+
 ## 0.19.27 (2026-09-19)
 
 - **DEFAULT_SETTINGS 동기화**: 현재 주력 운영값을 공장 기본값에 반영 (`gap_grace_mins_a/b` 45, `prevent_sleep_allow_after_eod` True, 모바일 API 기본 사용 등). 토큰·공인 URL은 default에 비움.

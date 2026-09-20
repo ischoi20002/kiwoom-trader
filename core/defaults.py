@@ -271,6 +271,12 @@ DEFAULT_SETTINGS = {
     "chop_valid_b_max": 3,
     "chop_valid_b_share_max_pct": 15.0,
     "chop_valid_a_floor": 10,
+    # 지수(KODEX200) N일 급락 후 쿨다운 — S1만 차단 (DD5_4_CD5)
+    "use_index_dd_gate": False,
+    "index_dd_lookback_days": 5,
+    "index_dd_ret_threshold_pct": -5.0,
+    "index_dd_cooldown_days": 5,
+    "index_dd_runtime_block_s1": False,
     "min_trde_val": 30.0,
     "vol_ratio": 1.5,
     "vol_lookback": 5.0,

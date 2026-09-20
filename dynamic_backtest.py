@@ -198,6 +198,8 @@ class DynamicBacktester:
         self._bt_ref_day_for_first: Optional[str] = None
         # prepare_dynamic_universe 4번째 반환값 — 일별 transition 레짐
         self.transition_regime_by_day: dict[str, str] = {}
+        # 지수 DD+쿨다운 게이트 — 일별 S1 차단
+        self.index_dd_block_by_day: dict[str, bool] = {}
         # ATR_SL 청산 후 동일종목 S1 재진입 금지 만료일(일자 normalize)
         self._atr_sl_reentry_until: Dict[str, pd.Timestamp] = {}
         # 종목별 ATR_SL 청산일(연속 손절 쿨다운 판정용)
@@ -483,6 +485,28 @@ class DynamicBacktester:
         print(f"[Done] {msg}")
         if callback:
             callback(msg, 5)
+
+        # [IndexDD] KODEX N일 급락 + 쿨다운 → 일별 S1 차단 맵
+        self.index_dd_block_by_day = {}
+        try:
+            if bool(self.settings.get("use_index_dd_gate", False)):
+                self.index_dd_block_by_day = (
+                    strategy_selector.build_index_dd_s1_block_by_day(
+                        self.settings,
+                        self.db,
+                        start_date,
+                        end_date,
+                        callback if callback else print,
+                    )
+                    or {}
+                )
+        except Exception as _idd_ex:
+            try:
+                print(f"[IndexDD] 맵 생성 생략: {_idd_ex}")
+            except Exception:
+                pass
+            self.index_dd_block_by_day = {}
+
         if not universe_schedule:
             if callback:
                 callback("  [Warning] 선택된 종목이 없습니다. 사전 계산(Phase 2)을 건너뜁니다.", 0)
@@ -641,6 +665,17 @@ class DynamicBacktester:
             day_t_start = time.time()
             progress = (idx / len(trading_days)) * 100
             if callback: callback(f"[{current_day}] 시계열 모의투자 중...", progress)
+
+            # [실험] 날짜별 파라미터 스케줄 — 보유 포지션을 유지한 채 청산 키 등만 교체
+            # tools/walkforward_* 에서 tester._param_schedule_by_day = {day: {key: val}}
+            try:
+                _ps = getattr(self, "_param_schedule_by_day", None)
+                if isinstance(_ps, dict) and current_day in _ps:
+                    _ov = _ps.get(current_day)
+                    if isinstance(_ov, dict) and _ov:
+                        self.settings.update(_ov)
+            except Exception:
+                pass
             
             # 2-1. 오전 종목 선정 (사전 계산된 스케줄 활용, Track A/B 분리)
             prev_day_idx = idx - 1
@@ -655,7 +690,11 @@ class DynamicBacktester:
             top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
 
             # [Transition] 레짐 전환일: tiered — TRANSITION=S2 선택, HARD=S1+S2
+            # [IndexDD] KODEX 급락 쿨다운은 S1만 OR 차단
             try:
+                _block_s1 = False
+                _block_s2 = False
+                _tr = "OFF"
                 if bool(self.settings.get("use_transition_gate", False)):
                     _tr_map = getattr(self, "transition_regime_by_day", None) or {}
                     _tr = str(
@@ -671,12 +710,18 @@ class DynamicBacktester:
                         _tr, self.settings
                     )
                     self.settings["transition_runtime_regime"] = _tr
-                    self.settings["transition_runtime_block_s1"] = _block_s1
-                    self.settings["transition_runtime_block_s2"] = _block_s2
                 else:
                     self.settings.pop("transition_runtime_regime", None)
-                    self.settings.pop("transition_runtime_block_s1", None)
-                    self.settings.pop("transition_runtime_block_s2", None)
+
+                _idd_map = getattr(self, "index_dd_block_by_day", None) or {}
+                _idd_on = bool(
+                    self.settings.get("use_index_dd_gate", False)
+                ) and bool(_idd_map.get(str(current_day), False))
+                if _idd_on:
+                    _block_s1 = True
+                self.settings["index_dd_runtime_block_s1"] = bool(_idd_on)
+                self.settings["transition_runtime_block_s1"] = _block_s1
+                self.settings["transition_runtime_block_s2"] = _block_s2
             except Exception:
                 pass
 

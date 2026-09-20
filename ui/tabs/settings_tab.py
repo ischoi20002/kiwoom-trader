@@ -944,6 +944,43 @@ class SettingsTab:
             toggle_key='hard_suppress_to_off_only',
         )
 
+        # ── 지수 DD 쿨다운 게이트 (DD5_4_CD5) ──
+        idd_f = ttk.LabelFrame(
+            _univ_root,
+            text=' 📉 지수 급락 쿨다운 (KODEX200 · S1만) ',
+            padding='15',
+        )
+        idd_f.pack(fill=tk.X, expand=False, pady=(0, 12))
+        add_param_row(
+            idd_f,
+            '지수 DD 게이트 사용',
+            None,
+            '',
+            'ON: KODEX200 N일 수익률≤임계 후 쿨다운 동안 신규 S1 차단(S2·청산 유지). Transition과 OR. 권장: N=5, 임계=-5, 쿨다운=5',
+            toggle_key='use_index_dd_gate',
+        )
+        add_param_row(
+            idd_f,
+            'lookback N일',
+            'index_dd_lookback_days',
+            '일',
+            'KODEX200 종가 N일 수익률 계산 구간 (기본 5)',
+        )
+        add_param_row(
+            idd_f,
+            '급락 임계 (%)',
+            'index_dd_ret_threshold_pct',
+            '%',
+            'N일 수익률이 이 값 이하(더 큰 하락)이면 충격. 기본 -5 (DD5_5_CD5)',
+        )
+        add_param_row(
+            idd_f,
+            '쿨다운 영업일',
+            'index_dd_cooldown_days',
+            '일',
+            '충격 다음 날부터 S1 차단 유지 일수 (기본 5)',
+        )
+
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')
         sel_f.pack(fill=tk.X, expand=False, pady=(0, 12))
         add_param_row(
