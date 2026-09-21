@@ -29,6 +29,8 @@ class SignalCallbacksService:
                 sig_lbl = "A"
             elif st == "TYPE_B" or st.endswith("_B"):
                 sig_lbl = "B"
+            elif st == "TYPE_C" or st.endswith("_C"):
+                sig_lbl = "C"
             else:
                 sig_lbl = "?"
             tr = str(sel_track or "AB").strip().upper() or "AB"

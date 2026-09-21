@@ -8,6 +8,11 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
+from strategy.box_reversion_selector import (
+    BoxReversionSelectionConfig,
+    evaluate_box_reversion_candidate,
+)
+
 
 class SelectionDbStaleError(Exception):
     """로컬 일봉 DB가 최신 장마감까지 갱신되지 않아 실시간 종목 선정을 중단할 때."""
@@ -1340,12 +1345,13 @@ def _merge_dual_track_picks(
     logger_callback,
     max_a: Optional[int] = None,
     max_b: Optional[int] = None,
+    max_c: Optional[int] = None,
 ) -> list:
     """
-    Track A 상위 max_slots_a + Track B 상위 max_slots_b 를 합치되,
-    양쪽에 모두 든 종목은 SelTrack=AB·Score=max 로 1행만 유지.
+    Track A/B/C 상위 후보를 합치고 중복 종목은 ``SelTrack=ABC``처럼 병합합니다.
 
-    ``max_a`` / ``max_b`` 가 주어지면(브레드스 레짐 슬롯) 설정의 max_slots_* 대신 사용.
+    ``max_a`` / ``max_b`` 가 주어지면 브레드스 레짐 슬롯을 적용합니다.
+    Track C는 TYPE_C가 구현되기 전까지 트랙 매칭 게이트에서 A/B 매수를 차단합니다.
     """
     max_a_i = (
         max(0, int(max_a))
@@ -1357,52 +1363,63 @@ def _merge_dual_track_picks(
         if max_b is not None
         else max(0, int(settings.get("max_slots_b", 10)))
     )
+    max_c_i = (
+        max(0, int(max_c))
+        if max_c is not None
+        else max(0, int(settings.get("max_slots_c", 15)))
+    )
     floor_a = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
     floor_b = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
+    floor_c = max(0.0, float(settings.get("sel_track_min_score_c", 0.0) or 0.0))
     cand_a = [d for d in selected_rows if d.get("_valid_a")]
     cand_b = [d for d in selected_rows if d.get("_valid_b")]
+    cand_c = [d for d in selected_rows if d.get("_valid_c")]
     picked_a = _sorted_dict_rows_top_with_slot_band(
         cand_a, "_score_a", max_a_i, settings, min_score_floor=floor_a
     )
     picked_b = _sorted_dict_rows_top_with_slot_band(
         cand_b, "_score_b", max_b_i, settings, min_score_floor=floor_b
     )
-    code_to_sb = {str(d["Code"]).zfill(6): float(d.get("_score_b", 0)) for d in picked_b}
-    seen = set()
-    final = []
+    picked_c = _sorted_dict_rows_top_with_slot_band(
+        cand_c, "_score_c", max_c_i, settings, min_score_floor=floor_c
+    )
 
     def strip_internal(d: dict) -> dict:
         return {k: v for k, v in d.items() if not str(k).startswith("_")}
 
-    for d in picked_a:
-        code = str(d["Code"]).zfill(6)
-        seen.add(code)
-        sa = float(d.get("_score_a", 0))
-        in_b_top = code in code_to_sb
-        if in_b_top:
-            sb = code_to_sb[code]
-            row = strip_internal(d)
-            row["SelTrack"] = "AB"
-            row["Score"] = round(max(sa, sb), 1)
-        else:
-            row = strip_internal(d)
-            row["SelTrack"] = "A"
-            row["Score"] = round(sa, 1)
-        final.append(row)
+    final_by_code: Dict[str, dict] = {}
+    track_by_code: Dict[str, set[str]] = {}
+    score_by_code: Dict[str, float] = {}
+    for track, score_key, picked in (
+        ("A", "_score_a", picked_a),
+        ("B", "_score_b", picked_b),
+        ("C", "_score_c", picked_c),
+    ):
+        for candidate in picked:
+            try:
+                code = str(candidate["Code"]).zfill(6)
+                score = float(candidate.get(score_key, 0) or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if code not in final_by_code:
+                final_by_code[code] = strip_internal(candidate)
+                track_by_code[code] = set()
+                score_by_code[code] = score
+            track_by_code[code].add(track)
+            score_by_code[code] = max(score_by_code[code], score)
 
-    for d in picked_b:
-        code = str(d["Code"]).zfill(6)
-        if code in seen:
-            continue
-        seen.add(code)
-        row = strip_internal(d)
-        row["SelTrack"] = "B"
-        row["Score"] = round(float(d.get("_score_b", 0)), 1)
+    final: list[dict] = []
+    for code, row in final_by_code.items():
+        row["SelTrack"] = "".join(
+            track for track in ("A", "B", "C") if track in track_by_code[code]
+        )
+        row["Score"] = round(score_by_code[code], 1)
         final.append(row)
 
     logger_callback(
-        f"[DualTrack] A후보 {len(cand_a)}→채택 {len(picked_a)}, "
-        f"B후보 {len(cand_b)}→채택 {len(picked_b)}, 최종 행 {len(final)}"
+        f"[Track] A후보 {len(cand_a)}→채택 {len(picked_a)}, "
+        f"B후보 {len(cand_b)}→채택 {len(picked_b)}, "
+        f"C후보 {len(cand_c)}→채택 {len(picked_c)}, 최종 행 {len(final)}"
     )
     return final
 
@@ -2371,9 +2388,9 @@ def select_monitoring_targets(
     kiwoom_access_token: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    KOSPI 200을 스캔해 Track A(눌림)·Track B(추세) 유니버스를 **분리** 선정합니다.
-    prepare_dynamic_universe 와 동일 필터(거래량 분출 A/B, RSI·대금 기준 분리 등)를 사용하며,
-    상위 max_slots_a + max_slots_b 를 합산해 CSV/GUI에 반환합니다.
+    KOSPI 200을 스캔해 Track A(눌림)·B(추세)·C(박스 회귀)를 분리 선정합니다.
+    Track C는 전용 TYPE_C 진입이 구현되기 전까지 관찰 대상으로만 감시되며,
+    트랙 매칭 안전장치가 기존 TYPE_A/B 매수를 차단합니다.
 
     selection_ohlcv_source:
         - api_only (기본): 실시간 선정 시 trading_data.db 일봉 미사용.
@@ -2653,6 +2670,8 @@ def select_monitoring_targets(
                 pass
 
     min_val_krw = float(settings.get('min_trde_val', 40.0)) * 100000000
+    use_track_c = _settings_bool_sel(settings, "use_sel_track_c", True)
+    box_c_config = BoxReversionSelectionConfig.from_mapping(settings)
 
     # 실시간(api_only)은 DB 일봉 미사용. 과거일(target_date) 선정은 백테스트 DB 유지.
     use_dm_daily = bool(
@@ -2819,10 +2838,19 @@ def select_monitoring_targets(
 
             aux = None
             aux_b = None
+            aux_c = None
             if use_track_a:
                 aux = _compute_sel_a_aux_from_daily_tail(df_valid, last_full, settings)
             if use_track_b:
                 aux_b = _compute_sel_b_aux_from_daily_tail(df_valid, last_full, settings)
+            if use_track_c:
+                aux_c = evaluate_box_reversion_candidate(
+                    df,
+                    code=code,
+                    name=str(name),
+                    config=box_c_config,
+                    as_of=target_date,
+                )
 
             # v2 경로에서는 _valid_a/_valid_b 컬럼이 의미 없으므로 0으로 고정
             valid_a = False
@@ -2832,7 +2860,11 @@ def select_monitoring_targets(
 
             has_a = use_track_a
             has_b = use_track_b
-            ok_row = (has_a and aux is not None) or (has_b and aux_b is not None)
+            ok_row = (
+                (has_a and aux is not None)
+                or (has_b and aux_b is not None)
+                or (use_track_c and aux_c is not None)
+            )
             if not ok_row:
                 return None, status
 
@@ -2886,11 +2918,28 @@ def select_monitoring_targets(
                 "_score_a": score_a_place,
                 "_valid_b": valid_b_place,
                 "_score_b": score_b_place,
+                "_valid_c": aux_c is not None,
+                "_score_c": float(aux_c.get("Score", 0.0)) if aux_c else 0.0,
             }
             if aux:
                 res.update(aux)
             if aux_b:
                 res.update(aux_b)
+            if aux_c:
+                for key in (
+                    "BoxLower",
+                    "BoxUpper",
+                    "BoxWidthPct",
+                    "BoxPositionPct",
+                    "ADX",
+                    "MASlopePctPerDay",
+                    "LowerTouches",
+                    "UpperTouches",
+                    "VolumeRatio",
+                    "ATRExpansionRatio",
+                ):
+                    if key in aux_c:
+                        res[key] = aux_c[key]
             return res, status
         except Exception:
             return None, status
@@ -3037,7 +3086,7 @@ def select_monitoring_targets(
 
     logger_callback(
         f"[Done] 최종 {len(df_result)}개 종목 선정 완료. "
-        f"(Track A·B 분리 상한 적용, 동적 백테 유니버스와 동일 로직)"
+        f"(Track A·B·C 분리 상한 적용, 동적 백테 유니버스와 동일 로직)"
     )
     return df_result
 
@@ -3669,13 +3718,84 @@ def _resync_batch_valid_to_period_universe(
         except Exception:
             pass
 
+    # Track C는 교차섹션 순위를 사용하지 않으므로 당기 유니버스 마스크만 적용합니다.
     try:
-        if "Valid_A" in df_all.columns and "Valid_B" in df_all.columns:
-            df_all["Valid"] = df_all["Valid_A"] | df_all["Valid_B"]
-        if "Score_A" in df_all.columns and "Score_B" in df_all.columns:
-            df_all["Score"] = df_all[["Score_A", "Score_B"]].max(axis=1)
+        if "Valid_C" in df_all.columns:
+            df_all.loc[~mask, "Valid_C"] = False
+        if "Score_C" in df_all.columns:
+            df_all.loc[~mask, "Score_C"] = 0.0
+    except Exception as e:
+        try:
+            logging.warning("period-univ Valid_C 재동기화 실패: %s", e, exc_info=True)
+        except Exception:
+            pass
+
+    try:
+        valid_columns = [
+            column for column in ("Valid_A", "Valid_B", "Valid_C") if column in df_all
+        ]
+        score_columns = [
+            column for column in ("Score_A", "Score_B", "Score_C") if column in df_all
+        ]
+        if valid_columns:
+            df_all["Valid"] = df_all[valid_columns].fillna(False).any(axis=1)
+        if score_columns:
+            df_all["Score"] = df_all[score_columns].fillna(0.0).max(axis=1)
     except Exception:
         pass
+
+
+def _apply_sel_track_c_batch_latest(df_all: pd.DataFrame, settings: dict) -> None:
+    """
+    슬라이딩 선정 창에서 종목별 마지막 일봉에 Track C 판정을 기록합니다.
+
+    호출부는 평가일 행만 스케줄에 사용하므로 과거 행을 매번 재평가하지 않아도
+    미래참조 없이 실시간 선정기와 동일한 결과를 얻습니다.
+    """
+    df_all["Valid_C"] = pd.Series(False, index=df_all.index, dtype=bool)
+    df_all["Score_C"] = pd.Series(0.0, index=df_all.index, dtype=float)
+    if not _settings_bool_sel(settings, "use_sel_track_c", True):
+        return
+
+    config = BoxReversionSelectionConfig.from_mapping(settings)
+    try:
+        grouped = df_all.groupby("code", sort=False)
+    except (KeyError, TypeError, ValueError):
+        return
+
+    for raw_code, group in grouped:
+        try:
+            ordered = group.sort_values("time") if "time" in group.columns else group
+            if ordered.empty:
+                continue
+            candidate = evaluate_box_reversion_candidate(
+                ordered,
+                code=str(raw_code).zfill(6),
+                config=config,
+            )
+            if candidate is None:
+                continue
+            last_index = ordered.index[-1]
+            df_all.at[last_index, "Valid_C"] = True
+            df_all.at[last_index, "Score_C"] = float(candidate.get("Score", 0.0))
+            metric_map = {
+                "BoxLower_C": "BoxLower",
+                "BoxUpper_C": "BoxUpper",
+                "BoxWidthPct_C": "BoxWidthPct",
+                "BoxPositionPct_C": "BoxPositionPct",
+                "ADX_C": "ADX",
+            }
+            for target_column, source_key in metric_map.items():
+                if target_column not in df_all.columns:
+                    df_all[target_column] = np.nan
+                df_all.at[last_index, target_column] = candidate.get(source_key, np.nan)
+        except Exception as e:
+            try:
+                logging.warning(
+                    "Track C 배치 판정 실패(%s): %s", str(raw_code).zfill(6), e
+                )
+            except Exception:
+                pass
 
 
 def _score_dynamic_universe_daily_ohlcv(
@@ -3685,7 +3805,7 @@ def _score_dynamic_universe_daily_ohlcv(
     with_b_debug: bool = False,
 ) -> None:
     """
-    ``prepare_dynamic_universe`` 와 동일: 일봉 OHLCV → 지표·Valid_A/Valid_B(트랙 선정)까지 in-place.
+    ``prepare_dynamic_universe`` 와 동일: 일봉 OHLCV → 지표·Valid_A/B/C까지 in-place.
     with_b_debug=True 이면 Track B 부분조건 열(Dbg_*)을 붙여 일자별 진단에 쓴다.
     """
     # 4. 벡터 지표
@@ -3755,8 +3875,9 @@ def _score_dynamic_universe_daily_ohlcv(
     else:
         df_all["Valid_B"] = pd.Series(False, index=df_all.index)
         df_all["Score_B"] = pd.Series(0.0, index=df_all.index)
-    df_all["Valid"] = df_all["Valid_A"] | df_all["Valid_B"]
-    df_all["Score"] = df_all[["Score_A", "Score_B"]].max(axis=1)
+    _apply_sel_track_c_batch_latest(df_all, settings)
+    df_all["Valid"] = df_all[["Valid_A", "Valid_B", "Valid_C"]].fillna(False).any(axis=1)
+    df_all["Score"] = df_all[["Score_A", "Score_B", "Score_C"]].fillna(0.0).max(axis=1)
 
 
 def _selection_daily_lookback_calendar_days(settings: Optional[dict] = None) -> int:
@@ -3796,7 +3917,15 @@ def _universe_batch_indicator_left_clip(
     return (end_dt - timedelta(days=lookback)).strftime("%Y-%m-%d")
 
 
-def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logger_callback):
+def prepare_dynamic_universe(
+    settings,
+    start_date,
+    end_date,
+    data_manager,
+    logger_callback,
+    *,
+    include_track_c_schedule: bool = False,
+):
     """
     [v17.7] True Batching: 전 기간 데이터를 한 번에 조회하고 Pandas 벡터 연산으로 스크리닝.
 
@@ -3998,15 +4127,19 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
     # 6. 스케줄 생성 — 평가일마다 [D-N, D] 창으로 지표·Valid 재판정
     logger_callback(
-        "  [Batch] 날짜별 슬라이딩 lookback 지표·상위 종목 추출 중 (Track A/B)..."
+        "  [Batch] 날짜별 슬라이딩 lookback 지표·상위 종목 추출 중 (Track A/B/C)..."
     )
     schedule_a = {}
     schedule_b = {}
+    schedule_c = {}
+    schedule_c_meta: Dict[str, Dict[str, Dict[str, float]]] = {}
     schedule = {}  # 기존 호환용 (합집합)
     max_s_a = int(settings.get('max_slots_a', 20))
     max_s_b = int(settings.get('max_slots_b', 10))
+    max_s_c = int(settings.get('max_slots_c', 15))
     floor_sa = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
     floor_sb = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
+    floor_sc = max(0.0, float(settings.get("sel_track_min_score_c", 0.0) or 0.0))
 
     # 스케줄 일자 = prepare 구간의 거래일 (DB 캘린더)
     try:
@@ -4221,7 +4354,15 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             except Exception:
                 transition_regime_by_day[d_str] = "OFF"
 
-        if transition_gate_on and day_max_a <= 0 and day_max_b <= 0:
+        if (
+            transition_gate_on
+            and day_max_a <= 0
+            and day_max_b <= 0
+            and (
+                max_s_c <= 0
+                or not _settings_bool_sel(settings, "use_type_c", False)
+            )
+        ):
             continue
 
         try:
@@ -4240,6 +4381,14 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
             )
         except Exception:
             day_b = day_u.iloc[:0]
+        try:
+            day_c = (
+                day_u.loc[day_u["Valid_C"].astype(bool)]
+                if "Valid_C" in day_u.columns
+                else day_u.iloc[:0]
+            )
+        except Exception:
+            day_c = day_u.iloc[:0]
 
         if not day_a.empty and day_max_a > 0:
             schedule_a[d_str] = (
@@ -4265,8 +4414,43 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
                 )["code"]
                 .tolist()
             )
+        if not day_c.empty and max_s_c > 0:
+            picked_c = _df_top_by_score_slot_band(
+                day_c,
+                score_col="Score_C",
+                code_col="code",
+                max_n=max_s_c,
+                settings=settings,
+                min_score_floor=floor_sc,
+            )
+            schedule_c[d_str] = picked_c["code"].tolist()
+            day_meta: Dict[str, Dict[str, float]] = {}
+            for _, picked_row in picked_c.iterrows():
+                try:
+                    picked_code = str(picked_row["code"]).zfill(6)
+                    lower = float(picked_row.get("BoxLower_C", np.nan))
+                    upper = float(picked_row.get("BoxUpper_C", np.nan))
+                    if np.isfinite(lower) and np.isfinite(upper) and upper > lower > 0:
+                        day_meta[picked_code] = {
+                            "box_lower": lower,
+                            "box_upper": upper,
+                        }
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if day_meta:
+                schedule_c_meta[d_str] = day_meta
+        # 안전 기본값(use_type_c=False)에서는 C를 관찰 스케줄로만 유지합니다.
+        active_c = (
+            schedule_c.get(d_str, [])
+            if _settings_bool_sel(settings, "use_type_c", False)
+            else []
+        )
         combined = list(
-            dict.fromkeys(schedule_a.get(d_str, []) + schedule_b.get(d_str, []))
+            dict.fromkeys(
+                schedule_a.get(d_str, [])
+                + schedule_b.get(d_str, [])
+                + active_c
+            )
         )
         if combined:
             schedule[d_str] = combined
@@ -4278,10 +4462,23 @@ def prepare_dynamic_universe(settings, start_date, end_date, data_manager, logge
 
     a_days = len(schedule_a)
     b_days = len(schedule_b)
+    c_days = len(schedule_c)
     if not schedule:
         logger_callback("  [Warning] 조건에 맞는 종목이 한 건도 추출되지 않았습니다. 필터 설정을 확인하세요.")
     else:
-        logger_callback(f"[Batch] 완료. Track A: {a_days}일, Track B: {b_days}일, 합산: {len(schedule)}일")
+        logger_callback(
+            f"[Batch] 완료. Track A: {a_days}일, Track B: {b_days}일, "
+            f"Track C(관찰): {c_days}일, 매수 유니버스: {len(schedule)}일"
+        )
+    if include_track_c_schedule:
+        return (
+            schedule,
+            schedule_a,
+            schedule_b,
+            transition_regime_by_day,
+            schedule_c,
+            schedule_c_meta,
+        )
     return schedule, schedule_a, schedule_b, transition_regime_by_day
 
 

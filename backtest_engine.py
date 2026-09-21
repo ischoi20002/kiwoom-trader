@@ -323,9 +323,19 @@ class TradingStrategy:
         return combined
 
     @staticmethod
-    def get_buy_signals_detailed(df, settings, market_trend='UP'):
-        """매수 신호 상세 분석 (v6.2: 상태값 포함)"""
-        return signals.get_buy_signals_detailed(df, settings, market_trend)
+    def get_buy_signals_detailed(
+        df,
+        settings,
+        market_trend='UP',
+        signal_context: Optional[dict[str, Any]] = None,
+    ):
+        """매수 신호 상세 분석(Type A/B/C 상태값 포함)."""
+        return signals.get_buy_signals_detailed(
+            df,
+            settings,
+            market_trend,
+            signal_context=signal_context,
+        )
 
     @staticmethod
     def get_buy_signals(df, settings, market_trend='UP'):
@@ -336,6 +346,14 @@ class TradingStrategy:
     def _check_s2_approval(pos, last_row, settings, indicator_row=None, market_trend='UP', curr_dt=None, indicators_dict=None, i=None):
         """[Phase 2] Type A/B 완전 분리된 2차 매수 승인 로직 (v40.0: Optimized)"""
         s = settings
+
+        # Box Reversion은 상단 회귀를 노리는 단일 진입 전략으로 S2 추매를 금지합니다.
+        try:
+            sig_type = str(pos.get("sig_type", pos.get("reason", "")) or "").upper()
+            if "TYPE_C" in sig_type:
+                return False
+        except Exception:
+            return False
 
         # 0. 기술 지표 참조 (Dict created if not provided - O(1) if passed directly)
         ind = indicator_row
@@ -487,6 +505,12 @@ class TradingStrategy:
             return f"s2_check_exception:{e}"
 
         s = settings
+        try:
+            sig_type = str(pos.get("sig_type", pos.get("reason", "")) or "").upper()
+            if "TYPE_C" in sig_type:
+                return "s2_type_c_disabled"
+        except Exception:
+            return "s2_type_unknown"
         ind = indicator_row
         if ind is None and indicators_dict is not None and i is not None:
             pass
@@ -1134,6 +1158,18 @@ class TradingStrategy:
             return False
 
     @staticmethod
+    def _holding_sig_is_type_c(pos: dict) -> bool:
+        """보유 dict의 Type C 판별(sig_type·reason 모두 확인)."""
+        try:
+            raw = pos.get("sig_type", pos.get("Sig_Type"))
+            if raw is not None and not pd.isna(raw):
+                if "TYPE_C" in str(raw).upper():
+                    return True
+            return "TYPE_C" in str(pos.get("reason", "") or "").upper()
+        except Exception:
+            return False
+
+    @staticmethod
     def _s1_simul_balance_tie_mode(settings: Optional[dict]) -> str:
         """
         동시신호 봉의 보유 A/B 동수 타이브레이크 적용 방식.
@@ -1162,6 +1198,7 @@ class TradingStrategy:
                 1
                 for h in (holdings or {}).values()
                 if "TYPE_B" not in str(h.get("sig_type", "") or "").upper()
+                and "TYPE_C" not in str(h.get("sig_type", "") or "").upper()
             )
             n_b = sum(
                 1
@@ -1299,24 +1336,39 @@ class TradingStrategy:
         settings: Optional[dict], sig_type: Any, code_track: Any
     ) -> bool:
         """
-        Track A/B 선정과 S1 Sig_Type 교차 허용 여부.
-        ``enforce_track_signal_match`` 가 False 이면 항상 True (미스매치 허용).
+        Track A/B/C 선정과 S1 Sig_Type 교차 허용 여부.
+
+        순수 Track C는 TYPE_C 구현 전 A/B 신호를 항상 차단합니다. 이 안전장치는
+        ``enforce_track_signal_match`` 설정을 꺼도 유지됩니다.
         """
+        try:
+            st = str(sig_type or "").strip().upper()
+            ct = str(code_track or "A").strip().upper() or "A"
+        except Exception:
+            return False
+
+        # TYPE_C 미구현 단계의 하드 가드: C 관찰 종목이 기존 전략으로 매수되는 것을 방지합니다.
+        if ct == "C" and st in ("TYPE_A", "TYPE_B"):
+            return False
+        if st == "TYPE_C":
+            try:
+                return "C" in ct and bool((settings or {}).get("use_type_c", False))
+            except Exception:
+                return False
+
         try:
             if not bool((settings or {}).get("enforce_track_signal_match", True)):
                 return True
         except Exception:
             pass
         try:
-            st = str(sig_type or "").upper()
-            ct = str(code_track or "A").strip().upper()
-            if st == "TYPE_A" and ct == "B":
-                return False
-            if st == "TYPE_B" and ct == "A":
-                return False
+            if st == "TYPE_A":
+                return "A" in ct
+            if st == "TYPE_B":
+                return "B" in ct
             return True
         except Exception:
-            return True
+            return False
 
     @staticmethod
     def _same_bar_prefer_sel_track_enabled(settings: Optional[dict]) -> bool:
@@ -1416,6 +1468,8 @@ class TradingStrategy:
                 return "TYPE_A"
             if u == "TYPE_B":
                 return "TYPE_B"
+            if u == "TYPE_C":
+                return "TYPE_C"
             return "TYPE_B"
         except Exception:
             return "TYPE_B"
@@ -2188,6 +2242,190 @@ class TradingStrategy:
         return ts
 
     @staticmethod
+    def _evaluate_type_c_exit(
+        now_price: float,
+        pos: dict,
+        settings: dict,
+        *,
+        indicator_row: Any = None,
+        current_time: Any = None,
+        kwargs: Optional[dict] = None,
+        time_is_bar_label: bool = False,
+    ) -> dict:
+        """진입 시 고정한 박스 경계를 사용해 TYPE_C 전용 청산을 판정합니다."""
+        try:
+            price = float(now_price)
+            avg_price = float(pos.get("avg_p", pos.get("avg_price", price)) or price)
+            profit_ratio = (
+                (price / avg_price - 1.0) * 100.0 if avg_price > 0 else 0.0
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            return {"action": "HOLD", "reason": "BOX_C_BAD_PRICE"}
+
+        def _indicator_value(key: str, default: float) -> float:
+            try:
+                if indicator_row is None:
+                    return float(default)
+                value = indicator_row.get(key, default)
+                return float(value if value is not None else default)
+            except (TypeError, ValueError, AttributeError):
+                return float(default)
+
+        try:
+            lower = float(pos.get("box_lower", 0) or 0)
+            upper = float(pos.get("box_upper", 0) or 0)
+            entry_atr = float(pos.get("box_atr_entry", 0) or 0)
+        except (TypeError, ValueError):
+            lower, upper, entry_atr = 0.0, 0.0, 0.0
+        if entry_atr <= 0:
+            entry_atr = _indicator_value(
+                "ATR_C", _indicator_value("ATR", 0.0)
+            )
+
+        # 메타데이터 유실 시 박스 목표를 추정하지 않고 비상 %손절만 유지합니다.
+        if not (upper > lower > 0 and entry_atr > 0):
+            try:
+                emergency_sl = abs(
+                    float(settings.get("type_c_missing_box_stop_loss_pct", 3.0))
+                )
+            except (TypeError, ValueError):
+                emergency_sl = 3.0
+            if profit_ratio <= -emergency_sl:
+                return {
+                    "action": "EXIT",
+                    "reason": "BOX_C_METADATA_STOP",
+                    "profit_ratio": profit_ratio,
+                }
+            return {"action": "HOLD", "reason": "BOX_C_METADATA_MISSING"}
+
+        try:
+            gap_limit = float(settings.get("type_c_gap_down_limit", -4.0))
+        except (TypeError, ValueError):
+            gap_limit = -4.0
+        if bool(settings.get("use_type_c_gap_down_exit", True)) and profit_ratio <= gap_limit:
+            return {
+                "action": "EXIT",
+                "reason": "BOX_C_GAP_DOWN",
+                "profit_ratio": profit_ratio,
+            }
+
+        try:
+            stop_atr = max(
+                0.0, float(settings.get("type_c_stop_atr_tolerance", 0.5))
+            )
+        except (TypeError, ValueError):
+            stop_atr = 0.5
+        stop_price = lower - stop_atr * entry_atr
+        bar_low = _indicator_value("Low", price)
+        if min(price, bar_low) <= stop_price:
+            return {
+                "action": "EXIT",
+                "reason": "BOX_C_STOP",
+                "profit_ratio": profit_ratio,
+                "stop_price": stop_price,
+            }
+
+        # 연속 종가 이탈은 완결 봉에서만 1회 갱신합니다.
+        confirmed_bar = bool(time_is_bar_label)
+        try:
+            confirmed_bar = confirmed_bar or bool((kwargs or {}).get("bar_confirmed"))
+        except Exception:
+            pass
+        if confirmed_bar:
+            bar_key = ""
+            try:
+                if kwargs and kwargs.get("bar_key") is not None:
+                    bar_key = str(kwargs.get("bar_key"))
+                elif indicator_row is not None and getattr(indicator_row, "name", None) is not None:
+                    bar_key = str(pd.Timestamp(indicator_row.name))
+                elif current_time is not None:
+                    bar_key = str(pd.Timestamp(current_time))
+            except (TypeError, ValueError):
+                bar_key = str(current_time or "")
+            previous_key = str(pos.get("box_last_breakdown_bar", "") or "")
+            if bar_key and bar_key != previous_key:
+                close_price = _indicator_value("Close", price)
+                try:
+                    count = max(0, int(pos.get("box_breakdown_closes", 0) or 0))
+                except (TypeError, ValueError):
+                    count = 0
+                count = count + 1 if close_price < lower else 0
+                pos["box_breakdown_closes"] = count
+                pos["box_last_breakdown_bar"] = bar_key
+            try:
+                breakdown_limit = max(
+                    1,
+                    int(float(settings.get("type_c_breakdown_confirm_bars", 2))),
+                )
+            except (TypeError, ValueError):
+                breakdown_limit = 2
+            if int(pos.get("box_breakdown_closes", 0) or 0) >= breakdown_limit:
+                return {
+                    "action": "EXIT",
+                    "reason": "BOX_C_BREAKDOWN",
+                    "profit_ratio": profit_ratio,
+                }
+
+        try:
+            target_buffer = max(
+                0.0, float(settings.get("type_c_target_atr_buffer", 0.2))
+            )
+        except (TypeError, ValueError):
+            target_buffer = 0.2
+        target_price = upper - target_buffer * entry_atr
+        if price >= target_price:
+            return {
+                "action": "EXIT",
+                "reason": "BOX_C_TAKE_PROFIT",
+                "profit_ratio": profit_ratio,
+                "target_price": target_price,
+            }
+
+        # 진입일 포함 평일 수 기준. bars_df가 있으면 실제 거래일 수를 우선합니다.
+        try:
+            max_days = max(
+                1, int(float(settings.get("type_c_max_holding_days", 5)))
+            )
+        except (TypeError, ValueError):
+            max_days = 5
+        held_days = 0
+        try:
+            entry_ts = pd.Timestamp(pos.get("entry_date") or pos.get("entry_time"))
+            eval_ts = TradingStrategy._time_gate_ts(
+                current_time or pd.Timestamp.now(), time_is_bar_label
+            )
+            bars_df = (kwargs or {}).get("bars_df")
+            if bars_df is not None and not getattr(bars_df, "empty", True):
+                dates = pd.DatetimeIndex(pd.to_datetime(bars_df.index)).normalize().unique()
+                held_days = int(
+                    sum(entry_ts.normalize() <= day <= eval_ts.normalize() for day in dates)
+                )
+            if held_days <= 0:
+                held_days = int(
+                    np.busday_count(
+                        entry_ts.date(),
+                        (eval_ts + pd.Timedelta(days=1)).date(),
+                    )
+                )
+        except (TypeError, ValueError):
+            held_days = 0
+        if held_days >= max_days:
+            return {
+                "action": "EXIT",
+                "reason": "BOX_C_TIME_EXIT",
+                "profit_ratio": profit_ratio,
+                "holding_days": held_days,
+            }
+
+        return {
+            "action": "HOLD",
+            "reason": "BOX_C_HOLD",
+            "profit_ratio": profit_ratio,
+            "target_price": target_price,
+            "stop_price": stop_price,
+        }
+
+    @staticmethod
     def evaluate_position(code, now_price, pos, settings, indicator_row=None, current_time=None, is_realtime=False, kwargs=None, indicators_dict=None, i=None, time_is_bar_label=False):
         """
         [v35.0] 실시간 감시와 모든 백테스팅(포트폴리오 포함)이 공유하는 통합 포지션 평가(매도 결정) 함수.
@@ -2330,6 +2568,16 @@ class TradingStrategy:
 
         is_exit = False
         exit_reason = ""
+        if TradingStrategy._holding_sig_is_type_c(pos):
+            return TradingStrategy._evaluate_type_c_exit(
+                now_price,
+                pos,
+                settings,
+                indicator_row=indicator_row,
+                current_time=current_time,
+                kwargs=kwargs,
+                time_is_bar_label=time_is_bar_label,
+            )
         is_type_b = TradingStrategy._holding_sig_is_type_b(pos)
         if not is_type_b:
             try:

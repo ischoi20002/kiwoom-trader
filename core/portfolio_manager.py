@@ -755,6 +755,19 @@ class PortfolioManager:
             dm.update_active_position_peaks(
                 nk, mp, max_p_high=mph if mph > 0 else None
             )
+            try:
+                if (
+                    "TYPE_C"
+                    in str(pos.get("sig_type", pos.get("reason", "")) or "").upper()
+                    and hasattr(dm, "update_active_position_box_state")
+                ):
+                    dm.update_active_position_box_state(
+                        nk,
+                        int(pos.get("box_breakdown_closes", 0) or 0),
+                        str(pos.get("box_last_breakdown_bar", "") or ""),
+                    )
+            except (TypeError, ValueError):
+                pass
         except Exception:
             pass
 
@@ -797,6 +810,15 @@ class PortfolioManager:
                 reason,
                 max_p=mp if mp > 0 else None,
                 max_p_high=mph if mph > 0 else None,
+                box_lower=(pos or {}).get("box_lower"),
+                box_upper=(pos or {}).get("box_upper"),
+                box_atr_entry=(pos or {}).get("box_atr_entry"),
+                box_breakdown_closes=(pos or {}).get(
+                    "box_breakdown_closes", 0
+                ),
+                box_last_breakdown_bar=(pos or {}).get(
+                    "box_last_breakdown_bar", ""
+                ),
             )
         except Exception as e:
             try:
@@ -1056,13 +1078,15 @@ class PortfolioManager:
             return False
 
     def _sig_type_from_order_history(self, code: str) -> Optional[str]:
-        """해당 종목 매수 주문의 TYPE_A/B. 없으면 None."""
+        """해당 종목 최근 매수 주문의 TYPE_A/B/C. 없으면 None."""
         try:
             nk = str(code or "").split("_")[0].zfill(6)
             rs_hint = self.data_manager.get_latest_buy_reason_with_sig_type(nk)
             if not rs_hint:
                 return None
             br = str(rs_hint).upper()
+            if "TYPE_C" in br:
+                return "TYPE_C"
             if "TYPE_B" in br:
                 return "TYPE_B"
             if "TYPE_A" in br:
@@ -1072,7 +1096,7 @@ class PortfolioManager:
         return None
 
     def _sig_type_from_sel_track(self, code: str) -> Optional[str]:
-        """감시 선정 트랙 A/B → TYPE_A/B. AB·미지정이면 None."""
+        """감시 단일 선정 트랙 A/B/C → TYPE_A/B/C. 복합이면 None."""
         try:
             nk = str(code or "").split("_")[0].zfill(6)
             mi = getattr(self.app, "monitor_info", None) or {}
@@ -1087,6 +1111,8 @@ class PortfolioManager:
                     return "TYPE_B"
                 if st == "A":
                     return "TYPE_A"
+                if st == "C":
+                    return "TYPE_C"
                 break
         except Exception:
             pass
@@ -1094,21 +1120,23 @@ class PortfolioManager:
 
     def _infer_sig_type_from_entry_reason(self, code: str, reason: Any) -> str:
         """
-        active_positions.reason 등만 있을 때 TYPE_A / TYPE_B 를 복원합니다.
+        active_positions.reason 등만 있을 때 TYPE_A/B/C를 복원합니다.
         SYNCED·API 문자열은 오늘 선정 트랙보다 해당 종목 매수 이력을 우선합니다.
         """
         try:
             nk = str(code or "").split("_")[0].zfill(6)
             r = str(reason or "").upper()
+            if "TYPE_C" in r:
+                return "TYPE_C"
             if "TYPE_B" in r:
                 return "TYPE_B"
             if "TYPE_A" in r and "TYPE_B" not in r:
                 return "TYPE_A"
             hist = self._sig_type_from_order_history(nk)
-            if hist in ("TYPE_A", "TYPE_B"):
+            if hist in ("TYPE_A", "TYPE_B", "TYPE_C"):
                 return hist
             sel = self._sig_type_from_sel_track(nk)
-            if sel in ("TYPE_A", "TYPE_B"):
+            if sel in ("TYPE_A", "TYPE_B", "TYPE_C"):
                 return sel
         except Exception:
             pass
@@ -1119,11 +1147,13 @@ class PortfolioManager:
     ) -> None:
         """복원된 유형을 보유 dict에 반영해 전략유형·추매 문구·청산 키가 갈라지지 않게 합니다."""
         try:
-            if eff not in ("TYPE_A", "TYPE_B"):
+            if eff not in ("TYPE_A", "TYPE_B", "TYPE_C"):
                 return
             cur = str(pos.get("sig_type") or "").strip().upper()
             rsn = str(pos.get("reason") or "").upper()
-            if "TYPE_B" in cur and eff != "TYPE_B":
+            if ("TYPE_B" in cur and eff != "TYPE_B") or (
+                "TYPE_C" in cur and eff != "TYPE_C"
+            ):
                 return
             if (
                 (not cur)
@@ -1136,7 +1166,7 @@ class PortfolioManager:
 
     def infer_sig_type_for_ui(self, code: str, pos: Optional[Dict[str, Any]]) -> str:
         """
-        감시 트리「전략유형」용: 보유 dict 의 sig_type·reason 우선, 없으면 주문·선정 맥락으로 단일 A/B.
+        감시 트리「전략유형」용: 보유 sig_type·reason 우선, 없으면 주문·선정 맥락으로 복원합니다.
         SYNCED 기본 TYPE_A 는 해당 종목 매수 이력으로 덮어 Type B 체결이 전략 A로 보이지 않게 합니다.
         """
         try:
@@ -1144,7 +1174,9 @@ class PortfolioManager:
             if isinstance(pos, dict):
                 st = str(pos.get("sig_type") or "").strip().upper()
                 rsn = str(pos.get("reason") or "").upper()
-                if "TYPE_B" in st or "TYPE_B" in rsn:
+                if "TYPE_C" in st or "TYPE_C" in rsn:
+                    eff = "TYPE_C"
+                elif "TYPE_B" in st or "TYPE_B" in rsn:
                     eff = "TYPE_B"
                 elif "SYNCED" in rsn or not st:
                     eff = self._infer_sig_type_from_entry_reason(
@@ -1264,6 +1296,21 @@ class PortfolioManager:
                             }
                             if _db_mph > 0:
                                 new_pos["max_p_high"] = float(_db_mph)
+                            try:
+                                if len(row) > 10 and float(row[10] or 0) > 0:
+                                    new_pos["box_lower"] = float(row[10])
+                                if len(row) > 11 and float(row[11] or 0) > 0:
+                                    new_pos["box_upper"] = float(row[11])
+                                if len(row) > 12 and float(row[12] or 0) > 0:
+                                    new_pos["box_atr_entry"] = float(row[12])
+                                if len(row) > 13:
+                                    new_pos["box_breakdown_closes"] = max(
+                                        0, int(row[13] or 0)
+                                    )
+                                if len(row) > 14 and row[14]:
+                                    new_pos["box_last_breakdown_bar"] = str(row[14])
+                            except (TypeError, ValueError):
+                                pass
                             try:
                                 if int(new_pos.get("stage", 1) or 1) >= 2:
                                     new_pos["entry_n"] = 2
@@ -2233,6 +2280,59 @@ class PortfolioManager:
         except Exception:
             return {}
 
+    def _type_c_entry_box_metadata(
+        self,
+        code: str,
+        snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """체결 시점의 고정 박스 경계와 ATR_C를 감시 메타·스냅샷에서 확보합니다."""
+        result: Dict[str, float] = {}
+        try:
+            nk = self._normalize_stock_code(code)
+        except Exception:
+            nk = str(code or "").zfill(6)
+
+        sources: List[Dict[str, Any]] = []
+        if isinstance(snapshot, dict):
+            sources.append(snapshot)
+        try:
+            monitor_info = getattr(self.app, "monitor_info", None) or {}
+            for key in (nk, str(code)):
+                info = monitor_info.get(key)
+                if isinstance(info, dict):
+                    sources.append(info)
+                    break
+        except Exception:
+            pass
+
+        for source in sources:
+            for target, keys in (
+                ("box_lower", ("box_lower", "BoxLower")),
+                ("box_upper", ("box_upper", "BoxUpper")),
+                ("box_atr_entry", ("box_atr_entry", "ATR_C", "atr_c")),
+            ):
+                if result.get(target, 0) > 0:
+                    continue
+                for key in keys:
+                    try:
+                        value = float(source.get(key, 0) or 0)
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    if value > 0:
+                        result[target] = value
+                        break
+
+        if result.get("box_atr_entry", 0) <= 0:
+            try:
+                bars = (getattr(self.app, "bars_data", None) or {}).get(nk)
+                if bars is not None and not getattr(bars, "empty", True):
+                    value = float(bars.iloc[-1].get("ATR_C", 0) or 0)
+                    if value > 0:
+                        result["box_atr_entry"] = value
+            except (KeyError, TypeError, ValueError, IndexError):
+                pass
+        return result
+
     def _to_f(self, v: Any) -> float:
         try:
             if isinstance(v, list):
@@ -2583,9 +2683,13 @@ class PortfolioManager:
                     reg_reason = reason or (meta[1] if meta else "SIGNAL")
                     # Type B 판별: evaluate_position·S2·균형게이트가 sig_type 키를 우선 참조
                     try:
-                        _sig_type = (
-                            "TYPE_B" if "TYPE_B" in str(reg_reason).upper() else "TYPE_A"
-                        )
+                        _reason_upper = str(reg_reason).upper()
+                        if "TYPE_C" in _reason_upper:
+                            _sig_type = "TYPE_C"
+                        elif "TYPE_B" in _reason_upper:
+                            _sig_type = "TYPE_B"
+                        else:
+                            _sig_type = "TYPE_A"
                     except Exception:
                         _sig_type = "TYPE_A"
                     
@@ -2595,6 +2699,9 @@ class PortfolioManager:
                     fee_amt = fp * iq * buy_r
                     total_invested = fp * iq + fee_amt
                     
+                    _snap_s1 = self._ensure_fill_snapshot(
+                        code, fp, snapshot, str(reg_reason)
+                    )
                     self.virtual_positions[code] = {
                         "name": reg_name, "avg_price": fp, "qty": iq,
                         "stage": 1, "invested": total_invested,
@@ -2603,7 +2710,11 @@ class PortfolioManager:
                         "sig_type": _sig_type,
                         "events": [], "max_now": fp
                     }
-                    _snap_s1 = self._ensure_fill_snapshot(code, fp, snapshot, str(reg_reason))
+                    if _sig_type == "TYPE_C":
+                        box_meta = self._type_c_entry_box_metadata(code, _snap_s1)
+                        self.virtual_positions[code].update(box_meta)
+                        self.virtual_positions[code]["box_breakdown_closes"] = 0
+                        self.virtual_positions[code]["box_last_breakdown_bar"] = ""
                     self.virtual_positions[code]["events"].append(
                         {
                             "time": now_str,
@@ -2613,7 +2724,17 @@ class PortfolioManager:
                             "snapshot": _snap_s1,
                         }
                     )
-                    self._save_active_position(code, reg_name, fp, iq, 1, total_invested, datetime.now().isoformat(), reg_reason)
+                    self._save_active_position(
+                        code,
+                        reg_name,
+                        fp,
+                        iq,
+                        1,
+                        total_invested,
+                        datetime.now().isoformat(),
+                        reg_reason,
+                        pos=self.virtual_positions[code],
+                    )
                     _ord_sfx = f" ord={order_no}" if order_no else ""
                     self.log(
                         f"[Portfolio] {reg_name}({code}) S1 진입 · {iq}주 @ {int(fp):,}원{_ord_sfx}"

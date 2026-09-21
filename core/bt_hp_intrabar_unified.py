@@ -554,8 +554,8 @@ def evaluate_bt_hp_intrabar_unified(
                     elif is_addon_target:
                         sig_type = str(ind_d.get("Sig_Type", "TYPE_B"))
 
-                    if (sig_type == "TYPE_A" and ct == "B") or (
-                        sig_type == "TYPE_B" and ct == "A"
+                    if not TradingStrategy.track_signal_match_allows(
+                        settings, sig_type, ct
                     ):
                         continue
                     if (not is_addon_target) and TradingStrategy.simultaneous_type_a_blocked(
@@ -567,15 +567,20 @@ def evaluate_bt_hp_intrabar_unified(
                     ):
                         continue
 
-                    use_sb_for_type = bool(use_sb_a) if (
-                        sig_type == "TYPE_A" and not is_addon_target
-                    ) else bool(use_sb_b) if (
-                        sig_type == "TYPE_B" and not is_addon_target
-                    ) else (
-                        use_sb_s2_b
-                        if "TYPE_B" in str(pos_sim.get("sig_type", "")).upper()
-                        else use_sb_s2_a
-                    )
+                    if not is_addon_target:
+                        if sig_type == "TYPE_A":
+                            use_sb_for_type = bool(use_sb_a)
+                        elif sig_type == "TYPE_B":
+                            use_sb_for_type = bool(use_sb_b)
+                        else:
+                            use_sb_for_type = False
+                    else:
+                        use_sb_for_type = (
+                            use_sb_s2_b
+                            if "TYPE_B"
+                            in str((pos_sim or {}).get("sig_type", "")).upper()
+                            else use_sb_s2_a
+                        )
 
                     can_execute = True
                     reason_base = (

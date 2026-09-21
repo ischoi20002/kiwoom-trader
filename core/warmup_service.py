@@ -178,7 +178,16 @@ class WarmupService:
                     pass
 
             detailed = TradingStrategy.get_buy_signals_detailed(
-                df_ind, self.app.settings, "UP"
+                df_ind,
+                self.app.settings,
+                "UP",
+                signal_context={
+                    "sel_track": str(
+                        row.get("sel_track", row.get("SelTrack", "AB")) or "AB"
+                    ).strip().upper(),
+                    "box_lower": row.get("box_lower", row.get("BoxLower")),
+                    "box_upper": row.get("box_upper", row.get("BoxUpper")),
+                },
             )
             if detailed is None or getattr(detailed, "empty", True):
                 return

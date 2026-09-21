@@ -71,9 +71,11 @@ def _dual_track_new_candidates(
     holdings_codes: List[str],
     max_sa: int,
     max_sb: int,
+    top_codes_c: Optional[List[str]] = None,
+    max_sc: int = 0,
 ) -> List[str]:
     """
-    신규 감시 후보만 Track A/B 각각 max_slots_a·max_slots_b 상한으로 잘라 합친다.
+    신규 감시 후보를 Track A/B/C별 슬롯 상한으로 잘라 합칩니다.
     (구버전 단일 max_slots로 B가 잘리던 문제 제거)
     """
     try:
@@ -93,7 +95,17 @@ def _dual_track_new_candidates(
             if c not in hc and c not in picked:
                 picked.add(c)
                 new_b.append(str(c))
-        return _interleave_track_codes(new_a, new_b)
+        new_c: list[str] = []
+        for c in top_codes_c or []:
+            if len(new_c) >= max(0, max_sc):
+                break
+            if c not in hc and c not in picked:
+                picked.add(c)
+                new_c.append(str(c))
+        return _interleave_track_codes(
+            _interleave_track_codes(new_a, new_b),
+            new_c,
+        )
     except Exception:
         return []
 
@@ -423,6 +435,46 @@ class DynamicBacktester:
         except Exception:
             self._bt_ref_day_for_first = None
 
+        # 파라미터 튜닝은 동일한 일별 유니버스·15분 지표를 반복 사용합니다.
+        # 호출자가 명시적으로 주입한 읽기 전용 컨텍스트만 재사용하여 일반 실행과 분리합니다.
+        try:
+            precomputed = getattr(self, "_precomputed_bt_context", None)
+            cached_start = pd.to_datetime((precomputed or {}).get("start_date"))
+            cached_end = pd.to_datetime((precomputed or {}).get("end_date"))
+            requested_start = pd.to_datetime(start_date)
+            requested_end = pd.to_datetime(end_date)
+            reusable = (
+                isinstance(precomputed, dict)
+                and cached_start <= requested_start
+                and cached_end >= requested_end
+                and isinstance(precomputed.get("cached_15m_data"), dict)
+            )
+        except (TypeError, ValueError, KeyError):
+            precomputed = None
+            reusable = False
+        if reusable and isinstance(precomputed, dict):
+            try:
+                self.schedule_a = precomputed.get("schedule_a", {}) or {}
+                self.schedule_b = precomputed.get("schedule_b", {}) or {}
+                self.schedule_c = precomputed.get("schedule_c", {}) or {}
+                self.schedule_c_meta = precomputed.get("schedule_c_meta", {}) or {}
+                self.transition_regime_by_day = (
+                    precomputed.get("transition_regime_by_day", {}) or {}
+                )
+                self.index_dd_block_by_day = (
+                    precomputed.get("index_dd_block_by_day", {}) or {}
+                )
+                self.cached_15m_data = precomputed["cached_15m_data"]
+                self.cached_1m_data = {}
+                self._bt_trading_days = trading_days
+                print(
+                    "[Dynamic] 사전 계산 컨텍스트 재사용 "
+                    f"({len(self.cached_15m_data)}종목)"
+                )
+                return True
+            except (KeyError, TypeError, ValueError) as exc:
+                print(f"[Dynamic] 사전 계산 컨텍스트 재사용 실패: {exc}")
+
         # prepare_dynamic_universe 시작일:
         # 1) 첫 시뮬일의 ref_day(직전 영업일) 키가 스케줄에 포함되도록 최소 확장
         # 2) transition share_delta 등 일별 통계 워밍업(지표 EWM 은 end 앵커 lookback)
@@ -465,7 +517,12 @@ class DynamicBacktester:
             pass
         t_start = time.time()
         _result = strategy_selector.prepare_dynamic_universe(
-            self.settings, sched_start, end_date, self.db, callback if callback else print
+            self.settings,
+            sched_start,
+            end_date,
+            self.db,
+            callback if callback else print,
+            include_track_c_schedule=True,
         )
         if isinstance(_result, tuple) and len(_result) >= 3:
             universe_schedule = _result[0]
@@ -475,11 +532,23 @@ class DynamicBacktester:
                 self.transition_regime_by_day = dict(_result[3]) if len(_result) >= 4 else {}
             except Exception:
                 self.transition_regime_by_day = {}
+            try:
+                # Track C는 TYPE_C 구현 전까지 관찰용 스케줄로만 보관합니다.
+                self.schedule_c = dict(_result[4]) if len(_result) >= 5 else {}
+            except Exception:
+                self.schedule_c = {}
+            try:
+                self.schedule_c_meta = dict(_result[5]) if len(_result) >= 6 else {}
+            except Exception:
+                self.schedule_c_meta = {}
         else:
             universe_schedule = _result
             self.schedule_a = universe_schedule
             self.schedule_b = {}
+            self.schedule_c = {}
+            self.schedule_c_meta = {}
             self.transition_regime_by_day = {}
+        self.universe_schedule = universe_schedule or {}
         t_duration = time.time() - t_start
         msg = f"사전 계산 완료 ({t_duration:.2f}초)"
         print(f"[Done] {msg}")
@@ -649,16 +718,17 @@ class DynamicBacktester:
         self.daily_equity = [{'date': start_date + " 08:59:00", 'equity': self.initial_cash, 'cash': self.initial_cash, 'holdings_n': 0}]
         
         # 신호 기록 초기화
-        for f in [SIGNAL_CSV, TRADE_CSV]:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
-        try:
-            clear_trade_csv_buffer()
-        except Exception:
-            pass
+        if not bool(getattr(self, "_suppress_backtest_artifacts", False)):
+            for f in [SIGNAL_CSV, TRADE_CSV]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+            try:
+                clear_trade_csv_buffer()
+            except Exception:
+                pass
 
         # 2. 일단위 루프
         for idx, current_day in enumerate(trading_days):
@@ -687,7 +757,21 @@ class DynamicBacktester:
             
             top_codes_a = self.schedule_a.get(ref_day, [])
             top_codes_b = self.schedule_b.get(ref_day, [])
-            top_codes = _interleave_track_codes(top_codes_a, top_codes_b)
+            top_codes_c = (
+                self.schedule_c.get(ref_day, [])
+                if (
+                    bool(self.settings.get("use_type_c", False))
+                    and not self.high_precision
+                )
+                else []
+            )
+            self._current_box_c_meta = (
+                getattr(self, "schedule_c_meta", {}).get(ref_day, {}) or {}
+            )
+            top_codes = _interleave_track_codes(
+                _interleave_track_codes(top_codes_a, top_codes_b),
+                top_codes_c,
+            )
 
             # [Transition] 레짐 전환일: tiered — TRANSITION=S2 선택, HARD=S1+S2
             # [IndexDD] KODEX 급락 쿨다운은 S1만 OR 차단
@@ -725,7 +809,7 @@ class DynamicBacktester:
             except Exception:
                 pass
 
-            # Track A/B 소속 맵 (매수 시 sig_type 검증용, 1분봉 정밀 모드에서도 사용)
+            # Track A/B/C 소속 맵 (매수 시 sig_type 검증용)
             track_map: dict[str, str] = {}
             for c in top_codes_a:
                 track_map[c] = 'A'
@@ -734,6 +818,11 @@ class DynamicBacktester:
                     track_map[c] = 'AB'
                 else:
                     track_map[c] = 'B'
+            for c in top_codes_c:
+                previous = track_map.get(c, "")
+                track_map[c] = "".join(
+                    track for track in ("A", "B", "C") if track in previous + "C"
+                )
             self._current_track_map = track_map
             
             if not top_codes and not bool(self.settings.get("transition_runtime_block_s1", False)):
@@ -742,13 +831,20 @@ class DynamicBacktester:
                 # 보유 종목만 감시(신규 진입 없음).
                 pass
             
-            # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보: Track A/B 각각 max_slots_a·max_slots_b)
+            # 2-2. 감시 대상 확정 (보유 종목 + 신규 후보: Track A/B/C 개별 슬롯)
             max_sa = int(self.settings.get("max_slots_a", 20))
             max_sb = int(self.settings.get("max_slots_b", 10))
+            max_sc = int(self.settings.get("max_slots_c", 15))
             holdings_codes = list(self.holdings.keys())
-            if top_codes_a or top_codes_b:
+            if top_codes_a or top_codes_b or top_codes_c:
                 new_candidates = _dual_track_new_candidates(
-                    top_codes_a, top_codes_b, holdings_codes, max_sa, max_sb
+                    top_codes_a,
+                    top_codes_b,
+                    holdings_codes,
+                    max_sa,
+                    max_sb,
+                    top_codes_c,
+                    max_sc,
                 )
             else:
                 hc_set = set(holdings_codes)
@@ -767,6 +863,76 @@ class DynamicBacktester:
                 base_df = self.cached_15m_data[code]
                 day_full = base_df.loc[current_day:current_day + " 23:59:59"].copy()
                 if day_full.empty: continue
+
+                # C는 평가 전일(ref_day)에 확정된 박스 경계를 당일 전체 봉에 고정 적용합니다.
+                if "C" in track_map.get(code, ""):
+                    try:
+                        box_meta = (
+                            getattr(self, "schedule_c_meta", {})
+                            .get(ref_day, {})
+                            .get(code, {})
+                        )
+                        if box_meta:
+                            signal_cache = getattr(
+                                self, "_type_c_signal_cache", None
+                            )
+                            cache_key = (
+                                str(code).zfill(6),
+                                str(ref_day),
+                                str(current_day),
+                                float(box_meta.get("box_lower", 0) or 0),
+                                float(box_meta.get("box_upper", 0) or 0),
+                            )
+                            c_detailed = (
+                                signal_cache.get(cache_key)
+                                if isinstance(signal_cache, dict)
+                                else None
+                            )
+                            if c_detailed is None:
+                                try:
+                                    requested_history = int(
+                                        self.settings.get(
+                                            "type_c_signal_history_bars",
+                                            self.settings.get(
+                                                "high_precision_causal_lookback_bars",
+                                                400,
+                                            ),
+                                        )
+                                    )
+                                except (TypeError, ValueError):
+                                    requested_history = 400
+                                history = base_df.loc[
+                                    : current_day + " 23:59:59"
+                                ].tail(max(20, requested_history))
+                                c_detailed = (
+                                    TradingStrategy.get_buy_signals_detailed(
+                                        history,
+                                        self.settings,
+                                        "UP",
+                                        signal_context={
+                                            "sel_track": track_map.get(code, "C"),
+                                            "box_lower": box_meta.get("box_lower"),
+                                            "box_upper": box_meta.get("box_upper"),
+                                        },
+                                    )
+                                )
+                                if isinstance(signal_cache, dict):
+                                    signal_cache[cache_key] = c_detailed.loc[
+                                        current_day : current_day + " 23:59:59"
+                                    ].copy()
+                            common_index = day_full.index.intersection(c_detailed.index)
+                            for column in c_detailed.columns:
+                                day_full.loc[common_index, column] = c_detailed.loc[
+                                    common_index, column
+                                ]
+                    except Exception as e:
+                        try:
+                            print(
+                                f"[Dynamic] TYPE_C 일봉 경계 신호 계산 실패 "
+                                f"({code} {current_day}): {e}"
+                            )
+                        except Exception:
+                            pass
 
                 day_data[code] = day_full
                 day_signals[code] = day_full
@@ -787,6 +953,10 @@ class DynamicBacktester:
             for i, c in enumerate(top_codes_b):
                 if c not in code_to_rank:
                     code_to_rank[c] = offset_b + i
+            offset_c = len(top_codes_a) + len(top_codes_b)
+            for i, c in enumerate(top_codes_c):
+                if c not in code_to_rank:
+                    code_to_rank[c] = offset_c + i
             
             for curr_time in timeline:
                 # 같은 슬롯 S1은 동시주문 — 타입·동수는 이 시각 직전 보유로만 판정
@@ -971,7 +1141,13 @@ class DynamicBacktester:
                                     can_execute = False
                                 
                                 # [v31.5] Smart Buy (Supply/Demand Confirmation)
-                                use_sb_for_type = self.use_sb_a if sig_type == "TYPE_A" else self.use_sb_b
+                                if sig_type == "TYPE_A":
+                                    use_sb_for_type = self.use_sb_a
+                                elif sig_type == "TYPE_B":
+                                    use_sb_for_type = self.use_sb_b
+                                else:
+                                    # TYPE_C는 가격행동·거래량 조건 자체로 확정합니다.
+                                    use_sb_for_type = False
                                 
                                 if use_sb_for_type:
                                     ab_ratio = last_sig.get('ask_bid_ratio', last_sig.get('Ask_Bid_Ratio', 1.0 / (last_sig.get('bid_ask_ratio', 1.0) + 1e-10)))
@@ -1009,9 +1185,20 @@ class DynamicBacktester:
                                     )
                                 else:
                                     sig_type = str(last_sig.get('Sig_Type', 'TYPE_B'))
-                                use_sb_for_type = self.use_sb_a if (sig_type == "TYPE_A" and not is_addon_target) else \
-                                                   self.use_sb_b if (sig_type == "TYPE_B" and not is_addon_target) else \
-                                                   (self.use_sb_s2_b if "TYPE_B" in str(h_info.get("sig_type", "")) else self.use_sb_s2_a)
+                                if not is_addon_target:
+                                    if sig_type == "TYPE_A":
+                                        use_sb_for_type = self.use_sb_a
+                                    elif sig_type == "TYPE_B":
+                                        use_sb_for_type = self.use_sb_b
+                                    else:
+                                        use_sb_for_type = False
+                                else:
+                                    use_sb_for_type = (
+                                        self.use_sb_s2_b
+                                        if "TYPE_B"
+                                        in str((h_info or {}).get("sig_type", ""))
+                                        else self.use_sb_s2_a
+                                    )
                                 
                                 # [v33.9] Prefix "SmartBuy|" if it was enabled and passed
                                 if use_sb_for_type:
@@ -1076,13 +1263,15 @@ class DynamicBacktester:
             )
             
             # [Perf] 매매 CSV 버퍼 일괄 flush (하루 단위로 디스크 I/O 감소)
-            try:
-                flush_trade_csv_buffer()
-            except Exception:
-                pass
+            if not bool(getattr(self, "_suppress_backtest_artifacts", False)):
+                try:
+                    flush_trade_csv_buffer()
+                except Exception:
+                    pass
             
             day_t_duration = time.time() - day_t_start
-            print(f"[Day] {current_day} 처리 완료 ({day_t_duration:.2f}초)")
+            if not bool(getattr(self, "_quiet_backtest", False)):
+                print(f"[Day] {current_day} 처리 완료 ({day_t_duration:.2f}초)")
 
         if self.holdings:
             last_day = trading_days[-1]
@@ -1104,10 +1293,11 @@ class DynamicBacktester:
                         'Return': ret, 'Reason': reason, 'Cash': self.cash, 'Fee': sell_fee,
                         'Sig_Type': h_info.get('sig_type', 'TYPE_A')
                     })
-        try:
-            flush_trade_csv_buffer()
-        except Exception:
-            pass
+        if not bool(getattr(self, "_suppress_backtest_artifacts", False)):
+            try:
+                flush_trade_csv_buffer()
+            except Exception:
+                pass
         try:
             self.last_run_elapsed_sec = float(time.time() - _run_t0)
         except Exception:
@@ -1120,9 +1310,10 @@ class DynamicBacktester:
                     "고정밀" if self.high_precision else "15분"
                 )
             )
-            print(
-                f"[Dynamic] 모드={_mode} 소요={self.last_run_elapsed_sec:.1f}초"
-            )
+            if not bool(getattr(self, "_quiet_backtest", False)):
+                print(
+                    f"[Dynamic] 모드={_mode} 소요={self.last_run_elapsed_sec:.1f}초"
+                )
         except Exception:
             pass
         return self._finalize_backtest(interval)
@@ -1859,7 +2050,26 @@ class DynamicBacktester:
                 is_sig = False
             if not is_sig:
                 return
-            sig_type = str(curr_row.get("Sig_Type", "TYPE_A"))
+            if bool(self.settings.get("transition_runtime_block_s1", False)):
+                return
+            code_track = str(
+                (getattr(self, "_current_track_map", {}) or {}).get(code, "A")
+            )
+            sig_type = self._effective_s1_sig_type_for_buy(curr_row, code_track)
+            if not TradingStrategy.track_signal_match_allows(
+                self.settings, sig_type, code_track
+            ):
+                return
+            if TradingStrategy.simultaneous_type_a_blocked(
+                self.settings, curr_row, sig_type
+            ):
+                return
+            if TradingStrategy.simultaneous_equal_holdings_blocked(
+                self.settings,
+                curr_row,
+                self._s1_holdings_for_type_decision(),
+            ):
+                return
             fill = self._resolve_auction_market_fill(
                 code,
                 curr_15m_time,
@@ -1937,6 +2147,19 @@ class DynamicBacktester:
 
         if h_info is None:
             sig_type = str(sig_res.get("Sig_Type", "TYPE_A"))
+            if sig_type == "TYPE_C":
+                try:
+                    box_meta = (
+                        getattr(self, "_current_box_c_meta", {}).get(code, {}) or {}
+                    )
+                    if not (
+                        float(box_meta.get("box_upper", 0) or 0)
+                        > float(box_meta.get("box_lower", 0) or 0)
+                        > 0
+                    ):
+                        return False
+                except (TypeError, ValueError):
+                    return False
             # ATR_SL 재진입 쿨다운
             try:
                 if self._s1_blocked_by_atr_sl_cooldown(str(code).zfill(6), curr_time):
@@ -1949,6 +2172,8 @@ class DynamicBacktester:
             entry_n = 1
         else:
             if h_info['entry_n'] >= 2: return
+            if "TYPE_C" in str(h_info.get("sig_type", "") or "").upper():
+                return False
             # market_trend는 handle_buy_execution 호출부에서 넘겨받기 어렵지만, s2_approval은 이미 위에서 체크됨
             # 하지만 안전을 위해 다시 체크하려면 파라미터 추가 필요 (일단 위 339라인에서 체크 완료됨)
             target_amt = s2_amt
@@ -1969,6 +2194,26 @@ class DynamicBacktester:
                 'entry_date': curr_time, 'sig_type': sig_type,
                 'atr_at_entry': last_row.get('ATR', 0) # Store ATR for SL
             }
+            if sig_type == "TYPE_C":
+                try:
+                    box_meta = (
+                        getattr(self, "_current_box_c_meta", {}).get(code, {}) or {}
+                    )
+                    lower = float(box_meta.get("box_lower", 0) or 0)
+                    upper = float(box_meta.get("box_upper", 0) or 0)
+                    atr_c = float(last_row.get("ATR_C", 0) or 0)
+                    if upper > lower > 0:
+                        self.holdings[code].update(
+                            {
+                                "box_lower": lower,
+                                "box_upper": upper,
+                                "box_atr_entry": atr_c,
+                                "box_breakdown_closes": 0,
+                                "box_last_breakdown_bar": "",
+                            }
+                        )
+                except (KeyError, TypeError, ValueError):
+                    pass
         else:
             old_qty = h_info['qty']
             h_info['avg_p'] = (h_info['avg_p'] * old_qty + real_amt) / (old_qty + qty)
@@ -2039,6 +2284,8 @@ class DynamicBacktester:
 
     def _log_trade_to_csv(self, dt, code, action, price, qty, reason, ret=0, fee=0, sig_type=None):
         """매매 한 건을 메모리 버퍼에 적재. 일 단위로 flush_trade_csv_buffer 호출됨."""
+        if bool(getattr(self, "_suppress_backtest_artifacts", False)):
+            return
         name = self.stock_name_map.get(code, code)
         safe_reason = str(reason).replace(",", ";")
         row = [
@@ -2062,10 +2309,13 @@ class DynamicBacktester:
                 pass
 
     def _finalize_backtest(self, interval):
-        print(f"[Dynamic] 시뮬레이션 완료. 총 {len(self.trades_history)}건의 매매(평가 포함) 발생.")
+        if not bool(getattr(self, "_quiet_backtest", False)):
+            print(f"[Dynamic] 시뮬레이션 완료. 총 {len(self.trades_history)}건의 매매(평가 포함) 발생.")
         trades_df = pd.DataFrame(self.trades_history)
         if not trades_df.empty:
             trades_df['Date'] = pd.to_datetime(trades_df['Date'])
+            if bool(getattr(self, "_suppress_backtest_artifacts", False)):
+                return trades_df
             trd_path = os.path.join(BASE_DIR, "dynamic_trade_report.html")
             import reporting.trade_report
             importlib.reload(reporting.trade_report)

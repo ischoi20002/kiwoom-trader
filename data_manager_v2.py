@@ -468,12 +468,22 @@ class DataManagerV2:
                     reason TEXT,
                     status TEXT DEFAULT 'OPEN',
                     max_p REAL DEFAULT 0,
-                    max_p_high REAL DEFAULT 0
+                    max_p_high REAL DEFAULT 0,
+                    box_lower REAL DEFAULT 0,
+                    box_upper REAL DEFAULT 0,
+                    box_atr_entry REAL DEFAULT 0,
+                    box_breakdown_closes INTEGER DEFAULT 0,
+                    box_last_breakdown_bar TEXT DEFAULT ''
                 )
             """)
             for _ap_mig in (
                 "ALTER TABLE active_positions ADD COLUMN max_p REAL DEFAULT 0",
                 "ALTER TABLE active_positions ADD COLUMN max_p_high REAL DEFAULT 0",
+                "ALTER TABLE active_positions ADD COLUMN box_lower REAL DEFAULT 0",
+                "ALTER TABLE active_positions ADD COLUMN box_upper REAL DEFAULT 0",
+                "ALTER TABLE active_positions ADD COLUMN box_atr_entry REAL DEFAULT 0",
+                "ALTER TABLE active_positions ADD COLUMN box_breakdown_closes INTEGER DEFAULT 0",
+                "ALTER TABLE active_positions ADD COLUMN box_last_breakdown_bar TEXT DEFAULT ''",
             ):
                 try:
                     conn.execute(_ap_mig)
@@ -1386,6 +1396,11 @@ class DataManagerV2:
         reason,
         max_p=None,
         max_p_high=None,
+        box_lower=None,
+        box_upper=None,
+        box_atr_entry=None,
+        box_breakdown_closes=None,
+        box_last_breakdown_bar=None,
     ):
         """
         활성 포지션 UPSERT.
@@ -1437,11 +1452,24 @@ class DataManagerV2:
             mp = max(float(mp or 0), float(prev_mp or 0))
             mph = max(float(mph or 0), float(prev_mph or 0))
 
+            def _as_box_float(raw: Any) -> float:
+                try:
+                    value = float(raw or 0)
+                    return value if value > 0 else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+
+            try:
+                breakdown_count = max(0, int(box_breakdown_closes or 0))
+            except (TypeError, ValueError):
+                breakdown_count = 0
             conn.execute(
                 """
                 INSERT OR REPLACE INTO active_positions
-                (code, name, avg_price, qty, stage, invested, entry_time, reason, status, max_p, max_p_high)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
+                (code, name, avg_price, qty, stage, invested, entry_time, reason,
+                 status, max_p, max_p_high, box_lower, box_upper, box_atr_entry,
+                 box_breakdown_closes, box_last_breakdown_bar)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     code,
@@ -1454,9 +1482,37 @@ class DataManagerV2:
                     reason,
                     mp,
                     mph,
+                    _as_box_float(box_lower),
+                    _as_box_float(box_upper),
+                    _as_box_float(box_atr_entry),
+                    breakdown_count,
+                    str(box_last_breakdown_bar or ""),
                 ),
             )
             conn.commit()
+
+    def update_active_position_box_state(
+        self,
+        code: str,
+        breakdown_closes: int,
+        last_breakdown_bar: Optional[str] = None,
+    ) -> None:
+        """Track C의 연속 하단 이탈 상태를 재시작 이후에도 유지합니다."""
+        try:
+            count = max(0, int(breakdown_closes or 0))
+            bar_key = str(last_breakdown_bar or "")
+            with self._lock, self._get_state_connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE active_positions
+                    SET box_breakdown_closes = ?, box_last_breakdown_bar = ?
+                    WHERE code = ? AND status = 'OPEN'
+                    """,
+                    (count, bar_key, str(code).zfill(6)),
+                )
+                conn.commit()
+        except (sqlite3.Error, TypeError, ValueError):
+            pass
 
     def update_active_position_peaks(
         self,
@@ -3820,13 +3876,18 @@ class DataManagerV2:
         Returns
         -------
         list[tuple]
-            ``(code, name, avg_price, qty, stage, invested, entry_time, reason, max_p, max_p_high)``
+            ``(code, name, avg_price, qty, stage, invested, entry_time, reason,
+            max_p, max_p_high, box_lower, box_upper, box_atr_entry,
+            box_breakdown_closes, box_last_breakdown_bar)``
         """
         with self._get_state_connection() as conn:
             try:
                 cursor = conn.execute(
                     "SELECT code, name, avg_price, qty, stage, invested, entry_time, reason, "
-                    "COALESCE(max_p, 0), COALESCE(max_p_high, 0) "
+                    "COALESCE(max_p, 0), COALESCE(max_p_high, 0), "
+                    "COALESCE(box_lower, 0), COALESCE(box_upper, 0), "
+                    "COALESCE(box_atr_entry, 0), COALESCE(box_breakdown_closes, 0), "
+                    "COALESCE(box_last_breakdown_bar, '') "
                     "FROM active_positions WHERE status='OPEN'"
                 )
                 return cursor.fetchall()
@@ -3837,7 +3898,10 @@ class DataManagerV2:
                     "FROM active_positions WHERE status='OPEN'"
                 )
                 rows = cursor.fetchall()
-                return [tuple(r) + (0.0, 0.0) for r in rows]
+                return [
+                    tuple(r) + (0.0, 0.0, 0.0, 0.0, 0.0, 0, "")
+                    for r in rows
+                ]
 
     def get_kospi_list(self, count=200, force=False, settings=None, universe_log=None):
         """

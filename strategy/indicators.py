@@ -247,8 +247,10 @@ def calculate_all_indicators(df, settings):
         # Type A/B 청산용 ATR 주기 분리 (구버전 atr_period → A 트랙 폴백)
         atr_pa = int(settings.get("atr_period_a", settings.get("atr_period", 14)))
         atr_pb = int(settings.get("atr_period_b", settings.get("atr_period", 14)))
+        atr_pc = int(settings.get("type_c_atr_period", 14))
         df["ATR_A"] = calculate_atr(df, max(1, atr_pa))
         df["ATR_B"] = calculate_atr(df, max(1, atr_pb))
+        df["ATR_C"] = calculate_atr(df, max(1, atr_pc))
         df["ATR"] = df["ATR_A"]
 
     # 전일 동시간 거래량: S1/S2 × A/B lookback 완전 분리 (+ 레거시 2열)
@@ -302,8 +304,10 @@ def calculate_buy_indicators_light(df, settings):
     if 'High' in df.columns and 'Low' in df.columns:
         atr_pa = int(settings.get("atr_period_a", settings.get("atr_period", 14)))
         atr_pb = int(settings.get("atr_period_b", settings.get("atr_period", 14)))
+        atr_pc = int(settings.get("type_c_atr_period", 14))
         df["ATR_A"] = calculate_atr(df, max(1, atr_pa))
         df["ATR_B"] = calculate_atr(df, max(1, atr_pb))
+        df["ATR_C"] = calculate_atr(df, max(1, atr_pc))
         df["ATR"] = df["ATR_A"]
 
     try:

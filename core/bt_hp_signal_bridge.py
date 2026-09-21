@@ -913,11 +913,12 @@ def fetch_m1_chunk_for_bt_hp_bridge(
 
 
 def sel_track_to_bt_code_track(sel: Any) -> str:
-    """감시 `sel_track` → 동적 백테 `code_track` (A/B/AB)."""
+    """감시 ``sel_track``을 A/B/C 조합의 백테스트 트랙으로 정규화합니다."""
     try:
         u = str(sel or "AB").strip().upper()
-        if u in ("A", "B", "AB"):
-            return u
+        normalized = "".join(track for track in ("A", "B", "C") if track in u)
+        if normalized:
+            return normalized
     except (TypeError, ValueError):
         pass
     return "AB"

@@ -119,17 +119,14 @@ _MONITOR_COL_MIN_WIDTH: Dict[str, int] = {
 
 def format_strategy_type_label(sel_track: object) -> str:
     """
-    선정 트랙(sel_track: A / B / AB) → 실시간 감시 '전략유형' 컬럼 표시문자열.
+    선정 트랙(A/B/C 조합) → 실시간 감시 '전략유형' 컬럼 표시문자열.
     SignalEngine 등에서 동일 문구를 쓰려면 이 함수를 import 해 사용합니다.
     """
     try:
         tr = str(sel_track if sel_track is not None else "").strip().upper()
-        if tr == "A":
-            return "전략 A"
-        if tr == "B":
-            return "전략 B"
-        if tr in ("AB", "A+B"):
-            return "전략 A+B"
+        normalized = "".join(track for track in ("A", "B", "C") if track in tr)
+        if normalized:
+            return "전략 " + "+".join(normalized)
         return "전략 A+B"
     except Exception:
         return "전략 A+B"
@@ -156,8 +153,7 @@ def format_entry_signal_type_label(
     app: Any = None,
 ) -> str:
     """
-    보유 종목: 실제 매수 체결에 쓰인 신호 구분(sig_type TYPE_A/B)을 표시.
-    비보유(감시만)·pos 없음: 선정 트랙(sel_track) 기존 문구(전략 A/B/A+B).
+    보유 종목은 실제 TYPE_A/B/C를, 비보유 종목은 선정 트랙을 표시합니다.
 
     code·app 이 있으면 PortfolioManager.infer_sig_type_for_ui 로 단일 A/B 를
     (DB 복구 후 sig_type 누락·SYNCED 등) 보강합니다.
@@ -175,13 +171,19 @@ def format_entry_signal_type_label(
                     return "전략 B"
                 if eff == "TYPE_A":
                     return "전략 A"
+                if eff == "TYPE_C":
+                    return "전략 C"
         if isinstance(pos, dict):
             st = str(pos.get("sig_type") or "").strip().upper()
+            if st == "TYPE_C" or "TYPE_C" in st:
+                return "전략 C"
             if st == "TYPE_B" or "TYPE_B" in st:
                 return "전략 B"
             if st == "TYPE_A" or "TYPE_A" in st:
                 return "전략 A"
             rsn = str(pos.get("reason") or "").upper()
+            if "TYPE_C" in rsn:
+                return "전략 C"
             if "TYPE_B" in rsn:
                 return "전략 B"
             if "TYPE_A" in rsn and "TYPE_B" not in rsn:

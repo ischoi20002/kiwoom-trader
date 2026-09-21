@@ -556,10 +556,11 @@ class TradingController:
         if 'Code' not in temp_df.columns and 'code' in df.columns:
             temp_df.rename(columns={'code': 'Code'}, inplace=True)
             
-        # 감시 상한: Track A/B 합 (구 max_slots 단일 키는 폴백)
+        # 감시 상한: Track A/B/C 합 (C는 TYPE_C 구현 전 관찰 전용)
         max_sa = int(self.app.settings.get('max_slots_a', 20))
         max_sb = int(self.app.settings.get('max_slots_b', 10))
-        max_slots = max_sa + max_sb
+        max_sc = int(self.app.settings.get('max_slots_c', 15))
+        max_slots = max_sa + max_sb + max_sc
         if max_slots <= 0:
             max_slots = int(self.app.settings.get('max_slots', 20))
         self.monitor_codes = temp_df['Code'].tolist()[:max_slots]
@@ -587,6 +588,9 @@ class TradingController:
                     row.get('SelTrack', row.get('sel_track', row.get('seltrack', 'AB')))
                 ).strip().upper()
                 or 'AB',
+                # Track C 신호는 종목선정 시 전일까지 확정된 박스 경계를 사용합니다.
+                'box_lower': float(row.get('BoxLower', row.get('box_lower', 0)) or 0),
+                'box_upper': float(row.get('BoxUpper', row.get('box_upper', 0)) or 0),
             }
 
     def _merged_warmup_codes(self):
@@ -829,14 +833,14 @@ class TradingController:
 
     def _narrow_monitor_sel_track_after_s1_buy(self, code: object, reason: object) -> None:
         """
-        선정 트랙이 AB(또는 미지정)인 종목이 S1 매수(TYPE_A/B)로 나가면
-        감시 메타 sel_track 을 단일 A/B 로 좁힙니다.
-        이미 A/B 로 확정된 트랙은 미체결 재주문 때문에 되돌리지 않습니다.
+        복합 선정 트랙 종목이 S1 매수(TYPE_A/B/C)로 나가면 실제 체결 트랙으로 좁힙니다.
         """
         try:
             nk = str(code or "").split("_")[0].zfill(6)
             rs = str(reason or "").upper()
-            if "TYPE_B" in rs:
+            if "TYPE_C" in rs:
+                new_tr = "C"
+            elif "TYPE_B" in rs:
                 new_tr = "B"
             elif "TYPE_A" in rs:
                 new_tr = "A"
@@ -855,7 +859,12 @@ class TradingController:
                     cur = str(
                         ent.get("sel_track") or ent.get("SelTrack") or ""
                     ).strip().upper()
-                    if cur not in ("AB", "A+B", ""):
+                    normalized = "".join(
+                        track for track in ("A", "B", "C") if track in cur
+                    )
+                    if normalized and (
+                        len(normalized) <= 1 or new_tr not in normalized
+                    ):
                         continue
                     ent["sel_track"] = new_tr
                     try:

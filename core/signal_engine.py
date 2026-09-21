@@ -1293,16 +1293,26 @@ class SignalEngine:
                 calc_df = self._closed_df_for_indicator_calc(closed_df)
                 df_ind = TradingStrategy.calculate_indicators(calc_df, settings)
                 df_ind = self._apply_ready_column_to_indicators(df_ind)
-                detailed = TradingStrategy.get_buy_signals_detailed(df_ind, settings, "UP")
+                _sel_tr = str(
+                    info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                ).strip().upper()
+                signal_context = {
+                    "sel_track": _sel_tr,
+                    "box_lower": info.get("box_lower", info.get("BoxLower")),
+                    "box_upper": info.get("box_upper", info.get("BoxUpper")),
+                }
+                detailed = TradingStrategy.get_buy_signals_detailed(
+                    df_ind,
+                    settings,
+                    "UP",
+                    signal_context=signal_context,
+                )
                 last_ser = detailed.iloc[-1]
                 last_sig = (
                     last_ser.to_dict() if hasattr(last_ser, "to_dict") else dict(last_ser)
                 )
                 last_sig = self._merge_ready_into_sig(last_sig, bar_count)
                 is_buy = self._s1_buy_from_sig_dict(last_sig, bar_count)
-                _sel_tr = str(
-                    info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
-                ).strip().upper()
                 info["last_sig_cache"] = last_sig
                 info["last_detailed_sig"] = detailed
                 info["last_row_cache"] = df_ind.iloc[-1].to_dict()
@@ -1435,6 +1445,18 @@ class SignalEngine:
                 pass
 
             # 선정 트랙 ↔ 신호 타입 불일치: 주문·쿨다운 소모 전에 차단
+            try:
+                _sel_tr = str(
+                    info.get("sel_track", info.get("SelTrack", "AB")) or "AB"
+                ).strip().upper()
+                sig_type = TradingStrategy.effective_s1_sig_type_for_buy(
+                    getattr(self.app, "settings", None) or {},
+                    last_sig,
+                    getattr(self.app.portfolio, "virtual_positions", None) or {},
+                    _sel_tr,
+                )
+            except Exception:
+                sig_type = str(last_sig.get("Sig_Type", "TYPE_A") or "TYPE_A")
             if not self._apply_s1_track_match_gate(
                 nk,
                 info,
@@ -1831,6 +1853,8 @@ class SignalEngine:
                     bid_ask_ratio=ba,
                     ask_bid_ratio=ab,
                     vol_power=vp,
+                    bar_confirmed=True,
+                    bar_key=slot_key,
                     sel_track=(info or {}).get("sel_track")
                     or (info or {}).get("SelTrack"),
                 )
@@ -2647,26 +2671,38 @@ class SignalEngine:
         self, last_sig: Any, sel_track: str = "AB"
     ) -> str:
         """
-        S1 합치도 표시: 눌림목(A)과 추세돌파(B) 조건 충족 수를 보여준다.
-        선정 트랙이 A/B 단일이면 해당 트랙 지표만 표시(교차 트랙 문구 생략).
+        S1 합치도 표시: 눌림목(A)·추세돌파(B)·박스반등(C) 충족 수를 보여준다.
         """
         try:
             tr_raw = str(sel_track or "AB").strip().upper()
-            tr = tr_raw if tr_raw in ("A", "B", "AB") else "AB"
+            tr = "".join(x for x in ("A", "B", "C") if x in tr_raw) or "AB"
             ma_c = int(self._to_scalar(last_sig.get("Met_A", 0), 0))
             ta_t = max(1, int(self._to_scalar(last_sig.get("Tot_A", 1), 1)))
             mb_c = int(self._to_scalar(last_sig.get("Met_B", 0), 0))
             tb_t = max(1, int(self._to_scalar(last_sig.get("Tot_B", 1), 1)))
+            mc_c = int(self._to_scalar(last_sig.get("Met_C", 0), 0))
+            tc_t = max(1, int(self._to_scalar(last_sig.get("Tot_C", 1), 1)))
             if tr == "A":
                 return f"눌림A {ma_c}/{ta_t}"
             if tr == "B":
                 return f"추세B {mb_c}/{tb_t}"
+            if tr == "C":
+                return f"박스C {mc_c}/{tc_t}"
             st = str(self._to_scalar(last_sig.get("Sig_Type", "NONE"), "NONE"))
+            if st == "TYPE_C":
+                return f"박스C {mc_c}/{tc_t}"
             if st == "TYPE_B":
                 return f"추세B {mb_c}/{tb_t} (눌림A {ma_c}/{ta_t})"
             if st == "TYPE_A":
                 return f"눌림A {ma_c}/{ta_t} (추세B {mb_c}/{tb_t})"
-            return f"눌림A {ma_c}/{ta_t} · 추세B {mb_c}/{tb_t}"
+            parts = []
+            if "A" in tr:
+                parts.append(f"눌림A {ma_c}/{ta_t}")
+            if "B" in tr:
+                parts.append(f"추세B {mb_c}/{tb_t}")
+            if "C" in tr:
+                parts.append(f"박스C {mc_c}/{tc_t}")
+            return " · ".join(parts) if parts else "—"
         except Exception:
             try:
                 mc = int(self._to_scalar(last_sig["Met_Count"], 0))
@@ -3510,8 +3546,23 @@ class SignalEngine:
                     _mirror_df_ind = df_with_ind
                     try:
                         _sig_st = self._settings_for_s1_signals()
+                        _sig_context = {
+                            "sel_track": str(
+                                info.get("sel_track", info.get("SelTrack", "AB"))
+                                or "AB"
+                            ).strip().upper(),
+                            "box_lower": info.get(
+                                "box_lower", info.get("BoxLower")
+                            ),
+                            "box_upper": info.get(
+                                "box_upper", info.get("BoxUpper")
+                            ),
+                        }
                         info["last_detailed_sig"] = TradingStrategy.get_buy_signals_detailed(
-                            df_with_ind, _sig_st, "UP"
+                            df_with_ind,
+                            _sig_st,
+                            "UP",
+                            signal_context=_sig_context,
                         )
                         info["last_bar_count"] = current_bar_count
                         info["last_row_cache"] = df_with_ind.iloc[-1].to_dict()

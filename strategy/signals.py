@@ -94,8 +94,18 @@ def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bo
         return default
 
 
-def get_buy_signals_detailed(df, settings, market_trend='UP'):
-    """매수 신호 상세 분석 (Type A/B 통합). market_trend 인자는 호환용(시장·레짐 비사용 시 무시)."""
+def get_buy_signals_detailed(
+    df,
+    settings,
+    market_trend='UP',
+    signal_context: dict | None = None,
+):
+    """
+    매수 신호 상세 분석(Type A/B/C 통합).
+
+    Track C는 종목선정 시 전일까지 확정된 ``box_lower``/``box_upper``를
+    ``signal_context``로 전달받을 때만 계산하여 미래참조를 방지합니다.
+    """
     _ = market_trend  # 시장 지표/레짐 제거: 미사용
     settings = settings or {}
     ma60_ratio = (df['Close'] / df['MA60']) * 100
@@ -195,6 +205,110 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
     if _settings_bool(settings, "use_type_b_vol", True):
         signal_b &= cond_vol_b
 
+    # 6a. Type C: 박스 하단 접촉 → 박스 안 재진입 → 이전 봉 고가 돌파 + RSI 상승
+    signal_c = pd.Series(False, index=df.index, dtype=bool)
+    cond_c_touch = pd.Series(False, index=df.index, dtype=bool)
+    cond_c_reclaim = pd.Series(False, index=df.index, dtype=bool)
+    cond_c_prev_high_break = pd.Series(False, index=df.index, dtype=bool)
+    cond_c_rsi_rising = pd.Series(False, index=df.index, dtype=bool)
+    cond_c_candle = pd.Series(False, index=df.index, dtype=bool)
+    cond_c_volume = pd.Series(False, index=df.index, dtype=bool)
+    try:
+        context = signal_context if isinstance(signal_context, dict) else {}
+        sel_track = str(context.get("sel_track", "") or "").strip().upper()
+        box_lower = float(context.get("box_lower", context.get("BoxLower")))
+        box_upper = float(context.get("box_upper", context.get("BoxUpper")))
+        use_c = (
+            _settings_bool(settings, "use_type_c", False)
+            and "C" in sel_track
+            and np.isfinite(box_lower)
+            and np.isfinite(box_upper)
+            and box_upper > box_lower > 0
+        )
+        if use_c:
+            atr_col = "ATR_C" if "ATR_C" in df.columns else "ATR"
+            atr_c = pd.to_numeric(df[atr_col], errors="coerce")
+            touch_atr = max(
+                0.0, float(settings.get("type_c_touch_atr_tolerance", 0.3))
+            )
+            reclaim_atr = max(
+                0.0, float(settings.get("type_c_reclaim_atr_buffer", 0.1))
+            )
+            breakdown_atr = max(
+                0.0, float(settings.get("type_c_breakdown_atr_tolerance", 0.5))
+            )
+            touch_lookback = max(
+                1, int(float(settings.get("type_c_touch_lookback_bars", 3)))
+            )
+
+            touched_now = df["Low"] <= (box_lower + atr_c * touch_atr)
+            cond_c_touch = (
+                touched_now.astype(int)
+                .rolling(touch_lookback, min_periods=1)
+                .max()
+                .astype(bool)
+            )
+            cond_c_reclaim = df["Close"] >= (box_lower + atr_c * reclaim_atr)
+            cond_c_prev_high_break = df["Close"] > df["High"].shift(1)
+            cond_c_rsi_rising = (
+                (df["RSI"] > df["RSI"].shift(1))
+                & (df["RSI"] >= float(settings.get("type_c_rsi_min", 35.0)))
+                & (df["RSI"] <= float(settings.get("type_c_rsi_max", 55.0)))
+            )
+
+            candle_range = (df["High"] - df["Low"]).replace(0.0, np.nan)
+            close_location = (df["Close"] - df["Low"]) / candle_range
+            bullish = df["Close"] > df["Open"]
+            strong_close = close_location >= float(
+                settings.get("type_c_min_close_location", 0.65)
+            )
+            higher_low = df["Low"] > df["Low"].shift(1)
+            confirmation_count = (
+                bullish.astype(int)
+                + strong_close.fillna(False).astype(int)
+                + higher_low.astype(int)
+            )
+            min_confirmations = max(
+                0, min(3, int(float(settings.get("type_c_min_candle_confirmations", 1))))
+            )
+            cond_c_candle = confirmation_count >= min_confirmations
+
+            volume_ratio = pd.to_numeric(
+                df.get("Vol_Ratio", pd.Series(np.nan, index=df.index)),
+                errors="coerce",
+            )
+            cond_c_volume = volume_ratio.between(
+                float(settings.get("type_c_min_volume_ratio", 0.8)),
+                float(settings.get("type_c_max_volume_ratio", 2.0)),
+                inclusive="both",
+            )
+            max_position = float(
+                settings.get("type_c_max_box_position_pct", 35.0)
+            )
+            max_entry_price = box_lower + (box_upper - box_lower) * (
+                max_position / 100.0
+            )
+            cond_c_position = df["Close"] <= max_entry_price
+
+            breakdown = df["Close"] < (box_lower - atr_c * breakdown_atr)
+            consecutive_breakdown = breakdown & breakdown.shift(1).fillna(False)
+            signal_c = (
+                cond_c_touch
+                & cond_c_reclaim
+                & cond_c_prev_high_break
+                & cond_c_rsi_rising
+                & cond_c_candle
+                & cond_c_volume
+                & cond_c_position
+                & ~breakdown
+                & ~consecutive_breakdown
+                & atr_c.notna()
+            )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        signal_c = pd.Series(False, index=df.index, dtype=bool)
+    except Exception:
+        signal_c = pd.Series(False, index=df.index, dtype=bool)
+
     # 6b. 트리플 볼린저 과열 차단 (기본 OFF — 백테스트 비교용)
     try:
         if "BB_Z" in df.columns:
@@ -213,15 +327,19 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
                 hot = bb_z >= thr_all
                 signal_a = signal_a & ~hot
                 signal_b = signal_b & ~hot
+                signal_c = signal_c & ~hot
     except Exception:
         pass
 
     # 7. 최종 신호 및 공통 필터
-    signal = signal_a | signal_b
+    signal_ab = signal_a | signal_b
     
     if _settings_bool(settings, "use_macd_signal", True):
         # 15분 MACD 필터 ON: 히스토그램 양수(OSC>0)만 적용 (전봉 대비 상승 조건은 Type A/B와 중복되어 제거됨)
-        signal &= df["OSC"] > 0
+        signal_ab &= df["OSC"] > 0
+
+    # 평균회귀 C에는 추세형 MACD 양수 필터를 적용하지 않습니다.
+    signal = signal_ab | signal_c
 
     # 동시 신호: A·B 원시 조건이 모두 참이고 최종 Signal 도 참 — 동적 백테에서 보유 균형 동점 시 TYPE_B 우선에 사용
     s1_simul_ab = (
@@ -251,9 +369,11 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
             _eod = _hm == (15 * 60 + 30)
         if not _allow_1530:
             signal = np.asarray(signal, dtype=bool) & ~_eod
+            signal_c = np.asarray(signal_c, dtype=bool) & ~_eod
             s1_simul_ab = np.asarray(s1_simul_ab, dtype=bool) & ~_eod
         else:
             signal = np.asarray(signal, dtype=bool)
+            signal_c = np.asarray(signal_c, dtype=bool)
             s1_simul_ab = np.asarray(s1_simul_ab, dtype=bool)
     except Exception:
         pass
@@ -285,6 +405,16 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
 
     met_a, total_a = calc_met_count('TYPE_A')
     met_b, total_b = calc_met_count('TYPE_B')
+    c_conditions = [
+        cond_c_touch,
+        cond_c_reclaim,
+        cond_c_prev_high_break,
+        cond_c_rsi_rising,
+        cond_c_candle,
+        cond_c_volume,
+    ]
+    met_c = sum(condition.astype(int) for condition in c_conditions)
+    total_c = len(c_conditions)
     
     # 더 높은 합치도를 가진 타입을 기준으로 점수 산출
     ratio_a = met_a / np.maximum(total_a, 1)
@@ -292,18 +422,24 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
 
     same_bar_pri = _normalize_same_bar_priority(settings)
     sig_type_col = _compute_sig_type_column(signal_a, signal_b, ratio_a, ratio_b, same_bar_pri)
+    # C 전용 반등이 확인된 봉은 A/B 동시 여부와 무관하게 TYPE_C로 확정합니다.
+    sig_type_col = np.where(np.asarray(signal_c, dtype=bool), "TYPE_C", sig_type_col)
     is_type_b_row = sig_type_col == "TYPE_B"
+    is_type_c_row = sig_type_col == "TYPE_C"
     # Series·ndarray 혼용 시 위치 기준 합치도가 어긋나지 않도록 ndarray로 고정
     m_a = np.asarray(met_a, dtype=np.int32)
     m_b = np.asarray(met_b, dtype=np.int32)
     ta_i = max(1, int(total_a))
     tb_i = max(1, int(total_b))
-    final_met = np.where(is_type_b_row, m_b, m_a)
-    final_total = np.where(is_type_b_row, tb_i, ta_i)
+    m_c = np.asarray(met_c, dtype=np.int32)
+    tc_i = max(1, int(total_c))
+    final_met = np.where(is_type_c_row, m_c, np.where(is_type_b_row, m_b, m_a))
+    final_total = np.where(is_type_c_row, tc_i, np.where(is_type_b_row, tb_i, ta_i))
 
     n_rows = len(df.index)
     tot_a_col = np.full(n_rows, ta_i, dtype=np.int32)
     tot_b_col = np.full(n_rows, tb_i, dtype=np.int32)
+    tot_c_col = np.full(n_rows, tc_i, dtype=np.int32)
 
     return pd.DataFrame({
         'Signal': signal,
@@ -316,6 +452,14 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         'Tot_A': tot_a_col,
         'Met_B': m_b,
         'Tot_B': tot_b_col,
+        'Met_C': m_c,
+        'Tot_C': tot_c_col,
+        'C_Touch': cond_c_touch,
+        'C_Reclaim': cond_c_reclaim,
+        'C_PrevHighBreak': cond_c_prev_high_break,
+        'C_RSI_Rising': cond_c_rsi_rising,
+        'C_Candle': cond_c_candle,
+        'C_Volume': cond_c_volume,
         'RSI_Range': cond_rsi_range,
         'MACD_OK': cond_macd_basic,
         'MA60_Range': cond_ma60,
@@ -324,6 +468,8 @@ def get_buy_signals_detailed(df, settings, market_trend='UP'):
         "S1_Simultaneous_AB": s1_simul_ab,
     }, index=df.index)
 
-def get_buy_signals(df, settings, market_trend='UP'):
+def get_buy_signals(df, settings, market_trend='UP', signal_context: dict | None = None):
     """매수 신호 벡터만 반환"""
-    return get_buy_signals_detailed(df, settings, market_trend)['Signal']
+    return get_buy_signals_detailed(
+        df, settings, market_trend, signal_context=signal_context
+    )['Signal']

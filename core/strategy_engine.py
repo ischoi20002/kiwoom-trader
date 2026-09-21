@@ -168,6 +168,19 @@ class StrategyEngine:
         except Exception:
             stage = 1
         if stage == 1:
+            try:
+                if "TYPE_C" in str(
+                    pos.get("sig_type", pos.get("reason", "")) or ""
+                ).upper():
+                    return {
+                        "action": "HOLD",
+                        "hold_reason": "s2_type_c_disabled",
+                        "exit_hold_reason": exit_hold_reason,
+                        "stage": stage,
+                        "profit_ratio": profit_ratio,
+                    }
+            except Exception:
+                pass
             if bool(s.get("transition_runtime_block_s2", False)):
                 return {
                     "action": "HOLD",

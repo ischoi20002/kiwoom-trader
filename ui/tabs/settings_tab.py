@@ -15,6 +15,9 @@ class SettingsTab:
         self.conf_vars = {}
         self.type_a_widgets = []
         self.type_b_widgets = []
+        self.sel_c_widgets: list[tp.Any] = []
+        self.type_c_widgets: list[tp.Any] = []
+        self.exit_c_widgets: list[tp.Any] = []
         self.s2_a_widgets = []
         self.s2_b_widgets = []
         self.sel_a_v2_widgets: list[tp.Any] = []
@@ -266,7 +269,8 @@ class SettingsTab:
                 '  ↓ ③ S1 (공통필터 → A → B)\n'
                 '  ↓ ④ Stage 2 추매 (A/B)\n'
                 '  ↓ ⑤ Smart Buy / Smart Exit\n'
-                '  ↓ ⑥ 청산'
+                '  ↓ ⑥ 청산\n'
+                '  ↘ ⑦ Track C 박스 회귀 (독립 설정)'
             ),
             fg='#D8DEE9',
             bg=nord_deep,
@@ -297,6 +301,7 @@ class SettingsTab:
             ('s2', '④ Stage 2 추매 (A/B)'),
             ('smart', '⑤ Smart Wall'),
             ('exit', '⑥ 청산 · 리스크 (A/B)'),
+            ('track_c', '⑦ Track C · 박스 회귀'),
         ]
         self._settings_section_keys: list[str] = [k for k, _ in section_entries]
         self._section_by_key: dict[str, ttk.Frame] = {}
@@ -2207,6 +2212,112 @@ class SettingsTab:
             '0=비활성. 조회기간 내 ATR_SL 2회 이상이면 기본 N일 대신 이 일수로 연장(권장 5~7)',
         )
 
+        # ── Track C: A/B와 완전히 분리된 박스 회귀 설정 ──
+        track_c_parent = _sec_parent('track_c')
+        c_select_f = ttk.LabelFrame(
+            track_c_parent,
+            text=' 📦 [C-1] 종목 선정 — 일봉 박스권 ',
+            padding='15',
+        )
+        c_select_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            c_select_f,
+            'Track C 종목선정 사용',
+            None,
+            '',
+            '일봉 박스권 후보를 별도 Track C로 선정. 매수하려면 아래 TYPE_C 매수도 ON',
+            toggle_key='use_sel_track_c',
+        )
+        add_param_row(
+            c_select_f,
+            '최대 감시 종목 수 (C)',
+            'max_slots_c',
+            '개',
+            'Track C 일별 감시 상한',
+            widget_list=self.sel_c_widgets,
+        )
+        add_param_row(
+            c_select_f,
+            '최소 선정 점수 (C)',
+            'sel_track_min_score_c',
+            '점',
+            '점수 하한 미만 후보 제외. 0이면 점수 하한 미사용',
+            widget_list=self.sel_c_widgets,
+        )
+        add_header(c_select_f, '── 박스 계산 구간 · 유동성 ──')
+        add_param_row(c_select_f, '박스 룩백', 'box_sel_lookback', '일', '하단·상단 분위수 계산 기간', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '최소 일봉 이력', 'box_sel_min_history_bars', '봉', '지표·박스 판정에 필요한 최소 데이터', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, 'ATR 기간', 'box_sel_atr_period', '봉', '일봉 박스 접촉·이탈 허용폭 계산', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, 'ADX 기간', 'box_sel_adx_period', '봉', '추세 강도 계산 기간', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '이평 기간', 'box_sel_ma_period', '봉', '박스 횡보 기울기 판정 이동평균', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '이평 기울기 기간', 'box_sel_ma_slope_days', '일', 'MA 변화율 비교 간격', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '최소 평균 거래대금', 'box_sel_min_avg_trde_value_krw', '원', '기본 200억=20000000000', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '최소 주가', 'box_sel_min_price', '원', '저가·호가 왜곡 종목 제외', widget_list=self.sel_c_widgets)
+        add_header(c_select_f, '── 박스 형태 · 접촉 · 이탈 필터 ──')
+        add_param_row(c_select_f, '박스 폭 하한', 'box_sel_min_box_width_pct', '%', '너무 좁아 비용을 못 이기는 박스 제외', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '박스 폭 상한', 'box_sel_max_box_width_pct', '%', '과도한 변동·추세 종목 제외', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, 'ADX 상한', 'box_sel_max_adx', '', '값이 낮을수록 강한 횡보만 허용', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, 'MA 일평균 기울기 상한', 'box_sel_max_ma_slope_pct_per_day', '%/일', '절대 기울기 허용치', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '하단 최소 접촉 횟수', 'box_sel_min_lower_touches', '회', '박스 지지선 신뢰도', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '상단 최소 접촉 횟수', 'box_sel_min_upper_touches', '회', '박스 저항선 신뢰도', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '접촉 ATR 허용폭', 'box_sel_touch_atr_tolerance', '배', '경계±ATR×값을 접촉으로 인정', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '돌파 ATR 허용폭', 'box_sel_breakout_atr_tolerance', '배', '박스 이탈 판정 여유', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '최대 이탈 종가 수', 'box_sel_max_breakout_closes', '회', '룩백 중 허용할 경계 밖 종가', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '거래량 비율 상한', 'box_sel_max_volume_ratio', '배', '거래량 과열 종목 제외', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, 'ATR 팽창 비율 상한', 'box_sel_max_atr_expansion_ratio', '배', '최근 변동성 급증 종목 제외', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '박스 하단 분위수', 'box_sel_lower_quantile', '', '0~0.49, 기본 0.20', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '박스 상단 분위수', 'box_sel_upper_quantile', '', '0.51~1, 기본 0.80', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '선정 결과 상한', 'box_sel_max_candidates', '개', '단일 선정기 반환 상한', widget_list=self.sel_c_widgets)
+
+        c_signal_f = ttk.LabelFrame(
+            track_c_parent,
+            text=' 📈 [C-2] 매수 신호 — 15분봉 하단 반등 ',
+            padding='15',
+        )
+        c_signal_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            c_signal_f,
+            'TYPE_C 매수 사용',
+            None,
+            '',
+            '기본 OFF. Track C 선정 종목에서만 S1 진입하며 S2 추매는 사용하지 않음',
+            toggle_key='use_type_c',
+        )
+        add_param_row(c_signal_f, 'ATR_C 기간', 'type_c_atr_period', '봉', '15분봉 접촉·재진입·청산 공통 ATR', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '하단 접촉 허용폭', 'type_c_touch_atr_tolerance', 'ATR 배', '저가가 하단+ATR×값 이하면 접촉', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '박스 재진입 버퍼', 'type_c_reclaim_atr_buffer', 'ATR 배', '종가가 하단+ATR×값 이상이어야 반등 인정', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '붕괴 제외 허용폭', 'type_c_breakdown_atr_tolerance', 'ATR 배', '하단−ATR×값 아래 신호 차단', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '접촉 유효기간', 'type_c_touch_lookback_bars', '봉', '최근 N개 15분봉 안 하단 접촉 필요', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, 'RSI 하한', 'type_c_rsi_min', '', 'RSI 상승 조건의 허용 하한', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, 'RSI 상한', 'type_c_rsi_max', '', '과열 진입 방지', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '종가 위치 하한', 'type_c_min_close_location', '비율', '봉 저가~고가 내 종가 위치, 0~1', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '최소 캔들 확인 수', 'type_c_min_candle_confirmations', '개', '양봉·강한종가·저점상승 중 충족 수(0~3)', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '거래량 비율 하한', 'type_c_min_volume_ratio', '배', '15분 Vol_Ratio 하한', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '거래량 비율 상한', 'type_c_max_volume_ratio', '배', '15분 거래량 과열 상한', widget_list=self.type_c_widgets)
+        add_param_row(c_signal_f, '박스 내 진입 위치 상한', 'type_c_max_box_position_pct', '%', '하단=0, 상단=100 기준 최대 진입 위치', widget_list=self.type_c_widgets)
+
+        c_exit_f = ttk.LabelFrame(
+            track_c_parent,
+            text=' 🛡️ [C-3] 청산 · 리스크 — 진입 시 고정 박스 ',
+            padding='15',
+        )
+        c_exit_f.pack(fill=tk.X, pady=10)
+        add_param_row(c_exit_f, '상단 목표 버퍼', 'type_c_target_atr_buffer', 'ATR 배', '박스 상단−ATR×값에서 익절', widget_list=self.exit_c_widgets)
+        add_param_row(c_exit_f, '하단 손절 허용폭', 'type_c_stop_atr_tolerance', 'ATR 배', '박스 하단−ATR×값에서 즉시 손절', widget_list=self.exit_c_widgets)
+        add_param_row(c_exit_f, '종가 이탈 확인 봉 수', 'type_c_breakdown_confirm_bars', '봉', '하단 아래 연속 종가 N회면 청산', widget_list=self.exit_c_widgets)
+        add_param_row(c_exit_f, '최대 보유기간', 'type_c_max_holding_days', '거래일', '진입일 포함, 도달 시 시간 청산', widget_list=self.exit_c_widgets)
+        add_param_row(
+            c_exit_f,
+            '갭 하락 즉시 청산',
+            'type_c_gap_down_limit',
+            '%',
+            '수익률이 이 값 이하이면 박스 조건보다 먼저 청산',
+            toggle_key='use_type_c_gap_down_exit',
+            widget_list=self.exit_c_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(c_exit_f, '박스정보 유실 비상손절', 'type_c_missing_box_stop_loss_pct', '%', '재시작 등으로 박스 메타데이터가 없을 때만 적용', widget_list=self.exit_c_widgets)
+
         # 초기 표시: 첫 번째 사이드바 항목
         _show_settings_section('fund')
 
@@ -2240,6 +2351,34 @@ class SettingsTab:
         if 'use_type_b' in self.conf_vars:
             self.conf_vars['use_type_b'].trace_add('write', lambda *a: apply_st(self.type_b_widgets, self.conf_vars['use_type_b'].get()))
             apply_st(self.type_b_widgets, self.conf_vars['use_type_b'].get())
+        if 'use_sel_track_c' in self.conf_vars:
+            self.conf_vars['use_sel_track_c'].trace_add(
+                'write',
+                lambda *a: apply_st(
+                    self.sel_c_widgets,
+                    self.conf_vars['use_sel_track_c'].get(),
+                ),
+            )
+            apply_st(
+                self.sel_c_widgets,
+                self.conf_vars['use_sel_track_c'].get(),
+            )
+        if 'use_type_c' in self.conf_vars:
+            self.conf_vars['use_type_c'].trace_add(
+                'write',
+                lambda *a: (
+                    apply_st(
+                        self.type_c_widgets,
+                        self.conf_vars['use_type_c'].get(),
+                    ),
+                    apply_st(
+                        self.exit_c_widgets,
+                        self.conf_vars['use_type_c'].get(),
+                    ),
+                ),
+            )
+            apply_st(self.type_c_widgets, self.conf_vars['use_type_c'].get())
+            apply_st(self.exit_c_widgets, self.conf_vars['use_type_c'].get())
         if 'use_s2_master_a' in self.conf_vars:
             self.conf_vars['use_s2_master_a'].trace_add(
                 'write', lambda *a: apply_st(self.s2_a_widgets, self.conf_vars['use_s2_master_a'].get())
@@ -2357,17 +2496,25 @@ class SettingsTab:
             if not v:
                 continue
             if k in [
-                'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b',
+                'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b', 'max_slots_c',
                 'max_slots_band_extra_cap',
                 'transition_soft_slots_a', 'transition_soft_slots_b',
                 'chop_valid_a_min', 'chop_valid_b_max', 'chop_valid_a_floor',
                 'atr_sl_reentry_cooldown_days',
                 'atr_sl_streak_lookback_days',
                 'atr_sl_streak_cooldown_days',
-                'atr_period', 'atr_period_a', 'atr_period_b',
+                'atr_period', 'atr_period_a', 'atr_period_b', 'type_c_atr_period',
                 'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
                 'gc_window', 'rsi_window',
                 'mobile_status_api_port',
+                'box_sel_lookback', 'box_sel_min_history_bars',
+                'box_sel_atr_period', 'box_sel_adx_period',
+                'box_sel_ma_period', 'box_sel_ma_slope_days',
+                'box_sel_min_lower_touches', 'box_sel_min_upper_touches',
+                'box_sel_max_breakout_closes', 'box_sel_max_candidates',
+                'type_c_touch_lookback_bars',
+                'type_c_min_candle_confirmations',
+                'type_c_breakdown_confirm_bars', 'type_c_max_holding_days',
             ]:
                 self.app.settings[k] = int(float(v))
             else:
