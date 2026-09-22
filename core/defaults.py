@@ -277,6 +277,8 @@ DEFAULT_SETTINGS = {
     "index_dd_ret_threshold_pct": -5.0,
     "index_dd_cooldown_days": 5,
     "index_dd_runtime_block_s1": False,
+    # 저정밀 동적 BT: 유니버스·15분 지표 준비 캐시 (체결 파라미터만 바꿀 때 재사용)
+    "bt_prep_cache_enabled": True,
     "min_trde_val": 30.0,
     "vol_ratio": 1.5,
     "vol_lookback": 5.0,

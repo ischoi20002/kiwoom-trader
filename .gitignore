@@ -46,6 +46,7 @@ data/universe_marcap_daily/
 !settings.json
 bars_cache.json
 regime_gate_cache.json
+_local_bt_prep_cache/
 gui_restart_state.json
 *.png
 

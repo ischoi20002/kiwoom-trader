@@ -4210,17 +4210,25 @@ def prepare_dynamic_universe(
     _day_snapshots: List[Tuple[str, pd.DataFrame]] = []
 
     n_days = len(trading_days_list)
+    # 시간순이면 searchsorted 로 창을 자를 수 있다 (일자마다 전체 boolean mask 제거)
+    try:
+        df_all = df_all.sort_values("time", kind="mergesort").reset_index(drop=True)
+        _all_ts = pd.DatetimeIndex(pd.to_datetime(df_all["time"])).asi8
+    except Exception:
+        _all_ts = None
     for _di, d_str in enumerate(trading_days_list):
         try:
             d_ts = pd.Timestamp(d_str).normalize()
             left_ts = d_ts - timedelta(days=lookback_n)
-            win = df_all.loc[
-                (df_all["time"] >= left_ts)
-                & (
-                    df_all["time"]
-                    <= d_ts + timedelta(hours=23, minutes=59, seconds=59)
-                )
-            ].copy()
+            right_ts = d_ts + timedelta(hours=23, minutes=59, seconds=59)
+            if _all_ts is not None:
+                _li = int(np.searchsorted(_all_ts, pd.Timestamp(left_ts).value, side="left"))
+                _ri = int(np.searchsorted(_all_ts, pd.Timestamp(right_ts).value, side="right"))
+                win = df_all.iloc[_li:_ri].copy()
+            else:
+                win = df_all.loc[
+                    (df_all["time"] >= left_ts) & (df_all["time"] <= right_ts)
+                ].copy()
         except Exception:
             continue
         if win is None or win.empty:

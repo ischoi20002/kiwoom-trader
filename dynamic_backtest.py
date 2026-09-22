@@ -3,6 +3,7 @@ import os
 import re
 import time
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from data_manager_v2 import DataManagerV2
 import strategy.signals
@@ -47,6 +48,18 @@ from strategy.synthetic_realtime_fill import (
     synthesize_vol_power_vectorized,
 )
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from core.bt_prep_cache import (
+    cache_enabled as _bt_prep_cache_enabled,
+    get_ohlcv as _bt_cache_get_ohlcv,
+    get_signals as _bt_cache_get_signals,
+    get_universe as _bt_cache_get_universe,
+    ohlcv_fingerprint as _bt_ohlcv_fingerprint,
+    put_ohlcv as _bt_cache_put_ohlcv,
+    put_signals as _bt_cache_put_signals,
+    put_universe as _bt_cache_put_universe,
+    signal_fingerprint as _bt_signal_fingerprint,
+    universe_fingerprint as _bt_universe_fingerprint,
+)
 
 
 def snapshot_holdings_for_same_slot_s1(
@@ -516,65 +529,123 @@ class DynamicBacktester:
         except Exception:
             pass
         t_start = time.time()
-        _result = strategy_selector.prepare_dynamic_universe(
-            self.settings,
-            sched_start,
-            end_date,
-            self.db,
-            callback if callback else print,
-            include_track_c_schedule=True,
-        )
-        if isinstance(_result, tuple) and len(_result) >= 3:
-            universe_schedule = _result[0]
-            self.schedule_a = _result[1]
-            self.schedule_b = _result[2]
-            try:
-                self.transition_regime_by_day = dict(_result[3]) if len(_result) >= 4 else {}
-            except Exception:
-                self.transition_regime_by_day = {}
-            try:
-                # Track C는 TYPE_C 구현 전까지 관찰용 스케줄로만 보관합니다.
-                self.schedule_c = dict(_result[4]) if len(_result) >= 5 else {}
-            except Exception:
-                self.schedule_c = {}
-            try:
-                self.schedule_c_meta = dict(_result[5]) if len(_result) >= 6 else {}
-            except Exception:
-                self.schedule_c_meta = {}
-        else:
-            universe_schedule = _result
-            self.schedule_a = universe_schedule
-            self.schedule_b = {}
-            self.schedule_c = {}
-            self.schedule_c_meta = {}
-            self.transition_regime_by_day = {}
-        self.universe_schedule = universe_schedule or {}
-        t_duration = time.time() - t_start
-        msg = f"사전 계산 완료 ({t_duration:.2f}초)"
-        print(f"[Done] {msg}")
-        if callback:
-            callback(msg, 5)
-
-        # [IndexDD] KODEX N일 급락 + 쿨다운 → 일별 S1 차단 맵
-        self.index_dd_block_by_day = {}
+        use_prep_cache = _bt_prep_cache_enabled(self.settings)
+        universe_schedule = None
+        univ_fp = ""
         try:
-            if bool(self.settings.get("use_index_dd_gate", False)):
-                self.index_dd_block_by_day = (
-                    strategy_selector.build_index_dd_s1_block_by_day(
-                        self.settings,
-                        self.db,
-                        start_date,
-                        end_date,
-                        callback if callback else print,
-                    )
-                    or {}
-                )
-        except Exception as _idd_ex:
+            extra_files = self._bt_prep_extra_files()
+            db_path = getattr(self.db, "db_path", None) or "trading_data.db"
+            univ_fp = _bt_universe_fingerprint(
+                self.settings,
+                sched_start=str(sched_start),
+                end_date=str(end_date),
+                db_path=str(db_path),
+                extra_files=extra_files,
+            )
+        except Exception:
+            univ_fp = ""
+            use_prep_cache = False
+
+        cached_univ = _bt_cache_get_universe(univ_fp) if (use_prep_cache and univ_fp) else None
+        if isinstance(cached_univ, dict) and cached_univ.get("schedule") is not None:
             try:
-                print(f"[IndexDD] 맵 생성 생략: {_idd_ex}")
+                universe_schedule = cached_univ.get("schedule") or {}
+                self.schedule_a = cached_univ.get("schedule_a") or {}
+                self.schedule_b = cached_univ.get("schedule_b") or {}
+                self.schedule_c = cached_univ.get("schedule_c") or {}
+                self.schedule_c_meta = cached_univ.get("schedule_c_meta") or {}
+                self.transition_regime_by_day = dict(
+                    cached_univ.get("transition_regime_by_day") or {}
+                )
+                self.index_dd_block_by_day = dict(
+                    cached_univ.get("index_dd_block_by_day") or {}
+                )
+                self.universe_schedule = universe_schedule or {}
+                t_duration = time.time() - t_start
+                msg = f"유니버스 캐시 HIT ({t_duration:.2f}초)"
+                print(f"[Done] {msg}")
+                if callback:
+                    callback(msg, 5)
             except Exception:
-                pass
+                cached_univ = None
+                universe_schedule = None
+
+        if universe_schedule is None:
+            _result = strategy_selector.prepare_dynamic_universe(
+                self.settings,
+                sched_start,
+                end_date,
+                self.db,
+                callback if callback else print,
+                include_track_c_schedule=True,
+            )
+            if isinstance(_result, tuple) and len(_result) >= 3:
+                universe_schedule = _result[0]
+                self.schedule_a = _result[1]
+                self.schedule_b = _result[2]
+                try:
+                    self.transition_regime_by_day = dict(_result[3]) if len(_result) >= 4 else {}
+                except Exception:
+                    self.transition_regime_by_day = {}
+                try:
+                    self.schedule_c = dict(_result[4]) if len(_result) >= 5 else {}
+                except Exception:
+                    self.schedule_c = {}
+                try:
+                    self.schedule_c_meta = dict(_result[5]) if len(_result) >= 6 else {}
+                except Exception:
+                    self.schedule_c_meta = {}
+            else:
+                universe_schedule = _result
+                self.schedule_a = universe_schedule
+                self.schedule_b = {}
+                self.schedule_c = {}
+                self.schedule_c_meta = {}
+                self.transition_regime_by_day = {}
+            self.universe_schedule = universe_schedule or {}
+            t_duration = time.time() - t_start
+            msg = f"사전 계산 완료 ({t_duration:.2f}초)"
+            print(f"[Done] {msg}")
+            if callback:
+                callback(msg, 5)
+
+            # [IndexDD] KODEX N일 급락 + 쿨다운 → 일별 S1 차단 맵
             self.index_dd_block_by_day = {}
+            try:
+                if bool(self.settings.get("use_index_dd_gate", False)):
+                    self.index_dd_block_by_day = (
+                        strategy_selector.build_index_dd_s1_block_by_day(
+                            self.settings,
+                            self.db,
+                            start_date,
+                            end_date,
+                            callback if callback else print,
+                        )
+                        or {}
+                    )
+            except Exception as _idd_ex:
+                try:
+                    print(f"[IndexDD] 맵 생성 생략: {_idd_ex}")
+                except Exception:
+                    pass
+                self.index_dd_block_by_day = {}
+
+            if use_prep_cache and univ_fp:
+                try:
+                    _bt_cache_put_universe(
+                        univ_fp,
+                        {
+                            "schedule": universe_schedule,
+                            "schedule_a": self.schedule_a,
+                            "schedule_b": self.schedule_b,
+                            "schedule_c": getattr(self, "schedule_c", {}) or {},
+                            "schedule_c_meta": getattr(self, "schedule_c_meta", {}) or {},
+                            "transition_regime_by_day": self.transition_regime_by_day,
+                            "index_dd_block_by_day": self.index_dd_block_by_day,
+                        },
+                    )
+                except Exception:
+                    pass
 
         if not universe_schedule:
             if callback:
@@ -582,11 +653,33 @@ class DynamicBacktester:
             self.cached_15m_data = {}
         else:
             self.cached_15m_data = self._prepare_15m_cached_data(
-                universe_schedule, start_date, end_date, callback
+                universe_schedule,
+                start_date,
+                end_date,
+                callback,
+                univ_fp=univ_fp if use_prep_cache else "",
             )
         self.cached_1m_data = {}
         self._bt_trading_days = trading_days
         return True
+
+    def _bt_prep_extra_files(self) -> List[str]:
+        """유니버스 지문에 넣을 부가 파일 (CSV 유니버스 변경 감지)."""
+        files: List[str] = []
+        try:
+            idx_raw = str(
+                self.settings.get("universe_index_choice", "KODEX200") or "KODEX200"
+            ).strip().upper()
+        except Exception:
+            idx_raw = "KODEX200"
+        try:
+            if idx_raw in ("KOSPI", "KOSPI200"):
+                files.extend(["kospi_universe.csv", "kospi_top_500.csv"])
+            else:
+                files.extend(["kodex200.csv", "kodex_200.csv"])
+        except Exception:
+            pass
+        return files
 
     def diagnose_intraday_entry_potential(
         self,
@@ -861,8 +954,11 @@ class DynamicBacktester:
                 if code not in self.cached_15m_data: continue
                 
                 base_df = self.cached_15m_data[code]
-                day_full = base_df.loc[current_day:current_day + " 23:59:59"].copy()
+                day_full = base_df.loc[current_day:current_day + " 23:59:59"]
                 if day_full.empty: continue
+                # Track C는 당일 프레임에 박스 경계를 쓰므로 캐시 원본을 복사한다.
+                if "C" in track_map.get(code, ""):
+                    day_full = day_full.copy()
 
                 # C는 평가 전일(ref_day)에 확정된 박스 경계를 당일 전체 봉에 고정 적용합니다.
                 if "C" in track_map.get(code, ""):
@@ -1271,7 +1367,17 @@ class DynamicBacktester:
             
             day_t_duration = time.time() - day_t_start
             if not bool(getattr(self, "_quiet_backtest", False)):
-                print(f"[Day] {current_day} 처리 완료 ({day_t_duration:.2f}초)")
+                try:
+                    n_td = len(trading_days)
+                    if (
+                        idx == 0
+                        or (idx + 1) == n_td
+                        or ((idx + 1) % 20 == 0)
+                        or day_t_duration >= 0.8
+                    ):
+                        print(f"[Day] {current_day} 처리 완료 ({day_t_duration:.2f}초)")
+                except Exception:
+                    print(f"[Day] {current_day} 처리 완료 ({day_t_duration:.2f}초)")
 
         if self.holdings:
             last_day = trading_days[-1]
@@ -2339,81 +2445,193 @@ class DynamicBacktester:
                                   high_precision=self.high_precision)
         return trades_df
 
-    def _prepare_15m_cached_data(self, universe_schedule, start_date, end_date, callback):
-        if callback: callback("15분봉 데이터 일괄 로드 중...", 0)
-        u_codes = set()
-        for codes in universe_schedule.values(): u_codes.update(codes)
-        if not u_codes: return {}
-        all_codes = list(u_codes)
-        pad_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=21)).strftime("%Y-%m-%d")
-        placeholders = ",".join(["?"] * len(all_codes))
-        query = f"""
-            SELECT b.code, b.datetime as time, b.open, b.high, b.low, b.close, b.volume,
-                   NULL AS vol_power, NULL AS total_ask, NULL AS total_bid
-            FROM bars_15m b
-            WHERE b.code IN ({placeholders}) AND b.datetime BETWEEN ? AND ?
-            ORDER BY b.code, b.datetime
-        """
-        with self.db._get_connection() as conn:
-            df_all = pd.read_sql_query(query, conn, params=all_codes + [pad_start, end_date + " 23:59:59"])
-        if df_all.empty: return {}
-        df_all.columns = [c.capitalize() if c.lower() != 'time' else 'time' for c in df_all.columns]
-        df_all['time'] = pd.to_datetime(df_all['time'])
-        df_all.set_index('time', inplace=True)
-        cached = {}
-        for code, group in df_all.groupby('Code'):
-            # [v31.5] Synthetic Metrics Pre-calculation for Dynamic Backtester
-            if self.settings.get('use_synthetic_realtime', True):
-                # [v31.5] Ensure numeric types for join columns
-                for col in ['Vol_power', 'Total_ask', 'Total_bid']:
-                    if col in group.columns:
-                        group[col] = pd.to_numeric(group[col], errors='coerce')
-                
-                p_changes = group['Close'].pct_change().fillna(0).values
-                vol_mas = group['Volume'].rolling(20).mean().bfill().values
-                vol_ratios = (group['Volume'] / (vol_mas + 1e-10)).values
-                vps = group['Vol_power'].values
-                tasks = group['Total_ask'].values
-                tbids = group['Total_bid'].values
-                
-                nan_vp = np.isnan(vps)
-                if np.any(nan_vp):
-                    vps[nan_vp] = synthesize_vol_power_vectorized(p_changes[nan_vp], vol_ratios[nan_vp])
-                
-                nan_ba = (np.isnan(tasks)) | (np.any(np.isnan(tbids)))
-                if np.any(nan_ba):
-                    r_vector = synthesize_bid_ask_ratio_vectorized(p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba])
-                    tasks[nan_ba] = 100000
-                    tbids[nan_ba] = (100000 * r_vector).astype(int)
-                
-                group = group.copy() # In-place modification warning prevention
-                group['Vol_power'] = vps
-                group['Total_ask'] = tasks
-                group['Total_bid'] = tbids
-                group['bid_ask_ratio'] = group['Total_bid'] / (group['Total_ask'] + 1e-10)
-                group['vol_power'] = vps # [v31.5] Maintain lowercase for backward compatibility if needed
+    def _fill_synthetic_15m_group(self, group: pd.DataFrame) -> pd.DataFrame:
+        """15분 그룹에 합성 수급을 채운다 (캐시 재사용 시 동일 결과)."""
+        try:
+            if not self.settings.get("use_synthetic_realtime", True):
+                return group
+        except Exception:
+            return group
+        try:
+            for col in ["Vol_power", "Total_ask", "Total_bid"]:
+                if col in group.columns:
+                    group[col] = pd.to_numeric(group[col], errors="coerce")
+            p_changes = group["Close"].pct_change().fillna(0).values
+            vol_mas = group["Volume"].rolling(20).mean().bfill().values
+            vol_ratios = (group["Volume"] / (vol_mas + 1e-10)).values
+            vps = group["Vol_power"].values
+            tasks = group["Total_ask"].values
+            tbids = group["Total_bid"].values
+            nan_vp = np.isnan(vps)
+            if np.any(nan_vp):
+                vps[nan_vp] = synthesize_vol_power_vectorized(
+                    p_changes[nan_vp], vol_ratios[nan_vp]
+                )
+            nan_ba = (np.isnan(tasks)) | (np.any(np.isnan(tbids)))
+            if np.any(nan_ba):
+                r_vector = synthesize_bid_ask_ratio_vectorized(
+                    p_changes[nan_ba], vol_ratios[nan_ba], vps[nan_ba]
+                )
+                tasks[nan_ba] = 100000
+                tbids[nan_ba] = (100000 * r_vector).astype(int)
+            group = group.copy()
+            group["Vol_power"] = vps
+            group["Total_ask"] = tasks
+            group["Total_bid"] = tbids
+            group["bid_ask_ratio"] = group["Total_bid"] / (group["Total_ask"] + 1e-10)
+            group["vol_power"] = vps
+            return group
+        except Exception:
+            return group
 
-            # [v16.92] Deep Optimization: Pre-calculate PULSE logic once per stock for the entire period
-            # This avoids O(N*M) redundant .groupby().cumsum() calls in the daily loop
-            df_ind = TradingStrategy.calculate_indicators(group, self.settings)
-            
-            is_ma_aligned = (df_ind['MA5'] > df_ind['MA20'])
-            ma_group_id = (~is_ma_aligned).cumsum()
-            df_ind['MA_Maint_Count'] = is_ma_aligned.groupby(ma_group_id).cumsum()
-            
-            is_rsi_above_50 = (df_ind['RSI'] >= 50.0)
-            rsi_group_id = (df_ind['RSI'] < 50.0).cumsum()
-            df_ind['RSI_Pulse_Count'] = is_rsi_above_50.groupby(rsi_group_id).cumsum()
-            
-            # [v16.92] Pre-calculate signals for the ENTIRE time series at once (Vectorized)
-            full_sigs = TradingStrategy.get_buy_signals_detailed(
-                df_ind, self.settings, market_trend="UP"
+    def _indicators_and_signals_15m(self, group: pd.DataFrame) -> pd.DataFrame:
+        """종목 15분 프레임에 지표·펄스·신호를 한 번에 붙인다."""
+        df_ind = TradingStrategy.calculate_indicators(group, self.settings)
+        is_ma_aligned = df_ind["MA5"] > df_ind["MA20"]
+        ma_group_id = (~is_ma_aligned).cumsum()
+        df_ind["MA_Maint_Count"] = is_ma_aligned.groupby(ma_group_id).cumsum()
+        is_rsi_above_50 = df_ind["RSI"] >= 50.0
+        rsi_group_id = (df_ind["RSI"] < 50.0).cumsum()
+        df_ind["RSI_Pulse_Count"] = is_rsi_above_50.groupby(rsi_group_id).cumsum()
+        full_sigs = TradingStrategy.get_buy_signals_detailed(
+            df_ind, self.settings, market_trend="UP"
+        )
+        df_ind = df_ind.join(full_sigs.drop(columns="Signal", errors="ignore"))
+        df_ind["Signal"] = full_sigs["Signal"]
+        df_ind["Ready"] = df_ind.reset_index().index >= 19
+        return df_ind
+
+    def _prepare_15m_cached_data(
+        self,
+        universe_schedule,
+        start_date,
+        end_date,
+        callback,
+        univ_fp: str = "",
+    ):
+        """유니버스 합집합 15분봉을 로드하고 지표·신호를 붙인다. 튜닝 재실행 시 캐시 재사용."""
+        t0 = time.time()
+        if callback:
+            callback("15분봉 데이터 일괄 로드 중...", 0)
+        u_codes = set()
+        try:
+            for codes in universe_schedule.values():
+                u_codes.update(codes)
+        except Exception:
+            return {}
+        if not u_codes:
+            return {}
+
+        ohlcv_fp = ""
+        sig_fp = ""
+        try:
+            if univ_fp:
+                ohlcv_fp = _bt_ohlcv_fingerprint(
+                    univ_fp,
+                    self.settings,
+                    start_date=str(start_date),
+                    end_date=str(end_date),
+                )
+                sig_fp = _bt_signal_fingerprint(ohlcv_fp, self.settings)
+        except Exception:
+            ohlcv_fp = ""
+            sig_fp = ""
+
+        cached_sig = _bt_cache_get_signals(sig_fp) if sig_fp else None
+        if isinstance(cached_sig, dict) and cached_sig:
+            try:
+                print(
+                    f"[Dynamic] 15분 신호 캐시 HIT ({time.time() - t0:.2f}초, {len(cached_sig)}종목)"
+                )
+            except Exception:
+                pass
+            if callback:
+                callback("15분 신호 캐시 재사용", 8)
+            return cached_sig
+
+        ohlcv_map = _bt_cache_get_ohlcv(ohlcv_fp) if ohlcv_fp else None
+        if not isinstance(ohlcv_map, dict) or not ohlcv_map:
+            all_codes = list(u_codes)
+            pad_start = (
+                datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=21)
+            ).strftime("%Y-%m-%d")
+            placeholders = ",".join(["?"] * len(all_codes))
+            query = f"""
+                SELECT b.code, b.datetime as time, b.open, b.high, b.low, b.close, b.volume,
+                       NULL AS vol_power, NULL AS total_ask, NULL AS total_bid
+                FROM bars_15m b
+                WHERE b.code IN ({placeholders}) AND b.datetime BETWEEN ? AND ?
+                ORDER BY b.code, b.datetime
+            """
+            with self.db._get_connection() as conn:
+                df_all = pd.read_sql_query(
+                    query, conn, params=all_codes + [pad_start, end_date + " 23:59:59"]
+                )
+            if df_all.empty:
+                return {}
+            df_all.columns = [
+                c.capitalize() if c.lower() != "time" else "time" for c in df_all.columns
+            ]
+            df_all["time"] = pd.to_datetime(df_all["time"])
+            df_all.set_index("time", inplace=True)
+            ohlcv_map = {}
+            for code, group in df_all.groupby("Code"):
+                ohlcv_map[code] = self._fill_synthetic_15m_group(group)
+            if ohlcv_fp:
+                try:
+                    _bt_cache_put_ohlcv(ohlcv_fp, ohlcv_map)
+                except Exception:
+                    pass
+        else:
+            try:
+                print(
+                    f"[Dynamic] 15분 OHLCV 캐시 HIT — 지표·신호만 재계산 ({len(ohlcv_map)}종목)"
+                )
+            except Exception:
+                pass
+
+        items = list(ohlcv_map.items())
+        cached: Dict[str, Any] = {}
+        n_workers = 1
+        try:
+            n_workers = min(8, max(1, int(os.cpu_count() or 1)), max(1, len(items)))
+        except Exception:
+            n_workers = 1
+
+        def _one(pair: Tuple[Any, pd.DataFrame]) -> Tuple[Any, Optional[pd.DataFrame]]:
+            code, group = pair
+            try:
+                return code, self._indicators_and_signals_15m(group)
+            except Exception as e:
+                try:
+                    print(f"[Dynamic] 15분 지표/신호 실패 ({code}): {e!r}", flush=True)
+                except Exception:
+                    pass
+                return code, None
+
+        if n_workers <= 1 or len(items) <= 1:
+            for pair in items:
+                code, df_ind = _one(pair)
+                if df_ind is not None:
+                    cached[code] = df_ind
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                for code, df_ind in ex.map(_one, items):
+                    if df_ind is not None:
+                        cached[code] = df_ind
+
+        if sig_fp and cached:
+            try:
+                _bt_cache_put_signals(sig_fp, cached)
+            except Exception:
+                pass
+        try:
+            print(
+                f"[Dynamic] 15분 지표+신호 준비 {len(cached)}종목 "
+                f"({time.time() - t0:.2f}초, workers={n_workers})"
             )
-            df_ind = df_ind.join(full_sigs.drop(columns='Signal', errors='ignore'))
-            df_ind['Signal'] = full_sigs['Signal']
-            
-            df_ind['Ready'] = (df_ind.reset_index().index >= 19)
-            cached[code] = df_ind
+        except Exception:
+            pass
         return cached
 
     def _get_m1_chunk_on_demand(self, code, date_str, curr_time):
