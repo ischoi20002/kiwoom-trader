@@ -54,6 +54,8 @@ def test_track_c_settings_section_and_integer_collection() -> None:
         assert "use_type_c" in tab.conf_vars
         assert "use_type_c_prev_high_break" in tab.conf_vars
         assert "use_type_c_gap_down_exit" in tab.conf_vars
+        assert "use_type_c_gap_grace" in tab.conf_vars
+        assert "type_c_gap_grace_mins" in tab.params_entries
 
         numeric_keys = {
             "max_slots_c",

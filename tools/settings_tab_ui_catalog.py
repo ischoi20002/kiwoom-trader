@@ -1608,6 +1608,8 @@ SETTING_UI_ROWS += (
     SettingUiRow(8530, "⑦ Track C · 박스 회귀", "[C-3] 청산 · 리스크 — 진입 시 고정 박스", "", "최대 보유기간", "type_c_max_holding_days"),
     SettingUiRow(8540, "⑦ Track C · 박스 회귀", "[C-3] 청산 · 리스크 — 진입 시 고정 박스", "", "갭 하락 즉시 청산 — 토글", "use_type_c_gap_down_exit"),
     SettingUiRow(8550, "⑦ Track C · 박스 회귀", "[C-3] 청산 · 리스크 — 진입 시 고정 박스", "", "갭 하락 즉시 청산 — 임계", "type_c_gap_down_limit"),
+    SettingUiRow(8555, "⑦ Track C · 박스 회귀", "[C-3] 청산 · 리스크 — 진입 시 고정 박스", "", "개장 초기 매도 유예 (C) — 토글", "use_type_c_gap_grace"),
+    SettingUiRow(8556, "⑦ Track C · 박스 회귀", "[C-3] 청산 · 리스크 — 진입 시 고정 박스", "", "개장 초기 매도 유예 (C) — 분", "type_c_gap_grace_mins"),
     SettingUiRow(8560, "⑦ Track C · 박스 회귀", "[C-3] 청산 · 리스크 — 진입 시 고정 박스", "", "박스정보 유실 비상손절", "type_c_missing_box_stop_loss_pct"),
 )
 

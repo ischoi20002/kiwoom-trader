@@ -2164,6 +2164,39 @@ class TradingStrategy:
             except (TypeError, ValueError, AttributeError):
                 return float(default)
 
+        def _finish(result: dict) -> dict:
+            """A/B gap_grace와 동일: 개장 직후 N분간 익절 외 EXIT를 보류."""
+            try:
+                if result.get("action") != "EXIT":
+                    return result
+                if str(result.get("reason", "")) == "BOX_C_TAKE_PROFIT":
+                    return result
+                if not bool(settings.get("use_type_c_gap_grace", True)):
+                    return result
+                if current_time is None:
+                    return result
+                from utils.krx_session_hours import get_session_hours
+
+                dt = TradingStrategy._time_gate_ts(
+                    current_time, time_is_bar_label
+                )
+                open_m = get_session_hours(dt.date()).open_minutes
+                hm = int(dt.hour) * 60 + int(dt.minute)
+                try:
+                    grace_mins = max(
+                        0, int(float(settings.get("type_c_gap_grace_mins", 45)))
+                    )
+                except (TypeError, ValueError):
+                    grace_mins = 45
+                if grace_mins > 0 and open_m <= hm < open_m + grace_mins:
+                    return {
+                        "action": "HOLD",
+                        "reason": f"GRACE({result.get('reason')})",
+                    }
+            except Exception:
+                return result
+            return result
+
         try:
             lower = float(pos.get("box_lower", 0) or 0)
             upper = float(pos.get("box_upper", 0) or 0)
@@ -2184,11 +2217,13 @@ class TradingStrategy:
             except (TypeError, ValueError):
                 emergency_sl = 3.0
             if profit_ratio <= -emergency_sl:
-                return {
-                    "action": "EXIT",
-                    "reason": "BOX_C_METADATA_STOP",
-                    "profit_ratio": profit_ratio,
-                }
+                return _finish(
+                    {
+                        "action": "EXIT",
+                        "reason": "BOX_C_METADATA_STOP",
+                        "profit_ratio": profit_ratio,
+                    }
+                )
             return {"action": "HOLD", "reason": "BOX_C_METADATA_MISSING"}
 
         try:
@@ -2196,11 +2231,13 @@ class TradingStrategy:
         except (TypeError, ValueError):
             gap_limit = -4.0
         if bool(settings.get("use_type_c_gap_down_exit", True)) and profit_ratio <= gap_limit:
-            return {
-                "action": "EXIT",
-                "reason": "BOX_C_GAP_DOWN",
-                "profit_ratio": profit_ratio,
-            }
+            return _finish(
+                {
+                    "action": "EXIT",
+                    "reason": "BOX_C_GAP_DOWN",
+                    "profit_ratio": profit_ratio,
+                }
+            )
 
         try:
             stop_atr = max(
@@ -2211,12 +2248,14 @@ class TradingStrategy:
         stop_price = lower - stop_atr * entry_atr
         bar_low = _indicator_value("Low", price)
         if min(price, bar_low) <= stop_price:
-            return {
-                "action": "EXIT",
-                "reason": "BOX_C_STOP",
-                "profit_ratio": profit_ratio,
-                "stop_price": stop_price,
-            }
+            return _finish(
+                {
+                    "action": "EXIT",
+                    "reason": "BOX_C_STOP",
+                    "profit_ratio": profit_ratio,
+                    "stop_price": stop_price,
+                }
+            )
 
         # 연속 종가 이탈은 완결 봉에서만 1회 갱신합니다.
         confirmed_bar = bool(time_is_bar_label)
@@ -2253,11 +2292,13 @@ class TradingStrategy:
             except (TypeError, ValueError):
                 breakdown_limit = 2
             if int(pos.get("box_breakdown_closes", 0) or 0) >= breakdown_limit:
-                return {
-                    "action": "EXIT",
-                    "reason": "BOX_C_BREAKDOWN",
-                    "profit_ratio": profit_ratio,
-                }
+                return _finish(
+                    {
+                        "action": "EXIT",
+                        "reason": "BOX_C_BREAKDOWN",
+                        "profit_ratio": profit_ratio,
+                    }
+                )
 
         try:
             target_buffer = max(
@@ -2267,12 +2308,14 @@ class TradingStrategy:
             target_buffer = 0.2
         target_price = upper - target_buffer * entry_atr
         if price >= target_price:
-            return {
-                "action": "EXIT",
-                "reason": "BOX_C_TAKE_PROFIT",
-                "profit_ratio": profit_ratio,
-                "target_price": target_price,
-            }
+            return _finish(
+                {
+                    "action": "EXIT",
+                    "reason": "BOX_C_TAKE_PROFIT",
+                    "profit_ratio": profit_ratio,
+                    "target_price": target_price,
+                }
+            )
 
         # 진입일 포함 평일 수 기준. bars_df가 있으면 실제 거래일 수를 우선합니다.
         try:
@@ -2303,12 +2346,14 @@ class TradingStrategy:
         except (TypeError, ValueError):
             held_days = 0
         if held_days >= max_days:
-            return {
-                "action": "EXIT",
-                "reason": "BOX_C_TIME_EXIT",
-                "profit_ratio": profit_ratio,
-                "holding_days": held_days,
-            }
+            return _finish(
+                {
+                    "action": "EXIT",
+                    "reason": "BOX_C_TIME_EXIT",
+                    "profit_ratio": profit_ratio,
+                    "holding_days": held_days,
+                }
+            )
 
         return {
             "action": "HOLD",

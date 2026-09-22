@@ -255,3 +255,51 @@ def test_type_c_time_exit_on_fifth_holding_day() -> None:
     )
 
     assert result["reason"] == "BOX_C_TIME_EXIT"
+
+
+def test_type_c_gap_grace_holds_gap_down_at_open() -> None:
+    """개장 유예 중 갭하락은 HOLD, 유예 밖·OFF면 EXIT."""
+    gap_settings = {
+        "use_type_c_gap_down_exit": True,
+        "type_c_gap_down_limit": -4.0,
+        "use_type_c_gap_grace": True,
+        "type_c_gap_grace_mins": 45,
+    }
+    held = TradingStrategy.evaluate_position(
+        "005930",
+        97.0,
+        _type_c_position(),
+        gap_settings,
+        indicator_row=pd.Series({"Low": 97.0, "Close": 97.0}),
+        current_time=pd.Timestamp("2026-09-22 09:15:00"),
+    )
+    exited = TradingStrategy.evaluate_position(
+        "005930",
+        97.0,
+        _type_c_position(),
+        gap_settings,
+        indicator_row=pd.Series({"Low": 97.0, "Close": 97.0}),
+        current_time=pd.Timestamp("2026-09-22 10:00:00"),
+    )
+    no_grace = TradingStrategy.evaluate_position(
+        "005930",
+        97.0,
+        _type_c_position(),
+        {**gap_settings, "use_type_c_gap_grace": False},
+        indicator_row=pd.Series({"Low": 97.0, "Close": 97.0}),
+        current_time=pd.Timestamp("2026-09-22 09:15:00"),
+    )
+    take_profit = TradingStrategy.evaluate_position(
+        "005930",
+        109.8,
+        _type_c_position(),
+        gap_settings,
+        indicator_row=pd.Series({"Low": 109.0, "Close": 109.8}),
+        current_time=pd.Timestamp("2026-09-22 09:15:00"),
+    )
+
+    assert held["action"] == "HOLD"
+    assert held["reason"] == "GRACE(BOX_C_GAP_DOWN)"
+    assert exited["reason"] == "BOX_C_GAP_DOWN"
+    assert no_grace["reason"] == "BOX_C_GAP_DOWN"
+    assert take_profit["reason"] == "BOX_C_TAKE_PROFIT"

@@ -118,10 +118,53 @@ def _read_prev_vol_lookback_days(
     return max(1, int(default))
 
 
+def _prev_day_vol_pivot_and_keys(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.MultiIndex] | tuple[None, None]:
+    """
+    Volume을 date×time 피벗으로 만들고, 원본 행 정렬용 MultiIndex를 반환한다.
+    실패 시 (None, None).
+    """
+    try:
+        date_only = df.index.normalize()
+        time_only = df.index.time
+        # pivot_table 대신 groupby→unstack: 집계 오버헤드·중간 DataFrame 복사를 줄인다.
+        pivoted = (
+            pd.Series(df["Volume"].to_numpy(), index=pd.MultiIndex.from_arrays([date_only, time_only]))
+            .groupby(level=[0, 1])
+            .first()
+            .unstack(level=1)
+        )
+        lookup_keys = pd.MultiIndex.from_arrays([date_only, time_only])
+        return pivoted, lookup_keys
+    except Exception:
+        return None, None
+
+
+def _fill_prev_day_vol_from_pivot(
+    df: pd.DataFrame,
+    pivoted: pd.DataFrame,
+    lookup_keys: pd.MultiIndex,
+    vol_lookback_days: int,
+    out_column: str,
+) -> None:
+    """이미 만든 피벗에 rolling을 적용해 out_column을 채운다."""
+    vol_lookback = max(1, int(vol_lookback_days))
+    try:
+        pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
+        stacked = pivoted_rolled.stack(future_stack=True)
+        df[out_column] = stacked.reindex(lookup_keys).to_numpy()
+        df[out_column] = df[out_column].ffill().fillna(0)
+    except Exception:
+        df[out_column] = 0
+
+
 def attach_prev_day_volume_quartet(df: pd.DataFrame, settings: dict | None) -> None:
     """
     S1/S2 × A/B 각각 독립 lookback으로 4열을 만든 뒤,
     레거시 호환용 Prev_Day_Vol(=S1A)·Prev_Day_Vol_B(=S1B)를 동기화한다.
+
+    피벗은 종목당 1회만 만들고 lookback별 rolling만 반복한다(캐시 미스 준비 가속).
     """
     s = settings or {}
     lb_s1a = _read_prev_vol_lookback_days(
@@ -146,6 +189,12 @@ def attach_prev_day_volume_quartet(df: pd.DataFrame, settings: dict | None) -> N
             df[c] = 0
         return
 
+    pivoted, lookup_keys = _prev_day_vol_pivot_and_keys(df)
+    if pivoted is None or lookup_keys is None:
+        for c in cols:
+            df[c] = 0
+        return
+
     done_lb: dict[int, str] = {}
     for lb, col in (
         (lb_s1a, "Prev_Day_Vol_S1_A"),
@@ -157,7 +206,7 @@ def attach_prev_day_volume_quartet(df: pd.DataFrame, settings: dict | None) -> N
         if src is not None:
             df[col] = df[src].copy()
         else:
-            attach_prev_day_same_time_volume(df, lb, col)
+            _fill_prev_day_vol_from_pivot(df, pivoted, lookup_keys, lb, col)
             done_lb[lb] = col
 
     df["Prev_Day_Vol"] = df["Prev_Day_Vol_S1_A"].copy()
@@ -178,15 +227,11 @@ def attach_prev_day_same_time_volume(
         df[out_column] = 0
         return
     try:
-        df_tmp = df[["Volume"]].copy()
-        df_tmp["date_only"] = df_tmp.index.normalize()
-        df_tmp["time_only"] = df_tmp.index.time
-        pivoted = df_tmp.pivot_table(index="date_only", columns="time_only", values="Volume")
-        pivoted_rolled = pivoted.shift(1).rolling(window=vol_lookback, min_periods=1).mean()
-        stacked = pivoted_rolled.stack(future_stack=True)
-        lookup_keys = pd.MultiIndex.from_arrays([df_tmp.index.normalize(), df_tmp.index.time])
-        df[out_column] = stacked.reindex(lookup_keys).values
-        df[out_column] = df[out_column].ffill().fillna(0)
+        pivoted, lookup_keys = _prev_day_vol_pivot_and_keys(df)
+        if pivoted is None or lookup_keys is None:
+            df[out_column] = 0
+            return
+        _fill_prev_day_vol_from_pivot(df, pivoted, lookup_keys, vol_lookback, out_column)
     except Exception:
         df[out_column] = 0
 

@@ -1039,6 +1039,8 @@ class DynamicBacktester:
                 all_times = []
                 for df in day_data.values(): all_times.extend(df.index.tolist())
                 timeline = sorted(list(set(all_times)))
+            # SmartBuy shadow 등에서 timeline.index(O(n)) 반복을 피한다.
+            timeline_pos = {t: i for i, t in enumerate(timeline)}
             
             today_sells = set()
             # [Phase 2] Track A 우선순위 → Track B 순서로 정렬
@@ -1179,17 +1181,55 @@ class DynamicBacktester:
                     # 기본은 15:30 슬롯 스킵. 옵션 ON이면 익일 09:00 시가 체결 판정으로 이월한다.
                     if _skip_eod_slot:
                         buy_candidates = []
-                    for code in sorted(buy_candidates, key=lambda c: code_to_rank.get(c, 999)):
-                        if code in today_sells or code in m1_processed: continue
+                    # Signal/Ready 셀만 먼저 보고, 후보만 상세 판정(대부분 종목·슬롯 스킵).
+                    active_buy: list = []
+                    for code in buy_candidates:
+                        if code in today_sells or code in m1_processed:
+                            continue
                         d_df = day_data.get(code)
-                        if d_df is None or curr_time not in d_df.index: continue
-                        last_sig = day_signals[code].loc[curr_time]
+                        if d_df is None or curr_time not in d_df.index:
+                            continue
+                        sig_df = day_signals.get(code)
+                        if sig_df is None or curr_time not in sig_df.index:
+                            continue
                         h_info = self.holdings.get(code)
-                        
-                        # 2차 매수 대상인 경우 승인 조건 체크 (v22.1)
-                        is_buy_signal = (last_sig['Signal'] and last_sig['Ready'])
-                        is_addon_target = (h_info is not None and h_info['entry_n'] < 2)
-                        
+                        is_addon_target = h_info is not None and h_info.get("entry_n", 0) < 2
+                        try:
+                            if not is_addon_target:
+                                if not (
+                                    bool(sig_df.at[curr_time, "Signal"])
+                                    and bool(sig_df.at[curr_time, "Ready"])
+                                ):
+                                    continue
+                            last_sig = sig_df.loc[curr_time]
+                        except Exception:
+                            continue
+                        is_buy_signal = bool(last_sig["Signal"]) and bool(last_sig["Ready"])
+                        if not (is_buy_signal or is_addon_target):
+                            continue
+                        active_buy.append(
+                            (
+                                code_to_rank.get(code, 999),
+                                code,
+                                d_df,
+                                last_sig,
+                                h_info,
+                                is_buy_signal,
+                                is_addon_target,
+                            )
+                        )
+                    active_buy.sort(key=lambda x: x[0])
+                    for (
+                        _rank,
+                        code,
+                        d_df,
+                        last_sig,
+                        h_info,
+                        is_buy_signal,
+                        is_addon_target,
+                    ) in active_buy:
+                        if code in today_sells or code in m1_processed:
+                            continue
                         if is_buy_signal or is_addon_target:
                             can_execute = True
                             reason = "SIG" # 일관성 있게 backtest_engine의 기본 SIG와 통일
@@ -1256,7 +1296,9 @@ class DynamicBacktester:
                                         # [v27.5] Shadow Return (1h Lookahead)
                                         p_inc_str = ""
                                         try:
-                                            curr_idx = timeline.index(curr_time)
+                                            curr_idx = timeline_pos.get(curr_time, -1)
+                                            if curr_idx < 0:
+                                                raise KeyError(curr_time)
                                             future_idx = min(curr_idx + 4, len(timeline) - 1)
                                             future_time = timeline[future_idx]
                                             if future_time in d_df.index:
@@ -2594,7 +2636,8 @@ class DynamicBacktester:
         cached: Dict[str, Any] = {}
         n_workers = 1
         try:
-            n_workers = min(8, max(1, int(os.cpu_count() or 1)), max(1, len(items)))
+            # GIL 한계가 있어도 I/O·pandas 일부는 겹침 — CPU 상한 16
+            n_workers = min(16, max(1, int(os.cpu_count() or 1)), max(1, len(items)))
         except Exception:
             n_workers = 1
 

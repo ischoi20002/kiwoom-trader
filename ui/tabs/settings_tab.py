@@ -2325,7 +2325,17 @@ class SettingsTab:
             widget_list=self.exit_c_widgets,
             group_toggle_widgets=True,
         )
-        add_param_row(c_exit_f, '박스정보 유실 비상손절', 'type_c_missing_box_stop_loss_pct', '%', '재시작 등으로 박스 메타데이터가 없을 때만 적용', widget_list=self.exit_c_widgets)
+        add_param_row(
+            c_exit_f,
+            '개장 초기 매도 유예 (C)',
+            'type_c_gap_grace_mins',
+            '분',
+            '개장 직후 N분간 갭·손절 등 매도 보류(익절만 허용)',
+            toggle_key='use_type_c_gap_grace',
+            widget_list=self.exit_c_widgets,
+            group_toggle_widgets=True,
+        )
+        add_param_row(c_exit_f, '박스정보 유실 비상손절', 'type_c_missing_box_stop_loss_pct', '%', '박스 메타데이터가 없는 보유 포지션에만 적용', widget_list=self.exit_c_widgets)
 
         # 초기 표시: 첫 번째 사이드바 항목
         _show_settings_section('fund')
@@ -2514,6 +2524,7 @@ class SettingsTab:
                 'atr_sl_streak_cooldown_days',
                 'atr_period', 'atr_period_a', 'atr_period_b', 'type_c_atr_period',
                 'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
+                'type_c_gap_grace_mins',
                 'gc_window', 'rsi_window',
                 'mobile_status_api_port',
                 'box_sel_lookback', 'box_sel_min_history_bars',

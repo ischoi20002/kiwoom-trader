@@ -13,6 +13,12 @@
 
 ---
 
+## 0.21.2 (2026-09-22)
+
+- **저정밀 Dynamic BT 가속**: `Prev_Day_Vol` 피벗 1회화, 매수 루프 Signal/Ready 선필터, 타임라인 인덱스 dict, 15분 준비 ThreadPool 상한 16.
+- **TYPE_C 개장 매도 유예**: `use_type_c_gap_grace` / `type_c_gap_grace_mins`(A/B와 동일, 익절만 예외). 설정 UI·테스트 반영.
+- **defaults 동기화**: 현행 Type C·백테스트 기간 설정을 `DEFAULT_SETTINGS`에 반영(모바일 토큰/URL 제외).
+
 ## 0.21.1 (2026-09-22)
 
 - **주문 캘린더**: `get_orders_for_calendar_date`에서 `date` import 누락으로 가상계좌 일별 주문 조회가 실패하던 오류 수정.
