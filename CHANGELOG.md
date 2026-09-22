@@ -13,6 +13,10 @@
 
 ---
 
+## 0.21.3 (2026-09-22)
+
+- **B 추세 레짐 표시**: `selection_regime` 분리 후 `_settings_bool_sel`·`resolve_universe_codes` import 누락으로 「조회 실패」가 뜨던 오류 수정.
+
 ## 0.21.2 (2026-09-22)
 
 - **저정밀 Dynamic BT 가속**: `Prev_Day_Vol` 피벗 1회화, 매수 루프 Signal/Ready 선필터, 타임라인 인덱스 dict, 15분 준비 ThreadPool 상한 16.

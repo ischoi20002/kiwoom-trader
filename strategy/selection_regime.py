@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 
 from strategy.selection_dynamic_score import _score_dynamic_universe_daily_ohlcv
-from strategy.universe_codes import load_kodex200_universe_codes
+from strategy.selection_scoring import _settings_bool_sel
+from strategy.universe_codes import load_kodex200_universe_codes, resolve_universe_codes
 
 
 def compute_market_breadth(
