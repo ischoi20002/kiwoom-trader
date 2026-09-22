@@ -1589,6 +1589,7 @@ SETTING_UI_ROWS += (
     SettingUiRow(8220, "⑦ Track C · 박스 회귀", "[C-1] 종목 선정 — 일봉 박스권", "박스 형태 · 접촉 · 이탈 필터", "박스 상단 분위수", "box_sel_upper_quantile"),
     SettingUiRow(8230, "⑦ Track C · 박스 회귀", "[C-1] 종목 선정 — 일봉 박스권", "박스 형태 · 접촉 · 이탈 필터", "선정 결과 상한", "box_sel_max_candidates"),
     SettingUiRow(8300, "⑦ Track C · 박스 회귀", "[C-2] 매수 신호 — 15분봉 하단 반등", "", "TYPE_C 매수 사용 — 토글", "use_type_c"),
+    SettingUiRow(8305, "⑦ Track C · 박스 회귀", "[C-2] 매수 신호 — 15분봉 하단 반등", "", "전고 돌파 요구 — 토글", "use_type_c_prev_high_break"),
     SettingUiRow(8310, "⑦ Track C · 박스 회귀", "[C-2] 매수 신호 — 15분봉 하단 반등", "", "ATR_C 기간", "type_c_atr_period"),
     SettingUiRow(8320, "⑦ Track C · 박스 회귀", "[C-2] 매수 신호 — 15분봉 하단 반등", "", "하단 접촉 허용폭", "type_c_touch_atr_tolerance"),
     SettingUiRow(8330, "⑦ Track C · 박스 회귀", "[C-2] 매수 신호 — 15분봉 하단 반등", "", "박스 재진입 버퍼", "type_c_reclaim_atr_buffer"),

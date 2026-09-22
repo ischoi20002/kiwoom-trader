@@ -319,7 +319,7 @@ DEFAULT_SETTINGS = {
     "use_atr_trailing_stop_a": True,
     "use_type_b": True,
     "use_type_c": False,
-    # TYPE_C 하단 반등 신호 — 전용 청산 구현 전까지 use_type_c는 False 유지
+    # TYPE_C 하단 반등 신호 — 기본 OFF (검증 후 운영 시 ON)
     "type_c_atr_period": 14,
     "type_c_touch_atr_tolerance": 0.3,
     "type_c_reclaim_atr_buffer": 0.1,
@@ -332,6 +332,8 @@ DEFAULT_SETTINGS = {
     "type_c_min_volume_ratio": 0.8,
     "type_c_max_volume_ratio": 2.0,
     "type_c_max_box_position_pct": 35.0,
+    # 직전 봉 고가 돌파 요구 (병목 조건). OFF 시 하단 반등만으로 진입 가능
+    "use_type_c_prev_high_break": True,
     # TYPE_C 전용 청산 — 진입 시 고정한 박스 경계 기준
     "type_c_target_atr_buffer": 0.2,
     "type_c_stop_atr_tolerance": 0.5,

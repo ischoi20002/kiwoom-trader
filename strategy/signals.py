@@ -250,6 +250,9 @@ def get_buy_signals_detailed(
             )
             cond_c_reclaim = df["Close"] >= (box_lower + atr_c * reclaim_atr)
             cond_c_prev_high_break = df["Close"] > df["High"].shift(1)
+            require_prev_high = _settings_bool(
+                settings, "use_type_c_prev_high_break", True
+            )
             cond_c_rsi_rising = (
                 (df["RSI"] > df["RSI"].shift(1))
                 & (df["RSI"] >= float(settings.get("type_c_rsi_min", 35.0)))
@@ -295,7 +298,6 @@ def get_buy_signals_detailed(
             signal_c = (
                 cond_c_touch
                 & cond_c_reclaim
-                & cond_c_prev_high_break
                 & cond_c_rsi_rising
                 & cond_c_candle
                 & cond_c_volume
@@ -304,6 +306,8 @@ def get_buy_signals_detailed(
                 & ~consecutive_breakdown
                 & atr_c.notna()
             )
+            if require_prev_high:
+                signal_c = signal_c & cond_c_prev_high_break
     except (KeyError, TypeError, ValueError, ArithmeticError):
         signal_c = pd.Series(False, index=df.index, dtype=bool)
     except Exception:
@@ -408,11 +412,12 @@ def get_buy_signals_detailed(
     c_conditions = [
         cond_c_touch,
         cond_c_reclaim,
-        cond_c_prev_high_break,
         cond_c_rsi_rising,
         cond_c_candle,
         cond_c_volume,
     ]
+    if _settings_bool(settings, "use_type_c_prev_high_break", True):
+        c_conditions.insert(2, cond_c_prev_high_break)
     met_c = sum(condition.astype(int) for condition in c_conditions)
     total_c = len(c_conditions)
     

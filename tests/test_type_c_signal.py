@@ -104,6 +104,32 @@ def test_type_c_signal_does_not_use_future_bar() -> None:
     assert before["Sig_Type"] == after["Sig_Type"] == "TYPE_C"
 
 
+def test_type_c_prev_high_break_can_be_disabled() -> None:
+    """전고 돌파 토글 OFF면 직전 고가를 넘지 않아도 TYPE_C 신호가 납니다."""
+    frame = _make_type_c_frame()
+    # 종가가 직전 고가(101.5)를 넘지 않도록 조정
+    frame.iloc[-1, frame.columns.get_loc("High")] = 101.4
+    frame.iloc[-1, frame.columns.get_loc("Close")] = 101.3
+    context = {"sel_track": "C", "box_lower": 100.0, "box_upper": 110.0}
+
+    required = _settings()
+    required["use_type_c_prev_high_break"] = True
+    with_req = get_buy_signals_detailed(
+        frame, required, signal_context=context
+    )
+    assert not bool(with_req.iloc[-1]["Signal"])
+    assert not bool(with_req.iloc[-1]["C_PrevHighBreak"])
+
+    optional = _settings()
+    optional["use_type_c_prev_high_break"] = False
+    without_req = get_buy_signals_detailed(
+        frame, optional, signal_context=context
+    )
+    assert bool(without_req.iloc[-1]["Signal"])
+    assert without_req.iloc[-1]["Sig_Type"] == "TYPE_C"
+    assert not bool(without_req.iloc[-1]["C_PrevHighBreak"])
+
+
 def test_type_c_s2_is_always_blocked() -> None:
     """TYPE_C 보유에는 기존 A/B 수익권 추매를 적용하지 않습니다."""
     position = {

@@ -2283,6 +2283,15 @@ class SettingsTab:
             '기본 OFF. Track C 선정 종목에서만 S1 진입하며 S2 추매는 사용하지 않음',
             toggle_key='use_type_c',
         )
+        add_param_row(
+            c_signal_f,
+            '전고 돌파 요구',
+            None,
+            '',
+            '직전 15분봉 고가 돌파 필수. OFF 시 하단 반등만으로 진입(건수↑)',
+            toggle_key='use_type_c_prev_high_break',
+            widget_list=self.type_c_widgets,
+        )
         add_param_row(c_signal_f, 'ATR_C 기간', 'type_c_atr_period', '봉', '15분봉 접촉·재진입·청산 공통 ATR', widget_list=self.type_c_widgets)
         add_param_row(c_signal_f, '하단 접촉 허용폭', 'type_c_touch_atr_tolerance', 'ATR 배', '저가가 하단+ATR×값 이하면 접촉', widget_list=self.type_c_widgets)
         add_param_row(c_signal_f, '박스 재진입 버퍼', 'type_c_reclaim_atr_buffer', 'ATR 배', '종가가 하단+ATR×값 이상이어야 반등 인정', widget_list=self.type_c_widgets)

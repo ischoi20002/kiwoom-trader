@@ -52,6 +52,7 @@ def test_track_c_settings_section_and_integer_collection() -> None:
         assert "track_c" in tab._settings_section_keys
         assert "use_sel_track_c" in tab.conf_vars
         assert "use_type_c" in tab.conf_vars
+        assert "use_type_c_prev_high_break" in tab.conf_vars
         assert "use_type_c_gap_down_exit" in tab.conf_vars
 
         numeric_keys = {
