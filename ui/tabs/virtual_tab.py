@@ -27,41 +27,22 @@ from reporting.krx_trading_calendar import (
     previous_trading_day,
     trading_days_inclusive,
 )
-
-# 포지션 탭 트리 컬럼 기본 폭(px). 사용자 조절·세로 분할은 virtual_portfolio_ui.json 에 저장합니다.
-_DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS: Dict[str, int] = {
-    "Entry": 140,
-    "Code": 72,
-    "Name": 120,
-    "Qty": 56,
-    "PnL": 100,
-    "PnLPct": 72,
-    "Eval": 100,
-    "BuyIn": 96,
-    "CurP": 88,
-    "AvgP": 88,
-    "DayChg": 88,
-    "WtPct": 72,
-}
-_DEFAULT_VIRTUAL_ORDER_COL_WIDTHS: Dict[str, int] = {
-    "Time": 138,
-    "Code": 88,
-    "Name": 100,
-    "Side": 88,
-    "Qty": 88,
-    "FQty": 72,
-    "OrderP": 88,
-    "FilledP": 88,
-    "VPOrd": 72,
-    "BAOrd": 200,
-    "Status": 88,
-    "Reason": 120,
-}
-_VIRTUAL_ACTIVE_COLS: Tuple[str, ...] = tuple(_DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS.keys())
-_VIRTUAL_ORDER_COLS: Tuple[str, ...] = tuple(_DEFAULT_VIRTUAL_ORDER_COL_WIDTHS.keys())
-_VIRTUAL_COL_MIN: Dict[str, int] = {c: 40 for c in _VIRTUAL_ACTIVE_COLS}
-_VIRTUAL_COL_MIN.update(
-    {c: 40 for c in _VIRTUAL_ORDER_COLS if c not in _VIRTUAL_COL_MIN}
+from core.virtual_tab_helpers import (
+    DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS as _DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS,
+    DEFAULT_VIRTUAL_ORDER_COL_WIDTHS as _DEFAULT_VIRTUAL_ORDER_COL_WIDTHS,
+    VIRTUAL_ACTIVE_COLS as _VIRTUAL_ACTIVE_COLS,
+    VIRTUAL_COL_MIN as _VIRTUAL_COL_MIN,
+    VIRTUAL_ORDER_COLS as _VIRTUAL_ORDER_COLS,
+    finite_tree_float as _finite_tree_float,
+    fmt_active_vs_prev as _fmt_active_vs_prev,
+    format_entry_datetime as _format_entry_datetime,
+    holding_cost_ex_fee as _holding_cost_ex_fee,
+    merge_virtual_col_widths as _merge_virtual_col_widths,
+    normalize_order_side_raw as _normalize_order_side_raw,
+    order_log_row_is_filled as _order_log_row_is_filled,
+    order_log_status_display as _order_log_status_display,
+    order_log_vp_cell as _order_log_vp_cell,
+    parse_virtual_sash_rel as _parse_virtual_sash_rel,
 )
 
 
@@ -665,39 +646,7 @@ class VirtualTab:
                 pass
         return {}
 
-    @staticmethod
-    def _parse_virtual_sash_rel(raw: Dict[str, Any]) -> Optional[float]:
-        try:
-            v = raw.get("sash0_rel")
-            if v is None:
-                return None
-            x = float(v)
-            if x != x:
-                return None
-            return max(0.08, min(0.88, x))
-        except (TypeError, ValueError):
-            return None
-
-    def _merge_virtual_col_widths(
-        self,
-        keys: Tuple[str, ...],
-        defaults: Dict[str, int],
-        saved: Any,
-    ) -> Dict[str, int]:
-        out = {k: int(defaults.get(k, 64)) for k in keys}
-        if not isinstance(saved, dict):
-            return out
-        for k, v in saved.items():
-            if k not in out:
-                continue
-            try:
-                iw = int(v)
-                lo = int(_VIRTUAL_COL_MIN.get(k, 32))
-                if lo <= iw <= 4000:
-                    out[k] = iw
-            except (TypeError, ValueError):
-                pass
-        return out
+    # sash/열폭 병합 → core.virtual_tab_helpers
 
     def _flush_virtual_ui_to_disk(self) -> None:
         """보유·주문 트리 컬럼 폭과 세로 분할 비율을 저장합니다."""
@@ -731,7 +680,7 @@ class VirtualTab:
             if rel is None:
                 rel = getattr(self, "_virtual_saved_sash_rel", None)
             if rel is None:
-                rel = self._parse_virtual_sash_rel(self._read_virtual_ui_file())
+                rel = _parse_virtual_sash_rel(self._read_virtual_ui_file())
             path = self._virtual_ui_json_path()
             dname = os.path.dirname(path)
             if dname:
@@ -1226,10 +1175,10 @@ class VirtualTab:
             )
             raw_ui = self._read_virtual_ui_file()
             try:
-                self._virtual_saved_sash_rel = self._parse_virtual_sash_rel(raw_ui)
+                self._virtual_saved_sash_rel = _parse_virtual_sash_rel(raw_ui)
             except Exception:
                 pass
-            wid_map = self._merge_virtual_col_widths(
+            wid_map = _merge_virtual_col_widths(
                 _VIRTUAL_ACTIVE_COLS,
                 _DEFAULT_VIRTUAL_ACTIVE_COL_WIDTHS,
                 raw_ui.get("columns_active"),
@@ -1405,8 +1354,8 @@ class VirtualTab:
         try:
             raw_ui = self._read_virtual_ui_file()
             if getattr(self, "_virtual_saved_sash_rel", None) is None:
-                self._virtual_saved_sash_rel = self._parse_virtual_sash_rel(raw_ui)
-            wid_map = self._merge_virtual_col_widths(
+                self._virtual_saved_sash_rel = _parse_virtual_sash_rel(raw_ui)
+            wid_map = _merge_virtual_col_widths(
                 _VIRTUAL_ORDER_COLS,
                 _DEFAULT_VIRTUAL_ORDER_COL_WIDTHS,
                 raw_ui.get("columns_orders"),
@@ -1963,88 +1912,7 @@ class VirtualTab:
         except Exception:
             return {}
 
-    @staticmethod
-    def _format_entry_datetime(entry_raw: object) -> str:
-        """진입 시각 ISO 등 → 'YYYY-MM-DD HH:MM' 형태로 표시."""
-        try:
-            et = str(entry_raw or "").strip()
-            if not et:
-                return "-"
-            if "T" in et:
-                d, tpart = et.split("T", 1)
-                return f"{d} {tpart[:5]}"
-            if len(et) >= 16 and et[4] == "-" and et[7] == "-":
-                return et[:16].replace("T", " ")
-        except Exception:
-            pass
-        return (str(entry_raw)[:16] if entry_raw else "-") or "-"
-
-    @staticmethod
-    def _order_log_status_display(
-        result: object, f_qty: object = None
-    ) -> str:
-        """주문 로그 '상태': 체결 완료는 사용자 표기 '성공'."""
-        try:
-            s = str(result or "").strip()
-        except Exception:
-            return "-"
-        su = s.upper()
-        # result 원천은 '주문 접수(SUCCESS)' 또는 '체결 완료(FILLED)'가 섞여 들어올 수 있음.
-        # UI에서는 두 의미를 구분해 표기합니다.
-        if su == "FILLED":
-            return "성공"
-        if su == "PARTIAL":
-            try:
-                fq = int(f_qty or 0)
-            except (TypeError, ValueError):
-                fq = 0
-            return f"부분체결({fq})" if fq > 0 else "부분체결"
-        if su in ("CANCELLED", "CANCELED", "CANCEL", "CNCL"):
-            try:
-                if int(f_qty or 0) > 0:
-                    return f"취소(부분체결 {int(f_qty)}주)"
-            except (TypeError, ValueError):
-                pass
-            return "취소(미체결)"
-        if su == "SUCCESS":
-            try:
-                if int(f_qty or 0) > 0:
-                    return f"부분체결({int(f_qty)})"
-            except (TypeError, ValueError):
-                pass
-            return "접수"
-        return s
-
-    @staticmethod
-    def _normalize_order_side_raw(side_raw: object) -> Literal["buy", "sell", "unknown"]:
-        """DB·코어에서 오는 side 값을 buy/sell로 정규화(필터·표시용)."""
-        try:
-            s = str(side_raw or "").strip().lower()
-        except Exception:
-            return "unknown"
-        if s in ("buy", "b", "매수", "bid"):
-            return "buy"
-        if s in ("sell", "s", "매도", "ask"):
-            return "sell"
-        return "unknown"
-
-    @staticmethod
-    def _order_log_row_is_filled(result: object, f_price: object, f_qty: object) -> bool:
-        """
-        체결 여부: result가 FILLED이거나 체결 수량이 1주 이상이면 체결로 간주합니다.
-        (부분체결·레거시 행도 필터에서 빠지지 않도록 수량 우선)
-        """
-        try:
-            if str(result or "").strip().upper() == "FILLED":
-                return True
-        except Exception:
-            pass
-        try:
-            if int(f_qty or 0) > 0:
-                return True
-        except (TypeError, ValueError):
-            pass
-        return False
+    # 주문로그 표시 포맷 → core.virtual_tab_helpers (모듈 함수 직접 사용)
 
     def _sorted_active_holdings(self) -> List[Tuple[str, Dict[str, Any]]]:
         """
@@ -2407,23 +2275,6 @@ class VirtualTab:
                 fee_sell = ex * float(qty) * sr
         return float(fee_buy + fee_sell)
 
-    @staticmethod
-    def _fmt_active_vs_prev(info: Dict[str, Any]) -> str:
-        """전일 종가 대비 등락폭(원). monitor_info['diff']와 감시 탭과 동일 규칙."""
-        try:
-            raw = info.get("diff")
-            if raw is None:
-                return "—"
-            s = str(raw).strip().replace(",", "")
-            if s in ("", "-", "—"):
-                return "—"
-            iv = int(round(float(s)))
-            if iv == 0:
-                return "0"
-            return f"{iv:+,}"
-        except Exception:
-            return "—"
-
     def _resolve_active_holdings_prices(
         self, nk: str, pos: Dict[str, Any], info: Dict[str, Any]
     ) -> Tuple[float, int, float, float, int]:
@@ -2498,30 +2349,6 @@ class VirtualTab:
             buy_in_amt = int(round(float(ap) * float(qty)))
 
         return (float(ap), int(qty), float(curr_p), float(eval_amt), int(buy_in_amt))
-
-    @staticmethod
-    def _holding_cost_ex_fee(ap: float, qty: int) -> float:
-        """매수 수수료를 제외한 매입금액(평균단가×수량)."""
-        try:
-            if qty <= 0:
-                return 0.0
-            a = float(ap)
-            if abs(a) <= 1e-12:
-                return 0.0
-            return float(a) * float(qty)
-        except (TypeError, ValueError):
-            return 0.0
-
-    @staticmethod
-    def _finite_tree_float(x: object, fallback: float = 0.0) -> float:
-        """Treeview 숫자 표시용: nan·inf·변환 실패 시 fallback."""
-        try:
-            v = float(x)
-        except (TypeError, ValueError):
-            return float(fallback)
-        if not math.isfinite(v):
-            return float(fallback)
-        return float(v)
 
     def _build_holdings_fee_toggle(
         self,
@@ -2660,7 +2487,7 @@ class VirtualTab:
             info = mi.get(nk, {}) or {}
             try:
                 ap, qty, curr_p, eval_amt, bi = self._resolve_active_holdings_prices(nk, pos, info)
-                ur = self._finite_tree_float(
+                ur = _finite_tree_float(
                     self._unrealized_at_price_net_of_sell_fee(pos, float(curr_p), qty, ap)
                 )
             except Exception:
@@ -2691,7 +2518,7 @@ class VirtualTab:
                     ap, qty, _cp, eval_amt, _bi = self._resolve_active_holdings_prices(
                         nk, pos, info
                     )
-                    s_den += self._holding_cost_ex_fee(ap, qty)
+                    s_den += _holding_cost_ex_fee(ap, qty)
                     s_eval += float(eval_amt)
                 s_pnl = s_eval - s_den
             else:
@@ -2775,7 +2602,7 @@ class VirtualTab:
             if not fee_on:
                 for _nk, pos, _info, res, _ur in rows:
                     ap, qty, _cp, eval_amt, _bi = res
-                    s_den += self._holding_cost_ex_fee(ap, qty)
+                    s_den += _holding_cost_ex_fee(ap, qty)
                     s_eval += float(eval_amt)
                 s_pnl = s_eval - s_den
             else:
@@ -2796,7 +2623,7 @@ class VirtualTab:
 
             total_eval_weight = 0.0
             for _nk, _pos, _info, res, _ur in rows:
-                total_eval_weight += self._finite_tree_float(float(res[3]))
+                total_eval_weight += _finite_tree_float(float(res[3]))
 
             valid_nks = {r[0] for r in rows}
             for idx, (nk, pos, info, res, ur) in enumerate(rows):
@@ -2866,18 +2693,18 @@ class VirtualTab:
             )
 
         if _ur_fee_incl is not None:
-            unrealized_fee_included = self._finite_tree_float(_ur_fee_incl)
+            unrealized_fee_included = _finite_tree_float(_ur_fee_incl)
         else:
-            unrealized_fee_included = self._finite_tree_float(
+            unrealized_fee_included = _finite_tree_float(
                 self._unrealized_at_price_net_of_sell_fee(pos, float(curr_p), qty, ap)
             )
-        cost_ex = self._holding_cost_ex_fee(ap, qty)
+        cost_ex = _holding_cost_ex_fee(ap, qty)
         try:
             inv = float(pos.get("invested", 0) or 0)
         except (TypeError, ValueError):
             inv = 0.0
 
-        gross_eval = self._finite_tree_float(float(eval_amt))
+        gross_eval = _finite_tree_float(float(eval_amt))
         fee_on = self._holdings_agg_fee_reflect_on()
         if not fee_on:
             unrealized_row = gross_eval - float(cost_ex)
@@ -2902,10 +2729,10 @@ class VirtualTab:
             else:
                 profit_pct_row = 0.0
 
-        unrealized_row = self._finite_tree_float(unrealized_row)
-        profit_pct_row = self._finite_tree_float(profit_pct_row)
+        unrealized_row = _finite_tree_float(unrealized_row)
+        profit_pct_row = _finite_tree_float(profit_pct_row)
         p_str = f"{profit_pct_row:+.2f}%"
-        entry_disp = self._format_entry_datetime(pos.get("entry_time", ""))
+        entry_disp = _format_entry_datetime(pos.get("entry_time", ""))
         tag_base = "even" if row_idx % 2 == 0 else "odd"
         p_tag = (
             "price_up"
@@ -2918,7 +2745,7 @@ class VirtualTab:
             nm = (str(raw_nm).strip() if raw_nm is not None else "") or str(nk)
         except Exception:
             nm = str(nk)
-        day_chg_disp = self._fmt_active_vs_prev(info)
+        day_chg_disp = _fmt_active_vs_prev(info)
         try:
             te = float(total_eval_for_weight) if total_eval_for_weight is not None else 0.0
         except (TypeError, ValueError):
@@ -3224,8 +3051,8 @@ class VirtualTab:
                 u_acc = self._unrealized_vs_cost_ex_buy_at_price(
                     float(crp), int(qr), float(ap_r)
                 )
-                total_unrealized_account += self._finite_tree_float(float(u_acc))
-                total_cost_ex_open_den += self._holding_cost_ex_fee(float(ap_r), int(qr))
+                total_unrealized_account += _finite_tree_float(float(u_acc))
+                total_cost_ex_open_den += _holding_cost_ex_fee(float(ap_r), int(qr))
             except Exception:
                 pass
 
@@ -3409,8 +3236,8 @@ class VirtualTab:
                     u_acc = self._unrealized_vs_cost_ex_buy_at_price(
                         float(crp), int(qr), float(ap_r)
                     )
-                    total_unrealized_account += self._finite_tree_float(float(u_acc))
-                    total_cost_ex_open_den += self._holding_cost_ex_fee(float(ap_r), int(qr))
+                    total_unrealized_account += _finite_tree_float(float(u_acc))
+                    total_cost_ex_open_den += _holding_cost_ex_fee(float(ap_r), int(qr))
                 except Exception:
                     pass
 
@@ -3563,15 +3390,6 @@ class VirtualTab:
         except Exception:
             return float(total_assets)
 
-    def _order_log_vp_cell(self, v: object) -> str:
-        """주문 로그용 체결강도 셀(소수 1자리 %)."""
-        try:
-            if v is None:
-                return "-"
-            return f"{float(v):.1f}%"
-        except Exception:
-            return "-"
-
     def _render_orders_safe(self) -> None:
         """메인 스레드 전용 — 주문 로그 트리만 갱신(예외 격리)."""
         try:
@@ -3653,7 +3471,7 @@ class VirtualTab:
                 except Exception:
                     continue
                 try:
-                    norm = self._normalize_order_side_raw(side)
+                    norm = _normalize_order_side_raw(side)
                 except Exception:
                     norm = "unknown"
                 if want_side == "buy" and norm != "buy":
@@ -3661,7 +3479,7 @@ class VirtualTab:
                 if want_side == "sell" and norm != "sell":
                     continue
                 try:
-                    is_filled = self._order_log_row_is_filled(result, f_price, f_qty)
+                    is_filled = _order_log_row_is_filled(result, f_price, f_qty)
                 except Exception:
                     is_filled = False
                 if want_fill == "filled" and not is_filled:
@@ -3731,9 +3549,9 @@ class VirtualTab:
                         fq_str,
                         f"{pn:,.0f}",
                         f_p_str,
-                        self._order_log_vp_cell(snap_vp),
+                        _order_log_vp_cell(snap_vp),
                         ba_o,
-                        self._order_log_status_display(result, f_qty),
+                        _order_log_status_display(result, f_qty),
                         rs_disp,
                     ),
                     tags=(tag_base, side_tag),

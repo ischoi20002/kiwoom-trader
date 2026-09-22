@@ -263,6 +263,8 @@ def stage_production(
     dirs_plan: Iterable[tuple[str, Set[str]]] = [
         ("core", CORE_EXCLUDE),
         ("core/execution", set()),
+        ("core/realtime", set()),
+        ("data_manager", set()),
         ("ui", set()),
         ("ui/tabs", UI_TABS_EXCLUDE),
         ("strategy", set()),

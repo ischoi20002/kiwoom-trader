@@ -18,6 +18,21 @@ from core.monitor_code_sets import (
     watchlist_only_codes_set,
 )
 from core.monitor_signal_status_display import monitor_signal_status_display_text
+from core.monitor_strategy_labels import (
+    format_entry_signal_type_label,
+    format_strategy_type_label,
+)
+from core.monitor_tab_helpers import (
+    DEFAULT_MONITOR_COL_WIDTHS as _DEFAULT_MONITOR_COL_WIDTHS,
+    MONITOR_COL_MIN_WIDTH as _MONITOR_COL_MIN_WIDTH,
+    format_selection_result_log_lines as _format_selection_result_log_lines,
+    monitor_fmt_bid_ask as _monitor_fmt_bid_ask,
+    monitor_fmt_vs_prev as _monitor_fmt_vs_prev,
+    monitor_ratio_direction as _monitor_ratio_direction,
+    parse_monitor_sash_rel as _parse_monitor_sash_rel,
+    selection_telegram_chunks as _selection_telegram_chunks,
+    stripe_direction_from_tags as _stripe_direction_from_tags,
+)
 from core.selection_compare import (
     load_selection_csv,
     log_selection_comparison,
@@ -28,169 +43,8 @@ from kiwoom_rest_api.auth.token import TokenManager
 from reporting.realtime_session_logger import RealtimeSessionLogger
 from utils.normalization import canonical_stock_code
 
-# 텔레그램 단일 메시지 최대 길이(일반 텍스트 기준 여유)
-_TELEGRAM_MAX_CHARS = 4000
-
-
-def _selection_telegram_chunks(
-    tag_stripped: str, total: int, lines: List[str], extra_note: str = ""
-) -> List[str]:
-    """종목 선정 알림 본문을 텔레그램 길이 제한에 맞게 분할(일반 텍스트, HTML 미사용)."""
-    header = (
-        f"🎯 종목 선정 완료 ({tag_stripped})\n"
-        f"총 {total}개 감시 등록\n"
-    )
-    if extra_note.strip():
-        header += extra_note.strip() + "\n"
-    header += "\n"
-    chunks: List[str] = []
-    buf = header
-    for line in lines:
-        add = line + "\n"
-        if len(buf) + len(add) > _TELEGRAM_MAX_CHARS:
-            chunks.append(buf)
-            buf = f"(목록 계속)\n{add}"
-        else:
-            buf += add
-    if buf.strip():
-        chunks.append(buf)
-    return chunks
-
-
-def _monitor_fmt_vs_prev(info: Dict[str, Any]) -> str:
-    """전일 종가 대비 등락폭(원). 실시간 fid 11 등 → monitor_info['diff']."""
-    try:
-        raw = info.get("diff")
-        if raw is None:
-            return "—"
-        s = str(raw).strip().replace(",", "")
-        if s in ("", "-", "—"):
-            return "—"
-        iv = int(round(float(s)))
-        if iv == 0:
-            return "0"
-        return f"{iv:+,}"
-    except Exception:
-        return "—"
-
-
-def _monitor_fmt_bid_ask(info: Dict[str, Any]) -> str:
-    """매도잔량 / 매수잔량 및 매도÷매수 비율(소수 1자리). SignalEngine·주문 로그와 동일."""
-    try:
-        from core.supply_display import format_bid_ask_monitor_display
-
-        return format_bid_ask_monitor_display(info.get("total_ask"), info.get("total_bid"))
-    except Exception:
-        return "— / — (—)"
-
-
-# 감시 트리 컬럼 기본 폭(px). 사용자 조절값·세로 분할 비율은 monitor_column_widths.json 에 저장됩니다.
-# JSON 형식: {"columns": {..}, "sash0_rel": 0.0~1.0} — 구버전 평면 dict 는 columns 만 있는 것으로 간주합니다.
-_DEFAULT_MONITOR_COL_WIDTHS: Dict[str, int] = {
-    "Score": 40,
-    "Code": 56,
-    "Name": 88,
-    "StratType": 52,
-    "Price": 64,
-    "AtrExit": 138,
-    "VsPrev": 50,
-    "Ratio": 62,
-    "Status": 188,
-    "VolPower": 52,
-    "BidAsk": 118,
-    "Volume": 72,
-}
-# 열을 너무 좁게 못 쓰게 하는 하한(px)
-_MONITOR_COL_MIN_WIDTH: Dict[str, int] = {
-    "Score": 32,
-    "Code": 48,
-    "Name": 52,
-    "StratType": 44,
-    "Price": 52,
-    "AtrExit": 72,
-    "VsPrev": 40,
-    "Ratio": 52,
-    "Status": 80,
-    "VolPower": 44,
-    "BidAsk": 72,
-    "Volume": 56,
-}
-
-
-def format_strategy_type_label(sel_track: object) -> str:
-    """
-    선정 트랙(A/B/C 조합) → 실시간 감시 '전략유형' 컬럼 표시문자열.
-    SignalEngine 등에서 동일 문구를 쓰려면 이 함수를 import 해 사용합니다.
-    """
-    try:
-        tr = str(sel_track if sel_track is not None else "").strip().upper()
-        normalized = "".join(track for track in ("A", "B", "C") if track in tr)
-        if normalized:
-            return "전략 " + "+".join(normalized)
-        return "전략 A+B"
-    except Exception:
-        return "전략 A+B"
-
-
-def _open_holding_pos(pos: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """수량>0 인 실제 보유 dict만 반환. 미체결·유령 dict는 선정 트랙 표시를 오염시키지 않습니다."""
-    try:
-        if not isinstance(pos, dict):
-            return None
-        qty = int(pos.get("qty") or pos.get("quantity") or 0)
-        if qty > 0:
-            return pos
-    except Exception:
-        return None
-    return None
-
-
-def format_entry_signal_type_label(
-    pos: Optional[Dict[str, Any]],
-    sel_track: object,
-    *,
-    code: Optional[str] = None,
-    app: Any = None,
-) -> str:
-    """
-    보유 종목은 실제 TYPE_A/B/C를, 비보유 종목은 선정 트랙을 표시합니다.
-
-    code·app 이 있으면 PortfolioManager.infer_sig_type_for_ui 로 단일 A/B 를
-    (DB 복구 후 sig_type 누락·SYNCED 등) 보강합니다.
-    """
-    try:
-        pos = _open_holding_pos(pos)
-        # 보유(dict)일 때만 포트폴리오 추정 — 미보유면 과거 매수 reason 으로 오표시될 수 있음
-        if app is not None and code and isinstance(pos, dict):
-            pf = getattr(app, "portfolio", None)
-            if pf is not None and hasattr(pf, "infer_sig_type_for_ui"):
-                eff = pf.infer_sig_type_for_ui(
-                    str(code).split("_")[0].zfill(6), pos
-                )
-                if eff == "TYPE_B":
-                    return "전략 B"
-                if eff == "TYPE_A":
-                    return "전략 A"
-                if eff == "TYPE_C":
-                    return "전략 C"
-        if isinstance(pos, dict):
-            st = str(pos.get("sig_type") or "").strip().upper()
-            if st == "TYPE_C" or "TYPE_C" in st:
-                return "전략 C"
-            if st == "TYPE_B" or "TYPE_B" in st:
-                return "전략 B"
-            if st == "TYPE_A" or "TYPE_A" in st:
-                return "전략 A"
-            rsn = str(pos.get("reason") or "").upper()
-            if "TYPE_C" in rsn:
-                return "전략 C"
-            if "TYPE_B" in rsn:
-                return "전략 B"
-            if "TYPE_A" in rsn and "TYPE_B" not in rsn:
-                return "전략 A"
-    except Exception:
-        pass
-    return format_strategy_type_label(sel_track)
+# format_strategy_type_label / format_entry_signal_type_label /
+# 텔레그램·셀포맷·열폭 상수 → core.monitor_* 로 이전. 위 import 로 re-export.
 
 
 class MonitorTab:
@@ -478,22 +332,6 @@ class MonitorTab:
                 pass
         return {}
 
-    @staticmethod
-    def _parse_monitor_sash_rel(raw: Dict[str, Any]) -> Optional[float]:
-        """저장된 상·하단 분할 비율(첫 번째 sash 위치 / Paned 높이)."""
-        try:
-            if not isinstance(raw, dict):
-                return None
-            v = raw.get("sash0_rel")
-            if v is None:
-                return None
-            x = float(v)
-            if x != x:  # NaN
-                return None
-            return max(0.06, min(0.90, x))
-        except (TypeError, ValueError):
-            return None
-
     def _load_saved_monitor_col_widths(self, cols: Tuple[str, ...]) -> Dict[str, int]:
         """저장된 폭이 있으면 병합(없는 열·잘못된 값은 기본값). sash0_rel 은 _monitor_saved_sash_rel 에 반영."""
         out: Dict[str, int] = {}
@@ -516,7 +354,7 @@ class MonitorTab:
                         out[k] = iw
                 except (TypeError, ValueError):
                     pass
-            self._monitor_saved_sash_rel = self._parse_monitor_sash_rel(raw)
+            self._monitor_saved_sash_rel = _parse_monitor_sash_rel(raw)
         except Exception as e:
             try:
                 print(f"[MonitorTab] 컬럼 폭 로드 실패: {e}")
@@ -1142,7 +980,7 @@ class MonitorTab:
             if rel is None:
                 rel = getattr(self, "_monitor_saved_sash_rel", None)
             if rel is None:
-                rel = self._parse_monitor_sash_rel(raw_existing)
+                rel = _parse_monitor_sash_rel(raw_existing)
             path = self._monitor_col_widths_json_path()
             dname = os.path.dirname(path)
             if dname:
@@ -1595,45 +1433,8 @@ class MonitorTab:
     def _log_selection_results(app: Any, df: pd.DataFrame) -> None:
         """선정 결과를 로그창에 표 형태로 출력 (팝업 대체)."""
         try:
-            d = df.copy()
-            d.columns = [str(c).lower() for c in d.columns]
-            app.log("\n" + "=" * 102)
-            app.log(f"🎯 [종목 선정 결과] {len(d)}개 → 실시간 감시 대상으로 바로 등록합니다.")
-            app.log("-" * 102)
-            app.log(
-                f"{'#':>3} | {'코드':8} | {'종목명':18} | {'가점':>6} | {'트랙':^5} | "
-                f"{'현재가':>10} | {'등락%':>7} | {'RSI':>5} | {'5일대금(억)':>10}"
-            )
-            app.log("-" * 102)
-            for i, (_, row) in enumerate(d.iterrows(), 1):
-                code = str(row.get("code", "")).zfill(6)
-                name = str(row.get("name", "Unknown"))[:18]
-                try:
-                    sc = float(row.get("score", 0))
-                except (TypeError, ValueError):
-                    sc = 0.0
-                st = str(row.get("seltrack", "")).strip().upper() or "-"
-                try:
-                    price = int(float(row.get("price", 0)))
-                except (TypeError, ValueError):
-                    price = 0
-                try:
-                    ratio = float(row.get("ratio", 0))
-                except (TypeError, ValueError):
-                    ratio = 0.0
-                try:
-                    rsi = float(row.get("rsi", 0))
-                except (TypeError, ValueError):
-                    rsi = 0.0
-                try:
-                    tv = int(float(row.get("avgtrdeval", 0)))
-                except (TypeError, ValueError):
-                    tv = 0
-                app.log(
-                    f"{i:3d} | {code} | {name:18} | {sc:6.1f} | {st:^5} | "
-                    f"{price:10,d} | {ratio:7.2f} | {rsi:5.1f} | {tv:10d}"
-                )
-            app.log("=" * 102 + "\n")
+            for line in _format_selection_result_log_lines(df):
+                app.log(line)
         except Exception as e:
             app.log(f"⚠️ [선정] 결과 로그 출력 실패: {e}")
 
@@ -3107,33 +2908,7 @@ class MonitorTab:
         except Exception:
             return set()
 
-    def _monitor_ratio_direction(self, ratio_val: object) -> str:
-        """등락률 표시값 → up / down / stable (줄무늬 행 태그용). ▲/▼ 접두와 +/- 숫자 모두 허용."""
-        try:
-            raw = str(ratio_val).strip()
-            if not raw:
-                return "stable"
-            if raw.startswith(("▲", "△")):
-                return "up"
-            if raw.startswith(("▼", "▽")):
-                return "down"
-            s = raw.replace("%", "").replace(",", "").strip()
-            s = s.lstrip("+")
-            try:
-                v = float(s)
-            except ValueError:
-                if "▼" in raw or "▽" in raw:
-                    return "down"
-                if "▲" in raw or "△" in raw:
-                    return "up"
-                return "stable"
-            if v > 0:
-                return "up"
-            if v < 0:
-                return "down"
-        except (TypeError, ValueError):
-            pass
-        return "stable"
+    # 등락 방향 판별 → core.monitor_tab_helpers (모듈 함수 직접 사용)
 
     def _monitor_info_entry(self, mi: Dict[str, Any], nk: str) -> Dict[str, Any]:
         """monitor_info 키가 003490 / 3490 혼재해도 6자리 nk로 조회."""
@@ -3385,20 +3160,6 @@ class MonitorTab:
             f"{vol_i:,}",
         )
 
-    @staticmethod
-    def _stripe_direction_from_tags(tags: Any) -> str:
-        """기존 행 태그에서 등락 방향(up/down/stable)만 추출."""
-        try:
-            for t in tags or ():
-                s = str(t)
-                if "up" in s:
-                    return "up"
-                if "down" in s:
-                    return "down"
-        except Exception:
-            pass
-        return "stable"
-
     def _monitor_tree_stripe_type(self, tree: Any, iid: str) -> str:
         """
         트리 **화면 순서** 기준 짝/홀 줄무늬.
@@ -3430,7 +3191,7 @@ class MonitorTab:
                 tags = tree.item(iid, "tags")
             except Exception:
                 tags = ()
-            direction = self._stripe_direction_from_tags(tags)
+            direction = _stripe_direction_from_tags(tags)
             tag = (
                 f"active_{direction}_{row_type}"
                 if is_active
@@ -3527,7 +3288,7 @@ class MonitorTab:
                         pass
                 if target.exists(nk):
                     continue
-                direction = self._monitor_ratio_direction(
+                direction = _monitor_ratio_direction(
                     self._ratio_cell_display_for_monitor_info(nk, info)
                 )
                 try:
@@ -3689,7 +3450,7 @@ class MonitorTab:
                 if not info:
                     info = {"name": nk, "sel_track": "AB"}
                 values = self._compose_monitor_row_values(nk, info)
-                direction = self._monitor_ratio_direction(
+                direction = _monitor_ratio_direction(
                     self._ratio_cell_display_for_monitor_info(nk, info)
                 )
                 try:
@@ -4218,7 +3979,7 @@ class MonitorTab:
                 # 오히려 보수적으로 표시 누락을 방지하기 위해 skip하지 않습니다.
                 pass
             ratio_disp = self._ratio_cell_display_for_monitor_info(nk, info)
-            direction = self._monitor_ratio_direction(ratio_disp)
+            direction = _monitor_ratio_direction(ratio_disp)
             values = self._compose_monitor_row_values(nk, info)
             # 보유 중이면 아래(보유 트리)에만 넣음. 예전에는 위 트리만 채워 다음 틱까지 보유 트리가 비어 깜빡임 발생.
             if self._virtual_position_is_active(nk, vp):

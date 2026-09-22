@@ -50,13 +50,13 @@ from core.status_api import StatusApiServer
 from core.trading_controller import TradingController, virtual_position_reference_price_for_monitor
 from core.strategy_engine import StrategyEngine
 from core.selection_service import SelectionService
-from core.post_fill_account_sync_service import PostFillAccountSyncService
+from core.execution.post_fill_account_sync_service import PostFillAccountSyncService
 from core.realtime_tick_dispatch_service import RealtimeTickDispatchService
 from core.eod_equity_snapshot_service import EodEquitySnapshotService
 from core.continuous_monitor_service import ContinuousMonitorService
 from core.regime_display_service import RegimeDisplayService
 from core.rest_auth_retry_service import RestAuthRetryService
-from core.fill_reconciliation_service import FillReconciliationService
+from core.execution.fill_reconciliation_service import FillReconciliationService
 from core.execution.order_execution_service import OrderExecutionService
 from core.execution.order_action_dispatcher import OrderActionDispatcher
 from core.execution.fill_confirmation_service import FillConfirmationService
@@ -68,6 +68,10 @@ from core.signal_callbacks_service import SignalCallbacksService
 from core.ui_trading_status_service import UiTradingStatusService
 from core.warmup_stock_prep_ui_service import WarmupStockPrepUiService
 from core.rt_ui_responsiveness import drain_ui_call_queue_once
+from core.auth_manager import AuthManager
+from core.config_handler import ConfigHandler
+from core.account_summary_telegram_service import AccountSummaryTelegramService
+from core.selection_monitor_start_service import SelectionMonitorStartService
 from core.rt_watchlist_m1_api_poller import RtWatchlistM1ApiPoller
 from core.next_open_pending_action_service import NextOpenPendingActionService
 from core.nxt_eligibility_service import NxtEligibilityService
@@ -120,327 +124,8 @@ REALTIME_TREE_UI_REFRESH_MS: int = 340
 REALTIME_TICK_DISPATCH_FLUSH_MS: int = 150
 
 
-class AuthManager:
-    """
-    키움 REST 액세스 토큰 관리.
-    동일 프로세스 내 반복 호출 시 OAuth 재요청·로그 스팸을 막기 위해 TTL 캐시를 둡니다.
-    OAuth는 직접 검증(return_code·token) + 단일 비행 + 429 쿨다운.
-    """
+# AuthManager / ConfigHandler 는 core 로 이전 (단일 구현).
 
-    # 키움 토큰은 통상 24h 내외 — 만료 전 갱신 여유를 두고 23시간 캐시
-    _TOKEN_TTL_SEC: float = 23 * 3600
-    _OAUTH_429_COOLDOWN_SEC: float = 120.0
-    _AUTH_FAIL_LOG_INTERVAL_SEC: float = 25.0
-
-    def __init__(self, logger_callback=None):
-        self.access_token: Optional[str] = None
-        self.log = logger_callback or print
-        self._token_lock = threading.Lock()
-        self._token_issued_monotonic: float = 0.0
-        self._oauth_cond = threading.Condition(self._token_lock)
-        self._oauth_in_progress: bool = False
-        self._oauth_429_until: float = 0.0
-        self._last_auth_fail_log_at: float = 0.0
-        # credentials=키 오류(재시도 무의미), rate_limit, network, other
-        self._last_failure_kind: str = ""
-
-    def has_cached_token(self) -> bool:
-        """네트워크 없이 유효 캐시 토큰 존재 여부."""
-        try:
-            now_m = time.monotonic()
-            with self._token_lock:
-                return bool(
-                    self.access_token
-                    and (now_m - self._token_issued_monotonic) < self._TOKEN_TTL_SEC
-                )
-        except Exception:
-            return False
-
-    def is_fatal_auth_error(self) -> bool:
-        """App Key/Secret 오류 등 — 재시도해도 성공하지 않는 경우."""
-        try:
-            return str(self._last_failure_kind or "") == "credentials"
-        except Exception:
-            return False
-
-    def oauth_cooldown_remaining_sec(self) -> float:
-        """429 쿨다운 남은 초."""
-        try:
-            with self._token_lock:
-                return max(0.0, float(self._oauth_429_until) - time.monotonic())
-        except Exception:
-            return 0.0
-
-    def invalidate_cached_token(self) -> None:
-        """401·8005 등으로 토큰이 무효일 때 캐시를 비웁니다."""
-        try:
-            with self._token_lock:
-                self.access_token = None
-                self._token_issued_monotonic = 0.0
-        except Exception:
-            pass
-
-    def _oauth_endpoint_and_keys(self) -> Tuple[str, str, str]:
-        """(token_url, appkey, secretkey) — USE_MOCK 에 맞는 키 쌍."""
-        use_mock = bool(getattr(config, "USE_MOCK", False))
-        if use_mock:
-            url = "https://mockapi.kiwoom.com/oauth2/token"
-            key = str(getattr(config, "MOCK_APP_KEY", "") or "").strip()
-            sec = str(getattr(config, "MOCK_APP_SECRET", "") or "").strip()
-            if not key:
-                key = str(getattr(config, "APP_KEY", "") or "").strip()
-            if not sec:
-                sec = str(getattr(config, "APP_SECRET", "") or "").strip()
-        else:
-            url = "https://api.kiwoom.com/oauth2/token"
-            key = str(getattr(config, "APP_KEY", "") or "").strip()
-            sec = str(getattr(config, "APP_SECRET", "") or "").strip()
-        return url, key, sec
-
-    def _set_429_cooldown(self) -> None:
-        try:
-            now_m = time.monotonic()
-            with self._token_lock:
-                self._oauth_429_until = max(
-                    self._oauth_429_until,
-                    now_m + self._OAUTH_429_COOLDOWN_SEC,
-                )
-            self._last_failure_kind = "rate_limit"
-        except Exception:
-            pass
-
-    def _log_auth_fail_throttled(self, err: Exception, *, force_msg: str = "") -> None:
-        """429·동시 실패 시 로그 스팸 방지."""
-        try:
-            now_m = time.monotonic()
-            msg = force_msg or str(err or "")
-            is_429 = "429" in msg or self._last_failure_kind == "rate_limit"
-            with self._token_lock:
-                if is_429:
-                    self._oauth_429_until = max(
-                        self._oauth_429_until,
-                        now_m + self._OAUTH_429_COOLDOWN_SEC,
-                    )
-                    self._last_failure_kind = "rate_limit"
-                if not force_msg and (
-                    now_m - self._last_auth_fail_log_at
-                ) < self._AUTH_FAIL_LOG_INTERVAL_SEC:
-                    return
-                self._last_auth_fail_log_at = now_m
-            if is_429:
-                self.log(
-                    "⚠️ [Auth] 키움 OAuth 조회 제한(HTTP 429) — "
-                    f"약 {int(self._OAUTH_429_COOLDOWN_SEC)}초 후 재시도합니다."
-                )
-            elif force_msg:
-                self.log(force_msg)
-            else:
-                self.log(f"❌ [Auth] 인증 실패: {err}")
-        except Exception:
-            pass
-
-    def _request_oauth_token(self) -> Optional[str]:
-        """
-        kiwoom_rest_api TokenManager 는 HTTP 200 + return_code≠0(8001 등)을
-        성공으로 오인해 빈 토큰을 줄 수 있어 직접 검증합니다.
-        """
-        url, appkey, secretkey = self._oauth_endpoint_and_keys()
-        use_mock = bool(getattr(config, "USE_MOCK", False))
-        mode_str = "모의투자" if use_mock else "실전투자"
-
-        if not appkey or not secretkey:
-            self._last_failure_kind = "credentials"
-            self._log_auth_fail_throttled(
-                RuntimeError("empty key"),
-                force_msg=(
-                    f"❌ [Auth] {mode_str} App Key/Secret이 비어 있습니다. "
-                    "config.py 의 MOCK_APP_KEY·MOCK_APP_SECRET(모의) 또는 "
-                    "APP_KEY·APP_SECRET(실전)을 확인하세요."
-                ),
-            )
-            return None
-
-        try:
-            res = requests.post(
-                url,
-                json={
-                    "grant_type": "client_credentials",
-                    "appkey": appkey,
-                    "secretkey": secretkey,
-                },
-                headers={"Content-Type": "application/json;charset=UTF-8"},
-                timeout=20,
-            )
-        except requests.RequestException as ex:
-            self._last_failure_kind = "network"
-            self._log_auth_fail_throttled(ex)
-            return None
-
-        if res.status_code == 429:
-            self._set_429_cooldown()
-            self._log_auth_fail_throttled(Exception("HTTP 429"))
-            return None
-
-        try:
-            data = res.json() if res.text else {}
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-
-        rmsg = str(data.get("return_msg") or "").strip()
-        try:
-            rc_i = int(data.get("return_code", 0) or 0)
-        except (TypeError, ValueError):
-            rc_i = -1
-
-        token = str(data.get("token") or "").strip()
-        if token and rc_i in (0,):
-            self._last_failure_kind = ""
-            return token
-
-        if (
-            "8001" in rmsg
-            or "8002" in rmsg
-            or "App Key" in rmsg
-            or "Secret Key" in rmsg
-        ):
-            self._last_failure_kind = "credentials"
-            key_hint = (
-                "MOCK_APP_KEY / MOCK_APP_SECRET"
-                if use_mock
-                else "APP_KEY / APP_SECRET"
-            )
-            self._log_auth_fail_throttled(
-                RuntimeError(rmsg or "8001"),
-                force_msg=(
-                    f"❌ [Auth] {mode_str} API 키 검증 실패(8001). "
-                    f"키움 OpenAPI+에서 **{mode_str}용** App Key·Secret을 다시 발급해 "
-                    f"config.py 의 {key_hint} 에 정확히 넣어 주세요. "
-                    f"(실전 키를 모의 서버에 쓰거나 그 반대면 실패합니다)"
-                ),
-            )
-            return None
-
-        self._last_failure_kind = "other"
-        detail = rmsg or f"HTTP {res.status_code}"
-        self._log_auth_fail_throttled(
-            RuntimeError(detail),
-            force_msg=f"❌ [Auth] OAuth 실패 — {detail} (return_code={rc_i})",
-        )
-        return None
-
-    def get_auth_token(self) -> Optional[str]:
-        try:
-            now_m = time.monotonic()
-            with self._oauth_cond:
-                if (
-                    self.access_token
-                    and (now_m - self._token_issued_monotonic) < self._TOKEN_TTL_SEC
-                ):
-                    return self.access_token
-
-                if now_m < self._oauth_429_until:
-                    return None
-
-                while self._oauth_in_progress:
-                    self._oauth_cond.wait(timeout=45.0)
-                    now_m = time.monotonic()
-                    if (
-                        self.access_token
-                        and (now_m - self._token_issued_monotonic) < self._TOKEN_TTL_SEC
-                    ):
-                        return self.access_token
-                    if now_m < self._oauth_429_until:
-                        return None
-
-                self._oauth_in_progress = True
-
-            try:
-                token = self._request_oauth_token()
-                with self._oauth_cond:
-                    if token:
-                        self.access_token = token
-                        self._token_issued_monotonic = time.monotonic()
-                        self._last_failure_kind = ""
-                        self.log("✅ [Auth] REST API 토큰 인증 성공")
-                        return self.access_token
-                    self.access_token = None
-                    self._token_issued_monotonic = 0.0
-            except Exception as e:
-                self._log_auth_fail_throttled(e)
-            finally:
-                with self._oauth_cond:
-                    self._oauth_in_progress = False
-                    self._oauth_cond.notify_all()
-        except Exception as e:
-            self._log_auth_fail_throttled(e)
-        return None
-
-    def get_token(self) -> Optional[str]:
-        """[v4.0.1] API Client 호환용 인터페이스"""
-        return self.get_auth_token()
-
-class ConfigHandler:
-    def __init__(self, logger_callback=None):
-        self.log = logger_callback or print
-        self.settings_file = "settings.json"
-        self.cache_file = "bars_cache.json"
-
-    def load_settings(self, default_settings):
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, 'r', encoding='utf-8') as f:
-                    return {**default_settings, **json.load(f)}
-            except Exception as e:
-                self.log(f"Error loading settings: {e}")
-        return default_settings.copy()
-
-    def save_settings(self, settings):
-        try:
-            if isinstance(settings, dict):
-                drop_keys = {
-                    "harvest_kosdaq150_enabled",
-                    "kosdaq_top_n",
-                    "kosdaq_harvest_union_start",
-                }
-                for k in list(settings.keys()):
-                    try:
-                        ks = str(k)
-                    except Exception:
-                        continue
-                    if ks in drop_keys or ks.startswith("kq_"):
-                        settings.pop(k, None)
-                try:
-                    choice = str(settings.get("universe_index_choice", "") or "").strip().upper()
-                except Exception:
-                    choice = ""
-                if choice in ("KOSDAQ", "KOSDAQ150", "KQ150"):
-                    settings["universe_index_choice"] = "KOSPI200"
-            with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, indent=4, ensure_ascii=False)
-            return True
-        except Exception as e:
-            self.log(f"Error saving settings: {e}")
-            return False
-
-    def load_bars_cache(self):
-        if os.path.exists(self.cache_file):
-            try:
-                import io
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    return {c: pd.read_json(io.StringIO(j)) for c, j in data.items()}
-            except: pass
-        return {}
-
-    def save_bars_cache(self, bars_data):
-        try:
-            data = {c: df.to_json() for c, df in bars_data.items() if not df.empty}
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f)
-            return True
-        except: return False
 
 class KiwoomApp:
     @property
@@ -583,6 +268,8 @@ class KiwoomApp:
         self.post_fill_account_sync_service = PostFillAccountSyncService(
             self, log_func=self.log
         )
+        self.account_summary_telegram_service = AccountSummaryTelegramService(self)
+        self.selection_monitor_start_service = SelectionMonitorStartService(self)
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
         self._sync_ka10080_rest_pacing_from_settings()
@@ -2899,341 +2586,26 @@ class KiwoomApp:
         force_selection: bool = False,
         on_done: Optional[Any] = None,
     ) -> bool:
-        """
-        ``selected_targets.csv`` 가 신선하면 즉시 감시 시작,
-        만료·없으면 일일 선정 후 시작합니다.
-
-        ``force_selection=True``: 신선도와 무관하게 일일 선정을 다시 수행한 뒤 시작
-        (장마감 선정 실패 후 장전 재시도 등).
-        ``on_done``: 최종 성공/실패(bool) 콜백 — 비동기 선정 완료 후에도 호출.
-        """
-        done_cb = on_done if callable(on_done) else None
-
-        def _notify(ok: bool) -> None:
-            if done_cb is None:
-                return
-            try:
-                done_cb(bool(ok))
-            except Exception:
-                pass
-
-        tc = self.trading_controller
+        """선정 신선도 확인 후 감시 시작 (SelectionMonitorStartService 위임)."""
         try:
-            if bool(getattr(tc, "is_monitoring", False)):
-                _notify(True)
-                return False
-            if bool(getattr(tc, "_run_start_sequence_active", False)):
-                try:
-                    self.log(
-                        "⚠️ [감시] 시작 절차가 이미 진행 중입니다. 잠시 후 다시 시도하세요."
-                    )
-                except Exception:
-                    pass
-                _notify(False)
-                return False
-            if bool(getattr(self, "_ensure_sel_start_active", False)):
-                # 선정 대기 중 재클릭: 플래그 해제 후 보유만 즉시(옛 CSV 사용 금지)
-                try:
-                    self._ensure_sel_start_active = False
-                except Exception:
-                    pass
-                held_codes = []
-                try:
-                    held_codes = list(tc.held_position_codes())
-                except Exception:
-                    held_codes = []
-                if held_codes:
-                    try:
-                        self.log(
-                            f"ℹ️ [감시] 선정 대기 취소 — "
-                            f"보유 {len(held_codes)}종만 즉시 감시 "
-                            f"(선정 완료 전 옛 CSV는 사용하지 않음)"
-                        )
-                    except Exception:
-                        pass
-                    started = bool(tc._start_held_positions_only(held_codes))
-                    _notify(started)
-                    return started
-                try:
-                    self.log(
-                        "⚠️ [감시] 일일 선정이 진행 중이었습니다. "
-                        "보유가 없으면 선정 완료 후 다시 눌러 주세요."
-                    )
-                except Exception:
-                    pass
-                _notify(False)
-                return False
-        except Exception:
-            pass
-
-        need_select = bool(force_selection)
-        try:
-            from core.selection_freshness import (
-                is_selected_targets_fresh,
-                selection_freshness_status,
+            return bool(
+                self.selection_monitor_start_service.ensure_fresh_selection_then_start(
+                    force_selection=force_selection,
+                    on_done=on_done,
+                )
             )
-
-            st = getattr(self, "settings", None) or {}
-            path = "selected_targets.csv"
-            if not need_select and is_selected_targets_fresh(path, settings=st):
-                try:
-                    from core.selection_freshness import count_selected_targets
-
-                    n_sel = int(count_selected_targets(path))
-                except Exception:
-                    n_sel = -1
-                if n_sel == 0:
-                    held_codes = []
-                    try:
-                        held_codes = list(tc.held_position_codes())
-                    except Exception:
-                        held_codes = []
-                    if held_codes:
-                        try:
-                            self.log(
-                                f"ℹ️ [감시] 선정 CSV 0건·보유 {len(held_codes)}종 — "
-                                f"보유만 감시합니다."
-                            )
-                        except Exception:
-                            pass
-                        started = bool(tc._start_held_positions_only(held_codes))
-                        _notify(started)
-                        return started
-                    try:
-                        self.log(
-                            "⚠️ [감시] 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        scb = getattr(tc, "status_cb", None)
-                        if callable(scb):
-                            scb(
-                                "SHOW_WARNING",
-                                "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
-                            )
-                    except Exception:
-                        pass
-                    _notify(False)
-                    return False
-                started = bool(tc.start(skip_selection_fresh_check=True))
-                _notify(started)
-                return started
-            if need_select:
-                try:
-                    self.log(
-                        "🔄 [감시] 강제 재선정(장마감 실패 복구 또는 요청) — "
-                        "선정을 수행한 뒤 감시를 시작합니다."
-                    )
-                except Exception:
-                    pass
-            else:
-                _ok, detail = selection_freshness_status(path, settings=st)
-                try:
-                    self.log(
-                        f"🔄 [감시] 일일 감시목록 갱신 필요 — {detail}. "
-                        "선정을 수행한 뒤 감시를 시작합니다."
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            if force_selection:
-                try:
-                    self.log(
-                        f"⚠️ [감시] 신선도 검사 실패({e}) — 강제 재선정을 계속합니다."
-                    )
-                except Exception:
-                    pass
-            else:
-                try:
-                    self.log(f"⚠️ [감시] 신선도 검사 실패({e}) — 기존 CSV로 시작 시도")
-                except Exception:
-                    pass
-                started = bool(tc.start(skip_selection_fresh_check=True))
-                _notify(started)
-                return started
-
-        mt = getattr(self, "monitor_tab", None)
-        if mt is None or not hasattr(mt, "select_monitoring_targets"):
-            held_n = 0
-            try:
-                held_n = len(tc.held_position_codes())
-            except Exception:
-                held_n = 0
-            if held_n > 0:
-                try:
-                    self.log(
-                        f"ℹ️ [감시] 선정 UI 없음·보유 {held_n}종 — "
-                        f"보유 청산 감시로 시작합니다."
-                    )
-                except Exception:
-                    pass
-                started = bool(tc.start(skip_selection_fresh_check=True))
-                _notify(started)
-                return started
-            try:
-                self.log("⚠️ [감시] monitor_tab 없음 — 선정 불가")
-            except Exception:
-                pass
-            try:
-                scb = getattr(tc, "status_cb", None)
-                if callable(scb):
-                    scb(
-                        "SHOW_WARNING",
-                        "일일 감시목록 선정이 필요합니다.",
-                    )
-            except Exception:
-                pass
-            _notify(False)
-            return False
-
-        self._ensure_sel_start_active = True
-
-        def _on_complete(ok: bool) -> None:
-            def _job() -> None:
-                try:
-                    self._ensure_sel_start_active = False
-                except Exception:
-                    pass
-                if not ok:
-                    held_codes: list = []
-                    try:
-                        held_codes = list(tc.held_position_codes())
-                    except Exception:
-                        held_codes = []
-                    if held_codes:
-                        try:
-                            self.log(
-                                f"ℹ️ [감시] 오늘 선정 0건·보유 {len(held_codes)}종 — "
-                                f"이전 일자 CSV는 쓰지 않고 보유만 감시합니다."
-                            )
-                        except Exception:
-                            pass
-                        started = False
-                        try:
-                            started = bool(
-                                tc._start_held_positions_only(held_codes)
-                            )
-                        except Exception as ex:
-                            try:
-                                self.log(f"❌ [감시] 보유-only 시작 실패: {ex}")
-                            except Exception:
-                                pass
-                        _notify(started)
-                        return
-                    try:
-                        self.log(
-                            "⚠️ [감시] 오늘 선정 0건·보유 없음 — "
-                            "이전 일자 감시목록으로 시작하지 않습니다."
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        scb = getattr(tc, "status_cb", None)
-                        if callable(scb):
-                            scb(
-                                "SHOW_WARNING",
-                                "오늘 선정 종목이 0건입니다. 보유가 있으면 보유만 감시합니다.",
-                            )
-                    except Exception:
-                        pass
-                    _notify(False)
-                    return
-                try:
-                    from core.selection_freshness import count_selected_targets
-
-                    n_sel = int(count_selected_targets("selected_targets.csv"))
-                except Exception:
-                    n_sel = -1
-                if n_sel == 0:
-                    held_codes = []
-                    try:
-                        held_codes = list(tc.held_position_codes())
-                    except Exception:
-                        held_codes = []
-                    if held_codes:
-                        try:
-                            self.log(
-                                f"ℹ️ [감시] 선정 CSV 0건·보유 {len(held_codes)}종 — "
-                                f"보유만 감시합니다."
-                            )
-                        except Exception:
-                            pass
-                        started = False
-                        try:
-                            started = bool(
-                                tc._start_held_positions_only(held_codes)
-                            )
-                        except Exception as ex:
-                            try:
-                                self.log(f"❌ [감시] 보유-only 시작 실패: {ex}")
-                            except Exception:
-                                pass
-                        _notify(started)
-                        return
-                    try:
-                        self.log(
-                            "⚠️ [감시] 선정 결과가 0건입니다 — 감시 시작을 건너뜁니다."
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        scb = getattr(tc, "status_cb", None)
-                        if callable(scb):
-                            scb(
-                                "SHOW_WARNING",
-                                "감시 선정 결과가 0건이라 감시를 시작하지 않습니다.",
-                            )
-                    except Exception:
-                        pass
-                    _notify(False)
-                    return
-                try:
-                    self.log(
-                        f"✅ [감시] 일일 선정 완료({n_sel}종목) — 감시를 시작합니다."
-                    )
-                except Exception:
-                    pass
-                started = False
-                try:
-                    started = bool(tc.start(skip_selection_fresh_check=True))
-                except Exception as ex:
-                    try:
-                        self.log(f"❌ [감시] 선정 후 시작 실패: {ex}")
-                    except Exception:
-                        pass
-                    started = False
-                _notify(started)
-
-            try:
-                self.root.after(0, _job)
-            except Exception:
-                _job()
-
-        try:
-            import threading
-
-            threading.Thread(
-                target=lambda: mt.select_monitoring_targets(
-                    auto_confirm=True,
-                    on_complete=_on_complete,
-                ),
-                daemon=True,
-                name="EnsureSelThenStart",
-            ).start()
-            # 비동기 진행 중 — 최종 결과는 on_done 으로 통지
-            return True
         except Exception as e:
             try:
-                self._ensure_sel_start_active = False
+                self.log(f"❌ [감시] ensure_fresh_selection_then_start 실패: {e}")
             except Exception:
                 pass
-            try:
-                self.log(f"❌ [감시] 선정 스레드 기동 실패: {e}")
-            except Exception:
-                pass
-            _notify(False)
+            if callable(on_done):
+                try:
+                    on_done(False)
+                except Exception:
+                    pass
             return False
+
 
     def _sync_continuous_monitor_ui(self) -> None:
         """레거시 no-op(연속 감시 전용 버튼 제거)."""
@@ -4095,153 +3467,28 @@ class KiwoomApp:
             self.log(f"⚠️ [Telegram] 예외: {e}")
 
     def _build_account_summary_telegram_message(self, header: str) -> Optional[str]:
-        """
-        포지션관리 상단 계좌 요약(virtual_tab vars)을 동일 항목으로 텔레그램에 전송합니다.
-
-        포함 항목:
-        - 총자산
-        - D+2예수금
-        - 주식평가금
-        - 미실현 손익
-        - 금일손익
-        """
+        """포지션관리 상단 계좌 요약 → 텔레그램 본문 (서비스 위임)."""
         try:
-            vt = getattr(self, "virtual_tab", None)
-            if vt is None:
-                return None
-
-            # virtual_tab 상단 요약 vars 키는 UI에서 고정
-            total = str((vt.vars.get("total").get() if vt.vars.get("total") else "") or "").strip()
-            d2_cash = str((vt.vars.get("d2_cash").get() if vt.vars.get("d2_cash") else "") or "").strip()
-            stock = str((vt.vars.get("stock").get() if vt.vars.get("stock") else "") or "").strip()
-            open_ur = str((vt.vars.get("open_ur").get() if vt.vars.get("open_ur") else "") or "").strip()
-            day = str((vt.vars.get("day").get() if vt.vars.get("day") else "") or "").strip()
-
-            if not any([total, d2_cash, stock, open_ur, day]):
-                return None
-
-            msg = (
-                f"📌 <b>[계좌요약]</b>\n{header}\n"
-                f"총자산: {total}\n"
-                f"D+2예수금: {d2_cash}\n"
-                f"주식평가금: {stock}\n"
-                f"미실현 손익: {open_ur}\n"
-                f"금일손익: {day}"
-            )
-            return msg
+            return self.account_summary_telegram_service.build_message(header)
         except Exception:
             return None
 
     def _start_account_summary_telegram_worker(self, *, header: str, seq: int) -> None:
-        """
-        계좌 동기화(REST 포함, force) 후 UI 요약을 다시 읽어 텔레그램을 발송합니다.
-
-        seq는 타이머 중복 실행 시 최신 요청만 처리하기 위한 용도입니다.
-        """
+        """force 계좌 동기화 후 계좌요약 텔레그램 (서비스 위임)."""
         try:
-            root = getattr(self, "root", None)
-            if root is None:
-                return
-        except Exception:
-            return
-
-        def _worker() -> None:
-            acquired = False
-            try:
-                acquired = self._portfolio_sync_thread_lock.acquire(timeout=120.0)
-                if acquired:
-                    # 체결 반영 직후 스로틀로 스킵되면 요약이 틀어지므로 force=True
-                    self.portfolio.sync_with_actual_account(
-                        silent=True,
-                        force=True,
-                        refresh_cash_deposit=True,
-                    )
-            except Exception:
-                pass
-            finally:
-                if acquired:
-                    try:
-                        self._portfolio_sync_thread_lock.release()
-                    except Exception:
-                        pass
-
-            def _after() -> None:
-                try:
-                    # 최신 seq만 처리 (연속 체결 시 이전 워커 결과 폐기)
-                    if seq != self._account_summary_after_trade_seq:
-                        return
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, "virtual_tab"):
-                        self.virtual_tab.refresh_portfolio_light()
-                except Exception:
-                    pass
-
-                msg = self._build_account_summary_telegram_message(header=header)
-                if msg:
-                    self.send_telegram_message(msg, parse_mode="HTML")
-
-            try:
-                root.after(0, _after)
-            except Exception:
-                pass
-
-        try:
-            import threading
-
-            threading.Thread(target=_worker, daemon=True).start()
+            self.account_summary_telegram_service.start_worker(header=header, seq=seq)
         except Exception:
             pass
 
     def schedule_account_summary_telegram_after_trade(self, *, delay_sec: int = 12) -> None:
-        """
-        체결 확정 이후 delay_sec(기본 12초) 지연 후
-        force 계좌 동기화 결과로 계좌요약 텔레그램을 발송합니다.
-
-        연속 체결이 들어오면 최신 기준으로 이전 타이머는 취소(최종 1회만 발송).
-        """
+        """체결 후 지연 계좌요약 텔레그램 (서비스 위임)."""
         try:
-            root = getattr(self, "root", None)
-            if root is None:
-                return
-        except Exception:
-            return
-
-        try:
-            delay_ms = max(0, int(delay_sec * 1000))
-        except Exception:
-            delay_ms = 12 * 1000
-
-        self._account_summary_after_trade_seq += 1
-        seq = self._account_summary_after_trade_seq
-
-        try:
-            if self._account_summary_after_trade_job_id is not None:
-                try:
-                    root.after_cancel(self._account_summary_after_trade_job_id)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        def _job() -> None:
-            try:
-                if seq != self._account_summary_after_trade_seq:
-                    return
-                self._start_account_summary_telegram_worker(
-                    header="체결 후 계좌정보 동기화",
-                    seq=seq,
-                )
-            except Exception:
-                pass
-
-        try:
-            self._account_summary_after_trade_job_id = root.after(
-                delay_ms, _job
+            self.account_summary_telegram_service.schedule_after_trade(
+                delay_sec=delay_sec
             )
         except Exception:
             pass
+
     def _vp_structure_signature(self) -> Tuple[Any, ...]:
         """
         virtual_positions 구조 + 종료 이력 건수.

@@ -13,6 +13,17 @@
 
 ---
 
+## 0.21.0 (2026-09-22)
+
+- **점진 리팩토링(Phase 1–7)**: 동작 동일성·shim 유지 전제로 대형 모듈을 표적 추출.
+- **Auth/표시 경계**: AuthManager 단일화(`core/auth_manager`), core→ui 역의존 제거(`monitor_strategy_labels` 등).
+- **선정 파사드**: `strategy_selector`를 re-export 파사드로 축소. 스코어링·레짐·트랙배치·라이브선정·동적유니버스를 `strategy/selection_*`로 분리.
+- **TradingStrategy / RT**: `strategy/trading_strategy.py` 공유층. RT leaf·허브를 `core/realtime/`로 패키징(구경로 shim 유지).
+- **DataManager 믹스인**: FDR·VP·유니버스·영업일·포지션·주문이력·ka10080를 `data_manager/` 패키지로 분리.
+- **SignalEngine 믹스인**: S1/보유/합성S2·틱핸들러·주문라우팅·트리UI 헬퍼 분리. `signal_engine` 코어 디스패치만 유지.
+- **GUI/탭 서비스**: 계좌요약 텔레그램·선정후감시시작 서비스 추출. monitor/virtual 탭 non-UI 포맷·폭 헬퍼 보강.
+- **배포**: 운영 zip에 `data_manager/` 패키지 포함.
+
 ## 0.20.1 (2026-09-22)
 
 - **저정밀 동적 BT 준비 캐시**: 유니버스 선정·15분 지표/신호를 설정 지문으로 재사용. 청산·S2 등 체결 파라미터만 바꾸면 준비 단계를 건너뛴다.
