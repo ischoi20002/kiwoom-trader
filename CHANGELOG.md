@@ -13,6 +13,10 @@
 
 ---
 
+## 0.21.4 (2026-09-22)
+
+- **일일 선정 FDR**: `selection_live`에서 `FinanceDataReader as fdr` import 누락으로 전 종목 「fdr is not defined」가 나던 오류 수정.
+
 ## 0.21.3 (2026-09-22)
 
 - **B 추세 레짐 표시**: `selection_regime` 분리 후 `_settings_bool_sel`·`resolve_universe_codes` import 누락으로 「조회 실패」가 뜨던 오류 수정.

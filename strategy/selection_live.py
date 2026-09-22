@@ -7,8 +7,9 @@ import os
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
+import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 
