@@ -2,7 +2,7 @@
 """감시 탭 non-UI 헬퍼 — 텔레그램 분할·셀 포맷·열 폭 기본값 (Tk 비의존)."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.signal_monitor_display import format_monitor_vs_prev_cell
 from core.supply_display import format_bid_ask_monitor_display
@@ -110,6 +110,72 @@ def monitor_ratio_direction(ratio_val: object) -> str:
     return "stable"
 
 
+def ws_fid_raw(vals: Any, fid: int) -> Tuple[bool, Any]:
+    """0B payload에서 fid 키(int/str) 존재 여부와 원본값."""
+    try:
+        if not isinstance(vals, dict):
+            return False, None
+        if fid in vals:
+            return True, vals.get(fid)
+        sk = str(fid)
+        if sk in vals:
+            return True, vals.get(sk)
+    except Exception:
+        pass
+    return False, None
+
+
+def normalize_ws_num_token(v: object) -> Optional[str]:
+    """
+    websocket fid 토큰을 파싱 가능한 문자열로 정규화한다.
+
+    - '▲'/'▼' → +/−
+    - 미수신·플레이스홀더(빈문자/'—'/None 등)는 None
+      → 호출측에서 직전 유효값을 유지해 보합색 깜빡임을 막는다.
+    - 브로커가 보낸 실제 보합 '0'은 '0'으로 반환한다.
+    """
+    try:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s or s in ("-", "—", "–", "None", "null", "nan", "NaN"):
+            return None
+        if "▲" in s or "△" in s:
+            s = s.replace("▲", "+").replace("△", "+")
+        if "▼" in s or "▽" in s:
+            s = s.replace("▼", "-").replace("▽", "-")
+        s = s.replace(",", "").strip()
+        if not s:
+            return None
+        return s
+    except Exception:
+        return None
+
+
+def apply_ws_prev_close_fields(info: Dict[str, Any], vals: Any) -> None:
+    """
+    fid 11(diff)·12(ratio)가 키로 존재하고 유효할 때만 info를 갱신한다.
+
+    키가 없거나 플레이스홀더면 직전 값을 덮어쓰지 않는다.
+    (가격만 있는 부분 패킷이 전일대비를 '0'으로 지워 행 색이 보합으로 깜빡이던 문제 방지)
+    """
+    try:
+        if not isinstance(info, dict):
+            return
+        has_d, raw_d = ws_fid_raw(vals, 11)
+        if has_d:
+            nd = normalize_ws_num_token(raw_d)
+            if nd is not None:
+                info["diff"] = nd
+        has_r, raw_r = ws_fid_raw(vals, 12)
+        if has_r:
+            nr = normalize_ws_num_token(raw_r)
+            if nr is not None:
+                info["ratio"] = nr
+    except Exception:
+        pass
+
+
 def stripe_direction_from_tags(tags: Any) -> str:
     """기존 행 태그에서 등락 방향(up/down/stable)만 추출."""
     try:
@@ -205,6 +271,9 @@ __all__ = [
     "monitor_fmt_vs_prev",
     "monitor_fmt_bid_ask",
     "monitor_ratio_direction",
+    "ws_fid_raw",
+    "normalize_ws_num_token",
+    "apply_ws_prev_close_fields",
     "stripe_direction_from_tags",
     "parse_monitor_sash_rel",
     "format_selection_result_log_lines",

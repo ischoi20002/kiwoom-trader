@@ -25,6 +25,7 @@ from core.monitor_strategy_labels import (
 from core.monitor_tab_helpers import (
     DEFAULT_MONITOR_COL_WIDTHS as _DEFAULT_MONITOR_COL_WIDTHS,
     MONITOR_COL_MIN_WIDTH as _MONITOR_COL_MIN_WIDTH,
+    apply_ws_prev_close_fields as _apply_ws_prev_close_fields,
     format_selection_result_log_lines as _format_selection_result_log_lines,
     monitor_fmt_bid_ask as _monitor_fmt_bid_ask,
     monitor_fmt_vs_prev as _monitor_fmt_vs_prev,
@@ -2707,39 +2708,9 @@ class MonitorTab:
                 except Exception:
                     pass
                 trde_val = int(get_val(26) // 1000)
-                # fid 11(diff), 12(ratio)는 websocket payload에서 keys 타입이
-                # 문자열('11','12') 또는 정수(11,12)로 올 수 있다.
-                # 한쪽만 가정하면 매 틱 기본값('0')만 들어가 '대비'가 고정처럼 보일 수 있어
-                # 둘 다 확인하도록 한다.
-                def _normalize_ws_num_token(v: object) -> str:
-                    """
-                    websocket fid 토큰(문자열/숫자)을 UI/엔진이 처리 가능한 형태로 정규화한다.
-                    - '▲'/'▼'가 섞여 들어오면 +/−로 치환
-                    - '—'/'-'/'None'/빈 문자열은 '0'로 치환
-                    """
-                    try:
-                        if v is None:
-                            return "0"
-                        s = str(v).strip()
-                        if not s or s in ("-", "—", "–"):
-                            return "0"
-                        # 화살표 → 부호로 정규화
-                        if "▲" in s or "△" in s:
-                            s = s.replace("▲", "+").replace("△", "+")
-                        if "▼" in s or "▽" in s:
-                            s = s.replace("▼", "-").replace("▽", "-")
-                        # 기존에 부호가 없는데 중간에 +/− 치환이 없었으면, 첫 글자 기준으로 처리하지 않는다.
-                        # (fid 값이 예: '+1.23%' 또는 '-1.23%' 형태일 수 있어 그대로 유지)
-                        # 쉼표만 제거(표시용은 남겨도 되지만, 엔진 파싱은 ',' 제거 가정이 많음)
-                        s = s.replace(",", "").strip()
-                        return s
-                    except Exception:
-                        return "0"
-
-                ratio_raw = vals.get(12) if 12 in vals else vals.get("12", vals.get(12, "0"))
-                diff_raw = vals.get(11) if 11 in vals else vals.get("11", vals.get(11, "0"))
-                ratio_val = _normalize_ws_num_token(ratio_raw)
-                diff_val = _normalize_ws_num_token(diff_raw)
+                # fid 11(diff)·12(ratio): int/str 키 모두 허용.
+                # 미수신·플레이스홀더를 '0'으로 덮어쓰면 행 색이 잠깐 보합(#D8DEE9)으로
+                # 깜빡이므로, 유효값이 있을 때만 갱신한다.
                 vol_power = get_val(228)
                 # 수신 자체를 GUI 멈춤 상황에서도 추적(해당 코드만 주기적 기록)
                 try:
@@ -2756,8 +2727,7 @@ class MonitorTab:
                     pass
                 info['price'] = now_price
                 info['last_price'] = now_price
-                info['ratio'] = ratio_val
-                info['diff'] = diff_val
+                _apply_ws_prev_close_fields(info, vals)
                 info['volume'] = volume
                 info['trde_val'] = trde_val
                 info['vol_power'] = vol_power

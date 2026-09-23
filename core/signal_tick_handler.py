@@ -1474,6 +1474,7 @@ class SignalTickHandlerMixin:
 
             # 예외가 나도 숫자 열(현재가/거래량)만큼은 최소한 갱신되도록 폴백 enqueue.
             # (복잡 지표/태그 계산은 건너뛰고 UI 멈춤 체감을 우선 완화)
+            # 가격 태그는 기존 info 전일대비로 계산 — price_stable 고정 시 보합색 깜빡임 방지
             try:
                 c = str(code).split("_")[0].zfill(6) if code is not None else ""
                 if c:
@@ -1493,6 +1494,24 @@ class SignalTickHandlerMixin:
                                 vol_i = int(float(volume))
                             except Exception:
                                 vol_i = int(float(info.get("volume", 0) or 0))
+                            try:
+                                np_f = float(np_i)
+                                op_f = float(self._to_scalar(info.get("open", 0), 0))
+                                if op_f <= 1e-12:
+                                    op_f = np_f
+                                ratio_cell, dir_rn = self._monitor_tree_ratio_and_direction(
+                                    info, np_f, np_f - op_f, op_f
+                                )
+                            except Exception:
+                                ratio_cell = "0.00%"
+                                dir_rn = 0.0
+                            p_tag = (
+                                "price_up"
+                                if dir_rn > 0
+                                else (
+                                    "price_down" if dir_rn < 0 else "price_stable"
+                                )
+                            )
                             full_values = (
                                 f"{float(self._to_scalar(info.get('score', 0.0), 0.0)):.1f}",
                                 c,
@@ -1501,9 +1520,7 @@ class SignalTickHandlerMixin:
                                 f"{np_i:,}",
                                 "—",
                                 self._format_monitor_vs_prev_cell(info),
-                                self.ratio_cell_display_for_monitor_tree(
-                                    info, float(now_price)
-                                ),
+                                ratio_cell,
                                 str(monitor_signal_status_display_text(info)),
                                 f"{float(self._to_scalar(info.get('vol_power', 0.0), 0.0)):.1f}%",
                                 self._format_monitor_bid_ask_cell(info),
@@ -1511,7 +1528,7 @@ class SignalTickHandlerMixin:
                             )
                             self.app.pending_tree_updates[c] = (
                                 full_values,
-                                ("status_low", "price_stable"),
+                                ("status_low", p_tag),
                                 False,
                             )
                             if defer_main_callbacks:
