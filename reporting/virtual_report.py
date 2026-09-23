@@ -1487,6 +1487,7 @@ def generate_virtual_narrative_report(
             .analysis-type-card {{ background: rgba(0,0,0,0.12); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }}
             .analysis-type-card.type-a {{ border-left: 4px solid #9ece6a; }}
             .analysis-type-card.type-b {{ border-left: 4px solid #88c0d0; }}
+            .analysis-type-card.type-c {{ border-left: 4px solid #c084fc; }}
             .depth-subtitle {{ font-size: 0.92rem; font-weight: 700; margin-bottom: 8px; color: #eceff4; }}
             .depth-lead {{ color: var(--text); font-size: 0.86rem; line-height: 1.55; }}
             .depth-subnote {{ font-size: 0.82rem; color: var(--text); line-height: 1.5; }}

@@ -460,6 +460,15 @@ class SettingsTab:
             
             if key:
                 val = self.app.settings.get(key, self.default_settings.get(key, ''))
+                # Type C 최소 거래대금: 설정·UI는 억 단위 (레거시 원 값은 표시 시 환산)
+                if key == 'box_sel_min_avg_trde_value_krw':
+                    try:
+                        _fv = float(val)
+                        if _fv >= 1e8:
+                            _fv = _fv / 1e8
+                        val = int(_fv) if float(_fv).is_integer() else _fv
+                    except (TypeError, ValueError):
+                        pass
                 ent = ttk.Entry(parent, width=12, justify='center', exportselection=0)
                 ent.insert(0, str(val))
                 ent.grid(row=r, column=2, sticky='w', padx=5)
@@ -861,7 +870,7 @@ class SettingsTab:
         add_param_row(
             transition_f,
             'G1 Type A 가드',
-            'use_rotation_a_guard_g1',
+            None,
             '',
             'ON: 전일 OFF·지수5일≥하한·고분산·A우세 시 신규 Type A만 스킵',
             toggle_key='use_rotation_a_guard_g1',
@@ -2281,7 +2290,7 @@ class SettingsTab:
         add_param_row(c_select_f, 'ADX 기간', 'box_sel_adx_period', '봉', '추세 강도 계산 기간', widget_list=self.sel_c_widgets)
         add_param_row(c_select_f, '이평 기간', 'box_sel_ma_period', '봉', '박스 횡보 기울기 판정 이동평균', widget_list=self.sel_c_widgets)
         add_param_row(c_select_f, '이평 기울기 기간', 'box_sel_ma_slope_days', '일', 'MA 변화율 비교 간격', widget_list=self.sel_c_widgets)
-        add_param_row(c_select_f, '최소 평균 거래대금', 'box_sel_min_avg_trde_value_krw', '원', '기본 200억=20000000000', widget_list=self.sel_c_widgets)
+        add_param_row(c_select_f, '최소 평균 거래대금', 'box_sel_min_avg_trde_value_krw', '억', 'Track A/B와 동일. 기본 200억', widget_list=self.sel_c_widgets)
         add_param_row(c_select_f, '최소 주가', 'box_sel_min_price', '원', '저가·호가 왜곡 종목 제외', widget_list=self.sel_c_widgets)
         add_header(c_select_f, '── 박스 형태 · 접촉 · 이탈 필터 ──')
         add_param_row(c_select_f, '박스 폭 하한', 'box_sel_min_box_width_pct', '%', '너무 좁아 비용을 못 이기는 박스 제외', widget_list=self.sel_c_widgets)
@@ -2538,37 +2547,52 @@ class SettingsTab:
 
     def collect_from_ui(self) -> None:
         """설정 탭 위젯 값을 ``app.settings`` 메모리에만 반영한다 (파일 저장 없음)."""
+        _int_keys = {
+            'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b', 'max_slots_c',
+            'max_slots_band_extra_cap',
+            'transition_soft_slots_a', 'transition_soft_slots_b',
+            'chop_valid_a_min', 'chop_valid_b_max', 'chop_valid_a_floor',
+            'atr_sl_reentry_cooldown_days',
+            'atr_sl_streak_lookback_days',
+            'atr_sl_streak_cooldown_days',
+            'atr_period', 'atr_period_a', 'atr_period_b', 'type_c_atr_period',
+            'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
+            'type_c_gap_grace_mins',
+            'gc_window', 'rsi_window',
+            'mobile_status_api_port',
+            'box_sel_lookback', 'box_sel_min_history_bars',
+            'box_sel_atr_period', 'box_sel_adx_period',
+            'box_sel_ma_period', 'box_sel_ma_slope_days',
+            'box_sel_min_lower_touches', 'box_sel_min_upper_touches',
+            'box_sel_max_breakout_closes', 'box_sel_max_candidates',
+            'type_c_touch_lookback_bars',
+            'type_c_min_candle_confirmations',
+            'type_c_breakdown_confirm_bars', 'type_c_max_holding_days',
+        }
         for k, ent in self.params_entries.items():
             if not ent:
                 continue
-            v = ent.get().strip().replace(',', '')
+            try:
+                v = ent.get().strip().replace(',', '')
+            except Exception:
+                continue
             if not v:
                 continue
-            if k in [
-                'backtest_initial_capital', 'max_slots', 'max_slots_a', 'max_slots_b', 'max_slots_c',
-                'max_slots_band_extra_cap',
-                'transition_soft_slots_a', 'transition_soft_slots_b',
-                'chop_valid_a_min', 'chop_valid_b_max', 'chop_valid_a_floor',
-                'atr_sl_reentry_cooldown_days',
-                'atr_sl_streak_lookback_days',
-                'atr_sl_streak_cooldown_days',
-                'atr_period', 'atr_period_a', 'atr_period_b', 'type_c_atr_period',
-                'gap_grace_mins', 'gap_grace_mins_a', 'gap_grace_mins_b',
-                'type_c_gap_grace_mins',
-                'gc_window', 'rsi_window',
-                'mobile_status_api_port',
-                'box_sel_lookback', 'box_sel_min_history_bars',
-                'box_sel_atr_period', 'box_sel_adx_period',
-                'box_sel_ma_period', 'box_sel_ma_slope_days',
-                'box_sel_min_lower_touches', 'box_sel_min_upper_touches',
-                'box_sel_max_breakout_closes', 'box_sel_max_candidates',
-                'type_c_touch_lookback_bars',
-                'type_c_min_candle_confirmations',
-                'type_c_breakdown_confirm_bars', 'type_c_max_holding_days',
-            ]:
-                self.app.settings[k] = int(float(v))
-            else:
-                self.app.settings[k] = float(v)
+            # bool 문자열이 Entry에 들어간 경우(잘못된 key=) float 변환 스킵
+            if v.lower() in ('true', 'false'):
+                try:
+                    self.app.settings[k] = v.lower() == 'true'
+                except Exception:
+                    pass
+                continue
+            try:
+                if k in _int_keys:
+                    self.app.settings[k] = int(float(v))
+                else:
+                    self.app.settings[k] = float(v)
+            except (TypeError, ValueError):
+                # 한 칸 실패해도 나머지 동기화는 계속
+                continue
         for k, var in self.conf_vars.items():
             if hasattr(var, 'get'):
                 val = var.get()

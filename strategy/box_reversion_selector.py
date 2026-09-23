@@ -11,6 +11,35 @@ import numpy as np
 import pandas as pd
 
 
+_EOK_TO_KRW: float = 100_000_000.0
+# 이 이상이면 예전 원(KRW) 단위 저장값으로 간주
+_LEGACY_TRDE_KRW_THRESHOLD: float = 1e8
+
+
+def box_sel_min_avg_trde_to_krw(
+    raw: Any,
+    default_eok: float = 200.0,
+) -> float:
+    """
+    Type C 최소 평균 거래대금 설정을 원(KRW)으로 변환합니다.
+
+    - 신규: 억 단위 (예: 200 → 200억 원)
+    - 레거시: 이미 원으로 저장된 대액 (≥1억 원)은 그대로 사용
+    """
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        try:
+            v = float(default_eok)
+        except (TypeError, ValueError):
+            v = 200.0
+    if v < 0:
+        return 0.0
+    if v >= _LEGACY_TRDE_KRW_THRESHOLD:
+        return v
+    return v * _EOK_TO_KRW
+
+
 @dataclass(frozen=True)
 class BoxReversionSelectionConfig:
     """박스권 후보 선정 설정."""
@@ -70,10 +99,12 @@ class BoxReversionSelectionConfig:
             ),
             min_avg_trde_value_krw=max(
                 0.0,
-                _number(
-                    "box_sel_min_avg_trde_value_krw",
-                    defaults.min_avg_trde_value_krw,
-                    float,
+                box_sel_min_avg_trde_to_krw(
+                    settings.get(
+                        "box_sel_min_avg_trde_value_krw",
+                        defaults.min_avg_trde_value_krw / _EOK_TO_KRW,
+                    ),
+                    default_eok=defaults.min_avg_trde_value_krw / _EOK_TO_KRW,
                 ),
             ),
             min_price=max(0.0, _number("box_sel_min_price", defaults.min_price, float)),

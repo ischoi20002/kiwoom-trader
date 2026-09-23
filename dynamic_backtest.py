@@ -1,9 +1,11 @@
 import pandas as pd
 import os
+import pickle
 import re
+import tempfile
 import time
 import copy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from data_manager_v2 import DataManagerV2
 import strategy.signals
@@ -59,6 +61,11 @@ from core.bt_prep_cache import (
     put_universe as _bt_cache_put_universe,
     signal_fingerprint as _bt_signal_fingerprint,
     universe_fingerprint as _bt_universe_fingerprint,
+)
+from core.bt_sig15_workers import (
+    indicators_and_signals_15m_frame,
+    sig15_pool_init as _sig15_pool_init,
+    sig15_pool_job as _sig15_pool_job,
 )
 
 
@@ -2701,20 +2708,7 @@ class DynamicBacktester:
 
     def _indicators_and_signals_15m(self, group: pd.DataFrame) -> pd.DataFrame:
         """종목 15분 프레임에 지표·펄스·신호를 한 번에 붙인다."""
-        df_ind = TradingStrategy.calculate_indicators(group, self.settings)
-        is_ma_aligned = df_ind["MA5"] > df_ind["MA20"]
-        ma_group_id = (~is_ma_aligned).cumsum()
-        df_ind["MA_Maint_Count"] = is_ma_aligned.groupby(ma_group_id).cumsum()
-        is_rsi_above_50 = df_ind["RSI"] >= 50.0
-        rsi_group_id = (df_ind["RSI"] < 50.0).cumsum()
-        df_ind["RSI_Pulse_Count"] = is_rsi_above_50.groupby(rsi_group_id).cumsum()
-        full_sigs = TradingStrategy.get_buy_signals_detailed(
-            df_ind, self.settings, market_trend="UP"
-        )
-        df_ind = df_ind.join(full_sigs.drop(columns="Signal", errors="ignore"))
-        df_ind["Signal"] = full_sigs["Signal"]
-        df_ind["Ready"] = df_ind.reset_index().index >= 19
-        return df_ind
+        return indicators_and_signals_15m_frame(group, self.settings)
 
     def _prepare_15m_cached_data(
         self,
@@ -2809,7 +2803,7 @@ class DynamicBacktester:
         cached: Dict[str, Any] = {}
         n_workers = 1
         try:
-            # GIL 한계가 있어도 I/O·pandas 일부는 겹침 — CPU 상한 16
+            # CPU 바운드 → ProcessPool (스레드는 GIL로 효과 제한). 상한 16
             n_workers = min(16, max(1, int(os.cpu_count() or 1)), max(1, len(items)))
         except Exception:
             n_workers = 1
@@ -2817,7 +2811,7 @@ class DynamicBacktester:
         def _one(pair: Tuple[Any, pd.DataFrame]) -> Tuple[Any, Optional[pd.DataFrame]]:
             code, group = pair
             try:
-                return code, self._indicators_and_signals_15m(group)
+                return code, indicators_and_signals_15m_frame(group, self.settings)
             except Exception as e:
                 try:
                     print(f"[Dynamic] 15분 지표/신호 실패 ({code}): {e!r}", flush=True)
@@ -2825,16 +2819,74 @@ class DynamicBacktester:
                     pass
                 return code, None
 
+        pool_mode = "serial"
         if n_workers <= 1 or len(items) <= 1:
             for pair in items:
                 code, df_ind = _one(pair)
                 if df_ind is not None:
                     cached[code] = df_ind
         else:
-            with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                for code, df_ind in ex.map(_one, items):
-                    if df_ind is not None:
-                        cached[code] = df_ind
+            cache_path = ""
+            try:
+                fd, cache_path = tempfile.mkstemp(
+                    prefix="bt_sig15_", suffix=".pkl"
+                )
+                os.close(fd)
+                with open(cache_path, "wb") as f:
+                    pickle.dump(
+                        {"ohlcv": ohlcv_map, "settings": dict(self.settings or {})},
+                        f,
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
+                codes = [c for c, _ in items]
+                chunksize = max(1, len(codes) // max(1, n_workers * 4))
+                with ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    initializer=_sig15_pool_init,
+                    initargs=(cache_path,),
+                ) as ex:
+                    for code, df_ind in ex.map(
+                        _sig15_pool_job, codes, chunksize=chunksize
+                    ):
+                        if df_ind is not None:
+                            cached[code] = df_ind
+                pool_mode = "process"
+            except Exception as e:
+                try:
+                    print(
+                        f"[Dynamic] 15분 ProcessPool 실패 → 스레드 폴백: {e!r}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+                cached.clear()
+                try:
+                    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                        for code, df_ind in ex.map(_one, items):
+                            if df_ind is not None:
+                                cached[code] = df_ind
+                    pool_mode = "thread"
+                except Exception as e2:
+                    try:
+                        print(
+                            f"[Dynamic] 15분 스레드 폴백 실패 → 순차: {e2!r}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+                    cached.clear()
+                    for pair in items:
+                        code, df_ind = _one(pair)
+                        if df_ind is not None:
+                            cached[code] = df_ind
+                    pool_mode = "serial"
+            finally:
+                if cache_path:
+                    try:
+                        if os.path.isfile(cache_path):
+                            os.remove(cache_path)
+                    except Exception:
+                        pass
 
         if sig_fp and cached:
             try:
@@ -2844,7 +2896,7 @@ class DynamicBacktester:
         try:
             print(
                 f"[Dynamic] 15분 지표+신호 준비 {len(cached)}종목 "
-                f"({time.time() - t0:.2f}초, workers={n_workers})"
+                f"({time.time() - t0:.2f}초, workers={n_workers}, mode={pool_mode})"
             )
         except Exception:
             pass

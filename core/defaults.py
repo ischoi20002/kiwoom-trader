@@ -534,7 +534,7 @@ DEFAULT_SETTINGS = {
     "box_sel_adx_period": 14,
     "box_sel_ma_period": 35,
     "box_sel_ma_slope_days": 5,
-    "box_sel_min_avg_trde_value_krw": 20000000000.0,
+    "box_sel_min_avg_trde_value_krw": 200.0,
     "box_sel_min_price": 3000.0,
     "box_sel_min_box_width_pct": 6.0,
     "box_sel_max_box_width_pct": 12.0,

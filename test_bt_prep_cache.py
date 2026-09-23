@@ -9,8 +9,12 @@ import unittest
 
 from core.bt_prep_cache import (
     clear_memory_cache,
+    get_ohlcv,
+    get_signals,
     get_universe,
     ohlcv_fingerprint,
+    put_ohlcv,
+    put_signals,
     put_universe,
     signal_fingerprint,
     universe_fingerprint,
@@ -117,6 +121,42 @@ class TestBtPrepCache(unittest.TestCase):
             self.assertEqual(got["schedule_c"]["2024-06-03"], ["000660"])
             cache_path = os.path.join(tmp, "_local_bt_prep_cache", "univ_abc123.pkl")
             self.assertTrue(os.path.isfile(cache_path))
+
+    def test_ohlcv_and_signal_disk_roundtrip(self) -> None:
+        """OHLCV·신호도 디스크에 남아 GUI 재시작 후에도 HIT 가능해야 한다."""
+        import pandas as pd
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ohlcv = {
+                "005930": pd.DataFrame(
+                    {"Open": [1.0], "High": [2.0], "Low": [0.5], "Close": [1.5], "Volume": [100]}
+                )
+            }
+            sig = {
+                "005930": pd.DataFrame(
+                    {"Close": [1.5], "Signal": [0], "Ready": [True]}
+                )
+            }
+            put_ohlcv("ohlcv_fp1", ohlcv, base_dir=tmp)
+            put_signals("sig_fp1", sig, base_dir=tmp)
+            clear_memory_cache()
+            got_o = get_ohlcv("ohlcv_fp1", base_dir=tmp)
+            got_s = get_signals("sig_fp1", base_dir=tmp)
+            self.assertIsNotNone(got_o)
+            self.assertIsNotNone(got_s)
+            assert got_o is not None and got_s is not None
+            self.assertIn("005930", got_o)
+            self.assertEqual(int(got_s["005930"]["Signal"].iloc[0]), 0)
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(tmp, "_local_bt_prep_cache", "ohlcv_ohlcv_fp1.pkl")
+                )
+            )
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(tmp, "_local_bt_prep_cache", "sig_sig_fp1.pkl")
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 동적 백테스트 준비 캐시 (저정밀 튜닝 가속).
 
 유니버스 선정·15분 OHLCV·신호 프레임을 설정 지문으로 재사용한다.
+유니버스/OHLCV/신호 모두 메모리+디스크에 저장해 GUI 재시작 후에도 HIT 가능하다.
 청산/S2/ATR 등 체결 파라미터만 바꾸면 준비 단계를 건너뛴다.
 """
 
@@ -361,44 +362,127 @@ def put_universe(
             pass
 
 
-def get_ohlcv(fp: str) -> Optional[Dict[str, Any]]:
-    """15분 OHLCV 메모리 캐시."""
+def _ohlcv_disk_path(fp: str, base_dir: Optional[str] = None) -> str:
+    return os.path.join(cache_dir(base_dir), f"ohlcv_{fp}.pkl")
+
+
+def _sig_disk_path(fp: str, base_dir: Optional[str] = None) -> str:
+    return os.path.join(cache_dir(base_dir), f"sig_{fp}.pkl")
+
+
+def _load_disk_dict(
+    path: str,
+) -> Optional[Dict[str, Any]]:
+    """디스크 pickle → data dict (버전 불일치·손상 시 None)."""
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+        if not isinstance(payload, dict):
+            return None
+        if int(payload.get("v", 0) or 0) != CACHE_VERSION:
+            return None
+        data = payload.get("data")
+        if not isinstance(data, dict) or not data:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _save_disk_dict(
+    path: str,
+    data: Dict[str, Any],
+) -> None:
+    """원자적 pickle 저장 (실패 시 tmp 정리)."""
+    tmp = path + ".tmp"
+    try:
+        _ensure_dir(os.path.dirname(path))
+        payload = {"v": CACHE_VERSION, "saved_at": time.time(), "data": data}
+        with open(tmp, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+def get_ohlcv(fp: str, base_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """15분 OHLCV 캐시 조회 (메모리 → 디스크)."""
     try:
         with _lock:
             if _mem.get("ohlcv_fp") == fp and isinstance(_mem.get("ohlcv"), dict):
                 return _mem["ohlcv"]
     except Exception:
         pass
-    return None
-
-
-def put_ohlcv(fp: str, data: Dict[str, Any]) -> None:
-    """15분 OHLCV 메모리 캐시 저장."""
+    data = _load_disk_dict(_ohlcv_disk_path(fp, base_dir))
+    if data is None:
+        return None
     try:
         with _lock:
             _mem["ohlcv_fp"] = fp
             _mem["ohlcv"] = data
     except Exception:
         pass
+    return data
 
 
-def get_signals(fp: str) -> Optional[Dict[str, Any]]:
-    """15분 지표+신호 메모리 캐시."""
+def put_ohlcv(
+    fp: str,
+    data: Dict[str, Any],
+    base_dir: Optional[str] = None,
+) -> None:
+    """15분 OHLCV를 메모리·디스크에 저장."""
+    try:
+        with _lock:
+            _mem["ohlcv_fp"] = fp
+            _mem["ohlcv"] = data
+    except Exception:
+        pass
+    try:
+        _save_disk_dict(_ohlcv_disk_path(fp, base_dir), data)
+    except Exception:
+        pass
+
+
+def get_signals(fp: str, base_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """15분 지표+신호 캐시 조회 (메모리 → 디스크)."""
     try:
         with _lock:
             if _mem.get("sig_fp") == fp and isinstance(_mem.get("sig"), dict):
                 return _mem["sig"]
     except Exception:
         pass
-    return None
-
-
-def put_signals(fp: str, data: Dict[str, Any]) -> None:
-    """15분 지표+신호 메모리 캐시 저장."""
+    data = _load_disk_dict(_sig_disk_path(fp, base_dir))
+    if data is None:
+        return None
     try:
         with _lock:
             _mem["sig_fp"] = fp
             _mem["sig"] = data
+    except Exception:
+        pass
+    return data
+
+
+def put_signals(
+    fp: str,
+    data: Dict[str, Any],
+    base_dir: Optional[str] = None,
+) -> None:
+    """15분 지표+신호를 메모리·디스크에 저장."""
+    try:
+        with _lock:
+            _mem["sig_fp"] = fp
+            _mem["sig"] = data
+    except Exception:
+        pass
+    try:
+        _save_disk_dict(_sig_disk_path(fp, base_dir), data)
     except Exception:
         pass
 
