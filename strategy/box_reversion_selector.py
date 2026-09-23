@@ -219,9 +219,15 @@ def _wilder_ewm(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(alpha=1.0 / float(period), adjust=False, min_periods=period).mean()
 
 
-def _add_atr_adx(df: pd.DataFrame, atr_period: int, adx_period: int) -> pd.DataFrame:
+def _add_atr_adx(
+    df: pd.DataFrame,
+    atr_period: int,
+    adx_period: int,
+    *,
+    copy: bool = True,
+) -> pd.DataFrame:
     """ATR과 ADX를 미래참조 없이 계산합니다."""
-    result = df.copy()
+    result = df.copy() if copy else df
     previous_close = result["close"].shift(1)
     true_range = pd.concat(
         [
@@ -263,6 +269,38 @@ def _bounded_score(value: float, best: float, worst: float) -> float:
     return float(np.clip((worst - value) / (worst - best), 0.0, 1.0))
 
 
+def _box_ohlcv_frame_from_clean(daily_ohlcv: pd.DataFrame) -> pd.DataFrame:
+    """
+    배치 경로용: 이미 숫자형 OHLCV인 프레임에서 박스 평가용 최소 열만 추출.
+    ``_normalize_daily_ohlcv`` 전체 복사·재파싱을 피한다.
+    """
+    cols = daily_ohlcv.columns
+    lower_map = {str(c): str(c).strip().lower() for c in cols}
+    # time → datetime 별칭
+    rename: dict[str, str] = {}
+    for c in cols:
+        cl = lower_map[str(c)]
+        if cl == "time":
+            rename[c] = "datetime"
+        elif cl != str(c):
+            rename[c] = cl
+    src = daily_ohlcv.rename(columns=rename, copy=False) if rename else daily_ohlcv
+    need = ["open", "high", "low", "close", "volume"]
+    missing = [c for c in need if c not in src.columns]
+    if missing:
+        raise ValueError(f"필수 일봉 컬럼 누락: {', '.join(missing)}")
+    keep = need + (["datetime"] if "datetime" in src.columns else [])
+    out = src.loc[:, keep].copy()
+    for column in need:
+        if not pd.api.types.is_numeric_dtype(out[column]):
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+    if "datetime" in out.columns and not pd.api.types.is_datetime64_any_dtype(
+        out["datetime"]
+    ):
+        out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
+    return out
+
+
 def evaluate_box_reversion_candidate(
     daily_ohlcv: pd.DataFrame,
     *,
@@ -270,17 +308,25 @@ def evaluate_box_reversion_candidate(
     name: Optional[str] = None,
     config: Optional[BoxReversionSelectionConfig] = None,
     as_of: Optional[date | datetime | pd.Timestamp] = None,
+    assume_clean: bool = False,
 ) -> Optional[dict[str, Any]]:
-    """한 종목이 박스권 후보인지 평가하고, 유효 후보만 반환합니다."""
+    """한 종목이 박스권 후보인지 평가하고, 유효 후보만 반환합니다.
+
+    assume_clean=True 이면 배치 슬라이딩처럼 이미 정제된 OHLCV만 넘길 때
+    정규화 전체 복사를 생략한다(결과는 동일).
+    """
     cfg = config or BoxReversionSelectionConfig()
     try:
-        df = _normalize_daily_ohlcv(daily_ohlcv)
+        if assume_clean:
+            df = _box_ohlcv_frame_from_clean(daily_ohlcv)
+        else:
+            df = _normalize_daily_ohlcv(daily_ohlcv)
         if as_of is not None and not df.empty:
             cutoff = pd.Timestamp(as_of)
             if "datetime" in df.columns:
-                df = df[df["datetime"] <= cutoff].copy()
+                df = df[df["datetime"] <= cutoff]
             elif isinstance(df.index, pd.DatetimeIndex):
-                df = df[df.index <= cutoff].copy()
+                df = df[df.index <= cutoff]
 
         required_bars = max(
             cfg.min_history_bars,
@@ -291,7 +337,7 @@ def evaluate_box_reversion_candidate(
         if len(df) < required_bars:
             return None
 
-        df = _add_atr_adx(df, cfg.atr_period, cfg.adx_period)
+        df = _add_atr_adx(df, cfg.atr_period, cfg.adx_period, copy=False)
         df["ma"] = df["close"].rolling(cfg.ma_period).mean()
         df["trde_value"] = df["close"] * df["volume"]
         df["avg_trde_value"] = df["trde_value"].rolling(cfg.lookback).mean()
@@ -306,7 +352,7 @@ def evaluate_box_reversion_candidate(
         if atr <= 0 or price < cfg.min_price:
             return None
 
-        box = df.iloc[-cfg.lookback :].copy()
+        box = df.iloc[-cfg.lookback :]
         lower = float(box["low"].quantile(cfg.lower_quantile))
         upper = float(box["high"].quantile(cfg.upper_quantile))
         center = (lower + upper) / 2.0

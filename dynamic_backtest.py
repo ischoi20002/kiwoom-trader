@@ -229,6 +229,80 @@ class DynamicBacktester:
         self._atr_sl_reentry_until: Dict[str, pd.Timestamp] = {}
         # 종목별 ATR_SL 청산일(연속 손절 쿨다운 판정용)
         self._atr_sl_exit_dates: Dict[str, List[pd.Timestamp]] = {}
+        # 일일 신규 Type A S1 건수 — 체결일(YYYY-MM-DD) 키
+        # (NEXT_OPEN은 전일 루프에서 체결 처리되므로 일자별 dict 필요)
+        self._daily_new_s1_a_by_day: Dict[str, int] = {}
+        # G1 로테이션 A 가드: ref_day → True 이면 당일 신규 TYPE_A 차단
+        self.rotation_a_guard_g1_by_ref_day: Dict[str, bool] = {}
+
+    def _normalize_bt_day(self, day: Any) -> str:
+        """BT 일자 키를 YYYY-MM-DD 로 통일."""
+        try:
+            if day is None or day == "":
+                return ""
+            return pd.Timestamp(day).strftime("%Y-%m-%d")
+        except Exception:
+            try:
+                return str(day)[:10]
+            except Exception:
+                return ""
+
+    def _max_daily_new_s1_a(self) -> int:
+        """일일 Type A 신규 S1 상한. 0 이하면 무제한."""
+        try:
+            return int(self.settings.get("max_daily_new_s1_a", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _reset_daily_new_s1_a(self, day: str) -> None:
+        """영업일 시작 훅(호환). 실제 카운트는 체결일 dict 기준."""
+        try:
+            d = self._normalize_bt_day(day)
+            self._daily_new_s1_a_date = d
+            # 당일 키는 유지(전일 NEXT_OPEN이 이미 채워 둔 카운트 보존)
+            if not hasattr(self, "_daily_new_s1_a_by_day") or self._daily_new_s1_a_by_day is None:
+                self._daily_new_s1_a_by_day = {}
+            self._daily_new_s1_a_count = int(self._daily_new_s1_a_by_day.get(d, 0) or 0)
+        except Exception:
+            self._daily_new_s1_a_date = ""
+            self._daily_new_s1_a_count = 0
+
+    def _can_open_new_s1_a(self, day: Optional[str] = None) -> bool:
+        """체결일 기준 Type A S1 추가 진입 가능 여부."""
+        lim = self._max_daily_new_s1_a()
+        if lim <= 0:
+            return True
+        try:
+            d = self._normalize_bt_day(
+                day if day is not None else getattr(self, "_daily_new_s1_a_date", "")
+            )
+            if not d:
+                return True
+            by = getattr(self, "_daily_new_s1_a_by_day", None)
+            if not isinstance(by, dict):
+                by = {}
+                self._daily_new_s1_a_by_day = by
+            return int(by.get(d, 0) or 0) < lim
+        except (TypeError, ValueError):
+            return True
+
+    def _note_new_s1_a(self, day: Optional[str] = None) -> None:
+        """Type A S1 체결 후 체결일 카운터 증가."""
+        try:
+            d = self._normalize_bt_day(
+                day if day is not None else getattr(self, "_daily_new_s1_a_date", "")
+            )
+            if not d:
+                return
+            by = getattr(self, "_daily_new_s1_a_by_day", None)
+            if not isinstance(by, dict):
+                by = {}
+                self._daily_new_s1_a_by_day = by
+            by[d] = int(by.get(d, 0) or 0) + 1
+            if d == str(getattr(self, "_daily_new_s1_a_date", "") or ""):
+                self._daily_new_s1_a_count = by[d]
+        except (TypeError, ValueError):
+            pass
 
     def _cache_run_hot_settings(self) -> None:
         """run / 진단 공통: 루프에서 자주 읽는 설정·임계값 캐시"""
@@ -560,7 +634,33 @@ class DynamicBacktester:
                 self.index_dd_block_by_day = dict(
                     cached_univ.get("index_dd_block_by_day") or {}
                 )
+                self.rotation_a_guard_g1_by_ref_day = dict(
+                    cached_univ.get("rotation_a_guard_g1_by_ref_day") or {}
+                )
                 self.universe_schedule = universe_schedule or {}
+                # 캐시에 G1 없으면 러너 사전계산으로 보완
+                try:
+                    _pre_g1 = self.settings.pop("_precomputed_rotation_a_guard_g1", None)
+                    if (
+                        isinstance(_pre_g1, dict)
+                        and _pre_g1
+                        and not self.rotation_a_guard_g1_by_ref_day
+                    ):
+                        self.rotation_a_guard_g1_by_ref_day = {
+                            str(k): bool(v) for k, v in _pre_g1.items()
+                        }
+                    if bool(self.settings.get("use_rotation_a_guard_g1", False)):
+                        _n_g1 = sum(
+                            1
+                            for v in (self.rotation_a_guard_g1_by_ref_day or {}).values()
+                            if v
+                        )
+                        print(
+                            f"[G1] 맵(캐시 HIT): 발동 {_n_g1}일",
+                            flush=True,
+                        )
+                except Exception:
+                    pass
                 t_duration = time.time() - t_start
                 msg = f"유니버스 캐시 HIT ({t_duration:.2f}초)"
                 print(f"[Done] {msg}")
@@ -595,6 +695,12 @@ class DynamicBacktester:
                     self.schedule_c_meta = dict(_result[5]) if len(_result) >= 6 else {}
                 except Exception:
                     self.schedule_c_meta = {}
+                try:
+                    self.rotation_a_guard_g1_by_ref_day = (
+                        dict(_result[6]) if len(_result) >= 7 else {}
+                    )
+                except Exception:
+                    self.rotation_a_guard_g1_by_ref_day = {}
             else:
                 universe_schedule = _result
                 self.schedule_a = universe_schedule
@@ -602,6 +708,7 @@ class DynamicBacktester:
                 self.schedule_c = {}
                 self.schedule_c_meta = {}
                 self.transition_regime_by_day = {}
+                self.rotation_a_guard_g1_by_ref_day = {}
             self.universe_schedule = universe_schedule or {}
             t_duration = time.time() - t_start
             msg = f"사전 계산 완료 ({t_duration:.2f}초)"
@@ -630,6 +737,32 @@ class DynamicBacktester:
                     pass
                 self.index_dd_block_by_day = {}
 
+            # G1: prepare 결과 우선, 없으면 러너 사전계산 주입
+            try:
+                if not getattr(self, "rotation_a_guard_g1_by_ref_day", None):
+                    self.rotation_a_guard_g1_by_ref_day = {}
+                _pre_g1 = self.settings.pop("_precomputed_rotation_a_guard_g1", None)
+                if isinstance(_pre_g1, dict) and _pre_g1:
+                    # prepare 맵이 비어 있을 때만 사전계산으로 채움
+                    if not self.rotation_a_guard_g1_by_ref_day:
+                        self.rotation_a_guard_g1_by_ref_day = {
+                            str(k): bool(v) for k, v in _pre_g1.items()
+                        }
+                _n_g1 = sum(
+                    1
+                    for v in (self.rotation_a_guard_g1_by_ref_day or {}).values()
+                    if v
+                )
+                if bool(self.settings.get("use_rotation_a_guard_g1", False)):
+                    print(f"[G1] 맵 준비: 발동 {_n_g1}일", flush=True)
+            except Exception as _g1_ex:
+                try:
+                    print(f"[G1] 맵 로드 생략: {_g1_ex}", flush=True)
+                except Exception:
+                    pass
+                if not getattr(self, "rotation_a_guard_g1_by_ref_day", None):
+                    self.rotation_a_guard_g1_by_ref_day = {}
+
             if use_prep_cache and univ_fp:
                 try:
                     _bt_cache_put_universe(
@@ -642,6 +775,10 @@ class DynamicBacktester:
                             "schedule_c_meta": getattr(self, "schedule_c_meta", {}) or {},
                             "transition_regime_by_day": self.transition_regime_by_day,
                             "index_dd_block_by_day": self.index_dd_block_by_day,
+                            "rotation_a_guard_g1_by_ref_day": getattr(
+                                self, "rotation_a_guard_g1_by_ref_day", {}
+                            )
+                            or {},
                         },
                     )
                 except Exception:
@@ -789,9 +926,15 @@ class DynamicBacktester:
         try:
             self._atr_sl_reentry_until = {}
             self._atr_sl_exit_dates = {}
+            self._daily_new_s1_a_by_day = {}
+            self._daily_new_s1_a_date = ""
+            self._daily_new_s1_a_count = 0
         except Exception:
             self._atr_sl_reentry_until = {}
             self._atr_sl_exit_dates = {}
+            self._daily_new_s1_a_by_day = {}
+            self._daily_new_s1_a_date = ""
+            self._daily_new_s1_a_count = 0
         idx_choice = self.settings.get("universe_index_choice", "KODEX200")
         self.stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         
@@ -899,6 +1042,18 @@ class DynamicBacktester:
                 self.settings["index_dd_runtime_block_s1"] = bool(_idd_on)
                 self.settings["transition_runtime_block_s1"] = _block_s1
                 self.settings["transition_runtime_block_s2"] = _block_s2
+
+                # G1: 전일(ref_day) 통계 기준 — 신규 TYPE_A만 차단 (S1 전체/S2 아님)
+                _g1_on = False
+                try:
+                    if bool(self.settings.get("use_rotation_a_guard_g1", False)):
+                        _g1_map = (
+                            getattr(self, "rotation_a_guard_g1_by_ref_day", None) or {}
+                        )
+                        _g1_on = bool(_g1_map.get(str(ref_day), False))
+                except Exception:
+                    _g1_on = False
+                self.settings["rotation_a_guard_block_type_a"] = bool(_g1_on)
             except Exception:
                 pass
 
@@ -1043,6 +1198,7 @@ class DynamicBacktester:
             timeline_pos = {t: i for i, t in enumerate(timeline)}
             
             today_sells = set()
+            self._reset_daily_new_s1_a(str(current_day))
             # [Phase 2] Track A 우선순위 → Track B 순서로 정렬
             code_to_rank = {}
             for i, c in enumerate(top_codes_a):
@@ -2308,6 +2464,17 @@ class DynamicBacktester:
                         return False
                 except (TypeError, ValueError):
                     return False
+            # 일일 Type A 신규 S1 상한 — 체결시각(curr_time) 일자 기준
+            # NEXT_OPEN은 전일 루프에서 호출되므로 반드시 fill 일자를 씀
+            if str(sig_type).upper() == "TYPE_A":
+                try:
+                    if bool(self.settings.get("rotation_a_guard_block_type_a", False)):
+                        return False
+                except Exception:
+                    pass
+                fill_day = self._normalize_bt_day(curr_time)
+                if not self._can_open_new_s1_a(fill_day):
+                    return False
             # ATR_SL 재진입 쿨다운
             try:
                 if self._s1_blocked_by_atr_sl_cooldown(str(code).zfill(6), curr_time):
@@ -2393,6 +2560,12 @@ class DynamicBacktester:
             'Reason': reason_str, 'Cash': self.cash, 'Sig_Type': sig_type
         })
         self._log_trade_to_csv(curr_time, code, f'BUY{entry_n}', price, qty, reason_str, fee=buy_fee, sig_type=sig_type)
+        # Type A S1 체결 시에만 일일 신규 카운터 증가(체결일 기준)
+        try:
+            if entry_n == 1 and str(sig_type).upper() == "TYPE_A":
+                self._note_new_s1_a(self._normalize_bt_day(curr_time))
+        except Exception:
+            pass
         return True
 
     def _execute_sell(self, code, price, curr_time, reason, indicator_row=None):

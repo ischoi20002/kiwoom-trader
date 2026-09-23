@@ -58,6 +58,24 @@ def test_range_stock_is_selected() -> None:
     assert 5.0 <= candidate["BoxWidthPct"] <= 15.0
 
 
+def test_assume_clean_matches_normalize_path() -> None:
+    """배치용 assume_clean 경로가 정규화 경로와 동일 결과를 내야 합니다."""
+    df = _make_range_ohlcv()
+    cfg = _relaxed_config()
+    a = evaluate_box_reversion_candidate(df, code="005930", config=cfg)
+    b = evaluate_box_reversion_candidate(
+        df.rename(columns={"datetime": "time"}),
+        code="005930",
+        config=cfg,
+        assume_clean=True,
+    )
+    assert a is not None and b is not None
+    assert a["Score"] == b["Score"]
+    assert a["BoxLower"] == b["BoxLower"]
+    assert a["BoxUpper"] == b["BoxUpper"]
+    assert a["ADX"] == b["ADX"]
+
+
 def test_trending_stock_is_rejected() -> None:
     """방향성이 강한 상승 종목은 박스 후보에서 제외되어야 합니다."""
     df = _make_range_ohlcv()

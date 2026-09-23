@@ -237,6 +237,32 @@ class SignalCallbacksService:
                     pass
                 return False
 
+            # G1: 신규 Type A만 차단 (B/C·S2는 유지)
+            try:
+                if (
+                    str(sig_type).upper() == "TYPE_A"
+                    and bool(
+                        self.app.settings.get("rotation_a_guard_block_type_a", False)
+                    )
+                ):
+                    try:
+                        sl = getattr(self.app, "session_logger", None)
+                        if sl:
+                            sl.log(
+                                "signal_buy_skipped",
+                                {
+                                    "code": code,
+                                    "name": name,
+                                    "reason": "rotation_a_guard_g1",
+                                    "sig_type": str(sig_type),
+                                },
+                            )
+                    except Exception:
+                        pass
+                    return False
+            except Exception:
+                pass
+
             try:
                 sl = getattr(self.app, "session_logger", None)
                 if sl:

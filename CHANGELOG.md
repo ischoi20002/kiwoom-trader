@@ -13,6 +13,12 @@
 
 ---
 
+## 0.21.5 (2026-09-23)
+
+- **G1 로테이션 Type A 가드**: 전일 OFF·지수5일·교차분산·A비중 조건 충족 시 **신규 TYPE_A만** 스킵(B/C·S2·청산 유지). Dynamic BT·실시간 선정·시그널 콜백 연동.
+- **G1 파라미터 최적화**: 그리드 스윕+풀 BT 검증 승자 `a_share_min=0.60` / `idx5_min=-1.0` / `xs_pct=50` 을 defaults·설정 UI 기본값으로 반영. `use_rotation_a_guard_g1` 기본 ON.
+- **BT 준비 캐시**: G1 관련 키를 유니버스 지문에 포함(CACHE_VERSION 갱신).
+
 ## 0.21.4 (2026-09-22)
 
 - **일일 선정 FDR**: `selection_live`에서 `FinanceDataReader as fdr` import 누락으로 전 종목 「fdr is not defined」가 나던 오류 수정.

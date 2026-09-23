@@ -175,6 +175,24 @@ class TradingController:
                 st.pop("transition_runtime_regime", None)
                 st.pop("transition_runtime_block_s1", None)
                 st.pop("transition_runtime_block_s2", None)
+                # G1만 켜진 경우에도 레짐 조회(TYPE_A 차단 플래그)
+                if bool(st.get("use_rotation_a_guard_g1", False)):
+                    try:
+                        import strategy_selector
+
+                        tg = strategy_selector.resolve_transition_gate_for_live(
+                            st,
+                            getattr(self.app, "data_manager", None),
+                            None,
+                            self.log,
+                        )
+                        st["rotation_a_guard_block_type_a"] = bool(
+                            tg.get("block_type_a", False)
+                        )
+                    except Exception:
+                        st["rotation_a_guard_block_type_a"] = False
+                else:
+                    st.pop("rotation_a_guard_block_type_a", None)
             else:
                 # 일일 선정 직후 등: 같은 프로세스에서 방금 FDR 레짐을 이미 넣었으면 재조회 생략
                 _skip_transition_fetch = False
@@ -209,10 +227,20 @@ class TradingController:
                         st["transition_runtime_regime"] = reg
                         st["transition_runtime_block_s1"] = bool(tg.get("block_s1", False))
                         st["transition_runtime_block_s2"] = bool(tg.get("block_s2", False))
+                        st["rotation_a_guard_block_type_a"] = bool(
+                            tg.get("block_type_a", False)
+                        )
                         try:
                             import time as _time
 
                             self._transition_flags_mono_ts = float(_time.monotonic())
+                        except Exception:
+                            pass
+                        try:
+                            if bool(st.get("rotation_a_guard_block_type_a", False)):
+                                self.log(
+                                    "ℹ️ [G1] 로테이션 A 가드 ON — 신규 Type A S1 차단"
+                                )
                         except Exception:
                             pass
                         try:

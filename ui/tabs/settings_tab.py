@@ -857,6 +857,36 @@ class SettingsTab:
             '',
             '유니버스 일간 수익률 표준편차(%). 지수 rvol 결측 시 보조',
         )
+        add_header(transition_f, '── 로테이션 A 가드(G1) ──')
+        add_param_row(
+            transition_f,
+            'G1 Type A 가드',
+            'use_rotation_a_guard_g1',
+            '',
+            'ON: 전일 OFF·지수5일≥하한·고분산·A우세 시 신규 Type A만 스킵',
+            toggle_key='use_rotation_a_guard_g1',
+        )
+        add_param_row(
+            transition_f,
+            'G1 A비중 하한',
+            'rotation_a_guard_a_share_min',
+            '',
+            'Valid_A/(A+B) 하한 (기본 0.60)',
+        )
+        add_param_row(
+            transition_f,
+            'G1 지수5일 하한(%)',
+            'rotation_a_guard_idx5_min',
+            '%',
+            '전일 기준 지수 5일 수익률 하한 (기본 -1)',
+        )
+        add_param_row(
+            transition_f,
+            'G1 분산 분위',
+            'rotation_a_guard_xs_pct',
+            '',
+            '교차섹션 ret std 분위 임계 (기본 50)',
+        )
         add_header(transition_f, '── TRANSITION 시 슬롯·차단 ──')
         add_param_row(
             transition_f,

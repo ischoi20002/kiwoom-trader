@@ -5,7 +5,8 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -405,19 +406,26 @@ def _resync_batch_valid_to_period_universe(
         except Exception:
             return
 
+    # 일자별 유니버스 멤버십 — 행 단위 Python 루프 대신 일자별 벡터 isin
     univ_cache: Dict[str, set[str]] = {}
     in_period = np.zeros(len(df_all), dtype=bool)
     try:
-        codes = df_all["code"].astype(str).str.zfill(6).tolist()
-        for i, d_str in enumerate(day_keys.tolist()):
+        codes_arr = df_all["code"].astype(str).str.zfill(6).to_numpy()
+        days_arr = np.asarray(day_keys, dtype=object)
+        for d_str in pd.unique(days_arr):
             try:
-                if d_str not in univ_cache:
-                    univ_cache[d_str] = {
-                        str(c).zfill(6) for c in (get_period_universe(d_str) or [])
+                d_key = str(d_str)
+                if d_key not in univ_cache:
+                    univ_cache[d_key] = {
+                        str(c).zfill(6) for c in (get_period_universe(d_key) or [])
                     }
-                in_period[i] = codes[i] in univ_cache[d_str]
+                univ_list = list(univ_cache[d_key])
+                if not univ_list:
+                    continue
+                day_m = days_arr == d_str
+                in_period[day_m] = np.isin(codes_arr[day_m], univ_list)
             except Exception:
-                in_period[i] = False
+                continue
     except Exception:
         return
 
@@ -689,12 +697,20 @@ def _resync_batch_valid_to_period_universe(
         pass
 
 
-def _apply_sel_track_c_batch_latest(df_all: pd.DataFrame, settings: dict) -> None:
+def _apply_sel_track_c_batch_latest(
+    df_all: pd.DataFrame,
+    settings: dict,
+    *,
+    codes: Optional[Set[str]] = None,
+) -> None:
     """
     슬라이딩 선정 창에서 종목별 마지막 일봉에 Track C 판정을 기록합니다.
 
     호출부는 평가일 행만 스케줄에 사용하므로 과거 행을 매번 재평가하지 않아도
     미래참조 없이 실시간 선정기와 동일한 결과를 얻습니다.
+
+    codes 가 있으면 해당 종목만 평가한다(당기 유니버스). Track C는 교차섹션이
+    없어 비유니버스 스킵 후에도 유니버스 종목 결과는 동일하다.
     """
     df_all["Valid_C"] = pd.Series(False, index=df_all.index, dtype=bool)
     df_all["Score_C"] = pd.Series(0.0, index=df_all.index, dtype=float)
@@ -702,33 +718,64 @@ def _apply_sel_track_c_batch_latest(df_all: pd.DataFrame, settings: dict) -> Non
         return
 
     config = BoxReversionSelectionConfig.from_mapping(settings)
+    code_filter: Optional[Set[str]] = None
+    if codes is not None:
+        try:
+            code_filter = {str(c).zfill(6) for c in codes}
+        except Exception:
+            code_filter = None
+
+    ohlcv_cols = [
+        c
+        for c in ("time", "datetime", "open", "high", "low", "close", "volume")
+        if c in df_all.columns
+    ]
+    if "close" not in ohlcv_cols:
+        return
+
     try:
         grouped = df_all.groupby("code", sort=False)
     except (KeyError, TypeError, ValueError):
         return
 
+    metric_map = {
+        "BoxLower_C": "BoxLower",
+        "BoxUpper_C": "BoxUpper",
+        "BoxWidthPct_C": "BoxWidthPct",
+        "BoxPositionPct_C": "BoxPositionPct",
+        "ADX_C": "ADX",
+    }
+
     for raw_code, group in grouped:
         try:
-            ordered = group.sort_values("time") if "time" in group.columns else group
+            code = str(raw_code).zfill(6)
+            if code_filter is not None and code not in code_filter:
+                continue
+            if "time" in group.columns:
+                try:
+                    if group["time"].is_monotonic_increasing:
+                        ordered = group
+                    else:
+                        ordered = group.sort_values("time")
+                except Exception:
+                    ordered = group.sort_values("time")
+            else:
+                ordered = group
             if ordered.empty:
                 continue
+            # 스코어 열이 아닌 OHLCV 만 전달 → 정규화/복사 비용 축소
+            slim = ordered.loc[:, [c for c in ohlcv_cols if c in ordered.columns]]
             candidate = evaluate_box_reversion_candidate(
-                ordered,
-                code=str(raw_code).zfill(6),
+                slim,
+                code=code,
                 config=config,
+                assume_clean=True,
             )
             if candidate is None:
                 continue
             last_index = ordered.index[-1]
             df_all.at[last_index, "Valid_C"] = True
             df_all.at[last_index, "Score_C"] = float(candidate.get("Score", 0.0))
-            metric_map = {
-                "BoxLower_C": "BoxLower",
-                "BoxUpper_C": "BoxUpper",
-                "BoxWidthPct_C": "BoxWidthPct",
-                "BoxPositionPct_C": "BoxPositionPct",
-                "ADX_C": "ADX",
-            }
             for target_column, source_key in metric_map.items():
                 if target_column not in df_all.columns:
                     df_all[target_column] = np.nan

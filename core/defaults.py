@@ -50,6 +50,7 @@ DEFAULT_SETTINGS = {
     "bt_open_auction_pass_enabled": False,
     "bt_universe_schedule_warmup_trading_days": 20,
     "bt_universe_indicator_lookback_days": 280,
+    "bt_sliding_score_workers": 0,
     "bt_rt_parity_fast_rsi_delta": 0.35,
     "bt_rt_parity_fast_osc_delta": 0.08,
     "bt_rt_parity_fast_osc_abs_max": 0.0,
@@ -277,6 +278,12 @@ DEFAULT_SETTINGS = {
     "index_dd_ret_threshold_pct": -5.0,
     "index_dd_cooldown_days": 5,
     "index_dd_runtime_block_s1": False,
+    # 로테이션·보합+ 장 Type A 가드(G1): 전일 OFF·idx5≥0·xs≥p60·A비중≥55% → 신규 TYPE_A 스킵
+    "use_rotation_a_guard_g1": True,
+    "rotation_a_guard_a_share_min": 0.60,
+    "rotation_a_guard_idx5_min": -1.0,
+    "rotation_a_guard_xs_pct": 50.0,
+    "rotation_a_guard_block_type_a": False,
     # 저정밀 동적 BT: 유니버스·15분 지표 준비 캐시 (체결 파라미터만 바꿀 때 재사용)
     "bt_prep_cache_enabled": True,
     "min_trde_val": 30.0,
@@ -464,6 +471,8 @@ DEFAULT_SETTINGS = {
     "max_slots_a": 20,
     "max_slots_b": 10,
     "max_slots_c": 15,
+    # 일일 신규 Type A S1(BUY1) 상한. 0 이하면 무제한.
+    "max_daily_new_s1_a": 0,
     "max_slots_score_rel_pad": 0.0,
     "max_slots_band_extra_cap": 12,
     "sel_track_min_score_a": 0.0,

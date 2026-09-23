@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import traceback
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -19,12 +20,173 @@ from strategy.selection_dynamic_score import (
 from strategy.selection_live_aux import _df_top_by_score_slot_band
 from strategy.selection_regime import (
     _build_index_vol_by_day,
+    _load_kodex200_daily_close,
     classify_transition_regime,
+    is_rotation_a_guard_g1_day,
     resolve_transition_regime_policy,
 )
 from strategy.selection_scoring import _settings_bool_sel
 from strategy.selection_track_batch import _resync_batch_valid_to_period_universe
 from strategy.universe_codes import load_kodex200_universe_codes
+
+# 슬라이딩 창 복사 시 필요한 원시 OHLCV 열만 유지 (지표는 일자마다 재생성)
+_SLIDING_OHLCV_COLS: Tuple[str, ...] = (
+    "code",
+    "time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+)
+
+
+def _sliding_score_workers(settings: Optional[dict]) -> int:
+    """
+    슬라이딩 일자 병렬 워커 수.
+
+    Track C(박스) 가 CPU 바운드라 ProcessPool 이 유리하다.
+    기본(0): min(8, CPU). 1 이면 순차.
+    """
+    try:
+        raw = int((settings or {}).get("bt_sliding_score_workers", 0) or 0)
+    except Exception:
+        raw = 0
+    cpu = max(1, int(os.cpu_count() or 1))
+    if raw == 1:
+        return 1
+    if raw <= 0:
+        return max(1, min(8, cpu))
+    return max(1, min(int(raw), 16, cpu))
+
+
+# ProcessPool 워커 전역 (initializer 로 주입)
+_SLIDING_POOL_DF: Optional[pd.DataFrame] = None
+_SLIDING_POOL_SETTINGS: Optional[dict] = None
+
+
+def _sliding_pool_init(df: pd.DataFrame, settings: dict) -> None:
+    """자식 프로세스에 OHLCV·설정을 1회만 적재."""
+    global _SLIDING_POOL_DF, _SLIDING_POOL_SETTINGS
+    _SLIDING_POOL_DF = df
+    _SLIDING_POOL_SETTINGS = settings
+
+
+def _sliding_pool_job(
+    payload: Tuple[str, str, int, int, Tuple[str, ...]],
+) -> Optional[Tuple[str, pd.DataFrame, int, int, float]]:
+    """(d_str, d_ts_iso, li, ri, univ_tuple) → 스냅샷."""
+    d_str, d_ts_iso, li, ri, univ_tuple = payload
+    try:
+        if _SLIDING_POOL_DF is None or _SLIDING_POOL_SETTINGS is None:
+            return None
+        return _score_one_sliding_day(
+            _SLIDING_POOL_DF,
+            li=int(li),
+            ri=int(ri),
+            d_str=str(d_str),
+            d_ts=pd.Timestamp(d_ts_iso),
+            settings=_SLIDING_POOL_SETTINGS,
+            univ_set=set(univ_tuple),
+        )
+    except Exception as e:
+        try:
+            logging.warning(
+                "슬라이딩 프로세스 스코어 실패 %s: %s", d_str, e, exc_info=True
+            )
+        except Exception:
+            pass
+        return None
+
+
+def _score_one_sliding_day(
+    df_ohlcv: pd.DataFrame,
+    *,
+    li: int,
+    ri: int,
+    d_str: str,
+    d_ts: pd.Timestamp,
+    settings: dict,
+    univ_set: Set[str],
+) -> Optional[Tuple[str, pd.DataFrame, int, int, float]]:
+    """
+    평가일 D에 대해 ``[D-N, D]`` 창을 스코어하고 당일·당기유니버스 스냅샷을 반환.
+
+    - 지표는 창 전체에서 재계산 (실시간 as-of 와 동일 EWM 재시작)
+    - RS/Valid resync 는 **당일 행만** 수행 (일자 cross-section 이라 전체창 resync 와 동치)
+    """
+    try:
+        if ri <= li:
+            return None
+        cols = [c for c in _SLIDING_OHLCV_COLS if c in df_ohlcv.columns]
+        win = df_ohlcv.iloc[li:ri].loc[:, cols].copy()
+        if win.empty:
+            return None
+        # code 연속 구간이 groupby.rolling/ewm 에 유리 (값 자체는 불변)
+        try:
+            win.sort_values(["code", "time"], kind="mergesort", inplace=True)
+            win.reset_index(drop=True, inplace=True)
+        except Exception:
+            pass
+
+        _score_dynamic_universe_daily_ohlcv(
+            win, settings, with_b_debug=False, track_c_codes=univ_set
+        )
+
+        try:
+            day_mask = win["time"].dt.normalize() == d_ts
+        except Exception:
+            day_mask = win["time"].dt.strftime("%Y-%m-%d") == d_str
+        day = win.loc[day_mask].copy()
+        if day is None or day.empty:
+            return None
+
+        # 당일만 period-universe RS/Valid 재동기화 (전체 창 루프 제거)
+        def _gp(_dt: Any) -> List[str]:
+            return list(univ_set)
+
+        try:
+            _resync_batch_valid_to_period_universe(day, _gp, settings)
+        except Exception as e:
+            try:
+                logging.warning(
+                    "슬라이딩 당일 resync 실패 %s: %s", d_str, e, exc_info=True
+                )
+            except Exception:
+                pass
+
+        try:
+            codes = day["code"].astype(str).str.zfill(6)
+            day_u = day.loc[codes.isin(univ_set)].copy()
+        except Exception:
+            day_u = day
+
+        try:
+            _va = (
+                int(day_u["Valid_A"].astype(bool).sum())
+                if "Valid_A" in day_u.columns
+                else 0
+            )
+            _vb = (
+                int(day_u["Valid_B"].astype(bool).sum())
+                if "Valid_B" in day_u.columns
+                else 0
+            )
+            _tot = _va + _vb
+            _share = (_vb / _tot * 100.0) if _tot > 0 else 0.0
+        except Exception:
+            _va, _vb, _share = 0, 0, 0.0
+
+        return (d_str, day_u, _va, _vb, float(_share))
+    except Exception as e:
+        try:
+            logging.warning(
+                "슬라이딩 일봉 스코어 실패 %s: %s", d_str, e, exc_info=True
+            )
+        except Exception:
+            pass
+        return None
+
 
 def prepare_dynamic_universe(
     settings,
@@ -296,12 +458,15 @@ def prepare_dynamic_universe(
 
     # [Transition] 백테스트: 일별 레짐 게이트
     transition_gate_on = _settings_bool_sel(settings, "use_transition_gate", False)
+    g1_guard_on = _settings_bool_sel(settings, "use_rotation_a_guard_g1", False)
     transition_days = 0
     transition_hard_days = 0
     transition_regime_by_day: Dict[str, str] = {}
+    rotation_a_guard_g1_by_ref_day: Dict[str, bool] = {}
 
     index_vol_by_day: Dict[str, Dict[str, float]] = {}
-    if transition_gate_on:
+    idx5_by_day: Dict[str, float] = {}
+    if transition_gate_on or g1_guard_on:
         try:
             fetch_start_iv = fetch_start
             index_vol_by_day = _build_index_vol_by_day(
@@ -309,6 +474,25 @@ def prepare_dynamic_universe(
             )
         except Exception:
             index_vol_by_day = {}
+    if g1_guard_on:
+        try:
+            _ix = _load_kodex200_daily_close(data_manager, fetch_start, end_date)
+            if _ix is not None and not _ix.empty and "d" in _ix.columns and "close" in _ix.columns:
+                _ix = _ix.drop_duplicates("d").sort_values("d")
+                _closes = _ix.set_index("d")["close"].astype(float)
+                _days_ix = list(_closes.index)
+                for _i, _d in enumerate(_days_ix):
+                    if _i < 5:
+                        continue
+                    try:
+                        _c0 = float(_closes.iloc[_i - 5])
+                        _c1 = float(_closes.iloc[_i])
+                        if _c0 > 0:
+                            idx5_by_day[str(_d)] = (_c1 / _c0 - 1.0) * 100.0
+                    except Exception:
+                        continue
+        except Exception:
+            idx5_by_day = {}
 
     # 일자별 Valid 집계(슬라이딩 점수) → share_delta
     transition_stats_by_day: Dict[str, Dict[str, float]] = {}
@@ -325,84 +509,156 @@ def prepare_dynamic_universe(
         _all_ts = pd.DatetimeIndex(pd.to_datetime(df_all["time"])).asi8
     except Exception:
         _all_ts = None
+
+    # 당기 유니버스를 일자별로 미리 고정 (병렬 시 cache 경쟁 방지 + 반복 조회 제거)
+    univ_by_day: Dict[str, Set[str]] = {}
+    for _d_pre in trading_days_list:
+        try:
+            _u = get_period_universe(pd.Timestamp(_d_pre))
+            univ_by_day[_d_pre] = {str(c).zfill(6) for c in (_u or [])}
+        except Exception:
+            univ_by_day[_d_pre] = set()
+
+    # (d_str, d_ts, li, ri) 작업 목록
+    _jobs: List[Tuple[str, pd.Timestamp, int, int]] = []
     for _di, d_str in enumerate(trading_days_list):
         try:
             d_ts = pd.Timestamp(d_str).normalize()
             left_ts = d_ts - timedelta(days=lookback_n)
             right_ts = d_ts + timedelta(hours=23, minutes=59, seconds=59)
             if _all_ts is not None:
-                _li = int(np.searchsorted(_all_ts, pd.Timestamp(left_ts).value, side="left"))
-                _ri = int(np.searchsorted(_all_ts, pd.Timestamp(right_ts).value, side="right"))
-                win = df_all.iloc[_li:_ri].copy()
-            else:
-                win = df_all.loc[
-                    (df_all["time"] >= left_ts) & (df_all["time"] <= right_ts)
-                ].copy()
-        except Exception:
-            continue
-        if win is None or win.empty:
-            continue
-        try:
-            _score_dynamic_universe_daily_ohlcv(win, settings, with_b_debug=False)
-            _resync_batch_valid_to_period_universe(
-                win, get_period_universe, settings
-            )
-        except Exception as e:
-            try:
-                logging.warning(
-                    "슬라이딩 일봉 스코어 실패 %s: %s", d_str, e, exc_info=True
+                _li = int(
+                    np.searchsorted(
+                        _all_ts, pd.Timestamp(left_ts).value, side="left"
+                    )
                 )
-            except Exception:
-                pass
+                _ri = int(
+                    np.searchsorted(
+                        _all_ts, pd.Timestamp(right_ts).value, side="right"
+                    )
+                )
+            else:
+                _m = (df_all["time"] >= left_ts) & (df_all["time"] <= right_ts)
+                _idx = np.flatnonzero(_m.to_numpy())
+                if len(_idx) == 0:
+                    continue
+                _li, _ri = int(_idx[0]), int(_idx[-1]) + 1
+            if _ri > _li:
+                _jobs.append((d_str, d_ts, _li, _ri))
+        except Exception:
             continue
 
+    n_workers = _sliding_score_workers(settings if isinstance(settings, dict) else {})
+    if n_days > 1:
         try:
-            day_mask = win["time"].dt.normalize() == d_ts
-        except Exception:
-            day_mask = win["time"].dt.strftime("%Y-%m-%d") == d_str
-        day = win.loc[day_mask]
-        if day is None or day.empty:
-            continue
-
-        universe = get_period_universe(d_ts)
-        try:
-            univ_set = {str(c).zfill(6) for c in (universe or [])}
-            day_u = day.loc[day["code"].astype(str).str.zfill(6).isin(univ_set)].copy()
-        except Exception:
-            day_u = day.copy()
-
-        try:
-            _va = (
-                int(day_u["Valid_A"].astype(bool).sum())
-                if "Valid_A" in day_u.columns
-                else 0
+            logger_callback(
+                f"  [Batch] 슬라이딩 스코어 {len(_jobs)}일 "
+                f"(workers={n_workers}, lookback={lookback_n}"
+                f"{', process' if n_workers > 1 else ''})"
             )
-            _vb = (
-                int(day_u["Valid_B"].astype(bool).sum())
-                if "Valid_B" in day_u.columns
-                else 0
-            )
-            _tot = _va + _vb
-            _share = (_vb / _tot * 100.0) if _tot > 0 else 0.0
-            _t_day_list.append(d_str)
-            _t_va_list.append(_va)
-            _t_vb_list.append(_vb)
-            _t_share_list.append(_share)
         except Exception:
             pass
 
-        _day_snapshots.append((d_str, day_u))
+    _results_by_day: Dict[str, Tuple[pd.DataFrame, int, int, float]] = {}
 
-        if n_days > 40 and (_di + 1) % 40 == 0:
+    def _run_job(
+        job: Tuple[str, pd.Timestamp, int, int],
+    ) -> Optional[Tuple[str, pd.DataFrame, int, int, float]]:
+        _ds, _dts, _li, _ri = job
+        return _score_one_sliding_day(
+            df_all,
+            li=_li,
+            ri=_ri,
+            d_str=_ds,
+            d_ts=_dts,
+            settings=settings,
+            univ_set=univ_by_day.get(_ds, set()),
+        )
+
+    def _ingest(got: Optional[Tuple[str, pd.DataFrame, int, int, float]]) -> None:
+        if got is None:
+            return
+        _ds, day_u, _va, _vb, _share = got
+        _results_by_day[_ds] = (day_u, _va, _vb, _share)
+
+    _done = 0
+    if n_workers <= 1 or len(_jobs) <= 1:
+        for job in _jobs:
+            _ingest(_run_job(job))
+            _done += 1
+            if n_days > 40 and _done % 40 == 0:
+                try:
+                    logger_callback(
+                        f"  [Batch] 슬라이딩 스코어 진행 {_done}/{len(_jobs)}일…"
+                    )
+                except Exception:
+                    pass
+    else:
+        # Track C 등 CPU 바운드 → ProcessPool (스레드는 GIL 때문에 오히려 느림)
+        payloads: List[Tuple[str, str, int, int, Tuple[str, ...]]] = []
+        for _ds, _dts, _li, _ri in _jobs:
+            payloads.append(
+                (
+                    _ds,
+                    _dts.isoformat(),
+                    int(_li),
+                    int(_ri),
+                    tuple(sorted(univ_by_day.get(_ds, set()))),
+                )
+            )
+        try:
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                initializer=_sliding_pool_init,
+                initargs=(df_all, settings),
+            ) as pool:
+                for got in pool.map(
+                    _sliding_pool_job,
+                    payloads,
+                    chunksize=max(1, len(payloads) // max(1, n_workers * 4)),
+                ):
+                    _done += 1
+                    _ingest(got)
+                    if n_days > 40 and _done % 40 == 0:
+                        try:
+                            logger_callback(
+                                f"  [Batch] 슬라이딩 스코어 진행 "
+                                f"{_done}/{len(payloads)}일…"
+                            )
+                        except Exception:
+                            pass
+        except Exception as e:
+            # 병렬 실패 시 순차로 재시도 (결과 정합 우선)
             try:
-                logger_callback(
-                    f"  [Batch] 슬라이딩 스코어 진행 {_di + 1}/{n_days}일…"
+                logging.warning(
+                    "슬라이딩 프로세스 병렬 실패 → 순차 재시도: %s", e, exc_info=True
                 )
             except Exception:
                 pass
+            try:
+                logger_callback(
+                    "  [Batch] 슬라이딩 프로세스 병렬 실패 → 순차 재시도"
+                )
+            except Exception:
+                pass
+            _results_by_day.clear()
+            for job in _jobs:
+                _ingest(_run_job(job))
+
+    # 시간순 스냅샷·transition 집계 (병렬 완료 순서와 무관)
+    for d_str in trading_days_list:
+        packed = _results_by_day.get(d_str)
+        if packed is None:
+            continue
+        day_u, _va, _vb, _share = packed
+        _t_day_list.append(d_str)
+        _t_va_list.append(int(_va))
+        _t_vb_list.append(int(_vb))
+        _t_share_list.append(float(_share))
+        _day_snapshots.append((d_str, day_u))
 
     # transition share delta
-    if transition_gate_on and _t_day_list:
+    if (transition_gate_on or g1_guard_on) and _t_day_list:
         try:
             _tdf = pd.DataFrame(
                 {
@@ -434,10 +690,38 @@ def prepare_dynamic_universe(
             transition_stats_by_day = {}
 
     # 2-pass: transition 반영 후 Track A/B 스케줄
+    # G1 xs 임계: 기간 내 교차섹션 std 분위(프로브와 동일 방식)
+    _g1_xs_thr = 3.05
+    if g1_guard_on:
+        try:
+            _xs_pct = float(settings.get("rotation_a_guard_xs_pct", 50.0) or 50.0)
+            _xs_vals = [
+                float(v)
+                for v in xs_ret_std_by_day.values()
+                if v is not None and np.isfinite(float(v))
+            ]
+            if _xs_vals:
+                _g1_xs_thr = float(np.nanpercentile(_xs_vals, _xs_pct))
+        except Exception:
+            _g1_xs_thr = 3.05
+    try:
+        _g1_a_min = float(settings.get("rotation_a_guard_a_share_min", 0.60) or 0.60)
+    except (TypeError, ValueError):
+        _g1_a_min = 0.60
+    try:
+        # idx5_min=0 허용 → `or` 폴백 사용 금지
+        _g1_i5_raw = settings.get("rotation_a_guard_idx5_min", -1.0)
+        _g1_idx5_min = float(-1.0 if _g1_i5_raw is None else _g1_i5_raw)
+    except (TypeError, ValueError):
+        _g1_idx5_min = -1.0
+
     for d_str, day_u in _day_snapshots:
         day_max_a = max_s_a
         day_max_b = max_s_b
-        if transition_gate_on:
+        _tl = "OFF"
+        _va = 0
+        _vb = 0
+        if transition_gate_on or g1_guard_on:
             try:
                 _ts = transition_stats_by_day.get(d_str, {})
                 _va = int(_ts.get("va", 0))
@@ -459,17 +743,38 @@ def prepare_dynamic_universe(
                     index_day_ret=_iv.get("ret_pct"),
                 )
                 transition_regime_by_day[d_str] = _tl
-                _ignore_soft = bool(settings.get("transition_ignore_soft", False))
-                if _tl == "HARD":
-                    day_max_a, day_max_b = 0, 0
-                    transition_hard_days += 1
-                elif _tl == "TRANSITION" and not _ignore_soft:
-                    day_max_a, day_max_b = resolve_transition_regime_policy(
-                        "TRANSITION", day_max_a, day_max_b, settings
-                    )
-                    transition_days += 1
+                if transition_gate_on:
+                    _ignore_soft = bool(settings.get("transition_ignore_soft", False))
+                    if _tl == "HARD":
+                        day_max_a, day_max_b = 0, 0
+                        transition_hard_days += 1
+                    elif _tl == "TRANSITION" and not _ignore_soft:
+                        day_max_a, day_max_b = resolve_transition_regime_policy(
+                            "TRANSITION", day_max_a, day_max_b, settings
+                        )
+                        transition_days += 1
             except Exception:
                 transition_regime_by_day[d_str] = "OFF"
+                _tl = "OFF"
+
+        if g1_guard_on:
+            try:
+                _ignore_soft_g1 = bool(settings.get("transition_ignore_soft", False))
+                _reg_g1 = "OFF" if (_tl == "TRANSITION" and _ignore_soft_g1) else _tl
+                rotation_a_guard_g1_by_ref_day[d_str] = bool(
+                    is_rotation_a_guard_g1_day(
+                        regime=_reg_g1,
+                        idx5=idx5_by_day.get(d_str),
+                        xs_ret_std=xs_ret_std_by_day.get(d_str),
+                        valid_a=_va,
+                        valid_b=_vb,
+                        xs_threshold=_g1_xs_thr,
+                        a_share_min=_g1_a_min,
+                        idx5_min=_g1_idx5_min,
+                    )
+                )
+            except Exception:
+                rotation_a_guard_g1_by_ref_day[d_str] = False
 
         if (
             transition_gate_on
@@ -576,6 +881,15 @@ def prepare_dynamic_universe(
         logger_callback(
             f"  [Transition] 레짐 전환: TRANSITION {transition_days}일, HARD {transition_hard_days}일"
         )
+    if g1_guard_on:
+        try:
+            _g1_n = sum(1 for v in rotation_a_guard_g1_by_ref_day.values() if v)
+            logger_callback(
+                f"  [G1] 로테이션 A 가드 발동 {_g1_n}/{len(rotation_a_guard_g1_by_ref_day)}일 "
+                f"(xs_thr={_g1_xs_thr:.2f})"
+            )
+        except Exception:
+            pass
 
     a_days = len(schedule_a)
     b_days = len(schedule_b)
@@ -595,6 +909,7 @@ def prepare_dynamic_universe(
             transition_regime_by_day,
             schedule_c,
             schedule_c_meta,
+            rotation_a_guard_g1_by_ref_day,
         )
     return schedule, schedule_a, schedule_b, transition_regime_by_day
 

@@ -525,6 +525,46 @@ def classify_transition_regime(
         return "OFF"
 
 
+def is_rotation_a_guard_g1_day(
+    *,
+    regime: str,
+    idx5: Optional[float],
+    xs_ret_std: Optional[float],
+    valid_a: int,
+    valid_b: int,
+    xs_threshold: float,
+    a_share_min: float = 0.60,
+    idx5_min: float = -1.0,
+) -> bool:
+    """
+    G1 로테이션 A 가드 (전일 통계 기준).
+
+    OFF · 지수 5일 수익률≥idx5_min · 종목분산 xs≥임계 · A비중≥a_share_min
+    → 그날 신규 Type A S1 억제에 사용.
+    """
+    try:
+        if str(regime or "OFF").strip().upper() != "OFF":
+            return False
+        if idx5 is None or not np.isfinite(float(idx5)):
+            return False
+        if float(idx5) < float(idx5_min):
+            return False
+        if xs_ret_std is None or not np.isfinite(float(xs_ret_std)):
+            return False
+        if float(xs_ret_std) < float(xs_threshold):
+            return False
+        va = max(0, int(valid_a))
+        vb = max(0, int(valid_b))
+        tot = va + vb
+        if tot <= 0:
+            return False
+        if (va / float(tot)) < float(a_share_min):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def resolve_transition_regime_policy(
     level: str,
     day_max_a: int,
@@ -823,7 +863,9 @@ def resolve_transition_gate_for_live(
         "block_s2": False,
     }
     if not _settings_bool_sel(settings, "use_transition_gate", False):
-        return result
+        # Transition 슬롯 게이트는 꺼져 있어도 G1만 켤 수 있음 → 아래 FDR 경로 유지
+        if not _settings_bool_sel(settings, "use_rotation_a_guard_g1", False):
+            return result
     if data_manager is None:
         log("⚠️ [Transition] data_manager 없음 — 게이트 OFF")
         return result
@@ -936,6 +978,77 @@ def resolve_transition_gate_for_live(
                 "TRANSITION", max_a, max_b, settings
             )
         block_s1, block_s2 = resolve_transition_runtime_blocks(regime, settings)
+        block_type_a = False
+        try:
+            if _settings_bool_sel(settings, "use_rotation_a_guard_g1", False):
+                # idx5: KODEX 5일 수익률
+                _idx5: Optional[float] = None
+                try:
+                    _ix = _load_kodex200_daily_close(
+                        data_manager,
+                        (as_of_dt - timedelta(days=40)).strftime("%Y-%m-%d"),
+                        end_s,
+                    )
+                    if (
+                        _ix is not None
+                        and not _ix.empty
+                        and "d" in _ix.columns
+                        and "close" in _ix.columns
+                    ):
+                        _ix = _ix.drop_duplicates("d").sort_values("d")
+                        _closes = _ix.set_index("d")["close"].astype(float)
+                        if end_s in _closes.index:
+                            _keys = list(_closes.index)
+                            _ii = _keys.index(end_s)
+                            if _ii >= 5:
+                                _c0 = float(_closes.iloc[_ii - 5])
+                                _c1 = float(_closes.iloc[_ii])
+                                if _c0 > 0:
+                                    _idx5 = (_c1 / _c0 - 1.0) * 100.0
+                except Exception:
+                    _idx5 = None
+                _xs_thr = 3.05
+                try:
+                    _xs_pct = float(settings.get("rotation_a_guard_xs_pct", 50.0) or 50.0)
+                    _xsdf = df_all.sort_values(["code", "time"]).copy()
+                    _xsdf["ret1"] = _xsdf.groupby("code")["close"].pct_change()
+                    _xs_s = _xsdf.groupby("time")["ret1"].std() * 100.0
+                    _xs_vals = [
+                        float(v) for v in _xs_s.values if v is not None and np.isfinite(float(v))
+                    ]
+                    if _xs_vals:
+                        _xs_thr = float(np.nanpercentile(_xs_vals, _xs_pct))
+                except Exception:
+                    pass
+                try:
+                    _a_min = float(settings.get("rotation_a_guard_a_share_min", 0.60) or 0.60)
+                except (TypeError, ValueError):
+                    _a_min = 0.60
+                try:
+                    # idx5_min=0 허용 → `or` 폴백 사용 금지
+                    _i5_raw = settings.get("rotation_a_guard_idx5_min", -1.0)
+                    _i5min = float(-1.0 if _i5_raw is None else _i5_raw)
+                except (TypeError, ValueError):
+                    _i5min = -1.0
+                _reg_g1 = regime
+                if regime == "TRANSITION" and bool(
+                    settings.get("transition_ignore_soft", False)
+                ):
+                    _reg_g1 = "OFF"
+                block_type_a = bool(
+                    is_rotation_a_guard_g1_day(
+                        regime=_reg_g1,
+                        idx5=_idx5,
+                        xs_ret_std=xs if np.isfinite(xs) else None,
+                        valid_a=va,
+                        valid_b=vb,
+                        xs_threshold=_xs_thr,
+                        a_share_min=_a_min,
+                        idx5_min=_i5min,
+                    )
+                )
+        except Exception:
+            block_type_a = False
         _ret_s = iv.get("ret_pct")
         _ret_txt = (
             f"{float(_ret_s):+.2f}%"
@@ -946,7 +1059,8 @@ def resolve_transition_gate_for_live(
             f"[Transition] {end_s} 레짐={regime} Valid_A={va} Valid_B={vb} "
             f"share={share:.1f}% d5={d5 if d5 is not None else 'n/a'} "
             f"idx_ret={_ret_txt} "
-            f"→ 슬롯 A={slots_a}/B={slots_b} S1차단={block_s1} S2차단={block_s2}"
+            f"→ 슬롯 A={slots_a}/B={slots_b} S1차단={block_s1} S2차단={block_s2} "
+            f"G1_A차단={block_type_a}"
         )
         result.update(
             {
@@ -955,6 +1069,7 @@ def resolve_transition_gate_for_live(
                 "slots_b": slots_b,
                 "block_s1": block_s1,
                 "block_s2": block_s2,
+                "block_type_a": block_type_a,
                 "as_of": end_s,
             }
         )
