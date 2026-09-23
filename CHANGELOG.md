@@ -13,6 +13,10 @@
 
 ---
 
+## 0.21.8 (2026-09-24)
+
+- **DEFAULT_SETTINGS 동기화**: 현재 운용 settings 반영 — `transition_prior_share_min` 40, Type C RSI 하한 40·캔들확인 0·이탈확인봉 2, Track C 최소 거래대금 220억.
+
 ## 0.21.7 (2026-09-23)
 
 - **백테스트 리포트 Type C 집계**: 분석 통계에 Type C(박스 되돌림) 카드·건수/실현손익을 추가. 가상 체결 리포트 Type×Stage 표에도 C열 반영.
