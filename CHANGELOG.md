@@ -13,6 +13,13 @@
 
 ---
 
+## 0.22.2 (2026-09-25)
+
+- **지수 DD 게이트 폐기**: Index DD(S1 쿨다운) 설정·런타임·선정 API 제거.
+- **KODEX200 구성 유니버스 폐기**: 감시·선정·BT 유니버스는 KOSPI 시총 상위 N만 사용. (레짐용 KODEX200 ETF 지수는 유지)
+- **레짐 게이트 UI 정리**: 전환 감지·G1·R5·TRANSITION 대응·HARD를 역할별 박스로 분리.
+- **DEFAULT_SETTINGS 동기화**: 현재 운용 `settings.json` 반영 (`s1_simul_balance_tie_mode=always` 등).
+
 ## 0.22.1 (2026-09-24)
 
 - **레짐 재계산 버튼**: 대시보드 「재시작」을 「레짐 재계산」으로 교체. 디스크 캐시 무시 후 Transition/G1/R5 FDR 강제 재계산.

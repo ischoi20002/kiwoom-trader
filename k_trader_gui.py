@@ -272,6 +272,12 @@ class KiwoomApp:
         self.selection_monitor_start_service = SelectionMonitorStartService(self)
 
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        # KODEX200 구성 유니버스 폐기 → 항상 KOSPI200
+        try:
+            if isinstance(self.settings, dict):
+                self.settings["universe_index_choice"] = "KOSPI200"
+        except Exception:
+            pass
         self._sync_ka10080_rest_pacing_from_settings()
         self._configure_ka10080_fetch_diag()
         # Tick dispatch 주기는 SignalEngine이 메인 스레드를 과점유할 때 UI가 멎는 문제를 직접 줄이므로,
@@ -450,17 +456,10 @@ class KiwoomApp:
         from core.watchlist_store import WatchlistStore
         from core.signal_engine import SignalEngine
         self.watchlist_store = WatchlistStore(logger_callback=self.log)
-        # 선택한 유니버스 인덱스 CSV만 종목명 캐시로 선적재 (미선택 kodex200 강제 로드 방지)
+        # KOSPI 유니버스 CSV만 종목명 캐시로 선적재 (KODEX200 구성 유니버스 폐기)
         try:
-            _idx = "KODEX200"
-            try:
-                _idx = str(
-                    (self.settings or {}).get("universe_index_choice", "KODEX200")
-                ).strip().upper()
-            except Exception:
-                _idx = "KODEX200"
             self.watchlist_store.preload_from_universe_index(
-                _idx, logger_callback=self.log
+                "KOSPI200", logger_callback=self.log
             )
         except Exception:
             pass
@@ -753,6 +752,12 @@ class KiwoomApp:
 
     def reset_ui_tabs(self):
         self.settings = self.config_handler.load_settings(DEFAULT_SETTINGS)
+        # KODEX200 구성 유니버스 폐기 → 항상 KOSPI200
+        try:
+            if isinstance(self.settings, dict):
+                self.settings["universe_index_choice"] = "KOSPI200"
+        except Exception:
+            pass
         self._sync_ka10080_rest_pacing_from_settings()
         self._configure_ka10080_fetch_diag()
         try:
@@ -1229,9 +1234,20 @@ class KiwoomApp:
 
     def get_kospi_200(self, force=False):
         try:
-            idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+            idx_choice = "KOSPI200"
+            try:
+                from strategy.universe_codes import normalize_universe_index_choice
+
+                idx_choice = normalize_universe_index_choice(
+                    (self.settings or {}).get("universe_index_choice")
+                )
+            except Exception:
+                idx_choice = "KOSPI200"
+            # 구 설정에 KODEX200 이 남아 있어도 강제 마이그레이션
+            if isinstance(self.settings, dict):
+                self.settings["universe_index_choice"] = "KOSPI200"
         except Exception:
-            idx_choice = "KODEX200"
+            idx_choice = "KOSPI200"
         self.log(f"[Data] 유니버스({idx_choice}) 로드...")
         df_200 = self.data_manager.get_kospi_list(
             count=200,

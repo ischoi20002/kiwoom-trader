@@ -27,7 +27,6 @@ from strategy.selection_live_aux import (
     _merge_dual_track_picks,
 )
 from strategy.selection_regime import (
-    resolve_index_dd_gate_for_live,
     resolve_transition_gate_for_live,
 )
 from strategy.selection_scoring import (
@@ -68,13 +67,12 @@ def select_monitoring_targets(
     logger_callback(f"[Select] [전략 종목 선정] ({t_str}) 분석 시작...")
 
     try:
-        univ_choice = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
-        if univ_choice in ("KOSPI", "KOSPI200"):
-            univ_choice = "KOSPI200"
-        else:
-            univ_choice = "KODEX200"
+        from strategy.universe_codes import normalize_universe_index_choice
+
+        # KODEX200 구성 유니버스 폐기 — 항상 KOSPI200
+        _ = normalize_universe_index_choice(settings.get("universe_index_choice"))
     except Exception:
-        univ_choice = "KODEX200"
+        pass
 
     try:
         _src = str(selection_ohlcv_source or "api_only").strip().lower()
@@ -209,93 +207,61 @@ def select_monitoring_targets(
             [{"Code": t, "Name": name_map.get(t, t)} for t in tickers]
         )
     else:
-        # 실시간: 선택값에 따라 유니버스 소스 분기
-        if univ_choice == "KOSPI200":
-            input_file = "kospi_universe.csv"
-            df_top = pd.DataFrame()
+        # 실시간: KOSPI 시총 상위 N (KODEX200 구성 유니버스 폐기)
+        input_file = "kospi_universe.csv"
+        df_top = pd.DataFrame()
+        top_n = 200
+        try:
+            top_n = int(settings.get("kospi_top_n", 200))
+        except Exception:
             top_n = 200
+        try:
+            _ = load_kospi_universe_codes(
+                logger_callback=logger_callback,
+                top_n=top_n,
+                allow_fdr_generate=False,
+                daily_refresh=True,
+                refresh_mode=str(settings.get("kospi_universe_refresh", "quarterly")),
+            )
+
+            if os.path.exists(input_file):
+                df_top = pd.read_csv(input_file, dtype=str)
+                if "종목코드" in df_top.columns:
+                    df_top.rename(
+                        columns={"종목코드": "Code", "종목명": "Name"},
+                        inplace=True,
+                    )
+                if "Code" in df_top.columns and "Name" not in df_top.columns:
+                    df_top["Name"] = df_top["Code"]
+                df_top["Code"] = df_top["Code"].astype(str).str.zfill(6)
+                # 유니버스는 파일 내 상위 리스트를 top_n으로 슬라이스
+                df_top = df_top.head(int(top_n)).copy()
+        except Exception as ex:
+            logger_callback(f"⚠️ [선정] KOSPI200 csv 로드 실패, FDR 폴백: {ex}")
+
+        if df_top is None or df_top.empty:
+            # csv가 없거나 스키마가 깨진 경우(최후 수단)
             try:
-                top_n = int(settings.get("kospi_top_n", 200))
-            except Exception:
-                top_n = 200
-            try:
-                _ = load_kospi_universe_codes(
+                tickers = load_kospi_universe_codes(
                     logger_callback=logger_callback,
                     top_n=top_n,
                     allow_fdr_generate=False,
                     daily_refresh=True,
                     refresh_mode=str(settings.get("kospi_universe_refresh", "quarterly")),
                 )
-
-                if os.path.exists(input_file):
-                    df_top = pd.read_csv(input_file, dtype=str)
-                    if "종목코드" in df_top.columns:
-                        df_top.rename(
-                            columns={"종목코드": "Code", "종목명": "Name"},
-                            inplace=True,
-                        )
-                    if "Code" in df_top.columns and "Name" not in df_top.columns:
-                        df_top["Name"] = df_top["Code"]
-                    df_top["Code"] = df_top["Code"].astype(str).str.zfill(6)
-                    # 유니버스는 파일 내 상위 리스트를 top_n으로 슬라이스
-                    df_top = df_top.head(int(top_n)).copy()
-            except Exception as ex:
-                logger_callback(f"⚠️ [선정] KOSPI200 csv 로드 실패, FDR 폴백: {ex}")
-
-            if df_top is None or df_top.empty:
-                # csv가 없거나 스키마가 깨진 경우(최후 수단)
-                try:
-                    tickers = load_kospi_universe_codes(
-                        logger_callback=logger_callback,
-                        top_n=top_n,
-                        allow_fdr_generate=False,
-                        daily_refresh=True,
-                        refresh_mode=str(settings.get("kospi_universe_refresh", "quarterly")),
+                df_fdr_names = fdr.StockListing("KOSPI")
+                name_map = dict(
+                    zip(
+                        df_fdr_names["Code"].astype(str).str.zfill(6),
+                        df_fdr_names["Name"],
                     )
-                    df_fdr_names = fdr.StockListing("KOSPI")
-                    name_map = dict(
-                        zip(
-                            df_fdr_names["Code"].astype(str).str.zfill(6),
-                            df_fdr_names["Name"],
-                        )
-                    )
-                    df_top = pd.DataFrame(
-                        [{"Code": t, "Name": name_map.get(t, t)} for t in tickers]
-                    )
-                except Exception as ex2:
-                    logger_callback(f"[Error] KOSPI200 유니버스 구성 실패: {ex2}")
-                    df_top = pd.DataFrame()
-        else:
-            # KODEX200: 기존 로직 유지
-            try:
-                from core.defaults import DEFAULT_SETTINGS
-
-                _merged = dict(DEFAULT_SETTINGS)
-                _merged.update(settings or {})
-            except Exception:
-                _merged = dict(settings or {})
-            try:
-                from core.kodex200_universe import resolve_kodex200_universe
-
-                df_top = resolve_kodex200_universe(
-                    _merged, count=200, log=logger_callback
                 )
-            except Exception as ex:
-                logger_callback(f"⚠️ [선정] KODEX200 유니버스 모듈 실패, 레거시 경로로 시도: {ex}")
-                input_file = "kodex200.csv"
-                if os.path.exists(input_file):
-                    df_top = pd.read_csv(
-                        input_file, dtype={"종목코드": str, "Code": str}
-                    )
-                    if "종목코드" in df_top.columns:
-                        df_top.rename(
-                            columns={"종목코드": "Code", "종목명": "Name"},
-                            inplace=True,
-                        )
-                else:
-                    df_kospi = fdr.StockListing("KOSPI")
-                    df_kospi = df_kospi[df_kospi["Code"].str.endswith("0")]
-                    df_top = df_kospi.sort_values(by="Marcap", ascending=False).head(200)
+                df_top = pd.DataFrame(
+                    [{"Code": t, "Name": name_map.get(t, t)} for t in tickers]
+                )
+            except Exception as ex2:
+                logger_callback(f"[Error] KOSPI200 유니버스 구성 실패: {ex2}")
+                df_top = pd.DataFrame()
 
         if df_top is None or df_top.empty:
             logger_callback("[Error] 구성 종목 리스트를 확보하지 못했습니다.")
@@ -670,30 +636,7 @@ def select_monitoring_targets(
         settings.pop("transition_runtime_block_s1", None)
         settings.pop("transition_runtime_block_s2", None)
 
-    # [IndexDD] KODEX 급락 쿨다운 — S1만 OR
     settings.pop("index_dd_runtime_block_s1", None)
-    if _settings_bool_sel(settings, "use_index_dd_gate", False):
-        try:
-            _idd = resolve_index_dd_gate_for_live(
-                settings,
-                data_manager,
-                target_date,
-                logger_callback,
-            )
-            _idd_block = bool(_idd.get("block_s1", False))
-            settings["index_dd_runtime_block_s1"] = _idd_block
-            if _idd_block:
-                settings["transition_runtime_block_s1"] = True
-                try:
-                    logger_callback("[IndexDD] S1 신규 차단 (급락 쿨다운)")
-                except Exception:
-                    pass
-        except Exception as e:
-            try:
-                logger_callback(f"⚠️ [IndexDD] 정책 적용 실패: {e}")
-            except Exception:
-                pass
-            settings.pop("index_dd_runtime_block_s1", None)
 
     merged_rows = _merge_dual_track_picks(
         selected,

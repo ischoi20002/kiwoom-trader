@@ -10,6 +10,7 @@ from strategy.selection_errors import SelectionDbStaleError
 from strategy.universe_codes import (
     load_kodex200_universe_codes,
     load_kospi_universe_codes,
+    normalize_universe_index_choice,
     resolve_universe_codes,
     _maybe_generate_kospi200_csv,
     _maybe_generate_kospi_universe_csv,
@@ -55,8 +56,6 @@ from strategy.selection_regime import (
     resolve_transition_regime_policy,
     resolve_transition_runtime_blocks,
     _load_kodex200_daily_close,
-    build_index_dd_s1_block_by_day,
-    resolve_index_dd_gate_for_live,
     resolve_transition_gate_for_live,
     compute_transition_regime_history,
 )
@@ -83,6 +82,7 @@ __all__ = [
     "SelectionDbStaleError",
     "load_kodex200_universe_codes",
     "load_kospi_universe_codes",
+    "normalize_universe_index_choice",
     "resolve_universe_codes",
     "calculate_rsi",
     "calculate_technical_indicators",
@@ -93,8 +93,6 @@ __all__ = [
     "is_rotation_a_guard_g1_day",
     "resolve_transition_regime_policy",
     "resolve_transition_runtime_blocks",
-    "build_index_dd_s1_block_by_day",
-    "resolve_index_dd_gate_for_live",
     "resolve_transition_gate_for_live",
     "compute_transition_regime_history",
     "select_monitoring_targets",

@@ -30,7 +30,6 @@ from strategy.selection_regime import (
 )
 from strategy.selection_scoring import _settings_bool_sel
 from strategy.selection_track_batch import _resync_batch_valid_to_period_universe
-from strategy.universe_codes import load_kodex200_universe_codes
 
 # 슬라이딩 창 복사 시 필요한 원시 OHLCV 열만 유지 (지표는 일자마다 재생성)
 _SLIDING_OHLCV_COLS: Tuple[str, ...] = (
@@ -234,12 +233,7 @@ def prepare_dynamic_universe(
     use_period_univ = refresh_mode != "monthly"
 
     def get_period_universe(dt):
-        """유니버스: KOSPI200=marcap as-of(갱신주기), KODEX200=고정 CSV."""
-        try:
-            idx_raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
-        except Exception:
-            idx_raw = "KODEX200"
-        idx_choice = "KOSPI200" if idx_raw in ("KOSPI", "KOSPI200") else "KODEX200"
+        """유니버스: KOSPI 시총 상위 N (marcap as-of, 갱신주기)."""
         d_ts = pd.Timestamp(dt).normalize()
         cache_key = universe_period_key(d_ts, refresh_mode)
         if cache_key in universe_cache:
@@ -250,29 +244,26 @@ def prepare_dynamic_universe(
                 top_n = int(settings.get("kospi_top_n", 200) or 200)
             except Exception:
                 top_n = 200
-            if idx_choice == "KOSPI200":
-                tickers, asof_str = get_kospi_top_n_for_refresh(
-                    d_ts,
-                    top_n,
-                    refresh_mode,
-                    logger_callback=(
-                        None if refresh_mode == "daily" else logger_callback
-                    ),
-                )
-                if (
-                    tickers
-                    and refresh_mode == "monthly"
-                    and logger_callback is not None
-                ):
-                    try:
-                        logger_callback(
-                            f"    - [Marcap] {d_ts.strftime('%Y%m')} as-of {asof_str or '?'} "
-                            f"KOSPI top{top_n} → {len(tickers)}종목"
-                        )
-                    except Exception:
-                        pass
-            else:
-                tickers = load_kodex200_universe_codes(logger_callback=logger_callback)
+            tickers, asof_str = get_kospi_top_n_for_refresh(
+                d_ts,
+                top_n,
+                refresh_mode,
+                logger_callback=(
+                    None if refresh_mode == "daily" else logger_callback
+                ),
+            )
+            if (
+                tickers
+                and refresh_mode == "monthly"
+                and logger_callback is not None
+            ):
+                try:
+                    logger_callback(
+                        f"    - [Marcap] {d_ts.strftime('%Y%m')} as-of {asof_str or '?'} "
+                        f"KOSPI top{top_n} → {len(tickers)}종목"
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 logging.warning("배치 유니버스 로드 실패: %s", e, exc_info=True)
@@ -328,14 +319,7 @@ def prepare_dynamic_universe(
         logger_callback(
             "  [Warning] 유니버스 파일에서 유니버스를 읽지 못해 추가 시도합니다."
         )
-        try:
-            idx_raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
-        except Exception:
-            idx_raw = "KODEX200"
-        idx_choice = "KOSPI200" if idx_raw in ("KOSPI", "KOSPI200") else "KODEX200"
-        candidate_files = ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]
-        if idx_choice == "KOSPI200":
-            candidate_files = ["kospi_universe.csv", "kospi_top_500.csv"]
+        candidate_files = ["kospi_universe.csv", "kospi_top_500.csv"]
         for f_name in candidate_files:
                 if os.path.exists(f_name):
                     try:
@@ -348,8 +332,7 @@ def prepare_dynamic_universe(
                             except Exception:
                                 top_n = 200
                             vals = df_k[c_col].apply(lambda x: str(x).zfill(6)).tolist()
-                            if idx_choice == "KOSPI200":
-                                vals = vals[: int(top_n)]
+                            vals = vals[: int(top_n)]
                             union_tickers = set(vals)
                             logger_callback(f"    - {f_name}에서 {len(union_tickers)}종목 로드 완료")
                             break
@@ -1106,22 +1089,14 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         if cache_key in union_cache:
             return union_cache[cache_key]
         try:
-            try:
-                idx_raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
-            except Exception:
-                idx_raw = "KODEX200"
-            idx_choice = "KOSPI200" if idx_raw in ("KOSPI", "KOSPI200") else "KODEX200"
             top_n = 200
             try:
                 top_n = int(settings.get("kospi_top_n", 200) or 200)
             except Exception:
                 top_n = 200
-            if idx_choice == "KOSPI200":
-                tickers, _ = get_kospi_top_n_for_refresh(
-                    d_ts, top_n, refresh_mode, logger_callback=None
-                )
-            else:
-                tickers = load_kodex200_universe_codes(logger_callback=None)
+            tickers, _ = get_kospi_top_n_for_refresh(
+                d_ts, top_n, refresh_mode, logger_callback=None
+            )
         except Exception:
             tickers = []
         if tickers:
@@ -1154,14 +1129,7 @@ def diagnose_dynamic_universe_selection_by_trading_day(
         union_tickers = set()
 
     if not union_tickers:
-        try:
-            _raw = str(settings.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
-        except Exception:
-            _raw = "KODEX200"
-        _idx = "KOSPI200" if _raw in ("KOSPI", "KOSPI200") else "KODEX200"
-        files = ["kodex200.csv", "kodex_200.csv", "kospi_top_500.csv"]
-        if _idx == "KOSPI200":
-            files = ["kospi_universe.csv", "kospi_top_500.csv"]
+        files = ["kospi_universe.csv", "kospi_top_500.csv"]
         for f_name in files:
                 if not os.path.isfile(f_name):
                     continue

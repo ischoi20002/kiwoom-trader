@@ -42,44 +42,36 @@ from utils.fee_rates import fee_decimal_rates_backtest
 
 class TradingStrategy:
     """[v6.4] 실시간 감시와 백테스팅이 공유하는 매매 전략 엔진"""
-    # 유니버스 인덱스 소스별( KODEX200 / KOSPI200 ) 코드->이름 맵 캐시
+    # 유니버스 코드->이름 맵 캐시 (KOSPI 시총 상위)
     _name_map_by_choice: dict[str, dict[str, str]] = {}
     
     @staticmethod
-    def get_stock_name_map(universe_index_choice: str = "KODEX200"):
-        """종목코드 -> 종목명 맵핑 로드.
+    def get_stock_name_map(universe_index_choice: str = "KOSPI200"):
+        """종목코드 -> 종목명 맵핑 로드 (``kospi_universe.csv``).
 
-        Parameters
-        ----------
-        universe_index_choice:
-            - 'KODEX200': kodex200.csv
-            - 'KOSPI200': kospi_universe.csv
+        KODEX200 구성 유니버스는 폐기되어 항상 KOSPI CSV를 사용한다.
         """
         try:
-            choice = str(universe_index_choice).strip().upper()
+            from strategy.universe_codes import normalize_universe_index_choice
+
+            choice = normalize_universe_index_choice(universe_index_choice)
         except Exception:
-            choice = "KODEX200"
-        if choice in ("KOSPI", "KOSPI200"):
             choice = "KOSPI200"
-        else:
-            choice = "KODEX200"
 
         cached = TradingStrategy._name_map_by_choice.get(choice)
         if cached is not None:
             return cached
 
-        csv_path = "kodex200.csv"
-        if choice == "KOSPI200":
-            csv_path = "kospi_universe.csv"
+        csv_path = "kospi_universe.csv"
 
         try:
             if not os.path.exists(csv_path):
-                # 다른 kodex_*.csv/kodex*.csv 또는 kospi_universe/*.csv 파일이 있는지 확인
                 import glob
-                if choice == "KOSPI200":
-                    files = glob.glob("kospi_universe*.csv") + glob.glob("kospi_*.csv") + glob.glob("kospi200*.csv")
-                else:
-                    files = glob.glob("kodex*.csv") + glob.glob("kospi_*.csv")
+                files = (
+                    glob.glob("kospi_universe*.csv")
+                    + glob.glob("kospi_*.csv")
+                    + glob.glob("kospi200*.csv")
+                )
                 if files:
                     csv_path = files[0]
                 else:
@@ -87,7 +79,7 @@ class TradingStrategy:
                     return {}
             
             if os.path.exists(csv_path):
-                # 기존 kodex200.csv 포맷(종목코드/종목명)과 kospi200.csv 포맷(Code/Name) 모두 허용
+                # kospi_universe.csv 포맷(종목코드/종목명 또는 Code/Name) 허용
                 df_name = pd.read_csv(csv_path, dtype=str, encoding='utf-8-sig')
 
                 if '종목코드' in df_name.columns:

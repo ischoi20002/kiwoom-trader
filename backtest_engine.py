@@ -489,7 +489,7 @@ class SimpleBacktester:
 
         self.buy_f_rate, self.sell_f_rate = fee_decimal_rates_backtest(self.settings)
         
-        idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+        idx_choice = self.settings.get("universe_index_choice", "KOSPI200")
         stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         stock_name = stock_name_map.get(code, code)
 

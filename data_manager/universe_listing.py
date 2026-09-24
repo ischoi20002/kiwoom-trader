@@ -131,27 +131,26 @@ class UniverseListingMixin:
 
     def get_kospi_list(self, count=200, force=False, settings=None, universe_log=None):
         """
-        KODEX200 / KOSPI200 유니버스 확보.
+        KOSPI 시총 상위 유니버스 확보 (KODEX200 구성 유니버스 폐기).
 
-        count<=200:
-        - KOSPI200: ``kospi_universe.csv``
-        - KODEX200: ``core.kodex200_universe.resolve_kodex200_universe``
+        count<=200: ``kospi_universe.csv`` / marcap as-of
         """
         import os
 
         import FinanceDataReader as fdr
         import pandas as pd
 
-        idx_choice = "KODEX200"
-        if isinstance(settings, dict):
-            try:
-                idx_choice = str(settings.get("universe_index_choice", "KODEX200")).strip().upper()
-            except Exception:
-                idx_choice = "KODEX200"
-        if idx_choice in ("KOSPI", "KOSPI200"):
-            idx_choice = "KOSPI200"
-        else:
-            idx_choice = "KODEX200"
+        try:
+            from strategy.universe_codes import normalize_universe_index_choice
+
+            # KODEX200 구성 유니버스 폐기 — 항상 KOSPI200
+            _ = normalize_universe_index_choice(
+                (settings or {}).get("universe_index_choice")
+                if isinstance(settings, dict)
+                else None
+            )
+        except Exception:
+            pass
 
         kospi_top_n = 200
         effective_count = int(count)
@@ -160,12 +159,11 @@ class UniverseListingMixin:
                 kospi_top_n = int(settings.get("kospi_top_n", 200))
         except Exception:
             kospi_top_n = 200
-        if idx_choice == "KOSPI200":
-            effective_count = min(effective_count, kospi_top_n)
+        effective_count = min(effective_count, kospi_top_n)
 
         cache_file = (
-            "kospi_universe.csv" if (count <= 200 and idx_choice == "KOSPI200") else "kodex_200.csv"
-        ) if count <= 200 else f"kospi_top_{count}.csv"
+            "kospi_universe.csv" if count <= 200 else f"kospi_top_{count}.csv"
+        )
 
         def _ulog(msg: str) -> None:
             try:
@@ -178,75 +176,48 @@ class UniverseListingMixin:
 
         try:
             if count <= 200:
-                if idx_choice == "KOSPI200":
-                    # kospi_universe_refresh 주기(기본 분기) marcap as-of → kospi_universe.csv
-                    try:
-                        _rmode = "quarterly"
-                        try:
-                            if isinstance(settings, dict):
-                                _rmode = str(
-                                    settings.get("kospi_universe_refresh", "quarterly")
-                                )
-                        except Exception:
-                            _rmode = "quarterly"
-                        if force:
-                            from core.marcap_universe import refresh_kospi_universe_csv_from_marcap
-
-                            refresh_kospi_universe_csv_from_marcap(
-                                kospi_universe_path=cache_file,
-                                target_n=max(400, effective_count),
-                                logger_callback=_ulog if universe_log is not None else None,
-                                refresh_mode=_rmode,
-                            )
-                        else:
-                            from core.marcap_universe import ensure_realtime_kospi_universe_csv
-
-                            ensure_realtime_kospi_universe_csv(
-                                kospi_universe_path=cache_file,
-                                target_n=max(400, effective_count),
-                                logger_callback=_ulog if universe_log is not None else None,
-                                refresh_mode=_rmode,
-                            )
-                        if os.path.exists(cache_file) and os.path.getsize(cache_file) > 10:
-                            df = pd.read_csv(cache_file, dtype=str)
-                            if "종목코드" in df.columns and "Code" not in df.columns:
-                                df.rename(columns={"종목코드": "Code", "종목명": "Name"}, inplace=True)
-                            if "Code" not in df.columns:
-                                return pd.DataFrame()
-                            if "Name" not in df.columns:
-                                df["Name"] = df["Code"]
-                            df["Code"] = df["Code"].astype(str).str.zfill(6)
-                            df_out = df[["Code", "Name"]].head(effective_count).copy()
-                            return df_out
-                    except Exception:
-                        pass
-
-                    return pd.DataFrame()
-
-                # KODEX200: 기존 resolve_kodex200_universe 로딩 유지
-                merged: dict = {}
+                # kospi_universe_refresh 주기(기본 분기) marcap as-of → kospi_universe.csv
                 try:
-                    from core.defaults import DEFAULT_SETTINGS
+                    _rmode = "quarterly"
+                    try:
+                        if isinstance(settings, dict):
+                            _rmode = str(
+                                settings.get("kospi_universe_refresh", "quarterly")
+                            )
+                    except Exception:
+                        _rmode = "quarterly"
+                    if force:
+                        from core.marcap_universe import refresh_kospi_universe_csv_from_marcap
 
-                    merged.update(DEFAULT_SETTINGS)
+                        refresh_kospi_universe_csv_from_marcap(
+                            kospi_universe_path=cache_file,
+                            target_n=max(400, effective_count),
+                            logger_callback=_ulog if universe_log is not None else None,
+                            refresh_mode=_rmode,
+                        )
+                    else:
+                        from core.marcap_universe import ensure_realtime_kospi_universe_csv
+
+                        ensure_realtime_kospi_universe_csv(
+                            kospi_universe_path=cache_file,
+                            target_n=max(400, effective_count),
+                            logger_callback=_ulog if universe_log is not None else None,
+                            refresh_mode=_rmode,
+                        )
+                    if os.path.exists(cache_file) and os.path.getsize(cache_file) > 10:
+                        df = pd.read_csv(cache_file, dtype=str)
+                        if "종목코드" in df.columns and "Code" not in df.columns:
+                            df.rename(columns={"종목코드": "Code", "종목명": "Name"}, inplace=True)
+                        if "Code" not in df.columns:
+                            return pd.DataFrame()
+                        if "Name" not in df.columns:
+                            df["Name"] = df["Code"]
+                        df["Code"] = df["Code"].astype(str).str.zfill(6)
+                        df_out = df[["Code", "Name"]].head(effective_count).copy()
+                        return df_out
                 except Exception:
                     pass
-                if isinstance(settings, dict):
-                    merged.update(settings)
-                from core.kodex200_universe import resolve_kodex200_universe
 
-                df = resolve_kodex200_universe(merged, count=200, log=_ulog)
-                if df is not None and not getattr(df, "empty", True):
-                    try:
-                        df.to_csv(cache_file, index=False, encoding="utf-8-sig")
-                    except Exception as ee:
-                        try:
-                            print(
-                                f"DEBUG ERROR [DataManagerV2]: kodex_200.csv 쓰기 실패: {ee}"
-                            )
-                        except Exception:
-                            pass
-                    return df
                 return pd.DataFrame()
 
             df = fdr.StockListing("KOSPI")

@@ -264,7 +264,7 @@ class SettingsTab:
         tk.Label(
             flow_wrap,
             text=(
-                'KODEX200 유니버스\n'
+                'KOSPI 유니버스 (시총 상위 N)\n'
                 '  ↓ ② 유니버스 종목선정 (A/B)\n'
                 '  ↓ ③ S1 (공통필터 → A → B)\n'
                 '  ↓ ④ Stage 2 추매 (A/B)\n'
@@ -653,9 +653,8 @@ class SettingsTab:
 
         _univ_root = _sec_parent('univ')
 
-        # ── 유니버스 인덱스 소스 선택 (KODEX200 / KOSPI 시총 상위 N) ──
-        # settings['universe_index_choice'] 내부값: KODEX200 / KOSPI200.
-        # UI 표시 'KOSPI' → 저장 시 KOSPI200.
+        # ── 유니버스: KOSPI 시총 상위 N 전용 (KODEX200 구성 유니버스 폐기) ──
+        # settings['universe_index_choice'] 내부값: 항상 KOSPI200.
         univ_source_f = ttk.LabelFrame(
             _univ_root,
             text=' 🔎 유니버스 인덱스 소스 ',
@@ -663,48 +662,34 @@ class SettingsTab:
         )
         univ_source_f.pack(fill=tk.X, expand=False, pady=(0, 12))
 
+        # 저장 시 항상 KOSPI200 으로 고정 (구 KODEX200 설정 마이그레이션)
         try:
-            if 'universe_index_choice' not in self.conf_vars:
-                init_val = self.app.settings.get(
-                    'universe_index_choice',
-                    self.default_settings.get('universe_index_choice', 'KODEX200'),
-                )
-                init_disp = str(init_val).strip().upper()
-                if init_disp == 'KOSPI200':
-                    init_disp = 'KOSPI'
-                elif init_disp not in ('KODEX200', 'KOSPI'):
-                    init_disp = 'KODEX200'
-                self.conf_vars['universe_index_choice'] = tk.StringVar(value=init_disp)
+            self.conf_vars['universe_index_choice'] = tk.StringVar(value='KOSPI')
         except Exception:
-            # UI 로딩 실패 시에도 나머지 섹션은 유지되도록 방어
-            self.conf_vars['universe_index_choice'] = tk.StringVar(value='KODEX200')
+            self.conf_vars['universe_index_choice'] = tk.StringVar(value='KOSPI')
 
         ttk.Label(
             univ_source_f,
-            text='선택',
+            text='소스',
             font=('Malgun Gothic', 10),
             foreground=txt_col,
         ).grid(row=0, column=0, sticky='w', padx=(5, 10))
 
-        univ_cmb = ttk.Combobox(
-            univ_source_f,
-            textvariable=self.conf_vars['universe_index_choice'],
-            values=['KODEX200', 'KOSPI'],
-            state='readonly',
-            width=10,
-        )
-        univ_cmb.grid(row=0, column=1, sticky='w', padx=(5, 10))
-
-        # 저장 단계에서는 conf_vars의 .get() 값을 settings에 반영합니다.
-        # (save_settings()에서 self.conf_vars 순회)
         ttk.Label(
             univ_source_f,
-            text='(KODEX=고정 200 / KOSPI=시총 상위 N)',
+            text='KOSPI (시총 상위 N)',
+            font=('Malgun Gothic', 10, 'bold'),
+            foreground=primary_col,
+        ).grid(row=0, column=1, sticky='w', padx=(5, 10))
+
+        ttk.Label(
+            univ_source_f,
+            text='(KODEX200 구성 유니버스는 폐기됨)',
             font=('Malgun Gothic', 9),
             foreground=primary_col,
         ).grid(row=0, column=2, sticky='w', padx=(10, 5))
 
-        # KOSPI 선택 시 marcap 시총 상위 N 슬라이스에 사용합니다.
+        # marcap 시총 상위 N 슬라이스
         try:
             if 'kospi_top_n' not in self.conf_vars:
                 init_topn = self.app.settings.get(
@@ -786,273 +771,294 @@ class SettingsTab:
             foreground=primary_col,
         ).grid(row=2, column=2, sticky='w', padx=(10, 5), pady=(4, 0))
 
-        def _sync_kospi_top_n_enabled(*_args: object) -> None:
-            """KODEX200이면 상위 N·갱신주기 비활성, KOSPI이면 해당 컨트롤 활성."""
-            try:
-                choice = str(self.conf_vars['universe_index_choice'].get()).strip().upper()
-                is_kospi = choice in ('KOSPI', 'KOSPI200')
-                kospi_n_cmb.configure(state='readonly' if is_kospi else 'disabled')
-                kospi_n_lbl.configure(style='TLabel' if is_kospi else 'Dimmed.TLabel')
-                kospi_ref_cmb.configure(state='readonly' if is_kospi else 'disabled')
-                kospi_ref_lbl.configure(style='TLabel' if is_kospi else 'Dimmed.TLabel')
-                if is_kospi:
-                    kospi_n_lbl.configure(foreground=primary_col)
-                    kospi_ref_lbl.configure(foreground=primary_col)
-            except (tk.TclError, AttributeError, KeyError):
-                pass
-
-        try:
-            self.conf_vars['universe_index_choice'].trace_add(
-                'write', _sync_kospi_top_n_enabled
-            )
-            _sync_kospi_top_n_enabled()
-        except Exception:
-            pass
-
         # save 시 표시문구 → 내부 키로 변환하기 위해 매핑 보관
         try:
             self._kospi_refresh_disp_to_key = _REFRESH_BY_DISP
         except Exception:
             pass
 
-        # ── 레짐 전환 게이트 (TRANS_S8_NS2: B-share 급락 + 변동성) ──
-        transition_f = ttk.LabelFrame(
+        # ── 레짐 게이트: 전환·G1·R5·HARD (중첩 프레임으로 역할별 분리) ──
+        # 주의: regime_f 자식은 pack만 사용 (add_param_row 의 grid 와 충돌 방지)
+        regime_f = ttk.LabelFrame(
             _univ_root,
-            text=' 🔄 레짐 전환 게이트 (Valid A/B · B-share) ',
-            padding='15',
+            text=' 🔄 레짐 게이트 ',
+            padding='12',
         )
-        transition_f.pack(fill=tk.X, expand=False, pady=(0, 12))
+        regime_f.pack(fill=tk.X, expand=False, pady=(0, 12))
+
+        regime_top = ttk.Frame(regime_f)
+        regime_top.pack(fill=tk.X, expand=False)
         add_param_row(
-            transition_f,
+            regime_top,
             '전환 게이트 사용',
             None,
             '',
-            'ON: Valid_B 비중 급락 + 변동성 확인 시 TRANSITION/HARD. 실시간·동적 백테 공통',
+            'ON: B비중 급락+변동성 → TRANSITION/HARD. 실시간·동적 백테 공통',
             toggle_key='use_transition_gate',
         )
-        add_header(transition_f, '── 전환(TRANSITION) 감지 ──')
+        ttk.Label(
+            regime_f,
+            text='아래는 역할별로 나뉩니다. 평소엔 마스터만 켜고, G1·R5는 보조 가드입니다.',
+            style='Dimmed.TLabel',
+            font=('Malgun Gothic', 9),
+        ).pack(anchor='w', padx=8, pady=(0, 8))
+
+        # ① 전환 감지
+        detect_f = ttk.LabelFrame(
+            regime_f,
+            text=' ① 전환 감지 (TRANSITION 후보) ',
+            padding='10',
+        )
+        detect_f.pack(fill=tk.X, expand=False, pady=(0, 8))
+        ttk.Label(
+            detect_f,
+            text='B비중(Valid_B)이 빠르게 줄고 변동성이 높을 때 전환 후보로 판정',
+            style='Dimmed.TLabel',
+            font=('Malgun Gothic', 9),
+        ).grid(row=0, column=0, columnspan=6, sticky='w', padx=5, pady=(0, 4))
+        # add_param_row 는 grid_rows 로 행을 관리 — 블러브용 행 예약
+        self.grid_rows[detect_f] = 1
         add_param_row(
-            transition_f,
-            '선행 B-share 하한(%)',
+            detect_f,
+            'B비중 선행 하한',
             'transition_prior_share_min',
             '%',
-            '5일 전 B-share가 이 값 이상이었을 때만 전환 후보',
+            '5일 전 B비중이 이 값 이상일 때만 후보',
         )
         add_param_row(
-            transition_f,
-            'B-share 5일 변화 상한',
+            detect_f,
+            'B비중 5일 변화',
             'transition_share_delta5_max',
             '%p',
-            '음수. 5일간 B-share 하락폭이 이 값 이하(더 큰 하락)이면 후보',
+            '음수. 5일 하락폭 ≤ 이 값이면 후보',
         )
         add_param_row(
-            transition_f,
-            'B-share 3일 변화 상한',
+            detect_f,
+            'B비중 3일 변화',
             'transition_share_delta3_max',
             '%p',
-            '음수. 3일 경로 보조 조건',
+            '음수. 3일 경로 보조',
         )
         add_param_row(
-            transition_f,
-            '지수 rvol20 하한',
+            detect_f,
+            '지수 변동성(rvol20)',
             'transition_rvol_min',
             '',
-            'KODEX200 연환산 20일 변동성(%). 이 값 이상이면 변동성 확인',
+            'KODEX200 연환산 20일 변동성(%) 하한',
         )
         add_param_row(
-            transition_f,
-            '교차섹션 ret std 하한',
+            detect_f,
+            '종목 분산(xs-std)',
             'transition_xs_ret_std_min',
             '',
-            '유니버스 일간 수익률 표준편차(%). 지수 rvol 결측 시 보조',
+            '유니버스 일수익률 표준편차(%). 지수 rvol 결측 시 보조',
         )
-        add_header(transition_f, '── 로테이션 A 가드(G1) ──')
+
+        # ② G1 — Type A 신규 스킵
+        g1_f = ttk.LabelFrame(
+            regime_f,
+            text=' ② G1 — Type A 신규 스킵 ',
+            padding='10',
+        )
+        g1_f.pack(fill=tk.X, expand=False, pady=(0, 8))
+        ttk.Label(
+            g1_f,
+            text='전일 OFF인데 분산↑·A우세·지수5일 양호할 때, 신규 Type A만 스킵 (진입 과열 완화)',
+            style='Dimmed.TLabel',
+            font=('Malgun Gothic', 9),
+        ).grid(row=0, column=0, columnspan=6, sticky='w', padx=5, pady=(0, 4))
+        self.grid_rows[g1_f] = 1
         add_param_row(
-            transition_f,
-            'G1 Type A 가드',
+            g1_f,
+            'G1 사용',
             None,
             '',
-            'ON: 전일 OFF·지수5일≥하한·고분산·A우세 시 신규 Type A만 스킵',
+            'ON: 위 조건일 때 신규 Type A만 스킵',
             toggle_key='use_rotation_a_guard_g1',
         )
         add_param_row(
-            transition_f,
-            'G1 A비중 하한',
+            g1_f,
+            'A비중 하한',
             'rotation_a_guard_a_share_min',
             '',
-            'Valid_A/(A+B) 하한 (기본 0.60)',
+            'Valid_A/(A+B) (기본 0.60)',
         )
         add_param_row(
-            transition_f,
-            'G1 지수5일 하한(%)',
+            g1_f,
+            '지수 5일 하한',
             'rotation_a_guard_idx5_min',
             '%',
-            '전일 기준 지수 5일 수익률 하한 (기본 -1)',
+            '전일 기준 지수 5일 수익률 (기본 -1)',
         )
         add_param_row(
-            transition_f,
-            'G1 분산 분위',
+            g1_f,
+            '분산 분위',
             'rotation_a_guard_xs_pct',
             '',
             '교차섹션 ret std 분위 임계 (기본 50)',
         )
-        add_header(transition_f, '── RS지속성 A 가드(R5_EXIT60) ──')
+
+        # ③ R5 — Type A 청산만 강화
+        r5_f = ttk.LabelFrame(
+            regime_f,
+            text=' ③ R5 — Type A 청산 강화 ',
+            padding='10',
+        )
+        r5_f.pack(fill=tk.X, expand=False, pady=(0, 8))
+        ttk.Label(
+            r5_f,
+            text='종목 RS순위 상관이 낮아진 날(리더십 교체) → Type A Flash/ATR만 일시 강화. 진입 제한 없음',
+            style='Dimmed.TLabel',
+            font=('Malgun Gothic', 9),
+        ).grid(row=0, column=0, columnspan=6, sticky='w', padx=5, pady=(0, 4))
+        self.grid_rows[r5_f] = 1
         add_param_row(
-            transition_f,
-            'R5 청산타이트',
+            r5_f,
+            'R5 사용',
             None,
             '',
-            'ON: RS순위상관 저하일에 Type A Flash/ATR만 임시 강화 (진입 제한 없음)',
+            'ON: RS순위상관 저하일에 Type A 청산만 타이트',
             toggle_key='use_rs_persist_guard',
         )
         add_param_row(
-            transition_f,
-            'R5 상관 상한',
+            r5_f,
+            '상관 상한',
             'rs_persist_corr_max',
             '',
             'RS 5일 순위상관 ≤ 이 값이면 발동 (기본 0.60)',
         )
         add_param_row(
-            transition_f,
-            'R5 Flash A(%)',
+            r5_f,
+            'Flash A',
             'rs_persist_exit_flash_a',
             '%',
-            'R5일 Type A Flash 임계 (기본 2.5, 평소 4.0)',
+            'R5일 Type A Flash (기본 2.5 · 평소 4.0)',
         )
         add_param_row(
-            transition_f,
-            'R5 ATR SL A',
+            r5_f,
+            'ATR 손절 A',
             'rs_persist_exit_atr_sl_a',
             '×',
-            'R5일 Type A ATR SL 배수 (기본 2.0, 평소 2.8)',
+            'R5일 Type A ATR SL 배수 (기본 2.0 · 평소 2.8)',
         )
-        add_header(transition_f, '── TRANSITION 시 슬롯·차단 ──')
+
+        # ④ TRANSITION 대응
+        soft_f = ttk.LabelFrame(
+            regime_f,
+            text=' ④ TRANSITION 대응 (슬롯 · 차단) ',
+            padding='10',
+        )
+        soft_f.pack(fill=tk.X, expand=False, pady=(0, 8))
+        ttk.Label(
+            soft_f,
+            text='TRANSITION으로 판정된 날의 감시 슬롯·S1/S2 차단',
+            style='Dimmed.TLabel',
+            font=('Malgun Gothic', 9),
+        ).grid(row=0, column=0, columnspan=6, sticky='w', padx=5, pady=(0, 4))
+        self.grid_rows[soft_f] = 1
         add_param_row(
-            transition_f,
-            'SOFT 슬롯 A',
+            soft_f,
+            '감시 슬롯 A',
             'transition_soft_slots_a',
             '개',
-            'TRANSITION일 Track A 감시 상한 (기본 8, TRANS_S8_NS2)',
+            'TRANSITION일 Track A 상한 (기본 8)',
         )
         add_param_row(
-            transition_f,
-            'SOFT 슬롯 B',
+            soft_f,
+            '감시 슬롯 B',
             'transition_soft_slots_b',
             '개',
-            'TRANSITION일 Track B 감시 상한',
+            'TRANSITION일 Track B 상한',
         )
         add_param_row(
-            transition_f,
-            'TRANSITION 시 S1 차단',
+            soft_f,
+            'S1 차단',
             None,
             '',
-            'ON: TRANSITION에서 신규 진입(S1) 중단. OFF면 위 슬롯 축소만 적용',
+            'ON: TRANSITION에서 신규 진입 중단. OFF면 슬롯 축소만',
             toggle_key='transition_block_s1_on_soft',
         )
         add_param_row(
-            transition_f,
-            'TRANSITION 시 S2 차단',
+            soft_f,
+            'S2 차단',
             None,
             '',
-            'TRANS_S8_NS2: OFF(HARD만 S2 차단). ON이면 TRANSITION에서도 추매 중단',
+            '기본 OFF(HARD만 S2 차단). ON이면 TRANSITION에서도 추매 중단',
             toggle_key='transition_block_s2_on_soft',
         )
         add_param_row(
-            transition_f,
+            soft_f,
             'TRANSITION 무시',
             None,
             '',
-            'ON: TRANSITION 판정을 OFF로 간주(슬롯·차단 미적용)',
+            'ON: TRANSITION을 OFF로 간주(슬롯·차단 미적용)',
             toggle_key='transition_ignore_soft',
         )
-        add_header(transition_f, '── HARD(chop) 임계 ──')
+
+        # ⑤ HARD (chop)
+        hard_f = ttk.LabelFrame(
+            regime_f,
+            text=' ⑤ HARD — A과밀 · B고갈 (chop) ',
+            padding='10',
+        )
+        hard_f.pack(fill=tk.X, expand=False, pady=(0, 2))
+        ttk.Label(
+            hard_f,
+            text='Valid_A 과다 + Valid_B 고갈이면 HARD. 강한 상승일엔 오발동 억제 가능',
+            style='Dimmed.TLabel',
+            font=('Malgun Gothic', 9),
+        ).grid(row=0, column=0, columnspan=6, sticky='w', padx=5, pady=(0, 4))
+        self.grid_rows[hard_f] = 1
         add_param_row(
-            transition_f,
-            'Valid_A 하한 (chop)',
+            hard_f,
+            'Valid_A 하한',
             'chop_valid_a_min',
             '개',
-            'A 과밀: Valid_A≥이 값 & Valid_B≤b_max → HARD',
+            'A≥이 값 & B≤상한 → HARD',
         )
         add_param_row(
-            transition_f,
-            'Valid_B 상한 (chop)',
+            hard_f,
+            'Valid_B 상한',
             'chop_valid_b_max',
             '개',
             'B 고갈 조건',
         )
         add_param_row(
-            transition_f,
-            'B-share 상한 (%)',
+            hard_f,
+            'B비중 상한',
             'chop_valid_b_share_max_pct',
             '%',
-            'B-share≤이 값 & Valid_A≥floor → HARD',
+            'B비중≤이 값 & Valid_A≥floor → HARD',
         )
         add_param_row(
-            transition_f,
-            'Valid_A floor (chop)',
+            hard_f,
+            'Valid_A floor',
             'chop_valid_a_floor',
             '개',
-            'B-share 상한 조건용 Valid_A 최소',
+            'B비중 상한 조건용 Valid_A 최소',
         )
         add_param_row(
-            transition_f,
-            '강한 상승일 HARD 억제',
+            hard_f,
+            '상승일 HARD 억제',
             None,
             '',
-            'ON: KODEX200 일수익률≥임계면 chop→HARD 건너뜀 (폭등일 A과밀 오발동 완화)',
+            'ON: KODEX200 일수익≥임계면 chop→HARD 건너뜀',
             toggle_key='hard_suppress_on_index_up',
         )
         add_param_row(
-            transition_f,
-            'HARD 억제 상승 임계 (%)',
+            hard_f,
+            '억제 상승 임계',
             'hard_suppress_index_up_pct',
             '%',
-            '지수(KODEX200) 일수익률이 이 값 이상이면 HARD 억제',
+            '지수 일수익률 ≥ 이 값이면 HARD 억제',
         )
         add_param_row(
-            transition_f,
-            '억제 시 OFF만',
+            hard_f,
+            '억제 후 OFF만',
             None,
             '',
-            'ON: 상승일 HARD 억제 후 TRANSITION 폴백 없이 OFF (슬롯 축소 없음)',
+            'ON: 억제 후 TRANSITION 폴백 없이 OFF (슬롯 축소 없음)',
             toggle_key='hard_suppress_to_off_only',
-        )
-
-        # ── 지수 DD 쿨다운 게이트 (DD5_4_CD5) ──
-        idd_f = ttk.LabelFrame(
-            _univ_root,
-            text=' 📉 지수 급락 쿨다운 (KODEX200 · S1만) ',
-            padding='15',
-        )
-        idd_f.pack(fill=tk.X, expand=False, pady=(0, 12))
-        add_param_row(
-            idd_f,
-            '지수 DD 게이트 사용',
-            None,
-            '',
-            'ON: KODEX200 N일 수익률≤임계 후 쿨다운 동안 신규 S1 차단(S2·청산 유지). Transition과 OR. 권장: N=5, 임계=-5, 쿨다운=5',
-            toggle_key='use_index_dd_gate',
-        )
-        add_param_row(
-            idd_f,
-            'lookback N일',
-            'index_dd_lookback_days',
-            '일',
-            'KODEX200 종가 N일 수익률 계산 구간 (기본 5)',
-        )
-        add_param_row(
-            idd_f,
-            '급락 임계 (%)',
-            'index_dd_ret_threshold_pct',
-            '%',
-            'N일 수익률이 이 값 이하(더 큰 하락)이면 충격. 기본 -5 (DD5_5_CD5)',
-        )
-        add_param_row(
-            idd_f,
-            '쿨다운 영업일',
-            'index_dd_cooldown_days',
-            '일',
-            '충격 다음 날부터 S1 차단 유지 일수 (기본 5)',
         )
 
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')
@@ -2626,16 +2632,9 @@ class SettingsTab:
         for k, var in self.conf_vars.items():
             if hasattr(var, 'get'):
                 val = var.get()
-                # UI 표시 'KOSPI' → 내부 설정키 'KOSPI200' 유지
+                # 유니버스는 KOSPI200 고정 (KODEX200 구성 유니버스 폐기)
                 if k == 'universe_index_choice':
-                    try:
-                        raw = str(val).strip().upper()
-                        if raw in ('KOSPI', 'KOSPI200'):
-                            val = 'KOSPI200'
-                        else:
-                            val = 'KODEX200'
-                    except Exception:
-                        val = 'KODEX200'
+                    val = 'KOSPI200'
                 if k == 'kospi_universe_refresh':
                     try:
                         raw = str(val).strip()

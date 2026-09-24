@@ -304,18 +304,7 @@ class GuiUtils:
 
     def get_criteria_text(self, settings, format_type="ui"):
         s = settings
-        try:
-            choice = str((s or {}).get("universe_index_choice", "KODEX200")).strip().upper()
-        except Exception:
-            choice = "KODEX200"
-        if choice in ("KOSPI", "KOSPI200"):
-            choice = "KOSPI200"
-        else:
-            choice = "KODEX200"
-        univ_label = {
-            "KOSPI200": "KOSPI200",
-            "KODEX200": "KODEX200",
-        }.get(choice, "KODEX200")
+        univ_label = "KOSPI"
         b = "▶ " if format_type == "ui" else "■ "
         line_break = "\n" if format_type == "ui" else "\n"
         return (

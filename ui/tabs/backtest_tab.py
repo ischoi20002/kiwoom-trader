@@ -1060,7 +1060,7 @@ class BacktestTab:
             if not opt_codes:
                 from backtest_engine import TradingStrategy
 
-                idx_choice = self.app.settings.get("universe_index_choice", "KODEX200")
+                idx_choice = self.app.settings.get("universe_index_choice", "KOSPI200")
                 name_map = TradingStrategy.get_stock_name_map(idx_choice)
                 opt_codes = (
                     list(name_map.keys())[:10] if name_map else list(fallback)

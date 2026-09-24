@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""유니버스 종목코드 로드 (KODEX200 / KOSPI CSV·marcap).
+"""유니버스 종목코드 로드 (KOSPI 시총 상위 N).
 
+KODEX200 구성 유니버스는 폐기됨. 레짐·지수 수익률용 KODEX200 ETF(069500)와는 별개.
 ``strategy_selector`` 에서 분리. 기존 호출은 strategy_selector re-export 로 호환.
 """
 from __future__ import annotations
@@ -8,10 +9,19 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime
-from typing import Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import FinanceDataReader as fdr
 import pandas as pd
+
+
+def normalize_universe_index_choice(_value: Any = None) -> str:
+    """
+    유니버스 인덱스 소스 정규화.
+
+    KODEX200 구성종목 유니버스는 폐기되었으므로 항상 ``KOSPI200``(시총 상위 N)을 반환한다.
+    """
+    return "KOSPI200"
 
 
 def load_kodex200_universe_codes(
@@ -384,20 +394,12 @@ def resolve_universe_codes(
     allow_fdr_generate: bool = True,
 ) -> list[str]:
     """
-    설정 ``universe_index_choice``에 따라 감시·백테 유니버스 코드를 반환한다.
+    감시·백테 유니버스 코드 반환 (항상 KOSPI 시총 상위 N).
 
-    - ``KOSPI200``: ``kospi_universe.csv`` / marcap
-    - ``KODEX200``: ``kodex200.csv``
+    ``universe_index_choice`` 의 KODEX200 값은 무시한다(폐기).
     """
     s = settings if isinstance(settings, dict) else {}
-    try:
-        choice = str(s.get("universe_index_choice", "KODEX200") or "KODEX200").strip().upper()
-    except Exception:
-        choice = "KODEX200"
-    if choice in ("KOSPI", "KOSPI200"):
-        choice = "KOSPI200"
-    else:
-        choice = "KODEX200"
+    choice = normalize_universe_index_choice(s.get("universe_index_choice"))
     refresh = str(s.get("kospi_universe_refresh", "quarterly") or "quarterly")
 
     if choice == "KOSPI200":
@@ -414,5 +416,13 @@ def resolve_universe_codes(
             allow_fdr_generate=allow_fdr_generate,
         )
 
-    return load_kodex200_universe_codes(logger_callback=logger_callback)
+    # 방어: normalize 가 항상 KOSPI200 이지만 타입 체커·향후 확장 대비
+    return load_kospi_universe_codes(
+        logger_callback=logger_callback,
+        top_n=200,
+        refresh_mode=refresh,
+        pit_asof=pit_asof,
+        daily_refresh=daily_refresh,
+        allow_fdr_generate=allow_fdr_generate,
+    )
 

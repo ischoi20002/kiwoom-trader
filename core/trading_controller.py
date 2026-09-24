@@ -315,27 +315,11 @@ class TradingController:
         except Exception:
             return
 
-        # [IndexDD] KODEX 급락 쿨다운 — S1만 OR 차단
+        # IndexDD 게이트는 폐기됨 — 잔여 런타임 플래그만 정리
         try:
-            import strategy_selector
-
-            if bool(st.get("use_index_dd_gate", False)):
-                idd = strategy_selector.resolve_index_dd_gate_for_live(
-                    st,
-                    getattr(self.app, "data_manager", None),
-                    None,
-                    self.log,
-                )
-                st["index_dd_runtime_block_s1"] = bool(idd.get("block_s1", False))
-                if bool(idd.get("block_s1", False)):
-                    st["transition_runtime_block_s1"] = True
-            else:
-                st.pop("index_dd_runtime_block_s1", None)
-        except Exception as e:
-            try:
-                self.log(f"⚠️ [IndexDD] 시작 시 갱신 실패: {e}")
-            except Exception:
-                pass
+            st.pop("index_dd_runtime_block_s1", None)
+        except Exception:
+            pass
 
     def recalculate_regime(self) -> None:
         """

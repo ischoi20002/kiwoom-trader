@@ -230,8 +230,6 @@ class DynamicBacktester:
         self._bt_ref_day_for_first: Optional[str] = None
         # prepare_dynamic_universe 4번째 반환값 — 일별 transition 레짐
         self.transition_regime_by_day: dict[str, str] = {}
-        # 지수 DD+쿨다운 게이트 — 일별 S1 차단
-        self.index_dd_block_by_day: dict[str, bool] = {}
         # ATR_SL 청산 후 동일종목 S1 재진입 금지 만료일(일자 normalize)
         self._atr_sl_reentry_until: Dict[str, pd.Timestamp] = {}
         # 종목별 ATR_SL 청산일(연속 손절 쿨다운 판정용)
@@ -597,9 +595,6 @@ class DynamicBacktester:
                 self.transition_regime_by_day = (
                     precomputed.get("transition_regime_by_day", {}) or {}
                 )
-                self.index_dd_block_by_day = (
-                    precomputed.get("index_dd_block_by_day", {}) or {}
-                )
                 self.cached_15m_data = precomputed["cached_15m_data"]
                 self.cached_1m_data = {}
                 self._bt_trading_days = trading_days
@@ -679,9 +674,6 @@ class DynamicBacktester:
                 self.schedule_c_meta = cached_univ.get("schedule_c_meta") or {}
                 self.transition_regime_by_day = dict(
                     cached_univ.get("transition_regime_by_day") or {}
-                )
-                self.index_dd_block_by_day = dict(
-                    cached_univ.get("index_dd_block_by_day") or {}
                 )
                 self.rotation_a_guard_g1_by_ref_day = dict(
                     cached_univ.get("rotation_a_guard_g1_by_ref_day") or {}
@@ -785,27 +777,6 @@ class DynamicBacktester:
             if callback:
                 callback(msg, 5)
 
-            # [IndexDD] KODEX N일 급락 + 쿨다운 → 일별 S1 차단 맵
-            self.index_dd_block_by_day = {}
-            try:
-                if bool(self.settings.get("use_index_dd_gate", False)):
-                    self.index_dd_block_by_day = (
-                        strategy_selector.build_index_dd_s1_block_by_day(
-                            self.settings,
-                            self.db,
-                            start_date,
-                            end_date,
-                            callback if callback else print,
-                        )
-                        or {}
-                    )
-            except Exception as _idd_ex:
-                try:
-                    print(f"[IndexDD] 맵 생성 생략: {_idd_ex}")
-                except Exception:
-                    pass
-                self.index_dd_block_by_day = {}
-
             # G1: prepare 결과 우선, 없으면 러너 사전계산 주입
             try:
                 if not getattr(self, "rotation_a_guard_g1_by_ref_day", None):
@@ -854,7 +825,6 @@ class DynamicBacktester:
                             "schedule_c": getattr(self, "schedule_c", {}) or {},
                             "schedule_c_meta": getattr(self, "schedule_c_meta", {}) or {},
                             "transition_regime_by_day": self.transition_regime_by_day,
-                            "index_dd_block_by_day": self.index_dd_block_by_day,
                             "rotation_a_guard_g1_by_ref_day": getattr(
                                 self, "rotation_a_guard_g1_by_ref_day", {}
                             )
@@ -888,16 +858,8 @@ class DynamicBacktester:
         """유니버스 지문에 넣을 부가 파일 (CSV 유니버스 변경 감지)."""
         files: List[str] = []
         try:
-            idx_raw = str(
-                self.settings.get("universe_index_choice", "KODEX200") or "KODEX200"
-            ).strip().upper()
-        except Exception:
-            idx_raw = "KODEX200"
-        try:
-            if idx_raw in ("KOSPI", "KOSPI200"):
-                files.extend(["kospi_universe.csv", "kospi_top_500.csv"])
-            else:
-                files.extend(["kodex200.csv", "kodex_200.csv"])
+            # KODEX200 구성 유니버스 폐기 — KOSPI CSV만 지문에 포함
+            files.extend(["kospi_universe.csv", "kospi_top_500.csv"])
         except Exception:
             pass
         return files
@@ -921,7 +883,7 @@ class DynamicBacktester:
         self.start_date = start_date
         self.end_date = end_date
         self._cache_run_hot_settings()
-        idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+        idx_choice = self.settings.get("universe_index_choice", "KOSPI200")
         self.stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         if callback:
             callback("진단: 백테스트와 동일 컨텍스트 로드 중...", 0)
@@ -1019,7 +981,7 @@ class DynamicBacktester:
             self._daily_new_s1_a_by_day = {}
             self._daily_new_s1_a_date = ""
             self._daily_new_s1_a_count = 0
-        idx_choice = self.settings.get("universe_index_choice", "KODEX200")
+        idx_choice = self.settings.get("universe_index_choice", "KOSPI200")
         self.stock_name_map = TradingStrategy.get_stock_name_map(idx_choice)
         
         if callback: callback("백테스트 준비 중...", 0)
@@ -1094,7 +1056,6 @@ class DynamicBacktester:
             )
 
             # [Transition] 레짐 전환일: tiered — TRANSITION=S2 선택, HARD=S1+S2
-            # [IndexDD] KODEX 급락 쿨다운은 S1만 OR 차단
             try:
                 _block_s1 = False
                 _block_s2 = False
@@ -1117,13 +1078,7 @@ class DynamicBacktester:
                 else:
                     self.settings.pop("transition_runtime_regime", None)
 
-                _idd_map = getattr(self, "index_dd_block_by_day", None) or {}
-                _idd_on = bool(
-                    self.settings.get("use_index_dd_gate", False)
-                ) and bool(_idd_map.get(str(current_day), False))
-                if _idd_on:
-                    _block_s1 = True
-                self.settings["index_dd_runtime_block_s1"] = bool(_idd_on)
+                self.settings.pop("index_dd_runtime_block_s1", None)
                 self.settings["transition_runtime_block_s1"] = _block_s1
                 self.settings["transition_runtime_block_s2"] = _block_s2
 

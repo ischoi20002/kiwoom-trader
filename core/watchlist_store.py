@@ -155,26 +155,23 @@ class WatchlistStore:
 
     def preload_from_universe_index(
         self,
-        universe_index_choice: Any = "KODEX200",
+        universe_index_choice: Any = "KOSPI200",
         *,
         logger_callback: Optional[Callable[[str], None]] = None,
         base_dir: Optional[str] = None,
     ) -> int:
         """
-        ``universe_index_choice`` 에 맞는 유니버스 CSV만 이름 캐시로 선적재합니다.
+        KOSPI 유니버스 CSV를 이름 캐시로 선적재합니다.
 
-        - KODEX200 → ``kodex200.csv``
-        - KOSPI200/KOSPI → ``kospi_universe.csv`` (없으면 kospi200*.csv 등)
+        KODEX200 구성 유니버스는 폐기되어 ``kospi_universe.csv`` 만 사용합니다.
         """
         log = logger_callback or self._log
         try:
-            choice = str(universe_index_choice or "").strip().upper()
+            from strategy.universe_codes import normalize_universe_index_choice
+
+            choice = normalize_universe_index_choice(universe_index_choice)
         except Exception:
-            choice = "KODEX200"
-        if choice in ("KOSPI", "KOSPI200"):
             choice = "KOSPI200"
-        else:
-            choice = "KODEX200"
 
         root = base_dir or os.getcwd()
         try:
@@ -182,25 +179,18 @@ class WatchlistStore:
         except Exception:
             root = os.getcwd()
 
-        if choice == "KOSPI200":
-            candidates = [
-                os.path.join(root, "kospi_universe.csv"),
-                os.path.join(root, "kospi200.csv"),
-            ]
-            try:
-                import glob
+        candidates = [
+            os.path.join(root, "kospi_universe.csv"),
+            os.path.join(root, "kospi200.csv"),
+        ]
+        try:
+            import glob
 
-                candidates.extend(sorted(glob.glob(os.path.join(root, "kospi_universe*.csv"))))
-                candidates.extend(sorted(glob.glob(os.path.join(root, "kospi200*.csv"))))
-            except Exception:
-                pass
-            label = "kospi_universe.csv"
-        else:
-            candidates = [
-                os.path.join(root, "kodex200.csv"),
-                os.path.join(root, "kodex_200.csv"),
-            ]
-            label = "kodex200.csv"
+            candidates.extend(sorted(glob.glob(os.path.join(root, "kospi_universe*.csv"))))
+            candidates.extend(sorted(glob.glob(os.path.join(root, "kospi200*.csv"))))
+        except Exception:
+            pass
+        label = "kospi_universe.csv"
 
         seen: set[str] = set()
         for path in candidates:
@@ -228,10 +218,9 @@ class WatchlistStore:
         logger_callback: Optional[Callable[[str], None]] = None,
     ) -> int:
         """
-        (호환) ``kodex200.csv`` 이름 캐시 선적재.
+        (레거시) ``kodex200.csv`` 이름 캐시 선적재.
 
-        유니버스가 KODEX200일 때만 호출하는 것을 권장합니다.
-        일반 경로: ``preload_from_universe_index``.
+        KODEX200 구성 유니버스는 폐기됨. 일반 경로: ``preload_from_universe_index``.
         """
         path = csv_path or os.path.join(os.getcwd(), "kodex200.csv")
         return self.preload_name_cache_from_csv(
