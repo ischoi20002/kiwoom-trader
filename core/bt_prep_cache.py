@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 CACHE_DIR_NAME = "_local_bt_prep_cache"
 
 # 선정 스케줄에 영향을 주는 키 접두어
@@ -31,6 +31,8 @@ _UNIVERSE_PREFIXES: Tuple[str, ...] = (
     "use_index_dd",
     "rotation_a_guard_",
     "use_rotation_a_guard",
+    "rs_persist_",
+    "use_rs_persist",
     "kospi_",
     "universe_",
     "bt_universe_",
@@ -65,6 +67,7 @@ _UNIVERSE_EXACT = frozenset(
         "regime_display_eod_buffer_minutes",
         "use_index_dd_gate",
         "use_rotation_a_guard_g1",
+        "use_rs_persist_guard",
         "use_type_c",
     }
 )

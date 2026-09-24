@@ -174,8 +174,8 @@ def _apply_sel_track_a_batch_v2(
         c1 = df_all["AvgVal5"] >= (min_억 * 100000000)
         c5 = df_all["OSC"] > 0
         c_ma60 = df_all["MA60"].notna()
-        use_a = bool(settings.get("use_sel_track_a", True))
-        c2_a = (df_all["MA_Diff"] <= conv) if use_a else pd.Series(False, index=df_all.index)
+        # 폴백도 감시 ON/OFF와 무관하게 Valid_A를 실제 조건으로 계산
+        c2_a = df_all["MA_Diff"] <= conv
         c3_a = (df_all["RSI"] >= float(settings.get("sel_rsi_min", 35.0))) & (
             df_all["RSI"] <= float(settings.get("sel_rsi_max", 70.0))
         )
@@ -355,11 +355,9 @@ def _apply_sel_track_b_batch_v2(
             logging.warning("_apply_sel_track_b_batch_v2 실패, 레거시로 폴백: %s", e, exc_info=True)
         except Exception:
             pass
-        use_b = bool(settings.get("use_sel_track_b", True))
-        c2_b = ((df_all["MA20"] > df_all["MA60"]) & (df_all["close"] > df_all["MA20"])) if use_b else pd.Series(
-            False, index=df_all.index
-        )
-        if use_b and _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
+        # 폴백도 감시 ON/OFF와 무관하게 Valid_B를 실제 조건으로 계산
+        c2_b = (df_all["MA20"] > df_all["MA60"]) & (df_all["close"] > df_all["MA20"])
+        if _settings_bool_sel(settings, "sel_b_require_close_ge_ma5", False):
             mult_fb = _sel_b_ma5_close_mult(settings)
             m5f = df_all["MA5"].astype(float)
             lcf = df_all["close"].astype(float)
@@ -451,9 +449,9 @@ def _resync_batch_valid_to_period_universe(
     except Exception:
         pass
 
-    # Valid_A 재적용 (행 단위 조건 + 재계산된 RS)
+    # Valid_A 재적용 (행 단위 조건 + 재계산된 RS) — 감시 토글과 무관하게 항상
     try:
-        if bool(settings.get("use_sel_track_a", True)) and "_sel_rs_pct" in df_all.columns:
+        if "_sel_rs_pct" in df_all.columns:
             rk_lo = float(settings.get("sel_a_rs_rank_min", 0.28))
             rk_hi = float(settings.get("sel_a_rs_rank_max", 0.92))
             pb_lo = float(settings.get("sel_a_pb_min_pct", 1.5))
@@ -551,9 +549,9 @@ def _resync_batch_valid_to_period_universe(
         except Exception:
             pass
 
-    # Valid_B 재적용
+    # Valid_B 재적용 — 감시 토글과 무관하게 항상
     try:
-        if bool(settings.get("use_sel_track_b", True)) and "_sel_b_rs_pct" in df_all.columns:
+        if "_sel_b_rs_pct" in df_all.columns:
             rk_lo = float(settings.get("sel_b_rs_rank_min", 0.38))
             rk_hi = float(settings.get("sel_b_rs_rank_max", 0.97))
             hi_lo = float(settings.get("sel_b_hi_min_pct", 92.0))
@@ -714,8 +712,7 @@ def _apply_sel_track_c_batch_latest(
     """
     df_all["Valid_C"] = pd.Series(False, index=df_all.index, dtype=bool)
     df_all["Score_C"] = pd.Series(0.0, index=df_all.index, dtype=float)
-    if not _settings_bool_sel(settings, "use_sel_track_c", True):
-        return
+    # Valid_C 는 항상 계산. use_sel_track_c 는 감시 편입만 제어.
 
     config = BoxReversionSelectionConfig.from_mapping(settings)
     code_filter: Optional[Set[str]] = None

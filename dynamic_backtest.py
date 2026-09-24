@@ -241,6 +241,13 @@ class DynamicBacktester:
         self._daily_new_s1_a_by_day: Dict[str, int] = {}
         # G1 로테이션 A 가드: ref_day → True 이면 당일 신규 TYPE_A 차단
         self.rotation_a_guard_g1_by_ref_day: Dict[str, bool] = {}
+        # R5: RS 순위지속성 저하 → Type A 청산 타이트 (전일 ref_day 키)
+        self.rs_persist_guard_by_ref_day: Dict[str, bool] = {}
+        self._r5_exit_tight_today: bool = False
+        # R5 조건부 A 청산 타이트: 평소값 백업 (일별 복원용)
+        self._r5_exit_base_flash_a: Optional[float] = None
+        self._r5_exit_base_atr_sl_a: Optional[float] = None
+        self._bt_trading_days: List[str] = []
 
     def _normalize_bt_day(self, day: Any) -> str:
         """BT 일자 키를 YYYY-MM-DD 로 통일."""
@@ -253,6 +260,41 @@ class DynamicBacktester:
                 return str(day)[:10]
             except Exception:
                 return ""
+
+    def _apply_r5_exit_tighten(self, active: bool) -> None:
+        """
+        R5 발동일에 Type A Flash/ATR SL만 임시 타이트.
+        진입은 막지 않음. evaluate_position이 settings를 매 봉 읽으므로 일별 덮어쓰기면 충분.
+        """
+        try:
+            if self._r5_exit_base_flash_a is None:
+                self._r5_exit_base_flash_a = float(
+                    self.settings.get("s1_a_flash_exit_pct", 4.0) or 4.0
+                )
+            if self._r5_exit_base_atr_sl_a is None:
+                self._r5_exit_base_atr_sl_a = float(
+                    self.settings.get("atr_multiplier_sl_a", 2.8) or 2.8
+                )
+            if active:
+                flash_t = float(
+                    self.settings.get("rs_persist_exit_flash_a", 2.5) or 2.5
+                )
+                atr_t = float(
+                    self.settings.get("rs_persist_exit_atr_sl_a", 2.0) or 2.0
+                )
+                self.settings["s1_a_flash_exit_pct"] = flash_t
+                self.settings["atr_multiplier_sl_a"] = atr_t
+                self._r5_exit_tight_today = True
+            else:
+                self.settings["s1_a_flash_exit_pct"] = float(
+                    self._r5_exit_base_flash_a
+                )
+                self.settings["atr_multiplier_sl_a"] = float(
+                    self._r5_exit_base_atr_sl_a
+                )
+                self._r5_exit_tight_today = False
+        except Exception:
+            self._r5_exit_tight_today = False
 
     def _max_daily_new_s1_a(self) -> int:
         """일일 Type A 신규 S1 상한. 0 이하면 무제한."""
@@ -644,6 +686,9 @@ class DynamicBacktester:
                 self.rotation_a_guard_g1_by_ref_day = dict(
                     cached_univ.get("rotation_a_guard_g1_by_ref_day") or {}
                 )
+                self.rs_persist_guard_by_ref_day = dict(
+                    cached_univ.get("rs_persist_guard_by_ref_day") or {}
+                )
                 self.universe_schedule = universe_schedule or {}
                 # 캐시에 G1 없으면 러너 사전계산으로 보완
                 try:
@@ -664,6 +709,16 @@ class DynamicBacktester:
                         )
                         print(
                             f"[G1] 맵(캐시 HIT): 발동 {_n_g1}일",
+                            flush=True,
+                        )
+                    if bool(self.settings.get("use_rs_persist_guard", False)):
+                        _n_r5 = sum(
+                            1
+                            for v in (self.rs_persist_guard_by_ref_day or {}).values()
+                            if v
+                        )
+                        print(
+                            f"[R5] 맵(캐시 HIT): 발동 {_n_r5}일",
                             flush=True,
                         )
                 except Exception:
@@ -708,6 +763,12 @@ class DynamicBacktester:
                     )
                 except Exception:
                     self.rotation_a_guard_g1_by_ref_day = {}
+                try:
+                    self.rs_persist_guard_by_ref_day = (
+                        dict(_result[7]) if len(_result) >= 8 else {}
+                    )
+                except Exception:
+                    self.rs_persist_guard_by_ref_day = {}
             else:
                 universe_schedule = _result
                 self.schedule_a = universe_schedule
@@ -716,6 +777,7 @@ class DynamicBacktester:
                 self.schedule_c_meta = {}
                 self.transition_regime_by_day = {}
                 self.rotation_a_guard_g1_by_ref_day = {}
+                self.rs_persist_guard_by_ref_day = {}
             self.universe_schedule = universe_schedule or {}
             t_duration = time.time() - t_start
             msg = f"사전 계산 완료 ({t_duration:.2f}초)"
@@ -762,6 +824,15 @@ class DynamicBacktester:
                 )
                 if bool(self.settings.get("use_rotation_a_guard_g1", False)):
                     print(f"[G1] 맵 준비: 발동 {_n_g1}일", flush=True)
+                if not getattr(self, "rs_persist_guard_by_ref_day", None):
+                    self.rs_persist_guard_by_ref_day = {}
+                _n_r5 = sum(
+                    1
+                    for v in (self.rs_persist_guard_by_ref_day or {}).values()
+                    if v
+                )
+                if bool(self.settings.get("use_rs_persist_guard", False)):
+                    print(f"[R5] 맵 준비: 발동 {_n_r5}일", flush=True)
             except Exception as _g1_ex:
                 try:
                     print(f"[G1] 맵 로드 생략: {_g1_ex}", flush=True)
@@ -769,6 +840,8 @@ class DynamicBacktester:
                     pass
                 if not getattr(self, "rotation_a_guard_g1_by_ref_day", None):
                     self.rotation_a_guard_g1_by_ref_day = {}
+                if not getattr(self, "rs_persist_guard_by_ref_day", None):
+                    self.rs_persist_guard_by_ref_day = {}
 
             if use_prep_cache and univ_fp:
                 try:
@@ -784,6 +857,10 @@ class DynamicBacktester:
                             "index_dd_block_by_day": self.index_dd_block_by_day,
                             "rotation_a_guard_g1_by_ref_day": getattr(
                                 self, "rotation_a_guard_g1_by_ref_day", {}
+                            )
+                            or {},
+                            "rs_persist_guard_by_ref_day": getattr(
+                                self, "rs_persist_guard_by_ref_day", {}
                             )
                             or {},
                         },
@@ -1050,7 +1127,7 @@ class DynamicBacktester:
                 self.settings["transition_runtime_block_s1"] = _block_s1
                 self.settings["transition_runtime_block_s2"] = _block_s2
 
-                # G1: 전일(ref_day) 통계 기준 — 신규 TYPE_A만 차단 (S1 전체/S2 아님)
+                # G1: Type A 신규 차단 / R5: Type A 청산만 타이트
                 _g1_on = False
                 try:
                     if bool(self.settings.get("use_rotation_a_guard_g1", False)):
@@ -1060,6 +1137,20 @@ class DynamicBacktester:
                         _g1_on = bool(_g1_map.get(str(ref_day), False))
                 except Exception:
                     _g1_on = False
+                try:
+                    if bool(self.settings.get("use_rs_persist_guard", False)):
+                        _r5_map = (
+                            getattr(self, "rs_persist_guard_by_ref_day", None) or {}
+                        )
+                        _r5_on = bool(_r5_map.get(str(ref_day), False))
+                        self._apply_r5_exit_tighten(bool(_r5_on))
+                    else:
+                        self._apply_r5_exit_tighten(False)
+                except Exception:
+                    try:
+                        self._apply_r5_exit_tighten(False)
+                    except Exception:
+                        pass
                 self.settings["rotation_a_guard_block_type_a"] = bool(_g1_on)
             except Exception:
                 pass
@@ -2570,7 +2661,8 @@ class DynamicBacktester:
         # Type A S1 체결 시에만 일일 신규 카운터 증가(체결일 기준)
         try:
             if entry_n == 1 and str(sig_type).upper() == "TYPE_A":
-                self._note_new_s1_a(self._normalize_bt_day(curr_time))
+                _fd = self._normalize_bt_day(curr_time)
+                self._note_new_s1_a(_fd)
         except Exception:
             pass
         return True

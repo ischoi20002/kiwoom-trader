@@ -565,6 +565,98 @@ def is_rotation_a_guard_g1_day(
         return False
 
 
+def _spearman_corr_pair(a: pd.Series, b: pd.Series, *, min_n: int = 40) -> Optional[float]:
+    """scipy 없이 Spearman 상관 (순위→피어슨)."""
+    try:
+        both = pd.concat([a, b], axis=1).dropna()
+        if len(both) < int(min_n):
+            return None
+        ra = both.iloc[:, 0].rank()
+        rb = both.iloc[:, 1].rank()
+        v = float(ra.corr(rb, method="pearson"))
+        return v if np.isfinite(v) else None
+    except Exception:
+        return None
+
+
+def compute_rs_rank_corr_by_day(
+    df_all: pd.DataFrame,
+    *,
+    lookback: int = 5,
+    rs_window: int = 20,
+    min_names: int = 40,
+) -> Dict[str, float]:
+    """
+    일별 RS 순위 지속성: ``rs_window``일 상대강도 순위의 ``lookback``영업일 전 대비 Spearman.
+
+    반환 키=YYYY-MM-DD, 값=상관(낮을수록 리더십 교체·순환매).
+    ``df_all`` 필요 컬럼: ``code``, ``time``, ``close``.
+    """
+    out: Dict[str, float] = {}
+    try:
+        if df_all is None or df_all.empty:
+            return out
+        need = {"code", "time", "close"}
+        if not need.issubset(set(df_all.columns)):
+            return out
+        d = df_all[["code", "time", "close"]].copy()
+        d["time"] = pd.to_datetime(d["time"], errors="coerce")
+        d["close"] = pd.to_numeric(d["close"], errors="coerce")
+        d["code"] = d["code"].astype(str).str.zfill(6)
+        d = d.dropna(subset=["time", "close"])
+        if d.empty:
+            return out
+        d["d"] = d["time"].dt.strftime("%Y-%m-%d")
+        px = d.pivot_table(index="d", columns="code", values="close", aggfunc="last")
+        px = px.sort_index()
+        px.index = px.index.astype(str)
+        lb = max(1, int(lookback))
+        rw = max(2, int(rs_window))
+        rs = px / px.shift(rw) - 1.0
+        days = list(rs.index)
+        for i, day in enumerate(days):
+            if i < lb:
+                continue
+            try:
+                corr = _spearman_corr_pair(
+                    rs.iloc[i - lb], rs.iloc[i], min_n=int(min_names)
+                )
+                if corr is not None:
+                    out[str(day)] = float(corr)
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return out
+
+
+def is_rs_persist_guard_day(
+    rs_rank_corr: Optional[float],
+    corr_max: float,
+) -> bool:
+    """
+    R5(RS 지속성) 가드: 상관 ≤ corr_max 이면 청산 타이트 대상일.
+    """
+    try:
+        if rs_rank_corr is None or not np.isfinite(float(rs_rank_corr)):
+            return False
+        return float(rs_rank_corr) <= float(corr_max)
+    except Exception:
+        return False
+
+
+def resolve_rs_persist_corr_threshold(
+    corr_by_day: Dict[str, float],
+    settings: Optional[dict] = None,
+) -> float:
+    """R5 임계: ``rs_persist_corr_max`` 절대값 (기본 0.60)."""
+    s = settings or {}
+    try:
+        return float(s.get("rs_persist_corr_max", 0.60) or 0.60)
+    except (TypeError, ValueError):
+        return 0.60
+
+
 def resolve_transition_regime_policy(
     level: str,
     day_max_a: int,
@@ -863,8 +955,11 @@ def resolve_transition_gate_for_live(
         "block_s2": False,
     }
     if not _settings_bool_sel(settings, "use_transition_gate", False):
-        # Transition 슬롯 게이트는 꺼져 있어도 G1만 켤 수 있음 → 아래 FDR 경로 유지
-        if not _settings_bool_sel(settings, "use_rotation_a_guard_g1", False):
+        # Transition 슬롯 게이트는 꺼져 있어도 G1/R5만 켤 수 있음 → 아래 FDR 경로 유지
+        if not (
+            _settings_bool_sel(settings, "use_rotation_a_guard_g1", False)
+            or _settings_bool_sel(settings, "use_rs_persist_guard", False)
+        ):
             return result
     if data_manager is None:
         log("⚠️ [Transition] data_manager 없음 — 게이트 OFF")
@@ -1049,10 +1144,28 @@ def resolve_transition_gate_for_live(
                 )
         except Exception:
             block_type_a = False
+        # R5: RS 순위지속성 저하 → Type A 청산 타이트만 (진입 차단 아님)
+        _r5_on = False
+        _r5_corr: Optional[float] = None
+        try:
+            if _settings_bool_sel(settings, "use_rs_persist_guard", False):
+                _corr_map = compute_rs_rank_corr_by_day(
+                    df_all, lookback=5, rs_window=20, min_names=40
+                )
+                _r5_corr = _corr_map.get(end_s)
+                _r5_thr = resolve_rs_persist_corr_threshold(_corr_map, settings)
+                _r5_on = bool(is_rs_persist_guard_day(_r5_corr, _r5_thr))
+        except Exception:
+            _r5_on = False
         _ret_s = iv.get("ret_pct")
         _ret_txt = (
             f"{float(_ret_s):+.2f}%"
             if _ret_s is not None and np.isfinite(float(_ret_s))
+            else "n/a"
+        )
+        _r5_txt = (
+            f"{float(_r5_corr):.3f}"
+            if _r5_corr is not None and np.isfinite(float(_r5_corr))
             else "n/a"
         )
         log(
@@ -1060,7 +1173,7 @@ def resolve_transition_gate_for_live(
             f"share={share:.1f}% d5={d5 if d5 is not None else 'n/a'} "
             f"idx_ret={_ret_txt} "
             f"→ 슬롯 A={slots_a}/B={slots_b} S1차단={block_s1} S2차단={block_s2} "
-            f"G1_A차단={block_type_a}"
+            f"G1_A차단={block_type_a} R5청산타이트={_r5_on}(rs5={_r5_txt})"
         )
         result.update(
             {
@@ -1070,6 +1183,7 @@ def resolve_transition_gate_for_live(
                 "block_s1": block_s1,
                 "block_s2": block_s2,
                 "block_type_a": block_type_a,
+                "r5_exit_tighten": bool(_r5_on),
                 "as_of": end_s,
             }
         )

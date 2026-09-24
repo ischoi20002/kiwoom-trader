@@ -282,6 +282,11 @@ DEFAULT_SETTINGS = {
     "rotation_a_guard_idx5_min": -1.0,
     "rotation_a_guard_xs_pct": 50.0,
     "rotation_a_guard_block_type_a": False,
+    # R5_EXIT60: RS 5일 순위상관 저하일에 Type A Flash/ATR만 임시 타이트 (진입 제한 없음)
+    "use_rs_persist_guard": True,
+    "rs_persist_corr_max": 0.60,
+    "rs_persist_exit_flash_a": 2.5,
+    "rs_persist_exit_atr_sl_a": 2.0,
     "bt_prep_cache_enabled": True,
     "min_trde_val": 30.0,
     "vol_ratio": 1.5,

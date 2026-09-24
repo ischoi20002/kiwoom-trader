@@ -534,8 +534,14 @@ def _merge_dual_track_picks(
     Track A/B/C 상위 후보를 합치고 중복 종목은 ``SelTrack=ABC``처럼 병합합니다.
 
     ``max_a`` / ``max_b`` 가 주어지면 브레드스 레짐 슬롯을 적용합니다.
+    Valid 스코어는 전 트랙 계산 전제. ``use_sel_track_*`` OFF 트랙은 감시 편입에서 제외합니다.
     Track C는 TYPE_C가 구현되기 전까지 트랙 매칭 게이트에서 A/B 매수를 차단합니다.
     """
+    mon_a = _settings_bool_sel(settings, "use_sel_track_a", True)
+    mon_b = _settings_bool_sel(settings, "use_sel_track_b", True)
+    mon_c = _settings_bool_sel(settings, "use_sel_track_c", True) and _settings_bool_sel(
+        settings, "use_type_c", False
+    )
     max_a_i = (
         max(0, int(max_a))
         if max_a is not None
@@ -551,12 +557,18 @@ def _merge_dual_track_picks(
         if max_c is not None
         else max(0, int(settings.get("max_slots_c", 15)))
     )
+    if not mon_a:
+        max_a_i = 0
+    if not mon_b:
+        max_b_i = 0
+    if not mon_c:
+        max_c_i = 0
     floor_a = max(0.0, float(settings.get("sel_track_min_score_a", 0.0) or 0.0))
     floor_b = max(0.0, float(settings.get("sel_track_min_score_b", 0.0) or 0.0))
     floor_c = max(0.0, float(settings.get("sel_track_min_score_c", 0.0) or 0.0))
-    cand_a = [d for d in selected_rows if d.get("_valid_a")]
-    cand_b = [d for d in selected_rows if d.get("_valid_b")]
-    cand_c = [d for d in selected_rows if d.get("_valid_c")]
+    cand_a = [d for d in selected_rows if d.get("_valid_a")] if mon_a else []
+    cand_b = [d for d in selected_rows if d.get("_valid_b")] if mon_b else []
+    cand_c = [d for d in selected_rows if d.get("_valid_c")] if mon_c else []
     picked_a = _sorted_dict_rows_top_with_slot_band(
         cand_a, "_score_a", max_a_i, settings, min_score_floor=floor_a
     )

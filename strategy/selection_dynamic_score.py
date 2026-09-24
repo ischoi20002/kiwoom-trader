@@ -114,20 +114,10 @@ def _score_dynamic_universe_daily_ohlcv(
         .reset_index(level=0, drop=True)
     )
 
-    use_a = bool(settings.get("use_sel_track_a", True))
-    if use_a:
-        _apply_sel_track_a_batch_v2(df_all, settings, min_억, conv)
-    else:
-        # use_a=False 여도 아래 Track B union에서 column 존재가 필요합니다.
-        df_all["Valid_A"] = pd.Series(False, index=df_all.index)
-        df_all["Score_A"] = pd.Series(0.0, index=df_all.index)
-
-    use_b = bool(settings.get("use_sel_track_b", True))
-    if use_b:
-        _apply_sel_track_b_batch_v2(df_all, settings, with_b_debug=with_b_debug)
-    else:
-        df_all["Valid_B"] = pd.Series(False, index=df_all.index)
-        df_all["Score_B"] = pd.Series(0.0, index=df_all.index)
+    # Valid_A/B/C 는 레짐·chop·진단용으로 항상 계산한다.
+    # use_sel_track_* 는 감시 편입(스케줄)만 제어한다 (OFF여도 Valid=0 강제 금지).
+    _apply_sel_track_a_batch_v2(df_all, settings, min_억, conv)
+    _apply_sel_track_b_batch_v2(df_all, settings, with_b_debug=with_b_debug)
     _apply_sel_track_c_batch_latest(df_all, settings, codes=track_c_codes)
     df_all["Valid"] = df_all[["Valid_A", "Valid_B", "Valid_C"]].fillna(False).any(axis=1)
     df_all["Score"] = df_all[["Score_A", "Score_B", "Score_C"]].fillna(0.0).max(axis=1)

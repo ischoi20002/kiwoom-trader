@@ -896,6 +896,36 @@ class SettingsTab:
             '',
             '교차섹션 ret std 분위 임계 (기본 50)',
         )
+        add_header(transition_f, '── RS지속성 A 가드(R5_EXIT60) ──')
+        add_param_row(
+            transition_f,
+            'R5 청산타이트',
+            None,
+            '',
+            'ON: RS순위상관 저하일에 Type A Flash/ATR만 임시 강화 (진입 제한 없음)',
+            toggle_key='use_rs_persist_guard',
+        )
+        add_param_row(
+            transition_f,
+            'R5 상관 상한',
+            'rs_persist_corr_max',
+            '',
+            'RS 5일 순위상관 ≤ 이 값이면 발동 (기본 0.60)',
+        )
+        add_param_row(
+            transition_f,
+            'R5 Flash A(%)',
+            'rs_persist_exit_flash_a',
+            '%',
+            'R5일 Type A Flash 임계 (기본 2.5, 평소 4.0)',
+        )
+        add_param_row(
+            transition_f,
+            'R5 ATR SL A',
+            'rs_persist_exit_atr_sl_a',
+            '×',
+            'R5일 Type A ATR SL 배수 (기본 2.0, 평소 2.8)',
+        )
         add_header(transition_f, '── TRANSITION 시 슬롯·차단 ──')
         add_param_row(
             transition_f,
@@ -1032,7 +1062,7 @@ class SettingsTab:
             'Track A 활성화',
             None,
             '',
-            'MA 수렴 + 눌림목 유니버스 선정. ON/OFF 시 Type A의 S1 진입(use_type_a)·S2 추매 전체(use_s2_master_a)와 동시에 맞춤',
+            'Valid_A는 항상 계산(레짐·chop용). OFF면 감시 편입만 끄고 Type A S1(use_type_a)·S2(use_s2_master_a)도 맞춤',
             toggle_key='use_sel_track_a',
         )
         add_param_row(
@@ -1214,7 +1244,7 @@ class SettingsTab:
             'Track B 활성화',
             None,
             '',
-            'MA 정배열 확산 + 추세돌파 유니버스 선정. ON/OFF 시 Type B의 S1 진입(use_type_b)·S2 추매 전체(use_s2_master_b)와 동시에 맞춤',
+            'Valid_B는 항상 계산(레짐·chop용). OFF면 감시 편입만 끄고 Type B S1(use_type_b)·S2(use_s2_master_b)도 맞춤',
             toggle_key='use_sel_track_b',
         )
         add_param_row(
@@ -2261,10 +2291,10 @@ class SettingsTab:
         c_select_f.pack(fill=tk.X, pady=10)
         add_param_row(
             c_select_f,
-            'Track C 종목선정 사용',
+            'Track C 감시 편입',
             None,
             '',
-            '일봉 박스권 후보를 별도 Track C로 선정. 매수하려면 아래 TYPE_C 매수도 ON',
+            'Valid_C는 항상 계산. ON이면 감시 후보에 편입(매수는 아래 TYPE_C 매수 토글)',
             toggle_key='use_sel_track_c',
         )
         add_param_row(

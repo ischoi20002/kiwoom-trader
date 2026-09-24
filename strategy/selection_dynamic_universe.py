@@ -22,7 +22,10 @@ from strategy.selection_regime import (
     _build_index_vol_by_day,
     _load_kodex200_daily_close,
     classify_transition_regime,
+    compute_rs_rank_corr_by_day,
     is_rotation_a_guard_g1_day,
+    is_rs_persist_guard_day,
+    resolve_rs_persist_corr_threshold,
     resolve_transition_regime_policy,
 )
 from strategy.selection_scoring import _settings_bool_sel
@@ -459,10 +462,23 @@ def prepare_dynamic_universe(
     # [Transition] 백테스트: 일별 레짐 게이트
     transition_gate_on = _settings_bool_sel(settings, "use_transition_gate", False)
     g1_guard_on = _settings_bool_sel(settings, "use_rotation_a_guard_g1", False)
+    r5_guard_on = _settings_bool_sel(settings, "use_rs_persist_guard", False)
     transition_days = 0
     transition_hard_days = 0
     transition_regime_by_day: Dict[str, str] = {}
     rotation_a_guard_g1_by_ref_day: Dict[str, bool] = {}
+    rs_persist_guard_by_ref_day: Dict[str, bool] = {}
+    rs_rank_corr_by_day: Dict[str, float] = {}
+    _r5_thr = 0.60
+    if r5_guard_on:
+        try:
+            rs_rank_corr_by_day = compute_rs_rank_corr_by_day(
+                df_all, lookback=5, rs_window=20, min_names=40
+            )
+            _r5_thr = resolve_rs_persist_corr_threshold(rs_rank_corr_by_day, settings)
+        except Exception:
+            rs_rank_corr_by_day = {}
+            _r5_thr = float(settings.get("rs_persist_corr_max", 0.60) or 0.60)
 
     index_vol_by_day: Dict[str, Dict[str, float]] = {}
     idx5_by_day: Dict[str, float] = {}
@@ -776,6 +792,18 @@ def prepare_dynamic_universe(
             except Exception:
                 rotation_a_guard_g1_by_ref_day[d_str] = False
 
+        if r5_guard_on:
+            try:
+                _r5 = bool(
+                    is_rs_persist_guard_day(
+                        rs_rank_corr_by_day.get(d_str),
+                        _r5_thr,
+                    )
+                )
+                rs_persist_guard_by_ref_day[d_str] = bool(_r5)
+            except Exception:
+                rs_persist_guard_by_ref_day[d_str] = False
+
         if (
             transition_gate_on
             and day_max_a <= 0
@@ -812,7 +840,12 @@ def prepare_dynamic_universe(
         except Exception:
             day_c = day_u.iloc[:0]
 
-        if not day_a.empty and day_max_a > 0:
+        # Valid_* 는 위에서 항상 계산됨. 감시 스케줄만 켜진 트랙에 편입.
+        mon_a = _settings_bool_sel(settings, "use_sel_track_a", True)
+        mon_b = _settings_bool_sel(settings, "use_sel_track_b", True)
+        mon_c = _settings_bool_sel(settings, "use_sel_track_c", True)
+
+        if mon_a and not day_a.empty and day_max_a > 0:
             schedule_a[d_str] = (
                 _df_top_by_score_slot_band(
                     day_a,
@@ -824,7 +857,7 @@ def prepare_dynamic_universe(
                 )["code"]
                 .tolist()
             )
-        if not day_b.empty and day_max_b > 0:
+        if mon_b and not day_b.empty and day_max_b > 0:
             schedule_b[d_str] = (
                 _df_top_by_score_slot_band(
                     day_b,
@@ -836,7 +869,7 @@ def prepare_dynamic_universe(
                 )["code"]
                 .tolist()
             )
-        if not day_c.empty and max_s_c > 0:
+        if mon_c and not day_c.empty and max_s_c > 0:
             picked_c = _df_top_by_score_slot_band(
                 day_c,
                 score_col="Score_C",
@@ -861,10 +894,10 @@ def prepare_dynamic_universe(
                     continue
             if day_meta:
                 schedule_c_meta[d_str] = day_meta
-        # 안전 기본값(use_type_c=False)에서는 C를 관찰 스케줄로만 유지합니다.
+        # use_type_c=False 이면 C는 관찰 스케줄만 유지하고 합동 감시에는 넣지 않음
         active_c = (
             schedule_c.get(d_str, [])
-            if _settings_bool_sel(settings, "use_type_c", False)
+            if mon_c and _settings_bool_sel(settings, "use_type_c", False)
             else []
         )
         combined = list(
@@ -890,6 +923,15 @@ def prepare_dynamic_universe(
             )
         except Exception:
             pass
+    if r5_guard_on:
+        try:
+            _r5_n = sum(1 for v in rs_persist_guard_by_ref_day.values() if v)
+            logger_callback(
+                f"  [R5] RS지속성 A 가드 발동 {_r5_n}/{len(rs_persist_guard_by_ref_day)}일 "
+                f"(corr_thr={_r5_thr:.3f})"
+            )
+        except Exception:
+            pass
 
     a_days = len(schedule_a)
     b_days = len(schedule_b)
@@ -910,6 +952,7 @@ def prepare_dynamic_universe(
             schedule_c,
             schedule_c_meta,
             rotation_a_guard_g1_by_ref_day,
+            rs_persist_guard_by_ref_day,
         )
     return schedule, schedule_a, schedule_b, transition_regime_by_day
 

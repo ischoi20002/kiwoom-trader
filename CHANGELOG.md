@@ -13,6 +13,17 @@
 
 ---
 
+## 0.22.0 (2026-09-24)
+
+- **R5_EXIT60 채택**: RS 5일 순위상관 ≤0.60인 날 Type A Flash(2.5%)·ATR SL(×2.0)만 임시 타이트. 진입 CAP/block·AF 교차는 폐기.
+- **R5 설정 단순화**: UI·defaults에 마스터/상관상한/Flash/ATR 4항목만 유지. 분위·idx5·require_a_fail·AF 키 제거.
+- **라이브 연동**: R5는 Type A 진입을 막지 않고 청산만 조임. `trading_controller`에서 일별 Flash/ATR 적용·복원.
+- **선정/감시 분리**: Track A/B/C의 Valid·Score는 항상 계산(전환·chop 레짐용). `use_sel_track_*` OFF는 **감시 편입만** 제외해, B OFF 시 Valid_B=0으로 HARD가 오발동하던 문제를 제거.
+
+## 0.21.9 (2026-09-24)
+
+- **선정/감시 분리**: Track A/B/C의 Valid·Score는 항상 계산(전환·chop 레짐용). `use_sel_track_*` OFF는 **감시 편입만** 제외해, B OFF 시 Valid_B=0으로 HARD가 오발동하던 문제를 제거.
+
 ## 0.21.8 (2026-09-24)
 
 - **DEFAULT_SETTINGS 동기화**: 현재 운용 settings 반영 — `transition_prior_share_min` 40, Type C RSI 하한 40·캔들확인 0·이탈확인봉 2, Track C 최소 거래대금 220억.

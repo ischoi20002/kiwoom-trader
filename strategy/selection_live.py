@@ -330,7 +330,6 @@ def select_monitoring_targets(
                 pass
 
     min_val_krw = float(settings.get('min_trde_val', 40.0)) * 100000000
-    use_track_c = _settings_bool_sel(settings, "use_sel_track_c", True)
     box_c_config = BoxReversionSelectionConfig.from_mapping(settings)
 
     # 실시간(api_only)은 DB 일봉 미사용. 과거일(target_date) 선정은 백테스트 DB 유지.
@@ -492,38 +491,28 @@ def select_monitoring_targets(
             df_valid = _add_vol_burst_ab_columns(df_valid, settings)
             last_full = df_valid.iloc[-1]
 
-            # 레거시 선택 로직(Track A/B v2 OFF)을 제거: 항상 v2 기준으로 판정합니다.
-            use_track_a = _settings_bool_sel(settings, "use_sel_track_a", True)
-            use_track_b = _settings_bool_sel(settings, "use_sel_track_b", True)
-
-            aux = None
-            aux_b = None
-            aux_c = None
-            if use_track_a:
-                aux = _compute_sel_a_aux_from_daily_tail(df_valid, last_full, settings)
-            if use_track_b:
-                aux_b = _compute_sel_b_aux_from_daily_tail(df_valid, last_full, settings)
-            if use_track_c:
-                aux_c = evaluate_box_reversion_candidate(
-                    df,
-                    code=code,
-                    name=str(name),
-                    config=box_c_config,
-                    as_of=target_date,
-                )
+            # 레짐·진단용 Valid 는 항상 계산. 감시 편입은 use_sel_track_* 로만 제한.
+            aux = _compute_sel_a_aux_from_daily_tail(df_valid, last_full, settings)
+            aux_b = _compute_sel_b_aux_from_daily_tail(df_valid, last_full, settings)
+            aux_c = evaluate_box_reversion_candidate(
+                df,
+                code=code,
+                name=str(name),
+                config=box_c_config,
+                as_of=target_date,
+            )
 
             # v2 경로에서는 _valid_a/_valid_b 컬럼이 의미 없으므로 0으로 고정
+            # (aux / aux_b update 가 실제 Valid·Score 를 채움)
             valid_a = False
             score_a_place = 0.0
             valid_b_place = False
             score_b_place = 0.0
 
-            has_a = use_track_a
-            has_b = use_track_b
             ok_row = (
-                (has_a and aux is not None)
-                or (has_b and aux_b is not None)
-                or (use_track_c and aux_c is not None)
+                aux is not None
+                or aux_b is not None
+                or aux_c is not None
             )
             if not ok_row:
                 return None, status
@@ -618,16 +607,15 @@ def select_monitoring_targets(
     selected = [r[0] for r in raw_results if r[0] is not None]
 
     try:
-        if _settings_bool_sel(settings, "use_sel_track_a", True):
-            selected = _apply_sel_a_live_cross_section(selected, settings)
+        # 교차섹션은 감시 ON/OFF와 무관하게 Valid/Score 정합용으로 항상 적용
+        selected = _apply_sel_a_live_cross_section(selected, settings)
     except Exception as e:
         try:
             logger_callback(f"⚠️ [선정] Track A v2 교차섹션 적용 실패: {e}")
         except Exception:
             pass
     try:
-        if _settings_bool_sel(settings, "use_sel_track_b", True):
-            selected = _apply_sel_b_live_cross_section(selected, settings)
+        selected = _apply_sel_b_live_cross_section(selected, settings)
     except Exception as e:
         try:
             logger_callback(f"⚠️ [선정] Track B v2 교차섹션 적용 실패: {e}")

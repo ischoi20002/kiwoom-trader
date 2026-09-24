@@ -130,6 +130,37 @@ class TradingController:
         self.websocket_worker_service = WebsocketWorkerService(
             self.app, log_func=self.log
         )
+        # R5 청산타이트: 평소 Flash/ATR 백업
+        self._r5_exit_base_flash_a: Optional[float] = None
+        self._r5_exit_base_atr_sl_a: Optional[float] = None
+
+    def _apply_live_r5_exit_tighten(self, active: bool) -> None:
+        """라이브 R5일 Type A Flash/ATR만 임시 타이트 (진입 제한 없음)."""
+        st = getattr(self.app, "settings", None)
+        if not isinstance(st, dict):
+            return
+        try:
+            tight_flash = float(st.get("rs_persist_exit_flash_a", 2.5) or 2.5)
+            tight_atr = float(st.get("rs_persist_exit_atr_sl_a", 2.0) or 2.0)
+            if self._r5_exit_base_flash_a is None:
+                cur = float(st.get("s1_a_flash_exit_pct", 4.0) or 4.0)
+                # 이미 타이트 값이 남아 있으면 평소 기본(4.0)으로 복원 기준
+                self._r5_exit_base_flash_a = (
+                    4.0 if abs(cur - tight_flash) < 1e-9 else cur
+                )
+            if self._r5_exit_base_atr_sl_a is None:
+                cur_a = float(st.get("atr_multiplier_sl_a", 2.8) or 2.8)
+                self._r5_exit_base_atr_sl_a = (
+                    2.8 if abs(cur_a - tight_atr) < 1e-9 else cur_a
+                )
+            if active and bool(st.get("use_rs_persist_guard", False)):
+                st["s1_a_flash_exit_pct"] = tight_flash
+                st["atr_multiplier_sl_a"] = tight_atr
+            else:
+                st["s1_a_flash_exit_pct"] = float(self._r5_exit_base_flash_a)
+                st["atr_multiplier_sl_a"] = float(self._r5_exit_base_atr_sl_a)
+        except Exception:
+            pass
 
     def toggle(self):
         """감시 상태를 토글합니다."""
@@ -175,8 +206,10 @@ class TradingController:
                 st.pop("transition_runtime_regime", None)
                 st.pop("transition_runtime_block_s1", None)
                 st.pop("transition_runtime_block_s2", None)
-                # G1만 켜진 경우에도 레짐 조회(TYPE_A 차단 플래그)
-                if bool(st.get("use_rotation_a_guard_g1", False)):
+                # G1 또는 R5만 켜진 경우에도 레짐 조회
+                if bool(st.get("use_rotation_a_guard_g1", False)) or bool(
+                    st.get("use_rs_persist_guard", False)
+                ):
                     try:
                         import strategy_selector
 
@@ -189,10 +222,15 @@ class TradingController:
                         st["rotation_a_guard_block_type_a"] = bool(
                             tg.get("block_type_a", False)
                         )
+                        _r5t = bool(tg.get("r5_exit_tighten", False))
+                        st["r5_exit_tighten_runtime"] = _r5t
+                        self._apply_live_r5_exit_tighten(_r5t)
                     except Exception:
                         st["rotation_a_guard_block_type_a"] = False
+                        self._apply_live_r5_exit_tighten(False)
                 else:
                     st.pop("rotation_a_guard_block_type_a", None)
+                    self._apply_live_r5_exit_tighten(False)
             else:
                 # 일일 선정 직후 등: 같은 프로세스에서 방금 FDR 레짐을 이미 넣었으면 재조회 생략
                 _skip_transition_fetch = False
@@ -211,6 +249,12 @@ class TradingController:
                             except Exception:
                                 pass
                             _skip_transition_fetch = True
+                            try:
+                                self._apply_live_r5_exit_tighten(
+                                    bool(st.get("r5_exit_tighten_runtime", False))
+                                )
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                 if not _skip_transition_fetch:
@@ -230,6 +274,9 @@ class TradingController:
                         st["rotation_a_guard_block_type_a"] = bool(
                             tg.get("block_type_a", False)
                         )
+                        _r5t = bool(tg.get("r5_exit_tighten", False))
+                        st["r5_exit_tighten_runtime"] = _r5t
+                        self._apply_live_r5_exit_tighten(_r5t)
                         try:
                             import time as _time
 
@@ -240,6 +287,13 @@ class TradingController:
                             if bool(st.get("rotation_a_guard_block_type_a", False)):
                                 self.log(
                                     "ℹ️ [G1] 로테이션 A 가드 ON — 신규 Type A S1 차단"
+                                )
+                        except Exception:
+                            pass
+                        try:
+                            if bool(tg.get("r5_exit_tighten", False)):
+                                self.log(
+                                    "ℹ️ [R5] RS지속성 저하 — Type A Flash/ATR 타이트"
                                 )
                         except Exception:
                             pass
