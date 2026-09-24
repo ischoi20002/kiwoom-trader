@@ -254,6 +254,7 @@ class RegimeDisplayService:
         *,
         reason: str = "manual",
         as_of: Optional[date] = None,
+        skip_cache: bool = False,
     ) -> None:
         """백그라운드에서 레짐 조회 후 메인 스레드 라벨 갱신."""
         if self._refresh_in_progress:
@@ -275,7 +276,9 @@ class RegimeDisplayService:
         def _worker() -> None:
             payload: dict[str, Any]
             try:
-                payload = self._fetch_regime_payload(as_of=resolved_asof)
+                payload = self._fetch_regime_payload(
+                    as_of=resolved_asof, skip_cache=bool(skip_cache)
+                )
                 payload["reason"] = reason
             except Exception as ex:
                 payload = {
@@ -296,16 +299,23 @@ class RegimeDisplayService:
 
         threading.Thread(target=_worker, daemon=True, name="RegimeDisplay").start()
 
-    def _fetch_regime_payload(self, *, as_of: Optional[date] = None) -> dict[str, Any]:
+    def _fetch_regime_payload(
+        self, *, as_of: Optional[date] = None, skip_cache: bool = False
+    ) -> dict[str, Any]:
         st = dict(getattr(self.app, "settings", None) or {})
         if not bool(st.get("use_transition_gate", False)):
-            return {
-                "regime_key": "GATE_OFF",
-                "as_of": "",
-                "apply_on": "",
-                "detail": "",
-                "reason": "gate_off",
-            }
+            # Transition OFF여도 R5/G1만 켜져 있으면 표시용으로라도 조회
+            if not (
+                bool(st.get("use_rotation_a_guard_g1", False))
+                or bool(st.get("use_rs_persist_guard", False))
+            ):
+                return {
+                    "regime_key": "GATE_OFF",
+                    "as_of": "",
+                    "apply_on": "",
+                    "detail": "",
+                    "reason": "gate_off",
+                }
 
         dm = getattr(self.app, "data_manager", None)
         if dm is None:
@@ -325,6 +335,7 @@ class RegimeDisplayService:
             dm,
             as_of_dt,
             logger_callback=lambda *_a, **_k: None,
+            skip_cache=bool(skip_cache),
         )
         reg = str(tg.get("regime", "OFF")).strip().upper()
         if reg not in ("OFF", "TRANSITION", "HARD"):
@@ -337,6 +348,8 @@ class RegimeDisplayService:
             detail = f"감시 {slots_a}/{slots_b}"
         elif reg == "HARD":
             detail = "신규 차단"
+        if bool(tg.get("r5_exit_tighten", False)):
+            detail = (detail + " · R5타이트").strip(" ·")
 
         as_of_s = str(tg.get("as_of") or as_of_dt.strftime("%Y-%m-%d"))
         apply_on = self._apply_on_from_data_asof(as_of_s)

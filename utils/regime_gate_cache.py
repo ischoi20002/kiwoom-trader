@@ -40,12 +40,32 @@ _FINGERPRINT_KEYS = (
     "max_slots_a",
     "max_slots_b",
     "kodex200_universe_priority",
+    # R5_EXIT60 (레짐 조회와 동시 판정)
+    "use_rs_persist_guard",
+    "rs_persist_corr_max",
+    "rs_persist_exit_flash_a",
+    "rs_persist_exit_atr_sl_a",
+    "use_rotation_a_guard_g1",
+    "rotation_a_guard_a_share_min",
+    "rotation_a_guard_idx5_min",
+    "rotation_a_guard_xs_pct",
 )
 
 
 def cache_file_path() -> str:
     """캐시 파일 절대 경로."""
     return os.path.join(project_root(), _CACHE_FILENAME)
+
+
+def clear_regime_gate_cache() -> bool:
+    """디스크 레짐 캐시를 삭제한다. 성공·파일이 없어도 True."""
+    path = cache_file_path()
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+        return True
+    except Exception:
+        return False
 
 
 def transition_gate_settings_fingerprint(settings: Optional[dict[str, Any]]) -> str:

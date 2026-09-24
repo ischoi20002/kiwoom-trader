@@ -196,7 +196,7 @@ class TradingController:
         Parameters
         ----------
         force
-            True 이면 최근 선정·갱신 캐시를 무시하고 FDR을 다시 조회합니다.
+            True 이면 메모리 15분 재사용·디스크 레짐 캐시를 무시하고 FDR을 다시 조회합니다.
         """
         st = getattr(self.app, "settings", None)
         if not isinstance(st, dict):
@@ -218,6 +218,7 @@ class TradingController:
                             getattr(self.app, "data_manager", None),
                             None,
                             self.log,
+                            skip_cache=bool(force),
                         )
                         st["rotation_a_guard_block_type_a"] = bool(
                             tg.get("block_type_a", False)
@@ -266,6 +267,7 @@ class TradingController:
                             getattr(self.app, "data_manager", None),
                             None,
                             self.log,
+                            skip_cache=bool(force),
                         )
                         reg = str(tg.get("regime", "OFF"))
                         st["transition_runtime_regime"] = reg
@@ -334,6 +336,36 @@ class TradingController:
                 self.log(f"⚠️ [IndexDD] 시작 시 갱신 실패: {e}")
             except Exception:
                 pass
+
+    def recalculate_regime(self) -> None:
+        """
+        디스크 레짐 캐시를 지우고 Transition/G1/R5를 FDR로 강제 재계산한다.
+        메인 스레드에서 호출하지 말 것(수 초~수십 초).
+        """
+        try:
+            from utils.regime_gate_cache import clear_regime_gate_cache
+
+            clear_regime_gate_cache()
+        except Exception:
+            pass
+        try:
+            self._transition_flags_mono_ts = 0.0
+        except Exception:
+            pass
+        try:
+            self.log("🔄 [레짐] 강제 재계산 시작 (캐시 무시)…")
+        except Exception:
+            pass
+        self._refresh_transition_runtime_flags(force=True)
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            reg = str(st.get("transition_runtime_regime", "OFF") or "OFF")
+            r5 = bool(st.get("r5_exit_tighten_runtime", False))
+            self.log(
+                f"✅ [레짐] 재계산 완료 — regime={reg}, R5청산타이트={'ON' if r5 else 'OFF'}"
+            )
+        except Exception:
+            pass
 
     def mark_transition_flags_fresh(self) -> None:
         """선정 등에서 레짐을 막 반영했을 때 FDR 재조회 생략용 시각을 찍습니다."""

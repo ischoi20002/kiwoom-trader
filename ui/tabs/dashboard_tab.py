@@ -11,8 +11,9 @@ class DashboardTab:
         self.app = app
         self.lbl_mode_badge: Optional[tk.Label] = None
         self.btn_sync: Optional[ttk.Button] = None
-        self.btn_restart: Optional[ttk.Button] = None
+        self.btn_regime_recalc: Optional[ttk.Button] = None
         self.btn_check_update: Optional[ttk.Button] = None
+        self._regime_recalc_busy: bool = False
         self.btn_server_switch: Optional[ttk.Button] = None
         self.btn_select: Optional[ttk.Button] = None
         self.btn_monitor_toggle: Optional[ttk.Button] = None
@@ -113,7 +114,7 @@ class DashboardTab:
         )
         self.btn_server_switch.pack(side=tk.LEFT)
 
-        # 2행: 동기화 · 재시작 · 업데이트 확인 (오른쪽 정렬)
+        # 2행: 동기화 · 레짐 재계산 · 업데이트 확인 (오른쪽 정렬)
         row_sys = ttk.Frame(ops)
         row_sys.pack(fill=tk.X)
         sys_right = ttk.Frame(row_sys)
@@ -126,13 +127,13 @@ class DashboardTab:
             command=self.app._sync_account_deposit,
         )
         self.btn_sync.pack(side=tk.LEFT, padx=(0, btn_gap))
-        self.btn_restart = ttk.Button(
+        self.btn_regime_recalc = ttk.Button(
             sys_right,
-            text="재시작",
+            text="레짐 재계산",
             width=btn_w,
-            command=self._on_restart_clicked,
+            command=self._on_regime_recalc_clicked,
         )
-        self.btn_restart.pack(side=tk.LEFT, padx=(0, btn_gap))
+        self.btn_regime_recalc.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_check_update = ttk.Button(
             sys_right,
             text="업데이트 확인",
@@ -329,15 +330,111 @@ class DashboardTab:
             except Exception:
                 pass
 
-    def _on_restart_clicked(self) -> None:
-        """대시보드 재시작 버튼 — 감시 상태를 유지한 채 GUI만 재기동."""
+    def _on_regime_recalc_clicked(self) -> None:
+        """디스크 캐시 무시하고 Transition/G1/R5를 FDR로 재계산."""
+        if bool(getattr(self, "_regime_recalc_busy", False)):
+            return
+        self._regime_recalc_busy = True
         try:
-            if hasattr(self.app, "restart_gui"):
-                self.app.restart_gui()
-                return
-        except Exception as e:
+            if self.btn_regime_recalc is not None:
+                self.btn_regime_recalc.configure(state=tk.DISABLED, text="계산 중…")
+        except Exception:
+            pass
+
+        def _work() -> None:
+            err = ""
             try:
-                messagebox.showerror("재시작", str(e), parent=self.parent)
+                tc = getattr(self.app, "trading_controller", None)
+                if tc is not None and hasattr(tc, "recalculate_regime"):
+                    tc.recalculate_regime()
+                else:
+                    from utils.regime_gate_cache import clear_regime_gate_cache
+                    import strategy_selector
+
+                    clear_regime_gate_cache()
+                    st = getattr(self.app, "settings", None) or {}
+                    tg = strategy_selector.resolve_transition_gate_for_live(
+                        st,
+                        getattr(self.app, "data_manager", None),
+                        None,
+                        getattr(self.app, "log", None),
+                        skip_cache=True,
+                    )
+                    if isinstance(st, dict):
+                        st["transition_runtime_regime"] = str(tg.get("regime", "OFF"))
+                        st["transition_runtime_block_s1"] = bool(
+                            tg.get("block_s1", False)
+                        )
+                        st["transition_runtime_block_s2"] = bool(
+                            tg.get("block_s2", False)
+                        )
+                        st["rotation_a_guard_block_type_a"] = bool(
+                            tg.get("block_type_a", False)
+                        )
+                        st["r5_exit_tighten_runtime"] = bool(
+                            tg.get("r5_exit_tighten", False)
+                        )
+            except Exception as e:
+                err = str(e)
+
+            def _done() -> None:
+                self._regime_recalc_busy = False
+                try:
+                    if self.btn_regime_recalc is not None:
+                        self.btn_regime_recalc.configure(
+                            state=tk.NORMAL, text="레짐 재계산"
+                        )
+                except Exception:
+                    pass
+                if err:
+                    try:
+                        messagebox.showerror("레짐 재계산", err, parent=self.parent)
+                    except Exception:
+                        pass
+                    return
+                try:
+                    rds = getattr(self.app, "regime_display_service", None)
+                    if rds is not None and hasattr(rds, "refresh_async"):
+                        # 방금 강제 재계산으로 캐시가 갱신됨 → 표시만 맞춤
+                        rds.refresh_async(reason="manual_recalc", skip_cache=False)
+                except Exception:
+                    pass
+                try:
+                    st = getattr(self.app, "settings", None) or {}
+                    reg = str(st.get("transition_runtime_regime", "OFF") or "OFF")
+                    r5 = bool(st.get("r5_exit_tighten_runtime", False))
+                    messagebox.showinfo(
+                        "레짐 재계산",
+                        f"완료\n\n레짐: {reg}\nR5 청산타이트: {'ON' if r5 else 'OFF'}",
+                        parent=self.parent,
+                    )
+                except Exception:
+                    pass
+
+            try:
+                root = getattr(self.app, "root", None)
+                if root is not None:
+                    root.after(0, _done)
+                else:
+                    _done()
+            except Exception:
+                _done()
+
+        try:
+            threading.Thread(
+                target=_work, daemon=True, name="RegimeRecalc"
+            ).start()
+        except Exception as e:
+            self._regime_recalc_busy = False
+            try:
+                if self.btn_regime_recalc is not None:
+                    self.btn_regime_recalc.configure(
+                        state=tk.NORMAL, text="레짐 재계산"
+                    )
+            except Exception:
+                pass
+            try:
+                messagebox.showerror("레짐 재계산", str(e), parent=self.parent)
             except Exception:
                 pass
 

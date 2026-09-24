@@ -934,6 +934,8 @@ def resolve_transition_gate_for_live(
     data_manager: Any,
     as_of: Optional[datetime] = None,
     logger_callback: Optional[Callable[..., None]] = None,
+    *,
+    skip_cache: bool = False,
 ) -> Dict[str, Any]:
     """
     실시간 선정용 transition 레짐·슬롯·차단 플래그.
@@ -943,6 +945,8 @@ def resolve_transition_gate_for_live(
     백테와 같이 **완료된 거래일** 기준만 사용한다.
     ``as_of`` 가 오늘(또는 미래)이면서 아직 장마감+버퍼 전이면 직전 완료 거래일로 스냅한다.
     과거 ``target_date`` 명시 시에는 그 날짜를 그대로 쓴다.
+
+    ``skip_cache=True`` 이면 디스크 캐시를 읽지 않고 FDR을 다시 조회한다.
     """
     log = logger_callback or (lambda *_a, **_k: None)
     max_a = int(settings.get("max_slots_a", 20))
@@ -985,19 +989,25 @@ def resolve_transition_gate_for_live(
         except Exception:
             pass
         end_s = as_of_dt.strftime("%Y-%m-%d")
-        try:
-            from utils.regime_gate_cache import load_regime_gate_cache, save_regime_gate_cache
+        if not skip_cache:
+            try:
+                from utils.regime_gate_cache import load_regime_gate_cache
 
-            cached = load_regime_gate_cache(as_of=end_s, settings=settings)
-            if cached:
-                result.update(cached)
-                log(
-                    f"ℹ️ [Transition] {end_s} 레짐 캐시 재사용 "
-                    f"(regime={cached.get('regime', 'OFF')}, FDR 재조회 생략)"
-                )
-                return result
-        except Exception:
-            pass
+                cached = load_regime_gate_cache(as_of=end_s, settings=settings)
+                if cached:
+                    result.update(cached)
+                    log(
+                        f"ℹ️ [Transition] {end_s} 레짐 캐시 재사용 "
+                        f"(regime={cached.get('regime', 'OFF')}, FDR 재조회 생략)"
+                    )
+                    return result
+            except Exception:
+                pass
+        else:
+            try:
+                log(f"ℹ️ [Transition] {end_s} 레짐 강제 재계산 (캐시 무시)")
+            except Exception:
+                pass
         start_s = (as_of_dt - timedelta(days=30)).strftime("%Y-%m-%d")
         codes = resolve_universe_codes(settings, logger_callback=log)
         if not codes:
