@@ -309,7 +309,7 @@ class GuiUtils:
         line_break = "\n" if format_type == "ui" else "\n"
         return (
             f"{b}{univ_label} 편입  |  {b}{s.get('min_trde_val', 40)}억+  |  {b}수렴 {int(s.get('ma_convergence', 3.0))}%  |  {b}선정RSI {s.get('sel_rsi_min', 40)}~{s.get('sel_rsi_max', 70)}{line_break}"
-            f"{b}분출 {int(s.get('vol_lookback', 10))}일내 {int(s.get('vol_ratio', 1.5)*100)}%+  |  {b}매수RSI {s.get('buy_rsi_min', 40)} ~ [A:{s.get('buy_rsi_max_a', 58.0)} / B:{s.get('buy_rsi_max_b', 65.0)}]"
+            f"{b}분출 {int(s.get('vol_lookback', 10))}일내 {int(s.get('vol_ratio', 1.5)*100)}%+  |  {b}매수RSI [A: {s.get('buy_rsi_min', 40)}~{s.get('buy_rsi_max_a', 58.0)} / B: {s.get('buy_rsi_min_b', s.get('buy_rsi_min', 40))}~{s.get('buy_rsi_max_b', 65.0)}]"
         )
 
 class CustomDatePicker(tk.Toplevel):

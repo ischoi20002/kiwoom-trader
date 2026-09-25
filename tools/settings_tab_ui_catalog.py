@@ -691,6 +691,22 @@ SETTING_UI_ROWS: tuple[SettingUiRow, ...] = (
         "same_bar_sig_prefer_sel_track",
     ),
     SettingUiRow(
+        3225,
+        "③ Stage 1 진입 (공통/A/B)",
+        "[3] 1단계 진입 (S1) — 감시 후 매수 신호",
+        "Type B: 돌파형 진입 조건",
+        "RSI 하한선 (B) — 토글",
+        "use_rsi_min_b",
+    ),
+    SettingUiRow(
+        3226,
+        "③ Stage 1 진입 (공통/A/B)",
+        "[3] 1단계 진입 (S1) — 감시 후 매수 신호",
+        "Type B: 돌파형 진입 조건",
+        "RSI 하한선 (B)",
+        "buy_rsi_min_b",
+    ),
+    SettingUiRow(
         3230,
         "③ Stage 1 진입 (공통/A/B)",
         "[3] 1단계 진입 (S1) — 감시 후 매수 신호",

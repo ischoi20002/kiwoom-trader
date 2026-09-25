@@ -511,7 +511,7 @@ class KiwoomApp:
             'buy_rsi_min', 'buy_rsi_max_a', 'gc_window', 'rsi_window', 'ma_convergence',
             'ma60_min', 'ma60_max',
             'vol_surge', 'prev_vol_lookback_s1_a',
-            'buy_rsi_max_b', 'vol_surge_b', 'prev_vol_lookback_s1_b',
+            'buy_rsi_min_b', 'buy_rsi_max_b', 'vol_surge_b', 'prev_vol_lookback_s1_b',
             's2_ma20_gap', 's2_ma5_gap', 's2_rsi_gap', 's2_macd_gap', 's2_vol_ratio',
             'prev_vol_lookback_s2_a', 's2_profit_limit', 's2_delay_hours',
             's2_b_ma20_gap', 's2_b_ma5_gap', 's2_b_rsi_gap', 's2_b_macd_gap', 's2_b_vol_ratio',

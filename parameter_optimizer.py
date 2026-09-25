@@ -65,7 +65,7 @@ _INDICATOR_PARAMS = frozenset({
 
 # 최적화 시 지표 재계산 스킵 판정용(신호·매매 로직만 영향). _INDICATOR_PARAMS 와 교집합 없어야 함.
 SIGNAL_ONLY_PARAMS = frozenset({
-    'buy_rsi_min', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
+    'buy_rsi_min', 'buy_rsi_min_b', 'buy_rsi_max_a', 'buy_rsi_max_b', 'vol_surge', 'vol_surge_b',
     's1_a_stop_loss', 's1_b_stop_loss', 's2_stop_loss', 's2_b_stop_loss',
     's1_a_take_profit', 's1_b_take_profit', 's2_take_profit', 's2_b_take_profit',
     'take_profit', 'stop_loss',
@@ -89,7 +89,7 @@ SIGNAL_ONLY_PARAMS = frozenset({
     'atr_multiplier_sl_a', 'atr_multiplier_sl_b', 'atr_multiplier_sl_s2', 'atr_multiplier_sl_s2_b',
     'atr_multiplier_trail_a', 'atr_multiplier_trail_b', 'atr_multiplier_trail_s2', 'atr_multiplier_trail_s2_b',
     'atr_sl_entry_grace_hours', 'atr_sl_entry_grace_mult', 'atr_sl_entry_grace_same_day',
-    'ma_convergence', 'use_rsi_min',
+    'ma_convergence', 'use_rsi_min', 'use_rsi_min_b',
     's1_equity_pct', 's2_equity_pct', 's1_sizing_unit', 's2_sizing_unit',
     'use_smart_exit', 'smart_exit_ba_ratio', 'smart_exit_vp', 'smart_exit_price_threshold',
     'use_smart_buy_a', 'use_smart_buy_b', 'use_smart_buy_s2', 'use_smart_buy_s2_b',

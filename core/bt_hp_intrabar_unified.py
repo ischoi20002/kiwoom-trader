@@ -204,7 +204,10 @@ def close_now_fast_prefilter_ok(settings: Dict[str, Any], ind_d: Any) -> bool:
     rsi = _safe_float_ind(ind_d, "RSI")
     osc = _safe_float_ind(ind_d, "OSC", 0.0)
     try:
-        rmin = float(settings.get("buy_rsi_min", 40.0))
+        rmin = min(
+            float(settings.get("buy_rsi_min", 40.0)),
+            float(settings.get("buy_rsi_min_b", 40.0)),
+        )
     except (TypeError, ValueError):
         rmin = 40.0
     try:

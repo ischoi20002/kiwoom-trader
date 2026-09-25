@@ -347,6 +347,8 @@ DEFAULT_SETTINGS = {
     "same_bar_block_type_a": False,
     "same_bar_block_simul": False,
     "s1_simul_balance_tie_mode": "always",
+    "use_rsi_min_b": True,
+    "buy_rsi_min_b": 65.0,
     "buy_rsi_max_b": 80.0,
     "use_smart_buy_b": False,
     "use_type_b_vol": True,

@@ -91,9 +91,11 @@ _INDICATOR_KEYS = frozenset(
 _SIGNAL_KEYS = frozenset(
     {
         "buy_rsi_min",
+        "buy_rsi_min_b",
         "buy_rsi_max_a",
         "buy_rsi_max_b",
         "use_rsi_min",
+        "use_rsi_min_b",
         "use_rsi_sig_filter",
         "ma60_min",
         "ma60_max",

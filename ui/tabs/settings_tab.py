@@ -1483,7 +1483,7 @@ class SettingsTab:
             'S1 진입 RSI 하한',
             'buy_rsi_min',
             '',
-            'Type A·B 15분 신호 모두 동일 하한 적용(use_rsi_min OFF면 0으로 완화) · Wilder RSI(14)',
+            'Type A 15분 신호 하한 적용(Type B는 전용 하한 미사용 시 폴백) · Wilder RSI(14)',
             toggle_key='use_rsi_min',
         )
         add_param_row(
@@ -1731,6 +1731,36 @@ class SettingsTab:
         )
         add_header(strat_f, '── Type B: 돌파형 진입 조건 ──')
         add_param_row(strat_f, 'B 전용 사용', None, '', '순풍(UP) 장세 전용', toggle_key='use_type_b')
+        add_param_row(
+            strat_f,
+            'RSI 하한선',
+            'buy_rsi_min_b',
+            '',
+            'Type B 전용 돌파 하한 (기본 65) · OFF면 S1 공통 하한 적용',
+            toggle_key='use_rsi_min_b',
+            widget_list=self.type_b_widgets,
+        )
+        add_param_row(
+            strat_f,
+            'RSI 상한선',
+            'buy_rsi_max_b',
+            '',
+            '돌파 강점 확인용 (기본 70) · 기준선 Wilder RSI(14)',
+            widget_list=self.type_b_widgets,
+        )
+        add_param_row(strat_f, 'Smart Buy', None, '', '돌파 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_b', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, '돌파 거래량', 'vol_surge_b', '배', '돌파 시점 폭발적 수급', toggle_key='use_type_b_vol', widget_list=self.type_b_widgets)
+        add_param_row(
+            strat_f,
+            '  ㄴ 전일동시간 평균 기간 (S1·B)',
+            'prev_vol_lookback_s1_b',
+            '일',
+            '15분 S1 Type B: Prev_Day_Vol_S1_B. 구 prev_vol_lookback_b 미설정 시 폴백',
+            widget_list=self.type_b_widgets,
+        )
+        add_param_row(strat_f, '추세 정렬 확인', None, '', '일봉/1분봉 추세 일치 여부', toggle_key='use_trend_aligned_b', widget_list=self.type_b_widgets)
+        add_param_row(strat_f, 'MACD GC 확인', None, '', '추가 모멘텀(GC) 확인', toggle_key='use_macd_gc_b', widget_list=self.type_b_widgets)
+
         # 동시신호(A+B) 확정: ①초안 → ②동수 시 B 덮기 → ③트랙 바로확정(ON이면 ①② 무시)
         add_header(strat_f, '── 동시신호(A+B) 타입 확정 ──')
         r_sb = get_next_row(strat_f)
@@ -1810,7 +1840,7 @@ class SettingsTab:
                 None,
                 '',
                 'ON이면 ①②를 건너뛰고 선정 트랙(A→TYPE_A, B→TYPE_B)으로 확정. '
-                'OFF(권장)=①→② 순서 유지',
+                'OFF(권장)=①② 순서 유지',
                 toggle_key='same_bar_sig_prefer_sel_track',
             )
         except Exception as e:
@@ -1819,26 +1849,6 @@ class SettingsTab:
                     self.app.log(f'동일봉 Sig_Type UI 생성 실패: {e}')
             except Exception:
                 pass
-        add_param_row(
-            strat_f,
-            'RSI 상한선',
-            'buy_rsi_max_b',
-            '',
-            '돌파 강점 확인용 (기본 70) · 기준선 Wilder RSI(14)',
-            widget_list=self.type_b_widgets,
-        )
-        add_param_row(strat_f, 'Smart Buy', None, '', '돌파 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_b', widget_list=self.type_b_widgets)
-        add_param_row(strat_f, '돌파 거래량', 'vol_surge_b', '배', '돌파 시점 폭발적 수급', toggle_key='use_type_b_vol', widget_list=self.type_b_widgets)
-        add_param_row(
-            strat_f,
-            '  ㄴ 전일동시간 평균 기간 (S1·B)',
-            'prev_vol_lookback_s1_b',
-            '일',
-            '15분 S1 Type B: Prev_Day_Vol_S1_B. 구 prev_vol_lookback_b 미설정 시 폴백',
-            widget_list=self.type_b_widgets,
-        )
-        add_param_row(strat_f, '추세 정렬 확인', None, '', '일봉/1분봉 추세 일치 여부', toggle_key='use_trend_aligned_b', widget_list=self.type_b_widgets)
-        add_param_row(strat_f, 'MACD GC 확인', None, '', '추가 모멘텀(GC) 확인', toggle_key='use_macd_gc_b', widget_list=self.type_b_widgets)
 
         s2_f = ttk.LabelFrame(_sec_parent('s2'), text=' 📈 [4] S2 — Type A 전용 (s2_* 만) ', padding='15')
         s2_f.pack(fill=tk.X, pady=10)

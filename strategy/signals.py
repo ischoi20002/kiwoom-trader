@@ -110,13 +110,18 @@ def get_buy_signals_detailed(
     settings = settings or {}
     ma60_ratio = (df['Close'] / df['MA60']) * 100
     
-    # 2. RSI 조건 — 하한은 S1 공통(use_rsi_min·buy_rsi_min), 상한만 A/B 분리
-    buy_rsi_min = settings.get('buy_rsi_min', 30.0) if settings.get('use_rsi_min', True) else 0.0
-    buy_rsi_max_b = settings.get('buy_rsi_max_b', 70.0)
-    buy_rsi_max_a = settings.get('buy_rsi_max_a', 65.0) # [v4.5 Sync] Default 55.0 -> 65.0
+    # 2. RSI 조건 — 하한 및 상한 A/B 분리
+    buy_rsi_min_a = float(settings.get('buy_rsi_min_a', settings.get('buy_rsi_min', 40.0))) if _settings_bool(settings, 'use_rsi_min', True) else 0.0
+    use_min_b = _settings_bool(settings, 'use_rsi_min_b', _settings_bool(settings, 'use_rsi_min', True))
+    default_min_b = float(settings.get('buy_rsi_min', 40.0))
+    buy_rsi_min_b = float(settings.get('buy_rsi_min_b', default_min_b)) if use_min_b else 0.0
+
+    buy_rsi_max_b = float(settings.get('buy_rsi_max_b', 70.0))
+    buy_rsi_max_a = float(settings.get('buy_rsi_max_a', 65.0)) # [v4.5 Sync] Default 55.0 -> 65.0
     
-    cond_rsi_range = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_b)
-    cond_rsi_type_a = (df['RSI'] >= buy_rsi_min) & (df['RSI'] <= buy_rsi_max_a)
+    cond_rsi_type_a = (df['RSI'] >= buy_rsi_min_a) & (df['RSI'] <= buy_rsi_max_a)
+    cond_rsi_type_b = (df['RSI'] >= buy_rsi_min_b) & (df['RSI'] <= buy_rsi_max_b)
+    cond_rsi_range = cond_rsi_type_b  # 하위 호환
     
     # [v26.11] RSI Signal Filter: Ensure RSI is above signal AND increasing (momentum strengthening)
     cond_rsi_sig = (df['RSI'] >= df['RSI_Sig']) & (df['RSI'] > df['RSI'].shift(1))
@@ -197,7 +202,7 @@ def get_buy_signals_detailed(
     cond_trend_aligned = (df['MA20'] > df['MA60']) & (df['Close'] > df['MA20'])
     cond_macd_gc = (df['MACD'] > df['MACD_Sig']) & (df['MACD'].shift(1) <= df['MACD_Sig'].shift(1))
     
-    signal_b = use_b & cond_rsi_range 
+    signal_b = use_b & cond_rsi_type_b 
     if settings.get('use_macd_gc_b', True): signal_b &= cond_macd_gc
     if settings.get('use_trend_aligned_b', True): signal_b &= cond_trend_aligned
     if use_rsi_sig_filter: signal_b &= cond_rsi_sig
@@ -393,7 +398,7 @@ def get_buy_signals_detailed(
                 conds.append(cond_rsi_sig)
             if settings.get('use_rsi_signal', True): conds.append(cond_rsi_50_pulse)
         elif sig_type == 'TYPE_B':
-            conds = [cond_rsi_range]
+            conds = [cond_rsi_type_b]
             if settings.get('use_macd_gc_b', True): conds.append(cond_macd_gc)
             if settings.get('use_trend_aligned_b', True): conds.append(cond_trend_aligned)
             if settings.get('use_type_b_vol', True): conds.append(cond_vol_b)
@@ -466,6 +471,8 @@ def get_buy_signals_detailed(
         'C_Candle': cond_c_candle,
         'C_Volume': cond_c_volume,
         'RSI_Range': cond_rsi_range,
+        'RSI_Range_A': cond_rsi_type_a,
+        'RSI_Range_B': cond_rsi_type_b,
         'MACD_OK': cond_macd_basic,
         'MA60_Range': cond_ma60,
         'MA_GC': cond_ma_gc,

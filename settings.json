@@ -334,6 +334,8 @@
     "same_bar_block_type_a": false,
     "same_bar_block_simul": false,
     "s1_simul_balance_tie_mode": "always",
+    "use_rsi_min_b": true,
+    "buy_rsi_min_b": 65.0,
     "buy_rsi_max_b": 80.0,
     "use_smart_buy_b": false,
     "use_type_b_vol": true,

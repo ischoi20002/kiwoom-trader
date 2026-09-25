@@ -1294,6 +1294,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "ㄴ 이평 골든크로스(분)", "toggle": "use_gc", "key": "gc_window", "unit": "분"},
                 {"label": "ㄴ RSI 50 돌파 컨펌(분)", "toggle": "use_rsi_signal", "key": "rsi_window", "unit": "분"},
                 {"label": "Type B (돌파 타점) 활성화", "toggle": "use_type_b", "key": "buy_rsi_max_b", "unit": " RSI"},
+                {"label": "ㄴ Type B RSI 하한", "toggle": "use_rsi_min_b", "key": "buy_rsi_min_b", "unit": " RSI"},
                 {"label": "ㄴ 전일동시간 평균(S1·B)", "key": "prev_vol_lookback_s1_b", "unit": "일"},
                 {"label": "ㄴ Smart Buy (Type B)", "toggle": "use_smart_buy_b"},
                 {"label": "ㄴ MACD 골든크로스(B)", "toggle": "use_macd_gc_b"},
