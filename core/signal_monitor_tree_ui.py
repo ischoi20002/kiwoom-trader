@@ -75,11 +75,14 @@ class SignalMonitorTreeUiMixin:
                 if abs(d_ws) < 1e-12:
                     return ("0.00%", 0.0)
                 prev_c = float(now_price) - float(d_ws)
+                sg = "▲" if d_ws > 0 else "▼"
                 if prev_c > 1e-9:
                     pct = (float(d_ws) / prev_c) * 100.0
-                    sg = "▲" if d_ws > 0 else "▼"
                     return (f"{sg} {abs(pct):.2f}%", float(d_ws))
-                return ("0.00%", 0.0)
+                # 현재가 미확정(0 등)으로 전일종가 역산 불가 — 방향은 diff 부호 유지(보합 오표시 방지)
+                if r_ws is not None and abs(r_ws) > 1e-12:
+                    return (f"{sg} {abs(r_ws):.2f}%", float(d_ws))
+                return ("—", float(d_ws))
             if r_ws is not None:
                 if abs(r_ws) < 1e-12:
                     return ("0.00%", 0.0)

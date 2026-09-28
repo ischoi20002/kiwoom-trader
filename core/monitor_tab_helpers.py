@@ -190,6 +190,96 @@ def stripe_direction_from_tags(tags: Any) -> str:
     return "stable"
 
 
+_ROW_DIRECTIONS: Tuple[str, ...] = ("up", "down", "stable")
+
+
+def row_direction_from_tags(tags: Any) -> Optional[str]:
+    """
+    행 태그(``up_even``·``active_down_odd`` 등)에서 등락 방향만 정확히 추출한다.
+
+    방향 태그가 없으면 None. (``warmup_ok_row`` 처럼 'up' 부분문자열을 포함한 태그를 오인하지 않음)
+    """
+    try:
+        for t in tags or ():
+            parts = str(t).split("_")
+            if parts and parts[0] == "active":
+                parts = parts[1:]
+            if (
+                len(parts) == 2
+                and parts[0] in _ROW_DIRECTIONS
+                and parts[1] in ("even", "odd")
+            ):
+                return parts[0]
+    except Exception:
+        pass
+    return None
+
+
+def _parse_signed_number(v: object) -> Optional[float]:
+    """전일대비·등락률 토큰 → 부호 있는 float. 미수신·파싱 불가면 None."""
+    try:
+        s = normalize_ws_num_token(v)
+        if s is None:
+            return None
+        s = s.replace("%", "").strip()
+        if not s:
+            return None
+        x = float(s)
+        if x != x:  # NaN
+            return None
+        return x
+    except (TypeError, ValueError):
+        return None
+
+
+def monitor_direction_from_info(info: Any) -> Optional[str]:
+    """
+    monitor_info 의 전일대비(diff, fid 11)·등락률(ratio, fid 12)로 행 방향을 판정한다.
+
+    - diff 부호 우선, diff 가 0/없음이면 ratio 부호
+    - 수신값이 모두 0 이면 실제 보합 → ``"stable"``
+    - 둘 다 없거나 파싱 불가면 None (호출측이 직전 색을 유지해야 함)
+    """
+    try:
+        if not isinstance(info, dict):
+            return None
+        d = _parse_signed_number(info.get("diff"))
+        r = _parse_signed_number(info.get("ratio"))
+        for v in (d, r):
+            if v is None:
+                continue
+            if v > 0:
+                return "up"
+            if v < 0:
+                return "down"
+        if d is not None or r is not None:
+            return "stable"
+    except Exception:
+        pass
+    return None
+
+
+def resolve_monitor_row_direction(
+    info: Any,
+    pending_dir: Optional[str],
+    current_dir: Optional[str],
+) -> str:
+    """
+    감시 행의 최종 등락 방향.
+
+    우선순위: 렌더 시점 최신 전일대비 → 큐 적재 시 계산된 방향(up/down) → 기존 행 색.
+    판단 근거가 없을 때 보합(흰색)으로 떨어뜨리지 않기 위한 규칙이다.
+    """
+    d = monitor_direction_from_info(info)
+    if d is not None:
+        return d
+    if pending_dir in ("up", "down"):
+        return str(pending_dir)
+    if current_dir in _ROW_DIRECTIONS:
+        return str(current_dir)
+    return "stable"
+
+
 def parse_monitor_sash_rel(raw: Dict[str, Any]) -> Optional[float]:
     """저장된 상·하단 분할 비율(첫 번째 sash 위치 / Paned 높이)."""
     try:
@@ -275,6 +365,9 @@ __all__ = [
     "normalize_ws_num_token",
     "apply_ws_prev_close_fields",
     "stripe_direction_from_tags",
+    "row_direction_from_tags",
+    "monitor_direction_from_info",
+    "resolve_monitor_row_direction",
     "parse_monitor_sash_rel",
     "format_selection_result_log_lines",
 ]

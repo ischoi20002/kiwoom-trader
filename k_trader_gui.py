@@ -2516,11 +2516,11 @@ class KiwoomApp:
                     row = mi.get(nk)
                     if not isinstance(row, dict):
                         continue
-                    row = dict(row)
                     row["last_price"] = float(ref_p)
-                    mi[nk] = row
+                    # 컨트롤러와 같은 행 객체를 공유해야 monitor_info 재할당 시
+                    # 웹소켓 전일대비(diff/ratio)가 옛 사본으로 되돌아가지 않는다.
                     try:
-                        self.trading_controller.monitor_info[nk] = dict(row)
+                        self.trading_controller.monitor_info[nk] = row
                     except Exception:
                         pass
                 if hasattr(self, "virtual_tab"):

@@ -28,11 +28,13 @@ from core.monitor_tab_helpers import (
     apply_ws_prev_close_fields as _apply_ws_prev_close_fields,
     format_selection_result_log_lines as _format_selection_result_log_lines,
     monitor_fmt_bid_ask as _monitor_fmt_bid_ask,
+    monitor_direction_from_info as _monitor_direction_from_info,
     monitor_fmt_vs_prev as _monitor_fmt_vs_prev,
     monitor_ratio_direction as _monitor_ratio_direction,
     parse_monitor_sash_rel as _parse_monitor_sash_rel,
+    resolve_monitor_row_direction as _resolve_monitor_row_direction,
+    row_direction_from_tags as _row_direction_from_tags,
     selection_telegram_chunks as _selection_telegram_chunks,
-    stripe_direction_from_tags as _stripe_direction_from_tags,
 )
 from core.selection_compare import (
     load_selection_csv,
@@ -2460,7 +2462,8 @@ class MonitorTab:
             if tc is not None:
                 if not isinstance(getattr(tc, "monitor_info", None), dict):
                     tc.monitor_info = {}
-                tc.monitor_info[nk] = dict(stub)
+                # 같은 행 객체 공유 — 사본이면 monitor_info 재할당 시 전일대비가 사라진다
+                tc.monitor_info[nk] = stub
         except Exception:
             pass
 
@@ -2892,6 +2895,71 @@ class MonitorTab:
             pass
         return {}
 
+    def _monitor_info_row_live(self, nk: str) -> Optional[Dict[str, Any]]:
+        """렌더 시점 최신 ``app.monitor_info`` 행(복사하지 않음 — 읽기 전용으로만 사용)."""
+        try:
+            mi = getattr(self.app, "monitor_info", None)
+            if not isinstance(mi, dict):
+                return None
+            row = mi.get(nk)
+            if isinstance(row, dict):
+                return row
+            for k, v in mi.items():
+                if isinstance(v, dict) and str(k).split("_")[0].zfill(6) == nk:
+                    return v
+        except Exception:
+            pass
+        return None
+
+    def _initial_row_direction(self, nk: str, info: Dict[str, Any]) -> str:
+        """행 신규 삽입 시 방향: 전일대비 우선, 없으면 등락률 표시 문자열로 폴백."""
+        try:
+            d = _monitor_direction_from_info(info)
+            if d is not None:
+                return d
+        except Exception:
+            pass
+        try:
+            return _monitor_ratio_direction(
+                self._ratio_cell_display_for_monitor_info(nk, info)
+            )
+        except Exception:
+            return "stable"
+
+    def _log_monitor_row_turned_flat(
+        self,
+        nk: str,
+        info: Optional[Dict[str, Any]],
+        pending_tag: str,
+        prev_dir: str,
+    ) -> None:
+        """등락색이 상승/하락 → 보합으로 바뀐 순간을 종목별 30초 간격으로 기록(원인 추적용)."""
+        try:
+            now_ts = time.time()
+            last_map = getattr(self, "_row_flat_log_last_ts", None)
+            if not isinstance(last_map, dict):
+                last_map = {}
+                self._row_flat_log_last_ts = last_map
+            if now_ts - float(last_map.get(nk, 0.0) or 0.0) < 30.0:
+                return
+            last_map[nk] = now_ts
+            src = info if isinstance(info, dict) else {}
+            self._realtime_session_logger.log(
+                "monitor_row_turned_flat",
+                {
+                    "code": nk,
+                    "prev_dir": prev_dir,
+                    "pending_tag": pending_tag,
+                    "diff": str(src.get("diff")),
+                    "ratio": str(src.get("ratio")),
+                    "price": str(src.get("price")),
+                    "open": str(src.get("open")),
+                    "has_info": bool(info),
+                },
+            )
+        except Exception:
+            pass
+
     def _patch_monitor_info_status_text(self, nk: str, text: str) -> None:
         """
         신호상태 열은 `_compose_monitor_row_values` 가 `status_text` 없으면 '대기'를 씁니다.
@@ -3161,7 +3229,7 @@ class MonitorTab:
                 tags = tree.item(iid, "tags")
             except Exception:
                 tags = ()
-            direction = _stripe_direction_from_tags(tags)
+            direction = _row_direction_from_tags(tags) or "stable"
             tag = (
                 f"active_{direction}_{row_type}"
                 if is_active
@@ -3258,9 +3326,7 @@ class MonitorTab:
                         pass
                 if target.exists(nk):
                     continue
-                direction = _monitor_ratio_direction(
-                    self._ratio_cell_display_for_monitor_info(nk, info)
-                )
+                direction = self._initial_row_direction(nk, info)
                 try:
                     idx = len(target.get_children())
                 except Exception:
@@ -3420,9 +3486,7 @@ class MonitorTab:
                 if not info:
                     info = {"name": nk, "sel_track": "AB"}
                 values = self._compose_monitor_row_values(nk, info)
-                direction = _monitor_ratio_direction(
-                    self._ratio_cell_display_for_monitor_info(nk, info)
-                )
+                direction = self._initial_row_direction(nk, info)
                 try:
                     idx = len(self.tree_monitor.get_children())
                 except Exception:
@@ -3735,7 +3799,35 @@ class MonitorTab:
                         continue
                     target_tree = self.tree_active_monitor if is_active else self.tree_monitor
                     other_tree = self.tree_monitor if is_active else self.tree_active_monitor
-                    
+
+                    # 등락 방향: 큐 적재 시점 태그는 몇 프레임 늦을 수 있으므로
+                    # 렌더 시점 최신 전일대비(monitor_info)를 우선하고,
+                    # 근거가 없으면 기존 행 색을 유지한다(보합·흰색으로 떨어지는 깜빡임 방지).
+                    prev_row_dir: Optional[str] = None
+                    try:
+                        for _tr in (target_tree, other_tree):
+                            if _tr is not None and _tr.exists(iid):
+                                prev_row_dir = _row_direction_from_tags(
+                                    _tr.item(iid, "tags")
+                                )
+                                break
+                    except Exception:
+                        prev_row_dir = None
+                    if "price_up" in str(tag):
+                        pending_dir = "up"
+                    elif "price_down" in str(tag):
+                        pending_dir = "down"
+                    else:
+                        pending_dir = "stable"
+                    info_live = self._monitor_info_row_live(iid)
+                    direction = _resolve_monitor_row_direction(
+                        info_live, pending_dir, prev_row_dir
+                    )
+                    if direction == "stable" and prev_row_dir in ("up", "down"):
+                        self._log_monitor_row_turned_flat(
+                            iid, info_live, str(tag), str(prev_row_dir)
+                        )
+
                     # 반대편 트리에 있으면 삭제 (이동 효과)
                     _step_log("other_tree_exists_check_start", {"target": "active" if target_tree is self.tree_active_monitor else "monitor"})
                     if other_tree.exists(iid):
@@ -3753,7 +3845,15 @@ class MonitorTab:
                     _step_log("target_tree_exists_check_start")
                     if not target_tree.exists(iid):
                         _step_log("target_tree_insert_call")
-                        target_tree.insert("", tk.END, iid=iid, values=values)
+                        # 태그 없이 넣으면 재줄무늬 시 보합으로 칠해지므로 방향 태그를 함께 지정
+                        insert_tag = (
+                            f"active_{direction}_even"
+                            if is_active
+                            else f"{direction}_even"
+                        )
+                        target_tree.insert(
+                            "", tk.END, iid=iid, values=values, tags=(insert_tag,)
+                        )
                         try:
                             self._restripe_monitor_tree(
                                 target_tree, is_active=bool(is_active)
@@ -3765,12 +3865,7 @@ class MonitorTab:
                     # 화면 순서(get_children 인덱스)로 짝/홀 — 캐시 길이 배정은 사용하지 않음
                     _step_log("target_tree_stripe_resolve")
                     row_type = self._monitor_tree_stripe_type(target_tree, iid)
-                    
-                    # 방향 결정
-                    if "price_up" in str(tag): direction = "up"
-                    elif "price_down" in str(tag): direction = "down"
-                    else: direction = "stable"
-                    
+
                     # 최종 태그 조합
                     if is_active:
                         final_tag = f"active_{direction}_{row_type}"
@@ -3863,9 +3958,11 @@ class MonitorTab:
                                     tag_update_enabled = bool(
                                         st_tag.get("enable_monitor_row_tag_update", True)
                                     )
+                                    # 적체 시에는 줄무늬(짝/홀)만 바뀌는 갱신만 생략하고,
+                                    # 등락색이 바뀌는 갱신은 항상 반영한다.
                                     if bool(
                                         getattr(self, "_render_skip_tags_backlog", False)
-                                    ):
+                                    ) and _row_direction_from_tags(curr_tags) == direction:
                                         tag_update_enabled = False
                                 except Exception:
                                     tag_update_enabled = True
@@ -3948,8 +4045,7 @@ class MonitorTab:
                 # 보유 판정 실패 시 기존 동작(continue)을 유지하지 않고,
                 # 오히려 보수적으로 표시 누락을 방지하기 위해 skip하지 않습니다.
                 pass
-            ratio_disp = self._ratio_cell_display_for_monitor_info(nk, info)
-            direction = _monitor_ratio_direction(ratio_disp)
+            direction = self._initial_row_direction(nk, info)
             values = self._compose_monitor_row_values(nk, info)
             # 보유 중이면 아래(보유 트리)에만 넣음. 예전에는 위 트리만 채워 다음 틱까지 보유 트리가 비어 깜빡임 발생.
             if self._virtual_position_is_active(nk, vp):
