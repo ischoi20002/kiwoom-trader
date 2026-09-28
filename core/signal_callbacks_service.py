@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
+import time
 import traceback
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from backtest_engine import TradingStrategy
+
+# 15분 확정 평가가 통과시킨 신호 스냅샷 키 (monitor_info[code] 에 저장)
+CONFIRMED_S1_SIG_KEY = "s1_confirmed_sig"
+# 주문 큐 지연을 감안한 스냅샷 유효 시간(초) 기본값
+DEFAULT_CONFIRMED_S1_SIG_TTL_SEC = 180.0
+_VALID_S1_SIG_TYPES = ("TYPE_A", "TYPE_B", "TYPE_C")
 
 
 class SignalCallbacksService:
@@ -16,6 +23,91 @@ class SignalCallbacksService:
     def __init__(self, app: Any, *, log_func: Optional[Any] = None) -> None:
         self.app = app
         self.log = log_func or print
+
+    @staticmethod
+    def store_confirmed_s1_signal(
+        info: Any, slot_key: str, last_sig: Any
+    ) -> None:
+        """
+        15분 확정 평가에서 트랙 검증까지 통과한 신호 행을 스냅샷으로 저장.
+
+        주문은 큐를 거쳐 비동기로 처리되므로, 그 사이 틱 경로가 형성봉으로
+        ``last_detailed_sig``/``last_sig_cache`` 를 덮어써도 확정봉 신호로 주문하게 한다.
+        """
+        try:
+            if not isinstance(info, dict) or not isinstance(last_sig, dict):
+                return
+            info[CONFIRMED_S1_SIG_KEY] = {
+                "slot": str(slot_key or ""),
+                "sig": dict(last_sig),
+                "at": time.monotonic(),
+            }
+        except Exception:
+            pass
+
+    def _confirmed_s1_sig_ttl_sec(self) -> float:
+        try:
+            st = getattr(self.app, "settings", None) or {}
+            return max(
+                1.0,
+                float(
+                    st.get(
+                        "realtime_s1_confirmed_sig_ttl_sec",
+                        DEFAULT_CONFIRMED_S1_SIG_TTL_SEC,
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            return DEFAULT_CONFIRMED_S1_SIG_TTL_SEC
+
+    def _resolve_buy_signal_row(self, info: Any) -> Tuple[Dict[str, Any], str]:
+        """
+        매수 콜백에서 사용할 신호 행과 출처를 반환.
+
+        우선순위: 확정 스냅샷(유효 시간 내) → ``last_detailed_sig`` → ``last_sig_cache``.
+        출처: ``confirmed`` / ``detailed`` / ``cache`` / ``""``(없음).
+        """
+        if not isinstance(info, dict):
+            return {}, ""
+        try:
+            snap = info.get(CONFIRMED_S1_SIG_KEY)
+            if isinstance(snap, dict) and isinstance(snap.get("sig"), dict):
+                age = time.monotonic() - float(snap.get("at", 0.0) or 0.0)
+                if 0.0 <= age <= self._confirmed_s1_sig_ttl_sec():
+                    return dict(snap["sig"]), "confirmed"
+        except Exception:
+            pass
+        try:
+            detailed = info.get("last_detailed_sig")
+            if detailed is not None and not getattr(detailed, "empty", True):
+                last_ser = detailed.iloc[-1]
+                row = (
+                    last_ser.to_dict()
+                    if hasattr(last_ser, "to_dict")
+                    else dict(last_ser)
+                )
+                return row, "detailed"
+        except Exception:
+            pass
+        try:
+            cached = info.get("last_sig_cache")
+            if isinstance(cached, dict) and cached:
+                return dict(cached), "cache"
+        except Exception:
+            pass
+        return {}, ""
+
+    @staticmethod
+    def _signal_row_is_live_buy(row: Dict[str, Any]) -> bool:
+        """신호 행이 실제 매수 신호(Signal=True, 유효 Sig_Type)인지."""
+        try:
+            sig_on = row.get("Signal", False)
+            if hasattr(sig_on, "item"):
+                sig_on = sig_on.item()
+            st = str(row.get("Sig_Type", "") or "").strip().upper()
+            return bool(sig_on) and st in _VALID_S1_SIG_TYPES
+        except Exception:
+            return False
 
     @staticmethod
     def format_track_mismatch_status(sel_track: Any, sig_type: Any) -> str:
@@ -94,35 +186,51 @@ class SignalCallbacksService:
             info = mi.get(code, {})
             name = str(info.get("name", "Unknown"))
 
-            detailed = info.get("last_detailed_sig")
-            row: dict = {}
-            if detailed is not None and not getattr(detailed, "empty", True):
-                last_ser = detailed.iloc[-1]
-                row = (
-                    last_ser.to_dict()
-                    if hasattr(last_ser, "to_dict")
-                    else dict(last_ser)
-                )
-            else:
-                cached = info.get("last_sig_cache")
-                if isinstance(cached, dict) and cached:
-                    row = dict(cached)
-                else:
-                    self.log(f"⚠️ [Skip] {code} 신호 캐시 없음")
-                    try:
-                        sl = getattr(self.app, "session_logger", None)
-                        if sl:
-                            sl.log(
-                                "signal_buy_skipped",
-                                {
-                                    "code": code,
-                                    "name": name,
-                                    "reason": "no_signal_cache",
-                                },
-                            )
-                    except Exception:
-                        pass
-                    return False
+            row, row_src = self._resolve_buy_signal_row(info)
+            if not row:
+                self.log(f"⚠️ [Skip] {code} 신호 캐시 없음")
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "signal_buy_skipped",
+                            {
+                                "code": code,
+                                "name": name,
+                                "reason": "no_signal_cache",
+                            },
+                        )
+                except Exception:
+                    pass
+                return False
+
+            # 캐시가 형성봉 등으로 덮여 신호가 꺼진 행이면 TYPE_B 폴백으로 오판하지 않고 스킵
+            if not self._signal_row_is_live_buy(row):
+                try:
+                    self.log(
+                        f"⚠️ [Skip] {code} 신호 캐시 불일치(src={row_src}) — "
+                        f"Signal={row.get('Signal')} Sig_Type={row.get('Sig_Type')}"
+                    )
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "signal_buy_skipped",
+                            {
+                                "code": code,
+                                "name": name,
+                                "reason": "stale_signal_cache",
+                                "row_src": row_src,
+                                "raw_signal": str(row.get("Signal", "")),
+                                "raw_sig_type": str(row.get("Sig_Type", "") or ""),
+                                "price": float(now_price),
+                            },
+                        )
+                except Exception:
+                    pass
+                return False
             # CSV/선정 단계에서 SelTrack(A/B/AB)을 넣은 경우에만 백테 트랙 검증과 동일
             tr = str(
                 info.get("sel_track", info.get("SelTrack", info.get("seltrack", "AB")))
@@ -274,6 +382,7 @@ class SignalCallbacksService:
                             "price": float(now_price),
                             "sig_type": sig_type,
                             "sel_track": tr,
+                            "row_src": row_src,
                             "rsi_sig": float(rsi_sig),
                             "macd": float(macd_val),
                             "osc": float(osc_val),

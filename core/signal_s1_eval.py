@@ -701,6 +701,15 @@ class SignalS1EvalMixin:
                     self._prefetch_touch_quote_sync_for_order(nk)
                 except Exception:
                     pass
+                # 큐 대기 중 틱 경로가 형성봉으로 캐시를 덮어써도 확정봉 신호로 주문되도록 스냅샷
+                try:
+                    from core.signal_callbacks_service import SignalCallbacksService
+
+                    SignalCallbacksService.store_confirmed_s1_signal(
+                        info, slot_key, last_sig
+                    )
+                except Exception:
+                    pass
                 self.last_buy_sig_time[nk] = datetime.now()
                 if mi_key and mi_key != nk:
                     self.last_buy_sig_time[mi_key] = self.last_buy_sig_time[nk]

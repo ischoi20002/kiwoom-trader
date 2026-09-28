@@ -13,6 +13,12 @@
 
 ---
 
+## 0.22.5 (2026-09-28)
+
+- **15분 확정 S1 매수 누락 수정**: 확정 평가는 TYPE_A로 통과했는데, 주문 콜백이 그 사이 형성봉으로 덮인 신호 캐시(`Sig_Type=NONE`)를 다시 읽어 `TYPE_B`로 오판 → `track_signal_mismatch`로 스킵되던 문제(443060 09-28, 001740 09-17).
+- **확정 신호 스냅샷**: 주문 큐 적재 직전 `monitor_info[code]["s1_confirmed_sig"]`에 확정봉 신호를 저장하고, `on_buy_signal_received`는 이를 우선 사용(유효 `realtime_s1_confirmed_sig_ttl_sec`, 기본 180초).
+- **안전장치**: 콜백에서 읽은 행이 `Signal=False` 또는 무효 `Sig_Type`이면 `stale_signal_cache`로 스킵(TYPE_B 폴백 오판 금지). `signal_buy_accepted`에 신호 출처 `row_src` 기록.
+
 ## 0.22.4 (2026-09-28)
 
 - **감시 등락색 흰색 깜빡임**: 렌더 시점 최신 전일대비(`monitor_info`)로 방향을 재판정하고, 근거가 없으면 기존 색을 유지(실제 보합 수신 시에만 흰색).

@@ -47,6 +47,12 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 ``status_text or confluence`` 에서 ``status_text`` 가 ``"대기"`` 등 비어 있지 않은 문자열이면 **합치도가 가려짐**  
 **수정**: ``monitor_signal_status_display_text()`` — 유효한 ``confluence`` 우선
 
+## core/signal_callbacks_service.py · core/signal_s1_eval.py
+
+### Bug — 15분 확정 S1 매수가 `track_signal_mismatch`(raw `NONE`)로 누락 (443060 09-28, 001740 09-17)
+확정 평가는 TYPE_A로 통과했지만 주문 큐에는 코드·가격만 전달되고, `on_buy_signal_received`가 `last_detailed_sig`를 **다시 읽음**. 그 사이 틱 경로가 형성봉(신호 없음)으로 캐시를 덮어써 `Sig_Type=NONE` → `effective_s1_sig_type_for_buy` 폴백 `TYPE_B` → 트랙 A 불일치로 스킵. 백테스트는 확정봉 `Sig_Type`을 바로 써서 매수함 
+**수정**: 확정 평가가 주문 직전 `info["s1_confirmed_sig"]` 스냅샷 저장(TTL `realtime_s1_confirmed_sig_ttl_sec`, 기본 180초), 콜백은 스냅샷 우선 사용. `Signal=False`/무효 `Sig_Type` 행은 `stale_signal_cache`로 스킵(TYPE_B 오판 금지)
+
 ## ui/tabs/virtual_tab.py
 
 ### Bug — 보유 직후 UI 멈춤(vp_price_stub + 동기 REST)
