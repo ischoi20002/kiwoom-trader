@@ -159,7 +159,10 @@ class UniverseListingMixin:
                 kospi_top_n = int(settings.get("kospi_top_n", 200))
         except Exception:
             kospi_top_n = 200
-        effective_count = min(effective_count, kospi_top_n)
+        # kospi_top_n 상한은 실시간 감시 유니버스(count<=200)에만 적용.
+        # 하베스팅 등 대량 요청(count>200)까지 자르면 전 종목 수집이 200개로 줄어듦.
+        if effective_count <= 200:
+            effective_count = min(effective_count, kospi_top_n)
 
         cache_file = (
             "kospi_universe.csv" if count <= 200 else f"kospi_top_{count}.csv"
