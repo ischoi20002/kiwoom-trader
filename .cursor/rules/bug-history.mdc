@@ -53,6 +53,12 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 확정 평가는 TYPE_A로 통과했지만 주문 큐에는 코드·가격만 전달되고, `on_buy_signal_received`가 `last_detailed_sig`를 **다시 읽음**. 그 사이 틱 경로가 형성봉(신호 없음)으로 캐시를 덮어써 `Sig_Type=NONE` → `effective_s1_sig_type_for_buy` 폴백 `TYPE_B` → 트랙 A 불일치로 스킵. 백테스트는 확정봉 `Sig_Type`을 바로 써서 매수함 
 **수정**: 확정 평가가 주문 직전 `info["s1_confirmed_sig"]` 스냅샷 저장(TTL `realtime_s1_confirmed_sig_ttl_sec`, 기본 180초), 콜백은 스냅샷 우선 사용. `Signal=False`/무효 `Sig_Type` 행은 `stale_signal_cache`로 스킵(TYPE_B 오판 금지)
 
+## strategy/selection_regime.py
+
+### Bug — 헤더 레짐(유지)과 30일 이력(약화) 불일치 (09-28 데이터)
+헤더·실시간 선정 `resolve_transition_gate_for_live` 는 120일, 이력 `compute_transition_regime_history` 는 ~195일 **고정 창**으로 한 번에 스코어 → `ewm(adjust=False)` RSI·MACD 가 창 시작일에 의존해 Valid_A/B 개수가 달라져 share d3 가 -7.1 vs -18.1 로 갈림 
+**수정**: 백테 `prepare_dynamic_universe` 와 같이 평가일마다 `[D-bt_universe_indicator_lookback_days, D]` 슬라이딩 창 재계산(`_sliding_valid_counts_by_day`). 레짐 캐시 지문에 `_CALC_VERSION` 포함. G1·R5 판정은 `_compute_g1_r5_by_day` 공통 사용
+
 ## ui/tabs/virtual_tab.py
 
 ### Bug — 보유 직후 UI 멈춤(vp_price_stub + 동기 REST)

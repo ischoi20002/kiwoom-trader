@@ -43,6 +43,12 @@ class RegimeDisplayService:
         "ERROR": "#BF616A",
     }
 
+    # G1/R5 가드 라벨 색상
+    _GUARD_COLOR_ACTIVE_G1: str = "#D08770"
+    _GUARD_COLOR_ACTIVE_R5: str = "#EBCB8B"
+    _GUARD_COLOR_NORMAL: str = "#81A1C1"
+    _GUARD_COLOR_DISABLED: str = "#616E88"
+
     def __init__(self, app: Any, *, log_func: Optional[Callable[[str], None]] = None) -> None:
         self.app = app
         self.log = log_func or print
@@ -117,24 +123,50 @@ class RegimeDisplayService:
         if reg not in ("OFF", "TRANSITION", "HARD"):
             return False
 
-        slots_a = int(cached.get("slots_a", 0) or 0)
-        slots_b = int(cached.get("slots_b", 0) or 0)
-        detail = ""
-        if reg == "TRANSITION":
-            detail = f"감시 {slots_a}/{slots_b}"
-        elif reg == "HARD":
-            detail = "신규 차단"
-
         apply_on = self._apply_on_from_data_asof(as_of_s)
         payload = {
             "regime_key": reg,
             "as_of": as_of_s,
             "apply_on": apply_on,
-            "detail": detail,
+            "detail": self._regime_detail(reg, cached),
+            "guard": self._guard_info(cached, st),
             "reason": "startup_cache",
         }
         self._on_refresh_done(payload)
         return True
+
+    @staticmethod
+    def _regime_detail(reg: str, tg: dict[str, Any]) -> str:
+        """레짐 라벨 뒤 보조 문구 (약화=감시 슬롯, 붕괴=신규 차단)."""
+        try:
+            if reg == "TRANSITION":
+                slots_a = int(tg.get("slots_a", 0) or 0)
+                slots_b = int(tg.get("slots_b", 0) or 0)
+                return f"감시 {slots_a}/{slots_b}"
+            if reg == "HARD":
+                return "신규 차단"
+        except (TypeError, ValueError):
+            pass
+        return ""
+
+    @staticmethod
+    def _guard_info(tg: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+        """게이트 결과(또는 캐시)에서 G1/R5 표시용 상태를 추출한다."""
+        info: dict[str, Any] = {
+            "g1_enabled": bool(settings.get("use_rotation_a_guard_g1", False)),
+            "r5_enabled": bool(settings.get("use_rs_persist_guard", False)),
+            "g1": False,
+            "r5": False,
+            "rs5": None,
+        }
+        try:
+            info["g1"] = bool(tg.get("block_type_a", False))
+            info["r5"] = bool(tg.get("r5_exit_tighten", False))
+            rs5 = tg.get("rs5_corr")
+            info["rs5"] = float(rs5) if rs5 is not None else None
+        except (TypeError, ValueError):
+            pass
+        return info
 
     def _eod_buffer_minutes(self) -> int:
         try:
@@ -262,6 +294,7 @@ class RegimeDisplayService:
         self._refresh_in_progress = True
         try:
             self._apply_label("LOADING", "", "", "")
+            self._apply_guard_labels(None)
         except Exception:
             pass
 
@@ -341,23 +374,14 @@ class RegimeDisplayService:
         if reg not in ("OFF", "TRANSITION", "HARD"):
             reg = "OFF"
 
-        slots_a = int(tg.get("slots_a", 0) or 0)
-        slots_b = int(tg.get("slots_b", 0) or 0)
-        detail = ""
-        if reg == "TRANSITION":
-            detail = f"감시 {slots_a}/{slots_b}"
-        elif reg == "HARD":
-            detail = "신규 차단"
-        if bool(tg.get("r5_exit_tighten", False)):
-            detail = (detail + " · R5타이트").strip(" ·")
-
         as_of_s = str(tg.get("as_of") or as_of_dt.strftime("%Y-%m-%d"))
         apply_on = self._apply_on_from_data_asof(as_of_s)
         return {
             "regime_key": reg,
             "as_of": as_of_s,
             "apply_on": apply_on,
-            "detail": detail,
+            "detail": self._regime_detail(reg, tg),
+            "guard": self._guard_info(tg, st),
             "reason": "ok",
         }
 
@@ -388,13 +412,21 @@ class RegimeDisplayService:
                     pass
 
             self._apply_label(key, as_of, apply_on, detail)
+            guard = payload.get("guard")
+            self._apply_guard_labels(guard if isinstance(guard, dict) else None)
 
             if reason in ("startup", "startup_cache"):
                 try:
                     show_d = apply_on or as_of
                     suffix = " — 캐시 재사용" if reason == "startup_cache" else ""
+                    g_txt = ""
+                    if isinstance(guard, dict):
+                        g1_t, _ = self._g1_text_color(guard)
+                        r5_t, _ = self._r5_text_color(guard)
+                        g_txt = f" · {g1_t} · {r5_t}"
                     self.log(
                         f"📊 [레짐표시] B 추세 레짐={self._REGIME_LABELS.get(key, key)}"
+                        + g_txt
                         + (f" (적용 {show_d})" if show_d else "")
                         + suffix
                     )
@@ -420,6 +452,8 @@ class RegimeDisplayService:
 
         st = dict(getattr(self.app, "settings", None) or {})
         gate_on = bool(st.get("use_transition_gate", False))
+        g1_on = bool(st.get("use_rotation_a_guard_g1", False))
+        r5_on = bool(st.get("use_rs_persist_guard", False))
         try:
             lookback = int(float(st.get("regime_history_lookback_days", 22)))
         except (TypeError, ValueError):
@@ -469,6 +503,8 @@ class RegimeDisplayService:
                         self.app,
                         rows,
                         gate_enabled=gate_on,
+                        g1_enabled=g1_on,
+                        r5_enabled=r5_on,
                     )
                 except Exception as ex:
                     try:
@@ -513,5 +549,51 @@ class RegimeDisplayService:
             color = self._REGIME_COLORS.get(regime_key, "#ECEFF4")
             bg = (getattr(self.app, "colors", None) or {}).get("bg", "#2E3440")
             lbl.config(text=text, fg=color, bg=bg)
+        except Exception:
+            pass
+
+    def _g1_text_color(self, guard: dict[str, Any]) -> tuple[str, str]:
+        """G1 라벨 문구·색상."""
+        if not bool(guard.get("g1_enabled", False)):
+            return "G1 미사용", self._GUARD_COLOR_DISABLED
+        if bool(guard.get("g1", False)):
+            return "G1 A신규차단", self._GUARD_COLOR_ACTIVE_G1
+        return "G1 정상", self._GUARD_COLOR_NORMAL
+
+    def _r5_text_color(self, guard: dict[str, Any]) -> tuple[str, str]:
+        """R5 라벨 문구·색상 (RS 5일 상관값 병기)."""
+        if not bool(guard.get("r5_enabled", False)):
+            return "R5 미사용", self._GUARD_COLOR_DISABLED
+        rs5 = guard.get("rs5")
+        rs_txt = ""
+        try:
+            if rs5 is not None:
+                rs_txt = f" ({float(rs5):.2f})"
+        except (TypeError, ValueError):
+            rs_txt = ""
+        if bool(guard.get("r5", False)):
+            return f"R5 청산타이트{rs_txt}", self._GUARD_COLOR_ACTIVE_R5
+        return f"R5 정상{rs_txt}", self._GUARD_COLOR_NORMAL
+
+    def _apply_guard_labels(self, guard: Optional[dict[str, Any]]) -> None:
+        """헤더 G1/R5 라벨 갱신. guard=None 이면 비운다 (계산 중·실패)."""
+        lbl_g1 = getattr(self.app, "lbl_g1_status", None)
+        lbl_r5 = getattr(self.app, "lbl_r5_status", None)
+        if lbl_g1 is None and lbl_r5 is None:
+            return
+        try:
+            bg = (getattr(self.app, "colors", None) or {}).get("bg", "#2E3440")
+            if guard is None:
+                if lbl_g1 is not None:
+                    lbl_g1.config(text="", bg=bg)
+                if lbl_r5 is not None:
+                    lbl_r5.config(text="", bg=bg)
+                return
+            if lbl_g1 is not None:
+                t, c = self._g1_text_color(guard)
+                lbl_g1.config(text=t, fg=c, bg=bg)
+            if lbl_r5 is not None:
+                t, c = self._r5_text_color(guard)
+                lbl_r5.config(text=t, fg=c, bg=bg)
         except Exception:
             pass

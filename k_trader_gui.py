@@ -806,6 +806,25 @@ class KiwoomApp:
             )
             self.lbl_regime_status.pack(side=tk.LEFT)
 
+            # G1(Type A 신규 억제)·R5(Type A 청산 타이트) — 레짐과 별도 색상
+            self.lbl_g1_status = tk.Label(
+                self.regime_header_box,
+                text="",
+                font=("Malgun Gothic", 10, "bold"),
+                fg=self.colors["primary"],
+                bg=self.colors["bg"],
+            )
+            self.lbl_g1_status.pack(side=tk.LEFT, padx=(10, 0))
+
+            self.lbl_r5_status = tk.Label(
+                self.regime_header_box,
+                text="",
+                font=("Malgun Gothic", 10, "bold"),
+                fg=self.colors["primary"],
+                bg=self.colors["bg"],
+            )
+            self.lbl_r5_status.pack(side=tk.LEFT, padx=(8, 0))
+
             self.btn_regime_history = ttk.Button(
                 self.regime_header_box,
                 text="30일",

@@ -14,7 +14,10 @@ import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 
-from strategy.selection_dynamic_score import _score_dynamic_universe_daily_ohlcv
+from strategy.selection_dynamic_score import (
+    _score_dynamic_universe_daily_ohlcv,
+    _selection_daily_lookback_calendar_days,
+)
 from strategy.selection_scoring import _settings_bool_sel
 from strategy.universe_codes import load_kodex200_universe_codes, resolve_universe_codes
 
@@ -314,16 +317,76 @@ def _build_index_vol_by_day(
     return out
 
 
+def _sliding_valid_counts_by_day(
+    df_ohlcv: pd.DataFrame,
+    settings: dict,
+    days: List[str],
+    lookback_days: int,
+) -> Dict[str, Dict[str, float]]:
+    """
+    평가일 D마다 ``[D-N, D]`` 창으로 일봉 스코어를 다시 계산해 Valid_A/B 개수·B비중을 구한다.
+
+    RSI·MACD 가 ``ewm(adjust=False)`` 라 창 시작일에 따라 Valid 판정이 달라지므로,
+    ``prepare_dynamic_universe`` (백테) 와 같은 슬라이딩 창을 써야 레짐이 일치한다.
+
+    반환: ``{YYYY-MM-DD: {"va", "vb", "share"}}`` (계산 실패 일자는 제외)
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    if df_ohlcv is None or df_ohlcv.empty or not days:
+        return out
+    try:
+        base = df_ohlcv.sort_values("time", kind="mergesort").reset_index(drop=True)
+        ts_arr = pd.DatetimeIndex(pd.to_datetime(base["time"])).asi8
+    except Exception:
+        return out
+    lb = max(1, int(lookback_days))
+    for d_str in days:
+        try:
+            d_ts = pd.Timestamp(d_str).normalize()
+            left_ts = d_ts - timedelta(days=lb)
+            right_ts = d_ts + timedelta(hours=23, minutes=59, seconds=59)
+            li = int(np.searchsorted(ts_arr, left_ts.value, side="left"))
+            ri = int(np.searchsorted(ts_arr, right_ts.value, side="right"))
+            if ri <= li:
+                continue
+            win = base.iloc[li:ri].copy()
+            win.sort_values(["code", "time"], kind="mergesort", inplace=True)
+            win.reset_index(drop=True, inplace=True)
+            _score_dynamic_universe_daily_ohlcv(win, settings, with_b_debug=False)
+            day = win[win["time"].dt.normalize() == d_ts]
+            if day.empty:
+                continue
+            va = int(day["Valid_A"].astype(bool).sum()) if "Valid_A" in day.columns else 0
+            vb = int(day["Valid_B"].astype(bool).sum()) if "Valid_B" in day.columns else 0
+            tot = va + vb
+            out[d_str] = {
+                "va": float(va),
+                "vb": float(vb),
+                "share": (vb / tot * 100.0) if tot > 0 else 0.0,
+            }
+        except Exception:
+            continue
+    return out
+
+
 def _compute_transition_regime_map_fdr(
     settings: dict,
     data_manager: Any,
     start_date: str,
     end_date: str,
     logger_callback: Optional[Callable[..., None]] = None,
+    *,
+    eval_last_days: Optional[int] = None,
+    detail_out: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
     """
     FDR 일봉 기반 일별 transition 레짐 맵.
     ``prepare_dynamic_universe`` 의 레짐 분류와 동일 로직, DB ``bars_1d`` 미사용.
+
+    Valid_A/B 는 평가일마다 ``[D-N, D]`` (N=``bt_universe_indicator_lookback_days``)
+    슬라이딩 창으로 재계산한다 (백테·실시간 헤더와 동일).
+    ``eval_last_days`` 지정 시 마지막 N영업일만 평가한다 (share delta 용 5일은 자동 추가).
+    ``detail_out`` 에 dict 를 넘기면 일별 G1·R5 판정(``_compute_g1_r5_by_day``)을 채운다.
     """
     log = logger_callback or (lambda *_a, **_k: None)
     regime_map: Dict[str, str] = {}
@@ -334,48 +397,58 @@ def _compute_transition_regime_map_fdr(
         if not codes:
             return regime_map
 
-        fetch_start = (pd.to_datetime(start_s) - timedelta(days=120)).strftime("%Y-%m-%d")
+        lookback_n = _selection_daily_lookback_calendar_days(settings)
+        fetch_start = (pd.to_datetime(start_s) - timedelta(days=lookback_n)).strftime(
+            "%Y-%m-%d"
+        )
         df_all = _fetch_daily_ohlcv_batch_fdr(
             data_manager, codes, fetch_start, end_s, log
         )
         if df_all is None or df_all.empty:
             return regime_map
 
-        _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
         df_sim = df_all[df_all["time"] >= pd.to_datetime(start_s)].copy()
         if df_sim.empty:
             return regime_map
 
-        trading_days_list = df_sim["time"].dt.strftime("%Y-%m-%d").unique().tolist()
+        trading_days_list = sorted(df_sim["time"].dt.strftime("%Y-%m-%d").unique().tolist())
+        if eval_last_days is not None:
+            try:
+                keep = max(1, int(eval_last_days)) + 5
+                trading_days_list = trading_days_list[-keep:]
+                df_sim = df_sim[
+                    df_sim["time"] >= pd.to_datetime(trading_days_list[0])
+                ].copy()
+            except Exception:
+                pass
 
-        xs_ret_std_by_day: Dict[str, float] = {}
-        try:
-            _xs_df = df_sim.sort_values(["code", "time"]).copy()
-            _xs_df["ret1"] = _xs_df.groupby("code")["close"].pct_change()
-            _xs_s = _xs_df.groupby("time")["ret1"].std() * 100.0
-            for t_idx, val in _xs_s.items():
-                if val is not None and np.isfinite(float(val)):
-                    xs_ret_std_by_day[pd.Timestamp(t_idx).strftime("%Y-%m-%d")] = float(
-                        val
-                    )
-        except Exception:
-            xs_ret_std_by_day = {}
-
-        fetch_start_iv = (pd.to_datetime(start_s) - timedelta(days=60)).strftime(
-            "%Y-%m-%d"
+        counts_by_day = _sliding_valid_counts_by_day(
+            df_all, settings, trading_days_list, lookback_n
         )
+
+        # 종가 수익률 분산은 창과 무관 → 전체 로드분으로 계산 (첫 평가일 NaN 방지)
+        xs_ret_std_by_day = _xs_ret_std_by_day(df_all)
+
+        fetch_start_iv = (
+            pd.to_datetime(trading_days_list[0]) - timedelta(days=60)
+        ).strftime("%Y-%m-%d")
         index_vol_by_day = _build_index_vol_by_day(data_manager, fetch_start_iv, end_s)
 
         transition_stats_by_day: Dict[str, Dict[str, float]] = {}
         try:
             _t_rows: List[Dict[str, Any]] = []
             for _d_str in trading_days_list:
-                _day = df_sim[df_sim["time"] == pd.to_datetime(_d_str)]
-                _va = int(_day["Valid_A"].astype(bool).sum()) if "Valid_A" in _day.columns else 0
-                _vb = int(_day["Valid_B"].astype(bool).sum()) if "Valid_B" in _day.columns else 0
-                _tot = _va + _vb
-                _share = (_vb / _tot * 100.0) if _tot > 0 else 0.0
-                _t_rows.append({"d": _d_str, "va": _va, "vb": _vb, "share": _share})
+                _c = counts_by_day.get(_d_str)
+                if _c is None:
+                    continue
+                _t_rows.append(
+                    {
+                        "d": _d_str,
+                        "va": int(_c["va"]),
+                        "vb": int(_c["vb"]),
+                        "share": float(_c["share"]),
+                    }
+                )
             _tdf = pd.DataFrame(_t_rows)
             if not _tdf.empty:
                 _tdf["share_delta5"] = _tdf["share"] - _tdf["share"].shift(5)
@@ -422,6 +495,25 @@ def _compute_transition_regime_map_fdr(
                 )
             except Exception:
                 regime_map[d_str] = "OFF"
+
+        if detail_out is not None:
+            try:
+                detail_out.update(
+                    _compute_g1_r5_by_day(
+                        settings,
+                        data_manager,
+                        df_all,
+                        trading_days_list,
+                        regime_map,
+                        counts_by_day,
+                        xs_ret_std_by_day,
+                    )
+                )
+            except Exception as ex:
+                try:
+                    log(f"⚠️ [Transition] G1/R5 이력 계산 실패: {ex}")
+                except Exception:
+                    pass
     except Exception as ex:
         try:
             log(f"⚠️ [Transition] FDR 레짐 맵 실패: {ex}")
@@ -765,6 +857,154 @@ def _load_kodex200_daily_close(
     return merged.reset_index(drop=True)
 
 
+def _xs_ret_std_by_day(df_ohlcv: pd.DataFrame) -> Dict[str, float]:
+    """일별 교차섹션 1일 수익률 표준편차(%) — 종가만 사용하므로 창 길이와 무관."""
+    out: Dict[str, float] = {}
+    try:
+        if df_ohlcv is None or df_ohlcv.empty:
+            return out
+        _df = df_ohlcv.sort_values(["code", "time"]).copy()
+        _df["ret1"] = _df.groupby("code")["close"].pct_change()
+        _s = _df.groupby("time")["ret1"].std() * 100.0
+        for t_idx, val in _s.items():
+            if val is not None and np.isfinite(float(val)):
+                out[pd.Timestamp(t_idx).strftime("%Y-%m-%d")] = float(val)
+    except Exception:
+        return out
+    return out
+
+
+def _compute_g1_r5_by_day(
+    settings: dict,
+    data_manager: Any,
+    df_ohlcv: pd.DataFrame,
+    days: List[str],
+    regime_by_day: Dict[str, str],
+    counts_by_day: Dict[str, Dict[str, float]],
+    xs_by_day: Optional[Dict[str, float]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    일별 G1(로테이션 A 가드)·R5(RS 지속성 가드) 판정.
+
+    설정 ON/OFF 와 무관하게 **판정값**을 계산한다 (적용 여부는 호출부가 결정).
+      - G1: 레짐 OFF · KODEX200 5일 수익률 ≥ idx5_min · xs ≥ 최근 120일 xs 분위 · A비중 ≥ 임계
+      - R5: 20일 RS 순위의 5영업일 Spearman ≤ ``rs_persist_corr_max``
+
+    반환: ``{YYYY-MM-DD: {"g1", "r5", "rs5", "idx5", "xs", "xs_thr"}}``
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not days:
+        return out
+    days_sorted = sorted(days)
+    try:
+        xs_map = xs_by_day if xs_by_day is not None else _xs_ret_std_by_day(df_ohlcv)
+    except Exception:
+        xs_map = {}
+
+    try:
+        xs_pct = float(settings.get("rotation_a_guard_xs_pct", 50.0) or 50.0)
+    except (TypeError, ValueError):
+        xs_pct = 50.0
+    try:
+        a_min = float(settings.get("rotation_a_guard_a_share_min", 0.60) or 0.60)
+    except (TypeError, ValueError):
+        a_min = 0.60
+    try:
+        # idx5_min=0 허용 → `or` 폴백 사용 금지
+        _i5_raw = settings.get("rotation_a_guard_idx5_min", -1.0)
+        i5_min = float(-1.0 if _i5_raw is None else _i5_raw)
+    except (TypeError, ValueError):
+        i5_min = -1.0
+    ignore_soft = bool(settings.get("transition_ignore_soft", False))
+
+    # KODEX200 종가 (idx5)
+    closes: Optional[pd.Series] = None
+    try:
+        _ix = _load_kodex200_daily_close(
+            data_manager,
+            (pd.to_datetime(days_sorted[0]) - timedelta(days=40)).strftime("%Y-%m-%d"),
+            days_sorted[-1],
+        )
+        if _ix is not None and not _ix.empty and {"d", "close"}.issubset(_ix.columns):
+            _ix = _ix.drop_duplicates("d").sort_values("d")
+            closes = _ix.set_index("d")["close"].astype(float)
+    except Exception:
+        closes = None
+
+    # R5 상관 (종가 패널 전체에서 1회)
+    corr_map: Dict[str, float] = {}
+    r5_thr = 0.60
+    try:
+        corr_map = compute_rs_rank_corr_by_day(
+            df_ohlcv, lookback=5, rs_window=20, min_names=40
+        )
+        r5_thr = resolve_rs_persist_corr_threshold(corr_map, settings)
+    except Exception:
+        corr_map = {}
+
+    try:
+        panel_days = sorted(
+            pd.Timestamp(d).strftime("%Y-%m-%d")
+            for d in pd.to_datetime(df_ohlcv["time"]).dt.normalize().unique()
+        )
+    except Exception:
+        panel_days = sorted(xs_map.keys())
+
+    for d in days_sorted:
+        try:
+            idx5: Optional[float] = None
+            if closes is not None and d in closes.index:
+                _keys = list(closes.index)
+                _ii = _keys.index(d)
+                if _ii >= 5:
+                    _c0 = float(closes.iloc[_ii - 5])
+                    _c1 = float(closes.iloc[_ii])
+                    if _c0 > 0:
+                        idx5 = (_c1 / _c0 - 1.0) * 100.0
+
+            # 실시간과 동일: [D-120일, D] 창의 xs 분위 (창 첫날은 pct_change NaN 이라 제외)
+            xs_thr = 3.05
+            try:
+                left = (pd.to_datetime(d) - timedelta(days=120)).strftime("%Y-%m-%d")
+                win_days = [k for k in panel_days if left <= k <= d]
+                vals = [xs_map[k] for k in win_days[1:] if k in xs_map]
+                if vals:
+                    xs_thr = float(np.nanpercentile(vals, xs_pct))
+            except Exception:
+                xs_thr = 3.05
+
+            xs_d = xs_map.get(d)
+            reg = str(regime_by_day.get(d, "OFF") or "OFF").strip().upper()
+            if reg == "TRANSITION" and ignore_soft:
+                reg = "OFF"
+            cnt = counts_by_day.get(d, {})
+            g1 = bool(
+                is_rotation_a_guard_g1_day(
+                    regime=reg,
+                    idx5=idx5,
+                    xs_ret_std=xs_d,
+                    valid_a=int(cnt.get("va", 0)),
+                    valid_b=int(cnt.get("vb", 0)),
+                    xs_threshold=xs_thr,
+                    a_share_min=a_min,
+                    idx5_min=i5_min,
+                )
+            )
+            rs5 = corr_map.get(d)
+            r5 = bool(is_rs_persist_guard_day(rs5, r5_thr))
+            out[d] = {
+                "g1": g1,
+                "r5": r5,
+                "rs5": rs5,
+                "idx5": idx5,
+                "xs": xs_d,
+                "xs_thr": xs_thr,
+            }
+        except Exception:
+            out[d] = {"g1": False, "r5": False, "rs5": None, "idx5": None, "xs": None, "xs_thr": None}
+    return out
+
+
 def resolve_transition_gate_for_live(
     settings: dict,
     data_manager: Any,
@@ -844,55 +1084,51 @@ def resolve_transition_gate_for_live(
                 log(f"ℹ️ [Transition] {end_s} 레짐 강제 재계산 (캐시 무시)")
             except Exception:
                 pass
-        start_s = (as_of_dt - timedelta(days=30)).strftime("%Y-%m-%d")
         codes = resolve_universe_codes(settings, logger_callback=log)
         if not codes:
             return result
-        fetch_start = (as_of_dt - timedelta(days=120)).strftime("%Y-%m-%d")
+        # 평가일·직전 5영업일 각각 [D-N, D] 창이 필요 → 연휴 대비 30일 여유
+        lookback_n = _selection_daily_lookback_calendar_days(settings)
+        fetch_start = (as_of_dt - timedelta(days=lookback_n + 30)).strftime("%Y-%m-%d")
         df_all = _fetch_daily_ohlcv_batch_fdr(
             data_manager, codes, fetch_start, end_s, log
         )
         if df_all is None or df_all.empty:
             log("⚠️ [Transition] FDR 일봉 부족 — 게이트 OFF")
             return result
-        _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=False)
-        df_day = df_all[df_all["time"].dt.normalize() == as_of_dt]
-        if df_day.empty:
-            last_t = df_all["time"].max()
-            df_day = df_all[df_all["time"].dt.normalize() == pd.Timestamp(last_t).normalize()]
-            end_s = pd.Timestamp(last_t).strftime("%Y-%m-%d")
-            as_of_dt = pd.Timestamp(last_t).normalize()
-        va = int(df_day["Valid_A"].astype(bool).sum()) if "Valid_A" in df_day.columns else 0
-        vb = int(df_day["Valid_B"].astype(bool).sum()) if "Valid_B" in df_day.columns else 0
-        tot = va + vb
-        share = (vb / tot * 100.0) if tot > 0 else 0.0
-        # share delta: 최근 6영업일
-        days = sorted(df_all["time"].dt.normalize().unique())
-        share_by_d: Dict[str, float] = {}
-        for d in days:
-            g = df_all[df_all["time"].dt.normalize() == d]
-            t2 = int(g["Valid_A"].astype(bool).sum()) + int(g["Valid_B"].astype(bool).sum())
-            vb2 = int(g["Valid_B"].astype(bool).sum())
-            share_by_d[pd.Timestamp(d).strftime("%Y-%m-%d")] = (
-                (vb2 / t2 * 100.0) if t2 > 0 else 0.0
-            )
+        df_all = df_all[df_all["time"].dt.normalize() <= as_of_dt]
+        if df_all.empty:
+            log("⚠️ [Transition] 기준일 이전 FDR 일봉 없음 — 게이트 OFF")
+            return result
+        day_keys = sorted(
+            pd.Timestamp(d).strftime("%Y-%m-%d")
+            for d in df_all["time"].dt.normalize().unique()
+        )
+        if end_s not in day_keys:
+            end_s = day_keys[-1]
+            as_of_dt = pd.Timestamp(end_s).normalize()
+        tgt_idx = day_keys.index(end_s)
+        eval_days = day_keys[max(0, tgt_idx - 5) : tgt_idx + 1]
+        counts_by_day = _sliding_valid_counts_by_day(
+            df_all, settings, eval_days, lookback_n
+        )
+        tgt = counts_by_day.get(end_s)
+        if tgt is None:
+            log(f"⚠️ [Transition] {end_s} 슬라이딩 스코어 실패 — 게이트 OFF")
+            return result
+        va = int(tgt["va"])
+        vb = int(tgt["vb"])
+        share = float(tgt["share"])
+        # share delta: 평가일 기준 3·5영업일 전 (각 날짜도 자기 창으로 재계산)
         d5 = None
         d3 = None
-        if end_s in share_by_d:
-            keys = sorted(share_by_d.keys())
-            idx = keys.index(end_s) if end_s in keys else len(keys) - 1
-            if idx >= 5:
-                d5 = share - share_by_d[keys[idx - 5]]
-            if idx >= 3:
-                d3 = share - share_by_d[keys[idx - 3]]
-        xs = np.nan
-        try:
-            _xsdf = df_all.sort_values(["code", "time"]).copy()
-            _xsdf["ret1"] = _xsdf.groupby("code")["close"].pct_change()
-            xs_s = _xsdf.groupby("time")["ret1"].std() * 100.0
-            xs = float(xs_s.loc[as_of_dt]) if as_of_dt in xs_s.index else float("nan")
-        except Exception:
-            xs = np.nan
+        if len(eval_days) >= 6 and eval_days[-6] in counts_by_day:
+            d5 = share - float(counts_by_day[eval_days[-6]]["share"])
+        if len(eval_days) >= 4 and eval_days[-4] in counts_by_day:
+            d3 = share - float(counts_by_day[eval_days[-4]]["share"])
+        xs_by_day = _xs_ret_std_by_day(df_all)
+        _xs_v = xs_by_day.get(end_s)
+        xs = float(_xs_v) if _xs_v is not None else np.nan
         iv = _build_index_vol_by_day(
             data_manager,
             (as_of_dt - timedelta(days=60)).strftime("%Y-%m-%d"),
@@ -919,90 +1155,31 @@ def resolve_transition_gate_for_live(
                 "TRANSITION", max_a, max_b, settings
             )
         block_s1, block_s2 = resolve_transition_runtime_blocks(regime, settings)
+        # G1(Type A 신규 억제)·R5(Type A 청산 타이트) — 이력 창과 같은 헬퍼로 판정
+        _g1_on = _settings_bool_sel(settings, "use_rotation_a_guard_g1", False)
+        _r5_enabled = _settings_bool_sel(settings, "use_rs_persist_guard", False)
         block_type_a = False
-        try:
-            if _settings_bool_sel(settings, "use_rotation_a_guard_g1", False):
-                # idx5: KODEX 5일 수익률
-                _idx5: Optional[float] = None
-                try:
-                    _ix = _load_kodex200_daily_close(
-                        data_manager,
-                        (as_of_dt - timedelta(days=40)).strftime("%Y-%m-%d"),
-                        end_s,
-                    )
-                    if (
-                        _ix is not None
-                        and not _ix.empty
-                        and "d" in _ix.columns
-                        and "close" in _ix.columns
-                    ):
-                        _ix = _ix.drop_duplicates("d").sort_values("d")
-                        _closes = _ix.set_index("d")["close"].astype(float)
-                        if end_s in _closes.index:
-                            _keys = list(_closes.index)
-                            _ii = _keys.index(end_s)
-                            if _ii >= 5:
-                                _c0 = float(_closes.iloc[_ii - 5])
-                                _c1 = float(_closes.iloc[_ii])
-                                if _c0 > 0:
-                                    _idx5 = (_c1 / _c0 - 1.0) * 100.0
-                except Exception:
-                    _idx5 = None
-                _xs_thr = 3.05
-                try:
-                    _xs_pct = float(settings.get("rotation_a_guard_xs_pct", 50.0) or 50.0)
-                    _xsdf = df_all.sort_values(["code", "time"]).copy()
-                    _xsdf["ret1"] = _xsdf.groupby("code")["close"].pct_change()
-                    _xs_s = _xsdf.groupby("time")["ret1"].std() * 100.0
-                    _xs_vals = [
-                        float(v) for v in _xs_s.values if v is not None and np.isfinite(float(v))
-                    ]
-                    if _xs_vals:
-                        _xs_thr = float(np.nanpercentile(_xs_vals, _xs_pct))
-                except Exception:
-                    pass
-                try:
-                    _a_min = float(settings.get("rotation_a_guard_a_share_min", 0.60) or 0.60)
-                except (TypeError, ValueError):
-                    _a_min = 0.60
-                try:
-                    # idx5_min=0 허용 → `or` 폴백 사용 금지
-                    _i5_raw = settings.get("rotation_a_guard_idx5_min", -1.0)
-                    _i5min = float(-1.0 if _i5_raw is None else _i5_raw)
-                except (TypeError, ValueError):
-                    _i5min = -1.0
-                _reg_g1 = regime
-                if regime == "TRANSITION" and bool(
-                    settings.get("transition_ignore_soft", False)
-                ):
-                    _reg_g1 = "OFF"
-                block_type_a = bool(
-                    is_rotation_a_guard_g1_day(
-                        regime=_reg_g1,
-                        idx5=_idx5,
-                        xs_ret_std=xs if np.isfinite(xs) else None,
-                        valid_a=va,
-                        valid_b=vb,
-                        xs_threshold=_xs_thr,
-                        a_share_min=_a_min,
-                        idx5_min=_i5min,
-                    )
-                )
-        except Exception:
-            block_type_a = False
-        # R5: RS 순위지속성 저하 → Type A 청산 타이트만 (진입 차단 아님)
         _r5_on = False
         _r5_corr: Optional[float] = None
-        try:
-            if _settings_bool_sel(settings, "use_rs_persist_guard", False):
-                _corr_map = compute_rs_rank_corr_by_day(
-                    df_all, lookback=5, rs_window=20, min_names=40
-                )
-                _r5_corr = _corr_map.get(end_s)
-                _r5_thr = resolve_rs_persist_corr_threshold(_corr_map, settings)
-                _r5_on = bool(is_rs_persist_guard_day(_r5_corr, _r5_thr))
-        except Exception:
-            _r5_on = False
+        if _g1_on or _r5_enabled:
+            try:
+                _gr = _compute_g1_r5_by_day(
+                    settings,
+                    data_manager,
+                    df_all,
+                    [end_s],
+                    {end_s: regime},
+                    {end_s: tgt},
+                    xs_by_day,
+                ).get(end_s, {})
+                if _g1_on:
+                    block_type_a = bool(_gr.get("g1", False))
+                if _r5_enabled:
+                    _r5_on = bool(_gr.get("r5", False))
+                    _r5_corr = _gr.get("rs5")
+            except Exception:
+                block_type_a = False
+                _r5_on = False
         _ret_s = iv.get("ret_pct")
         _ret_txt = (
             f"{float(_ret_s):+.2f}%"
@@ -1030,6 +1207,11 @@ def resolve_transition_gate_for_live(
                 "block_s2": block_s2,
                 "block_type_a": block_type_a,
                 "r5_exit_tighten": bool(_r5_on),
+                "rs5_corr": (
+                    float(_r5_corr)
+                    if _r5_corr is not None and np.isfinite(float(_r5_corr))
+                    else None
+                ),
                 "as_of": end_s,
             }
         )
@@ -1089,13 +1271,30 @@ def compute_transition_regime_history(
                 ).strftime("%Y-%m-%d")
             except Exception:
                 pass
-        start_s = (pd.to_datetime(end_s) - timedelta(days=75)).strftime("%Y-%m-%d")
+        # 표시 N영업일 + share delta 5영업일을 덮는 달력일 (연휴 여유 포함)
+        span_days = max(75, int((n + 6) * 1.6) + 14)
+        start_s = (pd.to_datetime(end_s) - timedelta(days=span_days)).strftime("%Y-%m-%d")
 
         def _silent(*_a: Any, **_k: Any) -> None:
             pass
 
-        _result = _compute_transition_regime_map_fdr(st, data_manager, start_s, end_s, _silent)
+        guard_by_day: Dict[str, Dict[str, Any]] = {}
+        _result = _compute_transition_regime_map_fdr(
+            st,
+            data_manager,
+            start_s,
+            end_s,
+            _silent,
+            eval_last_days=n,
+            detail_out=guard_by_day,
+        )
         regime_map: Dict[str, str] = dict(_result or {})
+        # 헤더(resolve_transition_gate_for_live)와 동일하게 약화 무시 옵션 반영
+        if bool(st.get("transition_ignore_soft", False)):
+            regime_map = {
+                k: ("OFF" if str(v).upper() == "TRANSITION" else v)
+                for k, v in regime_map.items()
+            }
 
         # KRX 영업일과의 교집합만 사용 (FDR 이상치 일자 방어). 캘린더 실패 시 맵 그대로.
         try:
@@ -1135,6 +1334,8 @@ def compute_transition_regime_history(
                         apply_on = nxt.strftime("%Y-%m-%d")
             except Exception:
                 apply_on = d
+            _gd = guard_by_day.get(d, {})
+            _rs5 = _gd.get("rs5")
             out.append(
                 {
                     "date": apply_on,
@@ -1142,6 +1343,14 @@ def compute_transition_regime_history(
                     "apply_on": apply_on,
                     "regime": reg,
                     "label": labels.get(reg, reg),
+                    # 판정값 (실전 적용 여부는 use_rotation_a_guard_g1 / use_rs_persist_guard)
+                    "g1": bool(_gd.get("g1", False)),
+                    "r5": bool(_gd.get("r5", False)),
+                    "rs5": (
+                        float(_rs5)
+                        if _rs5 is not None and np.isfinite(float(_rs5))
+                        else None
+                    ),
                 }
             )
     except Exception:

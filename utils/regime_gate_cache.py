@@ -16,10 +16,14 @@ from utils.server_mode_paths import project_root
 
 _CACHE_FILENAME = "regime_gate_cache.json"
 
+# 판정 로직이 바뀌면 올려서 이전 캐시를 무효화한다
+_CALC_VERSION = "sliding_lookback_v1"
+
 # 레짐 판정에 영향을 주는 설정 키
 _FINGERPRINT_KEYS = (
     "use_transition_gate",
     "regime_display_eod_buffer_minutes",
+    "bt_universe_indicator_lookback_days",
     "transition_prior_share_min",
     "transition_share_delta5_max",
     "transition_share_delta3_max",
@@ -71,7 +75,7 @@ def clear_regime_gate_cache() -> bool:
 def transition_gate_settings_fingerprint(settings: Optional[dict[str, Any]]) -> str:
     """레짐 판정 관련 설정만 해시한다."""
     st = settings or {}
-    payload: Dict[str, Any] = {}
+    payload: Dict[str, Any] = {"_calc_version": _CALC_VERSION}
     for key in _FINGERPRINT_KEYS:
         if key in st:
             payload[key] = st.get(key)
