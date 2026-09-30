@@ -337,19 +337,26 @@ class SignalHeldEvalMixin:
                         bar_ts=bar_ts,
                     )
                 if _routed in ("queued", "skipped"):
+                    _after_close_off = bool(
+                        _routed == "skipped" and not self._order_after_close_enabled()
+                    )
                     self._log_held_eval_diag(
                         nk,
                         slot_key,
                         (
-                            "skipped_1530"
-                            if _routed == "skipped" and self._is_1530_bar_slot(bar_ts)
+                            "skipped_after_close"
+                            if _after_close_off
                             else (
-                                "skipped_1945"
-                                if _routed == "skipped"
+                                "skipped_1530"
+                                if _routed == "skipped" and self._is_1530_bar_slot(bar_ts)
                                 else (
-                                    "queued_1945"
-                                    if self._is_1945_bar_slot(bar_ts)
-                                    else "queued_1530"
+                                    "skipped_1945"
+                                    if _routed == "skipped"
+                                    else (
+                                        "queued_1945"
+                                        if self._is_1945_bar_slot(bar_ts)
+                                        else "queued_1530"
+                                    )
                                 )
                             )
                         ),
@@ -357,10 +364,23 @@ class SignalHeldEvalMixin:
                     )
                     if _routed == "skipped":
                         try:
-                            tag = "19:45" if self._is_1945_bar_slot(bar_ts) else "15:30"
-                            self.app.log(
-                                f"ℹ️ [{tag}] 주문 비활성 — {act} 신호만 기록 ({nk})"
-                            )
+                            if _after_close_off:
+                                self.app.log(
+                                    f"ℹ️ [장마감후] 주문 OFF — {act} 신호만 기록 "
+                                    f"({nk} slot={slot_key})"
+                                )
+                            else:
+                                tag = "19:45" if self._is_1945_bar_slot(bar_ts) else "15:30"
+                                self.app.log(
+                                    f"ℹ️ [{tag}] 주문 비활성 — {act} 신호만 기록 ({nk})"
+                                )
+                        except Exception:
+                            pass
+                        try:
+                            if _after_close_off and isinstance(info, dict):
+                                msg = f"⏸ 장마감후 주문 OFF · {act} 신호만 기록"
+                                info["confluence"] = msg
+                                info["status_text"] = msg
                         except Exception:
                             pass
                     return

@@ -219,13 +219,6 @@ def build_status(app: Any) -> Dict[str, Any]:
     except Exception:
         monitor_count = 0
 
-    remote_running = False
-    try:
-        rc = getattr(app, "remote_commander", None)
-        remote_running = bool(rc is not None and getattr(rc, "is_running", False))
-    except Exception:
-        remote_running = False
-
     settings = getattr(app, "settings", None) or {}
     selection_fresh = False
     selection_mtime: Optional[str] = None
@@ -253,7 +246,6 @@ def build_status(app: Any) -> Dict[str, Any]:
         "mode": "mock" if use_mock else "live",
         "is_monitoring": is_mon,
         "monitor_code_count": monitor_count,
-        "remote_commander_running": remote_running,
         "selection_fresh": selection_fresh,
         "selection_mtime": selection_mtime,
         "selection_count": selection_count,

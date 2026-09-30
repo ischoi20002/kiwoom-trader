@@ -1234,7 +1234,7 @@ class MonitorTab:
             """트리·세로·가로 스크롤을 inner에 배치(tree는 inner의 자식이어야 함)."""
             ysb = ttk.Scrollbar(inner, orient=tk.VERTICAL, command=tree.yview)
             xsb = ttk.Scrollbar(inner, orient=tk.HORIZONTAL, command=tree.xview)
-            tree.configure(yscroll=ysb.set, xscroll=xsb.set)
+            tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
             tree.grid(row=0, column=0, sticky="nsew")
             ysb.grid(row=0, column=1, sticky="ns")
             xsb.grid(row=1, column=0, sticky="ew")
@@ -1563,7 +1563,7 @@ class MonitorTab:
                 self.app.monitor_codes = self.app.trading_controller.monitor_codes
                 self.app.monitor_info = self.app.trading_controller.monitor_info
                 self.update_watchlist(self.app.monitor_info)
-                tag = "[원격] " if auto_confirm else "[GUI] "
+                tag = "[자동] " if auto_confirm else "[GUI] "
                 self.app.log(
                     f"✅ {tag}{len(self.app.monitor_codes)}개 종목을 실시간 감시 대상으로 등록했습니다."
                 )

@@ -16,14 +16,13 @@ class PortfolioManager:
     """
     [v3.8] 포지션 관리(모의/실전별 저장), 계좌 동기화(Reconciliation), DB 연동을 전담하는 모듈.
     """
-    def __init__(self, app, data_manager, order_manager, settings=None, log_func=None, gui_callback=None, telegram_callback=None):
+    def __init__(self, app, data_manager, order_manager, settings=None, log_func=None, gui_callback=None):
         self.app = app
         self.data_manager = data_manager
         self.order_manager = order_manager
         self.settings = settings or {}
         self.log = log_func or print
         self.gui_callback = gui_callback
-        self.telegram_callback = telegram_callback
 
         # 수수료: 모의/실전은 on_fill 시점 settings + config.USE_MOCK 로 조회 (fee_decimal_rates_live_trading)
 

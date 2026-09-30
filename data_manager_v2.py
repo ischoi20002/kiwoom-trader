@@ -146,7 +146,7 @@ class DataManagerV2(
                 raise e
 
     def _get_state_connection(self):
-        """주문·포지션·원격명령 — config.USE_MOCK 에 따라 mock/live DB 분리."""
+        """주문·포지션 — config.USE_MOCK 에 따라 mock/live DB 분리."""
         try:
             p = state_db_path()
         except Exception:
@@ -353,14 +353,11 @@ class DataManagerV2(
                     result TEXT
                 )
             """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS remote_commands (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    command TEXT,
-                    timestamp TEXT,
-                    status TEXT DEFAULT 'PENDING'
-                )
-            """)
+            # 폐기된 원격 명령 테이블 정리
+            try:
+                conn.execute("DROP TABLE IF EXISTS remote_commands")
+            except sqlite3.Error:
+                pass
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS system_config (
                     key TEXT PRIMARY KEY,
@@ -427,7 +424,6 @@ class DataManagerV2(
         state_tables = (
             "order_history",
             "active_positions",
-            "remote_commands",
             "system_config",
         )
         try:
@@ -1163,41 +1159,3 @@ class DataManagerV2(
 
 
 
-
-    def get_remote_command(self):
-        """[v4.6.9] 원격 명령 테이블에서 최신 명령어를 하나 가져오고 삭제합니다 (Pop-and-Delete)."""
-        import sqlite3
-        conn = None
-        try:
-            try:
-                _sp = state_db_path()
-            except Exception:
-                _sp = self.state_db_path
-            conn = sqlite3.connect(_sp, timeout=10)
-            conn.execute("PRAGMA journal_mode=WAL;")
-            cursor = conn.cursor()
-            
-            # 1. 테이블 존재 여부 확인 (Defensive)
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='remote_commands'")
-            if not cursor.fetchone():
-                return None
-            
-            # 2. 가장 오래된 명령(먼저 들어온 것) 하나 가져오기
-            cursor.execute("SELECT id, command FROM remote_commands ORDER BY id ASC LIMIT 1")
-            row = cursor.fetchone()
-            
-            if row:
-                cmd_id, command = row
-                # 3. 가져온 명령은 즉시 삭제 (중복 실행 방지)
-                cursor.execute("DELETE FROM remote_commands WHERE id = ?", (cmd_id,))
-                conn.commit()
-                return command
-            
-            return None
-        except Exception as e:
-            # Polling 중이므로 조용히 로깅만 수행 (User 로깅은 지양)
-            if "database is locked" not in str(e).lower():
-                print(f"[DataManager] Remote Polling Error: {e}")
-            return None
-        finally:
-            if conn: conn.close()

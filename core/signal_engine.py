@@ -386,15 +386,50 @@ class SignalEngine(
         except Exception:
             return True
 
+    def _order_after_close_enabled(self) -> bool:
+        """
+        정규장 마감(15:30) 이후 주문 허용 상위 스위치(``order_after_close_enabled``, 기본 True).
+
+        OFF면 15:30 슬롯·애프터 슬롯은 신호만 기록한다.
+        """
+        try:
+            from utils.krx_bars import settings_allow_after_close_orders
+
+            return bool(
+                settings_allow_after_close_orders(getattr(self.app, "settings", None))
+            )
+        except Exception:
+            return True
+
+    def _after_close_order_blocked(self, bar_ts: Any = None) -> bool:
+        """
+        해당 슬롯(없으면 현재 형성 슬롯)이 마감 이후이고 상위 스위치가 OFF면 True.
+        """
+        try:
+            if self._order_after_close_enabled():
+                return False
+            ts = bar_ts
+            if ts is None:
+                from utils.krx_bars import krx_stream_slot_end_datetime
+
+                ts = krx_stream_slot_end_datetime()
+            from utils.krx_bars import is_krx_after_close_15m_slot
+
+            return bool(is_krx_after_close_15m_slot(ts))
+        except Exception:
+            return False
+
     def _order_1530_enabled(self) -> bool:
         """
         15:30 슬롯 실주문 허용(NXT 터치·익일시초 예약·당일 즉시).
 
         기본 False — 평가는 하되 주문은 당분간 생략.
+        상위 스위치 ``order_after_close_enabled`` 가 OFF면 항상 False.
         """
         try:
-            st = getattr(self.app, "settings", None) or {}
-            return bool(st.get("order_1530_enabled", False))
+            from utils.krx_bars import settings_allow_1530_orders
+
+            return bool(settings_allow_1530_orders(getattr(self.app, "settings", None)))
         except Exception:
             return False
 

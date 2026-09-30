@@ -51,6 +51,10 @@ __all__ = [
     "is_krx_no_signal_eval_15m_slot",
     "is_krx_auction_market_fill_slot",
     "is_krx_next_open_defer_15m_slot",
+    "is_krx_after_close_15m_slot",
+    "settings_allow_after_close_orders",
+    "settings_allow_1530_orders",
+    "after_close_orders_blocked_now",
     "krx_same_day_1530_label",
     "iter_krx_15m_slot_ends_for_day",
     "resample_1m_ohlcv_to_15m_krx",
@@ -313,6 +317,82 @@ def is_krx_next_open_defer_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> b
     """
     try:
         return bool(is_krx_last_15m_slot(ts) or is_krx_aftermarket_last_15m_slot(ts))
+    except Exception:
+        return False
+
+
+def is_krx_after_close_15m_slot(ts: Union[pd.Timestamp, datetime, str]) -> bool:
+    """
+    정규장 마감 이후 15분 라벨인지.
+
+    종가 단일가(기본 15:30) 슬롯 + 애프터마켓 슬롯(16:00…19:45) 전부.
+    ``order_after_close_enabled`` OFF 시 주문·체결 생략 대상.
+    """
+    try:
+        t = pd.Timestamp(ts)
+        return bool(is_krx_last_15m_slot(t) or _is_aftermarket_15m_label(t))
+    except Exception:
+        return False
+
+
+def settings_allow_after_close_orders(settings: Optional[dict]) -> bool:
+    """
+    정규장 마감(15:30) 이후 주문 허용 여부(``order_after_close_enabled``, 기본 True).
+
+    OFF면 15:30 슬롯·애프터 슬롯의 당일 주문·NXT 터치·익일 시초 예약을 모두 생략하고
+    신호만 기록한다(BT는 해당 슬롯 체결 생략).
+    """
+    try:
+        st = settings or {}
+        raw = st.get("order_after_close_enabled", True)
+        if isinstance(raw, str):
+            return raw.strip().lower() not in ("0", "false", "off", "no", "")
+        return bool(raw)
+    except Exception:
+        return True
+
+
+def settings_allow_1530_orders(settings: Optional[dict]) -> bool:
+    """
+    15:30(종가 단일가) 슬롯 주문 허용 여부 — RT·BT 공통 판정.
+
+    ``order_after_close_enabled``(기본 True) AND ``order_1530_enabled``(기본 False).
+    OFF면 RT는 신호만 기록, BT는 15:30 슬롯 체결(익일 시가 이월 포함)을 생략한다.
+    """
+    try:
+        if not settings_allow_after_close_orders(settings):
+            return False
+        st = settings or {}
+        raw = st.get("order_1530_enabled", False)
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("1", "true", "on", "yes")
+        return bool(raw)
+    except Exception:
+        return False
+
+
+def after_close_orders_blocked_now(
+    settings: Optional[dict], now: Optional[datetime] = None
+) -> bool:
+    """
+    ``order_after_close_enabled`` OFF + 거래일 정규장 종가(close) 이후(당일)면 True.
+
+    주문 집행·미체결 정정 루프의 벽시계 최종 방어선.
+    """
+    try:
+        if settings_allow_after_close_orders(settings):
+            return False
+        t = now if now is not None else datetime.now()
+        if t.weekday() >= 5:
+            return False
+        try:
+            from reporting.krx_trading_calendar import is_trading_day
+
+            if not is_trading_day(t.date()):
+                return False
+        except Exception:
+            pass
+        return bool(t >= get_session_hours(t.date()).close_datetime())
     except Exception:
         return False
 

@@ -76,6 +76,7 @@ class SignalOrderRoutingMixin:
             (모의 또는 실전 NXT 불가 종목)
         ``skipped``
             ``order_1530_enabled`` OFF → 주문·예약 모두 생략.
+            ``order_after_close_enabled`` OFF + 마감 이후 슬롯(15:30·애프터) → 생략.
         ``nxt``
             실전 NXT 가능 종목 플래그 설정 → 호출측이 바로 주문.
         ``none``
@@ -93,6 +94,8 @@ class SignalOrderRoutingMixin:
                     ts = krx_stream_slot_end_datetime()
                 except Exception:
                     ts = None
+            if ts is not None and self._after_close_order_blocked(ts):
+                return "skipped"
             if not self._is_1530_bar_slot(ts):
                 return "none"
             if not self._order_1530_enabled():
@@ -159,6 +162,8 @@ class SignalOrderRoutingMixin:
                     ts = None
             if not self._is_1945_bar_slot(ts):
                 return "none"
+            if not self._order_after_close_enabled():
+                return "skipped"
             if not self._next_open_1945_enabled():
                 return "skipped"
             nk = str(canonical_stock_code(code) or code).zfill(6)

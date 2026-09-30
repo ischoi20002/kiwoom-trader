@@ -45,11 +45,9 @@ from ui.styles import NordicStyle
 
 # [v3.8] Core Modules extraction
 from core.portfolio_manager import PortfolioManager
-from core.remote_commander import RemoteCommander
 from core.status_api import StatusApiServer
 from core.trading_controller import TradingController, virtual_position_reference_price_for_monitor
 from core.strategy_engine import StrategyEngine
-from core.selection_service import SelectionService
 from core.execution.post_fill_account_sync_service import PostFillAccountSyncService
 from core.realtime_tick_dispatch_service import RealtimeTickDispatchService
 from core.eod_equity_snapshot_service import EodEquitySnapshotService
@@ -498,7 +496,6 @@ class KiwoomApp:
             settings=self.settings,
             log_func=self.log,
             gui_callback=self._render_virtual_positions,
-            telegram_callback=self.send_telegram_message
         )
         
         # [v16.50] 최적화 상태 데이터 중앙 집중화 (Singleton State Management)
@@ -551,11 +548,6 @@ class KiwoomApp:
             # 설정 파일에 저장된 값이 있으면 그것을 사용, 없으면 False 초기화
             saved_val = self.settings.get(f"opt_{key}", False)
             self.opt_params_vars[key] = tk.BooleanVar(value=saved_val)
-        self.remote_commander = RemoteCommander(
-            self,
-            self.data_manager,
-            log_func=self.log
-        )
         self.status_api_server = StatusApiServer(self, log_func=self.log)
         # 주문 집행(S1/S2/EXIT) — TradingController 와 분리
         self.order_execution_service = OrderExecutionService(
@@ -613,7 +605,6 @@ class KiwoomApp:
             stock_prep_callback=self.warmup_stock_prep_ui_service.on_warmup_stock_prep,
         )
         self.strategy_engine = StrategyEngine(self)
-        self.selection_service = SelectionService(self, logger_callback=self.log)
 
         self.portfolio.load_all()
         # VirtualTab·콜백이 TARGETS_LOADED 전에 참조할 수 있음 — 미초기화 시 AttributeError로 즉시 종료
@@ -646,7 +637,6 @@ class KiwoomApp:
         except Exception:
             pass
 
-        # RemoteCommander는 인증 성공 후 RestAuthRetryService에서 1회만 기동합니다.
         # 앱이 켜져 있으면 거래일마다 개장 N분 전(기본 25분)에 감시를 자동 시작.
         try:
             if bool(getattr(self, "_suppress_auto_monitor_start", False)):
@@ -838,9 +828,6 @@ class KiwoomApp:
             
             self.status_label = ttk.Label(status_frame, text="상태: 대기 중", font=("Malgun Gothic", 9), foreground=self.colors['primary'])
             self.status_label.pack(side=tk.RIGHT, padx=5)
-            
-            self.lbl_remote_status = ttk.Label(status_frame, text="원격: 비활성", font=("Malgun Gothic", 9), foreground=self.colors['border'])
-            self.lbl_remote_status.pack(side=tk.LEFT, padx=10)
             # 무거운 UI 갱신(포지션 탭 전체 그리기 등) 중 표시 — 탭 전환이 잠시 먹지 않을 때 원인 안내
             self.lbl_ui_reactivity = ttk.Label(
                 status_frame,
@@ -3708,31 +3695,6 @@ class KiwoomApp:
     def _sell_all_virtual(self):
         if messagebox.askyesno("🚨 비상 청산", "모든 보유 종목을 즉시 시장가로 매도하시겠습니까?"):
             self.portfolio.sell_all()
-
-    def _handle_remote_update(self):
-        """원격/텔레그램 업데이트 — app_updater 경로로 통일."""
-        try:
-            self.send_telegram_message("📦 [원격 배포 시작]")
-        except Exception:
-            pass
-        try:
-            from core.app_updater import start_update_process
-
-            ok, msg = start_update_process(log=self.log)
-            if ok:
-                self.root.after(1000, self.on_close)
-            else:
-                try:
-                    self.send_telegram_message(f"❌ 업데이트 실패: {msg}")
-                except Exception:
-                    pass
-                self.log(f"[Error] [Remote] {msg}")
-        except Exception as e:
-            try:
-                self.send_telegram_message(f"❌ 업데이트 예외: {e!r}")
-            except Exception:
-                pass
-            self.log(f"[Error] [Remote] 업데이트 예외: {e!r}")
 
 if __name__ == "__main__":
     import sys

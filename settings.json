@@ -32,6 +32,7 @@
     "prevent_sleep_keep_display": false,
     "prevent_sleep_allow_after_eod": true,
     "next_open_1530_enabled": true,
+    "order_after_close_enabled": true,
     "order_1530_enabled": false,
     "next_open_1945_enabled": true,
     "bt_open_auction_pass_enabled": false,
@@ -573,8 +574,8 @@
     "post_fill_sync_enable_followup": true,
     "post_fill_sync_skip_while_pending": true,
     "sync_run_kt00007_on_silent_sync": false,
-    "bt_start_date": "2024-06-03",
-    "bt_end_date": "2026-09-23",
+    "bt_start_date": "2026-01-01",
+    "bt_end_date": "2026-09-30",
     "mock_account_id": "81220142",
     "debug_terminal_trace": false,
     "realtime_warmup_pre_validate_pause_max_sec": 0.0,
@@ -583,8 +584,8 @@
     "transition_runtime_block_s1": false,
     "transition_runtime_block_s2": false,
     "transition_runtime_regime": "OFF",
-    "opt_box_sel_ma_period": true,
-    "opt_box_sel_ma_slope_days": true,
-    "opt_box_sel_lookback": true,
-    "opt_box_sel_min_history_bars": true
+    "opt_box_sel_ma_period": false,
+    "opt_box_sel_ma_slope_days": false,
+    "opt_box_sel_lookback": false,
+    "opt_box_sel_min_history_bars": false
 }

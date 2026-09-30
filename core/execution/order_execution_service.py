@@ -256,6 +256,43 @@ class OrderExecutionService:
         except Exception:
             return False
 
+    def _after_close_order_blocked_now(
+        self, next_open: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        ``order_after_close_enabled`` OFF + 거래일 정규장 종가(close) 이후(당일)면 True.
+
+        익일 시초 예약 제출(``next_open``)은 개장 시각에 나가므로 제외한다.
+        """
+        try:
+            if next_open is not None:
+                return False
+            from utils.krx_bars import after_close_orders_blocked_now
+
+            return bool(
+                after_close_orders_blocked_now(getattr(self.app, "settings", None))
+            )
+        except Exception:
+            return False
+
+    def _log_after_close_block(self, code: Any, name: Any, kind: str) -> None:
+        """장마감 후 주문 OFF 차단 로그(앱 로그 + 세션 로그)."""
+        try:
+            self.log(
+                f"⏸ [장마감후] 주문 OFF — {kind} 주문 차단 ({name}({code}))"
+            )
+        except Exception:
+            pass
+        try:
+            sl = getattr(self.app, "session_logger", None)
+            if sl:
+                sl.log(
+                    "order_blocked_after_close",
+                    {"code": str(code), "name": str(name or ""), "kind": str(kind)},
+                )
+        except Exception:
+            pass
+
     def _coerce_aftermarket_limit(
         self,
         ot: str,
@@ -682,6 +719,9 @@ class OrderExecutionService:
         next_open = self._consume_next_open_limit_order(code)
         auction = self._consume_auction_market(code)
         nxt_src = self._consume_nxt_touch(code)
+        if self._after_close_order_blocked_now(next_open):
+            self._log_after_close_block(code, name, "S1 매수")
+            return False
         if next_open is not None:
             ot, ex_style = ("00", "limit")
             reason = self._tag_next_open_reason(
@@ -1042,6 +1082,11 @@ class OrderExecutionService:
         next_open = self._consume_next_open_limit_order(code)
         auction = self._consume_auction_market(code)
         nxt_src = self._consume_nxt_touch(code)
+        if self._after_close_order_blocked_now(next_open):
+            self._log_after_close_block(
+                code, pos.get("name", "") if isinstance(pos, dict) else "", str(action)
+            )
+            return
         if next_open is not None:
             ot, ex_style = ("00", "limit")
             reason = self._tag_next_open_reason(

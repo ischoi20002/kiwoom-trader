@@ -40,6 +40,75 @@ class SettingsTab:
         frame.columnconfigure(4, weight=0, minsize=80)   # 최적화 토글 (중간에 배치하여 잘림 방지)
         frame.columnconfigure(5, weight=1, minsize=200)  # 설명 (가로 확장)
 
+    # ── 주설정/하위설정 의존 표시 ──
+    def _dep_var_on(self, key: str) -> bool:
+        """토글 변수 ON 여부(변수 없음·오류 시 True로 간주해 하위를 가리지 않음)."""
+        try:
+            var = self.conf_vars.get(key)
+            if var is None:
+                return True
+            return bool(var.get())
+        except (tk.TclError, ValueError, AttributeError):
+            return True
+
+    def _dep_chain(self, parent_key: tp.Optional[str]) -> list[str]:
+        """직계 상위부터 최상위까지 토글 키 목록(순환 방지 상한 8)."""
+        out: list[str] = []
+        k = parent_key
+        while k and k not in out and len(out) < 8:
+            out.append(k)
+            k = self._dep_parent_of.get(k)
+        return out
+
+    def _dep_attach_trace(self, key: str) -> None:
+        """상위 토글 변경 시 전체 의존 행 갱신(키당 1회만 등록)."""
+        if not key or key in self._dep_traced:
+            return
+        var = self.conf_vars.get(key)
+        if var is None:
+            return
+        try:
+            var.trace_add('write', lambda *_a: self._dep_refresh_all())
+            self._dep_traced.add(key)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _dep_apply_row(self, row: dict[str, tp.Any]) -> None:
+        """
+        행 표시 상태 반영.
+
+        - 상위 중 하나라도 OFF → 체크박스 비활성·라벨/단위/연결선 흐리게
+        - 본인 토글 OFF → 입력칸만 흐리게(``user1`` 상태 — 입력·저장은 그대로 가능)
+        """
+        try:
+            anc_on = all(self._dep_var_on(k) for k in row.get('chain') or [])
+            own = row.get('toggle')
+            self_on = anc_on and (own is None or self._dep_var_on(own))
+            off = self._dep_off_col
+            cb = row.get('cb')
+            if cb is not None:
+                cb.configure(state=tk.NORMAL if anc_on else tk.DISABLED)
+            ent = row.get('entry')
+            if ent is not None:
+                ent.state(['!user1'] if self_on else ['user1'])
+            lbl = row.get('label')
+            if lbl is not None:
+                is_master = bool(own) and own in self._dep_masters
+                fg_on = self._dep_master_col if is_master else (row.get('label_fg') or self._dep_txt_col)
+                lbl.configure(foreground=fg_on if anc_on else off)
+            un = row.get('unit')
+            if un is not None:
+                un.configure(foreground=self._dep_master_col if anc_on else off)
+            conn = row.get('conn')
+            if conn is not None:
+                conn.configure(fg=self._dep_conn_col if anc_on else off)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _dep_refresh_all(self) -> None:
+        for row in list(getattr(self, '_dep_rows', []) or []):
+            self._dep_apply_row(row)
+
     def _ensure_opt_var(self, key: str, label: str = "") -> bool:
         """설정 행 키를 최적화 ○/● 대상에 자동 등록. 성공 시 True."""
         try:
@@ -187,6 +256,30 @@ class SettingsTab:
         style.configure('Dimmed.TLabel', foreground='#666666')
         style.configure('Dimmed.TEntry', foreground='#666666')
         style.map('Dimmed.TEntry', fieldbackground=[('disabled', '#3B4252')])
+
+        # 주설정/하위설정 의존 표시 상태
+        self._dep_rows: list[dict[str, tp.Any]] = []
+        self._dep_parent_of: dict[str, str] = {}
+        self._dep_toggle_rows: dict[str, list[dict[str, tp.Any]]] = {}
+        self._dep_masters: set[str] = set()
+        self._dep_traced: set[str] = set()
+        self._dep_off_col: str = '#616E88'
+        self._dep_txt_col: str = txt_col
+        self._dep_master_col: str = primary_col
+        self._dep_conn_col: str = secondary_col
+        # 그룹 위젯 리스트 → 그룹 주설정 토글(행을 리스트에 넣으면 자동으로 하위설정)
+        dep_group_by_list: dict[int, str] = {
+            id(self.type_a_widgets): 'use_type_a',
+            id(self.type_b_widgets): 'use_type_b',
+            id(self.s2_a_widgets): 'use_s2_master_a',
+            id(self.s2_b_widgets): 'use_s2_master_b',
+            id(self.sel_c_widgets): 'use_sel_track_c',
+            id(self.type_c_widgets): 'use_type_c',
+            id(self.exit_c_widgets): 'use_type_c',
+        }
+        # 입력칸 흐림: user1 상태 플래그(비활성과 달리 입력·프로그램 갱신 가능, Opt 강조와 공존)
+        style.map('TEntry', foreground=[('readonly', '#81A1C1'), ('user1', self._dep_off_col)])
+        style.map('Opt.TEntry', foreground=[('user1', self._dep_off_col)])
 
         # ── 헤더 ──
         header_sticky = ttk.Frame(self.parent, padding=(25, 12, 25, 8))
@@ -419,15 +512,53 @@ class SettingsTab:
             widget_list=None,
             group_toggle_widgets: bool = False,
             label_fg=None,
+            parent_toggle: tp.Optional[str] = None,
         ):
+            """
+            설정 한 행.
+
+            ``parent_toggle`` (또는 그룹 위젯 리스트) 가 있으면 하위설정으로 표시:
+            같은 프레임에 주설정 행이 있으면 └ 연결선으로 들여쓰고,
+            주설정 OFF 시 흐리게 표시한다.
+            """
             r = get_next_row(parent)
+            dep_parent: tp.Optional[str] = parent_toggle
+            if dep_parent is None and widget_list is not None:
+                dep_parent = dep_group_by_list.get(id(widget_list))
+            if dep_parent and dep_parent == toggle_key:
+                dep_parent = None
+            chain = self._dep_chain(dep_parent)
+            # 같은 프레임에 주설정 행이 있는 조상 수만큼 들여쓰기
+            indent = 0
+            for _k in chain:
+                if any(_mr.get('frame') is parent for _mr in self._dep_toggle_rows.get(_k, [])):
+                    indent += 1
+            if dep_parent:
+                label = str(label).lstrip(' ㄴ└').strip() or str(label)
+                if toggle_key:
+                    self._dep_parent_of[toggle_key] = dep_parent
+
+            cb = None
+            conn = None
+            cell0 = None
+            if toggle_key or indent > 0:
+                cell0 = ttk.Frame(parent)
+                _pad_l = 5 if indent <= 0 else 8 + 18 * (indent - 1)
+                cell0.grid(row=r, column=0, sticky='w', padx=(_pad_l, 0))
+                if indent > 0:
+                    conn = tk.Label(
+                        cell0,
+                        text='└',
+                        bg=bg_col,
+                        fg=secondary_col,
+                        font=('Malgun Gothic', 10),
+                    )
+                    conn.pack(side=tk.LEFT, padx=(0, 2))
             if toggle_key:
                 if toggle_key not in self.conf_vars:
                     def_val = self.default_settings.get(toggle_key, True)
                     self.conf_vars[toggle_key] = tk.BooleanVar(value=self.app.settings.get(toggle_key, def_val))
                 # 체크박스 + (최적화 대상이면) ○/● 를 같은 칸에 배치
-                cell0 = ttk.Frame(parent)
-                cell0.grid(row=r, column=0, sticky='w', padx=(5, 0))
                 cb = tk.Checkbutton(
                     cell0,
                     variable=self.conf_vars[toggle_key],
@@ -457,6 +588,8 @@ class SettingsTab:
                 foreground=label_fg or txt_col,
             )
             lbl.grid(row=r, column=1, sticky='w', pady=4)
+            ent = None
+            un = None
             
             if key:
                 val = self.app.settings.get(key, self.default_settings.get(key, ''))
@@ -489,6 +622,35 @@ class SettingsTab:
                 hn.grid(row=r, column=5, sticky='w', padx=10)
                 if widget_list is not None: widget_list.append(hn)
             if widget_list is not None: widget_list.append(lbl)
+
+            # 의존 표시 등록: 토글 행(주설정 후보) 또는 하위설정 행
+            if toggle_key or dep_parent:
+                row_info: dict[str, tp.Any] = {
+                    'frame': parent,
+                    'chain': chain,
+                    'toggle': toggle_key,
+                    'cb': cb,
+                    'entry': ent,
+                    'label': lbl,
+                    'label_fg': label_fg,
+                    'unit': un,
+                    'conn': conn,
+                }
+                self._dep_rows.append(row_info)
+                if toggle_key:
+                    self._dep_toggle_rows.setdefault(toggle_key, []).append(row_info)
+                    self._dep_attach_trace(toggle_key)
+                for _k in chain:
+                    self._dep_attach_trace(_k)
+                if dep_parent:
+                    self._dep_masters.add(dep_parent)
+                    for _mr in self._dep_toggle_rows.get(dep_parent, []):
+                        try:
+                            _mr['label'].configure(font=('Malgun Gothic', 10, 'bold'))
+                        except (tk.TclError, AttributeError, KeyError):
+                            pass
+                        self._dep_apply_row(_mr)
+                self._dep_apply_row(row_info)
 
         # UI 빌드 (그리드 순서대로 배치)
         cap_f = ttk.LabelFrame(_sec_parent('fund'), text=' 💰 [1] 자금 및 계좌 관리 ', padding='15')
@@ -548,10 +710,11 @@ class SettingsTab:
         )
         add_param_row(
             cap_f,
-            '  └ Type A 목표 비중',
+            'Type A 목표 비중',
             'type_balance_a_pct',
             '%',
             'Type B 목표 = (100 − A)%. 예: 65이면 A 65%·B 35%에 가깝게 유지',
+            parent_toggle='use_type_balance_gate',
         )
         add_param_row(
             cap_f,
@@ -585,6 +748,7 @@ class SettingsTab:
             '',
             '체크 시 모니터도 켜 둠. 기본은 화면만 꺼지고 PC는 깨어 있음',
             toggle_key='prevent_sleep_keep_display',
+            parent_toggle='prevent_sleep_while_running',
         )
         add_param_row(
             power_f,
@@ -594,6 +758,7 @@ class SettingsTab:
             '감시 EOD(정규장은 보통 16:00, 애프터 시행일은 20:30=20:00+버퍼) 이후 '
             '유휴 최대절전 허용. 장전 자동시작·감시 중에만 다시 막음',
             toggle_key='prevent_sleep_allow_after_eod',
+            parent_toggle='prevent_sleep_while_running',
         )
 
         # ── 모바일 읽기 전용 현황 API ──
@@ -617,6 +782,7 @@ class SettingsTab:
             'mobile_status_api_port',
             '',
             '기본 8765 — Windows 방화벽·공유기 내부 포트와 맞춤',
+            parent_toggle='mobile_status_api_enabled',
         )
         # 문자열 설정은 conf_vars로 수집 (params_entries float 변환 회피)
         for _mk, _mlabel, _mhint in (
@@ -882,6 +1048,7 @@ class SettingsTab:
             'rotation_a_guard_a_share_min',
             '',
             'Valid_A/(A+B) (기본 0.60)',
+            parent_toggle='use_rotation_a_guard_g1',
         )
         add_param_row(
             g1_f,
@@ -889,6 +1056,7 @@ class SettingsTab:
             'rotation_a_guard_idx5_min',
             '%',
             '전일 기준 지수 5일 수익률 (기본 -1)',
+            parent_toggle='use_rotation_a_guard_g1',
         )
         add_param_row(
             g1_f,
@@ -896,6 +1064,7 @@ class SettingsTab:
             'rotation_a_guard_xs_pct',
             '',
             '교차섹션 ret std 분위 임계 (기본 50)',
+            parent_toggle='use_rotation_a_guard_g1',
         )
 
         # ③ R5 — Type A 청산만 강화
@@ -926,6 +1095,7 @@ class SettingsTab:
             'rs_persist_corr_max',
             '',
             'RS 5일 순위상관 ≤ 이 값이면 발동 (기본 0.60)',
+            parent_toggle='use_rs_persist_guard',
         )
         add_param_row(
             r5_f,
@@ -933,6 +1103,7 @@ class SettingsTab:
             'rs_persist_exit_flash_a',
             '%',
             'R5일 Type A Flash (기본 2.5 · 평소 4.0)',
+            parent_toggle='use_rs_persist_guard',
         )
         add_param_row(
             r5_f,
@@ -940,6 +1111,7 @@ class SettingsTab:
             'rs_persist_exit_atr_sl_a',
             '×',
             'R5일 Type A ATR SL 배수 (기본 2.0 · 평소 2.8)',
+            parent_toggle='use_rs_persist_guard',
         )
 
         # ④ TRANSITION 대응
@@ -1051,6 +1223,7 @@ class SettingsTab:
             'hard_suppress_index_up_pct',
             '%',
             '지수 일수익률 ≥ 이 값이면 HARD 억제',
+            parent_toggle='hard_suppress_on_index_up',
         )
         add_param_row(
             hard_f,
@@ -1059,6 +1232,7 @@ class SettingsTab:
             '',
             'ON: 억제 후 TRANSITION 폴백 없이 OFF (슬롯 축소 없음)',
             toggle_key='hard_suppress_to_off_only',
+            parent_toggle='hard_suppress_on_index_up',
         )
 
         sel_f = ttk.LabelFrame(_univ_root, text=' 🔍 Type A — 눌림목 (Track A 종목 선정) ', padding='15')
@@ -1153,6 +1327,7 @@ class SettingsTab:
             '',
             '위 토글 ON일 때 MA5 통과용 허용 오차(소수)',
             widget_list=self.sel_a_v2_widgets,
+            parent_toggle='sel_a_require_close_ge_ma5',
         )
         add_param_row(
             sel_f,
@@ -1366,6 +1541,7 @@ class SettingsTab:
             '',
             '토글 ON일 때 종가/MA5 하한 (1−ε). 소수(0.005=0.5% 아래까지 허용)',
             widget_list=self.sel_b_v2_widgets,
+            parent_toggle='sel_b_require_close_ge_ma5',
         )
         add_param_row(
             sel_b_f,
@@ -1374,6 +1550,7 @@ class SettingsTab:
             '',
             '0이면 기존과 동일. 0.01이면 (1−ε)+0.01 배율까지 5일선 위 추가 요구(체감 필터)',
             widget_list=self.sel_b_v2_widgets,
+            parent_toggle='sel_b_require_close_ge_ma5',
         )
         add_param_row(
             sel_b_f,
@@ -1519,12 +1696,13 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
-            '15:30 신호 익일 시초 이월',
+            '장 마감 후 주문 허용',
             None,
             '',
-            'ON=15:30 완성봉 S1·S2·EXIT 신호를 즉시 주문하지 않고, 익일 09:00 동시호가 지정가로 이월(BT·RT 공통). '
-            '실주문은 아래 「15:30 주문 허용」이 ON일 때만',
-            toggle_key='next_open_1530_enabled',
+            'ON(기본)=15:30 이후(15:30 슬롯·애프터 16:00~19:45) 주문 경로 허용. '
+            'OFF=해당 슬롯은 신호만 기록 — 당일 주문·NXT 터치·익일시초 예약 모두 생략, '
+            '마감 후 미체결 터치 주문은 정정 대신 취소. BT도 동일 슬롯 체결 생략',
+            toggle_key='order_after_close_enabled',
         )
         add_param_row(
             strat_f,
@@ -1532,8 +1710,18 @@ class SettingsTab:
             None,
             '',
             'OFF(당분간 권장)=15:30 슬롯은 신호 평가만 하고 NXT 터치·익일시초 예약·당일 주문을 모두 생략. '
-            'ON=실전 NXT 또는 next_open 경로로 주문',
+            'ON=실전 NXT 또는 next_open 경로로 주문 (BT 동일)',
             toggle_key='order_1530_enabled',
+            parent_toggle='order_after_close_enabled',
+        )
+        add_param_row(
+            strat_f,
+            '15:30 신호 익일 시초 이월',
+            None,
+            '',
+            'ON=15:30 완성봉 S1·S2·EXIT 신호를 즉시 주문하지 않고, 익일 09:00 동시호가 지정가로 이월(BT·RT 공통)',
+            toggle_key='next_open_1530_enabled',
+            parent_toggle='order_1530_enabled',
         )
         add_param_row(
             strat_f,
@@ -1542,6 +1730,7 @@ class SettingsTab:
             '',
             'ON(권장)=애프터 말봉(19:45)을 20:00 직후 평가하고, 당일 주문 없이 익일 09:00 동시호가 지정가로 이월',
             toggle_key='next_open_1945_enabled',
+            parent_toggle='order_after_close_enabled',
         )
         add_param_row(
             strat_f,
@@ -1648,6 +1837,7 @@ class SettingsTab:
             'realtime_s1_live_max_chase_pct',
             '%',
             '봉종가 대비 라이브가 상승 허용 한도(기본 0.8). 초과 시 주문 스킵',
+            parent_toggle='realtime_s1_live_confirm_gate_enabled',
         )
         add_param_row(
             strat_f,
@@ -1655,6 +1845,7 @@ class SettingsTab:
             'realtime_s1_live_max_fade_pct',
             '%',
             '봉종가 대비 라이브가 하락 허용 한도(기본 1.0). 초과 시 주문 스킵',
+            parent_toggle='realtime_s1_live_confirm_gate_enabled',
         )
         add_param_row(
             strat_f,
@@ -1663,6 +1854,7 @@ class SettingsTab:
             '',
             'ON=봉종가와 라이브가가 MA20 같은 쪽에 있을 때만 주문(위↔아래 교차 시 스킵)',
             toggle_key='realtime_s1_live_ma20_side_confirm',
+            parent_toggle='realtime_s1_live_confirm_gate_enabled',
         )
 
         # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지
@@ -1680,11 +1872,12 @@ class SettingsTab:
         add_param_row(strat_f, '이평 골든크로스', 'gc_window', '분', 'N분 내 GC 발생 여부', toggle_key='use_gc', widget_list=self.type_a_widgets)
         add_param_row(
             strat_f,
-            '  ㄴ 이평 수렴 상한',
+            '이평 수렴 상한',
             'ma_convergence',
             '%',
             'GC 판정: (MA5/MA20-1)×100 ≤ 이 값 (기본 1.2)',
             widget_list=self.type_a_widgets,
+            parent_toggle='use_gc',
         )
         add_param_row(
             strat_f,
@@ -1706,28 +1899,31 @@ class SettingsTab:
         )
         add_param_row(
             strat_f,
-            '  ㄴ 이격 하한(%)',
+            '이격 하한(%)',
             'ma60_min',
             '%',
             '입력=허용 최소 이격%(기본 100≈60일선 가격 이상)',
             widget_list=self.type_a_widgets,
+            parent_toggle='use_ma60_safe',
         )
         add_param_row(
             strat_f,
-            '  ㄴ 이격 상한(%)',
+            '이격 상한(%)',
             'ma60_max',
             '%',
             '입력=허용 최대 이격%(기본 110≈60일선 대비 +10%까지)',
             widget_list=self.type_a_widgets,
+            parent_toggle='use_ma60_safe',
         )
         add_param_row(strat_f, '거래량 급증확인', 'vol_surge', '배', '전일 평균 대비 폭발력', toggle_key='use_vol_surge', widget_list=self.type_a_widgets)
         add_param_row(
             strat_f,
-            '  ㄴ 전일동시간 평균 기간 (S1·A)',
+            '전일동시간 평균 기간 (S1·A)',
             'prev_vol_lookback_s1_a',
             '일',
             '15분 S1 Type A: Prev_Day_Vol_S1_A 산출(거래일 N일). 구 prev_vol_lookback 미설정 시 폴백',
             widget_list=self.type_a_widgets,
+            parent_toggle='use_vol_surge',
         )
         add_header(strat_f, '── Type B: 돌파형 진입 조건 ──')
         add_param_row(strat_f, 'B 전용 사용', None, '', '순풍(UP) 장세 전용', toggle_key='use_type_b')
@@ -1752,11 +1948,12 @@ class SettingsTab:
         add_param_row(strat_f, '돌파 거래량', 'vol_surge_b', '배', '돌파 시점 폭발적 수급', toggle_key='use_type_b_vol', widget_list=self.type_b_widgets)
         add_param_row(
             strat_f,
-            '  ㄴ 전일동시간 평균 기간 (S1·B)',
+            '전일동시간 평균 기간 (S1·B)',
             'prev_vol_lookback_s1_b',
             '일',
             '15분 S1 Type B: Prev_Day_Vol_S1_B. 구 prev_vol_lookback_b 미설정 시 폴백',
             widget_list=self.type_b_widgets,
+            parent_toggle='use_type_b_vol',
         )
         add_param_row(strat_f, '추세 정렬 확인', None, '', '일봉/1분봉 추세 일치 여부', toggle_key='use_trend_aligned_b', widget_list=self.type_b_widgets)
         add_param_row(strat_f, 'MACD GC 확인', None, '', '추가 모멘텀(GC) 확인', toggle_key='use_macd_gc_b', widget_list=self.type_b_widgets)
@@ -1910,12 +2107,13 @@ class SettingsTab:
         )
         add_param_row(
             s2_f,
-            '  ㄴ 전일동시간 평균 기간 (S2·A)',
+            '전일동시간 평균 기간 (S2·A)',
             'prev_vol_lookback_s2_a',
             '일',
             'S2 Type A 거래량 조건: Prev_Day_Vol_S2_A. 구 prev_vol_lookback 미설정 시 폴백',
             widget_list=self.s2_a_widgets,
             group_toggle_widgets=True,
+            parent_toggle='use_s2_vol_surge',
         )
         add_param_row(
             s2_f,
@@ -2009,12 +2207,13 @@ class SettingsTab:
         )
         add_param_row(
             s2b_f,
-            '  ㄴ 전일동시간 평균 기간 (S2·B)',
+            '전일동시간 평균 기간 (S2·B)',
             'prev_vol_lookback_s2_b',
             '일',
             'S2 Type B 거래량 조건: Prev_Day_Vol_S2_B. 구 prev_vol_lookback_b 미설정 시 폴백',
             widget_list=self.s2_b_widgets,
             group_toggle_widgets=True,
+            parent_toggle='use_s2_b_vol_surge',
         )
         add_param_row(
             s2b_f,
@@ -2131,6 +2330,7 @@ class SettingsTab:
             '',
             'ON이면 S1(A)에서 목표 익절% 도달 전까지 고정 TAKE_PROFIT 청산을 생략·트레일만 무장',
             toggle_key='use_atr_trail_only_after_tp_s1_a',
+            parent_toggle='use_atr_trailing_stop_a',
         )
         add_header(exit_a_f, '── S2 눌림 (A) ──')
         add_param_row(exit_a_f, '익절', 's2_take_profit', '%', 'A 추매 포지션', toggle_key='use_s2_tp')
@@ -2159,6 +2359,7 @@ class SettingsTab:
             '',
             'ON이면 S2(A)에서 목표 익절% 이후에만 ATR 트레일 평가',
             toggle_key='use_atr_trail_only_after_tp_s2_a',
+            parent_toggle='use_atr_trailing_stop_s2',
         )
 
         exit_b_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [6-B] Type B 청산 · 리스크 (돌파·B추매) ', padding='15')
@@ -2214,6 +2415,7 @@ class SettingsTab:
             '',
             'ON이면 S1(B)에서 목표 익절% 도달 전까지 고정 TAKE_PROFIT 청산을 생략·트레일만 무장',
             toggle_key='use_atr_trail_only_after_tp_s1_b',
+            parent_toggle='use_atr_trailing_stop_b',
         )
         add_header(exit_b_f, '── S2 돌파 (B) ──')
         add_param_row(exit_b_f, '익절', 's2_b_take_profit', '%', 'B 추매 (s2_b_*)', toggle_key='use_s2_b_tp')
@@ -2242,6 +2444,7 @@ class SettingsTab:
             '',
             'ON이면 S2(B)에서 목표 익절% 이후에만 ATR 트레일 평가',
             toggle_key='use_atr_trail_only_after_tp_s2_b',
+            parent_toggle='use_atr_trailing_stop_s2_b',
         )
 
         # A/B 공통: ATR_SL 이후 동일종목 재진입 쿨다운
@@ -2434,65 +2637,14 @@ class SettingsTab:
         self.parent.after(1000, force_cleanup)
 
     def _init_toggles(self):
-        def apply_st(widgets, is_on):
-            st = tk.NORMAL if is_on else tk.DISABLED
-            pref = '' if is_on else 'Dimmed.'
-            for w in widgets:
-                try:
-                    if isinstance(w, tk.Checkbutton):
-                        w.config(state=st)
-                        continue
-                    w.config(state=st)
-                    if isinstance(w, ttk.Label):
-                        w.configure(style=f'{pref}TLabel')
-                    elif hasattr(w, 'configure'):
-                        w.configure(style=f'{pref}TEntry')
-                except (tk.TclError, AttributeError):
-                    pass
-        if 'use_type_a' in self.conf_vars:
-            self.conf_vars['use_type_a'].trace_add('write', lambda *a: apply_st(self.type_a_widgets, self.conf_vars['use_type_a'].get()))
-            apply_st(self.type_a_widgets, self.conf_vars['use_type_a'].get())
-        if 'use_type_b' in self.conf_vars:
-            self.conf_vars['use_type_b'].trace_add('write', lambda *a: apply_st(self.type_b_widgets, self.conf_vars['use_type_b'].get()))
-            apply_st(self.type_b_widgets, self.conf_vars['use_type_b'].get())
-        if 'use_sel_track_c' in self.conf_vars:
-            self.conf_vars['use_sel_track_c'].trace_add(
-                'write',
-                lambda *a: apply_st(
-                    self.sel_c_widgets,
-                    self.conf_vars['use_sel_track_c'].get(),
-                ),
-            )
-            apply_st(
-                self.sel_c_widgets,
-                self.conf_vars['use_sel_track_c'].get(),
-            )
-        if 'use_type_c' in self.conf_vars:
-            self.conf_vars['use_type_c'].trace_add(
-                'write',
-                lambda *a: (
-                    apply_st(
-                        self.type_c_widgets,
-                        self.conf_vars['use_type_c'].get(),
-                    ),
-                    apply_st(
-                        self.exit_c_widgets,
-                        self.conf_vars['use_type_c'].get(),
-                    ),
-                ),
-            )
-            apply_st(self.type_c_widgets, self.conf_vars['use_type_c'].get())
-            apply_st(self.exit_c_widgets, self.conf_vars['use_type_c'].get())
-        if 'use_s2_master_a' in self.conf_vars:
-            self.conf_vars['use_s2_master_a'].trace_add(
-                'write', lambda *a: apply_st(self.s2_a_widgets, self.conf_vars['use_s2_master_a'].get())
-            )
-            apply_st(self.s2_a_widgets, self.conf_vars['use_s2_master_a'].get())
-        if 'use_s2_master_b' in self.conf_vars:
-            self.conf_vars['use_s2_master_b'].trace_add(
-                'write', lambda *a: apply_st(self.s2_b_widgets, self.conf_vars['use_s2_master_b'].get())
-            )
-            apply_st(self.s2_b_widgets, self.conf_vars['use_s2_master_b'].get())
+        # 그룹(Type A/B·S2 A/B·Track C·Type C) 하위설정 흐림은 add_param_row 의존 표시가 담당.
+        # 빌드 도중 등록 순서와 무관하게 최종 상태로 한 번 맞춘다.
+        try:
+            for _k in list(self._dep_masters) + list(self._dep_parent_of.keys()):
+                self._dep_attach_trace(_k)
+            self._dep_refresh_all()
+        except (tk.TclError, AttributeError):
+            pass
         # 유니버스 Track A/B → 해당 타입 S1·S2 마스터 동기화 (사용자가 한 곳에서 켜고 끄도록)
         def _sync_sel_track_a_to_type_a(*_args: object) -> None:
             try:
@@ -2698,6 +2850,3 @@ class SettingsTab:
 
     def update_criteria(self):
         pass
-
-    def get_criteria_text(self, format_type="ui"):
-        return self.app.selection_service._get_criteria_summary(format_type)

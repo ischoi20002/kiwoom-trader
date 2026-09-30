@@ -1,0 +1,4 @@
+{"ts": "2026-09-23 08:35:41", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}
+{"ts": "2026-09-23 08:35:44", "kind": "ws_disconnect", "data": {"etype": "ConnectionClosedOK", "err": "received 1000 (OK) Bye; then sent 1000 (OK) Bye", "close_code": 1000, "close_reason": "Bye", "idle_sec_since_last_recv": 0.0, "disconnect_count": 1, "idle_recv_count": 0}}
+{"ts": "2026-09-23 08:35:49", "kind": "ws_disconnect", "data": {"etype": "ConnectionClosedOK", "err": "received 1000 (OK) Bye; then sent 1000 (OK) Bye", "close_code": 1000, "close_reason": "Bye", "idle_sec_since_last_recv": 3.0, "disconnect_count": 2, "idle_recv_count": 0}}
+{"ts": "2026-09-23 08:35:51", "kind": "ui_render_tree_updates_called", "data": {"pending_size": 0}}

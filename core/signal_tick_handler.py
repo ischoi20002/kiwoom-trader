@@ -646,6 +646,14 @@ class SignalTickHandlerMixin:
                     info["met_ratio"] = 0.0
                     is_buy = False
 
+                # 장마감 후 주문 OFF: 애프터 구간 틱 매수 차단(신호 표시만)
+                try:
+                    if is_buy and self._after_close_order_blocked(None):
+                        info["confluence"] = "⏸ 장마감후 주문 OFF · S1 신호만 기록"
+                        is_buy = False
+                except Exception:
+                    pass
+
                 # ATR_SL 이후 동일종목 재진입 쿨다운
                 try:
                     if is_buy and self._s1_blocked_by_atr_sl_reentry(code):

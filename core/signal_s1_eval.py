@@ -576,6 +576,25 @@ class SignalS1EvalMixin:
             ):
                 return
 
+            # 장마감 후 주문 OFF: 15:30·애프터 슬롯은 신호만 기록(예약 포함 전부 생략)
+            try:
+                if self._after_close_order_blocked(bar_ts):
+                    try:
+                        msg = "⏸ 장마감후 주문 OFF · S1 신호만 기록"
+                        info["confluence"] = msg
+                        info["status_text"] = msg
+                    except Exception:
+                        pass
+                    try:
+                        self.app.log(
+                            f"ℹ️ [장마감후] 주문 OFF — S1 신호만 기록 ({nk} slot={slot_key})"
+                        )
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+
             # 15:30: 주문 OFF면 신호만 / ON이면 NXT 터치 또는 익일09:00 예약
             # 19:45: 익일 시초 지정가 예약(당일 애프터 종료 후 즉시 주문 없음)
             _is_1530 = self._is_1530_bar_slot(bar_ts)

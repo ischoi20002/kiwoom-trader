@@ -28,12 +28,15 @@ from backtest_engine import (
 )
 from utils.fee_rates import fee_decimal_rates_backtest
 from utils.krx_bars import (
+    is_krx_after_close_15m_slot,
     is_krx_aftermarket_last_15m_slot,
     is_krx_auction_market_fill_slot,
     is_krx_first_15m_slot,
     is_krx_last_15m_slot,
     is_krx_no_signal_eval_15m_slot,
     krx_same_day_1530_label,
+    settings_allow_1530_orders,
+    settings_allow_after_close_orders,
     slice_m1_for_15m_end,
 )
 from utils.krx_session_hours import get_session_hours
@@ -165,6 +168,12 @@ class DynamicBacktester:
         self.bt_1945_signal_next_open_fill = bool(
             self.settings.get("next_open_1945_enabled", True)
         )
+        # 장마감 후 주문 OFF: 15:30·애프터 슬롯 체결 생략(RT 신호만 기록과 정합)
+        self.bt_after_close_orders = bool(
+            settings_allow_after_close_orders(self.settings)
+        )
+        # 15:30 주문 허용 OFF: 15:30 슬롯 체결(익일 시가 이월 포함) 생략(RT 신호만 기록과 정합)
+        self.bt_1530_orders = bool(settings_allow_1530_orders(self.settings))
         # BT 전용: 09:00 슬롯에서 첫 1분봉으로 조기 평가 후, 같은 슬롯 완성 15분 평가 이어감
         self.bt_open_auction_pass_enabled = bool(
             self.settings.get("bt_open_auction_pass_enabled", False)
@@ -1874,6 +1883,17 @@ class DynamicBacktester:
         except Exception:
             rsn = ""
         try:
+            if (not bool(getattr(self, "bt_after_close_orders", True))) and bool(
+                is_krx_after_close_15m_slot(curr_time)
+            ):
+                return None
+            if (not bool(getattr(self, "bt_1530_orders", True))) and bool(
+                is_krx_last_15m_slot(curr_time)
+            ):
+                return None
+        except Exception:
+            pass
+        try:
             if bool(self.bt_1530_signal_next_open_fill) and bool(
                 is_krx_last_15m_slot(curr_time)
             ):
@@ -3075,6 +3095,10 @@ class DynamicBacktester:
             # 15:30 — 신호평가·체결 스킵 / 15:15 — 인트라바 없이 15:30 종가 1회
             try:
                 if is_krx_no_signal_eval_15m_slot(curr_15m_time):
+                    return
+                if (not bool(getattr(self, "bt_after_close_orders", True))) and bool(
+                    is_krx_after_close_15m_slot(curr_15m_time)
+                ):
                     return
                 if is_krx_auction_market_fill_slot(curr_15m_time):
                     self._process_1515_auction_completed_bar(

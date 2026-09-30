@@ -420,6 +420,22 @@ class LimitOrderWatchService:
         self, chain_key: str, current_ord: str, meta: LimitOrderMeta
     ) -> None:
         """(confirm에서 넘어옴) 호가 정정만 수행하고, 다음 confirm은 첫 확인 간격(기본 60초)으로 예약합니다."""
+        # 장마감 후 주문 OFF: 마감 이후 정정(=애프터 재호가) 금지 → 미체결 타임아웃(취소)으로 흡수
+        try:
+            from utils.krx_bars import after_close_orders_blocked_now
+
+            if after_close_orders_blocked_now(getattr(self.app, "settings", None)):
+                try:
+                    self.log(
+                        f"⏸ [장마감후] 주문 OFF — 터치 정정 중단·취소 "
+                        f"({meta.code} ord={current_ord} kind={meta.kind})"
+                    )
+                except Exception:
+                    pass
+                self.timeout(current_ord)
+                return
+        except Exception:
+            pass
         max_a = self._get_touch_max_amends()
         if meta.touch_amend_attempts_done >= max_a:
             self.timeout(current_ord)

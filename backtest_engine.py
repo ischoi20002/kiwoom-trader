@@ -182,6 +182,8 @@ class SimpleBacktester:
         self.gap_down_limit = -5.0
         self.use_s2_tp_active = True
         self.use_type_b = False
+        self.bt_after_close_orders = True
+        self.bt_1530_orders = True
 
     def _use_flash_peak_bar_high(self) -> bool:
         """True면 Flash 고점에 봉 High 반영. 기본 False(종가·평가가)."""
@@ -501,6 +503,17 @@ class SimpleBacktester:
         self.use_sb_s2_b = s.get("use_smart_buy_s2_b", True)
         self.sb_ba = float(s.get('smart_buy_ba_ratio', 1.2))
         self.sb_vp = float(s.get('smart_buy_vp', 110.0))
+        try:
+            from utils.krx_bars import (
+                settings_allow_1530_orders,
+                settings_allow_after_close_orders,
+            )
+
+            self.bt_after_close_orders = bool(settings_allow_after_close_orders(s))
+            self.bt_1530_orders = bool(settings_allow_1530_orders(s))
+        except Exception:
+            self.bt_after_close_orders = True
+            self.bt_1530_orders = True
         
         self.use_sx = s.get('use_smart_exit', True) # [v4.5 Sync] Default True
         self.sx_ba = float(s.get('smart_exit_ba_ratio', 1.3)) # [v4.5 Sync] UI/SignalEngine Default 1.3
@@ -938,12 +951,25 @@ class SimpleBacktester:
             from strategy.signals import settings_allow_1530_signal_eval
 
             _skip_eod_sig = bool(is_krx_last_15m_slot(curr_date))
-            if _skip_eod_sig and settings_allow_1530_signal_eval(self.settings):
+            if (
+                _skip_eod_sig
+                and settings_allow_1530_signal_eval(self.settings)
+                and bool(getattr(self, "bt_1530_orders", True))
+            ):
                 _skip_eod_sig = False
             _auction_1515 = bool(is_krx_auction_market_fill_slot(curr_date))
         except Exception:
             _skip_eod_sig = False
             _auction_1515 = False
+        # 장마감 후 주문 OFF: 15:30·애프터 슬롯 체결 생략(RT 신호만 기록과 정합)
+        if (not _skip_eod_sig) and (not getattr(self, "bt_after_close_orders", True)):
+            try:
+                from utils.krx_bars import is_krx_after_close_15m_slot
+
+                if is_krx_after_close_15m_slot(curr_date):
+                    _skip_eod_sig = True
+            except Exception:
+                pass
         if _skip_eod_sig:
             try:
                 pos = params.get("position")
