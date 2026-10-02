@@ -59,6 +59,12 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 헤더·실시간 선정 `resolve_transition_gate_for_live` 는 120일, 이력 `compute_transition_regime_history` 는 ~195일 **고정 창**으로 한 번에 스코어 → `ewm(adjust=False)` RSI·MACD 가 창 시작일에 의존해 Valid_A/B 개수가 달라져 share d3 가 -7.1 vs -18.1 로 갈림 
 **수정**: 백테 `prepare_dynamic_universe` 와 같이 평가일마다 `[D-bt_universe_indicator_lookback_days, D]` 슬라이딩 창 재계산(`_sliding_valid_counts_by_day`). 레짐 캐시 지문에 `_CALC_VERSION` 포함. G1·R5 판정은 `_compute_g1_r5_by_day` 공통 사용
 
+## core/marcap_universe.py · strategy/selection_dynamic_universe.py
+
+### Bug — 백테 분기 유니버스 0종목 → 10-02 매수 전무 (005070 실시간 TYPE_B 매수 불일치)
+실시간은 `ensure_realtime_kospi_universe_csv` 에서 marcap 연도 parquet 를 3일 주기로 재다운로드하지만, 백테 경로(`load_marcap_day`)는 파일이 있으면 갱신 안 함. 로컬 2026 parquet 가 09-23 까지라 Q4 as-of(10-01, 7일 lookback, 추석 연휴) 스냅샷 없음 → 10-01 유니버스 빈 값 → 스케줄 공백·레짐 TRANSITION 오판. 유니버스 캐시 지문에 marcap 파일이 없어 갱신돼도 빈 스케줄 재사용 가능 
+**수정**: `refresh_marcap_if_lagging` (as-of 가 로컬 최신일보다 뒤 + 파일 6h 경과 시 재다운로드, 프로세스·연도당 1회) 를 `load_marcap_day` 공통 경로와 백테 캐시 지문 계산 전에 호출. 지문에 `data/marcap/*.parquet` 포함. 주기 유니버스가 비면 직전 주기 유니버스 유지(실시간 "기존 CSV 유지" 정책과 동일) + 경고
+
 ## ui/tabs/virtual_tab.py
 
 ### Bug — 보유 직후 UI 멈춤(vp_price_stub + 동기 REST)

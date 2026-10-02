@@ -231,6 +231,53 @@ def prepare_dynamic_universe(
     refresh_mode = normalize_refresh_mode(settings.get("kospi_universe_refresh"))
     # monthly 외에는 기간 내 주기 갱신 — lean 단일 유니버스 생략
     use_period_univ = refresh_mode != "monthly"
+    # 빈 주기 → 직전 비어있지 않은 주기 유니버스 (실시간 "기존 CSV as-of 유지" 와 동일 정책)
+    nonempty_hist: List[Tuple[pd.Timestamp, List[str]]] = []
+    fallback_cache: Dict[str, List[str]] = {}
+
+    def _fallback_universe(d_ts: pd.Timestamp, cache_key: str) -> List[str]:
+        """해당 주기 marcap 이 비었을 때 직전 주기 유니버스로 대체 (경고 1회)."""
+        if cache_key in fallback_cache:
+            return fallback_cache[cache_key]
+        prev: List[str] = []
+        prev_ts: Optional[pd.Timestamp] = None
+        try:
+            for h_ts, h_codes in nonempty_hist:
+                if h_ts <= d_ts and (prev_ts is None or h_ts > prev_ts):
+                    prev_ts, prev = h_ts, h_codes
+        except Exception:
+            prev, prev_ts = [], None
+        if not prev:
+            try:
+                from core.marcap_universe import _first_asof_for_refresh
+
+                prev_codes, prev_asof = get_kospi_top_n_for_refresh(
+                    _first_asof_for_refresh(d_ts, refresh_mode) - timedelta(days=1),
+                    int(settings.get("kospi_top_n", 200) or 200),
+                    refresh_mode,
+                    logger_callback=None,
+                )
+                prev = list(prev_codes or [])
+                prev_ts = pd.Timestamp(prev_asof) if prev_asof else None
+            except Exception as e:
+                try:
+                    logging.warning("직전 주기 유니버스 폴백 실패 %s: %s", cache_key, e, exc_info=True)
+                except Exception:
+                    pass
+                prev = []
+        fallback_cache[cache_key] = prev
+        try:
+            logger_callback(
+                f"  [Warn] 유니버스({refresh_mode}/{cache_key}) marcap 비어 있음 → "
+                + (
+                    f"직전 유니버스 유지 ({prev_ts.strftime('%Y-%m-%d') if prev_ts is not None else '?'} 기준, {len(prev)}종목)"
+                    if prev
+                    else "직전 유니버스도 없음 (해당 주기 선정 불가)"
+                )
+            )
+        except Exception:
+            pass
+        return prev
 
     def get_period_universe(dt):
         """유니버스: KOSPI 시총 상위 N (marcap as-of, 갱신주기)."""
@@ -238,6 +285,8 @@ def prepare_dynamic_universe(
         cache_key = universe_period_key(d_ts, refresh_mode)
         if cache_key in universe_cache:
             return universe_cache[cache_key]
+        if cache_key in fallback_cache:
+            return fallback_cache[cache_key]
         try:
             top_n = 200
             try:
@@ -272,7 +321,12 @@ def prepare_dynamic_universe(
             tickers = []
         if tickers:
             universe_cache[cache_key] = tickers
-        return tickers
+            try:
+                nonempty_hist.append((d_ts, list(tickers)))
+            except Exception:
+                pass
+            return tickers
+        return _fallback_universe(d_ts, cache_key)
 
     # 월별(또는 주기) marcap as-of 순회.
     # (구 Lean 시작월 단일 유니버스는 기간에 따라 같은 날 레짐이 달라져 제거)

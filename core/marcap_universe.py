@@ -34,6 +34,12 @@ _MARCAP_RAW_URL = (
 
 _year_df_cache: dict[int, pd.DataFrame] = {}
 
+# 로컬 parquet 가 요청 as-of 보다 뒤처질 때 재다운로드 (백테스트·실시간 공통 경로).
+# 업스트림 자체가 며칠 늦게 갱신되므로, 파일이 이 시간보다 새것이면 재시도하지 않는다.
+_LAG_REFRESH_MIN_AGE_HOURS = 6.0
+# 프로세스당 연도별 1회만 시도 (daily 모드 등 반복 조회 시 다운로드 폭주 방지)
+_lag_refresh_attempted: set[int] = set()
+
 
 def _log_cb(
     logger_callback: Optional[Callable[[str], None]],
@@ -56,8 +62,12 @@ def ensure_marcap_year(
     *,
     logger_callback: Optional[Callable[[str], None]] = None,
     max_cache_age_days: Optional[int] = None,
+    force: bool = False,
 ) -> Optional[Path]:
-    """연도 marcap parquet 를 확보한다. 성공 시 경로, 실패 시 None."""
+    """연도 marcap parquet 를 확보한다. 성공 시 경로, 실패 시 None.
+
+    ``force=True`` 면 연도와 무관하게 재다운로드한다 (실패 시 기존 파일 유지).
+    """
     try:
         y = int(year)
     except (TypeError, ValueError):
@@ -67,7 +77,9 @@ def ensure_marcap_year(
     stale = False
     try:
         if out.is_file() and out.stat().st_size > 1000:
-            if (
+            if force:
+                stale = True
+            elif (
                 max_cache_age_days is not None
                 and y == datetime.now().year
             ):
@@ -186,6 +198,80 @@ def _load_marcap_year_df(
     return df
 
 
+def _year_df_max_date(df: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """연도 DataFrame 의 최신 Date (없으면 None)."""
+    try:
+        if df is None or df.empty or "Date" not in df.columns:
+            return None
+        return pd.Timestamp(df["Date"].max()).normalize()
+    except Exception:
+        return None
+
+
+def refresh_marcap_if_lagging(
+    asof: date | datetime | str | pd.Timestamp,
+    *,
+    logger_callback: Optional[Callable[[str], None]] = None,
+    min_age_hours: Optional[float] = None,
+) -> bool:
+    """
+    요청 as-of(미래면 오늘) 가 로컬 연도 parquet 최신 Date 보다 뒤면 재다운로드한다.
+
+    - 파일이 ``min_age_hours`` 보다 새것이면 생략 (업스트림 지연 시 매 실행 다운로드 방지)
+    - 프로세스당 연도별 1회만 시도
+    - 갱신(다운로드 성공) 시 True
+    """
+    target = _normalize_asof(asof)
+    today = pd.Timestamp.now().normalize()
+    need = min(target, today)
+    # 주말이면 직전 금요일까지만 요구 (휴장일 판정은 하지 않음)
+    while need.weekday() >= 5:
+        need = need - pd.Timedelta(days=1)
+    y = int(need.year)
+    if y in _lag_refresh_attempted:
+        return False
+
+    path = marcap_year_path(y)
+    if not path.is_file():
+        # 파일이 없으면 _load_marcap_year_df 가 최초 다운로드한다
+        return False
+
+    max_d = _year_df_max_date(_load_marcap_year_df(y, logger_callback=logger_callback))
+    if max_d is not None and max_d >= need:
+        return False
+
+    try:
+        age_h = (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).total_seconds() / 3600.0
+    except OSError:
+        age_h = float("inf")
+    try:
+        min_age = float(_LAG_REFRESH_MIN_AGE_HOURS if min_age_hours is None else min_age_hours)
+    except (TypeError, ValueError):
+        min_age = _LAG_REFRESH_MIN_AGE_HOURS
+    if age_h < min_age:
+        return False
+
+    _lag_refresh_attempted.add(y)
+    _log_cb(
+        logger_callback,
+        f"  [Marcap] {y}년 로컬 데이터가 {max_d.strftime('%Y-%m-%d') if max_d is not None else '없음'}까지 "
+        f"→ as-of {need.strftime('%Y-%m-%d')} 필요, 재다운로드",
+    )
+    out = ensure_marcap_year(y, logger_callback=logger_callback, force=True)
+    _year_df_cache.pop(y, None)
+    if out is None:
+        return False
+    try:
+        new_max = _year_df_max_date(_load_marcap_year_df(y, logger_callback=logger_callback))
+        _log_cb(
+            logger_callback,
+            f"  [Marcap] {y}년 갱신 후 최신 {new_max.strftime('%Y-%m-%d') if new_max is not None else '?'}",
+        )
+    except Exception:
+        pass
+    return True
+
+
 def _normalize_asof(asof: date | datetime | str | pd.Timestamp) -> pd.Timestamp:
     return pd.to_datetime(asof).normalize()
 
@@ -260,6 +346,13 @@ def load_marcap_day(
     (day_df, actual_asof)
     """
     target = _normalize_asof(asof)
+    try:
+        refresh_marcap_if_lagging(target, logger_callback=logger_callback)
+    except Exception as e:
+        try:
+            logging.warning("marcap 지연 갱신 확인 실패 %s: %s", target, e, exc_info=True)
+        except Exception:
+            pass
     for offset in range(max(1, int(lookback_days))):
         check = target - pd.Timedelta(days=offset)
         df_y = _load_marcap_year_df(check.year, logger_callback=logger_callback)

@@ -656,6 +656,16 @@ class DynamicBacktester:
         except Exception:
             pass
         t_start = time.time()
+        # 캐시 지문 계산 전에 marcap 최신화 — 갱신 전 지문으로 빈 유니버스 캐시가 HIT 되는 것 방지
+        try:
+            from core.marcap_universe import refresh_marcap_if_lagging
+
+            refresh_marcap_if_lagging(end_date, logger_callback=print)
+        except Exception as e:
+            try:
+                print(f"[Dynamic] marcap 최신화 확인 실패(기존 파일 사용): {e}")
+            except Exception:
+                pass
         use_prep_cache = _bt_prep_cache_enabled(self.settings)
         universe_schedule = None
         univ_fp = ""
@@ -864,11 +874,24 @@ class DynamicBacktester:
         return True
 
     def _bt_prep_extra_files(self) -> List[str]:
-        """유니버스 지문에 넣을 부가 파일 (CSV 유니버스 변경 감지)."""
+        """유니버스 지문에 넣을 부가 파일 (CSV·marcap 유니버스 변경 감지)."""
         files: List[str] = []
         try:
             # KODEX200 구성 유니버스 폐기 — KOSPI CSV만 지문에 포함
             files.extend(["kospi_universe.csv", "kospi_top_500.csv"])
+        except Exception:
+            pass
+        try:
+            # 주기별 시총 유니버스 원천 (갱신 시 스케줄 재계산)
+            from core.marcap_universe import marcap_year_path
+
+            marcap_dir = os.path.dirname(str(marcap_year_path(2000)))
+            if os.path.isdir(marcap_dir):
+                files.extend(
+                    os.path.join(marcap_dir, f)
+                    for f in sorted(os.listdir(marcap_dir))
+                    if f.startswith("marcap-") and f.endswith(".parquet")
+                )
         except Exception:
             pass
         return files
