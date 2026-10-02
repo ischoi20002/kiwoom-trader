@@ -1065,11 +1065,17 @@ def resolve_transition_gate_for_live(
         except Exception:
             pass
         end_s = as_of_dt.strftime("%Y-%m-%d")
+        # 캐시 키에 유니버스를 포함하므로 캐시 조회 전에 확정한다
+        codes = resolve_universe_codes(settings, logger_callback=log)
+        if not codes:
+            return result
         if not skip_cache:
             try:
                 from utils.regime_gate_cache import load_regime_gate_cache
 
-                cached = load_regime_gate_cache(as_of=end_s, settings=settings)
+                cached = load_regime_gate_cache(
+                    as_of=end_s, settings=settings, universe_codes=codes
+                )
                 if cached:
                     result.update(cached)
                     log(
@@ -1084,9 +1090,6 @@ def resolve_transition_gate_for_live(
                 log(f"ℹ️ [Transition] {end_s} 레짐 강제 재계산 (캐시 무시)")
             except Exception:
                 pass
-        codes = resolve_universe_codes(settings, logger_callback=log)
-        if not codes:
-            return result
         # 평가일·직전 5영업일 각각 [D-N, D] 창이 필요 → 연휴 대비 30일 여유
         lookback_n = _selection_daily_lookback_calendar_days(settings)
         fetch_start = (as_of_dt - timedelta(days=lookback_n + 30)).strftime("%Y-%m-%d")
@@ -1218,7 +1221,9 @@ def resolve_transition_gate_for_live(
         try:
             from utils.regime_gate_cache import save_regime_gate_cache
 
-            save_regime_gate_cache(as_of=end_s, settings=settings, payload=result)
+            save_regime_gate_cache(
+                as_of=end_s, settings=settings, payload=result, universe_codes=codes
+            )
         except Exception:
             pass
         return result

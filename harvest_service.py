@@ -10,6 +10,10 @@ from data_manager_v2 import DataManagerV2
 from utils.normalization import normalize_code
 from kiwoom_rest_api.auth.token import TokenManager
 from core.auth_manager import AuthManager
+from data_manager.minute_adjust_refetch import (
+    detect_minute_overlap_mismatch,
+    refetch_and_replace_code,
+)
 import sys
 import io
 
@@ -49,6 +53,8 @@ class HarvestService:
 
         self.target_list_path = target_list_path
         self.running = True
+        # 분봉 수정주가 변경 감지·재수신 사용 여부 (settings ``harvest_minute_adj_refetch``, 최초 사용 시 로드)
+        self._minute_adj_enabled: Optional[bool] = None
         # 성능 최적화: sync_meta를 run()에서 한 번에 적재해서
         # is_data_complete()에서 종목당 DB 왕복(3~4회)을 제거합니다.
         self._sync_meta_cache: dict[str, dict[str, str]] = {}
@@ -227,6 +233,58 @@ class HarvestService:
 
         return int(total_saved)
 
+    def _minute_adj_refetch_if_changed(
+        self,
+        code: str,
+        token: str,
+        bars: list,
+        upto: str,
+        cap_dt: Optional[str],
+    ) -> Optional[int]:
+        """
+        이번 페이지 중 DB 와 겹치는 1분봉 종가가 바뀌었으면(키움 소급 수정주가) 해당 종목 분봉을
+        API 바닥까지 다시 받아 교체한다. 교체 성공 시 저장한 1분봉 수, 아니면 None(기존 증분 계속).
+        """
+        try:
+            if self._minute_adj_enabled is None:
+                self._minute_adj_enabled = bool(
+                    self._load_harvest_settings().get("harvest_minute_adj_refetch", True)
+                )
+            if not self._minute_adj_enabled:
+                return None
+            ncode = normalize_code(code)
+            mm = detect_minute_overlap_mismatch(self.db.db_path, "bars_1m", ncode, bars, upto)
+            if not mm:
+                return None
+            self.log(
+                f"   🔁 {code}: 기존 1분봉과 키움 값 불일치 {mm['n_mismatch']}/{mm['n_compared']}봉 "
+                f"(오차 중앙값 {mm['median_rel'] * 100:.2f}%) → 수정주가 이벤트로 보고 분봉 전체 재수신"
+            )
+            rec = refetch_and_replace_code(
+                self._fetch_minute_data,
+                self._parse_to_bars,
+                self.db.db_path,
+                ncode,
+                token,
+                cap=cap_dt,
+                should_continue=lambda: self.running,
+            )
+            r1 = rec.get("bars_1m", {}) or {}
+            r15 = rec.get("bars_15m", {}) or {}
+            self.log(
+                f"   🔁 {code}: 재수신 결과 1m={r1.get('status')} (변경 {r1.get('changed', '-')}/{r1.get('n', '-')}, "
+                f"{str(r1.get('from', ''))[:10]}~) | 15m={r15.get('status')} (변경 {r15.get('changed', '-')})"
+            )
+            if r1.get("status") == "replaced":
+                return int(r1.get("n") or 0)
+            return None
+        except Exception as e:
+            try:
+                self.log(f"   ⚠️ {code}: 분봉 수정주가 재수신 실패(기존 증분 계속): {e}")
+            except Exception:
+                pass
+            return None
+
     def _parse_to_bars(self, raw_list):
         """API 원본 데이터를 정형화된 리스트로 변환"""
         if not raw_list: return []
@@ -284,6 +342,7 @@ class HarvestService:
         total_fetched = 0
         last_raw_top: str = ""
         last_raw_bottom: str = ""
+        adj_checked = False
 
         while self.running:
             raw_data, next_key = self._fetch_minute_data(code, token, next_key)
@@ -298,6 +357,16 @@ class HarvestService:
             raw_bottom = bars[-1]["time"]
             last_raw_top = raw_top
             last_raw_bottom = raw_bottom
+
+            # 처음으로 기존 DB 구간과 겹치는 페이지에서 1회: 키움 소급 수정주가 감지 시 전체 재수신
+            if not adj_checked and initial_last_sync and raw_bottom <= initial_last_sync:
+                adj_checked = True
+                n_refetched = self._minute_adj_refetch_if_changed(
+                    code, token, bars, initial_last_sync, cap_dt_once
+                )
+                if n_refetched:
+                    total_fetched = n_refetched
+                    break
 
             filtered = (
                 [b for b in bars if not cap_dt_once or b["time"] <= cap_dt_once]

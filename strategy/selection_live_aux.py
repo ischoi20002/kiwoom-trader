@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -33,6 +34,41 @@ from strategy.selection_scoring import (
     calculate_technical_indicators,
     get_strategy_score,
 )
+
+
+def _live_liq_part(df: pd.DataFrame) -> pd.Series:
+    """
+    점수 유동성 항목 (백테 배치와 동일: 5일 평균 대금 / 500억, 상한 100, ×0.12).
+
+    원 단위 ``_sel_avg_val5`` 우선, 없으면 억 단위 ``AvgTrdeVal`` 폴백.
+    """
+    try:
+        if "_sel_avg_val5" in df.columns:
+            won = pd.to_numeric(df["_sel_avg_val5"], errors="coerce")
+            if "AvgTrdeVal" in df.columns:
+                won = won.fillna(
+                    pd.to_numeric(df["AvgTrdeVal"], errors="coerce") * 100000000.0
+                )
+        else:
+            won = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce") * 100000000.0
+        won = pd.Series(won, index=df.index).fillna(0.0)
+        return (won / 50000000000.0 * 100.0).clip(upper=100.0) * 0.12
+    except Exception:
+        return pd.Series(0.0, index=df.index)
+
+
+def _live_osc_rise_bonus(df: pd.DataFrame) -> pd.Series:
+    """OSC 가 전일보다 상승했을 때만 +10 (백테 배치와 동일, 결측은 0)."""
+    try:
+        osc = pd.to_numeric(df.get("OSC"), errors="coerce")
+        osc_p = (
+            pd.to_numeric(df["OSC_Prev"], errors="coerce")
+            if "OSC_Prev" in df.columns
+            else osc
+        )
+        return (pd.Series(osc, index=df.index) > pd.Series(osc_p, index=df.index)).astype(float) * 10.0
+    except Exception:
+        return pd.Series(0.0, index=df.index)
 
 
 def _compute_sel_a_aux_from_daily_tail(
@@ -180,9 +216,9 @@ def _apply_sel_a_live_cross_section(rows: list, settings: dict) -> list:
         rs_part = df["_sel_rs_pct"].fillna(0.0) * 55.0
         pb_part = pb_score * 0.28
         ma_part = df["_sel_ma_ok"].astype(float) * 18.0
-        liq_raw = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
-        liq_part = (liq_raw / 500.0 * 100.0).clip(upper=100.0) * 0.12
-        osc_bonus = 10.0  # 동적 배치와 유사: 우상향 가점은 일괄 경로에서 생략·단순화
+        liq_part = _live_liq_part(df)
+        # 백테 배치(_resync_batch_valid_to_period_universe)와 동일: OSC 상승 시에만 +10
+        osc_bonus = _live_osc_rise_bonus(df)
         mode = _sel_score_mode(settings)
         if _use_score_a_s1_pnl_aligned(mode):
             sc = _score_a_s1_pnl_aligned_series(df, settings)
@@ -364,17 +400,8 @@ def _apply_sel_b_live_cross_section(rows: list, settings: dict) -> list:
         tr_st = ((lc / ma20r.replace(0, np.nan) - 1.0) * 100.0).clip(lower=0.0, upper=10.0) * 10.0
         tr_part = tr_st * 0.15
         slope_bonus = df["_sel_b_slope_ok"].astype(float) * 10.0
-        liq_raw = pd.to_numeric(df.get("AvgTrdeVal", 0), errors="coerce").fillna(0.0)
-        liq_part = (liq_raw / 500.0 * 100.0).clip(upper=100.0) * 0.12
-        osc_r = pd.to_numeric(df.get("OSC", 0), errors="coerce")
-        if "OSC_Prev" in df.columns:
-            osc_p = pd.to_numeric(df["OSC_Prev"], errors="coerce")
-        else:
-            osc_p = osc_r
-        try:
-            osc_bonus = (osc_r > osc_p).astype(float) * 10.0
-        except Exception:
-            osc_bonus = 0.0
+        liq_part = _live_liq_part(df)
+        osc_bonus = _live_osc_rise_bonus(df)
         mode = _sel_score_mode(settings)
         if _use_score_b_s1_pnl_aligned(mode):
             sc = _score_b_s1_pnl_aligned_series(df, settings)

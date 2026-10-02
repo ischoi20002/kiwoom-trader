@@ -529,6 +529,8 @@ def select_monitoring_targets(
                 "VolMax": int(df_valid["volume"].max()),
                 "MABufScale": 1.0,
                 "AvgTrdeVal": int(last_full["AvgVal5"] / 100000000),
+                # 점수 유동성 항목용 원 단위 (백테 배치와 동일 — 억 절사 오차 제거)
+                "_sel_avg_val5": float(last_full["AvgVal5"]),
                 "_valid_a": valid_a,
                 "_score_a": score_a_place,
                 "_valid_b": valid_b_place,

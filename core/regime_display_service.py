@@ -111,9 +111,14 @@ class RegimeDisplayService:
         as_of = self._completed_asof_date()
         as_of_s = as_of.strftime("%Y-%m-%d")
         try:
+            from strategy.universe_codes import resolve_universe_codes
             from utils.regime_gate_cache import load_regime_gate_cache
 
-            cached = load_regime_gate_cache(as_of=as_of_s, settings=st)
+            # 레짐 계산 때와 같은 유니버스여야 캐시 유효 (메인 스레드라 CSV 읽기만)
+            codes = resolve_universe_codes(st, allow_fdr_generate=False)
+            cached = load_regime_gate_cache(
+                as_of=as_of_s, settings=st, universe_codes=codes
+            )
         except Exception:
             return False
         if not cached:

@@ -2,7 +2,7 @@
 """
 Transition 레짐(FDR 일봉) 계산 결과 디스크 캐시.
 
-동일 완료 거래일(as_of) + 동일 설정이면 GUI 재시작 시 FDR 재조회를 생략한다.
+동일 완료 거래일(as_of) + 동일 설정 + 동일 유니버스면 GUI 재시작 시 FDR 재조회를 생략한다.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from utils.server_mode_paths import project_root
 
@@ -86,16 +86,35 @@ def transition_gate_settings_fingerprint(settings: Optional[dict[str, Any]]) -> 
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def universe_codes_fingerprint(codes: Optional[Iterable[Any]]) -> str:
+    """레짐 판정 유니버스(종목코드 집합) 해시. 비어 있으면 빈 문자열."""
+    try:
+        norm = sorted(
+            {str(c).strip().zfill(6) for c in (codes or []) if str(c).strip()}
+        )
+    except Exception:
+        return ""
+    if not norm:
+        return ""
+    return hashlib.sha256(",".join(norm).encode("utf-8")).hexdigest()[:16]
+
+
 def load_regime_gate_cache(
     *,
     as_of: str,
     settings: Optional[dict[str, Any]],
+    universe_codes: Optional[Iterable[Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     디스크 캐시를 읽는다.
 
-    as_of·설정 지문이 일치할 때만 payload(dict)를 반환한다.
+    as_of·설정 지문·유니버스 지문이 일치할 때만 payload(dict)를 반환한다.
+    ``universe_codes`` 가 비면(유니버스 확인 불가) 캐시를 쓰지 않는다 —
+    분기 전환 등으로 유니버스가 바뀐 뒤 이전 유니버스 레짐을 재사용하지 않기 위함.
     """
+    u_fp = universe_codes_fingerprint(universe_codes)
+    if not u_fp:
+        return None
     path = cache_file_path()
     try:
         if not os.path.isfile(path):
@@ -108,6 +127,8 @@ def load_regime_gate_cache(
             return None
         fp = transition_gate_settings_fingerprint(settings)
         if str(data.get("settings_fingerprint", "")) != fp:
+            return None
+        if str(data.get("universe_fingerprint", "")) != u_fp:
             return None
         payload = data.get("payload")
         if not isinstance(payload, dict):
@@ -125,12 +146,14 @@ def save_regime_gate_cache(
     as_of: str,
     settings: Optional[dict[str, Any]],
     payload: Dict[str, Any],
+    universe_codes: Optional[Iterable[Any]] = None,
 ) -> None:
-    """성공한 레짐 계산 결과를 디스크에 저장한다."""
+    """성공한 레짐 계산 결과를 디스크에 저장한다 (계산에 쓴 유니버스 지문 포함)."""
     path = cache_file_path()
     record = {
         "as_of": str(as_of or "").strip()[:10],
         "settings_fingerprint": transition_gate_settings_fingerprint(settings),
+        "universe_fingerprint": universe_codes_fingerprint(universe_codes),
         "computed_at": datetime.now().isoformat(timespec="seconds"),
         "payload": dict(payload),
     }
