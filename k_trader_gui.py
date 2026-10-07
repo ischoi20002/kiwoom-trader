@@ -276,6 +276,13 @@ class KiwoomApp:
                 self.settings["universe_index_choice"] = "KOSPI200"
         except Exception:
             pass
+        # 실시간 15분 슬롯 격자의 애프터 포함 여부를 현재 설정으로 판정(설정 재로드·저장 즉시 반영)
+        try:
+            from utils.aftermarket_policy import register_live_settings_provider
+
+            register_live_settings_provider(lambda: getattr(self, "settings", None))
+        except Exception as e:
+            print(f"⚠️ 애프터 봉 정책 등록 실패: {e}")
         self._sync_ka10080_rest_pacing_from_settings()
         self._configure_ka10080_fetch_diag()
         # Tick dispatch 주기는 SignalEngine이 메인 스레드를 과점유할 때 UI가 멎는 문제를 직접 줄이므로,

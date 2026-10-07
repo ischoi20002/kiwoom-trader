@@ -46,6 +46,8 @@ DEFAULT_SETTINGS = {
     "prevent_sleep_allow_after_eod": True,
     "next_open_1530_enabled": True,
     "order_after_close_enabled": True,
+    # 애프터(16:00~19:45) 15분봉을 지표·신호 시계열에 사용: "auto"=order_after_close_enabled 추종, true/false=강제
+    "use_aftermarket_bars": "auto",
     "order_1530_enabled": False,
     "next_open_1945_enabled": True,
     "bt_open_auction_pass_enabled": False,

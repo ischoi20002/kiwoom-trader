@@ -133,12 +133,25 @@ def _next_weekday_first_slot_after(t: pd.Timestamp) -> pd.Timestamp:
 
 
 def _ah_enabled(day0: pd.Timestamp) -> bool:
+    """
+    슬롯 격자에 애프터 16슬롯을 포함할지.
+
+    달력상 시행일(``has_krx_aftermarket``) AND 애프터 사용 정책
+    (``utils.aftermarket_policy.live_aftermarket_grid_enabled``).
+    """
     try:
         from reporting.krx_trading_calendar import has_krx_aftermarket
 
-        return bool(has_krx_aftermarket(day0.date()))
+        if not bool(has_krx_aftermarket(day0.date())):
+            return False
     except Exception:
         return False
+    try:
+        from utils.aftermarket_policy import live_aftermarket_grid_enabled
+
+        return bool(live_aftermarket_grid_enabled())
+    except Exception:
+        return True
 
 
 def _ah_open_minutes() -> int:
@@ -414,13 +427,14 @@ def iter_krx_15m_slot_ends_for_day(day: Union[pd.Timestamp, datetime, str]) -> L
         day0 = pd.Timestamp(day).normalize()
         h = get_session_hours(day0.date())
         out = [pd.Timestamp(x) for x in h.iter_15m_slot_labels()]
-        try:
-            from utils.krx_session_hours import iter_aftermarket_15m_slot_labels
+        if _ah_enabled(day0):
+            try:
+                from utils.krx_session_hours import iter_aftermarket_15m_slot_labels
 
-            for x in iter_aftermarket_15m_slot_labels(day0.date()):
-                out.append(pd.Timestamp(x))
-        except Exception:
-            pass
+                for x in iter_aftermarket_15m_slot_labels(day0.date()):
+                    out.append(pd.Timestamp(x))
+            except Exception:
+                pass
         return out
     except Exception:
         return []
@@ -1208,7 +1222,26 @@ def resample_1m_ohlcv_to_15m_krx(
     """
     1m OHLCV(열: open, high, low, close, volume, index=datetime)을
     KRX 타임스탬프 규칙으로 15m DataFrame(열 datetime+OHLCV+code)로 집계한다.
+
+    데이터 수집 계층(하베스팅 ``bars_15m``)이므로 애프터 사용 정책과 무관하게
+    애프터 슬롯을 항상 포함한다. 신호용 제외는 사용 시점에서 한다.
     """
+    try:
+        from utils.aftermarket_policy import force_aftermarket_grid
+
+        ctx = force_aftermarket_grid(True)
+    except Exception:
+        import contextlib
+
+        ctx = contextlib.nullcontext()
+    with ctx:
+        return _resample_1m_ohlcv_to_15m_krx_impl(df_1m, code)
+
+
+def _resample_1m_ohlcv_to_15m_krx_impl(
+    df_1m: pd.DataFrame, code: str
+) -> pd.DataFrame:
+    """``resample_1m_ohlcv_to_15m_krx`` 본체(슬롯 격자는 호출 컨텍스트를 따른다)."""
     ncode = normalize_code(code)
     _empty = pd.DataFrame(
         columns=["datetime", "open", "high", "low", "close", "volume", "code"]

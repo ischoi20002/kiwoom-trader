@@ -38,8 +38,19 @@ class _AppStub:
         return
 
 
+def _section_of(tab: SettingsTab, widget: tk.Misc) -> str:
+    """위젯이 속한 사이드바 섹션 키를 반환합니다."""
+    w: tk.Misc | None = widget
+    while w is not None:
+        for sid, frame in tab._section_by_key.items():
+            if w is frame:
+                return sid
+        w = w.master
+    return ""
+
+
 def test_track_c_settings_section_and_integer_collection() -> None:
-    """C 설정 45개가 별도 섹션에 노출되고 정수 키가 정수로 저장되는지 확인합니다."""
+    """C 설정이 선정·진입·청산 섹션에 나뉘어 노출되고 정수 키가 정수로 저장되는지 확인합니다."""
     root = tk.Tk()
     root.withdraw()
     try:
@@ -49,7 +60,11 @@ def test_track_c_settings_section_and_integer_collection() -> None:
         tab = SettingsTab(parent, app, DEFAULT_SETTINGS)
         root.update_idletasks()
 
-        assert "track_c" in tab._settings_section_keys
+        assert "track_c" not in tab._settings_section_keys
+        assert _section_of(tab, tab.params_entries["max_slots_c"]) == "univ"
+        assert _section_of(tab, tab.params_entries["box_sel_lookback"]) == "univ"
+        assert _section_of(tab, tab.params_entries["type_c_rsi_min"]) == "s1"
+        assert _section_of(tab, tab.params_entries["type_c_target_atr_buffer"]) == "exit"
         assert "use_sel_track_c" in tab.conf_vars
         assert "use_type_c" in tab.conf_vars
         assert "use_type_c_prev_high_break" in tab.conf_vars

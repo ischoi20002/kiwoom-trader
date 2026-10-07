@@ -901,6 +901,12 @@ class TradingStrategy:
                 return ("추매 —", 0.0)
             s = settings or {}
 
+            # Type C(박스)는 추매(S2)가 없음 → A 트랙 추매 합치도로 오표시하지 않고 C 청산 기준 표시
+            if TradingStrategy._holding_sig_is_type_c(pos):
+                return TradingStrategy.compute_type_c_holding_display_text(
+                    pos, s, indicator_row, now_price=now_price, curr_dt=curr_dt
+                )
+
             def _row_get(key: str, default: float = 0.0) -> float:
                 try:
                     if hasattr(indicator_row, "get"):
@@ -1028,6 +1034,104 @@ class TradingStrategy:
             return (f"추매({tr_lab}) {passed}/{total}", ratio_clr)
         except Exception:
             return ("추매 —", 0.0)
+
+    @staticmethod
+    def compute_type_c_holding_display_text(
+        pos: dict,
+        settings: dict,
+        indicator_row: object = None,
+        now_price: float | None = None,
+        curr_dt: object | None = None,
+    ) -> tuple[str, float]:
+        """
+        Type C(박스) 보유 종목의 감시 '신호상태' 열 문자열.
+        `_evaluate_type_c_exit` 와 같은 설정 키로 목표가·손절가·보유일·종가 이탈 횟수를 요약.
+        반환: (표시 문자열, 손절가→목표가 구간 내 현재가 위치 0~1)
+        """
+        try:
+            if not pos:
+                return ("박스(C) —", 0.0)
+            s = settings or {}
+
+            def _row_get(key: str, default: float = 0.0) -> float:
+                try:
+                    if indicator_row is not None and hasattr(indicator_row, "get"):
+                        v = indicator_row.get(key, default)
+                        return float(v) if v is not None else float(default)
+                except (TypeError, ValueError):
+                    pass
+                return float(default)
+
+            def _setting_float(key: str, default: float) -> float:
+                try:
+                    return float(s.get(key, default))
+                except (TypeError, ValueError):
+                    return float(default)
+
+            cp = 0.0
+            try:
+                if now_price is not None:
+                    cp = float(now_price)
+            except (TypeError, ValueError):
+                cp = 0.0
+            if cp <= 0:
+                cp = _row_get("Close", 0.0)
+
+            try:
+                lower = float(pos.get("box_lower", 0) or 0)
+                upper = float(pos.get("box_upper", 0) or 0)
+                entry_atr = float(pos.get("box_atr_entry", 0) or 0)
+            except (TypeError, ValueError):
+                lower, upper, entry_atr = 0.0, 0.0, 0.0
+            if entry_atr <= 0:
+                entry_atr = _row_get("ATR_C", _row_get("ATR", 0.0))
+
+            # 보유일: 진입일 포함 평일 수(청산 판정의 bars_df 미제공 폴백과 동일)
+            max_days = max(1, int(_setting_float("type_c_max_holding_days", 5)))
+            held_days = 0
+            try:
+                et_raw = pos.get("entry_date") or pos.get("entry_time")
+                if et_raw is not None:
+                    entry_ts = pd.Timestamp(et_raw)
+                    eval_ts = (
+                        pd.Timestamp(curr_dt) if curr_dt is not None else pd.Timestamp.now()
+                    )
+                    held_days = int(
+                        np.busday_count(
+                            entry_ts.date(),
+                            (eval_ts + pd.Timedelta(days=1)).date(),
+                        )
+                    )
+            except Exception:
+                held_days = 0
+            day_txt = f" · {held_days}/{max_days}일" if held_days > 0 else ""
+
+            # 박스 메타데이터 유실 시 청산 로직은 비상 %손절만 유지
+            if not (upper > lower > 0 and entry_atr > 0):
+                emergency_sl = abs(_setting_float("type_c_missing_box_stop_loss_pct", 3.0))
+                return (f"박스(C) 메타없음 · 비상SL -{emergency_sl:g}%{day_txt}", 0.0)
+
+            stop_atr = max(0.0, _setting_float("type_c_stop_atr_tolerance", 0.5))
+            target_buffer = max(0.0, _setting_float("type_c_target_atr_buffer", 0.2))
+            stop_price = lower - stop_atr * entry_atr
+            target_price = upper - target_buffer * entry_atr
+
+            txt = f"박스(C) 목표 {target_price:,.0f} · 손절 {stop_price:,.0f}{day_txt}"
+            try:
+                bd_cnt = int(pos.get("box_breakdown_closes", 0) or 0)
+            except (TypeError, ValueError):
+                bd_cnt = 0
+            if bd_cnt > 0:
+                bd_limit = max(1, int(_setting_float("type_c_breakdown_confirm_bars", 2)))
+                txt += f" · 이탈 {bd_cnt}/{bd_limit}"
+
+            ratio = 0.0
+            span = target_price - stop_price
+            if cp > 0 and span > 0:
+                ratio = min(1.0, max(0.0, (cp - stop_price) / span))
+            return (txt, ratio)
+        except Exception:
+            return ("박스(C) —", 0.0)
 
     @staticmethod
     def _holding_sig_is_type_b(pos: dict) -> bool:

@@ -276,10 +276,10 @@ class WatchlistStore:
         try:
             # pykrx의 일부 경로(시장 정보 스크래핑/인증)는 KRX_ID/KRX_PW 환경변수를 요구합니다.
             # 실시간 감시는 시작 즉시 많은 종목에 대해 이름이 필요할 수 있으므로,
-            # 환경변수가 없으면 즉시 스킵(종목코드 그대로 반환)해서 불필요한 인증 실패 로그를 줄입니다.
-            krx_id = os.environ.get("KRX_ID", "").strip()
-            krx_pw = os.environ.get("KRX_PW", "").strip()
-            if not krx_id or not krx_pw:
+            # 계정(환경변수 또는 config.py)이 없으면 즉시 스킵(종목코드 그대로 반환)해서 불필요한 인증 실패 로그를 줄입니다.
+            from utils.krx_credentials import ensure_krx_env
+
+            if not ensure_krx_env():
                 return code
 
             from pykrx import stock

@@ -358,12 +358,13 @@ class SettingsTab:
             flow_wrap,
             text=(
                 'KOSPI 유니버스 (시총 상위 N)\n'
-                '  ↓ ② 유니버스 종목선정 (A/B)\n'
-                '  ↓ ③ S1 (공통필터 → A → B)\n'
-                '  ↓ ④ Stage 2 추매 (A/B)\n'
-                '  ↓ ⑤ Smart Buy / Smart Exit\n'
-                '  ↓ ⑥ 청산\n'
-                '  ↘ ⑦ Track C 박스 회귀 (독립 설정)'
+                '  ↓ ② 유니버스 종목선정 (A/B/C)\n'
+                '  ↓ ③ 레짐 게이트 (슬롯·차단)\n'
+                '  ↓ ④ S1 (공통필터 → A → B → C)\n'
+                '  ↓ ⑤ Stage 2 추매 (A/B, C 없음)\n'
+                '  ↓ ⑥ Smart Buy / Smart Exit\n'
+                '  ↓ ⑦ 청산 (A/B/C · R5)\n'
+                '  ⑧ 주문 실행 · 시스템 (운영)'
             ),
             fg='#D8DEE9',
             bg=nord_deep,
@@ -388,13 +389,14 @@ class SettingsTab:
         sb_list.pack(fill=tk.BOTH, expand=True)
 
         section_entries: tp.List[tp.Tuple[str, str]] = [
-            ('fund', '① 자금 · 사이징'),
-            ('univ', '② 유니버스 · 종목선정'),
-            ('s1', '③ Stage 1 진입 (공통/A/B)'),
-            ('s2', '④ Stage 2 추매 (A/B)'),
-            ('smart', '⑤ Smart Wall'),
-            ('exit', '⑥ 청산 · 리스크 (A/B)'),
-            ('track_c', '⑦ Track C · 박스 회귀'),
+            ('fund', '① 자금 · 사이징 · 수수료'),
+            ('univ', '② 유니버스 · 종목선정 (A/B/C)'),
+            ('regime', '③ 레짐 게이트'),
+            ('s1', '④ Stage 1 진입 (공통/A/B/C)'),
+            ('s2', '⑤ Stage 2 추매 (A/B)'),
+            ('smart', '⑥ Smart Buy / Exit'),
+            ('exit', '⑦ 청산 · 리스크 (A/B/C)'),
+            ('system', '⑧ 주문 실행 · 시스템'),
         ]
         self._settings_section_keys: list[str] = [k for k, _ in section_entries]
         self._section_by_key: dict[str, ttk.Frame] = {}
@@ -716,106 +718,6 @@ class SettingsTab:
             'Type B 목표 = (100 − A)%. 예: 65이면 A 65%·B 35%에 가깝게 유지',
             parent_toggle='use_type_balance_gate',
         )
-        add_param_row(
-            cap_f,
-            '선정 시 거래정지 종목 제외',
-            None,
-            '',
-            '네이버 실시간 tradeStopType=HALTED — 대시보드 종목 선정(실시간)에서만 적용',
-            toggle_key='exclude_trading_halt_on_selection',
-        )
-
-        # ── 시스템 전원 (최대절전 방지) ──
-        power_f = ttk.LabelFrame(
-            _sec_parent('fund'),
-            text=' 🔆 시스템 전원 (최대절전 방지) ',
-            padding='15',
-        )
-        power_f.pack(fill=tk.X, pady=10)
-        add_param_row(
-            power_f,
-            '실행 중 최대절전 방지',
-            None,
-            '',
-            '유휴 최대절전(하이버네이트) 억제 — 장전 자동시작·실시간 감시가 꺼지지 않도록. '
-            '전원옵션은 절전 대신 최대절전 사용 권장. 덮개 닫힘은 전원옵션 따름',
-            toggle_key='prevent_sleep_while_running',
-        )
-        add_param_row(
-            power_f,
-            '화면 꺼짐도 방지',
-            None,
-            '',
-            '체크 시 모니터도 켜 둠. 기본은 화면만 꺼지고 PC는 깨어 있음',
-            toggle_key='prevent_sleep_keep_display',
-            parent_toggle='prevent_sleep_while_running',
-        )
-        add_param_row(
-            power_f,
-            '장마감 선정 후 최대절전 허용',
-            None,
-            '',
-            '감시 EOD(정규장은 보통 16:00, 애프터 시행일은 20:30=20:00+버퍼) 이후 '
-            '유휴 최대절전 허용. 장전 자동시작·감시 중에만 다시 막음',
-            toggle_key='prevent_sleep_allow_after_eod',
-            parent_toggle='prevent_sleep_while_running',
-        )
-
-        # ── 모바일 읽기 전용 현황 API ──
-        mobile_f = ttk.LabelFrame(
-            _sec_parent('fund'),
-            text=' 📱 모바일 현황 API (읽기 전용 · 포트포워딩) ',
-            padding='15',
-        )
-        mobile_f.pack(fill=tk.X, pady=10)
-        add_param_row(
-            mobile_f,
-            '모바일 현황 API 사용',
-            None,
-            '',
-            '공유기 포트포워딩으로 외부 조회 (주문 불가)',
-            toggle_key='mobile_status_api_enabled',
-        )
-        add_param_row(
-            mobile_f,
-            'API 포트',
-            'mobile_status_api_port',
-            '',
-            '기본 8765 — Windows 방화벽·공유기 내부 포트와 맞춤',
-            parent_toggle='mobile_status_api_enabled',
-        )
-        # 문자열 설정은 conf_vars로 수집 (params_entries float 변환 회피)
-        for _mk, _mlabel, _mhint in (
-            ('mobile_status_api_token', '접속 PIN', '숫자 8자리 — 아래 생성 버튼 (공백 입력도 가능)'),
-            ('mobile_status_public_url', '공개 URL', '예: http://mydomain.ddns.net:28765'),
-            ('mobile_status_tls_cert', 'TLS 인증서 경로', '선택 — PEM cert (없으면 HTTP)'),
-            ('mobile_status_tls_key', 'TLS 키 경로', '선택 — PEM private key'),
-            ('mobile_status_api_host', '바인드 주소', '기본 0.0.0.0 (포트포워딩용)'),
-        ):
-            r = get_next_row(mobile_f)
-            ttk.Label(mobile_f, text=_mlabel, font=('Malgun Gothic', 10), foreground=txt_col).grid(
-                row=r, column=1, sticky='w', pady=4
-            )
-            _init = str(self.app.settings.get(_mk, self.default_settings.get(_mk, '')) or '')
-            self.conf_vars[_mk] = tk.StringVar(value=_init)
-            _ent = ttk.Entry(mobile_f, textvariable=self.conf_vars[_mk], width=42, exportselection=0)
-            _ent.grid(row=r, column=2, columnspan=3, sticky='we', padx=5)
-            if _mhint:
-                ttk.Label(mobile_f, text=f'  ({_mhint})', style='Dimmed.TLabel').grid(
-                    row=r, column=5, sticky='w', padx=10
-                )
-        r_tok = get_next_row(mobile_f)
-        ttk.Button(
-            mobile_f,
-            text='PIN 생성·채우기',
-            width=18,
-            command=self._generate_mobile_status_token,
-        ).grid(row=r_tok, column=2, sticky='w', padx=5, pady=(4, 0))
-        ttk.Label(
-            mobile_f,
-            text='  (저장 후 재기동 · 대시보드「설정 링크」로 폰 전달)',
-            style='Dimmed.TLabel',
-        ).grid(row=r_tok, column=5, sticky='w', padx=10)
 
         _univ_root = _sec_parent('univ')
 
@@ -943,11 +845,26 @@ class SettingsTab:
         except Exception:
             pass
 
-        # ── 레짐 게이트: 전환·G1·R5·HARD (중첩 프레임으로 역할별 분리) ──
+        univ_excl_f = ttk.LabelFrame(
+            _univ_root,
+            text=' 🚫 선정 공통 제외 ',
+            padding='15',
+        )
+        univ_excl_f.pack(fill=tk.X, expand=False, pady=(0, 12))
+        add_param_row(
+            univ_excl_f,
+            '선정 시 거래정지 종목 제외',
+            None,
+            '',
+            '네이버 실시간 tradeStopType=HALTED — 대시보드 종목 선정(실시간)에서만 적용',
+            toggle_key='exclude_trading_halt_on_selection',
+        )
+
+        # ── 레짐 게이트: 전환·G1·TRANSITION·HARD (R5 는 ⑦ 청산으로 분리) ──
         # 주의: regime_f 자식은 pack만 사용 (add_param_row 의 grid 와 충돌 방지)
         regime_f = ttk.LabelFrame(
-            _univ_root,
-            text=' 🔄 레짐 게이트 ',
+            _sec_parent('regime'),
+            text=' 🔄 [3] 레짐 게이트 ',
             padding='12',
         )
         regime_f.pack(fill=tk.X, expand=False, pady=(0, 12))
@@ -964,7 +881,7 @@ class SettingsTab:
         )
         ttk.Label(
             regime_f,
-            text='아래는 역할별로 나뉩니다. 평소엔 마스터만 켜고, G1·R5는 보조 가드입니다.',
+            text='아래는 역할별로 나뉩니다. 평소엔 마스터만 켜고, G1은 보조 가드입니다. (R5 Type A 청산 강화는 ⑦ 청산에 있음)',
             style='Dimmed.TLabel',
             font=('Malgun Gothic', 9),
         ).pack(anchor='w', padx=8, pady=(0, 8))
@@ -1067,57 +984,10 @@ class SettingsTab:
             parent_toggle='use_rotation_a_guard_g1',
         )
 
-        # ③ R5 — Type A 청산만 강화
-        r5_f = ttk.LabelFrame(
-            regime_f,
-            text=' ③ R5 — Type A 청산 강화 ',
-            padding='10',
-        )
-        r5_f.pack(fill=tk.X, expand=False, pady=(0, 8))
-        ttk.Label(
-            r5_f,
-            text='종목 RS순위 상관이 낮아진 날(리더십 교체) → Type A Flash/ATR만 일시 강화. 진입 제한 없음',
-            style='Dimmed.TLabel',
-            font=('Malgun Gothic', 9),
-        ).grid(row=0, column=0, columnspan=6, sticky='w', padx=5, pady=(0, 4))
-        self.grid_rows[r5_f] = 1
-        add_param_row(
-            r5_f,
-            'R5 사용',
-            None,
-            '',
-            'ON: RS순위상관 저하일에 Type A 청산만 타이트',
-            toggle_key='use_rs_persist_guard',
-        )
-        add_param_row(
-            r5_f,
-            '상관 상한',
-            'rs_persist_corr_max',
-            '',
-            'RS 5일 순위상관 ≤ 이 값이면 발동 (기본 0.60)',
-            parent_toggle='use_rs_persist_guard',
-        )
-        add_param_row(
-            r5_f,
-            'Flash A',
-            'rs_persist_exit_flash_a',
-            '%',
-            'R5일 Type A Flash (기본 2.5 · 평소 4.0)',
-            parent_toggle='use_rs_persist_guard',
-        )
-        add_param_row(
-            r5_f,
-            'ATR 손절 A',
-            'rs_persist_exit_atr_sl_a',
-            '×',
-            'R5일 Type A ATR SL 배수 (기본 2.0 · 평소 2.8)',
-            parent_toggle='use_rs_persist_guard',
-        )
-
-        # ④ TRANSITION 대응
+        # ③ TRANSITION 대응
         soft_f = ttk.LabelFrame(
             regime_f,
-            text=' ④ TRANSITION 대응 (슬롯 · 차단) ',
+            text=' ③ TRANSITION 대응 (슬롯 · 차단) ',
             padding='10',
         )
         soft_f.pack(fill=tk.X, expand=False, pady=(0, 8))
@@ -1167,10 +1037,10 @@ class SettingsTab:
             toggle_key='transition_ignore_soft',
         )
 
-        # ⑤ HARD (chop)
+        # ④ HARD (chop)
         hard_f = ttk.LabelFrame(
             regime_f,
-            text=' ⑤ HARD — A과밀 · B고갈 (chop) ',
+            text=' ④ HARD — A과밀 · B고갈 (chop) ',
             padding='10',
         )
         hard_f.pack(fill=tk.X, expand=False, pady=(0, 2))
@@ -1651,7 +1521,7 @@ class SettingsTab:
             widget_list=self.sel_b_v2_widgets,
         )
 
-        strat_f = ttk.LabelFrame(_sec_parent('s1'), text=' 🎯 [3] 1단계 진입 (S1) — 감시 후 매수 신호 ', padding='15')
+        strat_f = ttk.LabelFrame(_sec_parent('s1'), text=' 🎯 [4] 1단계 진입 (S1) — 감시 후 매수 신호 ', padding='15')
         strat_f.pack(fill=tk.X, pady=10)
 
         add_header(strat_f, '── 단계 공통 필수 필터 (A/B 모두 적용) ──')
@@ -1679,183 +1549,11 @@ class SettingsTab:
             'RSI(14) vs 시그널(9봉 단순이평) 등 — 지표 주기 UI 비노출·고정 14/9',
             toggle_key='use_rsi_sig_filter',
         )
-        add_param_row(
+        ttk.Label(
             strat_f,
-            '동일 종목 S1 재매수 쿨다운',
-            's1_buy_signal_cooldown_sec',
-            '초',
-            '직전 S1 매수 성공 시각 기준 최소 간격(틱 중복·연속 주문 방지). 기본 1800=30분',
-        )
-        add_param_row(
-            strat_f,
-            'S1: 로컬 15분 확정 시 평가',
-            None,
-            '',
-            'ON=완성 15분에서 S1·S2·청산',
-            toggle_key='realtime_s1_eval_on_local_15m_close',
-        )
-        add_param_row(
-            strat_f,
-            '장 마감 후 주문 허용',
-            None,
-            '',
-            'ON(기본)=15:30 이후(15:30 슬롯·애프터 16:00~19:45) 주문 경로 허용. '
-            'OFF=해당 슬롯은 신호만 기록 — 당일 주문·NXT 터치·익일시초 예약 모두 생략, '
-            '마감 후 미체결 터치 주문은 정정 대신 취소. BT도 동일 슬롯 체결 생략',
-            toggle_key='order_after_close_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '15:30 주문 허용',
-            None,
-            '',
-            'OFF(당분간 권장)=15:30 슬롯은 신호 평가만 하고 NXT 터치·익일시초 예약·당일 주문을 모두 생략. '
-            'ON=실전 NXT 또는 next_open 경로로 주문 (BT 동일)',
-            toggle_key='order_1530_enabled',
-            parent_toggle='order_after_close_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '15:30 신호 익일 시초 이월',
-            None,
-            '',
-            'ON=15:30 완성봉 S1·S2·EXIT 신호를 즉시 주문하지 않고, 익일 09:00 동시호가 지정가로 이월(BT·RT 공통)',
-            toggle_key='next_open_1530_enabled',
-            parent_toggle='order_1530_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '19:45 익일 시초 이월',
-            None,
-            '',
-            'ON(권장)=애프터 말봉(19:45)을 20:00 직후 평가하고, 당일 주문 없이 익일 09:00 동시호가 지정가로 이월',
-            toggle_key='next_open_1945_enabled',
-            parent_toggle='order_after_close_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '틱 말분 보조',
-            None,
-            '',
-            'ON(권장)=공식 말분 실패·타임아웃 시 틱 seal로 완성15 보조 평가. '
-            '공식 말분 평가 OFF(레거시)일 때만 :00 틱이 주경로',
-            toggle_key='realtime_15m_last_minute_from_ticks',
-        )
-        add_param_row(
-            strat_f,
-            'API실패 시 틱 결측채움',
-            None,
-            '',
-            'ON(권장)=완성15 합성 시 공식 1분이 없는 분을 틱 seal로 채움. '
-            '앞구간 공식 1분이 하나도 없으면(재시작 직후) 아래 공식1분 필수가 합성을 보류',
-            toggle_key='realtime_15m_compose_tick_fill_on_api_miss',
-        )
-        add_param_row(
-            strat_f,
-            '완성15 공식1분 필수',
-            None,
-            '',
-            'ON(권장)=슬롯 앞구간(말분 제외)에 공식 1분이 없으면 틱만으로 완성15를 만들지 않음. '
-            '워밍업 선적재·폴러 catchup 후 재시도',
-            toggle_key='realtime_15m_compose_require_official_head',
-        )
-        add_param_row(
-            strat_f,
-            '말분 틱불완전 시 공식대기',
-            None,
-            '',
-            'ON(권장)=장중 재시작 등으로 말분 틱이 중간부터면 부분 틱으로 평가하지 않고 '
-            '공식 말분 1분을 받은 뒤 공식 1분만으로 평가',
-            toggle_key='realtime_15m_wait_official_last_if_tick_incomplete',
-        )
-        add_param_row(
-            strat_f,
-            'head 공식 soft교체',
-            None,
-            '',
-            'ON(권장)=슬롯 앞구간 닫힌 뒤 ka10080 1회로 공식 1분을 덮어씀(정합). '
-            '실패해도 틱봉·말분 평가 유지',
-            toggle_key='realtime_m1_head_official_catchup_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '틱말분 타임아웃',
-            'realtime_15m_tick_tail_wait_sec',
-            '초',
-            '다음분 :00 틱이 없을 때(무거래) 말분·매분 seal 대기. 기본 1.5',
-        )
-        add_param_row(
-            strat_f,
-            '틱말분 백업(마감후)',
-            'realtime_15m_tick_tail_backup_after_close_sec',
-            '초',
-            '공식 우선: 슬롯 마감+N초까지 공식 평가 대기. 미완 종목만 틱 합성 시작. 기본 50',
-        )
-        add_param_row(
-            strat_f,
-            '15:19 공식대기 한도',
-            'realtime_pre_auction_official_wait_max_sec',
-            '초',
-            '레거시(미사용). 15:19(15:15슬롯)는 틱말분 즉시평가. '
-            '백업 한도는 「틱말분 백업(마감후)」와 동일',
-        )
-        add_param_row(
-            strat_f,
-            '15:30 공식대기 한도',
-            'realtime_eod_official_wait_max_sec',
-            '초',
-            '15:30 비NXT: 공식 1분 대기 상한(기본 300=5분). 초과 시 틱말분 합성 평가',
-        )
-        add_param_row(
-            strat_f,
-            '공식 말분 1분 평가',
-            None,
-            '',
-            'ON(권장)=말분 완성15를 공식 1분 REST로 평가(분산 n×1.1s). '
-            '틱 말분은 실패·타임아웃 보조. OFF=레거시 틱 주경로',
-            toggle_key='realtime_15m_eval_on_official_last_m1',
-        )
-        add_param_row(
-            strat_f,
-            'ka10080 전역 간격',
-            'realtime_ka10080_global_min_interval_sec',
-            '초',
-            '키움 ka10080 유량=1(초당 1회). 권장 1.05. 0.5 이하면 429(허용요청초과) 위험',
-        )
-        add_param_row(
-            strat_f,
-            '라이브가 주문 게이트(S1·S2·EXIT)',
-            None,
-            '',
-            'ON=완성봉으로 S1·S2·청산 판정 후, 주문 직전 라이브가로 추격/이탈·MA20 정합 확인. '
-            '실패 시 주문 스킵(S1은 쿨다운 미소모)',
-            toggle_key='realtime_s1_live_confirm_gate_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '라이브 추격 상한',
-            'realtime_s1_live_max_chase_pct',
-            '%',
-            '봉종가 대비 라이브가 상승 허용 한도(기본 0.8). 초과 시 주문 스킵',
-            parent_toggle='realtime_s1_live_confirm_gate_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '라이브 이탈 하한',
-            'realtime_s1_live_max_fade_pct',
-            '%',
-            '봉종가 대비 라이브가 하락 허용 한도(기본 1.0). 초과 시 주문 스킵',
-            parent_toggle='realtime_s1_live_confirm_gate_enabled',
-        )
-        add_param_row(
-            strat_f,
-            '라이브 MA20 정합',
-            None,
-            '',
-            'ON=봉종가와 라이브가가 MA20 같은 쪽에 있을 때만 주문(위↔아래 교차 시 스킵)',
-            toggle_key='realtime_s1_live_ma20_side_confirm',
-            parent_toggle='realtime_s1_live_confirm_gate_enabled',
-        )
+            text='  (15분봉 확정 평가 경로·장마감 후 주문·라이브가 게이트·재매수 쿨다운은 ⑧ 주문 실행에 있음)',
+            style='Dimmed.TLabel',
+        ).grid(row=get_next_row(strat_f), column=0, columnspan=6, sticky='w', pady=(2, 0))
 
         # Type A → Type B 순(세로): 동일 그리드 폭으로 가독성 유지
         add_header(strat_f, '── Type A: 눌림목 진입 조건 ──')
@@ -1944,7 +1642,6 @@ class SettingsTab:
             '돌파 강점 확인용 (기본 70) · 기준선 Wilder RSI(14)',
             widget_list=self.type_b_widgets,
         )
-        add_param_row(strat_f, 'Smart Buy', None, '', '돌파 시 수급 필터 적용 (VP/BA)', toggle_key='use_smart_buy_b', widget_list=self.type_b_widgets)
         add_param_row(strat_f, '돌파 거래량', 'vol_surge_b', '배', '돌파 시점 폭발적 수급', toggle_key='use_type_b_vol', widget_list=self.type_b_widgets)
         add_param_row(
             strat_f,
@@ -2047,7 +1744,7 @@ class SettingsTab:
             except Exception:
                 pass
 
-        s2_f = ttk.LabelFrame(_sec_parent('s2'), text=' 📈 [4] S2 — Type A 전용 (s2_* 만) ', padding='15')
+        s2_f = ttk.LabelFrame(_sec_parent('s2'), text=' 📈 [5] S2 — Type A 전용 (s2_* 만) ', padding='15')
         s2_f.pack(fill=tk.X, pady=10)
         add_param_row(
             s2_f,
@@ -2130,7 +1827,7 @@ class SettingsTab:
             '7. 추매 Smart Buy (Type A)',
             None,
             '',
-            '켜면 [5] VP/BA로 Type A 추매만 필터',
+            '켜면 ⑥ Smart Buy VP/BA로 Type A 추매만 필터',
             toggle_key='use_smart_buy_s2',
             widget_list=self.s2_a_widgets,
             group_toggle_widgets=True,
@@ -2146,7 +1843,7 @@ class SettingsTab:
             group_toggle_widgets=True,
         )
 
-        s2b_f = ttk.LabelFrame(_sec_parent('s2'), text=' 📈 [4-B] S2 — Type B 전용 (s2_b_* 만) ', padding='15')
+        s2b_f = ttk.LabelFrame(_sec_parent('s2'), text=' 📈 [5-B] S2 — Type B 전용 (s2_b_* 만) ', padding='15')
         s2b_f.pack(fill=tk.X, pady=10)
         add_header(s2b_f, 'Type B 종목은 아래 s2_b_* 만 사용합니다 (s2_* 와 독립)')
         add_param_row(
@@ -2230,7 +1927,7 @@ class SettingsTab:
             '7. 추매 Smart Buy (Type B)',
             None,
             '',
-            '켜면 [5] VP/BA로 Type B 추매만 필터',
+            '켜면 ⑥ Smart Buy VP/BA로 Type B 추매만 필터',
             toggle_key='use_smart_buy_s2_b',
             widget_list=self.s2_b_widgets,
             group_toggle_widgets=True,
@@ -2246,10 +1943,27 @@ class SettingsTab:
             group_toggle_widgets=True,
         )
 
-        rt_f = ttk.LabelFrame(_sec_parent('smart'), text=' 🔫 [5] 전술적 수급 (Smart Buy / Smart Exit) ', padding='15')
+        rt_f = ttk.LabelFrame(_sec_parent('smart'), text=' 🔫 [6] 전술적 수급 (Smart Buy / Smart Exit) ', padding='15')
         rt_f.pack(fill=tk.X, pady=10)
+        add_header(rt_f, '── Smart Buy 임계 (S1·S2 공통) ──')
         add_param_row(rt_f, 'Smart Buy 최소 체결강도 (VP)', 'smart_buy_vp', '%', 'S1 + S2 Type A/B Smart Buy 공통 임계')
         add_param_row(rt_f, 'Smart Buy 매도벽 비율 (BA)', 'smart_buy_ba_ratio', '배', '매도잔량/매수잔량 — S1·S2 Smart Buy 공통 임계')
+        add_header(rt_f, '── Smart Buy 적용 대상 ──')
+        add_param_row(
+            rt_f,
+            'S1 Type B Smart Buy',
+            None,
+            '',
+            '돌파 S1 진입 시 위 VP/BA 수급 필터 적용 (④ Type B 사용 시에만 유효)',
+            toggle_key='use_smart_buy_b',
+            widget_list=self.type_b_widgets,
+        )
+        ttk.Label(
+            rt_f,
+            text='  (S2 추매 Smart Buy 는 ⑤ Stage 2 의 「7. 추매 Smart Buy」 A/B 항목에서 켜고 끔)',
+            style='Dimmed.TLabel',
+        ).grid(row=get_next_row(rt_f), column=0, columnspan=6, sticky='w', pady=(2, 0))
+        add_header(rt_f, '── Smart Exit ──')
         add_param_row(rt_f, 'Smart Exit 탈출용 체결강도 (VP)', 'smart_exit_vp', '%', '에너지 소멸 확인', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 탈출용 매도벽 비율', 'smart_exit_ba_ratio', '배', '매도잔량/매수잔량(Smart Buy BA와 동일). 임계 이상이면 탈출 후보', toggle_key='use_smart_exit')
         add_param_row(rt_f, 'Smart Exit 가격 하락 임계', 'smart_exit_price_threshold', '%', '고점 대비 하락 폭(%) — 양수 권장. 음수 입력 시에도 절댓값으로 동일 적용', toggle_key='use_smart_exit')
@@ -2257,7 +1971,7 @@ class SettingsTab:
         exit_parent = _sec_parent('exit')
         exit_common_f = ttk.LabelFrame(
             exit_parent,
-            text=' 🛡️ [6] Flash 고점 기준 (BT·RT 공통) ',
+            text=' 🛡️ [7] Flash 고점 기준 (BT·RT 공통) ',
             padding='15',
         )
         exit_common_f.pack(fill=tk.X, pady=10)
@@ -2277,7 +1991,7 @@ class SettingsTab:
             'ON이면 ATR 무장·트레일만 High. Flash는 위 토글. (Flash 종가+ATR High 혼합 가능)',
             toggle_key='use_atr_peak_bar_high',
         )
-        exit_a_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [6-A] Type A 청산 · 리스크 (눌림·A추매) ', padding='15')
+        exit_a_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [7-A] Type A 청산 · 리스크 (눌림·A추매) ', padding='15')
         exit_a_f.pack(fill=tk.X, pady=10)
         add_param_row(
             exit_a_f,
@@ -2362,7 +2076,7 @@ class SettingsTab:
             parent_toggle='use_atr_trailing_stop_s2',
         )
 
-        exit_b_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [6-B] Type B 청산 · 리스크 (돌파·B추매) ', padding='15')
+        exit_b_f = ttk.LabelFrame(exit_parent, text=' 🛡️ [7-B] Type B 청산 · 리스크 (돌파·B추매) ', padding='15')
         exit_b_f.pack(fill=tk.X, pady=10)
         add_param_row(
             exit_b_f,
@@ -2447,6 +2161,53 @@ class SettingsTab:
             parent_toggle='use_atr_trailing_stop_s2_b',
         )
 
+        # 레짐 R5 — Type A 청산만 강화 (진입 제한 없음)
+        r5_f = ttk.LabelFrame(
+            exit_parent,
+            text=' 🛡️ [7-R5] 레짐 R5 — Type A 청산 강화 ',
+            padding='15',
+        )
+        r5_f.pack(fill=tk.X, pady=10)
+        ttk.Label(
+            r5_f,
+            text='종목 RS순위 상관이 낮아진 날(리더십 교체) → Type A Flash/ATR만 일시 강화. 진입 제한 없음',
+            style='Dimmed.TLabel',
+            font=('Malgun Gothic', 9),
+        ).grid(row=0, column=0, columnspan=6, sticky='w', padx=5, pady=(0, 4))
+        self.grid_rows[r5_f] = 1
+        add_param_row(
+            r5_f,
+            'R5 사용',
+            None,
+            '',
+            'ON: RS순위상관 저하일에 Type A 청산만 타이트',
+            toggle_key='use_rs_persist_guard',
+        )
+        add_param_row(
+            r5_f,
+            '상관 상한',
+            'rs_persist_corr_max',
+            '',
+            'RS 5일 순위상관 ≤ 이 값이면 발동 (기본 0.60)',
+            parent_toggle='use_rs_persist_guard',
+        )
+        add_param_row(
+            r5_f,
+            'Flash A',
+            'rs_persist_exit_flash_a',
+            '%',
+            'R5일 Type A Flash (기본 2.5 · 평소 4.0)',
+            parent_toggle='use_rs_persist_guard',
+        )
+        add_param_row(
+            r5_f,
+            'ATR 손절 A',
+            'rs_persist_exit_atr_sl_a',
+            '×',
+            'R5일 Type A ATR SL 배수 (기본 2.0 · 평소 2.8)',
+            parent_toggle='use_rs_persist_guard',
+        )
+
         # A/B 공통: ATR_SL 이후 동일종목 재진입 쿨다운
         exit_cd_f = ttk.LabelFrame(
             exit_parent,
@@ -2500,14 +2261,13 @@ class SettingsTab:
             '0=비활성. 조회기간 내 ATR_SL 2회 이상이면 기본 N일 대신 이 일수로 연장(권장 5~7)',
         )
 
-        # ── Track C: A/B와 완전히 분리된 박스 회귀 설정 ──
-        track_c_parent = _sec_parent('track_c')
+        # ── Track C (박스 회귀): 선정 → ② 유니버스, 진입 → ④ S1, 청산 → ⑦ 청산 (A/B 뒤에 배치) ──
         c_select_f = ttk.LabelFrame(
-            track_c_parent,
-            text=' 📦 [C-1] 종목 선정 — 일봉 박스권 ',
+            _univ_root,
+            text=' 📦 Type C — 박스 회귀 (Track C 종목 선정 · 일봉 박스권) ',
             padding='15',
         )
-        c_select_f.pack(fill=tk.X, pady=10)
+        c_select_f.pack(fill=tk.X, expand=False, pady=(0, 12))
         add_param_row(
             c_select_f,
             'Track C 감시 편입',
@@ -2558,8 +2318,8 @@ class SettingsTab:
         add_param_row(c_select_f, '선정 결과 상한', 'box_sel_max_candidates', '개', '단일 선정기 반환 상한', widget_list=self.sel_c_widgets)
 
         c_signal_f = ttk.LabelFrame(
-            track_c_parent,
-            text=' 📈 [C-2] 매수 신호 — 15분봉 하단 반등 ',
+            _sec_parent('s1'),
+            text=' 📦 [4-C] Type C 진입 — 15분봉 박스 하단 반등 ',
             padding='15',
         )
         c_signal_f.pack(fill=tk.X, pady=10)
@@ -2594,11 +2354,11 @@ class SettingsTab:
         add_param_row(c_signal_f, '박스 내 진입 위치 상한', 'type_c_max_box_position_pct', '%', '하단=0, 상단=100 기준 최대 진입 위치', widget_list=self.type_c_widgets)
 
         c_exit_f = ttk.LabelFrame(
-            track_c_parent,
-            text=' 🛡️ [C-3] 청산 · 리스크 — 진입 시 고정 박스 ',
+            exit_parent,
+            text=' 🛡️ [7-C] Type C 청산 · 리스크 (진입 시 고정 박스) ',
             padding='15',
         )
-        c_exit_f.pack(fill=tk.X, pady=10)
+        c_exit_f.pack(fill=tk.X, pady=10, before=r5_f)
         add_param_row(c_exit_f, '상단 목표 버퍼', 'type_c_target_atr_buffer', 'ATR 배', '박스 상단−ATR×값에서 익절', widget_list=self.exit_c_widgets)
         add_param_row(c_exit_f, '하단 손절 허용폭', 'type_c_stop_atr_tolerance', 'ATR 배', '박스 하단−ATR×값에서 즉시 손절', widget_list=self.exit_c_widgets)
         add_param_row(c_exit_f, '종가 이탈 확인 봉 수', 'type_c_breakdown_confirm_bars', '봉', '하단 아래 연속 종가 N회면 청산', widget_list=self.exit_c_widgets)
@@ -2624,6 +2384,300 @@ class SettingsTab:
             group_toggle_widgets=True,
         )
         add_param_row(c_exit_f, '박스정보 유실 비상손절', 'type_c_missing_box_stop_loss_pct', '%', '박스 메타데이터가 없는 보유 포지션에만 적용', widget_list=self.exit_c_widgets)
+
+        # ── ⑧ 주문 실행 · 시스템: 전략 조건이 아닌 주문 시간대·실시간 평가 경로·운영 설정 ──
+        sys_parent = _sec_parent('system')
+
+        order_time_f = ttk.LabelFrame(
+            sys_parent,
+            text=' 🕒 [8-1] 장마감 후 주문 정책 (BT·RT 공통) ',
+            padding='15',
+        )
+        order_time_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            order_time_f,
+            '장 마감 후 주문 허용',
+            None,
+            '',
+            'ON(기본)=15:30 이후(15:30 슬롯·애프터 16:00~19:45) 주문 경로 허용. '
+            'OFF=해당 슬롯은 신호만 기록 — 당일 주문·NXT 터치·익일시초 예약 모두 생략, '
+            '마감 후 미체결 터치 주문은 정정 대신 취소. BT도 동일 슬롯 체결 생략',
+            toggle_key='order_after_close_enabled',
+        )
+        add_param_row(
+            order_time_f,
+            '15:30 주문 허용',
+            None,
+            '',
+            'OFF(당분간 권장)=15:30 슬롯은 신호 평가만 하고 NXT 터치·익일시초 예약·당일 주문을 모두 생략. '
+            'ON=실전 NXT 또는 next_open 경로로 주문 (BT 동일)',
+            toggle_key='order_1530_enabled',
+            parent_toggle='order_after_close_enabled',
+        )
+        add_param_row(
+            order_time_f,
+            '15:30 신호 익일 시초 이월',
+            None,
+            '',
+            'ON=15:30 완성봉 S1·S2·EXIT 신호를 즉시 주문하지 않고, 익일 09:00 동시호가 지정가로 이월(BT·RT 공통)',
+            toggle_key='next_open_1530_enabled',
+            parent_toggle='order_1530_enabled',
+        )
+        add_param_row(
+            order_time_f,
+            '19:45 익일 시초 이월',
+            None,
+            '',
+            'ON(권장)=애프터 말봉(19:45)을 20:00 직후 평가하고, 당일 주문 없이 익일 09:00 동시호가 지정가로 이월',
+            toggle_key='next_open_1945_enabled',
+            parent_toggle='order_after_close_enabled',
+        )
+
+        eval15_f = ttk.LabelFrame(
+            sys_parent,
+            text=' ⏱️ [8-2] 15분봉 확정 평가 경로 (실시간 전용) ',
+            padding='15',
+        )
+        eval15_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            eval15_f,
+            'S1: 로컬 15분 확정 시 평가',
+            None,
+            '',
+            'ON=완성 15분에서 S1·S2·청산',
+            toggle_key='realtime_s1_eval_on_local_15m_close',
+        )
+        add_param_row(
+            eval15_f,
+            '공식 말분 1분 평가',
+            None,
+            '',
+            'ON(권장)=말분 완성15를 공식 1분 REST로 평가(분산 n×1.1s). '
+            '틱 말분은 실패·타임아웃 보조. OFF=레거시 틱 주경로',
+            toggle_key='realtime_15m_eval_on_official_last_m1',
+        )
+        add_param_row(
+            eval15_f,
+            '틱 말분 보조',
+            None,
+            '',
+            'ON(권장)=공식 말분 실패·타임아웃 시 틱 seal로 완성15 보조 평가. '
+            '공식 말분 평가 OFF(레거시)일 때만 :00 틱이 주경로',
+            toggle_key='realtime_15m_last_minute_from_ticks',
+        )
+        add_param_row(
+            eval15_f,
+            'API실패 시 틱 결측채움',
+            None,
+            '',
+            'ON(권장)=완성15 합성 시 공식 1분이 없는 분을 틱 seal로 채움. '
+            '앞구간 공식 1분이 하나도 없으면(재시작 직후) 아래 공식1분 필수가 합성을 보류',
+            toggle_key='realtime_15m_compose_tick_fill_on_api_miss',
+        )
+        add_param_row(
+            eval15_f,
+            '완성15 공식1분 필수',
+            None,
+            '',
+            'ON(권장)=슬롯 앞구간(말분 제외)에 공식 1분이 없으면 틱만으로 완성15를 만들지 않음. '
+            '워밍업 선적재·폴러 catchup 후 재시도',
+            toggle_key='realtime_15m_compose_require_official_head',
+        )
+        add_param_row(
+            eval15_f,
+            '말분 틱불완전 시 공식대기',
+            None,
+            '',
+            'ON(권장)=장중 재시작 등으로 말분 틱이 중간부터면 부분 틱으로 평가하지 않고 '
+            '공식 말분 1분을 받은 뒤 공식 1분만으로 평가',
+            toggle_key='realtime_15m_wait_official_last_if_tick_incomplete',
+        )
+        add_param_row(
+            eval15_f,
+            'head 공식 soft교체',
+            None,
+            '',
+            'ON(권장)=슬롯 앞구간 닫힌 뒤 ka10080 1회로 공식 1분을 덮어씀(정합). '
+            '실패해도 틱봉·말분 평가 유지',
+            toggle_key='realtime_m1_head_official_catchup_enabled',
+        )
+        add_header(eval15_f, '── 대기 시간 · API 유량 ──')
+        add_param_row(
+            eval15_f,
+            '틱말분 타임아웃',
+            'realtime_15m_tick_tail_wait_sec',
+            '초',
+            '다음분 :00 틱이 없을 때(무거래) 말분·매분 seal 대기. 기본 1.5',
+        )
+        add_param_row(
+            eval15_f,
+            '틱말분 백업(마감후)',
+            'realtime_15m_tick_tail_backup_after_close_sec',
+            '초',
+            '공식 우선: 슬롯 마감+N초까지 공식 평가 대기. 미완 종목만 틱 합성 시작. 기본 50',
+        )
+        add_param_row(
+            eval15_f,
+            '15:19 공식대기 한도',
+            'realtime_pre_auction_official_wait_max_sec',
+            '초',
+            '레거시(미사용). 15:19(15:15슬롯)는 틱말분 즉시평가. '
+            '백업 한도는 「틱말분 백업(마감후)」와 동일',
+        )
+        add_param_row(
+            eval15_f,
+            '15:30 공식대기 한도',
+            'realtime_eod_official_wait_max_sec',
+            '초',
+            '15:30 비NXT: 공식 1분 대기 상한(기본 300=5분). 초과 시 틱말분 합성 평가',
+        )
+        add_param_row(
+            eval15_f,
+            'ka10080 전역 간격',
+            'realtime_ka10080_global_min_interval_sec',
+            '초',
+            '키움 ka10080 유량=1(초당 1회). 권장 1.05. 0.5 이하면 429(허용요청초과) 위험',
+        )
+
+        live_gate_f = ttk.LabelFrame(
+            sys_parent,
+            text=' 🎯 [8-3] 주문 직전 확인 (실시간 전용) ',
+            padding='15',
+        )
+        live_gate_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            live_gate_f,
+            '동일 종목 S1 재매수 쿨다운',
+            's1_buy_signal_cooldown_sec',
+            '초',
+            '직전 S1 매수 성공 시각 기준 최소 간격(틱 중복·연속 주문 방지). 기본 1800=30분',
+        )
+        add_param_row(
+            live_gate_f,
+            '라이브가 주문 게이트(S1·S2·EXIT)',
+            None,
+            '',
+            'ON=완성봉으로 S1·S2·청산 판정 후, 주문 직전 라이브가로 추격/이탈·MA20 정합 확인. '
+            '실패 시 주문 스킵(S1은 쿨다운 미소모)',
+            toggle_key='realtime_s1_live_confirm_gate_enabled',
+        )
+        add_param_row(
+            live_gate_f,
+            '라이브 추격 상한',
+            'realtime_s1_live_max_chase_pct',
+            '%',
+            '봉종가 대비 라이브가 상승 허용 한도(기본 0.8). 초과 시 주문 스킵',
+            parent_toggle='realtime_s1_live_confirm_gate_enabled',
+        )
+        add_param_row(
+            live_gate_f,
+            '라이브 이탈 하한',
+            'realtime_s1_live_max_fade_pct',
+            '%',
+            '봉종가 대비 라이브가 하락 허용 한도(기본 1.0). 초과 시 주문 스킵',
+            parent_toggle='realtime_s1_live_confirm_gate_enabled',
+        )
+        add_param_row(
+            live_gate_f,
+            '라이브 MA20 정합',
+            None,
+            '',
+            'ON=봉종가와 라이브가가 MA20 같은 쪽에 있을 때만 주문(위↔아래 교차 시 스킵)',
+            toggle_key='realtime_s1_live_ma20_side_confirm',
+            parent_toggle='realtime_s1_live_confirm_gate_enabled',
+        )
+
+        # ── 시스템 전원 (최대절전 방지) ──
+        power_f = ttk.LabelFrame(
+            sys_parent,
+            text=' 🔆 [8-4] 시스템 전원 (최대절전 방지) ',
+            padding='15',
+        )
+        power_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            power_f,
+            '실행 중 최대절전 방지',
+            None,
+            '',
+            '유휴 최대절전(하이버네이트) 억제 — 장전 자동시작·실시간 감시가 꺼지지 않도록. '
+            '전원옵션은 절전 대신 최대절전 사용 권장. 덮개 닫힘은 전원옵션 따름',
+            toggle_key='prevent_sleep_while_running',
+        )
+        add_param_row(
+            power_f,
+            '화면 꺼짐도 방지',
+            None,
+            '',
+            '체크 시 모니터도 켜 둠. 기본은 화면만 꺼지고 PC는 깨어 있음',
+            toggle_key='prevent_sleep_keep_display',
+            parent_toggle='prevent_sleep_while_running',
+        )
+        add_param_row(
+            power_f,
+            '장마감 선정 후 최대절전 허용',
+            None,
+            '',
+            '감시 EOD(정규장은 보통 16:00, 애프터 시행일은 20:30=20:00+버퍼) 이후 '
+            '유휴 최대절전 허용. 장전 자동시작·감시 중에만 다시 막음',
+            toggle_key='prevent_sleep_allow_after_eod',
+            parent_toggle='prevent_sleep_while_running',
+        )
+
+        # ── 모바일 읽기 전용 현황 API ──
+        mobile_f = ttk.LabelFrame(
+            sys_parent,
+            text=' 📱 [8-5] 모바일 현황 API (읽기 전용 · 포트포워딩) ',
+            padding='15',
+        )
+        mobile_f.pack(fill=tk.X, pady=10)
+        add_param_row(
+            mobile_f,
+            '모바일 현황 API 사용',
+            None,
+            '',
+            '공유기 포트포워딩으로 외부 조회 (주문 불가)',
+            toggle_key='mobile_status_api_enabled',
+        )
+        add_param_row(
+            mobile_f,
+            'API 포트',
+            'mobile_status_api_port',
+            '',
+            '기본 8765 — Windows 방화벽·공유기 내부 포트와 맞춤',
+            parent_toggle='mobile_status_api_enabled',
+        )
+        # 문자열 설정은 conf_vars로 수집 (params_entries float 변환 회피)
+        for _mk, _mlabel, _mhint in (
+            ('mobile_status_api_token', '접속 PIN', '숫자 8자리 — 아래 생성 버튼 (공백 입력도 가능)'),
+            ('mobile_status_public_url', '공개 URL', '예: http://mydomain.ddns.net:28765'),
+            ('mobile_status_tls_cert', 'TLS 인증서 경로', '선택 — PEM cert (없으면 HTTP)'),
+            ('mobile_status_tls_key', 'TLS 키 경로', '선택 — PEM private key'),
+            ('mobile_status_api_host', '바인드 주소', '기본 0.0.0.0 (포트포워딩용)'),
+        ):
+            r = get_next_row(mobile_f)
+            ttk.Label(mobile_f, text=_mlabel, font=('Malgun Gothic', 10), foreground=txt_col).grid(
+                row=r, column=1, sticky='w', pady=4
+            )
+            _init = str(self.app.settings.get(_mk, self.default_settings.get(_mk, '')) or '')
+            self.conf_vars[_mk] = tk.StringVar(value=_init)
+            _ent = ttk.Entry(mobile_f, textvariable=self.conf_vars[_mk], width=42, exportselection=0)
+            _ent.grid(row=r, column=2, columnspan=3, sticky='we', padx=5)
+            if _mhint:
+                ttk.Label(mobile_f, text=f'  ({_mhint})', style='Dimmed.TLabel').grid(
+                    row=r, column=5, sticky='w', padx=10
+                )
+        r_tok = get_next_row(mobile_f)
+        ttk.Button(
+            mobile_f,
+            text='PIN 생성·채우기',
+            width=18,
+            command=self._generate_mobile_status_token,
+        ).grid(row=r_tok, column=2, sticky='w', padx=5, pady=(4, 0))
+        ttk.Label(
+            mobile_f,
+            text='  (저장 후 재기동 · 대시보드「설정 링크」로 폰 전달)',
+            style='Dimmed.TLabel',
+        ).grid(row=r_tok, column=5, sticky='w', padx=10)
 
         # 초기 표시: 첫 번째 사이드바 항목
         _show_settings_section('fund')

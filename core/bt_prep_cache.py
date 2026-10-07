@@ -262,8 +262,14 @@ def ohlcv_fingerprint(
     start_date: str,
     end_date: str,
 ) -> str:
-    """15분 OHLCV(+합성 수급) 지문."""
+    """15분 OHLCV(+합성 수급) 지문. 애프터 봉 포함 여부(정책 해석 결과)도 키에 포함."""
     picked = _pick_settings(settings, ("use_synthetic_realtime",))
+    try:
+        from utils.aftermarket_policy import aftermarket_bars_enabled_for_settings
+
+        ah_on = bool(aftermarket_bars_enabled_for_settings(settings))
+    except Exception:
+        ah_on = True
     blob = {
         "v": CACHE_VERSION,
         "kind": "ohlcv",
@@ -271,6 +277,7 @@ def ohlcv_fingerprint(
         "start_date": str(start_date),
         "end_date": str(end_date),
         "settings": picked,
+        "aftermarket_bars": ah_on,
     }
     return _hash_blob(blob)
 

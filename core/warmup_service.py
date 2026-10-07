@@ -613,22 +613,45 @@ class WarmupService:
                     pass
         return list(by_tm.values())
 
+    def _filter_15m_for_signal(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        신호용 15분 시계열 정리: 비거래일 행 제거 + 애프터 정책 OFF 시 애프터(16:00~19:45) 행 제거.
+        (백테 ``_prepare_15m_cached_data`` 의 ``drop_aftermarket_rows`` 와 동일 기준)
+        """
+        if df is None or df.empty:
+            return df if df is not None else pd.DataFrame()
+        out = df
+        try:
+            from reporting.krx_trading_calendar import filter_ohlcv_index_to_trading_days
+
+            out = filter_ohlcv_index_to_trading_days(out)
+        except Exception:
+            pass
+        try:
+            from utils.aftermarket_policy import drop_aftermarket_rows
+
+            filtered = drop_aftermarket_rows(out, getattr(self.app, "settings", None))
+            if filtered is not None:
+                out = filtered
+        except Exception as e:
+            try:
+                self.log(f"⚠️ [Warmup] 애프터 봉 필터 실패(원본 사용): {e}")
+            except Exception:
+                pass
+        return out
+
     def _merge_15m_ohlcv(self, a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
         """동일 종목 DB/API 15분 OHLCV 병합(인덱스 중복 시 최신 우선)."""
         try:
             if a is None or a.empty:
-                return b.copy() if b is not None and not b.empty else pd.DataFrame()
+                if b is None or b.empty:
+                    return pd.DataFrame()
+                return self._filter_15m_for_signal(b.copy())
             if b is None or b.empty:
-                return a.copy()
+                return self._filter_15m_for_signal(a.copy())
             out = pd.concat([a, b]).sort_index()
             out = out[~out.index.duplicated(keep="last")]
-            try:
-                from reporting.krx_trading_calendar import filter_ohlcv_index_to_trading_days
-
-                out = filter_ohlcv_index_to_trading_days(out)
-            except Exception:
-                pass
-            return out
+            return self._filter_15m_for_signal(out)
         except Exception as e:
             self.log(f"⚠️ [Warmup] 15m 병합 실패: {e}")
             return a if a is not None and not a.empty else pd.DataFrame()

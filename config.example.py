@@ -30,6 +30,11 @@ ALLOW_REAL_ORDER = False  # 실전투자 주문 허용 여부 (매우 주의!)
 TELEGRAM_BOT_TOKEN = ""
 TELEGRAM_CHAT_ID = ""
 
+# 4. KRX 정보데이터시스템(data.krx.co.kr) 계정 — pykrx 공식 시세 조회용 (선택)
+# 환경변수 KRX_ID / KRX_PW 가 있으면 그쪽이 우선합니다.
+KRX_ID = ""
+KRX_PW = ""
+
 # 4. (선택) GitHub Release 업데이트 — 비공개 저장소면 토큰 필요
 # 환경변수 GH_TOKEN / GITHUB_TOKEN / KTRADER_GITHUB_TOKEN 권장
 # GITHUB_RELEASES_REPO = "owner/repo"

@@ -186,6 +186,9 @@ def _try_pykrx_kodex200_etf(
     - 영업일 자동 추정 없이 **YYYYMMDD** 를 오늘부터 과거로 시도한다.
     """
     try:
+        from utils.krx_credentials import ensure_krx_env
+
+        ensure_krx_env()
         from pykrx import stock
         from pykrx.website.krx.etx.core import PDF
     except Exception:

@@ -268,6 +268,15 @@ class ParameterOptimizer:
             def load_with_m1(code):
                 nonlocal total_finished
                 res_15m = loader.get_data(code, start_date, end_date, interval, force_refresh=force_refresh)
+                if res_15m is not None and str(interval) == "15m":
+                    try:
+                        from utils.aftermarket_policy import drop_aftermarket_rows
+
+                        res_15m = drop_aftermarket_rows(res_15m, self.base_settings)
+                        if res_15m is not None and res_15m.empty:
+                            res_15m = None
+                    except Exception as e:
+                        print(f"  (!) 애프터 봉 필터 실패({code}, 원본 사용): {e}")
                 res_1m = None
                 if high_precision:
                     m1_start = res_15m.index.min().strftime('%Y-%m-%d') if res_15m is not None else start_date

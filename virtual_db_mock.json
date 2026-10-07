@@ -5921,6 +5921,68 @@
             "exit_time": "10:30:41",
             "exit_datetime": "2026-08-13 10:30:41",
             "code": "012330"
+        },
+        {
+            "name": "영원무역",
+            "avg_price": 71704.0,
+            "qty": 25,
+            "stage": 1,
+            "invested": 1798874.1,
+            "entry_time": "2026-09-22T15:40:26.871485",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-10-01 21:08:05",
+                    "action": "SYNC_EXIT",
+                    "price": 71704.0,
+                    "qty": 25,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 71704.0,
+            "max_p": 71704.0,
+            "max_price": 71704.0,
+            "box_breakdown_closes": 0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 71704.0,
+            "exit_date": "2026-10-01",
+            "exit_time": "21:08:05",
+            "exit_datetime": "2026-10-01 21:08:05",
+            "code": "111770"
+        },
+        {
+            "name": "SKC",
+            "avg_price": 89235.0,
+            "qty": 20,
+            "stage": 1,
+            "invested": 1790946.45,
+            "entry_time": "2026-09-23T14:32:56.284992",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-10-01 21:08:05",
+                    "action": "SYNC_EXIT",
+                    "price": 89235.0,
+                    "qty": 20,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 89235.0,
+            "max_p": 89235.0,
+            "max_price": 89235.0,
+            "box_breakdown_closes": 0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 89235.0,
+            "exit_date": "2026-10-01",
+            "exit_time": "21:08:05",
+            "exit_datetime": "2026-10-01 21:08:05",
+            "code": "011790"
         }
     ],
     "pending_exit_snapshots": {}

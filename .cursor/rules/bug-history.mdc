@@ -47,6 +47,10 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 ``status_text or confluence`` 에서 ``status_text`` 가 ``"대기"`` 등 비어 있지 않은 문자열이면 **합치도가 가려짐**  
 **수정**: ``monitor_signal_status_display_text()`` — 유효한 ``confluence`` 우선
 
+### Bug — Type C 보유 종목 신호상태가 「추매(A) n/6」 (086790 하나금융지주 10-07)
+`compute_s2_confluence_display_text` 가 B 여부만 판별하고 나머지는 A 트랙 S2 합치도로 계산 → 추매가 없는 Type C(박스)도 A 추매 조건으로 표시 
+**수정**: `TradingStrategy.compute_type_c_holding_display_text` — `_evaluate_type_c_exit` 와 같은 키로 「박스(C) 목표·손절·보유일·이탈 횟수」 표시. S2 합치도 함수와 `signal_tick_handler` 보유 분기(stage 무관) 모두 Type C 우선 분기
+
 ## core/signal_callbacks_service.py · core/signal_s1_eval.py
 
 ### Bug — 15분 확정 S1 매수가 `track_signal_mismatch`(raw `NONE`)로 누락 (443060 09-28, 001740 09-17)

@@ -1616,6 +1616,15 @@ class PortfolioBacktester:
         
         def _load_data(code):
             d15 = self.loader.get_data(code, w_start_dt, end_date, interval, force_refresh=force_refresh)
+            if d15 is not None and str(interval) == "15m":
+                try:
+                    from utils.aftermarket_policy import drop_aftermarket_rows
+
+                    d15 = drop_aftermarket_rows(d15, self.settings)
+                    if d15 is not None and d15.empty:
+                        d15 = None
+                except Exception as e:
+                    print(f"  (!) 애프터 봉 필터 실패({code}, 원본 사용): {e}")
             dm1 = None
             if high_precision:
                 dm1 = self.loader.get_data(code, w_start_dt, end_date, interval='1m')

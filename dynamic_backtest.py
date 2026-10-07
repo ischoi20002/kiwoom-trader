@@ -40,6 +40,11 @@ from utils.krx_bars import (
     slice_m1_for_15m_end,
 )
 from utils.krx_session_hours import get_session_hours
+from utils.aftermarket_policy import (
+    aftermarket_bars_enabled_for_settings,
+    drop_aftermarket_rows,
+    force_aftermarket_grid,
+)
 from core.bt_hp_signal_bridge import compute_intrabar_indicator_step
 from core.bt_hp_intrabar_unified import (
     evaluate_bt_hp_intrabar_unified,
@@ -976,7 +981,27 @@ class DynamicBacktester:
         return pd.DataFrame(rows)
 
     def run(self, start_date, end_date, interval='15m', callback=None, high_precision=False):
-        """메인 시뮬레이션 루프 (일단위 유니버스 갱신 + 분단위/15분단위 체결)"""
+        """
+        메인 시뮬레이션 루프 (일단위 유니버스 갱신 + 분단위/15분단위 체결).
+
+        실행 스레드의 15분 슬롯 격자(애프터 포함 여부)를 이 백테 설정의
+        ``use_aftermarket_bars`` 정책으로 고정한다(같은 프로세스의 실시간 설정과 분리).
+        """
+        try:
+            ah_on = aftermarket_bars_enabled_for_settings(self.settings)
+        except Exception:
+            ah_on = True
+        with force_aftermarket_grid(ah_on):
+            return self._run_impl(
+                start_date,
+                end_date,
+                interval=interval,
+                callback=callback,
+                high_precision=high_precision,
+            )
+
+    def _run_impl(self, start_date, end_date, interval='15m', callback=None, high_precision=False):
+        """``run`` 본체."""
         _run_t0 = time.time()
         self.last_run_elapsed_sec = 0.0
         self.high_precision = high_precision
@@ -2873,6 +2898,19 @@ class DynamicBacktester:
             ]
             df_all["time"] = pd.to_datetime(df_all["time"])
             df_all.set_index("time", inplace=True)
+            # 애프터 정책 OFF(기본: 장마감 후 주문 OFF 추종) → 16:00~19:45 봉 제외 (실시간 워밍업과 동일 기준)
+            try:
+                n_before = len(df_all)
+                filtered = drop_aftermarket_rows(df_all, self.settings)
+                if filtered is not None:
+                    df_all = filtered
+                n_drop = n_before - len(df_all)
+                if n_drop > 0:
+                    print(f"[Dynamic] 애프터 15분봉 {n_drop:,}행 제외 (use_aftermarket_bars 정책)")
+            except Exception as e:
+                print(f"[Dynamic] 애프터 봉 필터 실패(원본 사용): {e!r}")
+            if df_all.empty:
+                return {}
             ohlcv_map = {}
             for code, group in df_all.groupby("Code"):
                 ohlcv_map[code] = self._fill_synthetic_15m_group(group)

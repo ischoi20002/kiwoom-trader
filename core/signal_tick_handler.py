@@ -838,9 +838,20 @@ class SignalTickHandlerMixin:
                     if isinstance(pos_h, dict):
                         stg = int(pos_h.get("entry_n", pos_h.get("stage", 1)) or 1)
                         _sel_h = info.get("sel_track") or info.get("SelTrack")
+                        # Type C(박스)는 추매(S2)가 없으므로 stage 와 무관하게 C 청산 기준 표시
+                        if TradingStrategy._holding_sig_is_type_c(pos_h):
+                            c_txt, c_mr = TradingStrategy.compute_type_c_holding_display_text(
+                                pos_h,
+                                self.app.settings,
+                                eval_ind,
+                                now_price=float(now_price),
+                                curr_dt=datetime.now(),
+                            )
+                            info["confluence"] = c_txt
+                            info["met_ratio"] = float(c_mr)
                         # stage>=2(추매 체결)여도 S1 진입 시각 기준 지연 미충족이면
                         # 「추매(S2) 완료」로 덮어쓰지 않음(동기화·DB 불일치 시 오표시 방지).
-                        if stg >= 2 and TradingStrategy.s2_delay_elapsed_for_position(
+                        elif stg >= 2 and TradingStrategy.s2_delay_elapsed_for_position(
                             pos_h,
                             self.app.settings,
                             datetime.now(),
