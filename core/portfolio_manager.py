@@ -2300,6 +2300,12 @@ class PortfolioManager:
                 info = monitor_info.get(key)
                 if isinstance(info, dict):
                     sources.append(info)
+                    # ATR_C 는 감시 메타 최상위가 아니라 지표 행 캐시에만 있음
+                    # (S1 확정 평가가 저장한 last_row_cache 우선, 보유 청산용 캐시는 보조)
+                    for cache_key in ("last_row_cache", "exit_last_row_cache"):
+                        row_cache = info.get(cache_key)
+                        if row_cache is not None and hasattr(row_cache, "get"):
+                            sources.append(row_cache)
                     break
         except Exception:
             pass

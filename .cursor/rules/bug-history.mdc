@@ -51,6 +51,10 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 `compute_s2_confluence_display_text` 가 B 여부만 판별하고 나머지는 A 트랙 S2 합치도로 계산 → 추매가 없는 Type C(박스)도 A 추매 조건으로 표시 
 **수정**: `TradingStrategy.compute_type_c_holding_display_text` — `_evaluate_type_c_exit` 와 같은 키로 「박스(C) 목표·손절·보유일·이탈 횟수」 표시. S2 합치도 함수와 `signal_tick_handler` 보유 분기(stage 무관) 모두 Type C 우선 분기
 
+### Bug — Type C 「도달시 매도 기준가」가 ATR SL 표시 + 진입 ATR 0 저장 (086790 10-07)
+`compute_atr_exit_display_text`·`explain_exit_hold` 가 Type C 를 A 트랙으로 계산해 「ATR SL」 표시(실제 C 청산엔 ATR SL 없음). 또 실시간 체결 시 `_type_c_entry_box_metadata` 가 ATR_C 를 감시 메타 최상위·`bars_data`(원시 OHLCV)에서만 찾아 `box_atr_entry=0` 저장 → 청산이 매 봉 현재 ATR_C 로 손절·목표 계산(백테는 진입봉 ATR_C 고정) 
+**수정**: Type C 는 `_type_c_exit_display_text`(박스SL·GAP·메타 유실 시 비상SL 중 최고가), 손절·목표 공식은 `_type_c_box_exit_levels` 로 공유. 진입 ATR 은 `monitor_info` 의 `last_row_cache`·`exit_last_row_cache` 에서도 조회
+
 ## core/signal_callbacks_service.py · core/signal_s1_eval.py
 
 ### Bug — 15분 확정 S1 매수가 `track_signal_mismatch`(raw `NONE`)로 누락 (443060 09-28, 001740 09-17)

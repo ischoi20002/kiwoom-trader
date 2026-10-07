@@ -548,6 +548,18 @@ class TradingStrategy:
         if not isinstance(pos, dict):
             return "exit:no_pos"
         s = settings or {}
+        # Type C 는 박스 청산만 사용 — A/B 의 Flash/ATR/TP/SL 관측은 무의미
+        if TradingStrategy._holding_sig_is_type_c(pos):
+            try:
+                lv = TradingStrategy._type_c_box_exit_levels(pos, s, indicator_row)
+                if lv is None:
+                    return f"type_c:{eval_hold_reason or 'BOX_C_METADATA_MISSING'}"
+                return (
+                    f"type_c:{eval_hold_reason or 'BOX_C_HOLD'}"
+                    f"(px={px:.0f},stop={lv['stop_price']:.0f},target={lv['target_price']:.0f})"
+                )
+            except Exception:
+                return "type_c:calc_error"
         parts: list[str] = []
 
         def _gv(key: str, default: float = 0.0) -> float:
@@ -1077,14 +1089,7 @@ class TradingStrategy:
             if cp <= 0:
                 cp = _row_get("Close", 0.0)
 
-            try:
-                lower = float(pos.get("box_lower", 0) or 0)
-                upper = float(pos.get("box_upper", 0) or 0)
-                entry_atr = float(pos.get("box_atr_entry", 0) or 0)
-            except (TypeError, ValueError):
-                lower, upper, entry_atr = 0.0, 0.0, 0.0
-            if entry_atr <= 0:
-                entry_atr = _row_get("ATR_C", _row_get("ATR", 0.0))
+            levels = TradingStrategy._type_c_box_exit_levels(pos, s, indicator_row)
 
             # 보유일: 진입일 포함 평일 수(청산 판정의 bars_df 미제공 폴백과 동일)
             max_days = max(1, int(_setting_float("type_c_max_holding_days", 5)))
@@ -1107,14 +1112,12 @@ class TradingStrategy:
             day_txt = f" · {held_days}/{max_days}일" if held_days > 0 else ""
 
             # 박스 메타데이터 유실 시 청산 로직은 비상 %손절만 유지
-            if not (upper > lower > 0 and entry_atr > 0):
+            if levels is None:
                 emergency_sl = abs(_setting_float("type_c_missing_box_stop_loss_pct", 3.0))
                 return (f"박스(C) 메타없음 · 비상SL -{emergency_sl:g}%{day_txt}", 0.0)
 
-            stop_atr = max(0.0, _setting_float("type_c_stop_atr_tolerance", 0.5))
-            target_buffer = max(0.0, _setting_float("type_c_target_atr_buffer", 0.2))
-            stop_price = lower - stop_atr * entry_atr
-            target_price = upper - target_buffer * entry_atr
+            stop_price = float(levels["stop_price"])
+            target_price = float(levels["target_price"])
 
             txt = f"박스(C) 목표 {target_price:,.0f} · 손절 {stop_price:,.0f}{day_txt}"
             try:
@@ -1132,6 +1135,93 @@ class TradingStrategy:
             return (txt, ratio)
         except Exception:
             return ("박스(C) —", 0.0)
+
+    @staticmethod
+    def _type_c_box_exit_levels(
+        pos: dict,
+        settings: dict,
+        indicator_row: object = None,
+    ) -> Optional[dict]:
+        """
+        Type C 박스 손절가·목표가 (`_evaluate_type_c_exit` 와 같은 키·공식).
+        박스 메타데이터(하단·상단·진입 ATR)가 없으면 None — 청산 로직도 이때는 비상 %손절만 사용.
+        """
+        try:
+            s = settings or {}
+
+            def _setting_float(key: str, default: float) -> float:
+                try:
+                    return float(s.get(key, default))
+                except (TypeError, ValueError):
+                    return float(default)
+
+            try:
+                lower = float(pos.get("box_lower", 0) or 0)
+                upper = float(pos.get("box_upper", 0) or 0)
+                entry_atr = float(pos.get("box_atr_entry", 0) or 0)
+            except (TypeError, ValueError):
+                lower, upper, entry_atr = 0.0, 0.0, 0.0
+            if entry_atr <= 0 and indicator_row is not None and hasattr(indicator_row, "get"):
+                try:
+                    entry_atr = float(
+                        indicator_row.get("ATR_C", indicator_row.get("ATR", 0.0)) or 0.0
+                    )
+                except (TypeError, ValueError):
+                    entry_atr = 0.0
+            if not (upper > lower > 0 and entry_atr > 0 and np.isfinite(entry_atr)):
+                return None
+
+            stop_atr = max(0.0, _setting_float("type_c_stop_atr_tolerance", 0.5))
+            target_buffer = max(0.0, _setting_float("type_c_target_atr_buffer", 0.2))
+            return {
+                "stop_price": lower - stop_atr * entry_atr,
+                "target_price": upper - target_buffer * entry_atr,
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def _type_c_exit_display_text(
+        pos: dict,
+        settings: dict,
+        indicator_row: object,
+        now_price: float,
+    ) -> str:
+        """
+        '도달시 매도 기준가' 열의 Type C 버전 — 하방 청산 기준가 중 가장 높은(먼저 닿는) 1개.
+        후보: 박스 손절(BOX_C_STOP), 갭다운(BOX_C_GAP_DOWN), 메타 유실 시 비상 %손절.
+        """
+        try:
+            s = settings or {}
+            avg_p = float(pos.get("avg_p", pos.get("avg_price", now_price)) or now_price)
+            if avg_p <= 0:
+                avg_p = float(now_price)
+            candidates: list[tuple[str, float]] = []
+
+            levels = TradingStrategy._type_c_box_exit_levels(pos, s, indicator_row)
+            if levels is not None:
+                candidates.append(("박스SL", float(levels["stop_price"])))
+            else:
+                try:
+                    em_sl = abs(float(s.get("type_c_missing_box_stop_loss_pct", 3.0)))
+                except (TypeError, ValueError):
+                    em_sl = 3.0
+                candidates.append(("비상SL", avg_p * (1.0 - em_sl / 100.0)))
+
+            if bool(s.get("use_type_c_gap_down_exit", True)):
+                try:
+                    gap_limit = float(s.get("type_c_gap_down_limit", -4.0))
+                except (TypeError, ValueError):
+                    gap_limit = -4.0
+                candidates.append(("GAP", avg_p * (1.0 + gap_limit / 100.0)))
+
+            candidates = [c for c in candidates if np.isfinite(c[1]) and c[1] > 0]
+            if not candidates:
+                return "—"
+            label, px = max(candidates, key=lambda x: x[1])
+            return f"{label} {px:,.0f}"
+        except Exception:
+            return "—"
 
     @staticmethod
     def _holding_sig_is_type_b(pos: dict) -> bool:
@@ -1949,6 +2039,11 @@ class TradingStrategy:
             if not pos or float(now_price) <= 0:
                 return "—"
             s = settings or {}
+            # Type C 는 ATR SL/TRL/Flash 를 쓰지 않음(evaluate_position 이 박스 청산으로 조기 분기)
+            if TradingStrategy._holding_sig_is_type_c(pos):
+                return TradingStrategy._type_c_exit_display_text(
+                    pos, s, indicator_row, float(now_price)
+                )
             stage = TradingStrategy._coerce_position_stage(pos)
             is_type_b = TradingStrategy._holding_sig_is_type_b(pos)
             if not is_type_b:
