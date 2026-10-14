@@ -236,7 +236,7 @@ def universe_fingerprint(
     db_path: str,
     extra_files: Optional[Iterable[str]] = None,
 ) -> str:
-    """유니버스 선정 지문."""
+    """유니버스 선정 지문. 일봉 애프터 정책(정규장 덧씌우기 여부)도 키에 포함."""
     picked = _pick_settings(settings, _UNIVERSE_EXACT, _UNIVERSE_PREFIXES)
     files = [file_mtime_token(db_path)]
     try:
@@ -244,6 +244,12 @@ def universe_fingerprint(
             files.append(file_mtime_token(str(p)))
     except Exception:
         pass
+    try:
+        from utils.aftermarket_policy import aftermarket_bars_enabled_for_settings
+
+        ah_on = bool(aftermarket_bars_enabled_for_settings(settings))
+    except Exception:
+        ah_on = True
     blob = {
         "v": CACHE_VERSION,
         "kind": "univ",
@@ -252,6 +258,9 @@ def universe_fingerprint(
         "settings": picked,
         "files": files,
     }
+    # 애프터 정책 OFF → 일봉 정규장 덧씌우기 (ON 은 기존 지문 유지)
+    if not ah_on:
+        blob["aftermarket_daily"] = "regular_m15"
     return _hash_blob(blob)
 
 

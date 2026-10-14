@@ -79,6 +79,14 @@ def transition_gate_settings_fingerprint(settings: Optional[dict[str, Any]]) -> 
     for key in _FINGERPRINT_KEYS:
         if key in st:
             payload[key] = st.get(key)
+    # 애프터 정책 OFF 면 일봉을 정규장 기준으로 덧씌우므로 레짐 결과가 달라진다 (ON 은 기존 지문 유지)
+    try:
+        from utils.aftermarket_policy import aftermarket_bars_enabled_for_settings
+
+        if not aftermarket_bars_enabled_for_settings(st):
+            payload["_aftermarket_daily"] = "regular_kiwoom"
+    except Exception:
+        pass
     try:
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:

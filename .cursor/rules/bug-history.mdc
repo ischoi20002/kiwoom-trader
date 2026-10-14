@@ -92,6 +92,12 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 **수정(데이터)**: `tools/refetch_minute_bars_adjusted.py` — 키움 ka10080(`upd_stkpc_tp=1`)을 API 바닥까지 받아 그 구간 삭제 후 교체(전부 받은 경우만, 교체 전 구간 백업). **키움 분봉 제공은 최근 약 1년(2025-10-01~)** 이라 그 이전 분봉은 수정 전 그대로 → 2025-10-01 경계에 점프 잔존(사용자 선택). 키움과 FDR 은 감자 등 수정 기준이 달라 일부 종목(012170 등)은 15분봉≠일봉이 정상 
 **수정(자동)**: `harvest_code` 가 기존 DB 구간과 처음 겹치는 페이지에서 1회 `detect_minute_overlap_mismatch`(겹친 봉 절반 이상 불일치 & 오차 중앙값 0.3% 초과) → `refetch_and_replace_code` 로 1m·15m 전체 재수신(`data_manager/minute_adjust_refetch.py`, 끄기: `harvest_minute_adj_refetch=false`). 재수신 실패 시 기존 증분 계속, 다음 하베스팅 때 재감지
 
+## data_manager/krx_regular_daily.py
+
+### Bug — 애프터 시행(2026-09-14) 이후 FDR 일봉 종가가 애프터 마지막 체결가 (평균 +0.25%, 최대 +22.9%)
+장마감 후 주문 OFF(15분봉 애프터 제외)인데 일봉 선정·레짐은 애프터 포함 고가·저가·종가 사용 → 정규장 기준과 불일치 
+**수정**: `bars_1d` 는 그대로 두고 정책 OFF 일 때만 `apply_regular_session_overlay` 가 읽는 시점에 비율(원본 시가/기준값 시가)로 고저종 덧씌움(시가·거래량 원본). 기준값 소스: **백테**(유니버스·진단·과거일 선정) `source="m15"` = 로컬 `bars_15m` 정규장 봉(종가 단일가 라벨까지) 집계(KRX 공식값과 1원 반올림 외 일치), **실시간**(선정·레짐 헤더/이력) `source="kiwoom"` = 키움 ka10080(15분봉) 직접 조회 → `bars_1d_regular_kiwoom` 캐시(하베스팅 테이블과 분리, 종목별 `covered_to` 이후만 재조회, 400일 초과 삭제) — 실시간 선정은 하베스팅 DB 미사용 원칙. 키움 일봉 ka10081 은 FDR 처럼 애프터 종가라 사용 불가. 장중 ka10080 유량(1회/초) 경합을 피하려 `core/regular_daily_prefetch.py` 가 장전·장마감 후 백그라운드 사전조회. 캐시 지문은 OFF 일 때만 변경. KRX(pykrx) 는 로그인 필요라 미사용
+
 ## ui/tabs/virtual_tab.py
 
 ### Bug — 보유 직후 UI 멈춤(vp_price_stub + 동기 REST)

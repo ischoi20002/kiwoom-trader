@@ -5983,6 +5983,68 @@
             "exit_time": "21:08:05",
             "exit_datetime": "2026-10-01 21:08:05",
             "code": "011790"
+        },
+        {
+            "name": "코스모신소재",
+            "avg_price": 46664.0,
+            "qty": 39,
+            "stage": 1,
+            "invested": 1826265.636,
+            "entry_time": "2026-10-02T22:07:52.512849",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-10-13 22:24:26",
+                    "action": "SYNC_EXIT",
+                    "price": 46664.0,
+                    "qty": 39,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 46664.0,
+            "max_p": 46664.0,
+            "max_price": 46664.0,
+            "box_breakdown_closes": 0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 46664.0,
+            "exit_date": "2026-10-13",
+            "exit_time": "22:24:26",
+            "exit_datetime": "2026-10-13 22:24:26",
+            "code": "005070"
+        },
+        {
+            "name": "삼성생명",
+            "avg_price": 283500.0,
+            "qty": 6,
+            "stage": 1,
+            "invested": 1706953.5,
+            "entry_time": "2026-10-06T21:44:57.813903",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-10-13 22:24:26",
+                    "action": "SYNC_EXIT",
+                    "price": 283500.0,
+                    "qty": 6,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 283500.0,
+            "max_p": 283500.0,
+            "max_price": 283500.0,
+            "box_breakdown_closes": 0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 283500.0,
+            "exit_date": "2026-10-13",
+            "exit_time": "22:24:26",
+            "exit_datetime": "2026-10-13 22:24:26",
+            "code": "032830"
         }
     ],
     "pending_exit_snapshots": {}

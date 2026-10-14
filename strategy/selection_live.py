@@ -13,6 +13,13 @@ import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 
+from data_manager.krx_regular_daily import (
+    SOURCE_KIWOOM,
+    SOURCE_M15,
+    apply_regular_session_overlay,
+    ensure_kiwoom_regular,
+    regular_daily_overlay_enabled,
+)
 from strategy.box_reversion_selector import (
     BoxReversionSelectionConfig,
     evaluate_box_reversion_candidate,
@@ -302,6 +309,21 @@ def select_monitoring_targets(
     use_dm_daily = bool(
         data_manager is not None and (target_date is not None or not api_only_live)
     )
+    # 정규장 일봉 기준값: 실시간은 키움 15분봉(캐시), DB 일봉 경로는 백테와 같은 로컬 15분봉
+    regular_source = SOURCE_M15 if use_dm_daily else SOURCE_KIWOOM
+    if regular_source == SOURCE_KIWOOM and regular_daily_overlay_enabled(settings):
+        try:
+            ensure_kiwoom_regular(
+                df_top["Code"].astype(str).str.zfill(6).tolist(),
+                data_manager=data_manager,
+                log=logger_callback,
+                progress_every=50,
+            )
+        except Exception as e:
+            try:
+                logger_callback(f"⚠️ [선정] 정규장 일봉(키움) 확보 실패 — 원본 일봉 사용: {e}")
+            except Exception:
+                pass
 
     def process_code(row):
         code, name = str(row['Code']).zfill(6), row['Name']
@@ -442,6 +464,15 @@ def select_monitoring_targets(
             # 컬럼명 표준화
             df.columns = [str(c).lower() for c in df.columns]
             if 'time' in df.columns: df.rename(columns={'time': 'datetime'}, inplace=True)
+            # 애프터 정책 OFF → 애프터 시행일 이후 고가·저가·종가를 정규장 기준으로 (DB·키움·FDR 공통)
+            df = apply_regular_session_overlay(
+                df,
+                settings,
+                code=code,
+                data_manager=data_manager,
+                source=regular_source,
+                log=logger_callback,
+            )
             
             status["data"] = 1
             

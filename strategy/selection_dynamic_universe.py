@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from data_manager.krx_regular_daily import apply_regular_session_overlay
 from strategy.selection_dynamic_score import (
     _score_dynamic_universe_daily_ohlcv,
     _selection_daily_lookback_calendar_days,
@@ -435,6 +436,10 @@ def prepare_dynamic_universe(
         df_all["code"] = df_all["code"].astype(str).str.zfill(6)
     except Exception:
         pass
+    # 애프터 정책 OFF → 애프터 시행일 이후 고가·저가·종가를 로컬 15분봉 정규장 기준으로 덧씌움
+    df_all = apply_regular_session_overlay(
+        df_all, settings, data_manager=data_manager, source="m15", log=logger_callback
+    )
 
     # 6. 스케줄 생성 — 평가일마다 [D-N, D] 창으로 지표·Valid 재판정
     logger_callback(
@@ -1262,6 +1267,9 @@ def diagnose_dynamic_universe_selection_by_trading_day(
             df_all["code"] = df_all["code"].astype(str).str.zfill(6)
     except Exception:
         pass
+    df_all = apply_regular_session_overlay(
+        df_all, settings, data_manager=data_manager, source="m15"
+    )
 
     _score_dynamic_universe_daily_ohlcv(df_all, settings, with_b_debug=True)
     try:

@@ -283,6 +283,16 @@ class KiwoomApp:
             register_live_settings_provider(lambda: getattr(self, "settings", None))
         except Exception as e:
             print(f"⚠️ 애프터 봉 정책 등록 실패: {e}")
+        # 애프터 정책 OFF 시 실시간 선정·레짐용 정규장 일봉(키움 15분봉) 캐시 — 장전·장마감 후 사전조회
+        try:
+            from core.regular_daily_prefetch import RegularDailyPrefetcher
+            from data_manager.krx_regular_daily import register_kiwoom_token_provider
+
+            register_kiwoom_token_provider(self.auth_manager.get_auth_token)
+            self.regular_daily_prefetcher = RegularDailyPrefetcher(self)
+            self.regular_daily_prefetcher.start()
+        except Exception as e:
+            print(f"⚠️ 정규장 일봉 사전조회 등록 실패: {e}")
         self._sync_ka10080_rest_pacing_from_settings()
         self._configure_ka10080_fetch_diag()
         # Tick dispatch 주기는 SignalEngine이 메인 스레드를 과점유할 때 UI가 멎는 문제를 직접 줄이므로,

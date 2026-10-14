@@ -14,6 +14,12 @@ import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 
+from data_manager.krx_regular_daily import (
+    SOURCE_KIWOOM,
+    apply_regular_session_overlay,
+    ensure_kiwoom_regular,
+    regular_daily_overlay_enabled,
+)
 from strategy.selection_dynamic_score import (
     _score_dynamic_universe_daily_ohlcv,
     _selection_daily_lookback_calendar_days,
@@ -157,10 +163,13 @@ def _fetch_daily_ohlcv_batch_fdr(
     logger_callback: Optional[Callable[..., None]] = None,
     *,
     max_workers: int = 12,
+    settings: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     레짐·전환 게이트용: 유니버스 종목 일봉을 FDR에서 병렬 조회한다.
     ``bars_1d`` DB 동기화 없이도 동작한다.
+
+    ``settings`` 의 애프터 정책이 OFF 면 애프터 시행일 이후를 키움 15분봉 정규장 기준으로 덧씌운다.
     """
     empty = pd.DataFrame(
         columns=["code", "time", "open", "high", "low", "close", "volume"]
@@ -228,6 +237,19 @@ def _fetch_daily_ohlcv_batch_fdr(
 
     out = pd.concat(parts, ignore_index=True)
     out = out.sort_values(["code", "time"]).reset_index(drop=True)
+    if settings is not None and regular_daily_overlay_enabled(settings):
+        try:
+            ensure_kiwoom_regular(
+                norm_codes, data_manager=data_manager, log=log, progress_every=50
+            )
+        except Exception as ex:
+            try:
+                log(f"⚠️ [Transition] 정규장 일봉(키움) 확보 실패 — 원본 일봉 사용: {ex}")
+            except Exception:
+                pass
+        out = apply_regular_session_overlay(
+            out, settings, data_manager=data_manager, source=SOURCE_KIWOOM, log=log
+        )
     try:
         log(
             f"[Transition] FDR 일봉 {len(out)}행 / "
@@ -402,7 +424,7 @@ def _compute_transition_regime_map_fdr(
             "%Y-%m-%d"
         )
         df_all = _fetch_daily_ohlcv_batch_fdr(
-            data_manager, codes, fetch_start, end_s, log
+            data_manager, codes, fetch_start, end_s, log, settings=settings
         )
         if df_all is None or df_all.empty:
             return regime_map
@@ -1094,7 +1116,7 @@ def resolve_transition_gate_for_live(
         lookback_n = _selection_daily_lookback_calendar_days(settings)
         fetch_start = (as_of_dt - timedelta(days=lookback_n + 30)).strftime("%Y-%m-%d")
         df_all = _fetch_daily_ohlcv_batch_fdr(
-            data_manager, codes, fetch_start, end_s, log
+            data_manager, codes, fetch_start, end_s, log, settings=settings
         )
         if df_all is None or df_all.empty:
             log("⚠️ [Transition] FDR 일봉 부족 — 게이트 OFF")
