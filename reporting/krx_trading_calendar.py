@@ -387,6 +387,42 @@ def aftermarket_last_m1_datetime(day: date | datetime | str) -> datetime:
     return datetime.combine(d, KRX_AFTERMARKET_LAST_M1)
 
 
+# 애프터 종료 직후 서버·FDR 반영 지연 여유
+HARVEST_UNBLOCK_BUFFER_MINUTES: int = 5
+
+
+def harvest_blocked_until_local(
+    now: Optional[datetime] = None,
+    *,
+    buffer_minutes: int = HARVEST_UNBLOCK_BUFFER_MINUTES,
+) -> Optional[datetime]:
+    """
+    하베스팅 금지 구간이면 허용 시각을, 아니면 None 을 반환.
+
+    애프터마켓 시행 거래일의 정규장 마감(SessionHours.close) ~ 애프터 종료(20:00)+버퍼.
+    이 구간에 수집하면 형성 중인 분봉(1분봉은 INSERT OR IGNORE 라 영구 잔존)과
+    애프터 진행 중 FDR 일봉(종가·고저·거래량 미완)이 저장된다.
+    """
+    try:
+        t = now or datetime.now()
+        d = t.date()
+        if not is_trading_day(d) or not has_krx_aftermarket(d):
+            return None
+        from utils.krx_session_hours import get_session_hours
+
+        start = get_session_hours(d).close_datetime()
+        try:
+            buf = max(0, min(int(buffer_minutes), 60))
+        except (TypeError, ValueError):
+            buf = HARVEST_UNBLOCK_BUFFER_MINUTES
+        until = aftermarket_end_datetime(d) + timedelta(minutes=buf)
+        if start <= t < until:
+            return until
+        return None
+    except Exception:
+        return None
+
+
 def minute_bar_complete_datetime_for_day(day: date | datetime | str) -> datetime:
     """
     해당 거래일 분봉 하베스트 완결에 필요한 마지막 1분봉 시각.

@@ -6045,6 +6045,37 @@
             "exit_time": "22:24:26",
             "exit_datetime": "2026-10-13 22:24:26",
             "code": "032830"
+        },
+        {
+            "name": "팬오션",
+            "avg_price": 6801.0,
+            "qty": 264,
+            "stage": 1,
+            "invested": 1801748.124,
+            "entry_time": "2026-10-14T19:27:51.491058",
+            "reason": "SYNCED",
+            "sig_type": "TYPE_A",
+            "events": [
+                {
+                    "time": "2026-10-19 20:07:33",
+                    "action": "SYNC_EXIT",
+                    "price": 6801.0,
+                    "qty": 264,
+                    "pnl": "+0.00%",
+                    "reason": "RECONCILIATION"
+                }
+            ],
+            "max_now": 6801.0,
+            "max_p": 6801.0,
+            "max_price": 6801.0,
+            "box_breakdown_closes": 0,
+            "final_pnl_pct": 0.0,
+            "realized_pnl_amt": 0.0,
+            "exit_price": 6801.0,
+            "exit_date": "2026-10-19",
+            "exit_time": "20:07:33",
+            "exit_datetime": "2026-10-19 20:07:33",
+            "code": "028670"
         }
     ],
     "pending_exit_snapshots": {}

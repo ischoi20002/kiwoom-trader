@@ -332,7 +332,19 @@ def apply_chart_catchup_to_m1_store(
             except Exception:
                 return False
 
+        def _had_existing_row(open_lab: pd.Timestamp) -> bool:
+            try:
+                return (
+                    existing is not None
+                    and not existing.empty
+                    and open_lab in existing.index
+                )
+            except Exception:
+                return False
+
         applied = 0
+        # 기존 1분이 다른 OHLCV 로 교체된 분(미완 말분의 최종 확정 등) — 동결 해제 대상
+        revised_labels: List[pd.Timestamp] = []
         from utils.krx_bars import m1_open_label_from_ka10080_cntr_tm
 
         for end_ts, row in df_1m.sort_index().iterrows():
@@ -347,13 +359,25 @@ def apply_chart_catchup_to_m1_store(
                 v = float(row.get("Volume", 0) or 0)
                 if _same_existing_row(open_lab, o, h, l_, c, v):
                     continue
+                had_existing = _had_existing_row(open_lab)
                 before = int(m1s.revision_for_code(nk))
                 m1s.apply_official_closed_minute(nk, open_lab, o, h, l_, c, v)
                 after = int(m1s.revision_for_code(nk))
                 if after > before:
                     applied += 1
+                    if had_existing:
+                        revised_labels.append(open_lab)
             except Exception:
                 continue
+        if revised_labels:
+            try:
+                from core.realtime.realtime_official_bars_sync import (
+                    unfreeze_compose_slots_for_m1_labels,
+                )
+
+                unfreeze_compose_slots_for_m1_labels(app, nk, revised_labels)
+            except Exception:
+                pass
         return applied
     except Exception:
         return 0

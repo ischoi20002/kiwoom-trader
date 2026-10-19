@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 from reporting.krx_trading_calendar import (
     aftermarket_last_m1_datetime,
+    harvest_blocked_until_local,
     has_krx_aftermarket,
     minute_bar_complete_datetime_for_day,
     minute_harvest_datetime_cap_iso,
@@ -60,6 +61,23 @@ def test_after_hours_no_cap() -> None:
     assert minute_harvest_datetime_cap_iso(now) is None
 
 
+def test_harvest_blocked_during_aftermarket() -> None:
+    until = datetime(2026, 10, 14, 20, 5, 0)
+    # 정규장 마감 시각부터 애프터 종료+5분 직전까지 차단
+    assert harvest_blocked_until_local(datetime(2026, 10, 14, 15, 30, 0)) == until
+    assert harvest_blocked_until_local(datetime(2026, 10, 14, 17, 0, 0)) == until
+    assert harvest_blocked_until_local(datetime(2026, 10, 14, 20, 4, 59)) == until
+
+
+def test_harvest_allowed_outside_aftermarket() -> None:
+    # 장전·장중(당일 봉 캡 적용)·애프터 종료+5분 이후·주말·애프터 시행 전은 허용
+    assert harvest_blocked_until_local(datetime(2026, 10, 14, 8, 0, 0)) is None
+    assert harvest_blocked_until_local(datetime(2026, 10, 14, 15, 29, 0)) is None
+    assert harvest_blocked_until_local(datetime(2026, 10, 14, 20, 5, 0)) is None
+    assert harvest_blocked_until_local(datetime(2026, 10, 17, 17, 0, 0)) is None
+    assert harvest_blocked_until_local(datetime(2026, 9, 11, 17, 0, 0)) is None
+
+
 if __name__ == "__main__":
     test_aftermarket_starts_2026_09_14()
     test_minute_complete_before_aftermarket_is_regular_close()
@@ -68,4 +86,6 @@ if __name__ == "__main__":
     test_required_eod_during_regular_session_prev_day()
     test_intraday_cap_includes_prev_aftermarket()
     test_after_hours_no_cap()
+    test_harvest_blocked_during_aftermarket()
+    test_harvest_allowed_outside_aftermarket()
     print("ok")

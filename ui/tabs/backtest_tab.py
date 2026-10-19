@@ -603,6 +603,34 @@ class BacktestTab:
     def _on_harvest_latest_prices(self) -> None:
         """harvest_service.py 를 별도 콘솔에서 실행해 로컬 시세 DB를 갱신합니다."""
         try:
+            from reporting.krx_trading_calendar import harvest_blocked_until_local
+
+            blocked_until = harvest_blocked_until_local()
+        except Exception as e:
+            blocked_until = None
+            try:
+                self.app.log(f"⚠️ [하베스팅] 애프터 차단 판정 실패(진행): {e}")
+            except Exception:
+                pass
+        if blocked_until is not None:
+            msg = (
+                "애프터장 진행 중(정규장 마감~20:00)에는 하베스팅할 수 없습니다.\n"
+                "형성 중인 분봉·미완 일봉이 DB에 저장되는 것을 막기 위함입니다.\n\n"
+                f"{blocked_until.strftime('%H:%M')} 이후 다시 실행하세요."
+            )
+            try:
+                self.app.log(
+                    f"⛔ [하베스팅] 애프터장 진행 중이라 실행하지 않습니다 "
+                    f"({blocked_until.strftime('%H:%M')} 이후 가능)."
+                )
+            except Exception:
+                pass
+            try:
+                messagebox.showwarning("하베스팅 불가", msg, parent=self.parent)
+            except Exception:
+                pass
+            return
+        try:
             import subprocess
             import sys
 

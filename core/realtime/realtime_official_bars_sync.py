@@ -17,7 +17,7 @@ import queue
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -28,6 +28,7 @@ from utils.krx_bars import (
     is_krx_15m_slot_end,
     is_krx_last_15m_slot,
     iter_krx_15m_slot_ends_for_day,
+    krx_15m_label_for_m1_open,
     krx_stream_slot_end_datetime,
     m1_bar_open_label_for_just_completed_minute,
     m1_closing_auction_ts_for_15m_end,
@@ -1332,6 +1333,42 @@ def _is_compose_slot_frozen(app: Any, code: str, slot: pd.Timestamp) -> bool:
         return False
 
 
+def unfreeze_compose_slots_for_m1_labels(
+    app: Any, code: str, m1_open_labels: Iterable[Any]
+) -> List[str]:
+    """
+    공식 1분 OHLCV 가 **기존 값과 다르게** 교체된 분이 속한 15분 슬롯의 동결을 해제한다.
+
+    동결은 축출·결측 스토어로 정상 봉이 오염되는 것을 막기 위한 것이므로, 증권사
+    차트가 같은 분을 다른 값으로 확정했다면 그 슬롯은 다시 합성·교정해야 한다.
+    반환: 동결 해제된 슬롯 문자열 목록.
+    """
+    released: List[str] = []
+    if not _compose_stable_freeze_enabled(app):
+        return released
+    try:
+        m = _stable_compose_state_map(app)
+        if not m:
+            return released
+        slots: Dict[pd.Timestamp, None] = {}
+        for raw in m1_open_labels or []:
+            try:
+                slot = krx_15m_label_for_m1_open(pd.Timestamp(raw).floor("min"))
+            except Exception:
+                slot = None
+            if slot is not None:
+                slots[pd.Timestamp(slot).floor("min")] = None
+        for slot in slots:
+            key = _stable_compose_key(code, slot)
+            cur = m.get(key)
+            if isinstance(cur, dict) and cur.get("frozen"):
+                m.pop(key, None)
+                released.append(slot.strftime("%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return released
+    return released
+
+
 def _note_compose_stable_result(
     app: Any,
     code: str,
@@ -1347,8 +1384,13 @@ def _note_compose_stable_result(
     """
     합성 결과를 안정화 카운터에 반영한다.
 
-    - 기존 행과 동일(matched_existing): hits+1, 필요 횟수 도달 시 frozen
+    - 기존 행과 동일(matched_existing) + 직전 지문 동일: hits+1, 필요 횟수 도달 시 frozen
+    - 기존 행과 동일하지만 카운터 없음/지문 불일치: hits=1 (첫 확인)
     - 신규/덮어쓰기(다른 값): hits=1 로 리셋(새 후보)
+
+    첫 확인에서 바로 동결하지 않는다. 말분 공식 1분이 정각 직후 조회돼 체결이
+    덜 반영된 상태(거래량·저가 미완)일 수 있으므로, 다음 catchup 이 최종 1분으로
+    교정할 기회를 남긴다.
     """
     if not _compose_stable_freeze_enabled(app):
         return
@@ -1360,11 +1402,6 @@ def _note_compose_stable_result(
         cur = m.get(key)
         if matched_existing and isinstance(cur, dict) and cur.get("fp") == fp:
             hits = int(cur.get("hits") or 1) + 1
-        elif matched_existing and (
-            not isinstance(cur, dict) or cur.get("fp") != fp
-        ):
-            # 기존 bars 와 같지만 카운터 없음/지문 불일치 → 2회차로 간주
-            hits = 2
         else:
             hits = 1
         m[key] = {

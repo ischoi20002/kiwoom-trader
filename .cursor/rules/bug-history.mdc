@@ -61,6 +61,12 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 확정 평가는 TYPE_A로 통과했지만 주문 큐에는 코드·가격만 전달되고, `on_buy_signal_received`가 `last_detailed_sig`를 **다시 읽음**. 그 사이 틱 경로가 형성봉(신호 없음)으로 캐시를 덮어써 `Sig_Type=NONE` → `effective_s1_sig_type_for_buy` 폴백 `TYPE_B` → 트랙 A 불일치로 스킵. 백테스트는 확정봉 `Sig_Type`을 바로 써서 매수함 
 **수정**: 확정 평가가 주문 직전 `info["s1_confirmed_sig"]` 스냅샷 저장(TTL `realtime_s1_confirmed_sig_ttl_sec`, 기본 180초), 콜백은 스냅샷 우선 사용. `Signal=False`/무효 `Sig_Type` 행은 `stale_signal_cache`로 스킵(TYPE_B 오판 금지)
 
+## core/realtime/realtime_official_bars_sync.py · core/realtime/realtime_m1_fallback.py
+
+### Bug — 미완 말분 1분으로 합성된 15분봉이 즉시 동결돼 교정 불가 (271560 10-15 백테 10:00 TYPE_A 매수 vs 실시간 미매수)
+정각+1초(10:00:01) ka10080 말분(09:59)이 체결 덜 반영된 상태(거래량 325 vs 최종 674, 종가 105,600 vs 105,400)로 저장 → 09:45 15분봉 종가·거래량 오류. `_note_compose_stable_result` 가 카운터 없이 첫 재합성이 기존 봉과 같으면 `hits=2` 로 간주해 **첫 확인에서 동결** → 10:14 헤드 catchup 이 최종 1분을 받아도 `skipped_stable`. 09:45 RSI 52.7(백테 49.8) 로 50선 아래 이탈이 사라져 10:00 봉 `cond_rsi_50_pulse` 거짓(6/7). 같은 날 23종목 중 8종목 28개 봉이 DB 와 불일치 
+**수정**: 첫 일치는 `hits=1`(실제 2회 연속 동일해야 동결). `apply_chart_catchup_to_m1_store` 가 **기존** 1분을 다른 OHLCV 로 교체하면 `unfreeze_compose_slots_for_m1_labels` 로 해당 슬롯 동결 해제 → 재합성 교정(신규 적재 분은 해제 안 함 — 축출 재적재 오염 방지 유지)
+
 ## strategy/selection_regime.py
 
 ### Bug — 헤더 레짐(유지)과 30일 이력(약화) 불일치 (09-28 데이터)
@@ -91,6 +97,12 @@ DB/동기화로 2단계로 보이는데 S1 진입 시각 기준 지연 미충족
 하베스팅 `save_bars` 는 `INSERT OR IGNORE` 증분이라 수집 당시 가격(수정 전)이 남음 → 이벤트일 15분봉이 ×5·÷5 점프, 백테 15분 지표 왜곡(실시간은 키움 수정주가라 점프 없음) 
 **수정(데이터)**: `tools/refetch_minute_bars_adjusted.py` — 키움 ka10080(`upd_stkpc_tp=1`)을 API 바닥까지 받아 그 구간 삭제 후 교체(전부 받은 경우만, 교체 전 구간 백업). **키움 분봉 제공은 최근 약 1년(2025-10-01~)** 이라 그 이전 분봉은 수정 전 그대로 → 2025-10-01 경계에 점프 잔존(사용자 선택). 키움과 FDR 은 감자 등 수정 기준이 달라 일부 종목(012170 등)은 15분봉≠일봉이 정상 
 **수정(자동)**: `harvest_code` 가 기존 DB 구간과 처음 겹치는 페이지에서 1회 `detect_minute_overlap_mismatch`(겹친 봉 절반 이상 불일치 & 오차 중앙값 0.3% 초과) → `refetch_and_replace_code` 로 1m·15m 전체 재수신(`data_manager/minute_adjust_refetch.py`, 끄기: `harvest_minute_adj_refetch=false`). 재수신 실패 시 기존 증분 계속, 다음 하베스팅 때 재감지
+
+## harvest_service.py
+
+### Bug — 애프터 진행 중(15:30~20:00) 하베스팅 시 미완 데이터 저장 (10-14 19시 실행)
+애프터 구간은 분봉 상한(`minute_harvest_datetime_cap_iso`)이 없어 형성 중인 봉까지 저장 → 1분봉은 `INSERT OR IGNORE` 라 미완 봉 영구 잔존. FDR 일봉도 당일 행(종가=수집 시점가, 고저·거래량 미완)이 저장되고 당일 재실행 시 갱신 안 됨 → 다음날 30일 겹침 검사가 수정주가 변경으로 오판해 전체 이력 재저장 
+**수정**: `harvest_blocked_until_local`(애프터 시행 거래일 정규장 마감~20:00+5분) — GUI 버튼은 경고창 후 미실행, `run()` 시작 시 거부, 장중 시작해 구간에 진입하면 분봉 루프·FDR 일봉 보강 전에 중단
 
 ## data_manager/krx_regular_daily.py
 

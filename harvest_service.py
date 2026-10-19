@@ -63,6 +63,8 @@ class HarvestService:
         # KRX 캘린더 기준 '반드시 포함되어야 할 마지막 1분봉'(애프터 19:59 / 정규 15:30)
         # — run()에서 1회 계산
         self._required_close_dt_once: Optional[datetime] = None
+        # 애프터 진행 중이라 시작 자체를 거부한 경우 허용 시각
+        self.blocked_until: Optional[datetime] = None
 
         self.log(f"🔍 [Info] 하베스팅 모드: 실전투자 서버 (데이터 무결성 우선)")
 
@@ -647,8 +649,38 @@ class HarvestService:
         except Exception:
             return False
 
+    def _harvest_blocked_now(self) -> Optional[datetime]:
+        """애프터 진행 구간(정규장 마감~애프터 종료+버퍼)이면 허용 시각, 아니면 None."""
+        try:
+            from reporting.krx_trading_calendar import harvest_blocked_until_local
+
+            return harvest_blocked_until_local()
+        except Exception as e:
+            self.log(f"⚠️ [하베스팅] 애프터 차단 판정 실패(진행): {e}")
+            return None
+
+    def _stop_if_blocked(self, stage: str) -> bool:
+        """실행 중 애프터 진행 구간에 들어가면 중단(미완 분봉·일봉 저장 방지)."""
+        until = self._harvest_blocked_now()
+        if until is None:
+            return False
+        self.running = False
+        self.log(
+            f"⛔ [하베스팅] 애프터장 진행 중이라 {stage}에서 중단합니다. "
+            f"{until.strftime('%H:%M')} 이후 다시 실행하세요."
+        )
+        return True
+
     def run(self):
         """메인 수집 루프 (KOSPI 전종목)."""
+        _blocked_until = self._harvest_blocked_now()
+        if _blocked_until is not None:
+            self.blocked_until = _blocked_until
+            self.log(
+                f"⛔ [하베스팅] 애프터장 진행 중(정규장 마감~20:00)에는 수집하지 않습니다. "
+                f"{_blocked_until.strftime('%H:%M')} 이후 다시 실행하세요."
+            )
+            return
         # 0. 공공데이터포털 KRX 상장종목(금융위 API) — 인증키가 있으면 최신 KOSPI 전체를 우선 사용
         codes_kospi_official: list = []
         svc_key = str(getattr(config, "DATA_GO_KR_SERVICE_KEY", "") or "").strip()
@@ -787,6 +819,8 @@ class HarvestService:
 
         for idx, code in enumerate(all_codes):
             if not self.running: break
+            if self._stop_if_blocked("분봉 수집"):
+                break
             
             self.log(f"[{idx+1}/{len(all_codes)}] 종목 분석 중 ({code})...")
             harvested = False
@@ -806,6 +840,9 @@ class HarvestService:
             else:
                 # 이미 최신이거나(보통 continue로 여기까지 오지 않지만) DB 범위 확장 없음이면 대기 최소화
                 time.sleep(0.02)
+
+        if self.running:
+            self._stop_if_blocked("FDR 일봉 보강")
 
         # FDR → bars_1d: 1m 적재 여부와 무관하게 EOD 기준 일봉 보강
         self.log("📅 [FDR→1d] 유니버스 bars_1d 조건부 보강(마지막 완결 거래일 기준)…")
@@ -856,7 +893,11 @@ if __name__ == "__main__":
     try:
         service.run()
         print("\n" + "=" * 50)
-        print("✅ 모든 작업이 완료되었습니다. (콘솔은 자동으로 닫힙니다)")
+        if service.blocked_until is not None:
+            print("⛔ 애프터장 진행 중이라 수집하지 않았습니다. (10초 후 콘솔이 닫힙니다)")
+            time.sleep(10)
+        else:
+            print("✅ 모든 작업이 완료되었습니다. (콘솔은 자동으로 닫힙니다)")
     except KeyboardInterrupt:
         service.running = False
         print("\n🛑 사용자에 의해 중지되었습니다.")
