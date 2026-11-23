@@ -150,6 +150,60 @@ def _copy_mobile_web(src_dir: Path, dst_dir: Path) -> int:
     return count
 
 
+def _patch_build_flavor_production(path: Path) -> None:
+    """운영 트리: BUILD_FLAVOR 를 production 으로 고정."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as ex:
+        raise RuntimeError(f"build_flavor 읽기 실패: {path}: {ex}") from ex
+    new_text, n = re.subn(
+        r'(BUILD_FLAVOR:\s*str\s*=\s*)["\']dev["\']',
+        r'\1"production"',
+        text,
+        count=1,
+    )
+    if n != 1:
+        # 이미 production 이거나 형식 변경 — 강제 치환 시도
+        new_text, n2 = re.subn(
+            r'(BUILD_FLAVOR:\s*str\s*=\s*)["\'][^"\']*["\']',
+            r'\1"production"',
+            text,
+            count=1,
+        )
+        if n2 != 1:
+            raise RuntimeError(f"BUILD_FLAVOR 패치 실패: {path}")
+    path.write_text(new_text, encoding="utf-8", newline="\n")
+
+
+def _scrub_license_enforce_from_config_texts(dest: Path) -> None:
+    """
+    운영본 config / config.example 에서 LICENSE_ENFORCE_REAL 줄·관련 주석 제거.
+    (고객이 스위치를 보지 않도록)
+    """
+    targets = [dest / "config.example.py", dest / "config.py"]
+    drop_re = re.compile(
+        r"^\s*(#\s*)?LICENSE_ENFORCE_REAL\b.*$",
+        re.IGNORECASE,
+    )
+    note_re = re.compile(
+        r"^\s*#.*LICENSE_ENFORCE_REAL.*$",
+        re.IGNORECASE,
+    )
+    for path in targets:
+        try:
+            if not path.is_file():
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            kept: List[str] = []
+            for line in lines:
+                if drop_re.match(line) or note_re.match(line):
+                    continue
+                kept.append(line)
+            path.write_text("".join(kept), encoding="utf-8", newline="\n")
+        except Exception as ex:
+            print(f"[경고] LICENSE_ENFORCE_REAL 제거 실패 ({path.name}): {ex}")
+
+
 def _patch_k_trader_gui_for_production(path: Path) -> None:
     """운영 빌드: 백테스트 탭·미사용 import 제거."""
     text = path.read_text(encoding="utf-8")
@@ -283,6 +337,12 @@ def stage_production(
     if gui_path.is_file():
         _patch_k_trader_gui_for_production(gui_path)
 
+    flavor_path = dest / "core" / "build_flavor.py"
+    if flavor_path.is_file():
+        _patch_build_flavor_production(flavor_path)
+
+    _scrub_license_enforce_from_config_texts(dest)
+
     for sub in ("realtime_session_logs", "equity_snapshots_mock", "equity_snapshots_live"):
         (dest / sub).mkdir(parents=True, exist_ok=True)
 
@@ -301,6 +361,7 @@ def stage_production(
         print(f"  Python 모듈: {py_count}개")
         print(f"  mobile_web 파일: {mobile_n}개")
         print("  백테스트 탭 제거 패치 적용됨 (k_trader_gui.py)")
+        print("  BUILD_FLAVOR=production · LICENSE_ENFORCE_REAL 운영본에서 제거")
     return summary
 
 

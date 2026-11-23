@@ -13,6 +13,10 @@
 
 ---
 
+## 0.26.1 (2026-11-23)
+
+- **운영본 라이선스 우회 스위치 숨김**: 배포 시 `BUILD_FLAVOR=production` 고정, `LICENSE_ENFORCE_REAL` 을 config/example 에서 제거. 운영에서는 해당 값을 넣어도 무시하고 실주문 라이선스 검사를 항상 적용. 개발(`c:\vibe`)에서만 스위치 유효.
+
 ## 0.26.0 (2026-11-23)
 
 - **실전 계좌 라이선스**: 모의투자는 그대로 두고, 실서버 실주문(`place_order`)만 서명된 `license.key` + `config.LIVE_ACCOUNT_NO` 일치 시에 허용. Ed25519 오프라인 검증(`core/license_guard.py`), 발급 도구 `tools/issue_license.py`, 실전 서버 전환 시 라이선스 상태 안내.

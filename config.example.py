@@ -27,10 +27,9 @@ ALLOW_MOCK_ORDER = True
 ALLOW_REAL_ORDER = False  # 실전투자 주문 허용 여부 (매우 주의!)
 
 # 2-1. 실전 계좌 라이선스 (모의투자는 검사하지 않음)
-# 발급자가 tools/issue_license.py 로 만든 license.key 를 프로그램 폴더에 두고,
+# 발급자가 만든 license.key 를 프로그램 폴더에 두고,
 # 아래 계좌번호를 라이선스에 등록된 실계좌와 동일하게 입력하세요.
 LIVE_ACCOUNT_NO = ""  # 예: "1234567890"
-LICENSE_ENFORCE_REAL = True  # False 면 실전 주문 시 라이선스 검사 생략(개발용)
 
 # 3. 텔레그램 알림 설정
 TELEGRAM_BOT_TOKEN = ""

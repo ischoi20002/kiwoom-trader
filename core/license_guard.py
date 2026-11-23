@@ -244,8 +244,28 @@ def load_verified_license(*, force_reload: bool = False) -> Tuple[Optional[Dict[
         return None, msg
 
 
+def _is_production_build() -> bool:
+    """운영 배포본이면 True — 우회 스위치 무시."""
+    try:
+        from core.build_flavor import is_production_build
+
+        return bool(is_production_build())
+    except Exception:
+        return False
+
+
 def license_enforcement_enabled() -> bool:
-    """config.LICENSE_ENFORCE_REAL (기본 True)."""
+    """
+    실전 라이선스 검사 on/off.
+
+    - 운영(production) 빌드: 항상 True (config 우회 불가)
+    - 개발(dev) 빌드만: config.LICENSE_ENFORCE_REAL=False 허용
+    """
+    try:
+        if _is_production_build():
+            return True
+    except Exception:
+        pass
     try:
         import config as _cfg
 
@@ -314,12 +334,13 @@ def ensure_real_trading_allowed(
     """
     실전 주문 직전 게이트.
 
-    - LICENSE_ENFORCE_REAL=False → 통과
+    - 운영 빌드: 항상 라이선스 필수
+    - 개발 빌드만 LICENSE_ENFORCE_REAL=False 시 통과
     - 그 외 → LIVE_ACCOUNT_NO(또는 인자)가 라이선스에 있어야 함
     """
     try:
         if not license_enforcement_enabled():
-            return True, "라이선스 검사 비활성(LICENSE_ENFORCE_REAL=False)"
+            return True, "라이선스 검사 비활성(개발 전용 LICENSE_ENFORCE_REAL=False)"
     except Exception:
         pass
 
