@@ -24,14 +24,15 @@ DEST = Path(r"c:\k-trader")
 PRESERVE_RUNTIME_FILES: Set[str] = {
     "settings.json",
     "config.py",
+    "license.key",
 }
 
 # Release zip 에도 넣지 않음 (비밀키·개인 설정 유출 방지, 수신측 유지)
 ZIP_EXCLUDE_FILES: Set[str] = {
     "settings.json",
     "config.py",
+    "license.key",
 }
-
 # 루트 필수 파일
 ROOT_FILES: List[str] = [
     "k_trader_gui.py",

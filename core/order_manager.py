@@ -243,6 +243,41 @@ class OrderManager:
                 pass
             return None
 
+        # 실전만: 등록(서명)된 계좌 라이선스 필수. 모의는 통과.
+        if not use_mock:
+            try:
+                from core.license_guard import ensure_real_trading_allowed
+
+                lic_ok, lic_msg = ensure_real_trading_allowed()
+            except Exception as lic_ex:
+                lic_ok, lic_msg = False, f"라이선스 검사 오류: {lic_ex}"
+            if not lic_ok:
+                try:
+                    self.last_order_reject_msg = str(lic_msg or "라이선스 거부")
+                except Exception:
+                    pass
+                try:
+                    self.app.log(f"🚫 [실전투자] 주문 차단 — {lic_msg}")
+                except Exception:
+                    pass
+                try:
+                    sl = getattr(self.app, "session_logger", None)
+                    if sl:
+                        sl.log(
+                            "order_blocked",
+                            {
+                                "code": code,
+                                "side": side,
+                                "qty": int(qty),
+                                "reason": "license_denied",
+                                "detail": str(lic_msg or ""),
+                                "name": name,
+                            },
+                        )
+                except Exception:
+                    pass
+                return None
+
         if not self.order_api:
             try:
                 self.last_order_reject_msg = ""

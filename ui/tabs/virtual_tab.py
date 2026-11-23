@@ -3606,6 +3606,28 @@ class VirtualTab:
 
             if not messagebox.askyesno("서버 전환 확인", f"현재 설정을 [{target_mode}] 모드로 전환하시겠습니까?"):
                 return
+
+            # 실전 전환 시 계좌 라이선스 상태 안내 (주문 차단만, 전환 자체는 허용)
+            lic_note = ""
+            if not new_mock:
+                try:
+                    from core.license_guard import describe_license_status
+
+                    lic_note = str(describe_license_status() or "").strip()
+                except Exception as lic_ex:
+                    lic_note = f"라이선스 상태 확인 실패: {lic_ex}"
+                if lic_note:
+                    try:
+                        messagebox.showwarning(
+                            "실전 라이선스",
+                            "실전 서버로 전환합니다.\n\n"
+                            f"{lic_note}\n\n"
+                            "실주문은 license.key + config.LIVE_ACCOUNT_NO 가\n"
+                            "등록 계좌와 일치할 때만 허용됩니다.\n"
+                            "모의투자·시세조회·하베스팅은 라이선스 없이 가능합니다.",
+                        )
+                    except Exception:
+                        pass
                 
             new_lines = []
             found = False
@@ -3623,12 +3645,14 @@ class VirtualTab:
                 f.writelines(new_lines)
                 
             # 성공 메시지 및 UI 업데이트
+            extra_lic = f"\n\n※ 라이선스: {lic_note}" if lic_note else ""
             messagebox.showinfo(
                 "설정 변경 완료",
                 f"성공적으로 [{target_mode}] 모드로 설정되었습니다.\n\n"
                 f"재시작하면 {target_mode} 서버에서 시작합니다.\n\n"
                 "※ 모의·실전은 포지션·종료내역·주문 로그가 서로 다른 파일에 저장되므로\n"
-                "   기록이 섞이지 않습니다.",
+                "   기록이 섞이지 않습니다."
+                f"{extra_lic}",
             )
             
             mode_bg = "#5E81AC" if new_mock else "#BF616A"

@@ -1,5 +1,8 @@
 venv/
 .venv/
+# 실전 계좌 라이선스 개인키·발급본 (절대 커밋 금지)
+tools/license_secrets/
+license.key
 # 비공개 Release용 로컬 토큰 (절대 커밋 금지)
 .ktrader_github_token
 USB 드라이브/
