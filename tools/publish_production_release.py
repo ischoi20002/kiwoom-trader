@@ -121,23 +121,21 @@ def publish(
     build_production_zip(zip_path, source=ROOT, version=ver)
     print(f"      size={zip_path.stat().st_size} bytes")
 
+    # Setup.exe 는 기본 로컬 전달만 — GitHub 업로드는 명시 옵션일 때만
     setup_exe: Optional[Path] = None
     if setup_path is not None and Path(setup_path).is_file():
         setup_exe = Path(setup_path)
-        print(f"[2/4] 기존 Setup.exe 사용: {setup_exe}")
+        print(f"[2/4] Setup.exe 명시 업로드: {setup_exe}")
     elif with_setup:
-        print("[2/4] Setup.exe 빌드…")
+        print("[2/4] Setup.exe 빌드 후 업로드…")
         from build_installer import build_installer
 
         setup_exe = build_installer(version=ver)
     else:
-        # dist 에 이미 있으면 함께 업로드
-        cand = ROOT / "dist" / f"K-Trader-Setup-{ver}.exe"
-        if cand.is_file():
-            setup_exe = cand
-            print(f"[2/4] dist Setup.exe 발견 → 함께 업로드: {cand}")
-        else:
-            print("[2/4] Setup.exe 생략 (빌드: --with-setup 또는 tools/build_installer.py)")
+        print(
+            "[2/4] Setup.exe 생략 (로컬 전용 — "
+            "업로드하려면 --with-setup 또는 --setup 경로)"
+        )
 
     if skip_gh:
         print("[skip] gh Release 게시 생략")
