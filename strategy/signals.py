@@ -94,6 +94,37 @@ def _settings_bool(settings: dict | None, key: str, default: bool = False) -> bo
         return default
 
 
+def _prev_regular_close(df: pd.DataFrame) -> pd.Series:
+    """
+    각 봉의 직전 거래일 정규장 종가(종가 단일가 라벨까지, 애프터 봉 제외).
+
+    df 에 직전 거래일 봉이 없으면 NaN — 비교 조건은 거짓이 되어 신호가 막힌다.
+    """
+    try:
+        idx = pd.DatetimeIndex(pd.to_datetime(df.index))
+        close = pd.to_numeric(df["Close"], errors="coerce").to_numpy(dtype=float)
+        days = idx.normalize()
+        hm = idx.hour.to_numpy(dtype=np.int32) * 60 + idx.minute.to_numpy(dtype=np.int32)
+        close_min: dict = {}
+        try:
+            from utils.krx_session_hours import get_session_hours
+
+            for d in days.unique():
+                try:
+                    close_min[d] = int(get_session_hours(d.date()).close_minutes)
+                except Exception:
+                    close_min[d] = 15 * 60 + 30
+        except Exception:
+            close_min = {d: 15 * 60 + 30 for d in days.unique()}
+        cut = np.asarray([close_min[d] for d in days], dtype=np.int32)
+        regular = hm <= cut
+        day_close = pd.Series(close[regular], index=days[regular]).groupby(level=0).last()
+        prev_close = day_close.shift(1)
+        return pd.Series(prev_close.reindex(days).to_numpy(dtype=float), index=df.index)
+    except Exception:
+        return pd.Series(np.nan, index=df.index, dtype=float)
+
+
 def get_buy_signals_detailed(
     df,
     settings,
@@ -194,6 +225,38 @@ def get_buy_signals_detailed(
         cond_rsi_50_pulse = (is_above_50) & (count_maint >= 1) & (count_maint <= r_window_bars)
         signal_a &= cond_rsi_50_pulse
 
+    # Type A: OSC/종가(%) 하한 — 약한 히스토그램 모멘텀 차단 (기존 use_macd_signal 의 OSC>0 과 별개)
+    use_osc_min_a = _settings_bool(settings, "use_osc_min_a", False)
+    if use_osc_min_a:
+        try:
+            osc_min_a = float(settings.get("buy_osc_min_a", 0.10))
+        except (TypeError, ValueError):
+            osc_min_a = 0.10
+        try:
+            osc_pct_a = (df["OSC"] / df["Close"].replace(0, np.nan)) * 100.0
+            cond_osc_min_a = (osc_pct_a >= osc_min_a).fillna(False)
+        except Exception:
+            cond_osc_min_a = pd.Series(False, index=df.index, dtype=bool)
+        signal_a &= cond_osc_min_a
+    else:
+        cond_osc_min_a = pd.Series(True, index=df.index, dtype=bool)
+
+    # Type A: 진입가(봉 종가) 전일 정규장 종가 대비 최소 상승률
+    use_day_chg_min_a = _settings_bool(settings, "use_day_chg_min_a", False)
+    if use_day_chg_min_a:
+        try:
+            day_chg_min_a = float(settings.get("buy_day_chg_min_a", 2.0))
+        except (TypeError, ValueError):
+            day_chg_min_a = 2.0
+        try:
+            prev_close_reg_a = _prev_regular_close(df)
+            day_chg_pct_a = (df["Close"] / prev_close_reg_a.replace(0, np.nan) - 1.0) * 100.0
+            cond_day_chg_a = (day_chg_pct_a >= day_chg_min_a).fillna(False)
+        except Exception:
+            cond_day_chg_a = pd.Series(False, index=df.index, dtype=bool)
+        signal_a &= cond_day_chg_a
+    else:
+        cond_day_chg_a = pd.Series(True, index=df.index, dtype=bool)
 
     # 6. Type B: 추세 돌파 (RSI 제약 + 정배열 + MACD GC)
     # [v26.3] Default to False if missing for safety
@@ -209,6 +272,20 @@ def get_buy_signals_detailed(
     # Type A의 use_vol_surge와 대칭: 돌파 거래량(vol_surge_b)이 실제 진입 신호에 반영되어야 함
     if _settings_bool(settings, "use_type_b_vol", True):
         signal_b &= cond_vol_b
+
+    # Type B 진입가(봉 종가) 전일 정규장 종가 대비 최소 상승률 — 약한 모멘텀 돌파 차단
+    use_day_chg_min_b = _settings_bool(settings, "use_day_chg_min_b", False)
+    if use_day_chg_min_b:
+        try:
+            day_chg_min_b = float(settings.get("buy_day_chg_min_b", 2.7))
+        except (TypeError, ValueError):
+            day_chg_min_b = 2.7
+        prev_close_reg = _prev_regular_close(df)
+        day_chg_pct = (df["Close"] / prev_close_reg.replace(0, np.nan) - 1.0) * 100.0
+        cond_day_chg_b = (day_chg_pct >= day_chg_min_b).fillna(False)
+        signal_b &= cond_day_chg_b
+    else:
+        cond_day_chg_b = pd.Series(True, index=df.index, dtype=bool)
 
     # 6a. Type C: 박스 하단 접촉 → 박스 안 재진입 → 이전 봉 고가 돌파 + RSI 상승
     signal_c = pd.Series(False, index=df.index, dtype=bool)
@@ -397,12 +474,17 @@ def get_buy_signals_detailed(
             if use_rsi_sig_filter:
                 conds.append(cond_rsi_sig)
             if settings.get('use_rsi_signal', True): conds.append(cond_rsi_50_pulse)
+            if use_osc_min_a:
+                conds.append(cond_osc_min_a)
+            if use_day_chg_min_a:
+                conds.append(cond_day_chg_a)
         elif sig_type == 'TYPE_B':
             conds = [cond_rsi_type_b]
             if settings.get('use_macd_gc_b', True): conds.append(cond_macd_gc)
             if settings.get('use_trend_aligned_b', True): conds.append(cond_trend_aligned)
             if settings.get('use_type_b_vol', True): conds.append(cond_vol_b)
             if use_rsi_sig_filter: conds.append(cond_rsi_sig)
+            if use_day_chg_min_b: conds.append(cond_day_chg_b)
         else:
             return 0, 1
         

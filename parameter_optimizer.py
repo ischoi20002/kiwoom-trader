@@ -115,6 +115,9 @@ SIGNAL_ONLY_PARAMS = frozenset({
     'use_atr_stop_loss_b', 'use_atr_trailing_stop_b', 'use_atr_trail_only_after_tp_s1_b',
     'use_atr_trail_only_after_tp_s2_b',
     'sel_b_rsi_min', 'sel_b_rsi_max', 'sel_b_min_trde_val',
+    'use_day_chg_min_b', 'buy_day_chg_min_b',
+    'use_osc_min_a', 'buy_osc_min_a',
+    'use_day_chg_min_a', 'buy_day_chg_min_a',
 })
 
 def init_worker(data_path):

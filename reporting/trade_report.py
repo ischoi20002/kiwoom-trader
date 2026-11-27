@@ -1290,6 +1290,8 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "Type A (눌림목) 활성화", "toggle": "use_type_a", "key": "buy_rsi_max_a", "unit": " RSI"},
                 {"label": "ㄴ 거래량 급증 확인(A)", "toggle": "use_vol_surge", "key": "vol_surge", "unit": "배"},
                 {"label": "ㄴ 전일동시간 평균(S1·A)", "key": "prev_vol_lookback_s1_a", "unit": "일"},
+                {"label": "ㄴ OSC 최소 강도(A)", "toggle": "use_osc_min_a", "key": "buy_osc_min_a", "unit": "%"},
+                {"label": "ㄴ 전일비 최소 상승률(A)", "toggle": "use_day_chg_min_a", "key": "buy_day_chg_min_a", "unit": "%"},
                 {"label": "ㄴ MA60 지지(상/하)", "keys": ["ma60_min", "ma60_max"], "unit": "%", "sep": "~"},
                 {"label": "ㄴ 이평 골든크로스(분)", "toggle": "use_gc", "key": "gc_window", "unit": "분"},
                 {"label": "ㄴ RSI 50 돌파 컨펌(분)", "toggle": "use_rsi_signal", "key": "rsi_window", "unit": "분"},
@@ -1300,6 +1302,7 @@ def generate_trade_report(df, interval, output_path="trade_report.html", total_t
                 {"label": "ㄴ MACD 골든크로스(B)", "toggle": "use_macd_gc_b"},
                 {"label": "ㄴ 정배열 추세 확인(B)", "toggle": "use_trend_aligned_b"},
                 {"label": "ㄴ 돌파 시 거래량 분출", "toggle": "use_type_b_vol", "key": "vol_surge_b", "unit": "배"},
+                {"label": "ㄴ 전일비 최소 상승률(B)", "toggle": "use_day_chg_min_b", "key": "buy_day_chg_min_b", "unit": "%"},
             ]
         },
         {

@@ -27,7 +27,13 @@ KA10080_GLOBAL_MIN_INTERVAL_SEC = 1.05
 MOCK_APP_KEY = "RIiFPemy5HD9jYU171gNSPhKmNhg-u87xcBNQCqu8EI"                     # 모의투자용 App Key 
 MOCK_APP_SECRET = "USCs4XVEe_olJC7sANMM3ytoflN93eI1xVtQZNp9_UE"                  # 모의투자용 Secret Key
 ALLOW_MOCK_ORDER = True # 모의투자 주문 허용 여부
-ALLOW_REAL_ORDER = False # 실전투자 주문 허용 여부 (매우 주의!)
+ALLOW_REAL_ORDER = True # 실전투자 주문 허용 여부 (매우 주의!)
+
+# 2-1. 실전 계좌 라이선스 (모의투자는 검사하지 않음)
+# license.key + LIVE_ACCOUNT_NO 가 일치해야 실주문이 나갑니다.
+# LICENSE_ENFORCE_REAL 은 개발(c:\vibe) 전용. 운영 배포본에서는 무시·미포함.
+LIVE_ACCOUNT_NO = "65889416"  # 실계좌번호 (숫자)
+LICENSE_ENFORCE_REAL = True  # 개발 PC에서만 의미 있음 (False=검사 생략)
 
 # 3. 텔레그램 알림 설정 (본인의 봇 토큰과 채팅방 ID를 입력하세요)
 TELEGRAM_BOT_TOKEN = "8696479782:AAFIpWSn7BmeYfXgv3EypV1kyJ51LdCjtn8"

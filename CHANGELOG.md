@@ -13,6 +13,14 @@
 
 ---
 
+## 1.0.0 (2026-11-27)
+
+- **정식 운영 버전(1.0.0)**: 검증 구간(0.x)을 마치고 선행 버전을 1로 전환.
+- **Type B 전일비 최소 상승률**: 신호봉 종가가 전일 정규장 종가 대비 N% 이상일 때만 B 진입 (`use_day_chg_min_b` / `buy_day_chg_min_b`, 기본 ON·2.7%). 약한 모멘텀 돌파 차단.
+- **Type A RSI 하한 상향**: S1 공통 `buy_rsi_min` 기본 40 → **58** (백테스트 민감도에서 총수익·연도 균형 최적).
+- **Type A 실험 필터(기본 OFF)**: OSC 최소 강도(`use_osc_min_a` / `buy_osc_min_a`), A 전일비 하한(`use_day_chg_min_a` / `buy_day_chg_min_a`) — UI·리포트·캐시 지문 반영. 민감도상 OFF가 유리해 기본 끔.
+- **DEFAULT_SETTINGS 동기화**: 현재 운용값 반영(B 전일비 ON, Track B 종가≥MA5, TRANSITION HARD·S1/S2 차단, 백테 종료일 2026-11-26 등).
+
 ## 0.26.1 (2026-11-23)
 
 - **운영본 라이선스 우회 스위치 숨김**: 배포 시 `BUILD_FLAVOR=production` 고정, `LICENSE_ENFORCE_REAL` 을 config/example 에서 제거. 운영에서는 해당 값을 넣어도 무시하고 실주문 라이선스 검사를 항상 적용. 개발(`c:\vibe`)에서만 스위치 유효.
