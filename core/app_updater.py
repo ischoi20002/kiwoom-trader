@@ -806,29 +806,39 @@ def start_update_process(
 
 
 def _restart_production_gui(prod: Path, log: Callable[[str], None]) -> bool:
-    """운영 GUI 재기동."""
-    pyw = prod / ".venv" / "Scripts" / "pythonw.exe"
-    py = prod / ".venv" / "Scripts" / "python.exe"
+    """운영 GUI 재기동 (포터블 python\\ → .venv → bat)."""
+    entry = "run_entry.py"
+    try:
+        if not (prod / entry).is_file():
+            entry = "k_trader_gui.py"
+    except Exception:
+        entry = "k_trader_gui.py"
+    candidates = (
+        prod / "python" / "pythonw.exe",
+        prod / "python" / "python.exe",
+        prod / ".venv" / "Scripts" / "pythonw.exe",
+        prod / ".venv" / "Scripts" / "python.exe",
+    )
     bat = prod / "run_k_trader.bat"
     try:
-        if pyw.is_file():
+        for py_path in candidates:
+            if not py_path.is_file():
+                continue
+            is_w = py_path.name.lower() == "pythonw.exe"
+            flags = 0
+            if sys.platform == "win32":
+                if is_w:
+                    flags = getattr(subprocess, "DETACHED_PROCESS", 0x8) | getattr(
+                        subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200
+                    )
+                else:
+                    flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10)
             subprocess.Popen(
-                [str(pyw), "-u", "k_trader_gui.py", "--auto-start"],
+                [str(py_path), "-u", entry, "--auto-start"],
                 cwd=str(prod),
-                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x8)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200),
+                creationflags=flags,
             )
-            log("[Update] pythonw 로 GUI 재시작")
-            return True
-        if py.is_file():
-            subprocess.Popen(
-                [str(py), "-u", "k_trader_gui.py", "--auto-start"],
-                cwd=str(prod),
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10)
-                if sys.platform == "win32"
-                else 0,
-            )
-            log("[Update] python 로 GUI 재시작")
+            log(f"[Update] {py_path.name} 로 GUI 재시작 ({entry})")
             return True
         if bat.is_file():
             subprocess.Popen(

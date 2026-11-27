@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-운영 zip 을 만들어 GitHub Release 로 게시한다.
+운영 zip (및 선택적으로 Setup.exe) 을 만들어 GitHub Release 로 게시한다.
 
 사용:
   py -3 -u tools/publish_production_release.py
-  py -3 -u tools/publish_production_release.py --version 0.19.9
+  py -3 -u tools/publish_production_release.py --with-setup
+  py -3 -u tools/publish_production_release.py --version 1.1.0
 
 전제: ``gh`` 로그인(또는 GH_TOKEN), origin 이 GitHub 저장소.
+      ``--with-setup`` 시 Inno Setup 6(ISCC) 및 포터블 런타임 빌드 가능해야 함.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -59,11 +61,40 @@ def _detect_repo_slug() -> str:
     if code != 0:
         return "ischoi20002/kiwoom-trader"
     url = (out or "").strip()
-    # nina.v@example.com:owner/repo.git / https://github.com/owner/repo.git
     m = re.search(r"github\.com[:/](?P<slug>[^/]+/[^/]+?)(?:\.git)?$", url)
     if m:
         return str(m.group("slug"))
     return "ischoi20002/kiwoom-trader"
+
+
+def _upload_asset(slug: str, tag: str, path: Path) -> None:
+    name = path.name
+    _run(
+        [
+            "gh",
+            "release",
+            "delete-asset",
+            tag,
+            name,
+            "--repo",
+            slug,
+            "--yes",
+        ],
+        check=False,
+    )
+    _run(
+        [
+            "gh",
+            "release",
+            "upload",
+            tag,
+            str(path),
+            "--repo",
+            slug,
+            "--clobber",
+        ],
+        check=True,
+    )
 
 
 def publish(
@@ -72,6 +103,8 @@ def publish(
     repo: Optional[str] = None,
     draft: bool = False,
     skip_gh: bool = False,
+    with_setup: bool = False,
+    setup_path: Optional[Path] = None,
 ) -> Path:
     from deploy_production import build_production_zip
 
@@ -84,65 +117,73 @@ def publish(
 
     out_dir = Path(tempfile.mkdtemp(prefix="k-trader-release-"))
     zip_path = out_dir / asset_name
-    print(f"[1/3] 운영 zip 생성: {zip_path}")
+    print(f"[1/4] 운영 zip 생성: {zip_path}")
     build_production_zip(zip_path, source=ROOT, version=ver)
     print(f"      size={zip_path.stat().st_size} bytes")
+
+    setup_exe: Optional[Path] = None
+    if setup_path is not None and Path(setup_path).is_file():
+        setup_exe = Path(setup_path)
+        print(f"[2/4] 기존 Setup.exe 사용: {setup_exe}")
+    elif with_setup:
+        print("[2/4] Setup.exe 빌드…")
+        from build_installer import build_installer
+
+        setup_exe = build_installer(version=ver)
+    else:
+        # dist 에 이미 있으면 함께 업로드
+        cand = ROOT / "dist" / f"K-Trader-Setup-{ver}.exe"
+        if cand.is_file():
+            setup_exe = cand
+            print(f"[2/4] dist Setup.exe 발견 → 함께 업로드: {cand}")
+        else:
+            print("[2/4] Setup.exe 생략 (빌드: --with-setup 또는 tools/build_installer.py)")
 
     if skip_gh:
         print("[skip] gh Release 게시 생략")
         return zip_path
 
-    notes = (
-        f"K-Trader 운영 패키지 v{ver}\n\n"
-        f"- 자산: `{asset_name}`\n"
-        "- `config.py` / `settings.json` 미포함 (수신측 유지)\n"
-        "- 적용: 대시보드「업데이트 확인」또는 `remote_update.bat`\n"
+    notes_lines = [
+        f"K-Trader 운영 패키지 v{ver}",
+        "",
+        f"- zip: `{asset_name}` (업데이트용, 설정 미포함)",
+    ]
+    if setup_exe is not None:
+        notes_lines.append(
+            f"- Setup: `{setup_exe.name}` (신규 설치용, 포터블 Python 포함)"
+        )
+    notes_lines.extend(
+        [
+            "- 신규: Setup.exe → 첫 실행 API 설정 마법사",
+            "- 업데이트: 대시보드「업데이트 확인」또는 `remote_update.bat`",
+            "- `config.py` / `settings.json` / `license.key` 는 수신측 유지",
+        ]
     )
     notes_file = out_dir / "notes.md"
-    notes_file.write_text(notes, encoding="utf-8")
+    notes_file.write_text("\n".join(notes_lines) + "\n", encoding="utf-8")
 
-    print(f"[2/3] Release 존재 여부 확인: {slug} {tag}")
+    assets: List[Path] = [zip_path]
+    if setup_exe is not None:
+        assets.append(setup_exe)
+
+    print(f"[3/4] Release 존재 여부 확인: {slug} {tag}")
     code, _, _ = _run(
         ["gh", "release", "view", tag, "--repo", slug],
         check=False,
     )
     if code == 0:
-        print(f"[3/3] 기존 Release에 자산 업로드/교체: {tag}")
-        # 동일 이름 자산이 있으면 삭제 후 업로드
-        _run(
-            [
-                "gh",
-                "release",
-                "delete-asset",
-                tag,
-                asset_name,
-                "--repo",
-                slug,
-                "--yes",
-            ],
-            check=False,
-        )
-        _run(
-            [
-                "gh",
-                "release",
-                "upload",
-                tag,
-                str(zip_path),
-                "--repo",
-                slug,
-                "--clobber",
-            ],
-            check=True,
-        )
+        print(f"[4/4] 기존 Release에 자산 업로드/교체: {tag}")
+        for asset in assets:
+            print(f"      upload {asset.name}")
+            _upload_asset(slug, tag, asset)
     else:
-        print(f"[3/3] Release 생성: {tag}")
+        print(f"[4/4] Release 생성: {tag}")
         cmd = [
             "gh",
             "release",
             "create",
             tag,
-            str(zip_path),
+            *[str(a) for a in assets],
             "--repo",
             slug,
             "--title",
@@ -154,12 +195,13 @@ def publish(
             cmd.append("--draft")
         _run(cmd, check=True)
 
-    print(f"[OK] GitHub Release 게시 완료: {slug} {tag} / {asset_name}")
+    names = ", ".join(a.name for a in assets)
+    print(f"[OK] GitHub Release 게시 완료: {slug} {tag} / {names}")
     return zip_path
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="운영 zip GitHub Release 게시")
+    p = argparse.ArgumentParser(description="운영 zip/Setup GitHub Release 게시")
     p.add_argument("--version", default="", help="미지정 시 core/version.py")
     p.add_argument("--repo", default="", help="owner/name (미지정 시 origin)")
     p.add_argument("--draft", action="store_true", help="draft Release")
@@ -167,6 +209,16 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         "--skip-gh",
         action="store_true",
         help="zip 만 만들고 Release 업로드 생략",
+    )
+    p.add_argument(
+        "--with-setup",
+        action="store_true",
+        help="(비권장) Setup.exe 를 빌드해 Release 에 함께 업로드. 기본은 zip만 — Setup은 로컬 전달",
+    )
+    p.add_argument(
+        "--setup",
+        default="",
+        help="이미 빌드된 Setup.exe 경로 (있으면 --with-setup 대신 사용)",
     )
     return p.parse_args(argv)
 
@@ -179,6 +231,8 @@ if __name__ == "__main__":
             repo=str(args.repo or "").strip() or None,
             draft=bool(args.draft),
             skip_gh=bool(args.skip_gh),
+            with_setup=bool(args.with_setup),
+            setup_path=Path(args.setup) if str(args.setup or "").strip() else None,
         )
     except Exception as ex:
         print(f"[오류] {ex}")

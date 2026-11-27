@@ -151,11 +151,15 @@ def resolve_gui_python(*, prefer_windowed: bool = True) -> Optional[str]:
         return None
     if prefer_windowed:
         names: Sequence[str] = (
+            os.path.join("python", "pythonw.exe"),
+            os.path.join("python", "python.exe"),
             os.path.join(".venv", "Scripts", "pythonw.exe"),
             os.path.join(".venv", "Scripts", "python.exe"),
         )
     else:
         names = (
+            os.path.join("python", "python.exe"),
+            os.path.join("python", "pythonw.exe"),
             os.path.join(".venv", "Scripts", "python.exe"),
             os.path.join(".venv", "Scripts", "pythonw.exe"),
         )
@@ -189,7 +193,13 @@ def spawn_gui_restart(*, resume_monitoring: bool) -> bool:
     exe = resolve_gui_python(prefer_windowed=True)
     if exe:
         try:
-            args: List[str] = [exe, "-u", "k_trader_gui.py"]
+            entry = "run_entry.py"
+            try:
+                if not os.path.isfile(os.path.join(cwd, entry)):
+                    entry = "k_trader_gui.py"
+            except Exception:
+                entry = "k_trader_gui.py"
+            args: List[str] = [exe, "-u", entry]
             if resume_monitoring:
                 args.append("--auto-start")
             flags = 0

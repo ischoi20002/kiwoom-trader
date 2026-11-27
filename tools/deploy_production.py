@@ -49,6 +49,7 @@ ROOT_FILES: List[str] = [
     "requirements.txt",
     "requirements-lock.txt",
     "run_k_trader.bat",
+    "run_entry.py",
     "install_k_trader.bat",
     "remote_update.bat",
     "apply_release_update.py",
@@ -250,10 +251,12 @@ def _verify_op_venv(dest: Path) -> None:
     deploy 는 .venv 를 복사/삭제하지 않는다. 다만 run_k_trader.bat 등은
     매 배포마다 덮어쓰므로, venv 가 없거나 패키지가 빠지면 실행이 실패한다.
     """
+    portable_py = dest / "python" / "python.exe"
     venv_py = dest / ".venv" / "Scripts" / "python.exe"
-    if not venv_py.is_file():
+    py = portable_py if portable_py.is_file() else venv_py
+    if not py.is_file():
         print(
-            "\n[경고] [운영] .venv 없음 — 최초 1회 install_k_trader.bat 실행 필요"
+            "\n[경고] [운영] 포터블 python\\ / .venv 없음 — Setup.exe 또는 install_k_trader.bat"
         )
         print(f"     → {dest}\\install_k_trader.bat")
         return
@@ -261,20 +264,21 @@ def _verify_op_venv(dest: Path) -> None:
         import subprocess
 
         r = subprocess.run(
-            [str(venv_py), "-c", "import pandas"],
+            [str(py), "-c", "import pandas"],
             capture_output=True,
             text=True,
             timeout=30,
         )
+        label = "python\\" if py == portable_py else ".venv"
         if r.returncode != 0:
             print(
-                "\n[경고] [운영] .venv 에 pandas 등 패키지 없음 — install_k_trader.bat 재실행"
+                f"\n[경고] [운영] {label} 에 pandas 등 패키지 없음 — install_k_trader.bat 재실행"
             )
             print(f"     → {dest}\\install_k_trader.bat")
             return
-        print("\n[OK] [운영] .venv + pandas 확인됨 (run_k_trader.bat 가 .venv 우선 사용)")
+        print(f"\n[OK] [운영] {label} + pandas 확인됨 (run_k_trader.bat 우선 사용)")
     except Exception as ex:
-        print(f"\n[경고] [운영] .venv 검사 생략: {ex}")
+        print(f"\n[경고] [운영] 런타임 검사 생략: {ex}")
 
 
 def stage_production(
@@ -369,7 +373,8 @@ def deploy(*, preserve_runtime: bool = False) -> None:
     """개발 소스 → ``c:\\k-trader`` 배포."""
     stage_production(DEST, preserve_runtime=preserve_runtime, quiet=False)
     print(f"\n실행: cd {DEST} && run_k_trader.bat")
-    print(f"  (최초/패키지 오류: {DEST}\\install_k_trader.bat)")
+    print(f"  (신규 PC: Setup.exe 또는 {DEST}\\install_k_trader.bat)")
+    print(f"  (Setup 빌드: py -3 -u tools\\build_installer.py)")
     print(f"  (다음 배포: {SOURCE}\\deploy_production.bat)")
     _verify_op_venv(DEST)
 
@@ -405,12 +410,14 @@ def build_production_zip(
                     "K-Trader 운영 패키지\n"
                     f"{ver_line}"
                     "\n"
-                    "1) 이 폴더를 c:\\k-trader 로 두거나 zip 을 그 위치에 푸세요.\n"
-                    "2) config.py / settings.json 은 패키지에 없습니다.\n"
-                    "   - 최초: config.example.py 를 config.py 로 복사 후 키·계좌를 채우세요.\n"
-                    "   - 업데이트: 기존 config.py·settings.json 은 유지됩니다.\n"
-                    "3) 최초 1회 install_k_trader.bat 실행 후 run_k_trader.bat.\n"
-                    "4) 이후 대시보드「업데이트 확인」으로 GitHub Release zip 을 받습니다.\n"
+                    "1) 신규 설치: 로컬 전달용 K-Trader-Setup-*.exe 권장 "
+                    "(GitHub 미게시, Python 포함, 첫 실행 API 설정 마법사).\n"
+                    "2) zip 만 쓰는 경우: 이 폴더를 c:\\k-trader 에 두고 "
+                    "install_k_trader.bat → run_k_trader.bat.\n"
+                    "3) config.py / settings.json / license.key 는 패키지에 없습니다.\n"
+                    "   - 최초: 실행 시 설정 마법사 (또는 대시보드「API·계정 설정」).\n"
+                    "   - 업데이트: 기존 설정·라이선스·DB 는 유지됩니다.\n"
+                    "4) 이후 대시보드「업데이트 확인」으로 Release zip 을 받습니다.\n"
                 ),
                 encoding="utf-8",
             )

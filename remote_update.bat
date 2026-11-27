@@ -28,7 +28,8 @@ call :log "[2/3] GitHub Release zip 적용..."
 cd /d "%OP%"
 
 set "PY="
-if exist "%OP%\.venv\Scripts\python.exe" set "PY=%OP%\.venv\Scripts\python.exe"
+if exist "%OP%\python\python.exe" set "PY=%OP%\python\python.exe"
+if not defined PY if exist "%OP%\.venv\Scripts\python.exe" set "PY=%OP%\.venv\Scripts\python.exe"
 if not defined PY (
   where py >nul 2>&1
   if not errorlevel 1 set "PY=py -3"
@@ -38,7 +39,7 @@ if not defined PY (
   if not errorlevel 1 set "PY=python"
 )
 if not defined PY (
-  call :fail "Python 없음 — %OP%\.venv 또는 py/python PATH"
+  call :fail "Python 없음 — %OP%\python 또는 .venv 또는 py/python PATH"
   exit /b 1
 )
 

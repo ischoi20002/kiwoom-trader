@@ -11,7 +11,20 @@ import json
 import threading
 import time
 import FinanceDataReader as fdr
-import config
+try:
+    import config
+except ImportError:
+    # 신규 설치: example/스텁 생성 후 재시도 (run_entry 가 정상 경로)
+    try:
+        from core.config_bootstrap import ensure_config_file_exists
+
+        ensure_config_file_exists()
+        import config
+    except Exception as _cfg_ex:
+        raise ImportError(
+            f"config.py 를 불러올 수 없습니다. run_entry.py 로 실행하거나 "
+            f"설정 마법사를 완료하세요. ({_cfg_ex})"
+        ) from _cfg_ex
 import importlib
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
@@ -3725,6 +3738,20 @@ if __name__ == "__main__":
         print("K-Trader: 시작 중… (이 메시지가 보이면 터미널 연결은 정상)", flush=True)
     except Exception:
         pass
+
+    # 직접 실행 시에도 설정 미완이면 마법사 → 재시작 (권장 진입점은 run_entry.py)
+    try:
+        from ui.first_run_config_wizard import maybe_bootstrap_and_restart
+
+        if maybe_bootstrap_and_restart():
+            raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception as _boot_ex:
+        try:
+            print(f"[부트스트랩] {_boot_ex!r}", flush=True)
+        except Exception:
+            pass
 
     root = tk.Tk()
     try:

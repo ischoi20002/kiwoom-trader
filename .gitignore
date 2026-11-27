@@ -1,5 +1,7 @@
 venv/
 .venv/
+# Setup.exe / 포터블 런타임 빌드 산출
+dist/
 # 실전 계좌 라이선스 개인키·발급본 (절대 커밋 금지)
 tools/license_secrets/
 license.key

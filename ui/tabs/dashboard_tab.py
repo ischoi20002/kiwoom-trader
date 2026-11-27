@@ -134,6 +134,13 @@ class DashboardTab:
             command=self._on_regime_recalc_clicked,
         )
         self.btn_regime_recalc.pack(side=tk.LEFT, padx=(0, btn_gap))
+        self.btn_api_config = ttk.Button(
+            sys_right,
+            text="API·계정 설정",
+            width=max(btn_w, 14),
+            command=self._on_api_config_clicked,
+        )
+        self.btn_api_config.pack(side=tk.LEFT, padx=(0, btn_gap))
         self.btn_check_update = ttk.Button(
             sys_right,
             text="업데이트 확인",
@@ -435,6 +442,18 @@ class DashboardTab:
                 pass
             try:
                 messagebox.showerror("레짐 재계산", str(e), parent=self.parent)
+            except Exception:
+                pass
+
+    def _on_api_config_clicked(self) -> None:
+        """config.py 수동 편집 대신 API·계정 설정 마법사."""
+        try:
+            from ui.first_run_config_wizard import open_config_wizard_from_app
+
+            open_config_wizard_from_app(self.app)
+        except Exception as e:
+            try:
+                messagebox.showerror("API·계정 설정", str(e), parent=self.parent)
             except Exception:
                 pass
 

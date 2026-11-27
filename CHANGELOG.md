@@ -13,6 +13,13 @@
 
 ---
 
+## 1.1.0 (2026-11-27)
+
+- **운영 Setup.exe (포터블 Python)**: `tools/build_portable_runtime.py`(빌드 PC Python 3.12 트리 복사+requirements) + Inno Setup(`tools/installer/k_trader.iss`, `tools/build_installer.py`)으로 Python·의존성 포함 설치본 생성. 신규 PC에 시스템 Python 불필요.
+- **첫 실행 API·계정 설정 마법사**: `config.py` 수동 편집 대신 Tk 마법사(`ui/first_run_config_wizard.py`, `core/config_bootstrap.py`). 대시보드「API·계정 설정」으로 재실행 가능. 진입점 `run_entry.py`.
+- **실행/업데이트 경로**: `run_k_trader.bat`·`remote_update.bat`·재시작 로직이 `python\` 포터블 런타임을 `.venv`보다 우선.
+- **배포**: GitHub Release 는 **zip만**(업데이트용). Setup.exe 는 로컬 `dist/` 빌드·USB/NAS 전달(기본 업로드 안 함, `--with-setup` 은 예외). `SETUP_COMPANY_PC.md` 갱신.
+
 ## 1.0.0 (2026-11-27)
 
 - **정식 운영 버전(1.0.0)**: 검증 구간(0.x)을 마치고 선행 버전을 1로 전환.
